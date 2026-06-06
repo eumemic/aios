@@ -1962,21 +1962,24 @@ async def find_tool_confirmed_event(
     return _row_to_event(row) if row is not None else None
 
 
-async def lookup_tool_name_by_call_id(
+async def lookup_tool_call_by_call_id(
     conn: asyncpg.Connection[Any],
     session_id: str,
     tool_call_id: str,
     *,
     account_id: str,
-) -> str | None:
-    """Return the function name of the matching ``tool_call`` on the parent
-    assistant event, or None if no parent is found.
+) -> dict[str, Any] | None:
+    """Return the full ``tool_call`` dict (id / type / function) from the
+    parent assistant event whose ``tool_calls`` array contains
+    ``tool_call_id``, or None if no parent is found.
 
-    Used by the custom tool-result handler to stamp a ``name`` field on
-    the tool-role event it appends, so ``_derive_tool_name`` populates
-    the ``tool_name`` column (issue #133, migration 0022).  Mirrors the
-    parent-assistant lookup in ``_derive_event_channel`` — same ``@>``
-    predicate, same partial index (``events_assistant_tool_calls_idx``).
+    Unwindowed by construction — scans the whole log via the
+    ``events_assistant_tool_calls_idx`` partial index (the same ``@>``
+    predicate as the parent-assistant lookup in ``_derive_event_channel``).
+    This is the dispatch source for a confirmed ``always_ask`` tool whose
+    parent assistant may have scrolled out of the token window (#737); a
+    windowed read would detect the confirmation yet fail to find the call.
+    The name-only sibling :func:`lookup_tool_name_by_call_id` delegates here.
     """
     raw = await conn.fetchval(
         "SELECT data->'tool_calls' FROM events "
@@ -1998,14 +2001,34 @@ async def lookup_tool_name_by_call_id(
     if not isinstance(tool_calls, list):
         return None
     for tc in tool_calls:
-        if not isinstance(tc, dict) or tc.get("id") != tool_call_id:
-            continue
-        function = tc.get("function")
-        if not isinstance(function, dict):
-            return None
-        name = function.get("name")
-        return name if isinstance(name, str) else None
+        if isinstance(tc, dict) and tc.get("id") == tool_call_id:
+            return tc
     return None
+
+
+async def lookup_tool_name_by_call_id(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+) -> str | None:
+    """Return the function name of the matching ``tool_call`` on the parent
+    assistant event, or None if no parent is found.
+
+    Used by the custom tool-result handler to stamp a ``name`` field on
+    the tool-role event it appends, so ``_derive_tool_name`` populates
+    the ``tool_name`` column (issue #133, migration 0022).  Delegates to
+    :func:`lookup_tool_call_by_call_id` and extracts the name.
+    """
+    tc = await lookup_tool_call_by_call_id(conn, session_id, tool_call_id, account_id=account_id)
+    if tc is None:
+        return None
+    function = tc.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    return name if isinstance(name, str) else None
 
 
 async def append_event(

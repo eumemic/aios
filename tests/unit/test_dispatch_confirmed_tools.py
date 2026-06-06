@@ -1,23 +1,26 @@
-"""Unit tests for ``_dispatch_confirmed_tools`` tool-confirmation lookup."""
+"""Unit tests for confirmed-tool dispatch.
+
+Two layers:
+
+* ``_dispatch_confirmed_tools`` (harness) — orchestration: detect
+  confirmations from the unwindowed lifecycle tail, drop in-flight ids,
+  delegate dispatch resolution.
+* ``resolve_confirmed_dispatchable`` (service) — the unwindowed resolver
+  that recovers each confirmed tool_call by ``tool_call_id`` from the log,
+  independent of the token window.  This is the heart of the #737 fix.
+"""
 
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aios.harness.loop import _dispatch_confirmed_tools
 from aios.harness.task_registry import TaskRegistry
-
-
-def _assistant_with_tool_calls(tool_call_ids: list[str]) -> SimpleNamespace:
-    return SimpleNamespace(
-        kind="message",
-        data={
-            "role": "assistant",
-            "tool_calls": [{"id": tcid, "type": "function"} for tcid in tool_call_ids],
-        },
-    )
+from aios.services import sessions as sessions_service
+from tests.unit.conftest import fake_pool_yielding_conn
 
 
 def _confirmed(tool_call_id: str, result: str = "allow") -> SimpleNamespace:
@@ -26,133 +29,249 @@ def _confirmed(tool_call_id: str, result: str = "allow") -> SimpleNamespace:
     )
 
 
+def _tool_call(tool_call_id: str, name: str = "bash") -> dict[str, Any]:
+    return {
+        "id": tool_call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": "{}"},
+    }
+
+
 class TestDispatchConfirmedTools:
-    async def test_returns_empty_when_no_assistant_tool_calls(self) -> None:
+    """Orchestration: lifecycle-tail detection + in-flight filter, then
+    delegate dispatch resolution to the unwindowed resolver."""
+
+    async def test_returns_empty_when_no_confirmations(self) -> None:
         pool = MagicMock()
-        with patch(
-            "aios.harness.loop.sessions_service.read_events",
-            AsyncMock(return_value=[]),
-        ):
-            assert (
-                await _dispatch_confirmed_tools(
-                    pool,
-                    "sess_x",
-                    [],
-                    account_id="acc_test_stub",
-                    task_registry=TaskRegistry(),
-                )
-                == []
-            )
-
-    async def test_returns_confirmed_but_not_completed(self) -> None:
-        """Baseline: a confirmed tool call with no tool result is pending."""
-        msg_events = [_assistant_with_tool_calls(["tc1"])]
-        pool = MagicMock()
-        with patch(
-            "aios.harness.loop.sessions_service.read_events",
-            AsyncMock(return_value=[_confirmed("tc1")]),
-        ):
-            pending = await _dispatch_confirmed_tools(
-                pool,
-                "sess_x",
-                msg_events,
-                account_id="acc_test_stub",
-                task_registry=TaskRegistry(),
-            )
-        assert [tc["id"] for tc in pending] == ["tc1"]
-
-    async def test_reads_lifecycle_tail_newest_first(self) -> None:
-        """Regression for #155: default ASC + LIMIT 200 scan drops recent
-        ``tool_confirmed`` events on long sessions (bulk are ancient
-        ``turn_ended``). The user clicks allow but the confirmation is
-        invisible to the dispatch sweep.
-        """
-        msg_events = [_assistant_with_tool_calls(["tc1"])]
-        mock_read = AsyncMock(return_value=[_confirmed("tc1")])
-        pool = MagicMock()
-        with patch("aios.harness.loop.sessions_service.read_events", mock_read):
-            pending = await _dispatch_confirmed_tools(
-                pool,
-                "sess_x",
-                msg_events,
-                account_id="acc_test_stub",
-                task_registry=TaskRegistry(),
-            )
-        assert [tc["id"] for tc in pending] == ["tc1"]
-        assert mock_read.call_args.kwargs["newest_first"] is True
-
-    async def test_dispatches_confirmed_from_older_assistant(self) -> None:
-        """Confirmed tool calls from older assistant turns must still be
-        dispatched, even when a later assistant turn carries different
-        tool_calls.
-
-        Reachable scenario: the model emits assistant message A1 with an
-        ``always_ask`` tool_call X.  Operator hasn't confirmed yet.  The
-        user — impatient — sends another message.  ``append_event`` lifts
-        idle to pending; the step fires; the model sees X as a synthetic
-        pending result and emits assistant message A2 with a NEW tool_call
-        Z (e.g., a search to gather context for the reply, or a new
-        ``always_allow`` action).  Z runs, lands its tool_result.  THEN
-        the operator finally confirms X.
-
-        Pre-fix ``_dispatch_confirmed_tools`` walked reversed events and
-        broke at the first assistant with non-empty tool_calls — A2's
-        ``[Z]``.  The dispatch filter checked ``confirmed={X}`` against
-        ``[Z]`` and returned ``[]``.  X is silently dropped; ghost-repair
-        eventually papers over with a synthetic "did not run" error (per
-        the two-branch recovery in ``sweep.find_and_repair_ghosts`` — see
-        #685), because the operator DID allow X; only the dispatch was
-        lost."""
-        msg_events = [
-            _assistant_with_tool_calls(["tc_X"]),  # older A1 with the confirmed tool
-            SimpleNamespace(
-                kind="message",
-                data={"role": "user", "content": "are you still there?"},
+        resolve = AsyncMock(return_value=[])
+        with (
+            patch(
+                "aios.harness.loop.sessions_service.read_events",
+                AsyncMock(return_value=[]),
             ),
-            _assistant_with_tool_calls(["tc_Z"]),  # newer A2 with a DIFFERENT tool_call
-            SimpleNamespace(
-                kind="message",
-                data={"role": "tool", "tool_call_id": "tc_Z", "content": "z done"},
+            patch(
+                "aios.harness.loop.sessions_service.resolve_confirmed_dispatchable",
+                resolve,
             ),
-        ]
-        pool = MagicMock()
-        with patch(
-            "aios.harness.loop.sessions_service.read_events",
-            AsyncMock(return_value=[_confirmed("tc_X")]),
         ):
             pending = await _dispatch_confirmed_tools(
-                pool,
-                "sess_x",
-                msg_events,
-                account_id="acc_test_stub",
-                task_registry=TaskRegistry(),
-            )
-        assert [tc["id"] for tc in pending] == ["tc_X"], (
-            "operator-confirmed tool_call from an older assistant turn was "
-            "dropped because _dispatch_confirmed_tools broke at the first "
-            "assistant-with-tool_calls it found, ignoring earlier turns"
-        )
-
-    async def test_skips_tool_call_with_in_flight_task(self) -> None:
-        """An in-flight task in ``task_registry`` blocks re-dispatch — without
-        this guard, a wake firing step N+1 before the task appended its
-        result would launch a second asyncio task for the same
-        ``tool_call_id`` (violates CLAUDE.md invariant #4).
-        """
-        msg_events = [_assistant_with_tool_calls(["tc1"])]
-        pool = MagicMock()
-        registry = TaskRegistry()
-        in_flight: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        registry.add("sess_x", "tc1", in_flight)  # type: ignore[arg-type]
-        with patch(
-            "aios.harness.loop.sessions_service.read_events",
-            AsyncMock(return_value=[_confirmed("tc1")]),
-        ):
-            pending = await _dispatch_confirmed_tools(
-                pool,
-                "sess_x",
-                msg_events,
-                account_id="acc_test_stub",
-                task_registry=registry,
+                pool, "sess_x", account_id="acc_test_stub", task_registry=TaskRegistry()
             )
         assert pending == []
+        resolve.assert_not_awaited()
+
+    async def test_returns_confirmed_dispatchable(self) -> None:
+        """A confirmed tool with no result is resolved and returned."""
+        pool = MagicMock()
+        resolve = AsyncMock(return_value=[_tool_call("tc1")])
+        with (
+            patch(
+                "aios.harness.loop.sessions_service.read_events",
+                AsyncMock(return_value=[_confirmed("tc1")]),
+            ),
+            patch(
+                "aios.harness.loop.sessions_service.resolve_confirmed_dispatchable",
+                resolve,
+            ),
+        ):
+            pending = await _dispatch_confirmed_tools(
+                pool, "sess_x", account_id="acc_test_stub", task_registry=TaskRegistry()
+            )
+        assert [tc["id"] for tc in pending] == ["tc1"]
+        assert resolve.await_args.kwargs["tool_call_ids"] == ["tc1"]
+
+    async def test_reads_lifecycle_tail_newest_first(self) -> None:
+        """Regression for #155: the lifecycle tail must be read newest-first
+        so a fresh ``tool_confirmed`` isn't hidden behind 200 ancient
+        ``turn_ended`` rows on a long session."""
+        pool = MagicMock()
+        mock_read = AsyncMock(return_value=[_confirmed("tc1")])
+        with (
+            patch("aios.harness.loop.sessions_service.read_events", mock_read),
+            patch(
+                "aios.harness.loop.sessions_service.resolve_confirmed_dispatchable",
+                AsyncMock(return_value=[_tool_call("tc1")]),
+            ),
+        ):
+            await _dispatch_confirmed_tools(
+                pool, "sess_x", account_id="acc_test_stub", task_registry=TaskRegistry()
+            )
+        assert mock_read.call_args.kwargs["newest_first"] is True
+
+    async def test_skips_in_flight_before_resolving(self) -> None:
+        """An in-flight task blocks re-dispatch — and short-circuits before
+        the resolver runs (no redundant DB work, no second asyncio task for
+        the same tool_call_id; CLAUDE.md invariant #4)."""
+        pool = MagicMock()
+        registry = TaskRegistry()
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        registry.add("sess_x", "tc1", fut)  # type: ignore[arg-type]
+        resolve = AsyncMock(return_value=[])
+        with (
+            patch(
+                "aios.harness.loop.sessions_service.read_events",
+                AsyncMock(return_value=[_confirmed("tc1")]),
+            ),
+            patch(
+                "aios.harness.loop.sessions_service.resolve_confirmed_dispatchable",
+                resolve,
+            ),
+        ):
+            pending = await _dispatch_confirmed_tools(
+                pool, "sess_x", account_id="acc_test_stub", task_registry=registry
+            )
+        assert pending == []
+        resolve.assert_not_awaited()
+
+    async def test_dedupes_confirmed_ids_preserving_order(self) -> None:
+        """Multiple allow events for the same id collapse to one candidate;
+        order follows first appearance in the (newest-first) tail."""
+        pool = MagicMock()
+        resolve = AsyncMock(return_value=[])
+        with (
+            patch(
+                "aios.harness.loop.sessions_service.read_events",
+                AsyncMock(
+                    return_value=[
+                        _confirmed("tc2"),
+                        _confirmed("tc1"),
+                        _confirmed("tc2"),  # duplicate
+                    ]
+                ),
+            ),
+            patch(
+                "aios.harness.loop.sessions_service.resolve_confirmed_dispatchable",
+                resolve,
+            ),
+        ):
+            await _dispatch_confirmed_tools(
+                pool, "sess_x", account_id="acc_test_stub", task_registry=TaskRegistry()
+            )
+        assert resolve.await_args.kwargs["tool_call_ids"] == ["tc2", "tc1"]
+
+    async def test_dispatches_confirmed_when_parent_scrolled_out_of_window(self) -> None:
+        """End-to-end regression for #737: a confirmed ``always_ask`` tool
+        whose parent assistant has scrolled out of the token window is still
+        dispatched.
+
+        Exercises the REAL resolver (only the DB queries are mocked), so a
+        regression that re-sources dispatch from the windowed message slice —
+        which by construction lacks the scrolled-out parent — would surface
+        here as an empty dispatch.  ``lookup_tool_call_by_call_id`` returning
+        the call models 'parent gone from the window but still in the log';
+        the operator's allow is visible via the unwindowed lifecycle tail."""
+        pool = cast("Any", fake_pool_yielding_conn(MagicMock()))
+        with (
+            patch(
+                "aios.harness.loop.sessions_service.read_events",
+                AsyncMock(return_value=[_confirmed("tc_X")]),
+            ),
+            patch(
+                "aios.services.sessions.queries.find_tool_result_event",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "aios.services.sessions.queries.lookup_tool_call_by_call_id",
+                AsyncMock(return_value=_tool_call("tc_X")),
+            ),
+        ):
+            pending = await _dispatch_confirmed_tools(
+                pool, "sess_x", account_id="acc_test_stub", task_registry=TaskRegistry()
+            )
+        assert [tc["id"] for tc in pending] == ["tc_X"], (
+            "confirmed always_ask tool_call whose parent assistant scrolled "
+            "out of the token window was never dispatched (#737)"
+        )
+
+
+class TestResolveConfirmedDispatchable:
+    """The unwindowed resolver — the heart of the #737 fix.
+
+    Dispatch is sourced by ``tool_call_id`` from the full log, NOT from the
+    token-windowed slice, so a confirmed ``always_ask`` tool whose parent
+    assistant has scrolled past ``window_max`` is still recovered."""
+
+    async def test_recovers_parent_tool_call_unwindowed(self) -> None:
+        """Regression for #737: a confirmed tool whose parent assistant has
+        scrolled out of the token window is recovered via the unwindowed
+        parent-by-tool_call_id lookup and returned for dispatch.
+
+        ``lookup_tool_call_by_call_id`` returning the call models 'A1 is
+        gone from the window but still in the log'; ``find_tool_result_event``
+        returning None models 'no result yet'.  Pre-fix, dispatch read the
+        windowed slice (which lacks A1) and returned nothing."""
+        pool = cast("Any", fake_pool_yielding_conn(MagicMock()))
+        with (
+            patch(
+                "aios.services.sessions.queries.find_tool_result_event",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "aios.services.sessions.queries.lookup_tool_call_by_call_id",
+                AsyncMock(return_value=_tool_call("tc_X")),
+            ),
+        ):
+            dispatchable = await sessions_service.resolve_confirmed_dispatchable(
+                pool, "sess_x", tool_call_ids=["tc_X"], account_id="acc_test_stub"
+            )
+        assert [tc["id"] for tc in dispatchable] == ["tc_X"]
+
+    async def test_skips_when_result_already_exists(self) -> None:
+        """A confirmed id whose ``tool_result`` exists in the log (even if it
+        scrolled out of the window) is NOT re-dispatched — no duplicate
+        ``tool_result`` (CLAUDE.md invariant #4).  The parent lookup is not
+        even reached."""
+        pool = cast("Any", fake_pool_yielding_conn(MagicMock()))
+        lookup = AsyncMock(return_value=_tool_call("tc_X"))
+        with (
+            patch(
+                "aios.services.sessions.queries.find_tool_result_event",
+                AsyncMock(return_value=SimpleNamespace(data={})),
+            ),
+            patch("aios.services.sessions.queries.lookup_tool_call_by_call_id", lookup),
+        ):
+            dispatchable = await sessions_service.resolve_confirmed_dispatchable(
+                pool, "sess_x", tool_call_ids=["tc_X"], account_id="acc_test_stub"
+            )
+        assert dispatchable == []
+        lookup.assert_not_awaited()
+
+    async def test_skips_when_no_parent_found(self) -> None:
+        """No parent assistant for the id (should not happen in practice) →
+        nothing to dispatch, no crash."""
+        pool = cast("Any", fake_pool_yielding_conn(MagicMock()))
+        with (
+            patch(
+                "aios.services.sessions.queries.find_tool_result_event",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "aios.services.sessions.queries.lookup_tool_call_by_call_id",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            dispatchable = await sessions_service.resolve_confirmed_dispatchable(
+                pool, "sess_x", tool_call_ids=["tc_missing"], account_id="acc_test_stub"
+            )
+        assert dispatchable == []
+
+    async def test_resolves_multiple_in_order(self) -> None:
+        """Several confirmed ids resolve to their calls, order preserved."""
+        pool = cast("Any", fake_pool_yielding_conn(MagicMock()))
+        with (
+            patch(
+                "aios.services.sessions.queries.find_tool_result_event",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "aios.services.sessions.queries.lookup_tool_call_by_call_id",
+                AsyncMock(side_effect=[_tool_call("tc_a"), _tool_call("tc_b")]),
+            ),
+        ):
+            dispatchable = await sessions_service.resolve_confirmed_dispatchable(
+                pool,
+                "sess_x",
+                tool_call_ids=["tc_a", "tc_b"],
+                account_id="acc_test_stub",
+            )
+        assert [tc["id"] for tc in dispatchable] == ["tc_a", "tc_b"]
