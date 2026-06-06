@@ -24,6 +24,10 @@ venv/
 *.pem
 *.key
 
+# local dev overlay: Google Workspace MCP server fleet (deployment-specific, not core)
+compose.override.yml
+mcp-fleet.env
+
 # Editor
 .vscode/
 .idea/
