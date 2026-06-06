@@ -21,7 +21,7 @@ from typing import Any
 
 import asyncpg
 
-from aios.db.queries import parse_jsonb
+from aios.db.queries import _get_scoped, parse_jsonb
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
 from aios.models.workflows import (
@@ -132,14 +132,14 @@ async def insert_workflow(
 async def get_workflow(
     conn: asyncpg.Connection[Any], workflow_id: str, *, account_id: str
 ) -> Workflow:
-    row = await conn.fetchrow(
-        "SELECT * FROM workflows WHERE id = $1 AND account_id = $2",
-        workflow_id,
-        account_id,
+    return await _get_scoped(
+        conn,
+        table="workflows",
+        id_=workflow_id,
+        account_id=account_id,
+        row=_row_to_workflow,
+        noun="workflow",
     )
-    if row is None:
-        raise NotFoundError(f"workflow {workflow_id} not found", detail={"id": workflow_id})
-    return _row_to_workflow(row)
 
 
 # ─── wf_runs (execution instances) ───────────────────────────────────────────
@@ -201,24 +201,38 @@ async def set_run_status(
     )
 
 
-async def set_run_output(
-    conn: asyncpg.Connection[Any], run_id: str, output: Any, *, account_id: str
+async def set_run_terminal(
+    conn: asyncpg.Connection[Any],
+    run_id: str,
+    *,
+    status: str,
+    output: Any,
+    account_id: str,
 ) -> None:
+    """Flip a run to its terminal ``status`` and store ``output`` in one UPDATE.
+
+    Called from ``_complete_run`` inside the same txn as the ``run_completed``
+    append. ``output`` is the script's return value on success and ``None`` on
+    error (the error detail lives in the ``run_completed`` payload).
+    """
     await conn.execute(
-        "UPDATE wf_runs SET output = $3::jsonb WHERE id = $1 AND account_id = $2",
+        "UPDATE wf_runs SET status = $3, output = $4::jsonb, updated_at = now() "
+        "WHERE id = $1 AND account_id = $2",
         run_id,
         account_id,
-        json.dumps(output),
+        status,
+        json.dumps(output) if output is not None else None,
     )
 
 
-async def list_active_run_ids(conn: asyncpg.Connection[Any]) -> list[tuple[str, str]]:
-    """``(id, account_id)`` for every non-terminal, live run — the sweep predicate."""
+async def list_active_run_ids(conn: asyncpg.Connection[Any]) -> list[str]:
+    """``id`` for every non-terminal, live run — the sweep predicate. (No
+    ``account_id``: ``defer_run_wake`` needs none and appends no journal span.)"""
     rows = await conn.fetch(
-        "SELECT id, account_id FROM wf_runs "
+        "SELECT id FROM wf_runs "
         "WHERE archived_at IS NULL AND status IN ('pending','running','suspended')"
     )
-    return [(r["id"], r["account_id"]) for r in rows]
+    return [r["id"] for r in rows]
 
 
 # ─── wf_run_events (the journal — single writer, gapless, idempotent) ─────────
@@ -233,15 +247,21 @@ async def append_run_event(
     payload: dict[str, Any],
     call_key: str | None = None,
 ) -> WfRunEvent | None:
-    """Append a journal event with a gapless seq; idempotent on
-    ``(run_id, call_key, type)``.
+    """Append a journal event with a gapless seq.
 
     Returns the inserted event, or ``None`` when nothing was inserted — either
-    the run is terminal/archived (the WHERE filters it) or an idempotent
-    ``(run_id, call_key, type)`` conflict (the memo dedup). In both cases no seq
-    is consumed, so the sequence stays gapless. The insert + the
-    ``last_event_seq`` bump are atomic (own savepoint when the caller is already
-    in a transaction — e.g. the ``run_completed`` + ``set_run_status`` unit).
+    the run is terminal/archived (the WHERE filters it) or an idempotent conflict
+    on the memo key ``(run_id, call_key, type)``. In both cases no seq is
+    consumed, so the sequence stays gapless. The insert + the ``last_event_seq``
+    bump are atomic (own savepoint when the caller is already in a transaction —
+    e.g. the ``run_completed`` + ``set_run_terminal`` unit).
+
+    The memo (``UNIQUE NULLS NOT DISTINCT (run_id, call_key, type)``) dedups
+    *every* event type uniformly — including the ``run_started``/``run_completed``
+    bookends, whose ``call_key IS NULL`` (``NULLS NOT DISTINCT`` makes those NULLs
+    collide instead of counting as distinct). So a replayed append is idempotent
+    by construction; the status guard above is the orthogonal "no writes to a
+    terminal/archived run" filter.
     """
     new_id = make_id(WORKFLOW_EVENT)
     async with conn.transaction():

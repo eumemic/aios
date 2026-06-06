@@ -35,9 +35,50 @@ from aios.workflows._protocol import (
 
 DEFAULT_CPU_SECONDS = 30
 DEFAULT_DEADLINE_SECONDS = 30.0
-DEFAULT_ADDRESS_SPACE_BYTES: int | None = None  # no AS cap by default; the deadline backstops
+# 4 GiB virtual-address ceiling: bounds a runaway allocation (e.g. ``[0]*10**10``
+# ≈ 80 GB) that the wall-clock deadline does NOT bound — the deadline caps
+# duration, not peak memory — while leaving ample headroom for a coordination
+# script. A ``setrlimit`` failure (platform-dependent) degrades to the deadline;
+# pass ``None`` to opt out.
+DEFAULT_ADDRESS_SPACE_BYTES: int | None = 4 * 1024**3
 
 HostOutcomeKind = Literal["suspended", "returned", "raised"]
+HostErrorKind = Literal[
+    "author_exception",
+    "script_host_crash",
+    "script_host_timeout",
+    "script_host_spawn_failed",
+]
+
+# SECURITY (load-bearing): the child IS the isolation boundary — author code is
+# assumed able to escape the restricted builtins and read the child's entire
+# environment (e.g. ``gate.__globals__['os'].environ``). So the child must inherit
+# NO secret-bearing variable: we pass a deny-by-default allowlist of launch /
+# locale essentials only — never ``AIOS_VAULT_KEY`` / ``AIOS_DB_URL`` / any
+# ``*_API_KEY`` / token. This is what makes "credential-free subprocess" (§3.4)
+# actually true; without it a malicious or buggy script reaches every tenant's
+# secrets via the inherited env. Extend this set, never widen to ``os.environ``.
+_CHILD_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONHASHSEED",
+        "VIRTUAL_ENV",
+        "__PYVENV_LAUNCHER__",  # macOS venv re-exec
+        "SYSTEMROOT",  # Windows interpreter launch
+        "PATHEXT",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -55,9 +96,7 @@ class HostOutcome:
     emitted: list[EmittedCapability] = field(default_factory=list)
     value: Any = None
     error_repr: str | None = None
-    error_kind: str | None = (
-        None  # author_exception | script_host_crash | script_host_timeout | ...
-    )
+    error_kind: HostErrorKind | None = None
     stderr: str = ""
 
 
@@ -123,11 +162,12 @@ async def run_script_host(
 ) -> HostOutcome:
     """Drive one wake of ``source`` in a fresh, credential-free subprocess."""
     init_bytes = encode_frame({"type": INIT, "source": source, "input": input, "memo": memo})
-    env = {
-        **os.environ,
-        "AIOS_WF_RLIMIT_CPU_S": str(cpu_seconds),
-        "AIOS_WF_RLIMIT_AS_BYTES": str(address_space_bytes or 0),
-    }
+    # Deny-by-default env: only non-secret launch/locale essentials cross the
+    # spawn (see ``_CHILD_ENV_ALLOWLIST``), plus the two rlimit knobs the child
+    # self-applies. The child must stay credential-free.
+    env = {k: os.environ[k] for k in _CHILD_ENV_ALLOWLIST if k in os.environ}
+    env["AIOS_WF_RLIMIT_CPU_S"] = str(cpu_seconds)
+    env["AIOS_WF_RLIMIT_AS_BYTES"] = str(address_space_bytes or 0)
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -167,4 +207,17 @@ async def run_script_host(
         raise
 
     stderr = stderr_bytes.decode("utf-8", "replace")
-    return _outcome_from_frames(_parse_frames(stdout_bytes), stderr, proc.returncode)
+    # A corrupt / oversized stream (``decode_length`` ValueError, ``json.loads``
+    # JSONDecodeError — the latter is a ValueError subclass) must error the run as
+    # a host crash, never escape the step uncaught and wedge a non-terminal run
+    # into a sweep crashloop.
+    try:
+        frames = _parse_frames(stdout_bytes)
+    except ValueError as exc:
+        return HostOutcome(
+            kind="raised",
+            error_kind="script_host_crash",
+            error_repr=f"unparseable script host output: {exc}",
+            stderr=stderr,
+        )
+    return _outcome_from_frames(frames, stderr, proc.returncode)

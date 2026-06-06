@@ -93,10 +93,15 @@ def upgrade() -> None:
             payload     jsonb NOT NULL DEFAULT '{}'::jsonb,
             created_at  timestamptz NOT NULL DEFAULT now(),
             UNIQUE (run_id, seq),
-            UNIQUE (run_id, call_key, type)
+            -- The memo. NULLS NOT DISTINCT so the call_key IS NULL bookends
+            -- (run_started/run_completed) collide too, not just the call-keyed
+            -- call_started/call_result — so append_run_event is idempotent on
+            -- replay for *every* event type by construction.
+            UNIQUE NULLS NOT DISTINCT (run_id, call_key, type)
         )
     """)
-    op.execute("CREATE INDEX wf_run_events_run_idx ON wf_run_events (run_id, seq)")
+    # No explicit (run_id, seq) index: UNIQUE (run_id, seq) above already
+    # materializes one, which serves list_run_events' ``ORDER BY seq``.
 
     op.execute(r"""
         CREATE TABLE wf_run_signals (

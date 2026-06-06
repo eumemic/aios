@@ -13,7 +13,10 @@ One wake:
    journal its ``call_result`` and fold it into ``memo`` — so replay sees a
    maximal memo and fast-forwards past it.
 4. Drive one wake of the pinned script in the credential-free subprocess.
-5. Returned → ``run_completed`` + ``completed`` (one txn). Raised → ``errored``.
+5. Raised → ``errored`` (except a transient ``script_host_spawn_failed``, which
+   re-raises so the sweep retries — an infra hiccup must not terminally error the
+   run). On a *real* replay (returned/suspended) a replay-prefix check fails
+   closed on divergence. Returned → ``run_completed`` + ``completed`` (one txn).
    Suspended → open any *new* frontier capability (a gate gets a nonce +
    ``call_started``) and park as ``suspended``; the run re-wakes on the next
    signal or sweep.
@@ -30,6 +33,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.workflows import WfRun
+from aios.services.wake import defer_run_wake
 from aios.workflows.host_launcher import run_script_host
 
 log = get_logger("aios.workflows.step")
@@ -53,8 +57,8 @@ async def run_workflow_step(run_id: str) -> None:
             for e in events
             if e.type == "call_result" and e.call_key is not None
         }
-        inflight: dict[str, dict[str, Any]] = {
-            e.call_key: e.payload
+        inflight: set[str] = {
+            e.call_key
             for e in events
             if e.type == "call_started" and e.call_key is not None and e.call_key not in memo
         }
@@ -83,16 +87,31 @@ async def run_workflow_step(run_id: str) -> None:
                 payload={"result": sig.result, "is_error": False},
             )
             memo[call_key] = sig.result
-            del inflight[call_key]
+            inflight.discard(call_key)
 
     # Drive one wake in the credential-free subprocess (no DB conn held).
     outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
 
+    needs_rewake = False
     async with pool.acquire() as conn:
-        # Replay-prefix assertion (fail-closed): every still-open capability must
-        # be re-reached by this replay. If one wasn't, the script emitted a
-        # divergent sequence (nondeterminism) — error loudly rather than orphan
-        # the old call_started and silently open a fresh one.
+        if outcome.kind == "raised":
+            if outcome.error_kind == "script_host_spawn_failed":
+                # Failure to *spawn* the host (EAGAIN/ENOMEM at fork) is a transient
+                # worker-infra fault, not the script's — never terminally error the
+                # run for it. Fail the step so the lock releases and the periodic
+                # sweep re-wakes the (still non-terminal) run when capacity returns.
+                raise RuntimeError(f"workflow {run_id}: {outcome.error_repr}")
+            await _complete_run(
+                conn, run, output=outcome.error_repr, is_error=True, error_kind=outcome.error_kind
+            )
+            return
+
+        # The host completed a real replay (suspended or returned), so every
+        # still-open capability MUST have been re-reached. Replay-prefix assertion
+        # (fail-closed): if one wasn't re-emitted, the script diverged
+        # (nondeterminism) — error loudly rather than orphan the old call_started.
+        # Gated on a non-crash outcome: a crashed/killed host emits nothing, and
+        # that emptiness is a crash (handled above), never divergence.
         emitted_keys = {cap.call_key for cap in outcome.emitted}
         diverged = sorted(k for k in inflight if k not in emitted_keys)
         if diverged:
@@ -107,11 +126,6 @@ async def run_workflow_step(run_id: str) -> None:
 
         if outcome.kind == "returned":
             await _complete_run(conn, run, output=outcome.value, is_error=False)
-            return
-        if outcome.kind == "raised":
-            await _complete_run(
-                conn, run, output=outcome.error_repr, is_error=True, error_kind=outcome.error_kind
-            )
             return
 
         # Suspended: open any *new* frontier capability, then park.
@@ -128,6 +142,12 @@ async def run_workflow_step(run_id: str) -> None:
                     call_key=cap.call_key,
                     payload={"capability": "gate", "gate_nonce": nonce},
                 )
+                # A resume signal can land before this call_started is journaled
+                # (the call_key is derivable); the pre-replay harvest only sees
+                # gates already inflight, so a self-wake harvests this freshly
+                # opened gate promptly instead of waiting for the periodic sweep.
+                if cap.call_key in signals:
+                    needs_rewake = True
             else:
                 # agent / parallel / pipeline are not openable in Block 1.
                 await _complete_run(
@@ -139,6 +159,11 @@ async def run_workflow_step(run_id: str) -> None:
                 )
                 return
         await wf_queries.set_run_status(conn, run_id, "suspended", account_id=account_id)
+
+    # Outside the txn (after the suspend commits): a self-wake so the next step
+    # harvests an already-delivered resume for a gate opened this wake.
+    if needs_rewake:
+        await defer_run_wake(run_id)
 
 
 async def _complete_run(
@@ -157,8 +182,10 @@ async def _complete_run(
         await wf_queries.append_run_event(
             conn, account_id=run.account_id, run_id=run.id, type="run_completed", payload=payload
         )
-        if not is_error:
-            await wf_queries.set_run_output(conn, run.id, output, account_id=run.account_id)
-        await wf_queries.set_run_status(
-            conn, run.id, "errored" if is_error else "completed", account_id=run.account_id
+        await wf_queries.set_run_terminal(
+            conn,
+            run.id,
+            status="errored" if is_error else "completed",
+            output=None if is_error else output,
+            account_id=run.account_id,
         )

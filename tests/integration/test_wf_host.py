@@ -13,6 +13,8 @@ import sys
 import textwrap
 from typing import Any
 
+import pytest
+
 from aios.workflows.host_launcher import HostOutcome, run_script_host
 
 
@@ -125,6 +127,25 @@ async def test_injected_globals_cannot_reach_runtime() -> None:
     assert out.value == []
 
 
+async def test_child_env_is_scrubbed_of_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    # gate.__globals__['os'].environ IS reachable (os is a host-module import), so
+    # the child's *environment* must carry no secrets — that's what makes the
+    # credential-free claim true. Regression for the env={**os.environ} spawn that
+    # leaked AIOS_VAULT_KEY / AIOS_DB_URL / provider keys into author-reachable env.
+    monkeypatch.setenv("AIOS_VAULT_KEY", "MASTER-KEY-SENTINEL")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SENTINEL")
+    monkeypatch.setenv("AIOS_DB_URL", "postgres://SENTINEL")
+    out = await _run(
+        "async def main(input):\n"
+        "    env = gate.__globals__['os'].environ\n"
+        "    secrets = ('AIOS_VAULT_KEY', 'ANTHROPIC_API_KEY', 'AIOS_DB_URL')\n"
+        "    return {'leaked': [k for k in secrets if k in env], 'has_path': 'PATH' in env}"
+    )
+    assert out.kind == "returned"
+    assert out.value["leaked"] == []  # no secret crossed the spawn
+    assert out.value["has_path"] is True  # but non-secret launch essentials still do
+
+
 # ─── runaway containment (B1.1) ──────────────────────────────────────────────
 
 
@@ -137,6 +158,22 @@ async def test_cpu_bomb_is_killed_and_parent_survives() -> None:
     assert out.kind == "raised"
     assert out.error_kind in ("script_host_timeout", "script_host_crash")
     # The parent is still alive and usable — a normal run still works right after.
+    ok = await _run("async def main(input):\n    return 'alive'")
+    assert ok.kind == "returned" and ok.value == "alive"
+
+
+async def test_address_space_bomb_is_contained_and_parent_survives() -> None:
+    # RLIMIT_AS is active (a real DEFAULT_ADDRESS_SPACE_BYTES), so a giant alloc the
+    # wall-clock deadline can't bound (it caps duration, not peak memory) is
+    # contained — MemoryError, or an OOM/deadline kill — never returned. An explicit
+    # small cap + deadline keep it fast; the alloc dwarfs any real RAM so it fails
+    # even where setrlimit(RLIMIT_AS) is a no-op.
+    out = await _run(
+        "async def main(input):\n    big = [0] * (10**10)\n    return len(big)",
+        address_space_bytes=256 * 1024 * 1024,
+        deadline_seconds=5.0,
+    )
+    assert out.kind == "raised"
     ok = await _run("async def main(input):\n    return 'alive'")
     assert ok.kind == "returned" and ok.value == "alive"
 

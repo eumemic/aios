@@ -93,6 +93,13 @@ async def test_append_run_event_gapless_idempotent_terminal(
     )
     assert e1 is not None and e1.seq == 1
 
+    # NULLS NOT DISTINCT memo: a second run_started (call_key IS NULL) is deduped
+    # too — bookends, not just call-keyed events — so no duplicate, no seq burned.
+    dup_started = await wf_queries.append_run_event(
+        wf_conn, account_id="acc_root", run_id=run_id, type="run_started", payload={"input": None}
+    )
+    assert dup_started is None
+
     key = "sha:abc#0"
     e2 = await wf_queries.append_run_event(
         wf_conn,

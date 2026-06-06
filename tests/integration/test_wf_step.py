@@ -23,6 +23,8 @@ from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.workflows import service
+from aios.workflows.determinism import CallKeyer
+from aios.workflows.host_launcher import HostOutcome
 from aios.workflows.step import run_workflow_step
 
 pytestmark = pytest.mark.integration
@@ -47,7 +49,10 @@ async def wf_runtime(
                 "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
                 "VALUES ('acc_wf', NULL, TRUE, 'wf-root')"
             )
-        with mock.patch("aios.workflows.service.defer_run_wake", new=AsyncMock()):
+        with (
+            mock.patch("aios.workflows.service.defer_run_wake", new=AsyncMock()),
+            mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()),
+        ):
             yield pool
     finally:
         runtime.pool = prev
@@ -210,3 +215,75 @@ async def test_divergent_replay_is_caught(wf_runtime: asyncpg.Pool[Any]) -> None
     assert run is not None and run.status == "errored"
     assert events[-1].type == "run_completed"
     assert events[-1].payload["error"]["kind"] == "nondeterministic_replay"
+
+
+async def test_host_crash_on_suspended_gate_is_not_divergence(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A host crash/timeout (emitted=[]) on a run suspended at a gate must report
+    the REAL infra cause, not a fabricated ``nondeterministic_replay`` — the
+    divergence check runs only on a real replay, after the raised branch."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    await run_workflow_step(run_id)  # wake 1: opens the gate, suspends
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "suspended"
+
+    timeout = HostOutcome(
+        kind="raised", error_kind="script_host_timeout", error_repr="deadline", emitted=[]
+    )
+    with mock.patch("aios.workflows.step.run_script_host", new=AsyncMock(return_value=timeout)):
+        await run_workflow_step(run_id)  # wake 2: host killed before re-emitting the gate
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "errored"
+    assert events[-1].type == "run_completed"
+    assert events[-1].payload["error"]["kind"] == "script_host_timeout"
+
+
+async def test_spawn_failure_is_transient_not_terminal(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """``script_host_spawn_failed`` (EAGAIN/ENOMEM at fork) is a worker-infra fault,
+    not the script's: the step raises (so the sweep retries) and never terminally
+    errors the run."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    spawn_failed = HostOutcome(
+        kind="raised", error_kind="script_host_spawn_failed", error_repr="EAGAIN", emitted=[]
+    )
+    with (
+        mock.patch("aios.workflows.step.run_script_host", new=AsyncMock(return_value=spawn_failed)),
+        pytest.raises(RuntimeError),
+    ):
+        await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status != "errored"  # retriable, not terminal
+    assert not any(e.type == "run_completed" for e in events)
+
+
+async def test_early_gate_signal_triggers_self_rewake(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """A resume delivered BEFORE the gate's call_started is journaled (its call_key
+    is derivable) is harvested on a prompt self-wake, not only by the ~30s sweep."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    # Pre-deliver the resume for the not-yet-opened gate (deterministic key #0).
+    gate_key = CallKeyer().next("gate", {"q": "ok?"})
+    async with pool.acquire() as conn:
+        await wf_queries.insert_run_signal(
+            conn, run_id=run_id, call_key=gate_key, kind="gate_resume", result="early"
+        )
+
+    with mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()) as rewake:
+        await run_workflow_step(run_id)  # opens the gate, sees the signal, self-wakes
+        assert rewake.await_count == 1  # a prompt self-wake, not a 30s sweep wait
+        await run_workflow_step(run_id)  # the self-wake's step harvests + completes
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {"answer": "early"}

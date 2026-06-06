@@ -23,10 +23,10 @@ log = get_logger("aios.workflows.sweep")
 async def wake_runs_needing_step(pool: asyncpg.Pool[Any]) -> int:
     """Defer a wake for every non-terminal run. Returns the number swept."""
     async with pool.acquire() as conn:
-        runs = await wf_queries.list_active_run_ids(conn)
-    for run_id, _account_id in runs:
+        run_ids = await wf_queries.list_active_run_ids(conn)
+    for run_id in run_ids:
         try:
             await defer_run_wake(run_id)
         except Exception:
             log.exception("wf_sweep.defer_failed", run_id=run_id)
-    return len(runs)
+    return len(run_ids)
