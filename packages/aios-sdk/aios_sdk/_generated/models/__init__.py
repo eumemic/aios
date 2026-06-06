@@ -92,6 +92,7 @@ from .list_sessions_status_type_0 import ListSessionsStatusType0
 from .mcp_permission_policy import McpPermissionPolicy
 from .mcp_permission_policy_type import McpPermissionPolicyType
 from .mcp_server_spec import McpServerSpec
+from .mcp_server_spec_headers_type_0 import McpServerSpecHeadersType0
 from .mcp_tool_config import McpToolConfig
 from .mcp_tool_config_transport_type_0 import McpToolConfigTransportType0
 from .mcp_toolset_config import McpToolsetConfig
@@ -313,6 +314,7 @@ __all__ = (
     "McpPermissionPolicy",
     "McpPermissionPolicyType",
     "McpServerSpec",
+    "McpServerSpecHeadersType0",
     "McpToolConfig",
     "McpToolConfigTransportType0",
     "McpToolsetConfig",

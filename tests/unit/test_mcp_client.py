@@ -6,6 +6,7 @@ All MCP SDK interactions are mocked. No network calls.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -545,3 +546,146 @@ class TestCallMcpTool:
             result = await call_mcp_tool("https://example.com/", None, {}, "tool", {})
 
         assert result == {"content": "[image content]"}
+
+
+# ── spec_headers merge + outbound (no-pool path) ──────────────────────────────
+
+
+def _capture_outbound_headers() -> tuple[Callable[..., Any], list[dict[str, str]]]:
+    """Patch target for ``httpx.AsyncClient`` that records the ``headers=``
+    kwarg of each constructed client.
+
+    Returns ``(fake_factory, captured)`` where ``captured`` accumulates the
+    outbound header dicts the client was built with — the exact headers
+    that go on the wire to the MCP server.
+    """
+    captured: list[dict[str, str]] = []
+
+    def fake_client(*_a: Any, **k: Any) -> MagicMock:
+        captured.append(dict(k.get("headers") or {}))
+        m = MagicMock()
+        m.__aenter__ = AsyncMock(return_value=m)
+        m.__aexit__ = AsyncMock(return_value=False)
+        return m
+
+    return fake_client, captured
+
+
+def _ok_session() -> AsyncMock:
+    mock_content = MagicMock()
+    mock_content.text = "ok"
+    mock_content.type = "text"
+    mock_result = MagicMock()
+    mock_result.content = [mock_content]
+    mock_result.isError = False
+
+    session = AsyncMock()
+    session.initialize = AsyncMock(return_value=MagicMock(instructions=None))
+    session.call_tool = AsyncMock(return_value=mock_result)
+    session.list_tools = AsyncMock(return_value=MagicMock(tools=[]))
+    return session
+
+
+def _transport() -> MagicMock:
+    t = MagicMock()
+    t.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock(), MagicMock()))
+    t.__aexit__ = AsyncMock(return_value=False)
+    return t
+
+
+def _session_ctx(session: AsyncMock) -> MagicMock:
+    cls = MagicMock()
+    cls.return_value.__aenter__ = AsyncMock(return_value=session)
+    cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    return cls
+
+
+class TestSpecHeadersOutbound:
+    """The no-pool (fresh-connection) path merges ``spec_headers`` with the
+    vault-derived auth headers and sends the merged dict on the wire."""
+
+    async def test_spec_headers_sent_on_outbound_request(self) -> None:
+        """A spec header with no auth collision reaches the outbound httpx
+        client."""
+        fake_client, captured = _capture_outbound_headers()
+        with (
+            patch("aios.mcp.client.httpx.AsyncClient", fake_client),
+            patch("aios.mcp.client.streamable_http_client", return_value=_transport()),
+            patch("aios.mcp.client.ClientSession", _session_ctx(_ok_session())),
+        ):
+            await call_mcp_tool(
+                "https://m/",
+                None,
+                {},
+                "tool",
+                {},
+                spec_headers={"X-MCP-Toolsets": "issues"},
+            )
+
+        assert captured, "httpx.AsyncClient must have been constructed"
+        assert captured[0].get("X-MCP-Toolsets") == "issues"
+
+    async def test_auth_headers_win_collision(self) -> None:
+        """When a spec header collides with a vault-derived auth header, the
+        auth header wins; non-colliding spec headers still pass through."""
+        fake_client, captured = _capture_outbound_headers()
+        with (
+            patch("aios.mcp.client.httpx.AsyncClient", fake_client),
+            patch("aios.mcp.client.streamable_http_client", return_value=_transport()),
+            patch("aios.mcp.client.ClientSession", _session_ctx(_ok_session())),
+        ):
+            await call_mcp_tool(
+                "https://m/",
+                None,
+                {"Authorization": "Bearer real"},
+                "tool",
+                {},
+                spec_headers={"Authorization": "Bearer spoof", "X-MCP-Toolsets": "issues"},
+            )
+
+        assert captured[0].get("Authorization") == "Bearer real"
+        assert captured[0].get("X-MCP-Toolsets") == "issues"
+
+    async def test_auth_wins_over_case_variant_spec_header(self) -> None:
+        """A spec header that is only a CASE-variant of an auth header must be
+        dropped — HTTP header names are case-insensitive, so leaving both in
+        would emit two Authorization headers on the wire with the spec value
+        first, defeating the auth-wins guarantee."""
+        fake_client, captured = _capture_outbound_headers()
+        with (
+            patch("aios.mcp.client.httpx.AsyncClient", fake_client),
+            patch("aios.mcp.client.streamable_http_client", return_value=_transport()),
+            patch("aios.mcp.client.ClientSession", _session_ctx(_ok_session())),
+        ):
+            await call_mcp_tool(
+                "https://m/",
+                None,
+                {"Authorization": "Bearer real"},
+                "tool",
+                {},
+                spec_headers={"authorization": "Bearer spoof"},
+            )
+
+        # Exactly one authorization header, carrying the auth value, regardless
+        # of case the spec used.
+        auth_values = [v for k, v in captured[0].items() if k.lower() == "authorization"]
+        assert auth_values == ["Bearer real"]
+
+    async def test_discover_passes_merged_headers(self) -> None:
+        """Discovery also merges spec headers with auth headers on the
+        outbound request."""
+        fake_client, captured = _capture_outbound_headers()
+        with (
+            patch("aios.mcp.client.httpx.AsyncClient", fake_client),
+            patch("aios.mcp.client.streamable_http_client", return_value=_transport()),
+            patch("aios.mcp.client.ClientSession", _session_ctx(_ok_session())),
+        ):
+            await discover_mcp_tools(
+                "https://m/",
+                None,
+                {},
+                "srv",
+                spec_headers={"X-MCP-Toolsets": "issues"},
+            )
+
+        assert captured[0].get("X-MCP-Toolsets") == "issues"

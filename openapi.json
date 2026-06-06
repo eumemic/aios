@@ -10584,6 +10584,20 @@
             "type": "boolean",
             "title": "Include Instructions",
             "default": true
+          },
+          "headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headers"
           }
         },
         "additionalProperties": false,
@@ -10593,7 +10607,7 @@
           "url"
         ],
         "title": "McpServerSpec",
-        "description": "One entry in an agent's ``mcp_servers`` list.\n\nDeclares a remote MCP server reachable via streamable HTTP transport.\nThe ``name`` is used to cross-reference from ``mcp_toolset`` tool entries\nand to namespace discovered tools as ``mcp__<name>__<tool_name>``.\n\n``include_instructions`` controls whether the server's\n``InitializeResult.instructions`` (per MCP spec) is rendered into the\nsystem prompt.  Defaults true so connector-mounted servers \u2014 and any\nthird-party server that ships useful affordance prose \u2014 light up\nautomatically.  Set false to opt out per agent (unfamiliar prose,\nnoisy servers)."
+        "description": "One entry in an agent's ``mcp_servers`` list.\n\nDeclares a remote MCP server reachable via streamable HTTP transport.\nThe ``name`` is used to cross-reference from ``mcp_toolset`` tool entries\nand to namespace discovered tools as ``mcp__<name>__<tool_name>``.\n\n``include_instructions`` controls whether the server's\n``InitializeResult.instructions`` (per MCP spec) is rendered into the\nsystem prompt.  Defaults true so connector-mounted servers \u2014 and any\nthird-party server that ships useful affordance prose \u2014 light up\nautomatically.  Set false to opt out per agent (unfamiliar prose,\nnoisy servers).\n\n``headers`` are extra NON-SECRET HTTP headers sent on every request to\nthis server \u2014 toolset selectors (e.g. GitHub's\n``X-MCP-Toolsets: discussions,issues``), format hints, API-version\npins.  Do NOT put secrets here: this dict is stored in plaintext agent\nJSON.  Real credentials belong in the vault path; a vault-derived auth\nheader overrides a same-named entry here (auth headers win on\ncollision).  Names must be valid HTTP tokens and values printable ASCII\n(validated below) so they can't fail only at connection time; headers\nthe MCP transport authors itself (Accept, Content-Type, Mcp-Session-Id,\nMcp-Protocol-Version) are rejected \u2014 setting them here is a silent no-op."
       },
       "McpToolConfig": {
         "properties": {

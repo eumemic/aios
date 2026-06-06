@@ -34,6 +34,7 @@ from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.logging import get_logger
 from aios.models.agents import (
+    McpServerSpec,
     PermissionPolicy,
     is_mcp_tool_name,
     resolve_permission,
@@ -241,7 +242,7 @@ async def _run_session_step_body(
         refresh_session_mount_state(pool, session_id, account_id=account_id),
     )
 
-    mcp_server_map: dict[str, str] = {s.name: s.url for s in agent.mcp_servers}
+    mcp_server_map: dict[str, McpServerSpec] = {s.name: s for s in agent.mcp_servers}
 
     # Build the events-independent prelude (system prompt + tools)
     # before windowing so its overhead can be subtracted from the
@@ -619,12 +620,13 @@ def _tc_name(tc: dict[str, Any]) -> str:
     return name
 
 
-def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, str]) -> bool:
+def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, McpServerSpec]) -> bool:
     """Return True if ``server_name`` resolves to a registered MCP server.
 
     ``mcp_server_map`` is the agent-derived map of MCP server names →
-    URLs (built upstream from both agent-declared HTTP MCP servers and
-    connection-provided MCP servers — all HTTP transport since #318).
+    ``McpServerSpec`` (built upstream from both agent-declared HTTP MCP
+    servers and connection-provided MCP servers — all HTTP transport
+    since #318).
 
     Used by :func:`_classify_tool_call` to short-circuit hallucinated
     tool names before the permission gate, so the model gets a tool
@@ -643,7 +645,7 @@ type ToolDispatchKind = Literal[
 def _classify_tool_call(
     tool_call: dict[str, Any],
     agent: Any,
-    mcp_server_map: dict[str, str],
+    mcp_server_map: dict[str, McpServerSpec],
 ) -> ToolDispatchKind:
     """Classify a tool call into a dispatch bucket.
 
@@ -723,19 +725,19 @@ async def discover_session_mcp_tools(
     for spec in agent.tools:
         if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
             enabled_server_names.add(spec.mcp_server_name)
-    servers: list[tuple[str, str]] = [
-        (s.name, s.url) for s in agent.mcp_servers if s.name in enabled_server_names
-    ]
+    servers: list[McpServerSpec] = [s for s in agent.mcp_servers if s.name in enabled_server_names]
     if not servers:
         return [], {}
 
     crypto_box = runtime.require_crypto_box()
 
-    async def _discover_one(name: str, url: str) -> tuple[list[dict[str, Any]], str | None]:
+    async def _discover_one(spec: McpServerSpec) -> tuple[list[dict[str, Any]], str | None]:
         vault_id, headers = await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, url, account_id=account_id
+            pool, crypto_box, session_id, spec.url, account_id=account_id
         )
-        return await discover_mcp_tools(url, vault_id, headers, name)
+        return await discover_mcp_tools(
+            spec.url, vault_id, headers, spec.name, spec_headers=spec.headers
+        )
 
     # Discovery runs as part of the step prelude — a process the model
     # didn't consciously initiate — so a single server's transport
@@ -744,17 +746,16 @@ async def discover_session_mcp_tools(
     # tools nor an instructions entry, so the system prompt's
     # mcp_servers_block reflects only servers the model can actually
     # use. Healthy servers' discoveries proceed unaffected.
-    raw_results = await asyncio.gather(
-        *[_discover_one(n, u) for n, u in servers], return_exceptions=True
-    )
+    raw_results = await asyncio.gather(*[_discover_one(s) for s in servers], return_exceptions=True)
     tools: list[dict[str, Any]] = []
     instructions_by_server: dict[str, str] = {}
-    for (name, url), result in zip(servers, raw_results, strict=True):
+    for spec, result in zip(servers, raw_results, strict=True):
+        name = spec.name
         if isinstance(result, BaseException):
             log.warning(
                 "mcp.discovery_failed",
                 server_name=name,
-                url=url,
+                url=spec.url,
                 error=f"{type(result).__name__}: {result}",
             )
             continue

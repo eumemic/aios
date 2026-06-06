@@ -1,0 +1,98 @@
+"""Unit test: the model-path MCP dispatcher threads ``McpServerSpec.headers``
+into ``call_mcp_tool`` as ``spec_headers``.
+
+Drives ``_execute_mcp_tool_async`` directly with the I/O boundaries
+(``_tool_lifecycle`` span/sweep machinery, auth resolution, the result-event
+append, and the crypto box) mocked, so the assertion is purely about the
+``spec_headers=`` kwarg flowing through from the server map.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from aios.harness.tool_dispatch import _execute_mcp_tool_async, _ToolCall
+from aios.models.agents import McpServerSpec
+
+
+@contextlib.asynccontextmanager
+async def _fake_lifecycle(*_args: Any, **_kwargs: Any) -> Any:
+    """Stand-in for ``_tool_lifecycle`` that yields a ready ``_ToolCall`` and
+    swallows the span/sweep/event machinery the real one runs."""
+    yield _ToolCall(
+        call_id="call_1",
+        name="mcp__gh__create_issue",
+        raw_args="{}",
+        bound_log=MagicMock(),
+    )
+
+
+class TestMcpDispatchSpecHeaders:
+    async def test_spec_headers_passed_to_call_mcp_tool(self) -> None:
+        spec = McpServerSpec(
+            name="gh",
+            url="https://mcp.github/",
+            headers={"X-MCP-Toolsets": "issues"},
+        )
+        mcp_server_map = {"gh": spec}
+
+        call_mock = AsyncMock(return_value={"content": "ok"})
+        with (
+            patch("aios.harness.tool_dispatch._tool_lifecycle", _fake_lifecycle),
+            patch("aios.harness.tool_dispatch._append_tool_result_event", new_callable=AsyncMock),
+            patch("aios.harness.tool_dispatch.runtime.require_crypto_box", return_value=object()),
+            patch(
+                "aios.mcp.client.resolve_auth_for_target_url",
+                new_callable=AsyncMock,
+                return_value=(None, {}),
+            ),
+            patch("aios.mcp.client.call_mcp_tool", call_mock),
+        ):
+            await _execute_mcp_tool_async(
+                MagicMock(),
+                "sess_x",
+                {"id": "call_1", "function": {"name": "mcp__gh__create_issue", "arguments": "{}"}},
+                mcp_server_map,
+                account_id="acc_test_stub",
+            )
+
+        call_mock.assert_awaited_once()
+        assert call_mock.await_args.kwargs.get("spec_headers") == {"X-MCP-Toolsets": "issues"}
+        # The resolved URL comes from the spec, not a bare string map value.
+        assert call_mock.await_args.args[0] == "https://mcp.github/"
+
+    async def test_unknown_server_bails(self) -> None:
+        """A tool naming a server absent from the map raises ``ToolBail`` —
+        the spec lookup replaced the old ``url is None`` guard."""
+        from aios.tools.invoke import ToolBail
+
+        captured: dict[str, Any] = {}
+
+        @contextlib.asynccontextmanager
+        async def _capture_lifecycle(*_args: Any, **_kwargs: Any) -> Any:
+            tc = _ToolCall(
+                call_id="call_1",
+                name="mcp__missing__do",
+                raw_args="{}",
+                bound_log=MagicMock(),
+            )
+            try:
+                yield tc
+            except ToolBail as err:
+                captured["bail"] = str(err)
+
+        with (
+            patch("aios.harness.tool_dispatch._tool_lifecycle", _capture_lifecycle),
+            patch("aios.harness.tool_dispatch.runtime.require_crypto_box", return_value=object()),
+        ):
+            await _execute_mcp_tool_async(
+                MagicMock(),
+                "sess_x",
+                {"id": "call_1", "function": {"name": "mcp__missing__do", "arguments": "{}"}},
+                {},
+                account_id="acc_test_stub",
+            )
+
+        assert "missing" in captured.get("bail", "")

@@ -69,7 +69,11 @@ class TestDiscoverSessionMcpTools:
         )
 
         async def _discover(
-            url: str, _vault_id: str | None, _headers: dict[str, str], name: str
+            url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
         ) -> tuple[list[dict[str, Any]], str | None]:
             return [{"name": f"mcp__{name}__t", "url": url}], None
 
@@ -113,7 +117,11 @@ class TestDiscoverSessionMcpTools:
             return None, {"Authorization": f"Bearer token-for-{url}"}
 
         async def _discover(
-            url: str, _vault_id: str | None, headers: dict[str, str], name: str
+            url: str,
+            _vault_id: str | None,
+            headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
         ) -> tuple[list[dict[str, Any]], str | None]:
             return [{"name": f"mcp__{name}__t", "auth": headers["Authorization"]}], None
 
@@ -153,7 +161,11 @@ class TestDiscoverSessionMcpTools:
         )
 
         async def _discover(
-            url: str, _vault_id: str | None, _headers: dict[str, str], name: str
+            url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
         ) -> tuple[list[dict[str, Any]], str | None]:
             if name == "gh":
                 return [], None
@@ -186,7 +198,11 @@ class TestDiscoverSessionMcpTools:
         )
 
         async def _discover(
-            _url: str, _vault_id: str | None, _headers: dict[str, str], _name: str
+            _url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            _name: str,
+            **_kwargs: Any,
         ) -> tuple[list[dict[str, Any]], str | None]:
             return [], ""
 
@@ -228,7 +244,11 @@ class TestDiscoverSessionMcpTools:
         )
 
         async def _discover(
-            _url: str, _vault_id: str | None, _headers: dict[str, str], name: str
+            _url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
         ) -> tuple[list[dict[str, Any]], str | None]:
             if name == "broken":
                 raise ConnectionError("simulated discovery failure")

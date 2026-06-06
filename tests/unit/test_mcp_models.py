@@ -62,6 +62,70 @@ class TestMcpServerSpec:
         spec = McpServerSpec(name="noisy", url="https://m", include_instructions=False)
         assert spec.include_instructions is False
 
+    def test_headers_default_none(self) -> None:
+        """``headers`` defaults to ``None`` — the no-extra-headers case."""
+        spec = McpServerSpec(name="github", url="https://m")
+        assert spec.headers is None
+
+    def test_headers_accepted(self) -> None:
+        """A custom non-secret headers dict is preserved verbatim."""
+        spec = McpServerSpec(
+            name="github",
+            url="https://m",
+            headers={"X-MCP-Toolsets": "discussions,issues"},
+        )
+        assert spec.headers == {"X-MCP-Toolsets": "discussions,issues"}
+
+    def test_headers_json_round_trip(self) -> None:
+        """headers survives a JSONB-style serialize/deserialize round trip."""
+        spec = McpServerSpec(
+            name="github",
+            url="https://m",
+            headers={"X-MCP-Toolsets": "issues", "X-Api-Version": "2024-01"},
+        )
+        j = json.dumps(spec.model_dump())
+        restored = McpServerSpec.model_validate_json(j)
+        assert restored.headers == {"X-MCP-Toolsets": "issues", "X-Api-Version": "2024-01"}
+
+    def test_extra_fields_rejected_with_headers_present(self) -> None:
+        """``extra="forbid"`` still rejects unknown fields even when the new
+        ``headers`` field is supplied — the field addition didn't loosen
+        the schema."""
+        with pytest.raises(ValueError):
+            McpServerSpec(name="t", url="https://m", headers={}, bogus=1)  # type: ignore[call-arg]
+
+    def test_headers_reject_crlf_in_value(self) -> None:
+        """A CR/LF in a header value (header-injection vector) is rejected at
+        config time, not silently dropped at connection time."""
+        with pytest.raises(ValueError, match="invalid value for header"):
+            McpServerSpec(name="t", url="https://m", headers={"X-Foo": "bar\r\nX-Evil: 1"})
+
+    def test_headers_reject_non_ascii_value(self) -> None:
+        """Non-ASCII header values can't be encoded on the wire — rejected."""
+        with pytest.raises(ValueError, match="invalid value for header"):
+            McpServerSpec(name="t", url="https://m", headers={"X-Foo": "résumé"})
+
+    def test_headers_reject_illegal_name(self) -> None:
+        """A header name with whitespace / illegal token chars is rejected."""
+        with pytest.raises(ValueError, match="invalid HTTP header name"):
+            McpServerSpec(name="t", url="https://m", headers={"X Foo": "bar"})
+
+    @pytest.mark.parametrize(
+        "reserved",
+        ["Accept", "content-type", "Mcp-Session-Id", "MCP-PROTOCOL-VERSION"],
+    )
+    def test_headers_reject_reserved_mcp_protocol_headers(self, reserved: str) -> None:
+        """Headers the MCP transport authors per-request are rejected (any
+        case) — setting them is a silent no-op that also fragments the pool
+        key."""
+        with pytest.raises(ValueError, match="authored by the MCP transport"):
+            McpServerSpec(name="t", url="https://m", headers={reserved: "x"})
+
+    def test_headers_allow_empty_value(self) -> None:
+        """An empty header value is legal HTTP and preserved."""
+        spec = McpServerSpec(name="t", url="https://m", headers={"X-Foo": ""})
+        assert spec.headers == {"X-Foo": ""}
+
 
 class TestMcpToolsetConfig:
     def test_defaults(self) -> None:

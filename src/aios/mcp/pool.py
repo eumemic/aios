@@ -1,7 +1,8 @@
 """Worker-scoped MCP session pool — per-call session checkout.
 
-Holds initialized ``ClientSession`` instances per ``(url, vault_id)`` key
-(stable across OAuth token rotation — see :meth:`acquire` and #459) so tool
+Holds initialized ``ClientSession`` instances per ``(url, vault_id, headers_key)``
+key (``headers_key`` hashes only the static spec headers, so the key is stable
+across OAuth token rotation — see :meth:`acquire` and #459) so tool
 discovery and invocation can reuse an already-initialized MCP connection
 instead of opening a fresh one on every call.
 
@@ -63,14 +64,14 @@ log = get_logger("aios.mcp.pool")
 # can't keep the worker on a dead socket indefinitely.
 _MCP_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
 
-# Cap on live sessions per ``(url, vault_id)``. Bounds session/connection growth
+# Cap on live sessions per ``(url, vault_id, headers_key)``. Bounds session/connection growth
 # under a model that fires many concurrent calls at one server; at the cap an
 # ``acquire`` waits for a release rather than opening unboundedly. A session is
 # created only when in-use < cap and none are idle, so the total live count never
 # exceeds the peak concurrent in-use count, which is bounded by this value.
 MAX_SESSIONS_PER_KEY = 8
 
-type _PoolKey = tuple[str, str | None]
+type _PoolKey = tuple[str, str | None, str]  # (url, vault_id, headers_key)
 
 
 @dataclass
@@ -154,8 +155,9 @@ class _Entry:
         # entry is by definition active), so last_used is the time the entry
         # last finished a checkout.
         #
-        # Post-#459 the pool keys on (url, vault_id), stable across
-        # OAuth refresh. The reaper's remaining job is the cold-entry
+        # Post-#459 the pool keys on (url, vault_id, headers_key), stable
+        # across OAuth refresh (headers_key hashes only the static spec
+        # headers). The reaper's remaining job is the cold-entry
         # vector (a vault whose tenant never returns) — defense-in-depth
         # signed off in #459's planning round, not silent accretion.
         self.last_used = last_used
@@ -268,15 +270,20 @@ class McpSessionPool:
             raise RuntimeError("mcp pool owner task signalled ready but produced no session")
         return _Entry(result["session"], result["init"], shutdown, task, time.monotonic(), sink)
 
-    async def acquire(self, url: str, vault_id: str | None, headers: dict[str, str]) -> _Entry:
+    async def acquire(
+        self, url: str, vault_id: str | None, headers_key: str, headers: dict[str, str]
+    ) -> _Entry:
         """Check out an entry for **exclusive** use; caller must release/discard it.
 
-        Keyed on ``(url, vault_id)`` — stable across OAuth token rotation
-        because ``vault_id`` is the row id of the ``vault_credentials``
-        entry that ``refresh_credential`` updates in place (see #459).
-        ``vault_id`` is ``None`` for the no-credential case (an
-        unauthenticated MCP server); all such callers on the same URL
-        share one key, which is safe because no auth identity is keyed on.
+        Keyed on ``(url, vault_id, headers_key)``. ``vault_id`` keeps the key
+        stable across OAuth token rotation because it is the row id of the
+        ``vault_credentials`` entry that ``refresh_credential`` updates in
+        place (see #459). ``headers_key`` hashes ONLY the spec's static
+        config headers (never the merged auth headers), so token rotation
+        does not change it either — preserving #459. ``vault_id`` is ``None``
+        for the no-credential case (an unauthenticated MCP server); all such
+        callers on the same URL with the same static headers share one key,
+        which is safe because no auth identity is keyed on.
 
         Reuses an idle entry if one exists; otherwise opens a fresh one when
         under the per-key cap; otherwise waits on the per-key Condition for a
@@ -287,7 +294,7 @@ class McpSessionPool:
         """
         if self._closed:
             raise RuntimeError("McpSessionPool is closed")
-        key: _PoolKey = (url, vault_id)
+        key: _PoolKey = (url, vault_id, headers_key)
         cond = self._condition_for(key)
         async with cond:
             while True:
@@ -306,7 +313,9 @@ class McpSessionPool:
                     return entry
                 await cond.wait()
 
-    async def release(self, url: str, vault_id: str | None, entry: _Entry) -> None:
+    async def release(
+        self, url: str, vault_id: str | None, headers_key: str, entry: _Entry
+    ) -> None:
         """Return a healthy entry to the idle pool for reuse.
 
         Called when the session is fine — a successful call, or a benign
@@ -315,14 +324,16 @@ class McpSessionPool:
         that a slot is free.
         """
         entry.last_used = time.monotonic()
-        key: _PoolKey = (url, vault_id)
+        key: _PoolKey = (url, vault_id, headers_key)
         cond = self._condition_for(key)
         async with cond:
             self._drop_in_use(key, entry)
             self._idle.setdefault(key, []).append(entry)
             cond.notify()
 
-    async def discard(self, url: str, vault_id: str | None, entry: _Entry) -> None:
+    async def discard(
+        self, url: str, vault_id: str | None, headers_key: str, entry: _Entry
+    ) -> None:
         """Drop a broken entry and close it in the background.
 
         Called when the session may be broken (transport failure, cancellation).
@@ -332,7 +343,7 @@ class McpSessionPool:
         the same leak the idle reaper exists to prevent. Frees the in-use slot
         and notifies one waiter.
         """
-        key: _PoolKey = (url, vault_id)
+        key: _PoolKey = (url, vault_id, headers_key)
         cond = self._condition_for(key)
         async with cond:
             self._drop_in_use(key, entry)

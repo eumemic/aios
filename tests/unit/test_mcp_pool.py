@@ -16,9 +16,16 @@ import httpx
 import pytest
 
 from aios.harness import runtime
+from aios.mcp.client import _headers_key
 from aios.mcp.pool import McpSessionPool
 
 URL = "https://m.example/"
+
+# Canonical headers-key components for the pool's 3-tuple key. The pool now
+# keys on (url, vault_id, headers_key); these are the keys the helper produces
+# for the no-headers case and a representative static-headers case.
+EMPTY_KEY = _headers_key(None)
+K1 = _headers_key({"X-MCP-Toolsets": "issues"})
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -58,7 +65,7 @@ def _session_ctx_seq(sessions: list[AsyncMock]) -> MagicMock:
     return cls
 
 
-def _live_count(pool: McpSessionPool, key: tuple[str, str | None]) -> int:
+def _live_count(pool: McpSessionPool, key: tuple[str, str | None, str]) -> int:
     return len(pool._idle.get(key, [])) + len(pool._in_use.get(key, set()))
 
 
@@ -76,15 +83,55 @@ class TestMcpSessionPool:
         ):
             pool = McpSessionPool()
             headers = {"Authorization": "Bearer tok"}
-            e1 = await pool.acquire(URL, "v", headers)
-            await pool.release(URL, "v", e1)
+            e1 = await pool.acquire(URL, "v", EMPTY_KEY, headers)
+            await pool.release(URL, "v", EMPTY_KEY, e1)
             # release moves the entry to idle and cleans up the empty in-use set.
-            assert (URL, "v") not in pool._in_use
-            assert pool._idle[(URL, "v")] == [e1]
-            e2 = await pool.acquire(URL, "v", headers)
+            assert (URL, "v", EMPTY_KEY) not in pool._in_use
+            assert pool._idle[(URL, "v", EMPTY_KEY)] == [e1]
+            e2 = await pool.acquire(URL, "v", EMPTY_KEY, headers)
 
         assert e1 is e2
         assert e1.session is e2.session
+        session.initialize.assert_awaited_once()
+
+    async def test_distinct_headers_key_distinct_entries(self) -> None:
+        """Same (url, vault_id) but different ``headers_key`` → DISTINCT
+        entries/sessions. The headers_key is part of the pool key so two
+        agents pointing at the same server with different static headers
+        (e.g. different ``X-MCP-Toolsets`` selectors) never share a
+        session."""
+        s_a, s_b = _make_mock_session(), _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
+        ):
+            pool = McpSessionPool()
+            e1 = await pool.acquire(URL, "v", EMPTY_KEY, {})
+            # e1 stays in use → the second acquire can't alias it even if the
+            # keys collided; distinct headers_key forces a wholly separate key.
+            e2 = await pool.acquire(URL, "v", K1, {"X-MCP-Toolsets": "issues"})
+
+        assert e1 is not e2
+        assert e1.session is not e2.session
+        assert (URL, "v", EMPTY_KEY) in pool._in_use
+        assert (URL, "v", K1) in pool._in_use
+
+    async def test_same_no_headers_none_and_empty_reuse_entry(self) -> None:
+        """``_headers_key(None)`` and ``_headers_key({})`` canonicalize to the
+        same key, so a no-headers acquire reuses an entry released under the
+        other — the no-regression guarantee for the today's-default case."""
+        session = _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
+        ):
+            pool = McpSessionPool()
+            e1 = await pool.acquire(URL, "v", _headers_key(None), {})
+            await pool.release(URL, "v", _headers_key(None), e1)
+            e2 = await pool.acquire(URL, "v", _headers_key({}), {})
+
+        assert e2 is e1
+        assert _live_count(pool, (URL, "v", EMPTY_KEY)) == 1
         session.initialize.assert_awaited_once()
 
     async def test_different_vault_ids_get_distinct_sessions(self) -> None:
@@ -96,8 +143,8 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
         ):
             pool = McpSessionPool()
-            e1 = await pool.acquire(URL, "vault_a", {"Authorization": "Bearer t1"})
-            e2 = await pool.acquire(URL, "vault_b", {"Authorization": "Bearer t2"})
+            e1 = await pool.acquire(URL, "vault_a", EMPTY_KEY, {"Authorization": "Bearer t1"})
+            e2 = await pool.acquire(URL, "vault_b", EMPTY_KEY, {"Authorization": "Bearer t2"})
 
         assert e1.session is not e2.session
         assert s_a.initialize.await_count == 1
@@ -124,8 +171,8 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s1, s2])),
         ):
             pool = McpSessionPool()
-            e1 = await pool.acquire(URL, "v", {})
-            e2 = await pool.acquire(URL, "v", {})  # e1 still in use → distinct entry
+            e1 = await pool.acquire(URL, "v", EMPTY_KEY, {})
+            e2 = await pool.acquire(URL, "v", EMPTY_KEY, {})  # e1 still in use → distinct entry
 
             assert e1 is not e2
             assert e1.error_sink is not e2.error_sink
@@ -149,17 +196,17 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
         ):
             pool = McpSessionPool()
-            e1 = await pool.acquire(URL, "v", headers)
-            await pool.discard(URL, "v", e1)
+            e1 = await pool.acquire(URL, "v", EMPTY_KEY, headers)
+            await pool.discard(URL, "v", EMPTY_KEY, e1)
             # Let the fire-and-forget close task run.
             await asyncio.sleep(0)
             await asyncio.sleep(0)
             assert e1._owner_task.done(), "discard must close the entry's owner task"
             # discard removes the entry AND cleans up the now-empty in-use set
             # (no ghost keys accumulating across tenant churn).
-            assert (URL, "v") not in pool._in_use
+            assert (URL, "v", EMPTY_KEY) not in pool._in_use
 
-            e2 = await pool.acquire(URL, "v", headers)
+            e2 = await pool.acquire(URL, "v", EMPTY_KEY, headers)
 
         assert e1.session is not e2.session
 
@@ -172,10 +219,10 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
         ):
             pool = McpSessionPool()
-            e1 = await pool.acquire(URL, "v", {})
-            await pool.release(URL, "v", e1)  # the call_mcp_tool _McpHttpError path
+            e1 = await pool.acquire(URL, "v", EMPTY_KEY, {})
+            await pool.release(URL, "v", EMPTY_KEY, e1)  # the call_mcp_tool _McpHttpError path
             assert not e1._owner_task.done(), "release must NOT close the session"
-            e2 = await pool.acquire(URL, "v", {})
+            e2 = await pool.acquire(URL, "v", EMPTY_KEY, {})
 
         assert e2 is e1
         session.initialize.assert_awaited_once()
@@ -190,7 +237,9 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq(sessions)),
         ):
             pool = McpSessionPool()
-            entries = await asyncio.gather(*[pool.acquire(URL, "v", {}) for _ in range(8)])
+            entries = await asyncio.gather(
+                *[pool.acquire(URL, "v", EMPTY_KEY, {}) for _ in range(8)]
+            )
 
         assert len({id(e) for e in entries}) == 8
         assert all(s.initialize.await_count == 1 for s in sessions)
@@ -207,14 +256,14 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq(sessions)),
         ):
             pool = McpSessionPool()
-            e1 = await pool.acquire(URL, "v", {})
-            await pool.acquire(URL, "v", {})  # now at cap (2 in use)
+            e1 = await pool.acquire(URL, "v", EMPTY_KEY, {})
+            await pool.acquire(URL, "v", EMPTY_KEY, {})  # now at cap (2 in use)
 
-            waiter = asyncio.create_task(pool.acquire(URL, "v", {}))
+            waiter = asyncio.create_task(pool.acquire(URL, "v", EMPTY_KEY, {}))
             await asyncio.sleep(0)
             assert not waiter.done(), "third acquire must block at the cap"
 
-            await pool.release(URL, "v", e1)
+            await pool.release(URL, "v", EMPTY_KEY, e1)
             e3 = await asyncio.wait_for(waiter, timeout=1.0)
 
         assert e3 is e1, "the freed (idle) entry should be reused by the waiter"
@@ -227,7 +276,7 @@ class TestMcpSessionPool:
         pool = McpSessionPool()
         await pool.close_all()
         with pytest.raises(RuntimeError):
-            await pool.acquire(URL, "v", {})
+            await pool.acquire(URL, "v", EMPTY_KEY, {})
 
     async def test_close_all_closes_idle_and_in_use(self) -> None:
         """close_all tears down BOTH released (idle) and checked-out (in-use)
@@ -238,9 +287,9 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_idle, s_in_use])),
         ):
             pool = McpSessionPool()
-            e_idle = await pool.acquire(URL, "a", {})
-            await pool.release(URL, "a", e_idle)  # → idle
-            e_in_use = await pool.acquire(URL, "b", {})  # stays in use
+            e_idle = await pool.acquire(URL, "a", EMPTY_KEY, {})
+            await pool.release(URL, "a", EMPTY_KEY, e_idle)  # → idle
+            e_in_use = await pool.acquire(URL, "b", EMPTY_KEY, {})  # stays in use
 
             await pool.close_all()
 
@@ -263,9 +312,9 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s1, s2])),
         ):
             pool = McpSessionPool()
-            e1 = await pool.acquire(URL, "v", {})
-            e2 = await pool.acquire(URL, "v", {})  # two distinct in-use entries
-            await pool.release(URL, "v", e1)  # e1 → idle, e2 stays in use
+            e1 = await pool.acquire(URL, "v", EMPTY_KEY, {})
+            e2 = await pool.acquire(URL, "v", EMPTY_KEY, {})  # two distinct in-use entries
+            await pool.release(URL, "v", EMPTY_KEY, e1)  # e1 → idle, e2 stays in use
             e1.last_used = 1000.0
             e2.last_used = 1000.0  # also old, but in-use → protected
 
@@ -288,11 +337,11 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s1, s2])),
         ):
             pool = McpSessionPool()
-            e1 = await pool.acquire(URL, "v", {})
-            e2 = await pool.acquire(URL, "v", {})
+            e1 = await pool.acquire(URL, "v", EMPTY_KEY, {})
+            e2 = await pool.acquire(URL, "v", EMPTY_KEY, {})
             # Release in order so the idle list is [e1, e2]; pop() returns e2.
-            await pool.release(URL, "v", e1)
-            await pool.release(URL, "v", e2)
+            await pool.release(URL, "v", EMPTY_KEY, e1)
+            await pool.release(URL, "v", EMPTY_KEY, e2)
 
             orig1 = e1.close
 
@@ -319,7 +368,7 @@ class TestMcpSessionPool:
             try:
                 await asyncio.wait_for(park.wait(), timeout=1.0)
                 # Reaper parked inside e1.close(). Acquire pops an idle entry (e2).
-                popped = await pool.acquire(URL, "v", {})
+                popped = await pool.acquire(URL, "v", EMPTY_KEY, {})
                 assert popped is e2
                 cont.set()
                 await asyncio.wait_for(reap, timeout=1.0)
@@ -340,12 +389,12 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
         ):
             pool = McpSessionPool()
-            e1 = await pool.acquire(URL, "vault_a", {"Authorization": "Bearer old"})
-            await pool.release(URL, "vault_a", e1)
-            e2 = await pool.acquire(URL, "vault_a", {"Authorization": "Bearer new"})
+            e1 = await pool.acquire(URL, "vault_a", EMPTY_KEY, {"Authorization": "Bearer old"})
+            await pool.release(URL, "vault_a", EMPTY_KEY, e1)
+            e2 = await pool.acquire(URL, "vault_a", EMPTY_KEY, {"Authorization": "Bearer new"})
 
         assert e2 is e1
-        assert _live_count(pool, (URL, "vault_a")) == 1
+        assert _live_count(pool, (URL, "vault_a", EMPTY_KEY)) == 1
 
     async def test_cross_tenant_isolation(self) -> None:
         """Two tenants sharing an MCP URL hold independent entries; one's
@@ -357,10 +406,10 @@ class TestMcpSessionPool:
             patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
         ):
             pool = McpSessionPool()
-            a1 = await pool.acquire(url, "vault_A", {"Authorization": "Bearer tokA"})
-            b1 = await pool.acquire(url, "vault_B", {"Authorization": "Bearer tokB"})
-            await pool.release(url, "vault_A", a1)
-            a2 = await pool.acquire(url, "vault_A", {"Authorization": "Bearer tokA_v2"})
+            a1 = await pool.acquire(url, "vault_A", EMPTY_KEY, {"Authorization": "Bearer tokA"})
+            b1 = await pool.acquire(url, "vault_B", EMPTY_KEY, {"Authorization": "Bearer tokB"})
+            await pool.release(url, "vault_A", EMPTY_KEY, a1)
+            a2 = await pool.acquire(url, "vault_A", EMPTY_KEY, {"Authorization": "Bearer tokA_v2"})
 
         assert a2 is a1, "A's session is reused across rotation"
         assert b1.session is not a1.session, "tenants hold distinct entries"
@@ -393,7 +442,7 @@ class TestMcpSessionPool:
             pool = McpSessionPool()
 
             async def opener() -> None:
-                await pool.acquire(URL, "v", {"Authorization": "tok"})
+                await pool.acquire(URL, "v", EMPTY_KEY, {"Authorization": "tok"})
 
             await asyncio.create_task(opener())
 
@@ -492,6 +541,36 @@ class TestCallMcpToolWithPool:
             await call_mcp_tool(URL, "v", {}, "do_thing", {})
 
         session.initialize.assert_awaited_once()
+
+    async def test_spec_headers_segment_pool_via_call(self, restore_runtime_pool: None) -> None:
+        """Two ``call_mcp_tool`` invocations with DIFFERENT ``spec_headers``
+        open two distinct pooled sessions (the headers_key is part of the pool
+        key); the SAME spec_headers reuses one. This proves spec_headers
+        threads end-to-end through ``call_mcp_tool`` into the pool key."""
+        from aios.mcp.client import call_mcp_tool
+
+        s_a, s_b = _make_mock_session(), _make_mock_session()
+        runtime.mcp_session_pool = McpSessionPool()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
+        ):
+            # First header set → opens s_a, released to idle.
+            await call_mcp_tool(URL, "v", {}, "t", {}, spec_headers={"X-MCP-Toolsets": "issues"})
+            # Same header set → reuses s_a (no new initialize).
+            await call_mcp_tool(URL, "v", {}, "t", {}, spec_headers={"X-MCP-Toolsets": "issues"})
+            # Different header set → distinct key → opens s_b.
+            await call_mcp_tool(
+                URL, "v", {}, "t", {}, spec_headers={"X-MCP-Toolsets": "discussions"}
+            )
+
+        pool = runtime.mcp_session_pool
+        assert pool is not None
+        all_keys = set(pool._idle) | set(pool._in_use)
+        assert s_a.initialize.await_count == 1
+        assert s_b.initialize.await_count == 1
+        assert (URL, "v", K1) in all_keys
+        assert (URL, "v", _headers_key({"X-MCP-Toolsets": "discussions"})) in all_keys
 
     async def test_does_not_retry_on_call_tool_failure(self, restore_runtime_pool: None) -> None:
         """A transport failure (broken pipe, TCP reset, HTTP/2 GOAWAY) may have

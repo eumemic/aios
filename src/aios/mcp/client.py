@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 from contextlib import AsyncExitStack
 from typing import Any, assert_never
@@ -164,6 +165,43 @@ def _auth_headers_from_payload(payload: dict[str, Any], auth_type: AuthType) -> 
     assert_never(auth_type)
 
 
+_EMPTY_HEADERS_KEY = hashlib.sha256(b"{}").hexdigest()
+
+
+def _headers_key(spec_headers: dict[str, str] | None) -> str:
+    """Stable cache-key component for a spec's static headers.
+
+    ``None`` and ``{}`` both canonicalize to the same hash so the
+    no-headers case keys identically to today.  Hashes ONLY the spec's
+    static config headers — never the merged auth headers — so OAuth
+    token rotation (#459) does not change the pool key.
+    """
+    if not spec_headers:
+        return _EMPTY_HEADERS_KEY
+    canon = json.dumps(spec_headers, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _merge_headers(
+    spec_headers: dict[str, str] | None, auth_headers: dict[str, str]
+) -> dict[str, str]:
+    """Outbound httpx headers: spec headers first, auth headers win on collision.
+
+    HTTP header names are case-insensitive, so collision detection must be too.
+    A plain ``{**spec, **auth}`` merge only dedupes byte-identical keys: a spec
+    header that is a case-variant of an auth header (e.g. spec ``authorization``
+    vs auth ``Authorization``) survives, and httpx emits BOTH on the wire with
+    the spec value first — defeating the auth-wins guarantee. Drop any spec
+    header whose name case-folds to an auth header name.
+    """
+    if not spec_headers:
+        return dict(auth_headers)
+    auth_names = {name.lower() for name in auth_headers}
+    merged = {name: value for name, value in spec_headers.items() if name.lower() not in auth_names}
+    merged.update(auth_headers)
+    return merged
+
+
 async def resolve_auth_for_target_url(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
@@ -230,6 +268,8 @@ async def discover_mcp_tools(
     vault_id: str | None,
     headers: dict[str, str],
     server_name: str,
+    *,
+    spec_headers: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Connect to an MCP server and discover available tools.
 
@@ -252,37 +292,39 @@ async def discover_mcp_tools(
     from aios.harness import runtime
 
     _pool = runtime.mcp_session_pool
+    merged = _merge_headers(spec_headers, headers)
+    hkey = _headers_key(spec_headers)
 
     if _pool is not None:
         # Pool path: check out a session; on a transport/protocol error discard
         # it and retry once with a fresh one. Always release-or-discard so the
         # per-key cap slot is freed.
-        entry = await _pool.acquire(url, vault_id, headers)
+        entry = await _pool.acquire(url, vault_id, hkey, merged)
         try:
             result = await entry.session.list_tools()
         except Exception:
-            await asyncio.shield(_pool.discard(url, vault_id, entry))
-            entry = await _pool.acquire(url, vault_id, headers)
+            await asyncio.shield(_pool.discard(url, vault_id, hkey, entry))
+            entry = await _pool.acquire(url, vault_id, hkey, merged)
             try:
                 result = await entry.session.list_tools()
             except BaseException:
-                await asyncio.shield(_pool.discard(url, vault_id, entry))
+                await asyncio.shield(_pool.discard(url, vault_id, hkey, entry))
                 raise
             else:
-                await asyncio.shield(_pool.release(url, vault_id, entry))
+                await asyncio.shield(_pool.release(url, vault_id, hkey, entry))
         except BaseException:
             # CancelledError etc. — don't retry (a re-acquire mid-cancellation
             # would spawn an owner task that's never tracked, leaking it); just
             # discard the checked-out entry and propagate.
-            await asyncio.shield(_pool.discard(url, vault_id, entry))
+            await asyncio.shield(_pool.discard(url, vault_id, hkey, entry))
             raise
         else:
-            await asyncio.shield(_pool.release(url, vault_id, entry))
+            await asyncio.shield(_pool.release(url, vault_id, hkey, entry))
         init_result = entry.init_result
     else:
         # Fallback: fresh connection per call (API process, tests).
         async with AsyncExitStack() as stack:
-            session, init_result = await _open_session(url, headers, stack)
+            session, init_result = await _open_session(url, merged, stack)
             result = await session.list_tools()
 
     if len(result.tools) > MAX_TOOLS_PER_SERVER:
@@ -328,6 +370,7 @@ async def call_mcp_tool(
     arguments: dict[str, Any],
     *,
     meta: dict[str, Any] | None = None,
+    spec_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Connect to an MCP server and invoke a tool.
 
@@ -335,16 +378,22 @@ async def call_mcp_tool(
     ``meta`` is an optional per-request metadata dict forwarded as the
     JSON-RPC request's ``_meta`` field — used by the focal-channel
     redesign to pass ``aios.focal_channel_path`` to connection-provided
-    MCP servers without stuffing it into arguments.  Returns a result
-    dict with either ``content`` (success) or ``error`` (failure).
+    MCP servers without stuffing it into arguments.  ``spec_headers`` are
+    the server's static config headers (``McpServerSpec.headers``); they
+    are merged with the vault-derived auth ``headers`` (auth wins on
+    collision) for the outbound request, and only the static headers
+    contribute to the pool key.  Returns a result dict with either
+    ``content`` (success) or ``error`` (failure).
     """
     try:
         from aios.harness import runtime
 
         _pool = runtime.mcp_session_pool
+        merged = _merge_headers(spec_headers, headers)
+        hkey = _headers_key(spec_headers)
 
         if _pool is not None:
-            entry = await _pool.acquire(url, vault_id, headers)
+            entry = await _pool.acquire(url, vault_id, hkey, merged)
             try:
                 result = await _call_tool_fast(
                     entry.session,
@@ -360,7 +409,7 @@ async def call_mcp_tool(
                 # idle for reuse rather than tearing it down and re-handshaking.
                 # shield so a second cancellation can't strand the entry checked
                 # out (leaking a per-key cap slot).
-                await asyncio.shield(_pool.release(url, vault_id, entry))
+                await asyncio.shield(_pool.release(url, vault_id, hkey, entry))
                 raise
             except BaseException:
                 # Transport failure or cancellation — the session may be broken.
@@ -370,13 +419,13 @@ async def call_mcp_tool(
                 # reset, HTTP/2 GOAWAY), so a retry could duplicate a side effect
                 # — e.g. ``signal_send`` delivering the same message twice.
                 # Surface the error so the model can retry through the session log.
-                await asyncio.shield(_pool.discard(url, vault_id, entry))
+                await asyncio.shield(_pool.discard(url, vault_id, hkey, entry))
                 raise
             else:
-                await asyncio.shield(_pool.release(url, vault_id, entry))
+                await asyncio.shield(_pool.release(url, vault_id, hkey, entry))
         else:
             async with AsyncExitStack() as stack:
-                session, _ = await _open_session(url, headers, stack)
+                session, _ = await _open_session(url, merged, stack)
                 result = await _call_tool_fast(
                     session, tool_name, arguments, meta, None, _TOOL_CALL_TIMEOUT_S
                 )
