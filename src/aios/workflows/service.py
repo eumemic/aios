@@ -22,12 +22,15 @@ async def create_run(
     *,
     account_id: str,
     workflow_id: str,
+    environment_id: str,
     input: Any = None,
 ) -> WfRun:
     """Create a run that snapshots the workflow's current script, then wake it.
 
     The run carries its own immutable ``script`` (+ ``script_sha``), so every
     wake execs exactly that source regardless of later edits to the workflow.
+    ``environment_id`` binds the run (and the sessions its ``agent()`` children
+    spawn into) to an environment — chosen at run-creation time, like a session's.
     """
     async with pool.acquire() as conn:
         workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
@@ -36,6 +39,7 @@ async def create_run(
             conn,
             account_id=account_id,
             workflow_id=workflow_id,
+            environment_id=environment_id,
             script=workflow.script,
             script_sha=script_sha,
             input=input,

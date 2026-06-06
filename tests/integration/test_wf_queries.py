@@ -20,12 +20,16 @@ from aios.errors import ConflictError
 async def wf_conn(
     migrated_db_url: str, _reset_db_state: None
 ) -> AsyncIterator[asyncpg.Connection[Any]]:
-    """A conn with a single root tenant ``acc_root`` (workflows FK ``accounts``)."""
+    """A conn with a single root tenant ``acc_root`` + env ``env_root``."""
     conn = await asyncpg.connect(migrated_db_url)
     try:
         await conn.execute(
             "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
             "VALUES ('acc_root', NULL, TRUE, 'tenant-root')"
+        )
+        await conn.execute(
+            "INSERT INTO environments (id, name, config, account_id) "
+            "VALUES ('env_root', 'wf-env', '{}'::jsonb, 'acc_root')"
         )
         yield conn
     finally:
@@ -40,6 +44,7 @@ async def _seed_run(conn: asyncpg.Connection[Any]) -> str:
         conn,
         account_id="acc_root",
         workflow_id=wf.id,
+        environment_id="env_root",
         script=wf.script,
         script_sha="deadbeef",
     )
@@ -72,10 +77,16 @@ async def test_insert_run_snapshots_script(wf_conn: asyncpg.Connection[Any]) -> 
         wf_conn, account_id="acc_root", name="demo", script="SRC-V1"
     )
     run = await wf_queries.insert_wf_run(
-        wf_conn, account_id="acc_root", workflow_id=wf.id, script=wf.script, script_sha="sha-v1"
+        wf_conn,
+        account_id="acc_root",
+        workflow_id=wf.id,
+        environment_id="env_root",
+        script=wf.script,
+        script_sha="sha-v1",
     )
     assert run.id.startswith("wfr_")
     assert run.status == "pending"
+    assert run.environment_id == "env_root"
     assert run.script == "SRC-V1"
     assert run.script_sha == "sha-v1"
     assert run.last_event_seq == 0

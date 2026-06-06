@@ -154,6 +154,7 @@ from .session_create_env import SessionCreateEnv
 from .session_create_metadata import SessionCreateMetadata
 from .session_interrupt_request import SessionInterruptRequest
 from .session_metadata import SessionMetadata
+from .session_origin import SessionOrigin
 from .session_status import SessionStatus
 from .session_stop_reason_type_0 import SessionStopReasonType0
 from .session_template import SessionTemplate
@@ -368,6 +369,7 @@ __all__ = (
     "SessionCreateMetadata",
     "SessionInterruptRequest",
     "SessionMetadata",
+    "SessionOrigin",
     "SessionStatus",
     "SessionStopReasonType0",
     "SessionTemplate",

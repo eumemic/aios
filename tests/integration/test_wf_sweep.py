@@ -28,6 +28,10 @@ async def sweep_pool(
                 "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
                 "VALUES ('acc_sw', NULL, TRUE, 'sweep-root')"
             )
+            await conn.execute(
+                "INSERT INTO environments (id, name, config, account_id) "
+                "VALUES ('env_sw', 'sweep-env', '{}'::jsonb, 'acc_sw')"
+            )
         yield pool
     finally:
         await pool.close()
@@ -49,7 +53,12 @@ async def test_sweep_wakes_only_nonterminal_runs(sweep_pool: asyncpg.Pool[Any]) 
         )
         for status in ("pending", "suspended", "completed", "errored"):
             run = await wf_queries.insert_wf_run(
-                conn, account_id="acc_sw", workflow_id=wf.id, script="x", script_sha="x"
+                conn,
+                account_id="acc_sw",
+                workflow_id=wf.id,
+                environment_id="env_sw",
+                script="x",
+                script_sha="x",
             )
             if status != "pending":
                 await wf_queries.set_run_status(conn, run.id, status, account_id="acc_sw")

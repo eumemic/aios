@@ -53,6 +53,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         id=row["id"],
         workflow_id=row["workflow_id"],
         account_id=row["account_id"],
+        environment_id=row["environment_id"],
         parent_run_id=row["parent_run_id"],
         script=row["script"],
         script_sha=row["script_sha"],
@@ -150,6 +151,7 @@ async def insert_wf_run(
     *,
     account_id: str,
     workflow_id: str,
+    environment_id: str,
     script: str,
     script_sha: str,
     input: Any = None,
@@ -161,13 +163,15 @@ async def insert_wf_run(
         row = await conn.fetchrow(
             """
             INSERT INTO wf_runs
-                (id, workflow_id, account_id, parent_run_id, script, script_sha, status, input)
-            VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7::jsonb)
+                (id, workflow_id, account_id, environment_id, parent_run_id,
+                 script, script_sha, status, input)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb)
             RETURNING *
             """,
             new_id,
             workflow_id,
             account_id,
+            environment_id,
             parent_run_id,
             script,
             script_sha,
@@ -175,7 +179,8 @@ async def insert_wf_run(
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
-            f"workflow {workflow_id} not found", detail={"workflow_id": workflow_id}
+            f"workflow {workflow_id} or environment {environment_id} not found",
+            detail={"workflow_id": workflow_id, "environment_id": environment_id},
         ) from exc
     assert row is not None
     return _row_to_wf_run(row)

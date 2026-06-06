@@ -871,6 +871,11 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
         focal_locked=row["focal_locked"],
+        # Soft reads: present in every ``SELECT *`` / ``RETURNING *`` feeder
+        # (the worker step's ``get_session_bare`` is one), default for the few
+        # explicit-column reads that don't select them.
+        origin=row.get("origin") or "foreground",
+        parent_run_id=row.get("parent_run_id"),
         # Present only when the query derives it (list_sessions); other callers
         # (single read, INSERT ... RETURNING) leave it None.
         last_event_at=row.get("last_event_at"),
@@ -947,6 +952,58 @@ async def insert_session(
         ) from exc
     assert row is not None
     return _row_to_session(row)
+
+
+async def insert_child_session(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    account_id: str,
+    agent_id: str,
+    environment_id: str,
+    agent_version: int,
+    parent_run_id: str,
+) -> Session | None:
+    """Insert a workflow ``agent()`` child under a deterministic ``session_id``.
+
+    ``INSERT ... ON CONFLICT (id) DO NOTHING RETURNING *`` — returns the new
+    :class:`Session` on first spawn, or ``None`` on conflict (a replay found the
+    existing row, so the caller harvests instead of re-spawning). ``origin`` is
+    ``'background'`` and ``agent_version`` is the **pinned** int resolved at
+    spawn (never ``None`` — a child must not track "latest"). v1 children carry
+    no vaults/resources/scheduled-tasks; the caller delivers the agent input in
+    the same transaction.
+    """
+    from aios.config import get_settings
+
+    workspace_path = str(get_settings().workspace_root / account_id / session_id)
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO sessions (
+                id, agent_id, environment_id, agent_version, title, metadata,
+                workspace_volume_path, env, focal_channel, focal_locked,
+                account_id, parent_run_id, origin
+            )
+            VALUES ($1, $2, $3, $4, NULL, '{}'::jsonb, $5, '{}'::jsonb,
+                    NULL, FALSE, $6, $7, 'background')
+            ON CONFLICT (id) DO NOTHING
+            RETURNING *
+            """,
+            session_id,
+            agent_id,
+            environment_id,
+            agent_version,
+            workspace_path,
+            account_id,
+            parent_run_id,
+        )
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise NotFoundError(
+            "agent or environment not found",
+            detail={"agent_id": agent_id, "environment_id": environment_id},
+        ) from exc
+    return _row_to_session(row) if row is not None else None
 
 
 async def get_session(

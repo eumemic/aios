@@ -228,6 +228,52 @@ async def create_session(
         return session
 
 
+async def create_child_session(
+    pool: asyncpg.Pool[Any],
+    *,
+    session_id: str,
+    account_id: str,
+    agent_id: str,
+    environment_id: str,
+    agent_version: int,
+    parent_run_id: str,
+    input: Any,
+) -> bool:
+    """Idempotently spawn a workflow ``agent()`` child under a deterministic id.
+
+    One transaction: insert the child row (``ON CONFLICT (id) DO NOTHING``) and,
+    **only on a real insert**, deliver ``input`` as the child's first user
+    message — without a stimulus the child would be born-idle (the loop ends
+    every turn idle, so nothing wakes it and the totality backstop would
+    spuriously flag it ``no_return``). Atomic, so a crash can never leave a child
+    row without its input.
+
+    Returns ``True`` if a row was created (first spawn), ``False`` on conflict (a
+    replay found the existing row → the caller harvests instead of re-spawning).
+    """
+    content = input if isinstance(input, str) else json.dumps(input)
+    async with pool.acquire() as conn, conn.transaction():
+        child = await queries.insert_child_session(
+            conn,
+            session_id=session_id,
+            account_id=account_id,
+            agent_id=agent_id,
+            environment_id=environment_id,
+            agent_version=agent_version,
+            parent_run_id=parent_run_id,
+        )
+        if child is None:
+            return False  # replay: row exists — do NOT re-deliver input
+        await queries.append_event(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind="message",
+            data={"role": "user", "content": content},
+        )
+        return True
+
+
 def _classify_awaiting(
     tc: dict[str, Any],
     agent: Agent | AgentVersion,

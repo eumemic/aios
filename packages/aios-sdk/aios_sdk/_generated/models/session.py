@@ -8,6 +8,7 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
+from ..models.session_origin import SessionOrigin
 from ..models.session_status import SessionStatus
 from ..types import UNSET, Unset
 
@@ -55,6 +56,8 @@ class Session:
             archived_at (datetime.datetime | None | Unset):
             focal_channel (None | str | Unset):
             focal_locked (bool | Unset):  Default: False.
+            origin (SessionOrigin | Unset):  Default: SessionOrigin.FOREGROUND.
+            parent_run_id (None | str | Unset):
             last_event_at (datetime.datetime | None | Unset):
             total_events (int | Unset):  Default: 0.
     """
@@ -80,6 +83,8 @@ class Session:
     archived_at: datetime.datetime | None | Unset = UNSET
     focal_channel: None | str | Unset = UNSET
     focal_locked: bool | Unset = False
+    origin: SessionOrigin | Unset = SessionOrigin.FOREGROUND
+    parent_run_id: None | str | Unset = UNSET
     last_event_at: datetime.datetime | None | Unset = UNSET
     total_events: int | Unset = 0
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -166,6 +171,16 @@ class Session:
 
         focal_locked = self.focal_locked
 
+        origin: str | Unset = UNSET
+        if not isinstance(self.origin, Unset):
+            origin = self.origin.value
+
+        parent_run_id: None | str | Unset
+        if isinstance(self.parent_run_id, Unset):
+            parent_run_id = UNSET
+        else:
+            parent_run_id = self.parent_run_id
+
         last_event_at: None | str | Unset
         if isinstance(self.last_event_at, Unset):
             last_event_at = UNSET
@@ -209,6 +224,10 @@ class Session:
             field_dict["focal_channel"] = focal_channel
         if focal_locked is not UNSET:
             field_dict["focal_locked"] = focal_locked
+        if origin is not UNSET:
+            field_dict["origin"] = origin
+        if parent_run_id is not UNSET:
+            field_dict["parent_run_id"] = parent_run_id
         if last_event_at is not UNSET:
             field_dict["last_event_at"] = last_event_at
         if total_events is not UNSET:
@@ -360,6 +379,22 @@ class Session:
 
         focal_locked = d.pop("focal_locked", UNSET)
 
+        _origin = d.pop("origin", UNSET)
+        origin: SessionOrigin | Unset
+        if isinstance(_origin, Unset):
+            origin = UNSET
+        else:
+            origin = SessionOrigin(_origin)
+
+        def _parse_parent_run_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        parent_run_id = _parse_parent_run_id(d.pop("parent_run_id", UNSET))
+
         def _parse_last_event_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -399,6 +434,8 @@ class Session:
             archived_at=archived_at,
             focal_channel=focal_channel,
             focal_locked=focal_locked,
+            origin=origin,
+            parent_run_id=parent_run_id,
             last_event_at=last_event_at,
             total_events=total_events,
         )

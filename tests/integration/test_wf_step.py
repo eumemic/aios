@@ -22,7 +22,10 @@ import pytest
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
+from aios.services import agents as agents_service
+from aios.services import sessions as sessions_service
 from aios.workflows import service
+from aios.workflows.child_id import child_session_id
 from aios.workflows.determinism import CallKeyer
 from aios.workflows.host_launcher import HostOutcome
 from aios.workflows.step import run_workflow_step
@@ -49,6 +52,10 @@ async def wf_runtime(
                 "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
                 "VALUES ('acc_wf', NULL, TRUE, 'wf-root')"
             )
+            await conn.execute(
+                "INSERT INTO environments (id, name, config, account_id) "
+                "VALUES ('env_wf', 'wf-env', '{}'::jsonb, 'acc_wf')"
+            )
         with (
             mock.patch("aios.workflows.service.defer_run_wake", new=AsyncMock()),
             mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()),
@@ -68,8 +75,93 @@ async def _events(pool: asyncpg.Pool[Any], run_id: str) -> list[tuple[int, str, 
 async def _make_run(pool: asyncpg.Pool[Any], script: str, *, input: Any = None) -> str:
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(conn, account_id="acc_wf", name="w", script=script)
-    run = await service.create_run(pool, account_id="acc_wf", workflow_id=wf.id, input=input)
+    run = await service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", input=input
+    )
     return run.id
+
+
+@pytest.fixture
+async def wf_agent_id(wf_runtime: asyncpg.Pool[Any]) -> str:
+    """A minimal agent for spawning children (model is never called in these tests)."""
+    agent = await agents_service.create_agent(
+        wf_runtime,
+        account_id="acc_wf",
+        name="child-agent",
+        model="test/dummy",
+        system="test child agent",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    return agent.id
+
+
+# ─── B2.B — child create (idempotent) + session read-model ───────────────────
+
+
+async def test_create_child_session_idempotent(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    cid = child_session_id(run_id, "sha:x#0")
+
+    created = await sessions_service.create_child_session(
+        pool,
+        session_id=cid,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        agent_version=1,
+        parent_run_id=run_id,
+        input={"q": "hi"},
+    )
+    assert created is True
+    # A replay (same id) is a rowcount-0 no-op — no double row, no double input.
+    again = await sessions_service.create_child_session(
+        pool,
+        session_id=cid,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        agent_version=1,
+        parent_run_id=run_id,
+        input={"q": "hi"},
+    )
+    assert again is False
+    async with pool.acquire() as conn:
+        user_msgs = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'message' AND data->>'role' = 'user'",
+            cid,
+            "acc_wf",
+        )
+    assert user_msgs == 1  # input delivered exactly once
+
+
+async def test_child_session_origin_and_parent_round_trip(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    cid = child_session_id(run_id, "sha:y#0")
+    await sessions_service.create_child_session(
+        pool,
+        session_id=cid,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        agent_version=1,
+        parent_run_id=run_id,
+        input="hi",
+    )
+    child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
+    assert child.origin == "background"
+    assert child.parent_run_id == run_id
+    assert child.agent_version == 1  # pinned, not None
 
 
 async def test_pure_script_completes_in_one_wake(wf_runtime: asyncpg.Pool[Any]) -> None:
