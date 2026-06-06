@@ -47,6 +47,21 @@ _N_SESSIONS = 3
 _N_ASSISTANT_PER = 400
 _N_UNREACTED_PER = 30
 
+# Tool-call-heavy sessions. The sess_perf_* sessions carry no tool_calls, so the
+# expensive branch of ``_SESSION_ACTIVE_EXPR`` — the CROSS JOIN LATERAL over
+# ``tool_calls`` + the NOT EXISTS anti-join over tool results — never runs on
+# them (the OR short-circuits on the unreacted-stimulus branch). These sessions
+# are fully resolved AND fully reacted (a final assistant message reacts to the
+# tail), so the active derivation can't short-circuit: it must scan every
+# tool_call and confirm each has a result. That full-scan worst case is what the
+# read-time budget test guards — a missing index / quadratic re-scan here would
+# blow the buffer budget (the per-row-correlated active expr can't be locked
+# structurally with ``find_subplans_over_events`` the way the sweep's bulk CTE
+# queries are: its SubPlans over events are inherent and keyset+LIMIT-bounded).
+_N_TC_SESSIONS = 3
+_N_TC_ASST_PER = 30  # assistant messages carrying tool_calls
+_N_TC_PER_ASST = 4  # tool_calls per assistant message
+
 
 async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
     """Seed the shape that triggers the pre-#140 correlated-subquery
@@ -131,6 +146,78 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
                     )
                 )
                 seq += 1
+            await conn.executemany(
+                "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
+                "VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'acc_test_stub') "
+                "ON CONFLICT (id) DO NOTHING",
+                rows,
+            )
+
+        # Tool-call-heavy sessions (see module comment): fully resolved + fully
+        # reacted, so the active derivation runs its tool_call branch to
+        # completion (no short-circuit) and the session still derives idle.
+        for t in range(_N_TC_SESSIONS):
+            tsid = f"sess_tc_{t:03d}"
+            await conn.execute(
+                "INSERT INTO sessions (id, agent_id, environment_id, workspace_volume_path, account_id) "
+                "VALUES ($1, 'agt_perf', 'env_perf', '/tmp/ws_' || $1, 'acc_test_stub') "
+                "ON CONFLICT (id) DO NOTHING",
+                tsid,
+            )
+            rows = []
+            seq = 1
+            for i in range(_N_TC_ASST_PER):
+                tcids = [f"tc_{tsid}_{i}_{k}" for k in range(_N_TC_PER_ASST)]
+                rows.append(
+                    (
+                        f"ev_a_{tsid}_{i}",
+                        tsid,
+                        seq,
+                        "message",
+                        json.dumps(
+                            {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": tc,
+                                        "type": "function",
+                                        "function": {"name": "bash", "arguments": "{}"},
+                                    }
+                                    for tc in tcids
+                                ],
+                                "reacting_to": seq - 1,
+                            }
+                        ),
+                        "assistant",
+                    )
+                )
+                seq += 1
+                for tc in tcids:
+                    rows.append(
+                        (
+                            f"ev_t_{tsid}_{i}_{tc}",
+                            tsid,
+                            seq,
+                            "message",
+                            json.dumps({"role": "tool", "tool_call_id": tc, "content": "ok"}),
+                            "tool",
+                        )
+                    )
+                    seq += 1
+            # Final assistant message reacts to every tool result, so there is no
+            # unreacted stimulus — the active OR can't short-circuit and must
+            # evaluate the (fully-resolved) tool_call branch.
+            rows.append(
+                (
+                    f"ev_a_{tsid}_final",
+                    tsid,
+                    seq,
+                    "message",
+                    json.dumps({"role": "assistant", "content": "done", "reacting_to": seq - 1}),
+                    "assistant",
+                )
+            )
             await conn.executemany(
                 "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
                 "VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'acc_test_stub') "
@@ -256,9 +343,15 @@ class TestSweepQueryBudget:
     ) -> None:
         """The read-time ``status`` derivation (``_SESSION_STATUS_EXPR``) runs
         per returned row on ``list_sessions``/``get_session``. Keyset + LIMIT
-        bound it to the page, so on the pathological fixture (3 sessions, ~830
-        events each) it must stay cheap — guard against an accidental
-        O(events^2) plan (e.g. a cross-join in the correlated subqueries)."""
+        bound it to the page, so it must stay cheap — guard against an accidental
+        O(events^2) plan (e.g. a cross-join in the correlated subqueries).
+
+        Crucially this also exercises the *expensive* branch: the ``sess_tc_*``
+        sessions are fully resolved + fully reacted, so the active expression
+        can't short-circuit and runs its CROSS JOIN LATERAL over ``tool_calls``
+        + NOT EXISTS anti-join over results to completion on every row. A
+        quadratic re-scan there would blow this budget — so this assertion is
+        the N+1 lock for ``_SESSION_ACTIVE_EXPR``'s tool_call branch."""
         list_sql = (
             f"SELECT sessions.*, ({_SESSION_STATUS_EXPR}) AS status, "
             "(SELECT e.created_at FROM events e WHERE e.session_id = sessions.id "

@@ -407,7 +407,10 @@ async def interrupt(
     pool: PoolDep,
     account_id: AccountIdDep,
 ) -> Session:
-    """Interrupt a running session: cancel all in-flight work and idle it."""
+    """Interrupt a running session: cancel all in-flight work and record the
+    interrupt. Status is derived, so the session then reads ``idle`` if nothing
+    is owed, or ``active`` if a cancelled tool's result re-wakes a follow-up
+    step (strictly more honest than the old unconditional idle)."""
     await service.append_event(
         pool, session_id, "interrupt", {"reason": body.reason}, account_id=account_id
     )

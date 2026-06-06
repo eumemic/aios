@@ -2634,7 +2634,7 @@
           "sessions"
         ],
         "summary": "Interrupt",
-        "description": "Interrupt a running session: cancel all in-flight work and idle it.",
+        "description": "Interrupt a running session: cancel all in-flight work and record the\ninterrupt. Status is derived, so the session then reads ``idle`` if nothing\nis owed, or ``active`` if a cancelled tool's result re-wakes a follow-up\nstep (strictly more honest than the old unconditional idle).",
         "operationId": "interrupt_session",
         "parameters": [
           {
