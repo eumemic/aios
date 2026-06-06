@@ -128,7 +128,6 @@ async def run_workflow_step(run_id: str) -> None:
                     call_key=cap.call_key,
                     payload={"capability": "gate", "gate_nonce": nonce},
                 )
-                inflight[cap.call_key] = {"capability": "gate", "gate_nonce": nonce}
             else:
                 # agent / parallel / pipeline are not openable in Block 1.
                 await _complete_run(
