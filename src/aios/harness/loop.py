@@ -281,7 +281,6 @@ async def _run_session_step_body(
     pending = await _dispatch_confirmed_tools(
         pool,
         session_id,
-        events,
         account_id=account_id,
         task_registry=task_registry,
     )
@@ -777,7 +776,6 @@ async def discover_session_mcp_tools(
 async def _dispatch_confirmed_tools(
     pool: Any,
     session_id: str,
-    message_events: list[Any],
     *,
     account_id: str,
     task_registry: TaskRegistry,
@@ -787,69 +785,30 @@ async def _dispatch_confirmed_tools(
     Returns the original tool call dicts ready for ``launch_tool_calls``,
     or an empty list if nothing to dispatch.
 
+    Resolution is UNWINDOWED and mirrors the sweep's case-(c) wake predicate
+    (``sweep.CONFIRMED_ROWS_SQL``): a ``tool_confirmed``/``allow`` lifecycle
+    event whose ``tool_call_id`` has no ``tool_result``.  Sourcing the
+    dispatchable calls from the windowed message slice — as an earlier version
+    did — dropped a confirmed ``always_ask`` tool whose parent assistant had
+    scrolled past ``window_max`` (#737, the window-edge sibling of the
+    lifecycle-``LIMIT`` bug #155).  Detection (the sweep) and dispatch (here)
+    now resolve the identical predicate, so they can't disagree at any edge.
+
     Skips ``tool_call_id``s whose asyncio task is still in flight per
-    *task_registry*: procrastinate releases the per-session lock when
-    step N's job body returns, but the fire-and-forget tool task
-    outlives the body — any wake firing step N+1 before the task
-    appends its result would otherwise re-launch the same tool and
-    write a second ``tool_result`` event (violates CLAUDE.md
-    invariant #4).
+    *task_registry*: procrastinate releases the per-session lock when step N's
+    job body returns, but the fire-and-forget tool task outlives the body —
+    any wake firing step N+1 before the task appends its result would otherwise
+    re-launch the same tool and write a second ``tool_result`` event (violates
+    CLAUDE.md invariant #4).  ``list_confirmed_unresolved_tool_calls`` applies
+    the complementary already-has-a-result guard.
     """
-    # Collect tool_calls from EVERY assistant message, not just the
-    # latest.  An always_ask tool_call in turn A1 can outlive A1 if
-    # the model emits a later assistant A2 (e.g., reacting to an
-    # impatient user message that lifts the session out of
-    # ``requires_action``).  Stopping at A2 would silently drop A1's
-    # operator-confirmed dispatch — ghost-repair then papers over
-    # with a synthetic "did not run" error (per the two-branch recovery
-    # in ``sweep.find_and_repair_ghosts``, see #685), even though the
-    # operator did allow the tool; the dispatch was lost.  Filtering by
-    # ``completed`` / ``in_flight`` below correctly excludes anything
-    # already handled.
-    asst_tool_calls: list[dict[str, Any]] = []
-    for e in message_events:
-        if e.kind == "message" and e.data.get("role") == "assistant":
-            tcs = e.data.get("tool_calls")
-            if tcs:
-                asst_tool_calls.extend(tcs)
-
-    if not asst_tool_calls:
-        return []
-
-    # Build set of tool_call_ids that already have a tool-role result.
-    completed: set[str] = set()
-    for e in message_events:
-        if e.kind == "message" and e.data.get("role") == "tool":
-            tcid = e.data.get("tool_call_id")
-            if tcid:
-                completed.add(tcid)
-
-    # Read the recent tail; on long sessions the default ASC scan would read
-    # the oldest 200 lifecycle events and miss any fresh tool_confirmed.
-    lifecycle_events = await sessions_service.read_events(
-        pool,
-        session_id,
-        kind="lifecycle",
-        newest_first=True,
-        limit=200,
-        account_id=account_id,
+    dispatchable = await sessions_service.list_confirmed_unresolved_tool_calls(
+        pool, session_id, account_id=account_id
     )
-    confirmed: set[str] = set()
-    for e in lifecycle_events:
-        if e.data.get("event") == "tool_confirmed" and e.data.get("result") == "allow":
-            tcid = e.data.get("tool_call_id")
-            if tcid:
-                confirmed.add(tcid)
-
+    if not dispatchable:
+        return []
     in_flight = task_registry.in_flight_tool_call_ids(session_id)
-    pending = [
-        tc
-        for tc in asst_tool_calls
-        if tc.get("id") in confirmed
-        and tc.get("id") not in completed
-        and tc.get("id") not in in_flight
-    ]
-    return pending
+    return [tc for tc in dispatchable if tc.get("id") not in in_flight]
 
 
 async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str) -> float | None:

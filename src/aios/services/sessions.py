@@ -564,6 +564,27 @@ async def read_events(
         )
 
 
+async def list_confirmed_unresolved_tool_calls(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> list[dict[str, Any]]:
+    """Dispatchable ``tool_call`` dicts for operator-confirmed tools in a
+    session that have no result yet, sourced unwindowed from the log.
+
+    One indexed query (see :func:`queries.list_confirmed_unresolved_tool_calls`)
+    that mirrors the sweep's case-(c) wake predicate, so a confirmed
+    ``always_ask`` tool whose parent assistant has scrolled out of the token
+    window (#737) — or simply isn't the latest assistant — is still recovered,
+    and one that already has a result is not re-dispatched (invariant #4).
+    """
+    async with pool.acquire() as conn:
+        return await queries.list_confirmed_unresolved_tool_calls(
+            conn, session_id, account_id=account_id
+        )
+
+
 async def get_event(
     pool: asyncpg.Pool[Any], session_id: str, event_id: str, *, account_id: str
 ) -> Event:
