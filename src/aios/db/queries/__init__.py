@@ -1071,7 +1071,10 @@ async def read_workflow_child_done(
     row = await conn.fetchrow(
         "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
         "AND kind = 'lifecycle' AND data->>'event' = 'workflow_child_done' "
-        "ORDER BY seq LIMIT 1",
+        # DESC: the marker is the child's terminal event — walk the (session_id,
+        # seq) index from the newest row so we stop at the first match, not scan
+        # the whole history forward on every parent wake.
+        "ORDER BY seq DESC LIMIT 1",
         session_id,
         account_id,
     )

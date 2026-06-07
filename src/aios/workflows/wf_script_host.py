@@ -77,7 +77,7 @@ def gate(spec: Any = None) -> _Capability:
 
 
 def agent(agent_id: str, input: Any = None, output_schema: Any = None) -> _Capability:
-    """Invoke an agent (a child session). Block 2 — the parent rejects it for now."""
+    """Invoke an agent: the parent spawns a child session and awaits its result."""
     return _Capability(
         "agent", {"agent_id": agent_id, "input": input, "output_schema": output_schema}
     )
