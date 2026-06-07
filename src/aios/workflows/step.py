@@ -9,9 +9,10 @@ One wake:
 1. Load the run + its journal + its signals; rebuild ``memo`` (resolved results)
    and ``inflight`` (opened-but-unresolved capabilities) from the log.
 2. On the first wake, append ``run_started`` and flip to ``running``.
-3. **Pre-replay harvest**: for any inflight capability that now has a signal,
-   journal its ``call_result`` and fold it into ``memo`` — so replay sees a
-   maximal memo and fast-forwards past it.
+3. **Pre-replay harvest**: for any inflight capability now done — a gate with a
+   delivered resume signal, or an agent child with a ``workflow_child_done``
+   marker — journal its ``call_result`` and fold it into ``memo`` so replay sees
+   a maximal memo and fast-forwards past it.
 4. Drive one wake of the pinned script in the credential-free subprocess.
 5. Raised → ``errored`` (except a transient ``script_host_spawn_failed``, which
    re-raises so the sweep retries — an infra hiccup must not terminally error the
@@ -62,8 +63,10 @@ async def run_workflow_step(run_id: str) -> None:
             for e in events
             if e.type == "call_result" and e.call_key is not None
         }
-        inflight: set[str] = {
-            e.call_key
+        # call_key -> call_started payload (capability + child_session_id), so the
+        # harvest can read a gate's signal or an agent child's marker.
+        inflight: dict[str, dict[str, Any]] = {
+            e.call_key: e.payload
             for e in events
             if e.type == "call_started" and e.call_key is not None and e.call_key not in memo
         }
@@ -78,21 +81,38 @@ async def run_workflow_step(run_id: str) -> None:
             )
             await wf_queries.set_run_status(conn, run_id, "running", account_id=account_id)
 
-        # Pre-replay harvest: resolve any inflight capability that has a signal.
-        for call_key in list(inflight):
-            sig = signals.get(call_key)
-            if sig is None:
-                continue
+        # Pre-replay harvest: resolve any inflight capability that is now done — a
+        # gate with a delivered resume signal, or an agent child with a completion
+        # marker — and fold its result into memo so replay fast-forwards past it.
+        for call_key, cap_payload in list(inflight.items()):
+            if cap_payload.get("capability") == "agent":
+                marker = await db_queries.read_workflow_child_done(
+                    conn, cap_payload["child_session_id"], account_id=account_id
+                )
+                if marker is None:
+                    continue  # child not done yet — stay suspended
+                result_payload = {
+                    "result": marker.get("result"),
+                    "is_error": bool(marker.get("is_error")),
+                    "error": marker.get("error"),
+                }
+            else:  # gate: the resume value lives in the signal
+                sig = signals.get(call_key)
+                if sig is None:
+                    continue
+                result_payload = {"result": sig.result, "is_error": False}
             await wf_queries.append_run_event(
                 conn,
                 account_id=account_id,
                 run_id=run_id,
                 type="call_result",
                 call_key=call_key,
-                payload={"result": sig.result, "is_error": False},
+                payload=result_payload,
             )
-            memo[call_key] = sig.result
-            inflight.discard(call_key)
+            # memo carries the bare result the host fast-forwards into the await;
+            # wrapping an errored agent result in AgentResult is B2.G.
+            memo[call_key] = result_payload["result"]
+            del inflight[call_key]
 
     # Drive one wake in the credential-free subprocess (no DB conn held).
     outcome = await run_script_host(source=run.script, input=run.input, memo=memo)

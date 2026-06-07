@@ -447,6 +447,82 @@ async def test_return_from_non_child_fails_closed(
     assert marker is None
 
 
+# ─── B2.E — harvest the child marker (spawn -> return -> complete) ────────────
+
+
+async def _child_id_of(pool: asyncpg.Pool[Any], run_id: str) -> str:
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    return next(e.payload["child_session_id"] for e in events if e.type == "call_started")
+
+
+async def test_agent_round_trip_harvest_completes_run(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(child_id, {"value": "child-result"})
+
+    await run_workflow_step(run_id)  # harvest marker -> call_result -> replay -> complete
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "completed" and run.output == "done"
+    assert [e.type for e in events] == [
+        "run_started",
+        "call_started",
+        "call_result",
+        "run_completed",
+    ]
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["is_error"] is False and cr.payload["result"] == "child-result"
+
+
+async def test_agent_error_surfaces_in_call_result(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.error_handler(child_id, {"message": "boom"})
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["is_error"] is True and cr.payload["error"] == {"message": "boom"}
+    # an errored child does NOT auto-raise — the run continues (§3.7).
+    assert run is not None and run.status == "completed" and run.output == "done"
+
+
+async def test_agent_stays_suspended_until_marker(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    await run_workflow_step(run_id)  # marker absent -> stays suspended, no call_result
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "suspended"
+    assert not any(e.type == "call_result" for e in events)
+
+
 # ─── crash-safety + divergence (B1.6 + B1.7) ─────────────────────────────────
 
 
