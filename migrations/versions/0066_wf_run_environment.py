@@ -9,8 +9,8 @@ the immutable workflow definition.
 ``wf_runs`` has no run-creation surface yet (Block 1 shipped the runtime core,
 not the HTTP/CLI), so the table is empty and ``NOT NULL`` with no default is safe.
 
-Revision ID: 0065
-Revises: 0064
+Revision ID: 0066
+Revises: 0065
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0065"
-down_revision: str = "0064"
+revision: str = "0066"
+down_revision: str = "0065"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
