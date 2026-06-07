@@ -185,7 +185,12 @@ class TestStepStartEndSpans:
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
-            id="sess_x", agent_id="agt_x", agent_version=None, focal_channel=None
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            origin="foreground",
+            parent_run_id=None,
         )
         agent = SimpleNamespace(
             model="openrouter/x",
@@ -288,7 +293,12 @@ class TestStepStartEndSpans:
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
-            id="sess_x", agent_id="agt_x", agent_version=None, focal_channel=None
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            origin="foreground",
+            parent_run_id=None,
         )
         agent = SimpleNamespace(
             model="openrouter/x",
@@ -385,7 +395,12 @@ class TestStepStartEndSpans:
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
-            id="sess_x", agent_id="agt_x", agent_version=None, focal_channel=None
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            origin="foreground",
+            parent_run_id=None,
         )
         agent = SimpleNamespace(
             model="openrouter/x",

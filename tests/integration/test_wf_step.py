@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import asyncpg
 import pytest
 
+from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
@@ -307,6 +308,143 @@ async def test_agent_not_found_errors_the_run(wf_runtime: asyncpg.Pool[Any]) -> 
     assert run is not None and run.status == "errored"
     assert events[-1].type == "run_completed"
     assert events[-1].payload["error"]["kind"] == "agent_not_found"
+
+
+# ─── B2.D — return()/error() completion tools + injection gate ────────────────
+
+
+async def _spawn_child(pool: asyncpg.Pool[Any], agent_id: str, ordinal: str) -> tuple[str, str]:
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    cid = child_session_id(run_id, ordinal)
+    await sessions_service.create_child_session(
+        pool,
+        session_id=cid,
+        account_id="acc_wf",
+        agent_id=agent_id,
+        environment_id="env_wf",
+        agent_version=1,
+        parent_run_id=run_id,
+        input="hi",
+    )
+    return run_id, cid
+
+
+async def test_completion_tools_injected_only_for_children(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    from aios.harness.step_context import compute_step_prelude
+
+    pool = wf_runtime
+    # compute_step_prelude asks the tool provider for connection tools; stub it.
+    prev_tp = runtime.tool_provider
+    tp = mock.Mock()
+    tp.list_tools_for_session = AsyncMock(return_value=[])
+    runtime.tool_provider = tp
+    try:
+        await _check_completion_injection(pool, wf_agent_id, compute_step_prelude)
+    finally:
+        runtime.tool_provider = prev_tp
+
+
+async def _check_completion_injection(
+    pool: asyncpg.Pool[Any], wf_agent_id: str, compute_step_prelude: Any
+) -> None:
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:d1#0")
+    child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
+    child_agent = await agents_service.load_for_session(pool, child, account_id="acc_wf")
+    child_prelude = await compute_step_prelude(
+        pool,
+        cid,
+        account_id="acc_wf",
+        session=child,
+        agent=child_agent,
+        channels=[],
+        memory_store_echoes=[],
+    )
+    child_tools = {t["function"]["name"] for t in child_prelude.tools}
+    assert {"return", "error"} <= child_tools
+
+    fg = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+    )
+    fg_session = await sessions_service.get_session_basic(pool, fg.id, account_id="acc_wf")
+    fg_agent = await agents_service.load_for_session(pool, fg_session, account_id="acc_wf")
+    fg_prelude = await compute_step_prelude(
+        pool,
+        fg.id,
+        account_id="acc_wf",
+        session=fg_session,
+        agent=fg_agent,
+        channels=[],
+        memory_store_echoes=[],
+    )
+    fg_tools = {t["function"]["name"] for t in fg_prelude.tools}
+    assert "return" not in fg_tools and "error" not in fg_tools
+
+
+async def test_return_writes_marker_archives_and_wakes_parent(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:d2#0")
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
+        res = await workflow_completion.return_handler(cid, {"value": {"answer": 42}})
+    assert res == {"status": "returned"}
+    wake.assert_awaited_once_with(run_id)
+
+    async with pool.acquire() as conn:
+        marker = await db_queries.read_workflow_child_done(conn, cid, account_id="acc_wf")
+    assert marker is not None
+    assert marker["is_error"] is False and marker["result"] == {"answer": 42}
+    child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
+    assert child.archived_at is not None  # self-archived — genuinely terminal
+
+
+async def test_error_marker_carries_message(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:d2e#0")
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        res = await workflow_completion.error_handler(cid, {"message": "nope"})
+    assert res == {"status": "errored"}
+    async with pool.acquire() as conn:
+        marker = await db_queries.read_workflow_child_done(conn, cid, account_id="acc_wf")
+    assert marker is not None and marker["is_error"] is True
+    assert marker["error"] == {"message": "nope"}
+
+
+async def test_return_from_non_child_fails_closed(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    from aios.tools import workflow_completion
+    from aios.tools.registry import ToolResult
+
+    pool = wf_runtime
+    fg = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+    )
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
+        res = await workflow_completion.return_handler(fg.id, {"value": 1})
+    assert isinstance(res, ToolResult) and res.is_error
+    wake.assert_not_awaited()  # never signal a NULL parent run
+    async with pool.acquire() as conn:
+        marker = await db_queries.read_workflow_child_done(conn, fg.id, account_id="acc_wf")
+    assert marker is None
 
 
 # ─── crash-safety + divergence (B1.6 + B1.7) ─────────────────────────────────

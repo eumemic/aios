@@ -171,6 +171,12 @@ async def compute_step_prelude(
     # focal attention; inject it whenever the session has bound channels.
     if channels:
         tools.append(_switch_channel_tool_spec())
+    # return/error are a workflow agent child's only way to finish — injected
+    # only for a background child of a run (§3.5), never a foreground session.
+    if session.origin == "background" and session.parent_run_id is not None:
+        from aios.tools.workflow_completion import workflow_completion_tool_specs
+
+        tools.extend(workflow_completion_tool_specs())
 
     mcp_servers_block = ""
     if agent.mcp_servers:

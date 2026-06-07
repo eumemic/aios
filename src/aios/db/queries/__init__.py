@@ -1006,6 +1006,56 @@ async def insert_child_session(
     return _row_to_session(row) if row is not None else None
 
 
+async def get_session_workflow_context(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> tuple[str, str | None] | None:
+    """``(account_id, parent_run_id)`` for a session, or ``None`` if it's absent.
+
+    Unscoped (internal/trusted — the ``return``/``error`` completion tools run
+    inside the child's own dispatch and need the parent run to wake). A non-null
+    ``parent_run_id`` is what marks the session a workflow child.
+    """
+    row = await conn.fetchrow(
+        "SELECT account_id, parent_run_id FROM sessions WHERE id = $1", session_id
+    )
+    return (row["account_id"], row["parent_run_id"]) if row is not None else None
+
+
+async def set_session_archived(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
+    """Idempotently soft-archive a session (no-op if already archived).
+
+    Unlike :func:`archive_session` this never raises ``NotFound`` — used by the
+    workflow completion tools (self-archive on ``return``) and run-termination
+    teardown, where a double-archive is benign.
+    """
+    await conn.execute(
+        "UPDATE sessions SET archived_at = now() "
+        "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL",
+        session_id,
+        account_id,
+    )
+
+
+async def read_workflow_child_done(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> dict[str, Any] | None:
+    """The child's ``workflow_child_done`` marker payload, or ``None`` if absent.
+
+    The single explicit completion signal the run-step harvest reads (§3.3/§3.5)
+    — never inferred from idle. ``data`` is ``{event, is_error, result}``.
+    """
+    row = await conn.fetchrow(
+        "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
+        "AND kind = 'lifecycle' AND data->>'event' = 'workflow_child_done' "
+        "ORDER BY seq LIMIT 1",
+        session_id,
+        account_id,
+    )
+    return parse_jsonb(row["data"]) if row is not None else None
+
+
 async def get_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Session:
