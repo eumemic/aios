@@ -179,6 +179,14 @@ class Settings(BaseSettings):
         description="Maximum bytes of stdout+stderr returned from a bash tool call. "
         "Output beyond this is truncated with a [truncated] marker.",
     )
+    tool_result_max_chars: int = Field(
+        default=200_000,
+        ge=1_000,
+        description="Maximum characters of a tool result stored inline in the "
+        "event log. A larger result is spilled to a file under the session's "
+        "attachments mount and replaced inline with a stub pointing the model "
+        "to read it, so a single oversized result can't exceed the context window.",
+    )
     upload_max_size_bytes: int = Field(
         default=50 * 1024 * 1024,
         ge=1,

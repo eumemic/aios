@@ -269,6 +269,15 @@ async def _append_tool_result_event(
     """
     from aios.db import queries
 
+    content = event_data.get("content")
+    if isinstance(content, str):
+        from aios.config import get_settings
+        from aios.sandbox.tool_result_spill import cap_tool_result_content
+
+        event_data["content"] = await cap_tool_result_content(
+            session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
+        )
+
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
