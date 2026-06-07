@@ -481,6 +481,12 @@ async def append_tool_result(
     in the connector-facing endpoint).  The caller is responsible for
     deferring the wake afterwards.
     """
+    from aios.sandbox.tool_result_spill import cap_tool_result_content
+
+    if isinstance(content, str):
+        content = await cap_tool_result_content(
+            session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
+        )
     async with conn.transaction():
         await queries.lock_active_session_for_update(conn, session_id, account_id=account_id)
         existing = await queries.find_tool_result_event(
