@@ -785,65 +785,30 @@ async def _dispatch_confirmed_tools(
     Returns the original tool call dicts ready for ``launch_tool_calls``,
     or an empty list if nothing to dispatch.
 
-    Both halves are UNWINDOWED, and must agree:
-
-    - Detection: the ``tool_confirmed`` lifecycle tail, read newest-first
-      so a fresh confirmation isn't missed behind 200 ancient
-      ``turn_ended`` rows on a long session (#155).
-    - Dispatch: each confirmed tool_call is resolved from the log by
-      ``tool_call_id`` (:func:`sessions_service.resolve_confirmed_dispatchable`),
-      independent of the token window.  An earlier version sourced the
-      dispatchable calls from the windowed message slice, so a confirmed
-      ``always_ask`` tool whose parent assistant had scrolled past
-      ``window_max`` was detected-as-confirmed yet never found to
-      dispatch — the #155 symptom reachable via the window edge (#737).
+    Resolution is UNWINDOWED and mirrors the sweep's case-(c) wake predicate
+    (``sweep.CONFIRMED_ROWS_SQL``): a ``tool_confirmed``/``allow`` lifecycle
+    event whose ``tool_call_id`` has no ``tool_result``.  Sourcing the
+    dispatchable calls from the windowed message slice — as an earlier version
+    did — dropped a confirmed ``always_ask`` tool whose parent assistant had
+    scrolled past ``window_max`` (#737, the window-edge sibling of the
+    lifecycle-``LIMIT`` bug #155).  Detection (the sweep) and dispatch (here)
+    now resolve the identical predicate, so they can't disagree at any edge.
 
     Skips ``tool_call_id``s whose asyncio task is still in flight per
-    *task_registry*: procrastinate releases the per-session lock when
-    step N's job body returns, but the fire-and-forget tool task
-    outlives the body — any wake firing step N+1 before the task
-    appends its result would otherwise re-launch the same tool and
-    write a second ``tool_result`` event (violates CLAUDE.md
-    invariant #4).  ``resolve_confirmed_dispatchable`` applies the
-    complementary already-has-a-result guard.
+    *task_registry*: procrastinate releases the per-session lock when step N's
+    job body returns, but the fire-and-forget tool task outlives the body —
+    any wake firing step N+1 before the task appends its result would otherwise
+    re-launch the same tool and write a second ``tool_result`` event (violates
+    CLAUDE.md invariant #4).  ``list_confirmed_unresolved_tool_calls`` applies
+    the complementary already-has-a-result guard.
     """
-    # Read the recent tail newest-first; the default ASC scan would read
-    # the oldest 200 lifecycle events and miss any fresh tool_confirmed.
-    lifecycle_events = await sessions_service.read_events(
-        pool,
-        session_id,
-        kind="lifecycle",
-        newest_first=True,
-        limit=200,
-        account_id=account_id,
+    dispatchable = await sessions_service.list_confirmed_unresolved_tool_calls(
+        pool, session_id, account_id=account_id
     )
-    # Confirmed (allow) tool_call_ids, de-duplicated but order-preserving
-    # so dispatch order is deterministic.
-    seen: set[str] = set()
-    confirmed: list[str] = []
-    for e in lifecycle_events:
-        if e.data.get("event") == "tool_confirmed" and e.data.get("result") == "allow":
-            tcid = e.data.get("tool_call_id")
-            if tcid and tcid not in seen:
-                seen.add(tcid)
-                confirmed.append(tcid)
-    if not confirmed:
+    if not dispatchable:
         return []
-
     in_flight = task_registry.in_flight_tool_call_ids(session_id)
-    candidates = [tcid for tcid in confirmed if tcid not in in_flight]
-    if not candidates:
-        return []
-
-    # Resolve each confirmed-and-not-in-flight id to its dispatchable
-    # tool_call dict from the unwindowed log, dropping any that already
-    # have a result.
-    return await sessions_service.resolve_confirmed_dispatchable(
-        pool,
-        session_id,
-        tool_call_ids=candidates,
-        account_id=account_id,
-    )
+    return [tc for tc in dispatchable if tc.get("id") not in in_flight]
 
 
 async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str) -> float | None:

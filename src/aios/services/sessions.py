@@ -564,46 +564,25 @@ async def read_events(
         )
 
 
-async def resolve_confirmed_dispatchable(
+async def list_confirmed_unresolved_tool_calls(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
-    tool_call_ids: list[str],
     account_id: str,
 ) -> list[dict[str, Any]]:
-    """Resolve confirmed-but-unresolved tool_calls to their dispatchable
-    tool_call dicts, sourced from the UNWINDOWED log.
+    """Dispatchable ``tool_call`` dicts for operator-confirmed tools in a
+    session that have no result yet, sourced unwindowed from the log.
 
-    For each ``tool_call_id`` (an operator-confirmed ``always_ask`` tool),
-    returns the parent assistant's tool_call dict — UNLESS the call already
-    has a ``tool_result``.  Both the result check (:func:`find_tool_result_event`)
-    and the parent lookup (:func:`lookup_tool_call_by_call_id`) are
-    unwindowed point-lookups keyed on ``tool_call_id``, so:
-
-    - a confirmed tool whose parent assistant has scrolled past
-      ``window_max`` is still recovered and dispatched (#737), and
-    - a confirmed tool whose ``tool_result`` has itself scrolled out is
-      NOT re-dispatched — no duplicate ``tool_result`` (CLAUDE.md
-      invariant #4).
-
-    Order-preserving over ``tool_call_ids``.  O(len(tool_call_ids)) indexed
-    lookups, not a full-log scan — the caller passes only the small set of
-    confirmed-and-not-in-flight ids from the lifecycle tail.
+    One indexed query (see :func:`queries.list_confirmed_unresolved_tool_calls`)
+    that mirrors the sweep's case-(c) wake predicate, so a confirmed
+    ``always_ask`` tool whose parent assistant has scrolled out of the token
+    window (#737) — or simply isn't the latest assistant — is still recovered,
+    and one that already has a result is not re-dispatched (invariant #4).
     """
-    dispatchable: list[dict[str, Any]] = []
     async with pool.acquire() as conn:
-        for tool_call_id in tool_call_ids:
-            existing = await queries.find_tool_result_event(
-                conn, session_id, tool_call_id, account_id=account_id
-            )
-            if existing is not None:
-                continue
-            tool_call = await queries.lookup_tool_call_by_call_id(
-                conn, session_id, tool_call_id, account_id=account_id
-            )
-            if tool_call is not None:
-                dispatchable.append(tool_call)
-    return dispatchable
+        return await queries.list_confirmed_unresolved_tool_calls(
+            conn, session_id, account_id=account_id
+        )
 
 
 async def get_event(

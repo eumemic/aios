@@ -121,6 +121,12 @@ CANDIDATE_ROWS_SQL = """
        {scope_clause}
 """
 
+# Cross-session detection of confirmed-but-unresolved tools, for the wake
+# decision (case (c)).  The dispatch-side counterpart that resolves these same
+# confirmed-allow, result-less tool_calls into the actual tool_call dicts to
+# launch is ``queries.list_confirmed_unresolved_tool_calls`` (per-session) —
+# keep the predicate (``tool_confirmed``/``allow`` ∧ no ``role='tool'`` result)
+# in sync.  Both are served by ``events_tool_confirmed_allow_idx`` (0065).
 CONFIRMED_ROWS_SQL = """
     SELECT DISTINCT lc.session_id
       FROM events lc

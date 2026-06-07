@@ -1962,24 +1962,21 @@ async def find_tool_confirmed_event(
     return _row_to_event(row) if row is not None else None
 
 
-async def lookup_tool_call_by_call_id(
+async def lookup_tool_name_by_call_id(
     conn: asyncpg.Connection[Any],
     session_id: str,
     tool_call_id: str,
     *,
     account_id: str,
-) -> dict[str, Any] | None:
-    """Return the full ``tool_call`` dict (id / type / function) from the
-    parent assistant event whose ``tool_calls`` array contains
-    ``tool_call_id``, or None if no parent is found.
+) -> str | None:
+    """Return the function name of the matching ``tool_call`` on the parent
+    assistant event, or None if no parent is found.
 
-    Unwindowed by construction — scans the whole log via the
-    ``events_assistant_tool_calls_idx`` partial index (the same ``@>``
-    predicate as the parent-assistant lookup in ``_derive_event_channel``).
-    This is the dispatch source for a confirmed ``always_ask`` tool whose
-    parent assistant may have scrolled out of the token window (#737); a
-    windowed read would detect the confirmation yet fail to find the call.
-    The name-only sibling :func:`lookup_tool_name_by_call_id` delegates here.
+    Used by the custom tool-result handler to stamp a ``name`` field on
+    the tool-role event it appends, so ``_derive_tool_name`` populates
+    the ``tool_name`` column (issue #133, migration 0022).  Mirrors the
+    parent-assistant lookup in ``_derive_event_channel`` — same ``@>``
+    predicate, same partial index (``events_assistant_tool_calls_idx``).
     """
     raw = await conn.fetchval(
         "SELECT data->'tool_calls' FROM events "
@@ -2001,34 +1998,91 @@ async def lookup_tool_call_by_call_id(
     if not isinstance(tool_calls, list):
         return None
     for tc in tool_calls:
-        if isinstance(tc, dict) and tc.get("id") == tool_call_id:
-            return tc
+        if not isinstance(tc, dict) or tc.get("id") != tool_call_id:
+            continue
+        function = tc.get("function")
+        if not isinstance(function, dict):
+            return None
+        name = function.get("name")
+        return name if isinstance(name, str) else None
     return None
 
 
-async def lookup_tool_name_by_call_id(
+async def list_confirmed_unresolved_tool_calls(
     conn: asyncpg.Connection[Any],
     session_id: str,
-    tool_call_id: str,
     *,
     account_id: str,
-) -> str | None:
-    """Return the function name of the matching ``tool_call`` on the parent
-    assistant event, or None if no parent is found.
+) -> list[dict[str, Any]]:
+    """Return the dispatchable ``tool_call`` dicts for a session: those
+    operator-confirmed (``tool_confirmed``/``allow``) whose ``tool_call_id``
+    has no paired ``tool_result`` yet, in chronological (parent-assistant
+    ``seq``) order.
 
-    Used by the custom tool-result handler to stamp a ``name`` field on
-    the tool-role event it appends, so ``_derive_tool_name`` populates
-    the ``tool_name`` column (issue #133, migration 0022).  Delegates to
-    :func:`lookup_tool_call_by_call_id` and extracts the name.
+    This is the dispatch-side resolver of the SAME predicate the sweep uses to
+    wake the session for case (c) — ``sweep.CONFIRMED_ROWS_SQL``: a
+    ``tool_confirmed``/``allow`` lifecycle event whose ``tool_call_id`` has no
+    ``role='tool'`` result.  Detection (the sweep, cross-session, projecting
+    only ``session_id``) and dispatch (here, per-session, projecting the
+    ``tool_call`` dicts) therefore agree by construction; re-resolving per step
+    is load-bearing against the wake→step TOCTOU window.
+
+    Unwindowed and unbounded — keyed on ``tool_call_id`` via the
+    ``events_tool_confirmed_allow_idx`` partial index (migration 0065), so a
+    confirmed tool whose parent assistant has scrolled out of the token window,
+    or simply isn't the latest assistant, is still recovered (#737).  The
+    ``NOT EXISTS`` result guard means one whose result has itself scrolled out
+    is not re-dispatched (no duplicate ``tool_result``; CLAUDE.md invariant
+    #4).  The parent-assistant join reuses ``events_assistant_tool_calls_idx``;
+    the result check reuses ``events_tool_result_idx``.
     """
-    tc = await lookup_tool_call_by_call_id(conn, session_id, tool_call_id, account_id=account_id)
-    if tc is None:
-        return None
-    function = tc.get("function")
-    if not isinstance(function, dict):
-        return None
-    name = function.get("name")
-    return name if isinstance(name, str) else None
+    rows = await conn.fetch(
+        """
+        SELECT a.seq AS asst_seq,
+               lc.data->>'tool_call_id' AS tool_call_id,
+               a.data->'tool_calls' AS tool_calls
+          FROM events lc
+          JOIN events a
+            ON a.session_id = lc.session_id
+           AND a.account_id = lc.account_id
+           AND a.kind = 'message'
+           AND a.role = 'assistant'
+           AND a.data ? 'tool_calls'
+           AND a.data->'tool_calls' @> jsonb_build_array(
+                 jsonb_build_object('id', lc.data->>'tool_call_id'))
+         WHERE lc.session_id = $1
+           AND lc.account_id = $2
+           AND lc.kind = 'lifecycle'
+           AND lc.data->>'event' = 'tool_confirmed'
+           AND lc.data->>'result' = 'allow'
+           AND NOT EXISTS (
+               SELECT 1 FROM events tr
+                WHERE tr.session_id = lc.session_id
+                  AND tr.account_id = lc.account_id
+                  AND tr.kind = 'message'
+                  AND tr.role = 'tool'
+                  AND tr.data->>'tool_call_id' = lc.data->>'tool_call_id'
+           )
+         ORDER BY a.seq ASC
+        """,
+        session_id,
+        account_id,
+    )
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        tool_call_id: str = row["tool_call_id"]
+        if tool_call_id in seen:
+            continue
+        tool_calls = parse_jsonb(row["tool_calls"])
+        if not isinstance(tool_calls, list):
+            continue
+        for tc in tool_calls:
+            if isinstance(tc, dict) and tc.get("id") == tool_call_id:
+                seen.add(tool_call_id)
+                out.append(tc)
+                break
+    return out
 
 
 async def append_event(
@@ -2208,10 +2262,12 @@ async def list_pending_calls_for_connector(
     """Pending custom tool calls across every active connection of ``connector`` type.
 
     Used by the runtime SSE at subscribe-time backfill.  A "pending"
-    call is a tool_call on the latest assistant message of a bound
-    session whose ``function.name`` is in ``connector.tools_schema``
-    and has no paired tool_result event yet.  No dependency on
-    ``stop_reason`` — the source of truth is the event log.
+    call is a tool_call on ANY assistant message of a bound session
+    whose ``function.name`` is in ``connector.tools_schema`` and has no
+    paired tool_result event yet — not just the latest assistant turn, so
+    a custom call left pending while the model emitted a later turn is
+    still surfaced for execution (the connector-side facet of #741).  No
+    dependency on ``stop_reason`` — the source of truth is the event log.
 
     Each emitted record carries ``connection_id`` so the runtime can
     fan out to the right per-connection worker.
@@ -2283,9 +2339,7 @@ async def list_pending_calls_for_connector(
         )
         workspace_path_by_session[row["session_id"]] = row["workspace_path"]
 
-    raw_by_sid = await _latest_unresolved_tool_calls(
-        conn, list(by_session.keys()), account_id=account_id
-    )
+    raw_by_sid = await _unresolved_tool_calls(conn, list(by_session.keys()), account_id=account_id)
     out: list[dict[str, Any]] = []
     for sid, calls in raw_by_sid.items():
         workspace_path = workspace_path_by_session[sid]
@@ -2347,7 +2401,7 @@ async def list_pending_calls_for_session_and_connection(
     if not name_set:
         return []
 
-    raw_by_sid = await _latest_unresolved_tool_calls(conn, [session_id], account_id=account_id)
+    raw_by_sid = await _unresolved_tool_calls(conn, [session_id], account_id=account_id)
     focal = conn_row["focal_channel"]
     workspace_path = conn_row["workspace_path"]
     out: list[dict[str, Any]] = []
@@ -2370,14 +2424,23 @@ async def list_pending_calls_for_session_and_connection(
     return out
 
 
-async def _latest_unresolved_tool_calls(
+async def _unresolved_tool_calls(
     conn: asyncpg.Connection[Any],
     session_ids: list[str],
     *,
     account_id: str,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Return ``{session_id: [tool_call_dict]}`` for the latest assistant's
-    tool_calls (per session) that have no paired tool_result event.
+    """Return ``{session_id: [tool_call_dict]}`` for EVERY assistant's
+    tool_calls (per session) that have no paired tool_result event, in
+    chronological (seq-ascending) order.
+
+    Spans all assistant turns, not just the latest: an ``always_ask``
+    tool_call on an earlier assistant can stay unresolved while a later
+    assistant emits other tool_calls (e.g. the model reacts to an impatient
+    user message before the operator confirms).  Restricting to the latest
+    assistant (a ``DISTINCT ON (session_id) ... ORDER BY seq DESC``) hid such
+    still-pending calls from ``Session.awaiting`` — the read-model sibling of
+    the dispatch-side window-edge bug #737 (#741).
 
     Pending-ness is purely an event-log property — the session row's
     ``status`` and ``stop_reason`` are irrelevant. Tool_call dicts are
@@ -2392,7 +2455,7 @@ async def _latest_unresolved_tool_calls(
     # falls back to the wider ``events_session_seq_idx``.
     asst_rows = await conn.fetch(
         """
-        SELECT DISTINCT ON (session_id) session_id, data
+        SELECT session_id, data
           FROM events
          WHERE session_id = ANY($1::text[])
            AND account_id = $2
@@ -2402,7 +2465,7 @@ async def _latest_unresolved_tool_calls(
            AND jsonb_array_length(
                  COALESCE(NULLIF(data->'tool_calls','null'::jsonb), '[]'::jsonb)
                ) > 0
-         ORDER BY session_id, seq DESC
+         ORDER BY session_id, seq ASC
         """,
         session_ids,
         account_id,
@@ -2415,13 +2478,9 @@ async def _latest_unresolved_tool_calls(
         sid: str = row["session_id"]
         data = parse_jsonb(row["data"])
         completed: set[str] = results_by_sid.get(sid, set())
-        unresolved = [
-            tc
-            for tc in (data.get("tool_calls") or [])
-            if tc.get("id") and tc["id"] not in completed
-        ]
-        if unresolved:
-            out[sid] = unresolved
+        for tc in data.get("tool_calls") or []:
+            if tc.get("id") and tc["id"] not in completed:
+                out.setdefault(sid, []).append(tc)
     return out
 
 
@@ -2458,17 +2517,19 @@ async def list_unresolved_tool_calls_batch(
     *,
     account_id: str,
 ) -> dict[str, list[dict[str, Any]]]:
-    """For each session, return the latest assistant's tool_calls that
-    have no paired tool_result, annotated with allow-lifecycle presence.
+    """For each session, return every assistant's tool_calls that have no
+    paired tool_result, annotated with allow-lifecycle presence.
 
-    Used by :func:`services.sessions.compute_awaiting` to build the
+    Spans all assistant turns, not just the latest, so a tool_call left
+    unresolved on an earlier turn still appears in ``Session.awaiting``
+    (#741).  Used by :func:`services.sessions.compute_awaiting` to build the
     ``Session.awaiting`` derived view. Returned dicts have keys
     ``tool_call_id``, ``name``, ``arguments``, ``has_allow_lifecycle``
     — the caller classifies kind / needs_confirm using ``agent`` (and
     the tool's ``classify_permission`` for arg-aware routes like
     ``http_request``).
     """
-    raw = await _latest_unresolved_tool_calls(conn, session_ids, account_id=account_id)
+    raw = await _unresolved_tool_calls(conn, session_ids, account_id=account_id)
     if not raw:
         return {}
     allow_rows = await conn.fetch(
