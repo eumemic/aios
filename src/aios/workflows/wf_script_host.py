@@ -17,8 +17,9 @@ interpreter that never imports them, even a full sandbox escape in author code
 reaches only this credential-free process. ``SAFE_BUILTINS`` and the absence of
 ``__import__`` are determinism/footgun aids, **not** the security boundary.
 
-Block 1: ``gate()`` is a real capability; ``agent()`` emits a frontier the parent
-rejects (Block 2); ``parallel()``/``pipeline()`` raise (Block 2).
+``gate()`` and ``agent()`` are real capabilities (for ``agent()`` the parent spawns
+a child session and harvests its completion marker); ``parallel()``/``pipeline()``
+still raise until Block 2.G.
 """
 
 from __future__ import annotations
@@ -76,8 +77,18 @@ def gate(spec: Any = None) -> _Capability:
     return _Capability("gate", spec)
 
 
-def agent(agent_id: str, input: Any = None, output_schema: Any = None) -> _Capability:
-    """Invoke an agent: the parent spawns a child session and awaits its result."""
+def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
+    """Invoke an agent: spawn a child session with ``input`` as its first user
+    message and await its ``return``/``error`` result.
+
+    ``input`` is **required and must not be None** — the child needs a real first
+    message to act on (a child born with no user message would sit idle forever and
+    poison the totality backstop). Pass a ``str`` (delivered verbatim) or any
+    JSON-serialisable value (delivered as canonical JSON). The error surfaces as a
+    normal exception in the author's script, so a bad call fails the run loudly.
+    """
+    if input is None:
+        raise ValueError("agent() requires a non-None input (the child's first message)")
     return _Capability(
         "agent", {"agent_id": agent_id, "input": input, "output_schema": output_schema}
     )

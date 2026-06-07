@@ -80,6 +80,18 @@ async def test_agent_emits_a_frontier_for_block2() -> None:
     assert out.emitted[0].capability_id == "agent"
 
 
+async def test_agent_requires_non_none_input() -> None:
+    # input is required: a child born with no first user message would sit idle
+    # forever. A bad call raises in the author's script → terminal RAISED.
+    missing = await _run("async def main(input):\n    return await agent('a1')")
+    assert missing.kind == "raised"
+    assert "input" in (missing.error_repr or "")  # TypeError: missing required 'input'
+
+    explicit_none = await _run("async def main(input):\n    return await agent('a1', None)")
+    assert explicit_none.kind == "raised"
+    assert "non-None input" in (explicit_none.error_repr or "")
+
+
 async def test_bad_capability_input_is_raised() -> None:
     out = await _run(
         "async def main(input):\n    return await gate({'t': 1.5})"

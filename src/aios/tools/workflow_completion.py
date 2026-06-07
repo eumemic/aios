@@ -2,12 +2,21 @@
 explicit way to finish (completion is NEVER inferred from idle — §3.5).
 
 Injected ONLY into a workflow child (``origin='background'`` with a
-``parent_run_id``; see ``compute_step_prelude``). The handler is the completion
-writer: it appends the single ``workflow_child_done`` marker on the child,
-soft-archives the child (making it genuinely terminal via ``archived_at``, not
-``status``), and wakes the parent run to harvest the marker. The child's result
-lives in the marker, so no signal row is needed — the parent's harvest reads
-markers, and the periodic ``wf_runs`` sweep is the lost-wake backstop.
+``parent_run_id``; see ``compute_step_prelude``). Termination is **two-phase**:
+
+* **Logical completion = the marker.** The handler writes the single
+  ``workflow_child_done`` marker on the child and wakes the parent run to harvest
+  it. The result lives in the marker, so no signal row is needed — the parent's
+  harvest reads markers, and the periodic ``wf_runs`` sweep is the lost-wake
+  backstop.
+* **Physical reap = ``archived_at``,** done LATER by the in-worker workflow-child
+  reaper once the child is provably quiescent — NOT here. Archive must be a
+  session's last write, yet this handler runs mid tool-lifecycle (the
+  ``tool_result`` append follows it) and sibling tools in the same assistant
+  batch may still be in flight; archiving here would crash those concurrent
+  appends against the ``archived_at IS NULL`` guard in ``append_event``. The
+  marker also makes the child soft-terminal in ``find_sessions_needing_inference``
+  so it is not re-woken for a wasteful extra model step in the meantime.
 """
 
 from __future__ import annotations
@@ -61,21 +70,23 @@ async def _finish(
         account_id, parent_run_id = ctx
         if parent_run_id is None:
             return _NOT_A_CHILD  # fail closed — never signal a NULL parent run
-        async with conn.transaction():
-            await queries.append_event(
-                conn,
-                account_id=account_id,
-                session_id=session_id,
-                kind="lifecycle",
-                data={
-                    "event": "workflow_child_done",
-                    "is_error": is_error,
-                    "result": result,
-                    "error": error,
-                },
-            )
-            await queries.set_session_archived(conn, session_id, account_id=account_id)
-    # After commit: wake the parent run to harvest the marker. The periodic
+        # Logical completion only: write the marker, do NOT archive (the reaper
+        # archives once the child is quiescent — see the module docstring). The
+        # child is not yet archived here, so this append + the tool_result append
+        # that follows both succeed.
+        await queries.append_event(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind="lifecycle",
+            data={
+                "event": "workflow_child_done",
+                "is_error": is_error,
+                "result": result,
+                "error": error,
+            },
+        )
+    # After the marker commits: wake the parent run to harvest it. The periodic
     # wf_runs sweep is the durable backstop if this wake is lost.
     await defer_run_wake(parent_run_id)
     return {"status": "errored" if is_error else "returned"}

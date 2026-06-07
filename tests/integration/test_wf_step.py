@@ -377,9 +377,13 @@ async def _check_completion_injection(
     assert "return" not in fg_tools and "error" not in fg_tools
 
 
-async def test_return_writes_marker_archives_and_wakes_parent(
+async def test_return_writes_marker_and_wakes_parent_without_archiving(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
+    """Two-phase termination: the handler writes the marker + wakes the parent but
+    does NOT archive. Archive must be a session's last write, yet this handler runs
+    mid tool-lifecycle (the tool_result append follows); physical reap is the
+    in-worker reaper's job once the child is quiescent."""
     from aios.tools import workflow_completion
 
     pool = wf_runtime
@@ -394,7 +398,7 @@ async def test_return_writes_marker_archives_and_wakes_parent(
     assert marker is not None
     assert marker["is_error"] is False and marker["result"] == {"answer": 42}
     child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
-    assert child.archived_at is not None  # self-archived — genuinely terminal
+    assert child.archived_at is None  # NOT archived by the handler — the reaper does that
 
 
 async def test_error_marker_carries_message(
@@ -435,6 +439,124 @@ async def test_return_from_non_child_fails_closed(
     async with pool.acquire() as conn:
         marker = await db_queries.read_workflow_child_done(conn, fg.id, account_id="acc_wf")
     assert marker is None
+
+
+async def test_return_real_dispatch_appends_result_and_does_not_archive(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The blind spot the bug survived in: drive ``return`` through the REAL tool
+    path (``_execute_tool_async``/``_tool_lifecycle``), not the handler directly.
+    Marker-only completion must append exactly one ``tool_result`` + both spans +
+    the marker, wake the parent, and leave the child UN-archived — so a concurrent
+    sibling tool in the same batch could still append (the multi-tool race that
+    sank the terminal-tool design). No exception is the headline: the original bug
+    crashed here on every completion."""
+    import json as _json
+
+    from aios.harness import tool_dispatch
+    from aios.harness.task_registry import TaskRegistry
+
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:rd#0")
+    call = {
+        "id": "call_ret",
+        "function": {"name": "return", "arguments": _json.dumps({"value": "ok"})},
+    }
+
+    prev_reg = runtime.task_registry
+    runtime.task_registry = TaskRegistry()
+    try:
+        with (
+            mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake,
+            mock.patch("aios.harness.sweep.defer_wake", new=AsyncMock()),
+        ):
+            await tool_dispatch._execute_tool_async(pool, cid, call, account_id="acc_wf")
+    finally:
+        runtime.task_registry = prev_reg
+
+    wake.assert_awaited_once_with(run_id)
+    async with pool.acquire() as conn:
+        result = await db_queries.find_tool_result_event(conn, cid, "call_ret", account_id="acc_wf")
+        marker = await db_queries.read_workflow_child_done(conn, cid, account_id="acc_wf")
+        events = await db_queries.read_events(conn, cid, account_id="acc_wf", limit=1000)
+    # invariant #4: exactly one tool_result for the call; both spans balanced.
+    assert result is not None and not bool(result.data.get("is_error"))
+    spans = [e.data.get("event") for e in events if e.kind == "span"]
+    assert spans.count("tool_execute_start") == 1 and spans.count("tool_execute_end") == 1
+    assert marker is not None and marker["result"] == "ok"
+    child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
+    assert child.archived_at is None  # un-archived → a sibling tool's appends won't crash
+
+
+async def test_completed_child_is_soft_terminal(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A child with a ``workflow_child_done`` marker is excluded from
+    ``find_sessions_needing_inference``, so its unreacted ``return`` tool_result
+    never triggers another model step (no wasted inference, no double-return)."""
+    from aios.harness.sweep import find_sessions_needing_inference
+    from aios.harness.task_registry import TaskRegistry
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:st#0")
+    reg = TaskRegistry()
+
+    # Before completion: the child's first user message is unreacted → needs inference.
+    assert cid in await find_sessions_needing_inference(pool, reg, session_id=cid)
+
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(cid, {"value": "done"})
+
+    # After the marker: soft-terminal, excluded from the wake set.
+    assert cid not in await find_sessions_needing_inference(pool, reg, session_id=cid)
+
+
+async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """``defer_wake(child)`` fires only on first spawn; a re-attach skips it (the
+    child is already sweep-wakeable, and may even be terminal — a wake span would
+    crash). If a re-attached child already has its marker (C1'/C4), the spawn arm
+    requests a self-wake so the parent harvests it now."""
+    from aios.workflows.host_launcher import EmittedCapability
+    from aios.workflows.step import _open_agent_capability
+
+    pool = wf_runtime
+    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    run_id = await _make_run(pool, script)
+    spec = {"agent_id": wf_agent_id, "input": "go", "output_schema": None}
+    call_key = CallKeyer().next("agent", spec)
+    cap = EmittedCapability(capability_id="agent", call_key=call_key, spec=spec)
+    cid = child_session_id(run_id, call_key)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        assert run is not None
+        # First spawn: created → defer_wake fires once.
+        with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w1:
+            r1 = await _open_agent_capability(conn, pool, run, cap)
+        assert not r1.rejected and not r1.needs_rewake
+        w1.assert_awaited_once()
+        # Re-attach, no marker yet → no defer_wake, no self-wake.
+        with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w2:
+            r2 = await _open_agent_capability(conn, pool, run, cap)
+        assert not r2.rejected and not r2.needs_rewake
+        w2.assert_not_awaited()
+
+    # Child completes before the parent journals call_started (C1'/C4).
+    from aios.tools import workflow_completion
+
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(cid, {"value": "r"})
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        assert run is not None
+        with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w3:
+            r3 = await _open_agent_capability(conn, pool, run, cap)
+        assert not r3.rejected and r3.needs_rewake  # marker present → self-wake to harvest
+        w3.assert_not_awaited()
 
 
 # ─── B2.E — harvest the child marker (spawn -> return -> complete) ────────────

@@ -215,6 +215,23 @@ ERRORED_SESSIONS_SQL = """
      WHERE um.user_seq IS NULL OR em.err_seq > um.user_seq
 """
 
+# Workflow children that have signalled logical completion (a ``workflow_child_done``
+# marker). They are **soft-terminal**: their unreacted ``tool_result`` (the
+# ``return``/``error`` call's own, plus any sibling tool results) must NOT trigger
+# another model step — that would waste an inference and let a confused child emit
+# a second ``return`` (a duplicate marker). The physical archive is the in-worker
+# workflow-child reaper's job, once the child is provably quiescent; until then this
+# keeps the finished child out of the wake set. Subtracted in-process (like
+# ``errored``) so the candidate/confirmed queries stay free of an anti-join the
+# perf guard flags as a SubPlan. Backed by ``events_workflow_child_done_idx`` (0067).
+COMPLETED_CHILD_SESSIONS_SQL = """
+    SELECT DISTINCT session_id
+      FROM events
+     WHERE kind = 'lifecycle'
+       AND data->>'event' = 'workflow_child_done'
+       {scope_clause}
+"""
+
 
 # ─── ghost repair ────────────────────────────────────────────────────────────
 
@@ -472,6 +489,23 @@ async def _errored_session_ids(
     return {r["session_id"] for r in rows}
 
 
+async def _completed_child_session_ids(
+    conn: asyncpg.Connection[Any], *, session_id: str | None = None
+) -> set[str]:
+    """Session IDs of workflow children that have signalled logical completion.
+
+    See ``COMPLETED_CHILD_SESSIONS_SQL``. A child with a ``workflow_child_done``
+    marker is soft-terminal — the sweep excludes it from inference so its
+    post-``return`` tool_result never triggers another model step (the physical
+    archive is the in-worker reaper's job). Subtracted in-process, mirroring
+    :func:`_errored_session_ids`.
+    """
+    scope_clause = "AND session_id = $1" if session_id else ""
+    params: list[Any] = [session_id] if session_id else []
+    rows = await conn.fetch(COMPLETED_CHILD_SESSIONS_SQL.format(scope_clause=scope_clause), *params)
+    return {r["session_id"] for r in rows}
+
+
 async def find_sessions_needing_inference(
     pool: asyncpg.Pool[Any],
     task_registry: TaskRegistry,
@@ -521,9 +555,14 @@ async def find_sessions_needing_inference(
         # (subtracted in-process to keep the candidate/confirmed queries free
         # of an anti-join that the perf guard would flag as a SubPlan).
         errored = await _errored_session_ids(conn, session_id=session_id)
+        # Workflow children that already signalled completion are soft-terminal:
+        # exclude them so a returned child isn't re-woken (no wasted model step,
+        # no duplicate ``return``). Same in-process-subtraction rationale as
+        # ``errored``. Physical archive is the in-worker reaper's job.
+        completed = await _completed_child_session_ids(conn, session_id=session_id)
 
-    candidates -= errored
-    confirmed_sessions -= errored
+    candidates -= errored | completed
+    confirmed_sessions -= errored | completed
     to_filter = candidates - confirmed_sessions
     filtered = (
         await _filter_incomplete_batches(pool, task_registry, to_filter) if to_filter else set()

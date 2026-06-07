@@ -27,7 +27,7 @@ One wake:
 from __future__ import annotations
 
 import secrets
-from typing import Any
+from typing import Any, NamedTuple
 
 import asyncpg
 
@@ -174,8 +174,11 @@ async def run_workflow_step(run_id: str) -> None:
                 if cap.call_key in signals:
                     needs_rewake = True
             elif cap.capability_id == "agent":
-                if await _open_agent_capability(conn, pool, run, cap):
+                spawn = await _open_agent_capability(conn, pool, run, cap)
+                if spawn.rejected:
                     return  # the frontier was terminally rejected (bad call) — run errored
+                if spawn.needs_rewake:
+                    needs_rewake = True  # C1'/C4: harvest the already-present marker next step
             else:
                 # parallel/pipeline reach the step as their `agent` leaves (B2.G);
                 # any other capability id is unknown.
@@ -195,21 +198,35 @@ async def run_workflow_step(run_id: str) -> None:
         await defer_run_wake(run_id)
 
 
+class _SpawnResult(NamedTuple):
+    """Outcome of opening one ``agent()`` frontier."""
+
+    rejected: bool  # the call was terminally rejected (run errored) — stop the step
+    needs_rewake: bool  # a re-attached child already has its marker — self-wake to harvest
+
+
 async def _open_agent_capability(
     conn: asyncpg.Connection[Any],
     pool: asyncpg.Pool[Any],
     run: WfRun,
     cap: EmittedCapability,
-) -> bool:
+) -> _SpawnResult:
     """Spawn (or, on replay/C1', re-attach) the ``agent()`` child for a frontier,
     then journal ``call_started{child_session_id, child_agent_version}``.
 
     Idempotent + crash-safe: the child id is deterministic, ``create_child_session``
     is ``ON CONFLICT`` (delivers the input atomically with the row on first spawn),
-    ``call_started`` dedups on the memo, and ``defer_wake`` dedups on its queueing
-    lock. On replay the child id already exists → re-attach, journaling the *row's*
-    pinned version (not a re-resolved one). Returns ``True`` iff the call was
-    terminally rejected (the run was errored — the caller should stop the step).
+    ``call_started`` dedups on the memo. On replay the child id already exists →
+    re-attach, journaling the *row's* pinned version (not a re-resolved one).
+
+    Returns ``rejected=True`` iff the call was terminally rejected (the run was
+    errored — the caller should stop the step). ``defer_wake`` fires **only on
+    first spawn** (``created``): on a re-attach the child is already sweep-wakeable
+    via its own first user message and may even be terminal, so appending a wake
+    span to it would crash. ``needs_rewake=True`` asks the caller for a self-wake
+    when a re-attached child *already* has its completion marker (C1'/C4: it
+    finished before this wake journaled ``call_started``, so the pre-replay harvest
+    — which only sees inflight ``call_started`` events — missed it).
     """
     account_id = run.account_id
     spec = cap.spec if isinstance(cap.spec, dict) else {}
@@ -221,7 +238,7 @@ async def _open_agent_capability(
             is_error=True,
             error_kind="not_implemented",
         )
-        return True
+        return _SpawnResult(rejected=True, needs_rewake=False)
     agent_id = spec.get("agent_id")
     if not isinstance(agent_id, str):
         await _complete_run(
@@ -231,7 +248,7 @@ async def _open_agent_capability(
             is_error=True,
             error_kind="bad_agent_call",
         )
-        return True
+        return _SpawnResult(rejected=True, needs_rewake=False)
 
     child_id = child_session_id(run.id, cap.call_key)
     try:
@@ -244,7 +261,7 @@ async def _open_agent_capability(
             is_error=True,
             error_kind="agent_not_found",
         )
-        return True
+        return _SpawnResult(rejected=True, needs_rewake=False)
 
     created = await create_child_session(
         pool,
@@ -259,11 +276,18 @@ async def _open_agent_capability(
     # On replay the row already carries its first-spawn version — journal THAT, so
     # call_started.child_agent_version always matches the version the child runs under.
     child_version: int | None
+    needs_rewake = False
     if created:
         child_version = pinned
     else:
         child = await db_queries.get_session_bare(conn, child_id, account_id=account_id)
         child_version = child.agent_version
+        # C1'/C4: the child finished before we journaled call_started, so the
+        # pre-replay harvest (which only scans inflight call_started events) could
+        # not have seen its marker. Ask for a self-wake so the next step harvests
+        # it now, rather than waiting up to one periodic run-sweep tick.
+        marker = await db_queries.read_workflow_child_done(conn, child_id, account_id=account_id)
+        needs_rewake = marker is not None
     await wf_queries.append_run_event(
         conn,
         account_id=account_id,
@@ -276,10 +300,13 @@ async def _open_agent_capability(
             "child_agent_version": child_version,
         },
     )
-    # Prompt wake of the child; the session sweep is the durable backstop (the
-    # child's first user message makes it is-wakeable regardless).
-    await defer_wake(pool, child_id, account_id=account_id, cause="workflow_child_spawn")
-    return False
+    # Prompt wake of the child ONLY on first spawn. On a re-attach the child is
+    # already sweep-wakeable via its own first user message (delivered with the
+    # row) and may already be terminal — appending a wake span to an archived
+    # child would crash on append_event's archived guard.
+    if created:
+        await defer_wake(pool, child_id, account_id=account_id, cause="workflow_child_spawn")
+    return _SpawnResult(rejected=False, needs_rewake=needs_rewake)
 
 
 async def _complete_run(
