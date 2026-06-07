@@ -235,7 +235,7 @@ async def _open_agent_capability(
 
     child_id = child_session_id(run.id, cap.call_key)
     try:
-        pinned = (await db_queries.get_agent(conn, agent_id, account_id=account_id)).version
+        pinned = await db_queries.get_agent_head_version(conn, agent_id, account_id=account_id)
     except NotFoundError:
         await _complete_run(
             conn,
@@ -258,13 +258,12 @@ async def _open_agent_capability(
     )
     # On replay the row already carries its first-spawn version — journal THAT, so
     # call_started.child_agent_version always matches the version the child runs under.
-    child_version = (
-        pinned
-        if created
-        else (
-            await db_queries.get_session_bare(conn, child_id, account_id=account_id)
-        ).agent_version
-    )
+    child_version: int | None
+    if created:
+        child_version = pinned
+    else:
+        child = await db_queries.get_session_bare(conn, child_id, account_id=account_id)
+        child_version = child.agent_version
     await wf_queries.append_run_event(
         conn,
         account_id=account_id,

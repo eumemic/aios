@@ -561,17 +561,10 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
     to list it in their ``tools`` declaration — it's focal-machinery
     scope, not agent scope.
     """
+    from aios.tools.registry import openai_tool_entry
     from aios.tools.registry import registry as tool_registry
 
-    tool = tool_registry.get("switch_channel")
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.parameters_schema,
-        },
-    }
+    return openai_tool_entry(tool_registry.get("switch_channel"))
 
 
 async def _dump_context_if_enabled(

@@ -17,7 +17,7 @@ from typing import Any
 from aios.db import queries
 from aios.harness import runtime
 from aios.services.wake import defer_run_wake
-from aios.tools.registry import ToolResult, registry
+from aios.tools.registry import ToolResult, openai_tool_entry, registry
 
 RETURN_TOOL_NAME = "return"
 ERROR_TOOL_NAME = "error"
@@ -56,26 +56,25 @@ async def _finish(
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
         ctx = await queries.get_session_workflow_context(conn, session_id)
-    if ctx is None:
-        return _NOT_A_CHILD
-    account_id, parent_run_id = ctx
-    if parent_run_id is None:
-        return _NOT_A_CHILD  # fail closed — never signal a NULL parent run
-
-    async with pool.acquire() as conn, conn.transaction():
-        await queries.append_event(
-            conn,
-            account_id=account_id,
-            session_id=session_id,
-            kind="lifecycle",
-            data={
-                "event": "workflow_child_done",
-                "is_error": is_error,
-                "result": result,
-                "error": error,
-            },
-        )
-        await queries.set_session_archived(conn, session_id, account_id=account_id)
+        if ctx is None:
+            return _NOT_A_CHILD
+        account_id, parent_run_id = ctx
+        if parent_run_id is None:
+            return _NOT_A_CHILD  # fail closed — never signal a NULL parent run
+        async with conn.transaction():
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="lifecycle",
+                data={
+                    "event": "workflow_child_done",
+                    "is_error": is_error,
+                    "result": result,
+                    "error": error,
+                },
+            )
+            await queries.set_session_archived(conn, session_id, account_id=account_id)
     # After commit: wake the parent run to harvest the marker. The periodic
     # wf_runs sweep is the durable backstop if this wake is lost.
     await defer_run_wake(parent_run_id)
@@ -95,17 +94,7 @@ async def error_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
 def workflow_completion_tool_specs() -> list[dict[str, Any]]:
     """The chat-completions tool entries for ``return``/``error`` — injected into
     a workflow child's tool list by ``compute_step_prelude``."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters_schema,
-            },
-        }
-        for tool in (registry.get(RETURN_TOOL_NAME), registry.get(ERROR_TOOL_NAME))
-    ]
+    return [openai_tool_entry(registry.get(name)) for name in (RETURN_TOOL_NAME, ERROR_TOOL_NAME)]
 
 
 def _register() -> None:

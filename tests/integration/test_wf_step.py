@@ -101,6 +101,23 @@ async def wf_agent_id(wf_runtime: asyncpg.Pool[Any]) -> str:
     return agent.id
 
 
+async def _spawn_child(pool: asyncpg.Pool[Any], agent_id: str, ordinal: str) -> tuple[str, str]:
+    """Make a run + idempotently spawn one child for ``ordinal``; return (run_id, cid)."""
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    cid = child_session_id(run_id, ordinal)
+    await sessions_service.create_child_session(
+        pool,
+        session_id=cid,
+        account_id="acc_wf",
+        agent_id=agent_id,
+        environment_id="env_wf",
+        agent_version=1,
+        parent_run_id=run_id,
+        input="hi",
+    )
+    return run_id, cid
+
+
 # ─── B2.B — child create (idempotent) + session read-model ───────────────────
 
 
@@ -148,18 +165,7 @@ async def test_child_session_origin_and_parent_round_trip(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
     pool = wf_runtime
-    run_id = await _make_run(pool, "async def main(input):\n    return 1")
-    cid = child_session_id(run_id, "sha:y#0")
-    await sessions_service.create_child_session(
-        pool,
-        session_id=cid,
-        account_id="acc_wf",
-        agent_id=wf_agent_id,
-        environment_id="env_wf",
-        agent_version=1,
-        parent_run_id=run_id,
-        input="hi",
-    )
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:y#0")
     child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
     assert child.origin == "background"
     assert child.parent_run_id == run_id
@@ -311,22 +317,6 @@ async def test_agent_not_found_errors_the_run(wf_runtime: asyncpg.Pool[Any]) -> 
 
 
 # ─── B2.D — return()/error() completion tools + injection gate ────────────────
-
-
-async def _spawn_child(pool: asyncpg.Pool[Any], agent_id: str, ordinal: str) -> tuple[str, str]:
-    run_id = await _make_run(pool, "async def main(input):\n    return 1")
-    cid = child_session_id(run_id, ordinal)
-    await sessions_service.create_child_session(
-        pool,
-        session_id=cid,
-        account_id="acc_wf",
-        agent_id=agent_id,
-        environment_id="env_wf",
-        agent_version=1,
-        parent_run_id=run_id,
-        input="hi",
-    )
-    return run_id, cid
 
 
 async def test_completion_tools_injected_only_for_children(

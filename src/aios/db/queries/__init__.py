@@ -527,6 +527,24 @@ async def get_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id:
     )
 
 
+async def get_agent_head_version(
+    conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str
+) -> int:
+    """The agent's current head ``version`` as a scalar — no full-row hydration.
+
+    Used to pin a workflow child's ``agent_version`` at spawn (the spawn path
+    needs only the int, not the parsed Agent). Raises ``NotFoundError`` if the
+    agent is absent, mirroring :func:`get_agent`. (Distinct from
+    :func:`get_agent_version`, which fetches one historical ``AgentVersion`` row.)
+    """
+    version = await conn.fetchval(
+        "SELECT version FROM agents WHERE id = $1 AND account_id = $2", agent_id, account_id
+    )
+    if version is None:
+        raise NotFoundError(f"agent {agent_id} not found", detail={"id": agent_id})
+    return int(version)
+
+
 async def list_agents(
     conn: asyncpg.Connection[Any],
     *,
@@ -882,6 +900,18 @@ def _row_to_session(row: asyncpg.Record) -> Session:
     )
 
 
+def _default_workspace_path(account_id: str, session_id: str) -> str:
+    """Per-tenant default workspace dir ``workspace_root/{account_id}/{session_id}``.
+
+    The #367 isolation convention (a stray bind-mount can't reach across tenants;
+    per-tenant quotas/backups scope to one dir) — one source of truth for the
+    session-insert paths.
+    """
+    from aios.config import get_settings
+
+    return str(get_settings().workspace_root / account_id / session_id)
+
+
 async def insert_session(
     conn: asyncpg.Connection[Any],
     *,
@@ -910,15 +940,9 @@ async def insert_session(
     ``focal_locked=True`` to start life locked on the spawning
     chat's channel.
     """
-    from aios.config import get_settings
-
     new_id = make_id(SESSION)
     if workspace_path is None:
-        # Per-tenant subdir (#367 follow-up): each account's sessions
-        # live under ``workspace_root/{account_id}/{session_id}`` so a
-        # stray bind-mount can't reach across tenants, and so per-tenant
-        # disk quotas / backups can scope to one directory.
-        workspace_path = str(get_settings().workspace_root / account_id / new_id)
+        workspace_path = _default_workspace_path(account_id, new_id)
     try:
         row = await conn.fetchrow(
             """
@@ -974,9 +998,7 @@ async def insert_child_session(
     no vaults/resources/scheduled-tasks; the caller delivers the agent input in
     the same transaction.
     """
-    from aios.config import get_settings
-
-    workspace_path = str(get_settings().workspace_root / account_id / session_id)
+    workspace_path = _default_workspace_path(account_id, session_id)
     try:
         row = await conn.fetchrow(
             """
@@ -1536,15 +1558,9 @@ async def clone_session(
     The clone primitive locks the parent row for the copy, so concurrent
     appenders serialize behind it and the copied seq range is gapless.
     """
-    from aios.config import get_settings
-
     new_id = make_id(SESSION)
     if workspace_path is None:
-        # Per-tenant subdir (#367 follow-up): each account's sessions
-        # live under ``workspace_root/{account_id}/{session_id}`` so a
-        # stray bind-mount can't reach across tenants, and so per-tenant
-        # disk quotas / backups can scope to one directory.
-        workspace_path = str(get_settings().workspace_root / account_id / new_id)
+        workspace_path = _default_workspace_path(account_id, new_id)
 
     async with conn.transaction():
         row = await conn.fetchrow(

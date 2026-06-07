@@ -170,6 +170,23 @@ class ToolRegistry:
 registry = ToolRegistry()
 
 
+def openai_tool_entry(tool: ToolDefinition) -> dict[str, Any]:
+    """The chat-completions ``tools`` entry for a registered built-in.
+
+    One source of truth for the registry → OpenAI tool-spec shape, shared by
+    :func:`to_openai_tools` and the injected built-ins (``switch_channel`` and
+    the workflow ``return``/``error`` completion tools).
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters_schema,
+        },
+    }
+
+
 def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
     """Translate an agent's declared tools into the OpenAI ``tools`` param.
 
@@ -221,16 +238,7 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
             effective = entry.transport or tool.transport
             if effective == "cli":
                 continue
-            result.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters_schema,
-                    },
-                }
-            )
+            result.append(openai_tool_entry(tool))
     return result
 
 
