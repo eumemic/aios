@@ -614,9 +614,13 @@ async def test_agent_round_trip_harvest_completes_run(
     assert cr.payload["is_error"] is False and cr.payload["result"] == "child-result"
 
 
-async def test_agent_error_surfaces_in_call_result(
+async def test_uncaught_agent_error_bubbles_and_errors_the_run(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
+    """R3 — an agent error the script does NOT catch is thrown at the ``await`` as
+    an ``AgentError``, propagates out of ``main``, and errors the run (the bubble).
+    The harvest still journals the child's error in the ``call_result``; the run's
+    terminal output is the raised ``AgentError`` repr."""
     from aios.tools import workflow_completion
 
     pool = wf_runtime
@@ -627,14 +631,67 @@ async def test_agent_error_surfaces_in_call_result(
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
         await workflow_completion.error_handler(child_id, {"message": "boom"})
 
-    await run_workflow_step(run_id)
+    await run_workflow_step(run_id)  # harvest -> throw AgentError -> uncaught -> RAISED
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
     cr = next(e for e in events if e.type == "call_result")
     assert cr.payload["is_error"] is True and cr.payload["error"] == {"message": "boom"}
-    # an errored child does NOT auto-raise — the run continues (§3.7).
-    assert run is not None and run.status == "completed" and run.output == "done"
+    rc = next(e for e in events if e.type == "run_completed")
+    assert rc.payload["is_error"] is True
+    assert "AgentError: boom" in rc.payload["output"]  # the raised AgentError bubbled out
+    assert run is not None and run.status == "errored"
+
+
+async def test_workflow_try_except_agent_error_continues(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """R3 headline — a workflow can ``try/except AgentError`` a failing agent and
+    carry on to a clean completion (Tom's "try/except a failing agent")."""
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent({wf_agent_id!r}, 'go')\n"
+        "    except AgentError as e:\n"
+        "        return {'caught': True, 'kind': e.kind}\n"
+        "    return {'caught': False}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.error_handler(child_id, {"message": "nope"})
+
+    await run_workflow_step(run_id)  # harvest -> throw AgentError -> caught -> return
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    # An explicit error() carries no kind; the script caught it and completed.
+    assert run is not None and run.status == "completed"
+    assert run.output == {"caught": True, "kind": None}
+
+
+async def test_workflow_uses_agent_return_value(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """R3 ``{ok}`` unwrap through the full step: the value the child ``return``s is
+    fast-forwarded into the ``await`` for the script to use."""
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    script = f"async def main(input):\n    r = await agent({wf_agent_id!r}, 'go')\n    return {{'got': r}}\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(child_id, {"value": "the-answer"})
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed" and run.output == {"got": "the-answer"}
 
 
 async def test_model_failure_writes_error_response_and_run_resolves(
@@ -668,13 +725,18 @@ async def test_model_failure_writes_error_response_and_run_resolves(
     assert response is not None
     assert response["is_error"] is True and response["error"] == {"kind": "child_errored"}
 
-    await run_workflow_step(run_id)  # harvest the error response -> resolve -> complete
+    await run_workflow_step(run_id)  # harvest the error response -> resolve (no hang)
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
     cr = next(e for e in events if e.type == "call_result")
     assert cr.payload["is_error"] is True and cr.payload["error"] == {"kind": "child_errored"}
-    assert run is not None and run.status == "completed" and run.output == "done"
+    # The run RESOLVES instead of hanging — the harvested child_errored becomes an
+    # AgentError at the await; uncaught here, it bubbles and terminally errors the
+    # run (R3). The totality hole is closed: a dead child no longer hangs the run.
+    rc = next(e for e in events if e.type == "run_completed")
+    assert rc.payload["is_error"] is True and "AgentError" in rc.payload["output"]
+    assert run is not None and run.status == "errored"
 
 
 async def test_model_failure_does_not_clobber_a_prior_response(

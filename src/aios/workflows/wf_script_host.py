@@ -47,6 +47,28 @@ class WorkflowScriptError(Exception):
     """The author script has the wrong shape (no ``async def main(input)``)."""
 
 
+class AgentError(Exception):
+    """A spawned ``agent()`` failed to return a value.
+
+    Raised at the ``await agent(...)`` site in the author script — the driver
+    ``coro.throw``s it when the call's journaled outcome is an error. So an author
+    can ``try/except AgentError`` and continue, or let it propagate to fail the run
+    (the bubble). ``kind`` distinguishes the failure mode: ``None`` for an explicit
+    ``error()`` from the child, ``"child_errored"`` for a model failure,
+    ``"no_return"`` for no response (see :class:`AgentNoReturnError`).
+    """
+
+    def __init__(self, message: str, *, kind: str | None = None) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+class AgentNoReturnError(AgentError):
+    """An ``agent()`` whose child went idle without ever responding (the totality
+    backstop). A subtype of :class:`AgentError`, so a blanket ``except AgentError``
+    catches it too; catch it explicitly to treat "no response" differently."""
+
+
 # ─── the capability awaitables (author-facing API) ───────────────────────────
 
 
@@ -191,6 +213,10 @@ def _build_coroutine(source: str, input_value: Any) -> Any:
         "parallel": parallel,
         "pipeline": pipeline,
         "log": log,
+        # The agent() failure type lives with its capability in the author API
+        # (not SAFE_BUILTINS), so `try/except AgentError` resolves it as a global.
+        "AgentError": AgentError,
+        "AgentNoReturnError": AgentNoReturnError,
     }
     code = compile(source, "<workflow>", "exec")
     exec(code, namespace)
@@ -211,21 +237,43 @@ def _emit_raised(emit: Any, exc: BaseException) -> None:
     emit({"type": RAISED, "repr": _exc_repr(exc), "traceback": traceback.format_exc()})
 
 
+_AGENT_ERROR_DEFAULT_MESSAGES: dict[str | None, str] = {
+    "child_errored": "the agent errored before responding to the request",
+    "no_return": "the agent went idle without responding to the request",
+}
+
+
+def _agent_error_from(error_info: Any) -> AgentError:
+    """Build the ``AgentError`` to throw at an ``await agent(...)`` from a memo
+    outcome's ``error`` payload (``{kind?, message?}``). ``no_return`` maps to the
+    :class:`AgentNoReturnError` subtype; everything else to the base class."""
+    info = error_info if isinstance(error_info, dict) else {}
+    kind = info.get("kind")
+    message = info.get("message") or _AGENT_ERROR_DEFAULT_MESSAGES.get(kind, "the agent failed")
+    if kind == "no_return":
+        return AgentNoReturnError(message, kind=kind)
+    return AgentError(message, kind=kind)
+
+
 # ─── the manual .send() driver ───────────────────────────────────────────────
 
 
 def _drive(coro: Any, memo: dict[str, Any], emit: Any) -> None:
     keyer = CallKeyer()
     to_send: Any = None
+    to_throw: BaseException | None = None
     while True:
         try:
-            yielded = coro.send(to_send)
+            # A journaled error outcome is delivered as a throw AT the await, so the
+            # author's try/except sees it; everything else is a plain resume value.
+            yielded = coro.throw(to_throw) if to_throw is not None else coro.send(to_send)
         except StopIteration as stop:
             emit({"type": RETURNED, "value": stop.value})
             return
         except BaseException as exc:
             _emit_raised(emit, exc)
             return
+        to_send, to_throw = None, None
         if not isinstance(yielded, _Yield):
             emit(
                 {
@@ -241,7 +289,14 @@ def _drive(coro: Any, memo: dict[str, Any], emit: Any) -> None:
             _emit_raised(emit, exc)
             return
         if call_key in memo:
-            to_send = memo[call_key]  # FAST-FORWARD a journaled result
+            # FAST-FORWARD a journaled outcome: an `{ok: value}` resumes the await
+            # with the value; an `{error: {...}}` throws AgentError at it (catchable
+            # by the author, else it propagates and fails the run).
+            outcome = memo[call_key]
+            if isinstance(outcome, dict) and "error" in outcome:
+                to_throw = _agent_error_from(outcome["error"])
+            else:
+                to_send = outcome["ok"]
             continue
         # FRONTIER: emit it and suspend (suspension is the absence of a resume).
         # content_hash + ordinal are recoverable from call_key, so the frame

@@ -48,11 +48,65 @@ async def test_memoized_result_fast_forwards() -> None:
     src = "async def main(input):\n    r = await gate({'q': 'ok?'})\n    return {'answer': r}"
     first = await _run(src)
     key = first.emitted[0].call_key
-    # Replay with the gate resolved → fast-forward past it to completion.
-    second = await _run(src, memo={key: "yes"})
+    # Replay with the gate resolved → fast-forward past it. The memo entry is the
+    # tagged outcome {"ok": value}; the driver unwraps it into the await (R3).
+    second = await _run(src, memo={key: {"ok": "yes"}})
     assert second.kind == "returned"
     assert second.value == {"answer": "yes"}
     assert second.emitted == []
+
+
+async def test_memoized_error_outcome_throws_agent_error() -> None:
+    """An {"error"} memo outcome is thrown at the await as AgentError; uncaught, it
+    propagates out of main and terminates the run (the bubble)."""
+    src = "async def main(input):\n    return await agent('a1', 'go')"
+    first = await _run(src)
+    key = first.emitted[0].call_key
+    out = await _run(src, memo={key: {"error": {"message": "boom"}}})
+    assert out.kind == "raised"
+    assert "AgentError: boom" in (out.error_repr or "")
+
+
+async def test_memoized_error_outcome_is_catchable() -> None:
+    """The headline: the author can try/except AgentError and carry on. `kind`
+    surfaces the failure mode (here a model failure)."""
+    src = (
+        "async def main(input):\n"
+        "    try:\n"
+        "        await agent('a1', 'go')\n"
+        "    except AgentError as e:\n"
+        "        return {'caught': True, 'kind': e.kind}\n"
+        "    return {'caught': False}"
+    )
+    first = await _run(src)
+    key = first.emitted[0].call_key
+    out = await _run(src, memo={key: {"error": {"kind": "child_errored"}}})
+    assert out.kind == "returned"
+    assert out.value == {"caught": True, "kind": "child_errored"}
+
+
+async def test_no_return_outcome_raises_agent_no_return_subtype() -> None:
+    """A no_return outcome raises AgentNoReturnError — caught by a blanket
+    `except AgentError` (it is a subtype) and directly as the subtype."""
+    catch_base = (
+        "async def main(input):\n"
+        "    try:\n"
+        "        await agent('a1', 'go')\n"
+        "    except AgentError as e:\n"
+        "        return isinstance(e, AgentNoReturnError)"
+    )
+    first = await _run(catch_base)
+    key = first.emitted[0].call_key
+    out = await _run(catch_base, memo={key: {"error": {"kind": "no_return"}}})
+    assert out.kind == "returned"
+    assert out.value is True  # caught as AgentError, and it IS the no-return subtype
+
+    catch_subtype = catch_base.replace("except AgentError as e", "except AgentNoReturnError")
+    catch_subtype = catch_subtype.replace(
+        "return isinstance(e, AgentNoReturnError)", "return 'caught-subtype'"
+    )
+    out2 = await _run(catch_subtype, memo={key: {"error": {"kind": "no_return"}}})
+    assert out2.kind == "returned" and out2.value == "caught-subtype"
 
 
 async def test_suspend_does_not_run_post_await_body() -> None:

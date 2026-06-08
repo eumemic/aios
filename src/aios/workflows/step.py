@@ -47,6 +47,17 @@ log = get_logger("aios.workflows.step")
 _TERMINAL = ("completed", "errored")
 
 
+def _memo_outcome(call_result_payload: dict[str, Any]) -> dict[str, Any]:
+    """Map a ``call_result`` payload to the host memo's tagged outcome: a value the
+    driver fast-forwards into the await (``{"ok": value}``), or an error it throws
+    there as ``AgentError`` (``{"error": {...}}``). The discriminated union lets the
+    host tell "the agent answered" from "the agent failed" even when the answer is
+    itself a dict — the real value always nests one level under ``"ok"``."""
+    if call_result_payload.get("is_error"):
+        return {"error": call_result_payload.get("error")}
+    return {"ok": call_result_payload.get("result")}
+
+
 async def run_workflow_step(run_id: str) -> None:
     pool = runtime.require_pool()
 
@@ -59,7 +70,7 @@ async def run_workflow_step(run_id: str) -> None:
         events = await wf_queries.list_run_events(conn, run_id)
         signals = {s.call_key: s for s in await wf_queries.list_run_signals(conn, run_id)}
         memo: dict[str, Any] = {
-            e.call_key: e.payload.get("result")
+            e.call_key: _memo_outcome(e.payload)
             for e in events
             if e.type == "call_result" and e.call_key is not None
         }
@@ -109,9 +120,9 @@ async def run_workflow_step(run_id: str) -> None:
                 call_key=call_key,
                 payload=result_payload,
             )
-            # memo carries the bare result the host fast-forwards into the await;
-            # wrapping an errored agent result in AgentResult is B2.G.
-            memo[call_key] = result_payload["result"]
+            # memo carries the host's tagged outcome (R3): an `{ok}` value to
+            # fast-forward into the await, or an `{error}` to throw as AgentError.
+            memo[call_key] = _memo_outcome(result_payload)
             del inflight[call_key]
 
     # Drive one wake in the credential-free subprocess (no DB conn held).
