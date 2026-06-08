@@ -179,6 +179,51 @@ async def open_listen_for_events(
     return ListenSubscription(queue=queue, _conn=conn)
 
 
+async def open_listen_for_run_events(
+    db_url: str,
+    run_id: str,
+    *,
+    queue_max: int = 1000,
+) -> ListenSubscription:
+    """Open a dedicated asyncpg connection LISTENing ``wf_run_events_<run_id>``.
+
+    The workflow-run analog of :func:`open_listen_for_events` — same dedicated
+    connection + bounded-queue-with-drop shape, feeding the ``/v1/runs/{id}/stream``
+    generator. No subscriber advisory lock: that is a session-worker coordination
+    signal (issue #81) with no workflow equivalent (the run sweep is unconditional).
+    """
+    conn = await asyncpg.connect(normalize_dsn(db_url))
+    try:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
+        channel = f"wf_run_events_{run_id}"
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            payload: str,
+        ) -> None:
+            # Sync-only (asyncpg read loop). Same drop-oldest backpressure; the SSE
+            # consumer recovers by reconnecting with `?after_seq=`.
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                log.warning(
+                    "listen.wf_run_events_queue_full_drop", run_id=run_id, queue_max=queue_max
+                )
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(payload)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+
+        await conn.add_listener(channel, _callback)
+    except BaseException:
+        conn.terminate()
+        raise
+    return ListenSubscription(queue=queue, _conn=conn)
+
+
 async def open_listen_for_connector_calls_by_type(
     db_url: str,
     connector: str,

@@ -186,6 +186,75 @@ async def sse_event_stream(
         subscription.terminate()
 
 
+def _serialize_wf_event(row: asyncpg.Record) -> dict[str, Any]:
+    """Convert a ``wf_run_events`` row to a JSON-friendly dict (matches WfRunEvent)."""
+    return {
+        "id": row["id"],
+        "run_id": row["run_id"],
+        "seq": row["seq"],
+        "type": row["type"],
+        "call_key": row["call_key"],
+        "payload": queries.parse_jsonb(row["payload"]),
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+async def wf_run_event_stream(
+    subscription: ListenSubscription,
+    pool: asyncpg.Pool[Any],
+    run_id: str,
+    after_seq: int = 0,
+) -> AsyncIterator[ServerSentEvent]:
+    """Yield ServerSentEvents for a workflow run: backfill from ``after_seq``, then
+    tail live NOTIFY on ``wf_run_events_<run_id>``.
+
+    The workflow analog of :func:`sse_event_stream`. Two differences: the run-event
+    channel carries only event ids (no transient streaming deltas), and the terminal
+    is the ``run_completed`` event (vs the session's ``status: terminated``
+    lifecycle). Owns terminating the subscription in ``finally``; the route handler
+    must have opened it via ``open_listen_for_run_events`` before this runs
+    (LISTEN-before-backfill).
+    """
+    queue = subscription.queue
+    try:
+        cursor = after_seq
+        async with pool.acquire() as conn:
+            backfill_rows = await conn.fetch(
+                "SELECT * FROM wf_run_events WHERE run_id = $1 AND seq > $2 ORDER BY seq ASC",
+                run_id,
+                after_seq,
+            )
+        for row in backfill_rows:
+            payload = _serialize_wf_event(row)
+            cursor = max(cursor, payload["seq"])
+            yield _event_to_sse(payload)
+            if payload["type"] == "run_completed":
+                yield ServerSentEvent(data="{}", event="done")
+                return
+        # Tail live notifications; dedup against the backfill cursor (an event can
+        # appear in BOTH if it committed during the backfill SELECT's snapshot).
+        while True:
+            event_id = await queue.get()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT * FROM wf_run_events WHERE id = $1", event_id)
+            if row is None:
+                log.warning("sse.wf_event_not_found", event_id=event_id)
+                continue
+            event_data = _serialize_wf_event(row)
+            if event_data["seq"] <= cursor:
+                continue
+            cursor = event_data["seq"]
+            yield _event_to_sse(event_data)
+            if event_data["type"] == "run_completed":
+                yield ServerSentEvent(data="{}", event="done")
+                return
+    except Exception:
+        log.exception("sse.wf_run_events.body_raised", run_id=run_id)
+        raise
+    finally:
+        subscription.terminate()
+
+
 async def runtime_connector_calls_stream(
     subscription: ListenSubscription,
     pool: asyncpg.Pool[Any],

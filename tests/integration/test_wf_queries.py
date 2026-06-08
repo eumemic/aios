@@ -7,12 +7,16 @@ gapless, idempotent journal writer the runtime depends on.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
 import asyncpg
 import pytest
 
+from aios.api.sse import wf_run_event_stream
+from aios.db.listen import open_listen_for_run_events
+from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, NotFoundError
 
@@ -253,3 +257,49 @@ async def test_append_run_event_notifies(
             await asyncio.wait_for(received.get(), timeout=0.5)
     finally:
         await listener.close()
+
+
+async def test_wf_run_event_stream_backfills_tails_and_terminates(
+    wf_conn: asyncpg.Connection[Any], migrated_db_url: str
+) -> None:
+    """The SSE generator: a pre-subscription event arrives via backfill, a
+    post-subscription event via the live NOTIFY tail, and ``run_completed`` ends the
+    stream with a ``done`` frame."""
+    run_id = await _seed_run(wf_conn)
+    # Appended BEFORE we subscribe → must come through the backfill.
+    await wf_queries.append_run_event(
+        wf_conn, account_id="acc_root", run_id=run_id, type="run_started", payload={"input": 1}
+    )
+
+    pool = await create_pool(migrated_db_url, min_size=1, max_size=2)
+    subscription = await open_listen_for_run_events(migrated_db_url, run_id)
+    collected: list[tuple[str, str | None]] = []
+    try:
+
+        async def _consume() -> None:
+            async for msg in wf_run_event_stream(subscription, pool, run_id):
+                kind = json.loads(msg.data).get("type") if msg.event == "event" else None
+                collected.append((msg.event, kind))
+                if msg.event == "done":
+                    return
+
+        task = asyncio.create_task(_consume())
+        await asyncio.sleep(0.2)  # let the backfill drain, then block on the queue
+        # Appended AFTER we subscribe → must come through the live NOTIFY tail.
+        await wf_queries.append_run_event(
+            wf_conn,
+            account_id="acc_root",
+            run_id=run_id,
+            type="run_completed",
+            payload={"output": 2, "is_error": False},
+        )
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        subscription.terminate()
+        await pool.close()
+
+    assert collected == [
+        ("event", "run_started"),  # backfill
+        ("event", "run_completed"),  # live tail
+        ("done", None),  # terminal
+    ]

@@ -9,6 +9,7 @@ payload (the script body is long). ``--input`` / ``--result`` are parsed as JSON
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -17,7 +18,8 @@ import typer
 from aios.cli.commands._shared import call_single, render_paginated
 from aios.cli.coverage import covers
 from aios.cli.files import load_payload
-from aios.cli.runtime import run_or_die
+from aios.cli.runtime import get_state, run_or_die
+from aios_sdk import stream_run
 from aios_sdk._generated.api.runs import (
     create_run,
     get_run,
@@ -185,5 +187,33 @@ def resume_run_(
         body = GateResume.from_dict({"gate_nonce": gate_nonce, "result": _json_arg(result)})
         call_single(ctx, resume_gate.sync_detailed, run_id=run_id, body=body)
         return None
+
+    run_or_die(_run)
+
+
+@runs_app.command("stream", help="Tail a run's journal as Server-Sent Events.")
+@covers("stream_run_events_v1_runs__run_id__stream_get")
+def stream_run_(
+    ctx: typer.Context,
+    run_id: str,
+    after_seq: Annotated[int, typer.Option("--after-seq", min=0)] = 0,
+    raw: Annotated[
+        bool, typer.Option("--raw", help="Print each SSE message as JSON (no formatting).")
+    ] = False,
+) -> None:
+    def _run() -> None:
+        client = get_state(ctx).sdk_client()
+        with client, stream_run(client, run_id, after_seq=after_seq) as messages:
+            for msg in messages:
+                if raw:
+                    sys.stdout.write(json.dumps({"event": msg.event, "data": msg.data}) + "\n")
+                elif msg.event == "event":
+                    e = json.loads(msg.data)
+                    sys.stdout.write(
+                        f"{e['seq']:<4} {e['type']:<14} {json.dumps(e['payload'])[:100]}\n"
+                    )
+                sys.stdout.flush()
+                if msg.event == "done":
+                    break
 
     run_or_die(_run)

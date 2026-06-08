@@ -68,6 +68,32 @@ def stream_session(
         yield parse_sse_lines(response.iter_lines())
 
 
+@contextmanager
+def stream_run(
+    client: AuthenticatedClient,
+    run_id: str,
+    *,
+    after_seq: int = 0,
+) -> Iterator[Iterator[SseMessage]]:
+    """Stream a workflow run's journal events as :class:`SseMessage` values.
+
+    The workflow-run analog of :func:`stream_session` (``GET /v1/runs/{id}/stream``).
+    Backfills from ``after_seq`` then tails live, ending on the ``done`` event after
+    ``run_completed``. Same lazy context-manager + unbounded-read-timeout contract.
+    """
+    params: dict[str, int] = {"after_seq": after_seq} if after_seq else {}
+    httpx_client = client.get_httpx_client()
+    with httpx_client.stream(
+        "GET",
+        f"/v1/runs/{run_id}/stream",
+        params=params,
+        headers={"Accept": "text/event-stream"},
+        timeout=httpx.Timeout(60.0, read=None),
+    ) as response:
+        response.raise_for_status()
+        yield parse_sse_lines(response.iter_lines())
+
+
 def parse_sse_lines(lines: Iterable[str]) -> Iterator[SseMessage]:
     """Yield :class:`SseMessage` values from an SSE line iterator.
 

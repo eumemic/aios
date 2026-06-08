@@ -12,8 +12,13 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Query, status
+from sse_starlette import EventSourceResponse
 
-from aios.api.deps import AccountIdDep, PoolDep
+from aios.api.deps import AccountIdDep, DbUrlDep, PoolDep
+from aios.api.sse import SSE_PREFLIGHT_EXCEPTIONS, make_sse_response, wf_run_event_stream
+from aios.db.listen import open_listen_for_run_events
+from aios.errors import SSEPreflightFailedError
+from aios.logging import get_logger
 from aios.models.common import ListResponse
 from aios.models.pagination import page_cursor
 from aios.models.workflows import (
@@ -25,6 +30,8 @@ from aios.models.workflows import (
     WorkflowCreate,
 )
 from aios.services import workflows as service
+
+log = get_logger("aios.api.routers.workflows")
 
 router = APIRouter(prefix="/v1/workflows", tags=["workflows"])
 runs_router = APIRouter(prefix="/v1/runs", tags=["runs"])
@@ -169,3 +176,36 @@ async def resume_gate(
         pool, run_id=run_id, account_id=account_id, gate_nonce=body.gate_nonce, result=body.result
     )
     return await service.get_run(pool, run_id, account_id=account_id)
+
+
+@runs_router.get("/{run_id}/stream", openapi_extra={"x-codegen": {"targets": []}})
+async def stream_run_events(
+    run_id: str,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    after_seq: int = 0,
+) -> EventSourceResponse:
+    """Stream a run's journal as Server-Sent Events: backfill from ``after_seq``,
+    then live, ending on ``run_completed``.
+
+    Preflights the LISTEN before constructing the response (issue #376), so a
+    transient connect failure is a clean 503 rather than a half-open stream.
+    """
+    await service.get_run(pool, run_id, account_id=account_id)  # 404s cross-tenant
+    try:
+        subscription = await open_listen_for_run_events(db_url, run_id)
+    except SSE_PREFLIGHT_EXCEPTIONS as exc:
+        log.warning(
+            "sse.wf_run_events.preflight_failed",
+            run_id=run_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        raise SSEPreflightFailedError(
+            "could not establish LISTEN connection for run events stream",
+            detail={"stream": "wf_run_events"},
+        ) from exc
+    return make_sse_response(
+        subscription, wf_run_event_stream(subscription, pool, run_id, after_seq=after_seq)
+    )
