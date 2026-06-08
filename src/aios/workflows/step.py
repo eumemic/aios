@@ -32,6 +32,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
 import asyncpg
+import jsonschema  # type: ignore[import-untyped]
 
 from aios.config import get_settings
 from aios.db import queries as db_queries
@@ -331,15 +332,23 @@ async def _open_agent_capability(
     """
     account_id = run.account_id
     spec = cap.spec if isinstance(cap.spec, dict) else {}
-    if spec.get("output_schema") is not None:
-        await _complete_run(
-            conn,
-            run,
-            output="agent() output_schema is not supported in v1 (lands in Block 3)",
-            is_error=True,
-            error_kind="not_implemented",
-        )
-        return _SpawnResult(rejected=True, needs_rewake=False)
+    output_schema = spec.get("output_schema")
+    if output_schema is not None:
+        # Structured output: the child must return a value matching this schema (the
+        # return tool enforces it; see workflow_completion). Reject a malformed schema
+        # here — author-facing — rather than letting it explode when the child builds
+        # its validator.
+        try:
+            jsonschema.Draft202012Validator.check_schema(output_schema)
+        except jsonschema.SchemaError as exc:
+            await _complete_run(
+                conn,
+                run,
+                output=f"agent() output_schema is not a valid JSON Schema: {exc.message}",
+                is_error=True,
+                error_kind="bad_agent_call",
+            )
+            return _SpawnResult(rejected=True, needs_rewake=False)
     agent_id = spec.get("agent_id")
     if not isinstance(agent_id, str):
         await _complete_run(
@@ -374,6 +383,7 @@ async def _open_agent_capability(
         parent_run_id=run.id,
         request_id=cap.call_key,  # the agent() call IS the request the child must answer
         input=spec.get("input"),
+        output_schema=output_schema,
     )
     # On replay the row already carries its first-spawn version — journal THAT, so
     # call_started.child_agent_version always matches the version the child runs under.
@@ -396,17 +406,20 @@ async def _open_agent_capability(
             )
             is not None
         )
+    cap_payload: dict[str, Any] = {
+        "capability": "agent",
+        "child_session_id": child_id,
+        "child_agent_version": child_version,
+    }
+    if output_schema is not None:
+        cap_payload["output_schema"] = output_schema  # audit: the shape this call demanded
     await wf_queries.append_run_event(
         conn,
         account_id=account_id,
         run_id=run.id,
         type="call_started",
         call_key=cap.call_key,
-        payload={
-            "capability": "agent",
-            "child_session_id": child_id,
-            "child_agent_version": child_version,
-        },
+        payload=cap_payload,
     )
     # Prompt wake of the child ONLY on first spawn. On a re-attach the child is
     # already sweep-wakeable via its own first user message (delivered with the
