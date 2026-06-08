@@ -1117,6 +1117,51 @@ async def count_request_nudges(
     return n or 0
 
 
+async def derive_response(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
+) -> dict[str, Any] | None:
+    """A request's **terminal outcome**, or ``None`` if it is still pending.
+
+    The single resolver the run harvest asks "what became of this ``agent()``?" — a
+    pure, monotonic function of the target's state (the dual of Block-0's
+    ``_SESSION_STATUS_EXPR``):
+
+    * a **written response** (``return``/``error``, model-failure, or the no_return
+      backstop) → that outcome;
+    * else, if the target is **gone** (archived or deleted before answering, so it
+      can never respond) → a Failed ``child_gone`` outcome;
+    * else → ``None`` (alive and unanswered — still pending).
+
+    The response and the liveness are read in **one query / one snapshot**, so a
+    response always dominates "gone" even if the target is archived the instant
+    after answering — there is no read-between-reads window. Each branch is
+    terminal-or-pending and never reverts (a response is permanent; gone is
+    permanent), so the harvest can journal the returned dict as the ``call_result``
+    payload directly.
+    """
+    row = await conn.fetchrow(
+        "SELECT (SELECT data FROM events e WHERE e.session_id = $1 AND e.account_id = $2 "
+        "        AND e.kind = 'lifecycle' AND e.data->>'event' = 'request_response' "
+        "        AND e.data->>'request_id' = $3 ORDER BY e.seq DESC LIMIT 1) AS response, "
+        "       EXISTS (SELECT 1 FROM sessions s WHERE s.id = $1 AND s.account_id = $2 "
+        "               AND s.archived_at IS NULL) AS live",
+        session_id,
+        account_id,
+        request_id,
+    )
+    assert row is not None
+    if row["response"] is not None:
+        response = parse_jsonb(row["response"])
+        return {
+            "result": response.get("result"),
+            "is_error": bool(response.get("is_error")),
+            "error": response.get("error"),
+        }
+    if not row["live"]:
+        return {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
+    return None
+
+
 async def derive_session_status(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> str:
@@ -6861,6 +6906,24 @@ async def unscoped_get_session_account_id(conn: asyncpg.Connection[Any], session
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"session_id": session_id})
     return cast("str", row["account_id"])
+
+
+async def unscoped_live_session_account_id(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> str | None:
+    """``account_id`` for a **live** session (exists and not archived), else ``None``.
+
+    The ``run_session_step`` entry guard uses this so a wake for a session that has
+    been archived or deleted is an idempotent no-op — mirroring
+    ``run_workflow_step``'s terminal early-return. Without it a stray wake (e.g. the
+    sweep racing an operator archive, or a reclaim) would reach ``append_event``'s
+    archived guard and crash the job.
+    """
+    account_id: str | None = await conn.fetchval(
+        "SELECT account_id FROM sessions WHERE id = $1 AND archived_at IS NULL",
+        session_id,
+    )
+    return account_id
 
 
 # ─── account management (#367 PR 7) ───────────────────────────────────────────

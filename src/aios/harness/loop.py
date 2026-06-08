@@ -128,8 +128,15 @@ async def run_session_step(
     ``lock`` parameter guarantees only one step runs per session at a
     time.
     """
-    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     pool = runtime.require_pool()
+    # Entry guard (mirrors run_workflow_step's terminal early-return): a wake for a
+    # session that has been archived or deleted is an idempotent no-op. Without it
+    # the unconditional step_start append below would hit append_event's archived
+    # guard and fail the job — e.g. a sweep wake racing an operator archive, or a
+    # workflow child reclaimed after answering.
+    account_id = await sessions_service.load_live_session_account_id(pool, session_id)
+    if account_id is None:
+        return
     task_registry = runtime.require_task_registry()
 
     # Outermost span pair: brackets the entire step (issue #131).  Emitted

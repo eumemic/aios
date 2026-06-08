@@ -98,20 +98,16 @@ async def run_workflow_step(run_id: str) -> None:
         for call_key, cap_payload in list(inflight.items()):
             if cap_payload.get("capability") == "agent":
                 # The child was invoked with request_id = call_key (the agent() call
-                # IS the request), so its response is read under that same id.
-                marker = await db_queries.read_request_response(
+                # IS the request), so its outcome is derived under that same id.
+                resolved = await db_queries.derive_response(
                     conn,
                     cap_payload["child_session_id"],
                     account_id=account_id,
                     request_id=call_key,
                 )
-                if marker is None:
-                    continue  # child not done yet — stay suspended
-                result_payload = {
-                    "result": marker.get("result"),
-                    "is_error": bool(marker.get("is_error")),
-                    "error": marker.get("error"),
-                }
+                if resolved is None:
+                    continue  # still pending — stay suspended
+                result_payload = resolved
             else:  # gate: the resume value lives in the signal
                 sig = signals.get(call_key)
                 if sig is None:
@@ -299,14 +295,18 @@ async def _open_agent_capability(
     else:
         child = await db_queries.get_session_bare(conn, child_id, account_id=account_id)
         child_version = child.agent_version
-        # C1'/C4: the child finished before we journaled call_started, so the
-        # pre-replay harvest (which only scans inflight call_started events) could
-        # not have seen its marker. Ask for a self-wake so the next step harvests
-        # it now, rather than waiting up to one periodic run-sweep tick.
-        marker = await db_queries.read_request_response(
-            conn, child_id, account_id=account_id, request_id=cap.call_key
+        # C1'/C4: the child reached a terminal outcome before we journaled
+        # call_started, so the pre-replay harvest (which only scans inflight
+        # call_started events) could not have seen it. Ask for a self-wake so the
+        # next step harvests it now, rather than waiting one periodic sweep tick.
+        # Routed through the same derive_response seam as the harvest, so an already-
+        # gone child (not just an answered one) triggers the prompt re-wake too.
+        needs_rewake = (
+            await db_queries.derive_response(
+                conn, child_id, account_id=account_id, request_id=cap.call_key
+            )
+            is not None
         )
-        needs_rewake = marker is not None
     await wf_queries.append_run_event(
         conn,
         account_id=account_id,
@@ -336,7 +336,18 @@ async def _complete_run(
     is_error: bool,
     error_kind: str | None = None,
 ) -> None:
-    """Append ``run_completed`` + flip status (+ store output) atomically."""
+    """Append ``run_completed`` + flip status (+ store output) atomically.
+
+    Child reclaim (archiving the run's spawned children) is deliberately NOT done
+    here: at run-completion the just-answered child is still finishing its own step
+    (it wrote its response and woke us *before* appending its tool_result), so
+    archiving it now would race that in-flight append into ``append_event``'s
+    archived guard. Safe reclaim is quiescence-gated — a child archives only once it
+    is genuinely idle — which is the deferred ``schedule-archival-on-quiescence``
+    mechanism. Until then a finished child lingers idle (harmless; no sandbox until
+    used). The run's correctness never depended on reclaim. The
+    ``run_session_step`` archived-guard makes that future reclaim crash-free.
+    """
     payload: dict[str, Any] = {"output": output, "is_error": is_error}
     if error_kind is not None:
         payload["error"] = {"kind": error_kind}

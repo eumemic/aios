@@ -57,6 +57,14 @@ async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> s
         return await queries.unscoped_get_session_account_id(conn, session_id)
 
 
+async def load_live_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str | None:
+    """``account_id`` for a live session (exists + not archived), or ``None`` if it
+    has been archived/deleted — the ``run_session_step`` entry guard, so a wake for
+    a gone session is an idempotent no-op rather than a crash."""
+    async with pool.acquire() as conn:
+        return await queries.unscoped_live_session_account_id(conn, session_id)
+
+
 async def load_session_workspace_path(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
 ) -> Path:

@@ -240,6 +240,7 @@ def _emit_raised(emit: Any, exc: BaseException) -> None:
 _AGENT_ERROR_DEFAULT_MESSAGES: dict[str | None, str] = {
     "child_errored": "the agent errored before responding to the request",
     "no_return": "the agent went idle without responding to the request",
+    "child_gone": "the agent was archived or deleted before responding to the request",
 }
 
 

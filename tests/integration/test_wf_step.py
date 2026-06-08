@@ -948,6 +948,96 @@ async def test_non_answering_child_resolves_run_via_agent_no_return_error(
     assert run is not None and run.status == "completed" and run.output == "gave-up"
 
 
+# ─── R5 — archived/deleted-child totality gap + the archived-session guard ────
+
+
+async def test_archived_session_wake_is_a_noop(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A wake for an archived (or deleted) session is an idempotent no-op — the
+    run_session_step entry guard returns before any append, so a stray wake (a
+    sweep racing an archive, a future reclaim) never crashes on append_event's
+    archived guard. Mirrors run_workflow_step's terminal early-return."""
+    from aios.harness import runtime
+    from aios.harness.loop import run_session_step
+
+    pool = wf_runtime
+    sess = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+    )
+    async with pool.acquire() as conn:
+        await db_queries.archive_session(conn, sess.id, account_id="acc_wf")
+        before = await conn.fetchval("SELECT last_event_seq FROM sessions WHERE id = $1", sess.id)
+
+    prev_reg = runtime.task_registry
+    runtime.task_registry = None  # the guard must return before require_task_registry
+    try:
+        await run_session_step(sess.id)  # must NOT raise
+    finally:
+        runtime.task_registry = prev_reg
+
+    async with pool.acquire() as conn:
+        after = await conn.fetchval("SELECT last_event_seq FROM sessions WHERE id = $1", sess.id)
+    assert after == before  # nothing appended — a clean no-op
+
+
+async def test_operator_archived_child_resolves_run_as_child_gone(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """An operator archiving a *running* child before it answers must not hang the
+    run: derive_response sees the child is no longer live and resolves the call as a
+    catchable AgentError(child_gone)."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent({wf_agent_id!r}, 'go')\n"
+        "    except AgentError as e:\n"
+        "        return {'caught': True, 'kind': e.kind}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+    async with pool.acquire() as conn:  # operator archives the child mid-flight
+        await db_queries.archive_session(conn, child_id, account_id="acc_wf")
+
+    await run_workflow_step(run_id)  # harvest -> child_gone -> AgentError -> caught
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {"caught": True, "kind": "child_gone"}
+
+
+async def test_operator_deleted_child_resolves_run_as_child_gone(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """Same totality guarantee when the child is hard-deleted (its events are gone):
+    the run resolves from the child's absence, not a written response."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent({wf_agent_id!r}, 'go')\n"
+        "    except AgentError as e:\n"
+        "        return e.kind\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+    async with pool.acquire() as conn:
+        await db_queries.delete_session(conn, child_id, account_id="acc_wf")
+
+    await run_workflow_step(run_id)  # harvest -> child_gone -> AgentError -> caught
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed" and run.output == "child_gone"
+
+
 async def test_agent_stays_suspended_until_marker(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
