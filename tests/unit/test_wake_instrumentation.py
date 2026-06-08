@@ -488,11 +488,13 @@ class TestStepStartEndSpans:
 @contextlib.asynccontextmanager
 async def _harness_with_guard(
     guard_result: tuple[bool, bool, str | None],
-) -> AsyncIterator[tuple[AsyncMock, AsyncMock]]:
+) -> AsyncIterator[tuple[AsyncMock, AsyncMock, MagicMock]]:
     """Drive ``run_session_step`` past a clean (tool-call-free) model turn with the
-    quiescence guard mocked to ``guard_result``. Yields the captured
-    ``(defer_wake, defer_run_wake)`` so a test can assert the post-guard wiring
-    (loop.py: nudge -> defer_wake(request_nudge); autoerror -> defer_run_wake)."""
+    quiescence guard mocked to ``guard_result``. Yields ``(defer_wake,
+    defer_run_wake, manager)`` — the manager records ``append_event`` and
+    ``defer_wake`` calls in order so a test can assert the post-guard wiring AND
+    that the wakes fire after ``step_end`` (loop.py: nudge -> defer_wake(
+    request_nudge); autoerror -> defer_run_wake)."""
     session = SimpleNamespace(
         id="sess_x",
         agent_id="agt_x",
@@ -512,8 +514,12 @@ async def _harness_with_guard(
         window_min=1000,
         window_max=10000,
     )
+    manager = MagicMock()
+    append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
     defer_wake = AsyncMock()
     defer_run_wake = AsyncMock()
+    manager.attach_mock(append_event, "append_event")
+    manager.attach_mock(defer_wake, "defer_wake")
     with (
         patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
         patch("aios.harness.loop.runtime.require_task_registry", return_value=MagicMock()),
@@ -538,10 +544,7 @@ async def _harness_with_guard(
             ),
         ),
         patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock()),
-        patch(
-            "aios.harness.loop.sessions_service.append_event",
-            AsyncMock(return_value=SimpleNamespace(id="ev")),
-        ),
+        patch("aios.harness.loop.sessions_service.append_event", append_event),
         patch(
             "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
             AsyncMock(return_value=guard_result),
@@ -555,7 +558,7 @@ async def _harness_with_guard(
         patch("aios.harness.loop.defer_wake", defer_wake),
         patch("aios.harness.loop.defer_run_wake", defer_run_wake),
     ):
-        yield defer_wake, defer_run_wake
+        yield defer_wake, defer_run_wake, manager
 
 
 class TestRequestTotalityWiring:
@@ -563,22 +566,40 @@ class TestRequestTotalityWiring:
     the suite leaves untested (every other loop-driving test mocks the guard to the
     all-False no-op)."""
 
-    async def test_nudge_defers_a_session_wake(self) -> None:
+    async def test_nudge_defers_a_session_wake_after_step_end(self) -> None:
         """guard says nudged -> the harness wakes the session (so the model gets
-        another turn to answer), and does NOT wake a caller run."""
+        another turn to answer), AFTER step_end so its wake_deferred lands in the
+        next step's window (#132), and does NOT wake a caller run."""
         from aios.harness.loop import run_session_step
 
-        async with _harness_with_guard((True, False, None)) as (defer_wake, defer_run_wake):
+        async with _harness_with_guard((True, False, None)) as (
+            defer_wake,
+            defer_run_wake,
+            manager,
+        ):
             await run_session_step("sess_x")
         defer_wake.assert_awaited_once_with(ANY, "sess_x", account_id=ANY, cause="request_nudge")
         defer_run_wake.assert_not_awaited()
+        # Ordering fence (mirrors the reschedule path): the nudge wake fires after
+        # the step_end span append, never inside the body.
+        last_step_end = max(
+            i
+            for i, (name, args, _kw) in enumerate(manager.mock_calls)
+            if name == "append_event" and args[2] == "span" and args[3].get("event") == "step_end"
+        )
+        first_defer = [name for name, _a, _kw in manager.mock_calls].index("defer_wake")
+        assert first_defer > last_step_end
 
     async def test_autoerror_defers_the_caller_run_wake(self) -> None:
         """guard says autoerrored -> the harness wakes the caller run to harvest the
         no_return response, and does NOT inject a session (nudge) wake."""
         from aios.harness.loop import run_session_step
 
-        async with _harness_with_guard((False, True, "run_x")) as (defer_wake, defer_run_wake):
+        async with _harness_with_guard((False, True, "run_x")) as (
+            defer_wake,
+            defer_run_wake,
+            _mgr,
+        ):
             await run_session_step("sess_x")
         defer_run_wake.assert_awaited_once_with("run_x")
         defer_wake.assert_not_awaited()
