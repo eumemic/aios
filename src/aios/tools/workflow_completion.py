@@ -201,21 +201,15 @@ async def _enforce_output_schema(session_id: str, request_id: Any, value: Any) -
     """Validate ``value`` against the schema this request demands, if any.
 
     Returns a model-facing error string to bounce back (the child retries), or
-    ``None`` to proceed. A non-str/unknown ``request_id`` or non-child session is
-    left for :func:`respond_to_request` to reject (``unknown_request`` /
-    ``not_a_child``); a request with no ``output_schema`` (the common case) passes.
+    ``None`` to proceed. A non-str ``request_id`` (or one matching no request) and a
+    non-child session resolve to no schema, leaving the rejection to
+    :func:`respond_to_request` (``unknown_request`` / ``not_a_child``); a request with
+    no ``output_schema`` (the common case) also passes.
     """
     if not isinstance(request_id, str):
         return None
-    pool = runtime.require_pool()
-    async with pool.acquire() as conn:
-        ctx = await queries.get_session_workflow_context(conn, session_id)
-        if ctx is None:
-            return None
-        account_id, _ = ctx
-        schema = await queries.get_request_output_schema(
-            conn, session_id, account_id=account_id, request_id=request_id
-        )
+    async with runtime.require_pool().acquire() as conn:
+        schema = await queries.get_request_output_schema(conn, session_id, request_id=request_id)
     return None if schema is None else _validate_value(value, schema)
 
 

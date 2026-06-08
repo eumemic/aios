@@ -1645,10 +1645,10 @@ async def test_get_request_output_schema_is_per_request(
                 data={"role": "user", "content": "x", "metadata": {"request": request}},
             )
         get = db_queries.get_request_output_schema
-        assert await get(conn, cid, account_id="acc_wf", request_id="req:a") == _OBJ_SCHEMA
-        assert await get(conn, cid, account_id="acc_wf", request_id="req:b") == schema_b
-        assert await get(conn, cid, account_id="acc_wf", request_id="req:none") is None
-        assert await get(conn, cid, account_id="acc_wf", request_id="req:nope") is None
+        assert await get(conn, cid, request_id="req:a") == _OBJ_SCHEMA
+        assert await get(conn, cid, request_id="req:b") == schema_b
+        assert await get(conn, cid, request_id="req:none") is None
+        assert await get(conn, cid, request_id="req:nope") is None
 
 
 async def test_return_enforces_output_schema(
@@ -1714,6 +1714,30 @@ async def test_malformed_output_schema_errors_the_run(
     assert children == 0  # rejected before any spawn
 
 
+async def test_non_object_output_schema_errors_the_run(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A non-object output_schema (a bare boolean — valid JSON Schema, but ``false``
+    rejects every value and ``true`` disables enforcement) is a degenerate author input:
+    fail the run cleanly as bad_agent_call rather than spawn a child that can never
+    return (or one with no enforcement)."""
+    pool = wf_runtime
+    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'hi', output_schema=False)\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "errored"
+    completed = [e for e in events if e.type == "run_completed"]
+    assert completed and completed[0].payload["error"]["kind"] == "bad_agent_call"
+    assert "object schema" in completed[0].payload["output"]
+    assert children == 0  # rejected before any spawn
+
+
 async def test_agent_output_schema_end_to_end(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
@@ -1743,9 +1767,7 @@ async def test_agent_output_schema_end_to_end(
 
     # The request message carries the schema (for both the model and the validator).
     async with pool.acquire() as conn:
-        seen = await db_queries.get_request_output_schema(
-            conn, child_id, account_id="acc_wf", request_id=request_id
-        )
+        seen = await db_queries.get_request_output_schema(conn, child_id, request_id=request_id)
     assert seen == _OBJ_SCHEMA
 
     # The child must conform: a bad value is rejected, a good one answers.

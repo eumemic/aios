@@ -335,16 +335,26 @@ async def _open_agent_capability(
     output_schema = spec.get("output_schema")
     if output_schema is not None:
         # Structured output: the child must return a value matching this schema (the
-        # return tool enforces it; see workflow_completion). Reject a malformed schema
-        # here — author-facing — rather than letting it explode when the child builds
-        # its validator.
-        try:
-            jsonschema.Draft202012Validator.check_schema(output_schema)
-        except jsonschema.SchemaError as exc:
+        # return tool enforces it; see workflow_completion). Reject a bad schema here —
+        # author-facing — rather than letting it explode when the child builds its
+        # validator. Require an *object* schema: a bare boolean (valid JSON Schema, but
+        # `false` rejects every value and `true` disables enforcement) is a degenerate
+        # author input, better surfaced as a bad call than a child that can never return.
+        schema_error: str | None = None
+        if not isinstance(output_schema, dict):
+            schema_error = (
+                f"output_schema must be a JSON object schema, got {type(output_schema).__name__}"
+            )
+        else:
+            try:
+                jsonschema.Draft202012Validator.check_schema(output_schema)
+            except jsonschema.SchemaError as exc:
+                schema_error = f"output_schema is not a valid JSON Schema: {exc.message}"
+        if schema_error is not None:
             await _complete_run(
                 conn,
                 run,
-                output=f"agent() output_schema is not a valid JSON Schema: {exc.message}",
+                output=f"agent() {schema_error}",
                 is_error=True,
                 error_kind="bad_agent_call",
             )
