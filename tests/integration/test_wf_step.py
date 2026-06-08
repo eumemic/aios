@@ -1047,6 +1047,78 @@ async def test_operator_deleted_child_resolves_run_as_child_gone(
     assert run is not None and run.status == "completed" and run.output == "child_gone"
 
 
+# ─── G — parallel() spawns a child fan-out and collects results ───────────────
+
+
+async def _children_of(pool: asyncpg.Pool[Any], run_id: str) -> list[str]:
+    """All agent children a run has spawned, in call_started (emission) order."""
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    return [e.payload["child_session_id"] for e in events if e.type == "call_started"]
+
+
+async def test_parallel_spawns_fanout_and_collects_results_in_order(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """parallel() over two agent() calls spawns BOTH children in one step (a single
+    frontier), then a later step harvests both and the run completes with the
+    results in thunk order."""
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await parallel([lambda: agent({wf_agent_id!r}, 'a'),"
+        f" lambda: agent({wf_agent_id!r}, 'b')])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # drive parallel -> spawn both children + suspend
+    children = await _children_of(pool, run_id)
+    assert len(children) == 2  # fanned out at once
+
+    for cid, value in zip(children, ["ra", "rb"], strict=True):
+        rid = await _open_request_id(pool, cid)
+        with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+            await workflow_completion.return_handler(cid, {"request_id": rid, "value": value})
+
+    await run_workflow_step(run_id)  # harvest both -> replay past parallel -> complete
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == ["ra", "rb"]  # branch order preserved
+
+
+async def test_parallel_barrier_yields_none_for_an_errored_child(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """An errored branch (uncaught) contributes None to the results list; the other
+    branch's value is unaffected and the run completes."""
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await parallel([lambda: agent({wf_agent_id!r}, 'a'),"
+        f" lambda: agent({wf_agent_id!r}, 'b')])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    children = await _children_of(pool, run_id)
+    rid0 = await _open_request_id(pool, children[0])
+    rid1 = await _open_request_id(pool, children[1])
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(children[0], {"request_id": rid0, "value": "ok"})
+        await workflow_completion.error_handler(
+            children[1], {"request_id": rid1, "message": "nope"}
+        )
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == ["ok", None]  # the errored branch → None, barrier still returns
+
+
 async def test_agent_stays_suspended_until_marker(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:

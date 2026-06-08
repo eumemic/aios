@@ -84,7 +84,9 @@ _CHILD_ENV_ALLOWLIST: frozenset[str] = frozenset(
 @dataclass(frozen=True)
 class EmittedCapability:
     capability_id: str
-    call_key: str  # "sha:<hex>#<ordinal>" — content_hash + ordinal are derivable from this
+    # "sha:<hex>#<ordinal>", optionally prefixed by a parallel branch path
+    # ("0.0/sha:<hex>#<ordinal>"). Treated as an opaque, deterministic key.
+    call_key: str
     spec: Any
 
 
