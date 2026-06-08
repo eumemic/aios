@@ -22,9 +22,11 @@ import pytest
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
+from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
+from aios.services import workflows as wf_service
 from aios.workflows import service
 from aios.workflows.child_id import child_session_id
 from aios.workflows.determinism import CallKeyer
@@ -59,6 +61,7 @@ async def wf_runtime(
             )
         with (
             mock.patch("aios.workflows.service.defer_run_wake", new=AsyncMock()),
+            mock.patch("aios.services.workflows.defer_run_wake", new=AsyncMock()),
             mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()),
             mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()),
         ):
@@ -1530,3 +1533,74 @@ async def test_early_gate_signal_triggers_self_rewake(wf_runtime: asyncpg.Pool[A
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "completed"
     assert run.output == {"answer": "early"}
+
+
+# ─── Block 3 surface: the services.workflows facade (create + by-nonce resume) ─
+
+
+async def test_service_create_and_resume_by_nonce_roundtrip(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """The public service path: create a workflow + run, drive to a gate, resume by
+    the gate's NONCE (not call_key), and complete."""
+    pool = wf_runtime
+    wf = await wf_service.create_workflow(
+        pool, account_id="acc_wf", name="gate-demo", script=_GATE_SCRIPT
+    )
+    run = await wf_service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+    )
+
+    await run_workflow_step(run.id)  # → suspends at the gate
+    assert (await wf_service.get_run(pool, run.id, account_id="acc_wf")).status == "suspended"
+    events = await wf_service.list_run_events(pool, run.id, account_id="acc_wf")
+    call_started = next(e for e in events if e.type == "call_started")
+    nonce = call_started.payload["gate_nonce"]
+    assert isinstance(nonce, str) and nonce
+
+    await wf_service.resume_gate_by_nonce(
+        pool, run_id=run.id, account_id="acc_wf", gate_nonce=nonce, result="yes"
+    )
+    await run_workflow_step(run.id)  # harvest the signal → replay past the gate → complete
+    done = await wf_service.get_run(pool, run.id, account_id="acc_wf")
+    assert done.status == "completed" and done.output == {"answer": "yes"}
+
+    # The gate is now resolved — re-resuming with the same (valid) nonce 404s
+    # ("no OPEN gate matches") rather than writing an orphaned signal nothing harvests.
+    with pytest.raises(NotFoundError):
+        await wf_service.resume_gate_by_nonce(
+            pool, run_id=run.id, account_id="acc_wf", gate_nonce=nonce, result="again"
+        )
+
+
+async def test_service_resume_by_nonce_rejects_bad_nonce_and_cross_tenant(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = wf_runtime
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+            "VALUES ('acc_intruder', 'acc_wf', FALSE, 'intruder')"
+        )
+    wf = await wf_service.create_workflow(
+        pool, account_id="acc_wf", name="gate-demo", script=_GATE_SCRIPT
+    )
+    run = await wf_service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+    )
+    await run_workflow_step(run.id)  # → suspended at the gate
+    events = await wf_service.list_run_events(pool, run.id, account_id="acc_wf")
+    nonce = next(e for e in events if e.type == "call_started").payload["gate_nonce"]
+
+    # Wrong nonce → 404 (no gate matches).
+    with pytest.raises(NotFoundError):
+        await wf_service.resume_gate_by_nonce(
+            pool, run_id=run.id, account_id="acc_wf", gate_nonce="not-a-real-nonce", result="x"
+        )
+    # Cross-tenant resume → 404 on the scope check, BEFORE the (correct) nonce is read.
+    with pytest.raises(NotFoundError):
+        await wf_service.resume_gate_by_nonce(
+            pool, run_id=run.id, account_id="acc_intruder", gate_nonce=nonce, result="x"
+        )
+    with pytest.raises(NotFoundError):
+        await wf_service.get_run(pool, run.id, account_id="acc_intruder")
+    # The run is untouched — still suspended, resumable by its owner.
+    assert (await wf_service.get_run(pool, run.id, account_id="acc_wf")).status == "suspended"

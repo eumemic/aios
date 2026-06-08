@@ -19,6 +19,7 @@ from aios_sdk.streaming import (
     stream_connection_discovery,
     stream_connector_calls,
     stream_management_calls,
+    stream_run,
     stream_session,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "stream_connection_discovery",
     "stream_connector_calls",
     "stream_management_calls",
+    "stream_run",
     "stream_session",
 ]

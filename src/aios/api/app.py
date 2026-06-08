@@ -28,6 +28,7 @@ from aios.api.routers import (
     sessions,
     skills,
     vaults,
+    workflows,
 )
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
@@ -100,6 +101,8 @@ def create_app() -> FastAPI:
     app.include_router(runtime_tokens.router)
     app.include_router(connectors.router)
     app.include_router(session_templates.router)
+    app.include_router(workflows.router)
+    app.include_router(workflows.runs_router)
     _mount_mcp(app)
     return app
 

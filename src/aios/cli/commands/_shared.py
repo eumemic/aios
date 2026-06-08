@@ -148,6 +148,7 @@ def render_paginated(
     limit: int = 50,
     max_widths: dict[str, int] | None = None,
     page_size: int = 200,
+    path_params: dict[str, Any] | None = None,
     **filters: Any,
 ) -> None:
     """Render an SDK list endpoint, paginated or fully fetched per ``all_``.
@@ -156,7 +157,14 @@ def render_paginated(
     opens an SDK client, walks pages when ``all_`` is True (or fetches one
     page otherwise), then renders through :func:`render_list`. The first page
     carries the filters + ``limit``; later pages send only the opaque ``cursor``.
+
+    ``path_params`` (e.g. the ``run_id`` of ``aios runs events``) are part of the
+    URL, so they are sent on EVERY page — unlike ``filters`` (query params), which
+    the opaque cursor carries and the server rejects (422) if re-sent alongside
+    ``?cursor=``. Without this, a ``--all`` walk of a path-param'd endpoint dropped
+    the path param on page 2 and the SDK call raised on the missing argument.
     """
+    path = path_params or {}
     state = get_state(ctx)
     with state.sdk_client() as client:
         if all_:
@@ -164,9 +172,9 @@ def render_paginated(
             cursor: str | None = None
             while True:
                 if cursor is not None:
-                    page = unwrap(fn(client=client, cursor=cursor))
+                    page = unwrap(fn(client=client, cursor=cursor, **path))
                 else:
-                    page = unwrap(fn(client=client, limit=page_size, **filters))
+                    page = unwrap(fn(client=client, limit=page_size, **path, **filters))
                 items.extend(page.data)
                 if isinstance(page.has_more, Unset) or not page.has_more:
                     break
@@ -179,7 +187,7 @@ def render_paginated(
                 "next_cursor": None,
             }
         else:
-            page = unwrap(fn(client=client, limit=limit, **filters))
+            page = unwrap(fn(client=client, limit=limit, **path, **filters))
             envelope = page.to_dict()
     render_list(state.output_format, envelope, columns=columns, max_widths=max_widths)
 

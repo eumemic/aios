@@ -123,7 +123,7 @@ def versions(
             max_widths={"model": 40},
             all_=all_,
             limit=limit,
-            agent_id=agent_id,
+            path_params={"agent_id": agent_id},
         )
 
     run_or_die(_run)

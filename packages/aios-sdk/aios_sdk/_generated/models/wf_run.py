@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+import datetime
+from collections.abc import Mapping
+from typing import Any, TypeVar, cast
+
+from attrs import define as _attrs_define
+from attrs import field as _attrs_field
+from dateutil.parser import isoparse
+
+from ..models.wf_run_status import WfRunStatus
+from ..types import UNSET, Unset
+
+T = TypeVar("T", bound="WfRun")
+
+
+@_attrs_define
+class WfRun:
+    """A durable workflow execution instance.
+
+    ``script`` is the run's own immutable snapshot of the workflow source at
+    creation time (``script_sha`` is its hash); every wake execs exactly this.
+    ``status`` is persisted (unlike sessions): the run loop writes
+    ``suspended``/``completed``/``errored``.
+
+        Attributes:
+            id (str):
+            workflow_id (str):
+            account_id (str):
+            environment_id (str):
+            script (str):
+            script_sha (str):
+            status (WfRunStatus):
+            last_event_seq (int):
+            created_at (datetime.datetime):
+            updated_at (datetime.datetime):
+            parent_run_id (None | str | Unset):
+            input_ (Any | Unset):
+            output (Any | Unset):
+            archived_at (datetime.datetime | None | Unset):
+    """
+
+    id: str
+    workflow_id: str
+    account_id: str
+    environment_id: str
+    script: str
+    script_sha: str
+    status: WfRunStatus
+    last_event_seq: int
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    parent_run_id: None | str | Unset = UNSET
+    input_: Any | Unset = UNSET
+    output: Any | Unset = UNSET
+    archived_at: datetime.datetime | None | Unset = UNSET
+    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        id = self.id
+
+        workflow_id = self.workflow_id
+
+        account_id = self.account_id
+
+        environment_id = self.environment_id
+
+        script = self.script
+
+        script_sha = self.script_sha
+
+        status = self.status.value
+
+        last_event_seq = self.last_event_seq
+
+        created_at = self.created_at.isoformat()
+
+        updated_at = self.updated_at.isoformat()
+
+        parent_run_id: None | str | Unset
+        if isinstance(self.parent_run_id, Unset):
+            parent_run_id = UNSET
+        else:
+            parent_run_id = self.parent_run_id
+
+        input_ = self.input_
+
+        output = self.output
+
+        archived_at: None | str | Unset
+        if isinstance(self.archived_at, Unset):
+            archived_at = UNSET
+        elif isinstance(self.archived_at, datetime.datetime):
+            archived_at = self.archived_at.isoformat()
+        else:
+            archived_at = self.archived_at
+
+        field_dict: dict[str, Any] = {}
+        field_dict.update(self.additional_properties)
+        field_dict.update(
+            {
+                "id": id,
+                "workflow_id": workflow_id,
+                "account_id": account_id,
+                "environment_id": environment_id,
+                "script": script,
+                "script_sha": script_sha,
+                "status": status,
+                "last_event_seq": last_event_seq,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
+        )
+        if parent_run_id is not UNSET:
+            field_dict["parent_run_id"] = parent_run_id
+        if input_ is not UNSET:
+            field_dict["input"] = input_
+        if output is not UNSET:
+            field_dict["output"] = output
+        if archived_at is not UNSET:
+            field_dict["archived_at"] = archived_at
+
+        return field_dict
+
+    @classmethod
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        d = dict(src_dict)
+        id = d.pop("id")
+
+        workflow_id = d.pop("workflow_id")
+
+        account_id = d.pop("account_id")
+
+        environment_id = d.pop("environment_id")
+
+        script = d.pop("script")
+
+        script_sha = d.pop("script_sha")
+
+        status = WfRunStatus(d.pop("status"))
+
+        last_event_seq = d.pop("last_event_seq")
+
+        created_at = isoparse(d.pop("created_at"))
+
+        updated_at = isoparse(d.pop("updated_at"))
+
+        def _parse_parent_run_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        parent_run_id = _parse_parent_run_id(d.pop("parent_run_id", UNSET))
+
+        input_ = d.pop("input", UNSET)
+
+        output = d.pop("output", UNSET)
+
+        def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                archived_at_type_0 = isoparse(data)
+
+                return archived_at_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(datetime.datetime | None | Unset, data)
+
+        archived_at = _parse_archived_at(d.pop("archived_at", UNSET))
+
+        wf_run = cls(
+            id=id,
+            workflow_id=workflow_id,
+            account_id=account_id,
+            environment_id=environment_id,
+            script=script,
+            script_sha=script_sha,
+            status=status,
+            last_event_seq=last_event_seq,
+            created_at=created_at,
+            updated_at=updated_at,
+            parent_run_id=parent_run_id,
+            input_=input_,
+            output=output,
+            archived_at=archived_at,
+        )
+
+        wf_run.additional_properties = d
+        return wf_run
+
+    @property
+    def additional_keys(self) -> list[str]:
+        return list(self.additional_properties.keys())
+
+    def __getitem__(self, key: str) -> Any:
+        return self.additional_properties[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.additional_properties[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self.additional_properties[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.additional_properties

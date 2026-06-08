@@ -21,7 +21,7 @@ from typing import Any
 
 import asyncpg
 
-from aios.db.queries import _get_scoped, parse_jsonb
+from aios.db.queries import _get_scoped, _list_scoped, parse_jsonb
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
 from aios.models.workflows import (
@@ -143,7 +143,70 @@ async def get_workflow(
     )
 
 
+async def list_workflows(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    limit: int = 50,
+    after: str | None = None,
+    name: str | None = None,
+) -> list[Workflow]:
+    """Keyset-paginated list of an account's workflows, newest first.
+
+    Hand-written (not ``_list_scoped``) because the ``workflows`` table has no
+    ``archived_at`` column — workflow definitions are immutable and never archived.
+    Each returned row is one ``(name, version)``; versioning/update is deferred, so
+    today there is one row per name.
+    """
+    args: list[Any] = [account_id]
+    where = ["account_id = $1"]
+    if name is not None:
+        args.append(name)
+        where.append(f"name = ${len(args)}")
+    if after is not None:
+        args.append(after)
+        where.append(f"id < ${len(args)}")
+    args.append(limit)
+    sql = f"SELECT * FROM workflows WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
+    return [_row_to_workflow(r) for r in await conn.fetch(sql, *args)]
+
+
 # ─── wf_runs (execution instances) ───────────────────────────────────────────
+
+
+async def get_wf_run(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> WfRun:
+    """Account-scoped run read (the public surface). Raises ``NotFoundError`` on a
+    miss — including a cross-tenant id, so it never leaks another account's run.
+    (The unscoped :func:`get_run_for_step` is the internal/trusted variant.)"""
+    return await _get_scoped(
+        conn,
+        table="wf_runs",
+        id_=run_id,
+        account_id=account_id,
+        row=_row_to_wf_run,
+        noun="workflow run",
+    )
+
+
+async def list_wf_runs(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    limit: int = 50,
+    after: str | None = None,
+    workflow_id: str | None = None,
+    status: str | None = None,
+) -> list[WfRun]:
+    """Keyset-paginated list of an account's runs (non-archived), newest first."""
+    return await _list_scoped(
+        conn,
+        table="wf_runs",
+        account_id=account_id,
+        row=_row_to_wf_run,
+        limit=limit,
+        after=after,
+        filters=[("workflow_id", workflow_id), ("status", status)],
+    )
 
 
 async def insert_wf_run(
@@ -294,11 +357,47 @@ async def append_run_event(
             run_id,
             row["seq"],
         )
+    # NOTIFY *after* the insert/bump txn (never inside it — a subscriber must not
+    # see a payload for an uncommitted row). pg_notify is transactional, so when an
+    # outer txn wraps this call (``_complete_run``'s run_completed + set_terminal
+    # unit), delivery is deferred to that commit; in the common autocommit path it
+    # fires immediately on the already-committed row. ``pg_notify`` function form,
+    # not literal NOTIFY: run-event ids are mixed-case prefixed-ULIDs (Postgres
+    # case-folds unquoted identifiers). Mirrors session ``append_event``. The
+    # ``/runs/{id}/stream`` backfill + seq-dedup recovers any missed tick.
+    await conn.execute("SELECT pg_notify($1, $2)", f"wf_run_events_{run_id}", row["id"])
     return _row_to_wf_run_event(row)
 
 
 async def list_run_events(conn: asyncpg.Connection[Any], run_id: str) -> list[WfRunEvent]:
+    """Unscoped, unpaginated journal read — the internal harvest path
+    (``run_workflow_step``). For the public surface use :func:`list_run_events_scoped`."""
     rows = await conn.fetch("SELECT * FROM wf_run_events WHERE run_id = $1 ORDER BY seq", run_id)
+    return [_row_to_wf_run_event(r) for r in rows]
+
+
+async def list_run_events_scoped(
+    conn: asyncpg.Connection[Any],
+    run_id: str,
+    *,
+    account_id: str,
+    after_seq: int = 0,
+    limit: int = 200,
+) -> list[WfRunEvent]:
+    """Account-scoped, forward-only (``seq > after_seq``) journal page.
+
+    ``wf_run_events`` has no ``account_id`` column, so scope via a join to
+    ``wf_runs`` — defense in depth even though the router pre-checks the run with
+    :func:`get_wf_run`. Ascending seq, like the session events read path."""
+    rows = await conn.fetch(
+        "SELECT e.* FROM wf_run_events e JOIN wf_runs r ON r.id = e.run_id "
+        "WHERE e.run_id = $1 AND r.account_id = $2 AND e.seq > $3 "
+        "ORDER BY e.seq ASC LIMIT $4",
+        run_id,
+        account_id,
+        after_seq,
+        limit,
+    )
     return [_row_to_wf_run_event(r) for r in rows]
 
 

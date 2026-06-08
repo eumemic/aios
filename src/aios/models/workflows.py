@@ -6,9 +6,9 @@ execution instance whose state lives entirely in its append-only journal
 (``WfRunEvent``); ``WfRunSignal`` is the side-marker an external resume writes
 so the journal keeps a single writer.
 
-These are internal read views (they carry ``account_id``); request/echo models
-and the public HTTP surface arrive in a later block. The runtime is driven
-internally via ``services.workflows`` + integration tests for now.
+The read views below carry ``account_id`` (internal); the ``*Create`` / resume
+request models at the bottom back the public HTTP surface (Block 3). Responses
+reuse the read views directly, the way ``Agent``/``Session`` do.
 """
 
 from __future__ import annotations
@@ -90,3 +90,40 @@ class WfRunSignal(BaseModel):
     kind: WfRunSignalKind
     result: Any = None  # arbitrary JSON: the externally-delivered resume value
     delivered_at: datetime
+
+
+# ─── request models (the public HTTP surface) ────────────────────────────────
+
+
+class WorkflowCreate(BaseModel):
+    """Request body for ``POST /v1/workflows`` — a new workflow definition at v1."""
+
+    name: str
+    script: str
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+
+
+class WfRunCreate(BaseModel):
+    """Request body for ``POST /v1/runs`` — launch a run of a workflow.
+
+    ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
+    binds to ``environment_id`` (like a session), into which its ``agent()`` children
+    spawn.
+    """
+
+    workflow_id: str
+    environment_id: str
+    input: Any = None
+
+
+class GateResume(BaseModel):
+    """Request body for ``POST /v1/runs/{run_id}/resume`` — deliver a gate's value.
+
+    Keyed by ``gate_nonce`` (the unguessable capability token minted into the gate's
+    ``call_started`` event), not the internal ``call_key``. ``result`` is the
+    externally-delivered resume value (arbitrary JSON).
+    """
+
+    gate_nonce: str
+    result: Any = None
