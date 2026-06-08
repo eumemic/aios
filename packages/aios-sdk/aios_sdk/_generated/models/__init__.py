@@ -52,6 +52,7 @@ from .event import Event
 from .event_data import EventData
 from .event_kind import EventKind
 from .file_upload_response import FileUploadResponse
+from .gate_resume import GateResume
 from .get_health_response_get_health import GetHealthResponseGetHealth
 from .github_repository_resource import GithubRepositoryResource
 from .github_repository_resource_echo import GithubRepositoryResourceEcho
@@ -86,6 +87,9 @@ from .list_response_union_memory_memory_prefix import (
 )
 from .list_response_vault import ListResponseVault
 from .list_response_vault_credential import ListResponseVaultCredential
+from .list_response_wf_run import ListResponseWfRun
+from .list_response_wf_run_event import ListResponseWfRunEvent
+from .list_response_workflow import ListResponseWorkflow
 from .list_session_events_dir import ListSessionEventsDir
 from .list_session_events_kind_type_0 import ListSessionEventsKindType0
 from .list_sessions_status_type_0 import ListSessionsStatusType0
@@ -217,6 +221,12 @@ from .vault_update_metadata_type_0 import VaultUpdateMetadataType0
 from .wait_response import WaitResponse
 from .wait_response_session_status import WaitResponseSessionStatus
 from .wait_response_session_stop_reason_type_0 import WaitResponseSessionStopReasonType0
+from .wf_run import WfRun
+from .wf_run_create import WfRunCreate
+from .wf_run_event import WfRunEvent
+from .wf_run_event_payload import WfRunEventPayload
+from .wf_run_event_type import WfRunEventType
+from .wf_run_status import WfRunStatus
 from .whatsapp_confirm_pairing_request import WhatsappConfirmPairingRequest
 from .whatsapp_confirm_pairing_response import WhatsappConfirmPairingResponse
 from .whatsapp_confirm_pairing_response_status import (
@@ -225,6 +235,12 @@ from .whatsapp_confirm_pairing_response_status import (
 from .whatsapp_start_pairing_request import WhatsappStartPairingRequest
 from .whatsapp_start_pairing_response import WhatsappStartPairingResponse
 from .whatsapp_unpair_request import WhatsappUnpairRequest
+from .workflow import Workflow
+from .workflow_create import WorkflowCreate
+from .workflow_create_input_schema_type_0 import WorkflowCreateInputSchemaType0
+from .workflow_create_output_schema_type_0 import WorkflowCreateOutputSchemaType0
+from .workflow_input_schema_type_0 import WorkflowInputSchemaType0
+from .workflow_output_schema_type_0 import WorkflowOutputSchemaType0
 
 __all__ = (
     "Account",
@@ -279,6 +295,7 @@ __all__ = (
     "EventData",
     "EventKind",
     "FileUploadResponse",
+    "GateResume",
     "GetHealthResponseGetHealth",
     "GithubRepositoryResource",
     "GithubRepositoryResourceEcho",
@@ -309,6 +326,9 @@ __all__ = (
     "ListResponseUnionMemoryMemoryPrefix",
     "ListResponseVault",
     "ListResponseVaultCredential",
+    "ListResponseWfRun",
+    "ListResponseWfRunEvent",
+    "ListResponseWorkflow",
     "ListSessionEventsDir",
     "ListSessionEventsKindType0",
     "ListSessionsStatusType0",
@@ -432,10 +452,22 @@ __all__ = (
     "WaitResponse",
     "WaitResponseSessionStatus",
     "WaitResponseSessionStopReasonType0",
+    "WfRun",
+    "WfRunCreate",
+    "WfRunEvent",
+    "WfRunEventPayload",
+    "WfRunEventType",
+    "WfRunStatus",
     "WhatsappConfirmPairingRequest",
     "WhatsappConfirmPairingResponse",
     "WhatsappConfirmPairingResponseStatus",
     "WhatsappStartPairingRequest",
     "WhatsappStartPairingResponse",
     "WhatsappUnpairRequest",
+    "Workflow",
+    "WorkflowCreate",
+    "WorkflowCreateInputSchemaType0",
+    "WorkflowCreateOutputSchemaType0",
+    "WorkflowInputSchemaType0",
+    "WorkflowOutputSchemaType0",
 )

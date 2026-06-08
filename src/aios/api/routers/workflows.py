@@ -1,0 +1,171 @@
+"""Workflow + run HTTP endpoints (Block 3 surface).
+
+Two routers in one module: ``/v1/workflows`` (the definition resource, mirroring
+``/v1/agents``) and the top-level ``/v1/runs`` (the execution instances, mirroring
+``/v1/sessions`` — a run carries ``workflow_id`` the way a session carries
+``agent_id``). Both are account-scoped via ``AccountIdDep``; the SSE
+``/v1/runs/{id}/stream`` endpoint is added in the streaming slice.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Query, status
+
+from aios.api.deps import AccountIdDep, PoolDep
+from aios.models.common import ListResponse
+from aios.models.pagination import page_cursor
+from aios.models.workflows import (
+    GateResume,
+    WfRun,
+    WfRunCreate,
+    WfRunEvent,
+    Workflow,
+    WorkflowCreate,
+)
+from aios.services import workflows as service
+
+router = APIRouter(prefix="/v1/workflows", tags=["workflows"])
+runs_router = APIRouter(prefix="/v1/runs", tags=["runs"])
+
+
+# ─── /v1/workflows (definitions) ─────────────────────────────────────────────
+
+
+@router.post("", operation_id="create_workflow", status_code=status.HTTP_201_CREATED)
+async def create_workflow(
+    body: WorkflowCreate, pool: PoolDep, account_id: AccountIdDep
+) -> Workflow:
+    """Create a workflow definition (version 1). Versioning/update is deferred."""
+    return await service.create_workflow(
+        pool,
+        account_id=account_id,
+        name=body.name,
+        script=body.script,
+        input_schema=body.input_schema,
+        output_schema=body.output_schema,
+    )
+
+
+@router.get("", operation_id="list_workflows")
+async def list_workflows(
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    cursor: str | None = None,
+    name: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+) -> ListResponse[Workflow]:
+    """List the account's workflows, newest first. First page: optional ``name`` +
+    ``limit``; subsequent pages: ``?cursor=<next_cursor>``."""
+    st = page_cursor(cursor, {"name": name, "limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    if st is not None:
+        name = st.filters.get("name")
+    items = await service.list_workflows(
+        pool, account_id=account_id, limit=page_limit + 1, after=after, name=name
+    )
+    return ListResponse[Workflow].paginate(
+        items, page_limit, cursor=lambda x: x.id, filters={"name": name}
+    )
+
+
+@router.get("/{workflow_id}", operation_id="get_workflow")
+async def get_workflow(workflow_id: str, pool: PoolDep, account_id: AccountIdDep) -> Workflow:
+    """Fetch one workflow definition by id."""
+    return await service.get_workflow(pool, workflow_id, account_id=account_id)
+
+
+# ─── /v1/runs (execution instances) ──────────────────────────────────────────
+
+
+@runs_router.post("", operation_id="create_run", status_code=status.HTTP_201_CREATED)
+async def create_run(body: WfRunCreate, pool: PoolDep, account_id: AccountIdDep) -> WfRun:
+    """Launch a run of a workflow. Snapshots the workflow's current script, binds
+    the run to ``environment_id`` (its ``agent()`` children spawn there), and wakes
+    it. A missing workflow or environment 404s."""
+    return await service.create_run(
+        pool,
+        account_id=account_id,
+        workflow_id=body.workflow_id,
+        environment_id=body.environment_id,
+        input=body.input,
+    )
+
+
+@runs_router.get("", operation_id="list_runs")
+async def list_runs(
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    cursor: str | None = None,
+    workflow_id: str | None = None,
+    status: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+) -> ListResponse[WfRun]:
+    """List the account's runs, newest first. First page: optional ``workflow_id`` /
+    ``status`` filters + ``limit``; subsequent pages: ``?cursor=<next_cursor>``."""
+    st = page_cursor(cursor, {"workflow_id": workflow_id, "status": status, "limit": limit})
+    after = str(st.cursor) if st is not None else None
+    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    if st is not None:
+        workflow_id = st.filters.get("workflow_id")
+        status = st.filters.get("status")
+    items = await service.list_runs(
+        pool,
+        account_id=account_id,
+        limit=page_limit + 1,
+        after=after,
+        workflow_id=workflow_id,
+        status=status,
+    )
+    return ListResponse[WfRun].paginate(
+        items,
+        page_limit,
+        cursor=lambda x: x.id,
+        filters={"workflow_id": workflow_id, "status": status},
+    )
+
+
+@runs_router.get("/{run_id}", operation_id="get_run")
+async def get_run(run_id: str, pool: PoolDep, account_id: AccountIdDep) -> WfRun:
+    """Fetch one run by id (status, output, last_event_seq, …)."""
+    return await service.get_run(pool, run_id, account_id=account_id)
+
+
+@runs_router.get("/{run_id}/events", operation_id="list_run_events")
+async def list_run_events(
+    run_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    cursor: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+) -> ListResponse[WfRunEvent]:
+    """A run's journal by sequence (oldest first). First page: optional ``limit``;
+    subsequent pages: ``?cursor=<next_cursor>``."""
+    # Scope check: 404 a cross-tenant run id before reading its journal.
+    await service.get_run(pool, run_id, account_id=account_id)
+    st = page_cursor(cursor, {"limit": limit})
+    if st is not None:
+        page_limit = st.limit
+        after_seq = int(st.cursor)
+    else:
+        page_limit = limit if limit is not None else 200
+        after_seq = 0
+    items = await service.list_run_events(
+        pool, run_id, account_id=account_id, after_seq=after_seq, limit=page_limit + 1
+    )
+    return ListResponse[WfRunEvent].paginate(items, page_limit, cursor=lambda x: x.seq)
+
+
+@runs_router.post("/{run_id}/resume", operation_id="resume_gate")
+async def resume_gate(
+    run_id: str, body: GateResume, pool: PoolDep, account_id: AccountIdDep
+) -> WfRun:
+    """Resume a suspended gate by its ``gate_nonce``, delivering ``result``. Returns
+    the updated run (its status flips back toward ``running``). A bad nonce or a
+    cross-tenant run 404s."""
+    await service.resume_gate_by_nonce(
+        pool, run_id=run_id, account_id=account_id, gate_nonce=body.gate_nonce, result=body.result
+    )
+    return await service.get_run(pool, run_id, account_id=account_id)

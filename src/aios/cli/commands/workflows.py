@@ -1,0 +1,189 @@
+"""``aios workflows ...`` (definitions) + ``aios runs ...`` (executions).
+
+Two typer sub-apps mirroring the two routers. ``runs`` favours convenience flags
+(launch + resume are usually ad-hoc) while ``workflows create`` takes a JSON
+payload (the script body is long). ``--input`` / ``--result`` are parsed as JSON
+(a workflow's input / a gate's result are arbitrary JSON).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Annotated, Any
+
+import typer
+
+from aios.cli.commands._shared import call_single, render_paginated
+from aios.cli.coverage import covers
+from aios.cli.files import load_payload
+from aios.cli.runtime import run_or_die
+from aios_sdk._generated.api.runs import (
+    create_run,
+    get_run,
+    list_run_events,
+    list_runs,
+    resume_gate,
+)
+from aios_sdk._generated.api.workflows import (
+    create_workflow,
+    get_workflow,
+    list_workflows,
+)
+from aios_sdk._generated.models.gate_resume import GateResume
+from aios_sdk._generated.models.wf_run_create import WfRunCreate
+from aios_sdk._generated.models.workflow_create import WorkflowCreate
+
+app = typer.Typer(name="workflows", help="Manage workflow definitions.", no_args_is_help=True)
+runs_app = typer.Typer(name="runs", help="Launch and observe workflow runs.", no_args_is_help=True)
+
+
+def _json_arg(value: str | None) -> Any:
+    """Parse a JSON CLI argument (``--input`` / ``--result``); ``None`` stays ``None``."""
+    return json.loads(value) if value is not None else None
+
+
+# ─── aios workflows (definitions) ────────────────────────────────────────────
+
+
+@app.command("list", help="List workflow definitions.")
+@covers("list_workflows")
+def list_workflows_(
+    ctx: typer.Context,
+    name: Annotated[str | None, typer.Option("--name", help="Filter by exact name.")] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
+    all_: Annotated[bool, typer.Option("--all", help="Fetch every page.")] = False,
+) -> None:
+    def _run() -> None:
+        render_paginated(
+            ctx,
+            list_workflows.sync_detailed,
+            columns=("id", "name", "version", "updated_at"),
+            max_widths={"name": 32},
+            all_=all_,
+            limit=limit,
+            name=name,
+        )
+
+    run_or_die(_run)
+
+
+@app.command("get", help="Fetch a workflow definition by id.")
+@covers("get_workflow")
+def get_workflow_(ctx: typer.Context, workflow_id: str) -> None:
+    def _run() -> None:
+        call_single(ctx, get_workflow.sync_detailed, workflow_id=workflow_id)
+
+    run_or_die(_run)
+
+
+@app.command("create", help="Create a workflow from a JSON payload (WorkflowCreate shape).")
+@covers("create_workflow")
+def create_workflow_(
+    ctx: typer.Context,
+    file: Annotated[Path | None, typer.Option("--file", help="Read JSON body from a file.")] = None,
+    stdin: Annotated[bool, typer.Option("--stdin", help="Read JSON body from stdin.")] = False,
+    data: Annotated[str | None, typer.Option("--data", help="Inline JSON body.")] = None,
+) -> None:
+    def _run() -> int | None:
+        payload = load_payload(file, stdin, data)
+        call_single(ctx, create_workflow.sync_detailed, body=WorkflowCreate.from_dict(payload))
+        return None
+
+    run_or_die(_run)
+
+
+# ─── aios runs (executions) ──────────────────────────────────────────────────
+
+
+@runs_app.command("list", help="List workflow runs.")
+@covers("list_runs")
+def list_runs_(
+    ctx: typer.Context,
+    workflow_id: Annotated[str | None, typer.Option("--workflow-id")] = None,
+    status: Annotated[str | None, typer.Option("--status", help="pending|running|…")] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
+    all_: Annotated[bool, typer.Option("--all", help="Fetch every page.")] = False,
+) -> None:
+    def _run() -> None:
+        render_paginated(
+            ctx,
+            list_runs.sync_detailed,
+            columns=("id", "workflow_id", "status", "updated_at"),
+            all_=all_,
+            limit=limit,
+            workflow_id=workflow_id,
+            status=status,
+        )
+
+    run_or_die(_run)
+
+
+@runs_app.command("get", help="Fetch a run by id.")
+@covers("get_run")
+def get_run_(ctx: typer.Context, run_id: str) -> None:
+    def _run() -> None:
+        call_single(ctx, get_run.sync_detailed, run_id=run_id)
+
+    run_or_die(_run)
+
+
+@runs_app.command("create", help="Launch a run of a workflow.")
+@covers("create_run")
+def create_run_(
+    ctx: typer.Context,
+    workflow_id: Annotated[str, typer.Option("--workflow-id")],
+    environment_id: Annotated[str, typer.Option("--environment-id")],
+    input_: Annotated[str | None, typer.Option("--input", help="The run's input as JSON.")] = None,
+) -> None:
+    def _run() -> int | None:
+        body = WfRunCreate.from_dict(
+            {
+                "workflow_id": workflow_id,
+                "environment_id": environment_id,
+                "input": _json_arg(input_),
+            }
+        )
+        call_single(ctx, create_run.sync_detailed, body=body)
+        return None
+
+    run_or_die(_run)
+
+
+@runs_app.command("events", help="List a run's journal events (oldest first).")
+@covers("list_run_events")
+def run_events_(
+    ctx: typer.Context,
+    run_id: str,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 200,
+    all_: Annotated[bool, typer.Option("--all", help="Fetch every page.")] = False,
+) -> None:
+    def _run() -> None:
+        render_paginated(
+            ctx,
+            list_run_events.sync_detailed,
+            columns=("seq", "type", "call_key"),
+            all_=all_,
+            limit=limit,
+            run_id=run_id,
+        )
+
+    run_or_die(_run)
+
+
+@runs_app.command("resume", help="Resume a suspended gate by its nonce.")
+@covers("resume_gate")
+def resume_run_(
+    ctx: typer.Context,
+    run_id: str,
+    gate_nonce: Annotated[str, typer.Option("--gate-nonce", help="The gate's capability nonce.")],
+    result: Annotated[
+        str | None, typer.Option("--result", help="The resume value as JSON.")
+    ] = None,
+) -> None:
+    def _run() -> int | None:
+        body = GateResume.from_dict({"gate_nonce": gate_nonce, "result": _json_arg(result)})
+        call_single(ctx, resume_gate.sync_detailed, run_id=run_id, body=body)
+        return None
+
+    run_or_die(_run)

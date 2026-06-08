@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, TypeVar, cast
+
+from attrs import define as _attrs_define
+from attrs import field as _attrs_field
+
+from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.workflow_create_input_schema_type_0 import (
+        WorkflowCreateInputSchemaType0,
+    )
+    from ..models.workflow_create_output_schema_type_0 import (
+        WorkflowCreateOutputSchemaType0,
+    )
+
+
+T = TypeVar("T", bound="WorkflowCreate")
+
+
+@_attrs_define
+class WorkflowCreate:
+    """Request body for ``POST /v1/workflows`` — a new workflow definition at v1.
+
+    Attributes:
+        name (str):
+        script (str):
+        input_schema (None | Unset | WorkflowCreateInputSchemaType0):
+        output_schema (None | Unset | WorkflowCreateOutputSchemaType0):
+    """
+
+    name: str
+    script: str
+    input_schema: None | Unset | WorkflowCreateInputSchemaType0 = UNSET
+    output_schema: None | Unset | WorkflowCreateOutputSchemaType0 = UNSET
+    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        from ..models.workflow_create_input_schema_type_0 import (
+            WorkflowCreateInputSchemaType0,
+        )
+        from ..models.workflow_create_output_schema_type_0 import (
+            WorkflowCreateOutputSchemaType0,
+        )
+
+        name = self.name
+
+        script = self.script
+
+        input_schema: dict[str, Any] | None | Unset
+        if isinstance(self.input_schema, Unset):
+            input_schema = UNSET
+        elif isinstance(self.input_schema, WorkflowCreateInputSchemaType0):
+            input_schema = self.input_schema.to_dict()
+        else:
+            input_schema = self.input_schema
+
+        output_schema: dict[str, Any] | None | Unset
+        if isinstance(self.output_schema, Unset):
+            output_schema = UNSET
+        elif isinstance(self.output_schema, WorkflowCreateOutputSchemaType0):
+            output_schema = self.output_schema.to_dict()
+        else:
+            output_schema = self.output_schema
+
+        field_dict: dict[str, Any] = {}
+        field_dict.update(self.additional_properties)
+        field_dict.update(
+            {
+                "name": name,
+                "script": script,
+            }
+        )
+        if input_schema is not UNSET:
+            field_dict["input_schema"] = input_schema
+        if output_schema is not UNSET:
+            field_dict["output_schema"] = output_schema
+
+        return field_dict
+
+    @classmethod
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.workflow_create_input_schema_type_0 import (
+            WorkflowCreateInputSchemaType0,
+        )
+        from ..models.workflow_create_output_schema_type_0 import (
+            WorkflowCreateOutputSchemaType0,
+        )
+
+        d = dict(src_dict)
+        name = d.pop("name")
+
+        script = d.pop("script")
+
+        def _parse_input_schema(
+            data: object,
+        ) -> None | Unset | WorkflowCreateInputSchemaType0:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                input_schema_type_0 = WorkflowCreateInputSchemaType0.from_dict(data)
+
+                return input_schema_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | WorkflowCreateInputSchemaType0, data)
+
+        input_schema = _parse_input_schema(d.pop("input_schema", UNSET))
+
+        def _parse_output_schema(
+            data: object,
+        ) -> None | Unset | WorkflowCreateOutputSchemaType0:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                output_schema_type_0 = WorkflowCreateOutputSchemaType0.from_dict(data)
+
+                return output_schema_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | WorkflowCreateOutputSchemaType0, data)
+
+        output_schema = _parse_output_schema(d.pop("output_schema", UNSET))
+
+        workflow_create = cls(
+            name=name,
+            script=script,
+            input_schema=input_schema,
+            output_schema=output_schema,
+        )
+
+        workflow_create.additional_properties = d
+        return workflow_create
+
+    @property
+    def additional_keys(self) -> list[str]:
+        return list(self.additional_properties.keys())
+
+    def __getitem__(self, key: str) -> Any:
+        return self.additional_properties[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.additional_properties[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self.additional_properties[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.additional_properties
