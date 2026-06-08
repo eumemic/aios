@@ -1,22 +1,21 @@
-"""The ``return`` / ``error`` completion tools — a workflow agent child's only,
-explicit way to finish (completion is NEVER inferred from idle — §3.5).
+"""The ``return`` / ``error`` tools — a workflow agent child's **response** to the
+request it was invoked with (a response is NEVER inferred from idle).
 
 Injected ONLY into a workflow child (``origin='background'`` with a
-``parent_run_id``; see ``compute_step_prelude``). Termination is **two-phase**:
+``parent_run_id``; see ``compute_step_prelude``). A child is spawned with a
+**request** (its first user message, stamped ``metadata.request``); ``return``/
+``error`` answer it. The handler:
 
-* **Logical completion = the marker.** The handler writes the single
-  ``workflow_child_done`` marker on the child and wakes the parent run to harvest
-  it. The result lives in the marker, so no signal row is needed — the parent's
-  harvest reads markers, and the periodic ``wf_runs`` sweep is the lost-wake
-  backstop.
-* **Physical reap = ``archived_at``,** done LATER by the in-worker workflow-child
-  reaper once the child is provably quiescent — NOT here. Archive must be a
-  session's last write, yet this handler runs mid tool-lifecycle (the
-  ``tool_result`` append follows it) and sibling tools in the same assistant
-  batch may still be in flight; archiving here would crash those concurrent
-  appends against the ``archived_at IS NULL`` guard in ``append_event``. The
-  marker also makes the child soft-terminal in ``find_sessions_needing_inference``
-  so it is not re-woken for a wasteful extra model step in the meantime.
+* writes the request's response **exactly once** (``write_response_if_absent`` —
+  first-writer-wins, so a ``return``+``error`` batch, a model double-call, or a
+  ``return`` racing the totality backstop all collapse to one response), and
+* wakes the caller (the run) to harvest it.
+
+It does **not** archive or terminate the child. Responding resumes the caller
+regardless of the child's subsequent fate; the child carries on (a fresh
+``agent()`` child has nothing else to do, so it quiesces, and run-end reclaim
+archives it — off the correctness path). The response is the durable record the
+caller's harvest reads; the periodic ``wf_runs`` sweep is the lost-wake backstop.
 """
 
 from __future__ import annotations
@@ -70,25 +69,27 @@ async def _finish(
         account_id, parent_run_id = ctx
         if parent_run_id is None:
             return _NOT_A_CHILD  # fail closed — never signal a NULL parent run
-        # Logical completion only: write the marker, do NOT archive (the reaper
-        # archives once the child is quiescent — see the module docstring). The
-        # child is not yet archived here, so this append + the tool_result append
-        # that follows both succeed.
-        await queries.append_event(
+        request_id = await queries.get_open_request_id(conn, session_id, account_id=account_id)
+        if request_id is None:
+            return _NOT_A_CHILD  # no open request to answer
+        # Respond to the request — exactly once (first-writer-wins). NOT archive,
+        # NOT terminate: responding resumes the caller; the child carries on (a
+        # fresh agent() child simply has nothing else to do and quiesces; run-end
+        # reclaim archives it). The response is the durable record the harvest reads.
+        wrote = await queries.write_response_if_absent(
             conn,
+            session_id,
             account_id=account_id,
-            session_id=session_id,
-            kind="lifecycle",
-            data={
-                "event": "workflow_child_done",
-                "is_error": is_error,
-                "result": result,
-                "error": error,
-            },
+            request_id=request_id,
+            is_error=is_error,
+            result=result,
+            error=error,
         )
-    # After the marker commits: wake the parent run to harvest it. The periodic
-    # wf_runs sweep is the durable backstop if this wake is lost.
-    await defer_run_wake(parent_run_id)
+    # Wake the caller to harvest the response only when we actually wrote it; a
+    # duplicate response (the request was already answered) is a no-op — the first
+    # response already woke the caller. The periodic wf_runs sweep is the backstop.
+    if wrote:
+        await defer_run_wake(parent_run_id)
     return {"status": "errored" if is_error else "returned"}
 
 

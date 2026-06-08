@@ -113,6 +113,7 @@ async def _spawn_child(pool: asyncpg.Pool[Any], agent_id: str, ordinal: str) -> 
         environment_id="env_wf",
         agent_version=1,
         parent_run_id=run_id,
+        request_id=ordinal,
         input="hi",
     )
     return run_id, cid
@@ -136,10 +137,11 @@ async def test_create_child_session_idempotent(
         environment_id="env_wf",
         agent_version=1,
         parent_run_id=run_id,
+        request_id="sha:x#0",
         input={"q": "hi"},
     )
     assert created is True
-    # A replay (same id) is a rowcount-0 no-op — no double row, no double input.
+    # A replay (same id) is a rowcount-0 no-op — no double row, no double request.
     again = await sessions_service.create_child_session(
         pool,
         session_id=cid,
@@ -148,6 +150,7 @@ async def test_create_child_session_idempotent(
         environment_id="env_wf",
         agent_version=1,
         parent_run_id=run_id,
+        request_id="sha:x#0",
         input={"q": "hi"},
     )
     assert again is False
@@ -158,7 +161,18 @@ async def test_create_child_session_idempotent(
             cid,
             "acc_wf",
         )
-    assert user_msgs == 1  # input delivered exactly once
+        # The request is delivered exactly once, carrying its correlation metadata.
+        req = await conn.fetchrow(
+            "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'message' AND role = 'user' ORDER BY seq ASC LIMIT 1",
+            cid,
+            "acc_wf",
+        )
+    assert user_msgs == 1
+    from aios.db.queries import parse_jsonb
+
+    request = parse_jsonb(req["data"])["metadata"]["request"]
+    assert request["request_id"] == "sha:x#0" and request["caller"] == {"kind": "run", "id": run_id}
 
 
 async def test_child_session_origin_and_parent_round_trip(
@@ -439,6 +453,34 @@ async def test_return_from_non_child_fails_closed(
     async with pool.acquire() as conn:
         marker = await db_queries.read_workflow_child_done(conn, fg.id, account_id="acc_wf")
     assert marker is None
+
+
+async def test_request_is_answered_exactly_once(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A child that responds twice (return then return, or return racing error)
+    yields exactly ONE response — first-writer-wins — and wakes the caller once."""
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:once#0")
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
+        r1 = await workflow_completion.return_handler(cid, {"value": "first"})
+        r2 = await workflow_completion.error_handler(cid, {"message": "too late"})
+    assert r1 == {"status": "returned"} and r2 == {"status": "errored"}
+    wake.assert_awaited_once_with(run_id)  # only the first response woke the caller
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'lifecycle' AND data->>'event' = 'workflow_child_done'",
+            cid,
+            "acc_wf",
+        )
+    assert len(rows) == 1  # exactly one response
+    response = db_queries.parse_jsonb(rows[0]["data"])
+    assert response["is_error"] is False and response["result"] == "first"  # the first one won
+    assert response["request_id"] == "sha:once#0"  # correlated to the request
 
 
 async def test_return_real_dispatch_appends_result_and_does_not_archive(

@@ -271,6 +271,7 @@ async def _open_agent_capability(
         environment_id=run.environment_id,
         agent_version=pinned,
         parent_run_id=run.id,
+        request_id=cap.call_key,  # the agent() call IS the request the child must answer
         input=spec.get("input"),
     )
     # On replay the row already carries its first-spawn version — journal THAT, so

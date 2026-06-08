@@ -237,19 +237,23 @@ async def create_child_session(
     environment_id: str,
     agent_version: int,
     parent_run_id: str,
+    request_id: str,
     input: Any,
 ) -> bool:
-    """Idempotently spawn a workflow ``agent()`` child under a deterministic id.
+    """Idempotently spawn a workflow ``agent()`` child and inject the first request.
+
+    `invoke_agent` = create_session + invoke_session: the child's first user
+    message **is a request** — its content is ``input``, and ``metadata.request``
+    carries ``{request_id, caller}`` so the target can correlate its response and
+    the caller (the run) can be resumed. The child must answer this request via
+    ``return``/``error`` (exactly once) — it is otherwise an ordinary user message
+    (the model sees only the content; metadata is stripped at render time).
 
     One transaction: insert the child row (``ON CONFLICT (id) DO NOTHING``) and,
-    **only on a real insert**, deliver ``input`` as the child's first user
-    message — without a stimulus the child would be born-idle (the loop ends
-    every turn idle, so nothing wakes it and the totality backstop would
-    spuriously flag it ``no_return``). Atomic, so a crash can never leave a child
-    row without its input.
-
-    Returns ``True`` if a row was created (first spawn), ``False`` on conflict (a
-    replay found the existing row → the caller harvests instead of re-spawning).
+    **only on a real insert**, deliver the request — without a stimulus the child
+    would be born-idle. Atomic, so a crash can never leave a child row without its
+    request. Returns ``True`` on first spawn, ``False`` on conflict (replay → the
+    caller harvests the response instead of re-spawning).
     """
     content = input if isinstance(input, str) else json.dumps(input)
     async with pool.acquire() as conn, conn.transaction():
@@ -263,13 +267,22 @@ async def create_child_session(
             parent_run_id=parent_run_id,
         )
         if child is None:
-            return False  # replay: row exists — do NOT re-deliver input
+            return False  # replay: row exists — do NOT re-deliver the request
         await queries.append_event(
             conn,
             account_id=account_id,
             session_id=session_id,
             kind="message",
-            data={"role": "user", "content": content},
+            data={
+                "role": "user",
+                "content": content,
+                "metadata": {
+                    "request": {
+                        "request_id": request_id,
+                        "caller": {"kind": "run", "id": parent_run_id},
+                    }
+                },
+            },
         )
         return True
 

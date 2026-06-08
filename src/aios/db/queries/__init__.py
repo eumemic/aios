@@ -1063,22 +1063,91 @@ async def set_session_archived(
 async def read_workflow_child_done(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> dict[str, Any] | None:
-    """The child's ``workflow_child_done`` marker payload, or ``None`` if absent.
+    """The child's request **response** (`workflow_child_done`), or ``None`` if the
+    request is still open.
 
-    The single explicit completion signal the run-step harvest reads (§3.3/§3.5)
-    — never inferred from idle. ``data`` is ``{event, is_error, result}``.
+    The single explicit response a workflow child gives its request (`return`/
+    `error`) — never inferred from idle. The run-step harvest reads it to resolve
+    the `agent()` call. ``data`` is ``{event, request_id, is_error, result, error}``.
+    Exactly one exists per request (see :func:`write_response_if_absent`), so the
+    ``LIMIT 1`` is unambiguous; the ``seq DESC`` index walk just stops at the first
+    (only) match instead of scanning history forward on every parent wake.
     """
     row = await conn.fetchrow(
         "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
         "AND kind = 'lifecycle' AND data->>'event' = 'workflow_child_done' "
-        # DESC: the marker is the child's terminal event — walk the (session_id,
-        # seq) index from the newest row so we stop at the first match, not scan
-        # the whole history forward on every parent wake.
         "ORDER BY seq DESC LIMIT 1",
         session_id,
         account_id,
     )
     return parse_jsonb(row["data"]) if row is not None else None
+
+
+async def get_open_request_id(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> str | None:
+    """The ``request_id`` of the session's open request, or ``None`` if it has none.
+
+    A request is a user message stamped ``metadata.request.request_id`` (see
+    ``create_child_session`` / `invoke_session`). v1 injects exactly one per child,
+    so this returns that one; multi-request `invoke_session` will refine "open" to
+    "no response yet" and let `return`/`error` name an explicit ``request_id``.
+    """
+    request_id: str | None = await conn.fetchval(
+        "SELECT data->'metadata'->'request'->>'request_id' FROM events "
+        "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' AND role = 'user' "
+        "AND data->'metadata'->'request'->>'request_id' IS NOT NULL "
+        "ORDER BY seq ASC LIMIT 1",
+        session_id,
+        account_id,
+    )
+    return request_id
+
+
+async def write_response_if_absent(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    request_id: str,
+    is_error: bool,
+    result: Any,
+    error: dict[str, Any] | None,
+) -> bool:
+    """Write a workflow child's request response, **exactly once** (first-writer-wins).
+
+    A child answers its request via `return`/`error`; the harness model-failure path
+    and the totality backstop can also produce a response. All of them must yield
+    **exactly one** response — `return`+`error` in the same assistant batch, a model
+    double-call, or a `return` racing the no_return backstop must not double-write.
+    ``FOR UPDATE`` on the session row + an absent-recheck makes the first writer win;
+    the rest no-op. Returns ``True`` iff this call wrote the response.
+
+    (v1 has one open request per child, so the guard is per-child; the ``request_id``
+    is carried on the event for the multi-request `invoke_session` case.)
+    """
+    async with conn.transaction():
+        await conn.execute(
+            "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            session_id,
+            account_id,
+        )
+        if await read_workflow_child_done(conn, session_id, account_id=account_id) is not None:
+            return False
+        await append_event(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind="lifecycle",
+            data={
+                "event": "workflow_child_done",
+                "request_id": request_id,
+                "is_error": is_error,
+                "result": result,
+                "error": error,
+            },
+        )
+    return True
 
 
 async def get_session(
