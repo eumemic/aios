@@ -187,7 +187,8 @@ ALL_ASST_ROWS_SQL = """
 ERRORED_SESSIONS_SQL = """
     SELECT s.id AS session_id
       FROM sessions s
-     WHERE s.last_error_seq > 0
+     WHERE s.archived_at IS NULL
+       AND s.last_error_seq > 0
        AND s.last_error_seq > s.last_user_seq
        {scope_clause}
 """

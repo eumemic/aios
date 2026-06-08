@@ -1,16 +1,16 @@
 """Perf regression tests for sweep queries (issue #140).
 
-The sweep path ran correlated subqueries against ``events`` that computed
-``MAX(reacting_to)`` per session inside a per-row SubPlan — an N+1 pattern
-that on JN's live data made one sweep pass cost ~7.5s on a 10k-event
-table. The fix in this PR hoists the aggregation to a CTE and swaps
-``data->>'role'`` for the normalized ``role`` column (from migration 0022).
+The sweep path originally ran correlated subqueries against ``events`` that
+computed ``MAX(reacting_to)`` per session inside a per-row SubPlan — an N+1
+pattern that on JN's live data made one sweep pass cost ~7.5s on a 10k-event
+table. ``CANDIDATE_ROWS_SQL`` and ``ERRORED_SESSIONS_SQL`` now use scalar
+columns maintained on the ``sessions`` row (migration 0066) — simple column
+arithmetic with no event-log scan at all.
 
 These tests encode the fix as a **structural** invariant: after
 ``EXPLAIN (FORMAT JSON)``, no node in the plan tree is a SubPlan scanning
 ``events``. Deterministic, no wall-clock assertion, no flake on slow CI.
-A regression from a well-meaning refactor ("why is this a CTE?") fails
-this test immediately.
+A regression from a well-meaning refactor fails this test immediately.
 
 The budget smoke test (``@pytest.mark.slow``) is a secondary fence: on
 the same seeded fixture, assert the rewritten queries actually complete
@@ -228,6 +228,8 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
         # Backfill the scalar columns on sessions to match the seeded events.
         # The production path maintains these in append_event; this test inserts
         # events directly, so it must reconcile the sessions rows manually.
+        # The backfill SQL below intentionally mirrors migration 0066's
+        # backfill logic — keep them in sync if either changes.
         await conn.execute(
             """
             UPDATE sessions s
@@ -340,7 +342,7 @@ class TestNoCorrelatedSubplanOverEvents:
         assert not found, (
             f"N+1 regression in errored-session derivation: "
             f"{len(found)} correlated subplan(s) over events. This query must "
-            f"hoist MAX(seq) per session via CTEs (see session_max_reacting)."
+            f"use maintained scalar columns on sessions (migration 0066), not event-log scans."
         )
 
     async def test_span_start_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:

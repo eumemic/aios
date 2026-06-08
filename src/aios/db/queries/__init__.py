@@ -2136,17 +2136,15 @@ async def append_event(
     # (its seq exceeds the latest error lifecycle event — see
     # ``_SESSION_ERRORED_EXPR``), and the sweep stops skipping it (#39, #353).
     is_user_message = kind == "message" and role == "user"
-    is_error_lifecycle = kind == "lifecycle" and (data or {}).get("stop_reason") == "error"
-    is_turn_ended = kind == "lifecycle" and (data or {}).get("event") == "turn_ended"
+    is_error_lifecycle = kind == "lifecycle" and data.get("stop_reason") == "error"
+    is_turn_ended = kind == "lifecycle" and data.get("event") == "turn_ended"
     tool_call_count_delta = (
-        len((data or {}).get("tool_calls") or [])
+        len(data.get("tool_calls") or [])
         if kind == "message" and role == "assistant"
         else (-1 if kind == "message" and role == "tool" else 0)
     )
     reacting_to_seq = (
-        int((data or {}).get("reacting_to") or 0)
-        if kind == "message" and role == "assistant"
-        else 0
+        int(data.get("reacting_to") or 0) if kind == "message" and role == "assistant" else 0
     )
 
     async with conn.transaction():
