@@ -584,10 +584,18 @@ async def list_confirmed_unresolved_tool_calls(
     ``always_ask`` tool whose parent assistant has scrolled out of the token
     window (#737) — or simply isn't the latest assistant — is still recovered,
     and one that already has a result is not re-dispatched (invariant #4).
+
+    Passes ``settings.confirmed_dispatch_max_age_seconds`` as the age bound on
+    the CONFIRM event: a confirmation older than that is skipped, so a
+    weeks-stale confirmed side-effecting call is not re-dispatched on a worker
+    restart (#746). This path is dispatch-only (no read-model caller), so the
+    bound is always applied here; it stays in sync with the sweep's detection
+    predicate (``sweep.CONFIRMED_ROWS_SQL``), which reads the same setting.
     """
+    max_age_seconds = get_settings().confirmed_dispatch_max_age_seconds
     async with pool.acquire() as conn:
         return await queries.list_confirmed_unresolved_tool_calls(
-            conn, session_id, account_id=account_id
+            conn, session_id, account_id=account_id, max_age_seconds=max_age_seconds
         )
 
 

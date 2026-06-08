@@ -27,6 +27,7 @@ import asyncpg
 if TYPE_CHECKING:
     from aios.models.agents import ToolSpec
 
+from aios.config import get_settings
 from aios.db.queries import parse_jsonb
 from aios.harness.task_registry import TaskRegistry
 from aios.logging import get_logger
@@ -125,8 +126,14 @@ CANDIDATE_ROWS_SQL = """
 # decision (case (c)).  The dispatch-side counterpart that resolves these same
 # confirmed-allow, result-less tool_calls into the actual tool_call dicts to
 # launch is ``queries.list_confirmed_unresolved_tool_calls`` (per-session) —
-# keep the predicate (``tool_confirmed``/``allow`` ∧ no ``role='tool'`` result)
-# in sync.  Both are served by ``events_tool_confirmed_allow_idx`` (0065).
+# keep the predicate (``tool_confirmed``/``allow`` ∧ no ``role='tool'`` result
+# ∧ confirm event within ``confirmed_dispatch_max_age_seconds``) in sync.  The
+# age bound is on ``lc.created_at`` (the CONFIRM event), NOT the assistant
+# turn: a fresh confirm of an old proposal is a fresh intent to dispatch
+# (#746).  CRITICAL: this age clause MUST stay byte-for-byte identical to the
+# dispatch resolver's — if detection surfaces a session for wake that dispatch
+# then can't resolve (or vice-versa), the worker wakes with no progress, the
+# #155 symptom.  Both are served by ``events_tool_confirmed_allow_idx`` (0065).
 CONFIRMED_ROWS_SQL = """
     SELECT DISTINCT lc.session_id
       FROM events lc
@@ -135,6 +142,10 @@ CONFIRMED_ROWS_SQL = """
        AND lc.kind = 'lifecycle'
        AND lc.data->>'event' = 'tool_confirmed'
        AND lc.data->>'result' = 'allow'
+       AND (
+             {age_param}::bigint IS NULL
+             OR lc.created_at >= now() - make_interval(secs => {age_param}::bigint)
+           )
        AND NOT EXISTS (
            SELECT 1 FROM events tr
             WHERE tr.session_id = lc.session_id
@@ -510,9 +521,17 @@ async def find_sessions_needing_inference(
         candidates = {r["session_id"] for r in candidate_rows}
 
         # Case (c) bypasses the batch filter — confirmed tools need dispatch.
+        # The confirm-event age bound (#746) MUST match the dispatch resolver's
+        # (``queries.list_confirmed_unresolved_tool_calls``) so detection and
+        # dispatch resolve the identical condition (no wake-with-no-progress,
+        # the #155 symptom).  ``$N`` is positional after ``scope_params``; bind
+        # the setting so a weeks-stale confirmation is not surfaced for wake.
+        confirmed_max_age_seconds = get_settings().confirmed_dispatch_max_age_seconds
+        age_param = f"${len(scope_params) + 1}"
         confirmed_rows = await conn.fetch(
-            CONFIRMED_ROWS_SQL.format(scope_clause=scope_clause),
+            CONFIRMED_ROWS_SQL.format(scope_clause=scope_clause, age_param=age_param),
             *scope_params,
+            confirmed_max_age_seconds,
         )
         confirmed_sessions = {r["session_id"] for r in confirmed_rows}
 

@@ -2013,6 +2013,7 @@ async def list_confirmed_unresolved_tool_calls(
     session_id: str,
     *,
     account_id: str,
+    max_age_seconds: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return the dispatchable ``tool_call`` dicts for a session: those
     operator-confirmed (``tool_confirmed``/``allow``) whose ``tool_call_id``
@@ -2022,12 +2023,28 @@ async def list_confirmed_unresolved_tool_calls(
     This is the dispatch-side resolver of the SAME predicate the sweep uses to
     wake the session for case (c) — ``sweep.CONFIRMED_ROWS_SQL``: a
     ``tool_confirmed``/``allow`` lifecycle event whose ``tool_call_id`` has no
-    ``role='tool'`` result.  Detection (the sweep, cross-session, projecting
+    ``role='tool'`` result, AND (when bounded) whose confirmation is within
+    ``max_age_seconds``.  Detection (the sweep, cross-session, projecting
     only ``session_id``) and dispatch (here, per-session, projecting the
     ``tool_call`` dicts) therefore agree by construction; re-resolving per step
-    is load-bearing against the wake→step TOCTOU window.
+    is load-bearing against the wake→step TOCTOU window.  CRITICAL: the age
+    clause here MUST stay byte-for-byte identical to ``CONFIRMED_ROWS_SQL`` —
+    a mismatch surfaces a session for wake that then yields no dispatchable
+    call, the wake-with-no-progress loop (#155 symptom).
 
-    Unwindowed and unbounded — keyed on ``tool_call_id`` via the
+    ``max_age_seconds`` is an OPTIONAL age bound on the ``tool_confirmed``
+    lifecycle event's (``lc``) ``created_at`` — when set, calls whose
+    CONFIRMATION is older than that many seconds are SKIPPED (excluded from
+    dispatch, not expired; no synthetic result).  It is keyed on the CONFIRM
+    event, NOT the assistant turn: an operator can confirm an OLD proposal,
+    which is a FRESH intent to dispatch (#746).  It defaults to ``None`` (no
+    bound) for safety/testability; this path is dispatch-only (the sole caller
+    is ``_dispatch_confirmed_tools`` via ``sessions.py``, no read-model
+    caller), so the dispatch caller always passes
+    ``settings.confirmed_dispatch_max_age_seconds``.  Parallel to the connector
+    backfill bound in :func:`_unresolved_tool_calls` (#744).
+
+    Unwindowed otherwise — keyed on ``tool_call_id`` via the
     ``events_tool_confirmed_allow_idx`` partial index (migration 0065), so a
     confirmed tool whose parent assistant has scrolled out of the token window,
     or simply isn't the latest assistant, is still recovered (#737).  The
@@ -2055,6 +2072,10 @@ async def list_confirmed_unresolved_tool_calls(
            AND lc.kind = 'lifecycle'
            AND lc.data->>'event' = 'tool_confirmed'
            AND lc.data->>'result' = 'allow'
+           AND (
+                 $3::bigint IS NULL
+                 OR lc.created_at >= now() - make_interval(secs => $3::bigint)
+               )
            AND NOT EXISTS (
                SELECT 1 FROM events tr
                 WHERE tr.session_id = lc.session_id
@@ -2067,6 +2088,7 @@ async def list_confirmed_unresolved_tool_calls(
         """,
         session_id,
         account_id,
+        max_age_seconds,
     )
     out: list[dict[str, Any]] = []
     seen: set[str] = set()

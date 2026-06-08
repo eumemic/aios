@@ -323,6 +323,26 @@ class Settings(BaseSettings):
         "unresolved-tool-call read-model, which surfaces all unresolved calls "
         "regardless of age (#741).",
     )
+    confirmed_dispatch_max_age_seconds: int = Field(
+        default=60 * 60,  # 1 hour
+        ge=60,
+        description="Age ceiling, in seconds, on the confirmation of an "
+        "operator-confirmed-but-unresolved tool call surfaced for auto-dispatch "
+        "on resume (``list_confirmed_unresolved_tool_calls`` / sweep "
+        "``CONFIRMED_ROWS_SQL``). A confirmed call whose ``tool_confirmed`` event "
+        "is older than this is SKIPPED — excluded from re-dispatch, not expired "
+        "(the event log is left untouched, no synthetic result). The bound is on "
+        "the CONFIRM event's ``created_at``, NOT the assistant turn: an operator "
+        "can confirm an OLD proposal, which is a FRESH intent to dispatch, so the "
+        "dispatchable-since timestamp is when confirmation was granted. A "
+        "legitimately confirmed call dispatches within seconds, so the default 1h "
+        "never touches a real one; the bound only suppresses weeks-stale "
+        "confirmations from re-running a side-effecting tool on a worker restart "
+        "(#746). Parallel to ``connector_backfill_max_age_seconds`` (#744); both "
+        "detection (sweep) and dispatch (resolver) apply this same bound in sync "
+        "so they resolve the identical condition (no wake-with-no-progress loop, "
+        "the #155 symptom).",
+    )
 
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
