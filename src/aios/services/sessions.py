@@ -57,6 +57,14 @@ async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> s
         return await queries.unscoped_get_session_account_id(conn, session_id)
 
 
+async def load_live_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str | None:
+    """``account_id`` for a live session (exists + not archived), or ``None`` if it
+    has been archived/deleted — the ``run_session_step`` entry guard, so a wake for
+    a gone session is an idempotent no-op rather than a crash."""
+    async with pool.acquire() as conn:
+        return await queries.unscoped_live_session_account_id(conn, session_id)
+
+
 async def load_session_workspace_path(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
 ) -> Path:
@@ -226,6 +234,66 @@ async def create_session(
             )
             session = session.model_copy(update={"scheduled_tasks": task_echoes})
         return session
+
+
+async def create_child_session(
+    pool: asyncpg.Pool[Any],
+    *,
+    session_id: str,
+    account_id: str,
+    agent_id: str,
+    environment_id: str,
+    agent_version: int,
+    parent_run_id: str,
+    request_id: str,
+    input: Any,
+) -> bool:
+    """Idempotently spawn a workflow ``agent()`` child and inject the first request.
+
+    `invoke_agent` = create_session + invoke_session: the child's first user
+    message **is a request** — its content is ``input``, and ``metadata.request``
+    carries ``{request_id, caller}`` so the target can correlate its response and
+    the caller (the run) can be resumed. The child must answer this request via
+    ``return``/``error`` (exactly once); the ``request_id`` is surfaced to the model
+    as a render-time marker on the message (see ``render_user_event``) so it knows
+    which id to echo back.
+
+    One transaction: insert the child row (``ON CONFLICT (id) DO NOTHING``) and,
+    **only on a real insert**, deliver the request — without a stimulus the child
+    would be born-idle. Atomic, so a crash can never leave a child row without its
+    request. Returns ``True`` on first spawn, ``False`` on conflict (replay → the
+    caller harvests the response instead of re-spawning).
+    """
+    content = input if isinstance(input, str) else json.dumps(input)
+    async with pool.acquire() as conn, conn.transaction():
+        child = await queries.insert_child_session(
+            conn,
+            session_id=session_id,
+            account_id=account_id,
+            agent_id=agent_id,
+            environment_id=environment_id,
+            agent_version=agent_version,
+            parent_run_id=parent_run_id,
+        )
+        if child is None:
+            return False  # replay: row exists — do NOT re-deliver the request
+        await queries.append_event(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind="message",
+            data={
+                "role": "user",
+                "content": content,
+                "metadata": {
+                    "request": {
+                        "request_id": request_id,
+                        "caller": {"kind": "run", "id": parent_run_id},
+                    }
+                },
+            },
+        )
+        return True
 
 
 def _classify_awaiting(
@@ -451,6 +519,107 @@ async def append_event(
         return await queries.append_event(
             conn, session_id=session_id, kind=kind, data=data, account_id=account_id
         )
+
+
+# A session gets this many nudges to answer an owed request before the harness
+# answers it on the model's behalf with a ``no_return`` error. Derived per request
+# from the count of nudge messages (see ``queries.count_request_nudges``).
+REQUEST_NUDGE_BUDGET = 3
+
+
+def _nudge_content(request_ids: list[str]) -> str:
+    ids = ", ".join(request_ids)
+    return (
+        f"You still owe a response to these request(s): {ids}. Answer each one with "
+        "return(request_id, value) if you have a result, or error(request_id, message) "
+        "if you can't complete it — you must answer before you can finish."
+    )
+
+
+async def append_assistant_and_guard_quiescence(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    assistant_msg: dict[str, Any],
+    *,
+    account_id: str,
+    parent_run_id: str | None,
+) -> tuple[bool, str | None]:
+    """Append the model's assistant message and, **atomically**, enforce the
+    request-totality invariant: a session may not go idle while it owes a response.
+
+    Only a workflow child (``parent_run_id`` set) can ever owe a request, so for any
+    other session this is a plain assistant append — the totality machinery (and its
+    per-turn open-request scan) is skipped entirely.
+
+    For a workflow child, in one transaction: append the assistant message; if the
+    session would now be idle (a tool-call-free turn — ``derive_session_status``
+    reads the just-appended event) and it still owes request responses, then for
+    each open request either append a **nudge** (a user message that re-triggers
+    inference, so the session stays active) when under :data:`REQUEST_NUDGE_BUDGET`,
+    or write its **no_return** error response when the budget is spent. Because the
+    nudge commits in the same transaction as the idling assistant event, no reader
+    can ever observe the session idle while a request is open — the invariant holds
+    at write time, with no sweep backstop.
+
+    Returns ``(nudged, autoerror_caller_run_id)``; the caller (the harness loop) does
+    the post-commit wakes — ``defer_wake(session)`` if nudged,
+    ``defer_run_wake(run_id)`` if a run id is returned (a request was auto-errored
+    and its caller run must harvest the no_return). The run id is the child's
+    ``parent_run_id`` — the single caller of every request in v1.
+    """
+    nudged = False
+    autoerror_caller_run_id: str | None = None
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.append_event(
+            conn, session_id=session_id, kind="message", data=assistant_msg, account_id=account_id
+        )
+        # Gates, cheapest first (this runs on EVERY end-of-turn append):
+        #   1. not a workflow child → cannot owe a request → plain append, done.
+        #   2. tool calls present → unresolved tool_call → active by construction
+        #      (the tools haven't run yet), so it can't be idle — settle in memory.
+        #   3. nothing owed → every request already answered → one indexed anti-join.
+        #   4. only now pay the multi-EXISTS idleness derivation (the same
+        #      _SESSION_STATUS_EXPR every external reader uses) — it could still be
+        #      active via a user message that arrived during inference.
+        if parent_run_id is None or assistant_msg.get("tool_calls"):
+            return (False, None)
+        open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
+        if not open_ids:
+            return (False, None)  # every request answered
+        if await queries.derive_session_status(conn, session_id, account_id=account_id) != "idle":
+            return (False, None)
+        to_nudge: list[str] = []
+        for request_id in open_ids:
+            nudges = await queries.count_request_nudges(
+                conn, session_id, account_id=account_id, request_id=request_id
+            )
+            if nudges >= REQUEST_NUDGE_BUDGET:
+                if await queries.write_response_if_absent(
+                    conn,
+                    session_id,
+                    account_id=account_id,
+                    request_id=request_id,
+                    is_error=True,
+                    result=None,
+                    error={"kind": "no_return"},
+                ):
+                    autoerror_caller_run_id = parent_run_id
+            else:
+                to_nudge.append(request_id)
+        if to_nudge:
+            await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="message",
+                data={
+                    "role": "user",
+                    "content": _nudge_content(to_nudge),
+                    "metadata": {"nudged_request_ids": to_nudge},
+                },
+                account_id=account_id,
+            )
+            nudged = True
+    return (nudged, autoerror_caller_run_id)
 
 
 async def append_tool_result(

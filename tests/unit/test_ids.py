@@ -35,6 +35,26 @@ class TestMakeId:
             make_id("agnet")
 
 
+class TestMakeIdDeterministic:
+    """The additive ``body=`` path for content-addressed (e.g. workflow child) ids."""
+
+    def test_same_body_yields_same_id(self) -> None:
+        body = bytes(range(16))
+        assert make_id(SESSION, body=body) == make_id(SESSION, body=body)
+
+    def test_deterministic_id_is_split_id_parseable(self) -> None:
+        prefix, ulid_part = split_id(make_id(SESSION, body=bytes(range(16))))
+        assert prefix == "sess"
+        assert len(ulid_part) == 26
+
+    def test_different_bodies_yield_different_ids(self) -> None:
+        assert make_id(SESSION, body=bytes(range(16))) != make_id(SESSION, body=bytes(range(1, 17)))
+
+    def test_body_must_be_16_bytes(self) -> None:
+        with pytest.raises(ValueError, match="must be exactly 16 bytes"):
+            make_id(SESSION, body=b"too short")
+
+
 class TestSplitId:
     def test_splits_well_formed_id(self) -> None:
         new_id = make_id(EVENT)

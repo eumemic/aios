@@ -527,6 +527,24 @@ async def get_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id:
     )
 
 
+async def get_agent_head_version(
+    conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str
+) -> int:
+    """The agent's current head ``version`` as a scalar — no full-row hydration.
+
+    Used to pin a workflow child's ``agent_version`` at spawn (the spawn path
+    needs only the int, not the parsed Agent). Raises ``NotFoundError`` if the
+    agent is absent, mirroring :func:`get_agent`. (Distinct from
+    :func:`get_agent_version`, which fetches one historical ``AgentVersion`` row.)
+    """
+    version = await conn.fetchval(
+        "SELECT version FROM agents WHERE id = $1 AND account_id = $2", agent_id, account_id
+    )
+    if version is None:
+        raise NotFoundError(f"agent {agent_id} not found", detail={"id": agent_id})
+    return int(version)
+
+
 async def list_agents(
     conn: asyncpg.Connection[Any],
     *,
@@ -849,10 +867,27 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         archived_at=row["archived_at"],
         focal_channel=row["focal_channel"],
         focal_locked=row["focal_locked"],
+        # Soft reads: present in every ``SELECT *`` / ``RETURNING *`` feeder
+        # (the worker step's ``get_session_bare`` is one), default for the few
+        # explicit-column reads that don't select them.
+        origin=row.get("origin") or "foreground",
+        parent_run_id=row.get("parent_run_id"),
         # Present only when the query derives it (list_sessions); other callers
         # (single read, INSERT ... RETURNING) leave it None.
         last_event_at=row.get("last_event_at"),
     )
+
+
+def _default_workspace_path(account_id: str, session_id: str) -> str:
+    """Per-tenant default workspace dir ``workspace_root/{account_id}/{session_id}``.
+
+    The #367 isolation convention (a stray bind-mount can't reach across tenants;
+    per-tenant quotas/backups scope to one dir) — one source of truth for the
+    session-insert paths.
+    """
+    from aios.config import get_settings
+
+    return str(get_settings().workspace_root / account_id / session_id)
 
 
 async def insert_session(
@@ -883,15 +918,9 @@ async def insert_session(
     ``focal_locked=True`` to start life locked on the spawning
     chat's channel.
     """
-    from aios.config import get_settings
-
     new_id = make_id(SESSION)
     if workspace_path is None:
-        # Per-tenant subdir (#367 follow-up): each account's sessions
-        # live under ``workspace_root/{account_id}/{session_id}`` so a
-        # stray bind-mount can't reach across tenants, and so per-tenant
-        # disk quotas / backups can scope to one directory.
-        workspace_path = str(get_settings().workspace_root / account_id / new_id)
+        workspace_path = _default_workspace_path(account_id, new_id)
     try:
         row = await conn.fetchrow(
             """
@@ -925,6 +954,263 @@ async def insert_session(
         ) from exc
     assert row is not None
     return _row_to_session(row)
+
+
+async def insert_child_session(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    account_id: str,
+    agent_id: str,
+    environment_id: str,
+    agent_version: int,
+    parent_run_id: str,
+) -> Session | None:
+    """Insert a workflow ``agent()`` child under a deterministic ``session_id``.
+
+    ``INSERT ... ON CONFLICT (id) DO NOTHING RETURNING *`` — returns the new
+    :class:`Session` on first spawn, or ``None`` on conflict (a replay found the
+    existing row, so the caller harvests instead of re-spawning). ``origin`` is
+    ``'background'`` and ``agent_version`` is the **pinned** int resolved at
+    spawn (never ``None`` — a child must not track "latest"). v1 children carry
+    no vaults/resources/scheduled-tasks; the caller delivers the agent input in
+    the same transaction.
+    """
+    workspace_path = _default_workspace_path(account_id, session_id)
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO sessions (
+                id, agent_id, environment_id, agent_version, title, metadata,
+                workspace_volume_path, env, focal_channel, focal_locked,
+                account_id, parent_run_id, origin
+            )
+            VALUES ($1, $2, $3, $4, NULL, '{}'::jsonb, $5, '{}'::jsonb,
+                    NULL, FALSE, $6, $7, 'background')
+            ON CONFLICT (id) DO NOTHING
+            RETURNING *
+            """,
+            session_id,
+            agent_id,
+            environment_id,
+            agent_version,
+            workspace_path,
+            account_id,
+            parent_run_id,
+        )
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise NotFoundError(
+            "agent or environment not found",
+            detail={"agent_id": agent_id, "environment_id": environment_id},
+        ) from exc
+    return _row_to_session(row) if row is not None else None
+
+
+async def get_session_workflow_context(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> tuple[str, str | None] | None:
+    """``(account_id, parent_run_id)`` for a session, or ``None`` if it's absent.
+
+    Unscoped (internal/trusted — the ``return``/``error`` completion tools run
+    inside the child's own dispatch and need the parent run to wake). A non-null
+    ``parent_run_id`` is what marks the session a workflow child.
+    """
+    row = await conn.fetchrow(
+        "SELECT account_id, parent_run_id FROM sessions WHERE id = $1", session_id
+    )
+    return (row["account_id"], row["parent_run_id"]) if row is not None else None
+
+
+async def read_request_response(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
+) -> dict[str, Any] | None:
+    """A specific request's written **response** (`request_response` event), or
+    ``None`` if none has been written.
+
+    The response-only primitive: it reflects only an explicit `return`/`error`,
+    harness-erroring, or no_return write — NOT liveness. It backs
+    :func:`write_response_if_absent`'s exactly-once absent-recheck (its only caller);
+    the run-step harvest instead uses :func:`derive_response`, which additionally
+    folds in `child_gone` liveness. Keeping this response-only is load-bearing — a
+    liveness check here would make the recheck treat a never-answered gone session
+    as already-answered and suppress the totality write. ``data`` is
+    ``{event, request_id, is_error, result, error}``. Exactly one exists per request
+    (see :func:`write_response_if_absent`), so ``LIMIT 1`` returns it directly; the
+    ``events_request_response_idx`` partial index (mig 0069) keeps this a point
+    lookup rather than a per-wake history scan.
+    """
+    row = await conn.fetchrow(
+        "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
+        "AND kind = 'lifecycle' AND data->>'event' = 'request_response' "
+        "AND data->>'request_id' = $3 ORDER BY seq DESC LIMIT 1",
+        session_id,
+        account_id,
+        request_id,
+    )
+    return parse_jsonb(row["data"]) if row is not None else None
+
+
+async def get_open_request_ids(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[str]:
+    """The ``request_id``s of the session's still-open requests, oldest first.
+
+    A request is a user message stamped ``metadata.request.request_id`` (see
+    ``create_child_session`` / `invoke_session`); it is *open* until a
+    ``request_response`` event answers it. Returns the asked-minus-answered set, so
+    an ordinary session (no requests) returns ``[]`` and the quiescence guard
+    no-ops for it. v1 injects one request per child, so this is ``[]`` or one id;
+    the set shape is ready for multi-request `invoke_session`.
+    """
+    rows: list[asyncpg.Record] = await conn.fetch(
+        "SELECT req.data->'metadata'->'request'->>'request_id' AS rid FROM events req "
+        "WHERE req.session_id = $1 AND req.account_id = $2 "
+        "AND req.kind = 'message' AND req.role = 'user' "
+        "AND req.data->'metadata'->'request'->>'request_id' IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM events resp "
+        "    WHERE resp.session_id = $1 AND resp.account_id = $2 "
+        "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
+        "    AND resp.data->>'request_id' = req.data->'metadata'->'request'->>'request_id') "
+        "ORDER BY req.seq ASC",
+        session_id,
+        account_id,
+    )
+    return [r["rid"] for r in rows]
+
+
+async def count_request_nudges(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
+) -> int:
+    """How many times this request has been nudged — the count of nudge user
+    messages whose ``metadata.nudged_request_ids`` include it.
+
+    The per-request retry budget is *derived* from the log, not stored — so it is
+    crash-safe and needs no counter to keep in sync (the same stance as
+    ``_count_consecutive_rescheduling`` for model-error backoff).
+    """
+    n: int | None = await conn.fetchval(
+        "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
+        "AND kind = 'message' AND role = 'user' "
+        "AND data->'metadata'->'nudged_request_ids' @> to_jsonb($3::text)",
+        session_id,
+        account_id,
+        request_id,
+    )
+    return n or 0
+
+
+async def derive_response(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
+) -> dict[str, Any] | None:
+    """A request's **terminal outcome**, or ``None`` if it is still pending.
+
+    The single resolver the run harvest asks "what became of this ``agent()``?" — a
+    pure, monotonic function of the target's state (the dual of Block-0's
+    ``_SESSION_STATUS_EXPR``):
+
+    * a **written response** (``return``/``error``, model-failure, or the no_return
+      backstop) → that outcome;
+    * else, if the target is **gone** (archived or deleted before answering, so it
+      can never respond) → a Failed ``child_gone`` outcome;
+    * else → ``None`` (alive and unanswered — still pending).
+
+    The response and the liveness are read in **one query / one snapshot**, so a
+    response always dominates "gone" even if the target is archived the instant
+    after answering — there is no read-between-reads window. Each branch is
+    terminal-or-pending and never reverts (a response is permanent; gone is
+    permanent), so the harvest can journal the returned dict as the ``call_result``
+    payload directly.
+    """
+    row = await conn.fetchrow(
+        "SELECT (SELECT data FROM events e WHERE e.session_id = $1 AND e.account_id = $2 "
+        "        AND e.kind = 'lifecycle' AND e.data->>'event' = 'request_response' "
+        "        AND e.data->>'request_id' = $3 ORDER BY e.seq DESC LIMIT 1) AS response, "
+        "       EXISTS (SELECT 1 FROM sessions s WHERE s.id = $1 AND s.account_id = $2 "
+        "               AND s.archived_at IS NULL) AS live",
+        session_id,
+        account_id,
+        request_id,
+    )
+    assert row is not None
+    if row["response"] is not None:
+        response = parse_jsonb(row["response"])
+        return {
+            "result": response.get("result"),
+            "is_error": bool(response.get("is_error")),
+            "error": response.get("error"),
+        }
+    if not row["live"]:
+        return {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
+    return None
+
+
+async def derive_session_status(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> str:
+    """The session's derived ``{active, idle}`` status via the single
+    ``_SESSION_STATUS_EXPR`` source of truth.
+
+    The quiescence guard calls this in the same transaction as the just-appended
+    assistant event — so it sees that event — to decide whether the session would
+    now go idle while still owing a request response.
+    """
+    status: str | None = await conn.fetchval(
+        f"SELECT ({_SESSION_STATUS_EXPR}) FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    return status or "idle"
+
+
+async def write_response_if_absent(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    request_id: str,
+    is_error: bool,
+    result: Any,
+    error: dict[str, Any] | None,
+) -> bool:
+    """Write a request's response, **exactly once per request** (first-writer-wins).
+
+    A session answers a request via `return`/`error`; concurrent or repeated writes
+    for the same ``request_id`` (`return`+`error` in one assistant batch, a model
+    double-call, a late `return` racing the model-failure path or the no_return
+    backstop) must still yield **exactly one** response. ``FOR UPDATE`` on the
+    session row + a per-``request_id`` absent-recheck makes the first writer win;
+    the rest no-op. Returns ``True`` iff this call wrote the response.
+
+    The guard is per ``request_id``, so a session with several open requests can
+    answer each independently without clobbering the others.
+    """
+    async with conn.transaction():
+        await conn.execute(
+            "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            session_id,
+            account_id,
+        )
+        if (
+            await read_request_response(
+                conn, session_id, account_id=account_id, request_id=request_id
+            )
+            is not None
+        ):
+            return False
+        await append_event(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind="lifecycle",
+            data={
+                "event": "request_response",
+                "request_id": request_id,
+                "is_error": is_error,
+                "result": result,
+                "error": error,
+            },
+        )
+    return True
 
 
 async def get_session(
@@ -1407,15 +1693,9 @@ async def clone_session(
     The clone primitive locks the parent row for the copy, so concurrent
     appenders serialize behind it and the copied seq range is gapless.
     """
-    from aios.config import get_settings
-
     new_id = make_id(SESSION)
     if workspace_path is None:
-        # Per-tenant subdir (#367 follow-up): each account's sessions
-        # live under ``workspace_root/{account_id}/{session_id}`` so a
-        # stray bind-mount can't reach across tenants, and so per-tenant
-        # disk quotas / backups can scope to one directory.
-        workspace_path = str(get_settings().workspace_root / account_id / new_id)
+        workspace_path = _default_workspace_path(account_id, new_id)
 
     async with conn.transaction():
         row = await conn.fetchrow(
@@ -6732,6 +7012,24 @@ async def unscoped_get_session_account_id(conn: asyncpg.Connection[Any], session
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"session_id": session_id})
     return cast("str", row["account_id"])
+
+
+async def unscoped_live_session_account_id(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> str | None:
+    """``account_id`` for a **live** session (exists and not archived), else ``None``.
+
+    The ``run_session_step`` entry guard uses this so a wake for a session that has
+    been archived or deleted is an idempotent no-op — mirroring
+    ``run_workflow_step``'s terminal early-return. Without it a stray wake (e.g. the
+    sweep racing an operator archive, or a reclaim) would reach ``append_event``'s
+    archived guard and crash the job.
+    """
+    account_id: str | None = await conn.fetchval(
+        "SELECT account_id FROM sessions WHERE id = $1 AND archived_at IS NULL",
+        session_id,
+    )
+    return account_id
 
 
 # ─── account management (#367 PR 7) ───────────────────────────────────────────

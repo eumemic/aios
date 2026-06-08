@@ -49,6 +49,7 @@ class WfRun(BaseModel):
     id: str
     workflow_id: str
     account_id: str
+    environment_id: str  # the run binds to an environment; agent() children inherit it
     parent_run_id: str | None = None
     script: str
     script_sha: str

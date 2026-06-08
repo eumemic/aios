@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from aios.workflows.host_launcher import HostOutcome, run_script_host
+from aios.workflows.wf_script_host import MAX_PARALLEL_FANOUT
 
 
 async def _run(
@@ -48,11 +49,65 @@ async def test_memoized_result_fast_forwards() -> None:
     src = "async def main(input):\n    r = await gate({'q': 'ok?'})\n    return {'answer': r}"
     first = await _run(src)
     key = first.emitted[0].call_key
-    # Replay with the gate resolved → fast-forward past it to completion.
-    second = await _run(src, memo={key: "yes"})
+    # Replay with the gate resolved → fast-forward past it. The memo entry is the
+    # tagged outcome {"ok": value}; the driver unwraps it into the await (R3).
+    second = await _run(src, memo={key: {"ok": "yes"}})
     assert second.kind == "returned"
     assert second.value == {"answer": "yes"}
     assert second.emitted == []
+
+
+async def test_memoized_error_outcome_throws_agent_error() -> None:
+    """An {"error"} memo outcome is thrown at the await as AgentError; uncaught, it
+    propagates out of main and terminates the run (the bubble)."""
+    src = "async def main(input):\n    return await agent('a1', 'go')"
+    first = await _run(src)
+    key = first.emitted[0].call_key
+    out = await _run(src, memo={key: {"error": {"message": "boom"}}})
+    assert out.kind == "raised"
+    assert "AgentError: boom" in (out.error_repr or "")
+
+
+async def test_memoized_error_outcome_is_catchable() -> None:
+    """The headline: the author can try/except AgentError and carry on. `kind`
+    surfaces the failure mode (here a model failure)."""
+    src = (
+        "async def main(input):\n"
+        "    try:\n"
+        "        await agent('a1', 'go')\n"
+        "    except AgentError as e:\n"
+        "        return {'caught': True, 'kind': e.kind}\n"
+        "    return {'caught': False}"
+    )
+    first = await _run(src)
+    key = first.emitted[0].call_key
+    out = await _run(src, memo={key: {"error": {"kind": "child_errored"}}})
+    assert out.kind == "returned"
+    assert out.value == {"caught": True, "kind": "child_errored"}
+
+
+async def test_no_return_outcome_raises_agent_no_return_subtype() -> None:
+    """A no_return outcome raises AgentNoReturnError — caught by a blanket
+    `except AgentError` (it is a subtype) and directly as the subtype."""
+    catch_base = (
+        "async def main(input):\n"
+        "    try:\n"
+        "        await agent('a1', 'go')\n"
+        "    except AgentError as e:\n"
+        "        return isinstance(e, AgentNoReturnError)"
+    )
+    first = await _run(catch_base)
+    key = first.emitted[0].call_key
+    out = await _run(catch_base, memo={key: {"error": {"kind": "no_return"}}})
+    assert out.kind == "returned"
+    assert out.value is True  # caught as AgentError, and it IS the no-return subtype
+
+    catch_subtype = catch_base.replace("except AgentError as e", "except AgentNoReturnError")
+    catch_subtype = catch_subtype.replace(
+        "return isinstance(e, AgentNoReturnError)", "return 'caught-subtype'"
+    )
+    out2 = await _run(catch_subtype, memo={key: {"error": {"kind": "no_return"}}})
+    assert out2.kind == "returned" and out2.value == "caught-subtype"
 
 
 async def test_suspend_does_not_run_post_await_body() -> None:
@@ -80,6 +135,18 @@ async def test_agent_emits_a_frontier_for_block2() -> None:
     assert out.emitted[0].capability_id == "agent"
 
 
+async def test_agent_requires_non_none_input() -> None:
+    # input is required: a child born with no first user message would sit idle
+    # forever. A bad call raises in the author's script → terminal RAISED.
+    missing = await _run("async def main(input):\n    return await agent('a1')")
+    assert missing.kind == "raised"
+    assert "input" in (missing.error_repr or "")  # TypeError: missing required 'input'
+
+    explicit_none = await _run("async def main(input):\n    return await agent('a1', None)")
+    assert explicit_none.kind == "raised"
+    assert "non-None input" in (explicit_none.error_repr or "")
+
+
 async def test_bad_capability_input_is_raised() -> None:
     out = await _run(
         "async def main(input):\n    return await gate({'t': 1.5})"
@@ -92,6 +159,203 @@ async def test_missing_main_is_raised() -> None:
     out = await _run("x = 1")
     assert out.kind == "raised"
     assert "main(input)" in (out.error_repr or "")
+
+
+# ─── parallel / pipeline (B2.G — the concurrent scheduler) ───────────────────
+
+_PARALLEL_SRC = (
+    "async def main(input):\n"
+    "    return await parallel([lambda: agent('a', '1'), lambda: agent('b', '2')])"
+)
+
+
+async def test_parallel_emits_all_branches_as_one_frontier() -> None:
+    """parallel fans its branches out as a single frontier — all children at once,
+    not one at a time."""
+    out = await _run(_PARALLEL_SRC)
+    assert out.kind == "suspended"
+    assert len(out.emitted) == 2
+    assert {e.capability_id for e in out.emitted} == {"agent"}
+    assert len({e.call_key for e in out.emitted}) == 2  # distinct keys
+
+
+async def test_parallel_collects_results_in_order() -> None:
+    """With every branch memoized, parallel fast-forwards to a results list in
+    thunk order."""
+    first = await _run(_PARALLEL_SRC)
+    k0, k1 = (e.call_key for e in first.emitted)
+    out = await _run(_PARALLEL_SRC, memo={k0: {"ok": "r1"}, k1: {"ok": "r2"}})
+    assert out.kind == "returned"
+    assert out.value == ["r1", "r2"]
+
+
+async def test_parallel_barrier_is_none_on_error() -> None:
+    """A branch whose agent errored (and which doesn't catch it) yields None in its
+    slot; the barrier itself still returns."""
+    first = await _run(_PARALLEL_SRC)
+    k0, k1 = (e.call_key for e in first.emitted)
+    out = await _run(
+        _PARALLEL_SRC, memo={k0: {"ok": "r1"}, k1: {"error": {"kind": "child_errored"}}}
+    )
+    assert out.kind == "returned"
+    assert out.value == ["r1", None]
+
+
+async def test_parallel_branch_can_catch_agent_error() -> None:
+    """The AgentError is thrown into the right branch's coroutine, so a branch can
+    try/except it and substitute its own value."""
+    src = (
+        "async def main(input):\n"
+        "    async def safe():\n"
+        "        try:\n"
+        "            return await agent('a', '1')\n"
+        "        except AgentError:\n"
+        "            return 'fallback'\n"
+        "    return await parallel([safe, lambda: agent('b', '2')])"
+    )
+    first = await _run(src)
+    k0, k1 = (e.call_key for e in first.emitted)
+    out = await _run(src, memo={k0: {"error": {"kind": "child_errored"}}, k1: {"ok": "r2"}})
+    assert out.kind == "returned"
+    assert out.value == ["fallback", "r2"]
+
+
+async def test_parallel_non_agent_error_fails_the_run() -> None:
+    """Fail-hard: the barrier absorbs ONLY an agent failure (AgentError). Any OTHER
+    exception out of a branch — an author bug — fails the WHOLE run loudly, never a
+    silent None slot. This is the barrier's most load-bearing property."""
+    src = (
+        "async def main(input):\n"
+        "    async def boom():\n"
+        "        raise ValueError('author bug in a branch')\n"
+        "    return await parallel([boom, lambda: agent('b', '2')])"
+    )
+    out = await _run(src)
+    assert out.kind == "raised"
+    assert out.error_repr is not None
+    assert "ValueError" in out.error_repr
+    assert "author bug in a branch" in out.error_repr
+
+
+async def test_parallel_absorbs_author_raised_agent_error() -> None:
+    """AgentError is the agent-failure signal, matched by type: a branch that lets an
+    AgentError escape — even one the author raised directly, not from an agent() —
+    becomes a None slot, exactly like an agent() that errored. (Counterpart to
+    test_parallel_non_agent_error_fails_the_run: AgentError → None, anything else →
+    fail-hard.)"""
+    src = (
+        "async def main(input):\n"
+        "    async def manual():\n"
+        "        raise AgentError('treat as a failed agent')\n"
+        "    return await parallel([manual, lambda: agent('b', '2')])"
+    )
+    first = await _run(src)
+    assert first.kind == "suspended"
+    key = next(e.call_key for e in first.emitted if e.capability_id == "agent")
+    out = await _run(src, memo={key: {"ok": "rb"}})
+    assert out.kind == "returned"
+    assert out.value == [None, "rb"]
+
+
+async def test_empty_parallel_returns_empty_list() -> None:
+    out = await _run("async def main(input):\n    return await parallel([])")
+    assert out.kind == "returned"
+    assert out.value == []
+
+
+async def test_parallel_fanout_over_cap_raises_before_spawning() -> None:
+    """A single parallel() wider than MAX_PARALLEL_FANOUT fails the run in the host —
+    deterministically, before any child capability is emitted (none to spawn). The
+    lifetime total across calls is bounded separately, parent-side."""
+    n = MAX_PARALLEL_FANOUT + 1
+    src = (
+        "async def main(input):\n"
+        f"    return await parallel([(lambda: agent('a', 'x')) for _ in range({n})])"
+    )
+    out = await _run(src)
+    assert out.kind == "raised"
+    assert out.error_kind == "too_wide_fanout"  # a distinct, machine-parseable kind
+    assert out.error_repr is not None
+    assert "fan-out" in out.error_repr and str(n) in out.error_repr
+    assert out.emitted == []  # nothing to spawn — failed before opening the frontier
+
+
+async def test_parallel_fanout_at_cap_is_allowed() -> None:
+    """Exactly MAX_PARALLEL_FANOUT branches is within the cap: the run suspends on the
+    full frontier rather than raising (the boundary is strict ``>``)."""
+    n = MAX_PARALLEL_FANOUT
+    src = (
+        "async def main(input):\n"
+        f"    return await parallel([(lambda: agent('a', str(i))) for i in range({n})])"
+    )
+    out = await _run(src)
+    assert out.kind == "suspended"
+    assert len(out.emitted) == n
+
+
+async def test_pipeline_runs_each_item_through_stages() -> None:
+    """pipeline threads each item through stages (a sync transform then an agent
+    leaf) independently; all items fan out at once."""
+    src = (
+        "async def main(input):\n"
+        "    return await pipeline([1, 10], lambda x: x + 1, lambda x: agent('s', x))"
+    )
+    first = await _run(src)
+    assert first.kind == "suspended"
+    assert len(first.emitted) == 2  # one agent leaf per item, post sync stage
+    k0, k1 = (e.call_key for e in first.emitted)
+    out = await _run(src, memo={k0: {"ok": "a"}, k1: {"ok": "b"}})
+    assert out.kind == "returned"
+    assert out.value == ["a", "b"]
+
+
+async def test_parallel_call_keys_are_replay_stable() -> None:
+    """The scheduler's fixed creation-order sweep makes the per-branch call_keys
+    identical across drives — the basis of replay-with-memo for parallel."""
+    first = await _run(_PARALLEL_SRC)
+    second = await _run(_PARALLEL_SRC)
+    assert [e.call_key for e in first.emitted] == [e.call_key for e in second.emitted]
+
+
+async def test_parallel_keys_are_branch_local_under_asymmetric_depth() -> None:
+    """Determinism regression: two branches share a content hash but have different
+    prerequisite depth (b0 awaits a gate first, b1 calls the agent directly). Keys
+    are branch-LOCAL (prefixed by the branch path), so a partial-memo replay where
+    b0 fast-forwards its gate and reaches the shared agent never steals b1's key —
+    each branch keeps its own child, no result swap. (A global emission-order keyer
+    would swap ordinals here.)"""
+    src = (
+        "async def main(input):\n"
+        "    async def b0():\n"
+        "        await gate('g')\n"
+        "        return await agent('p', 'x')\n"
+        "    async def b1():\n"
+        "        return await agent('p', 'x')\n"
+        "    return await parallel([b0, b1])"
+    )
+    # Drive 1 (empty memo): b0 blocks on its gate; b1 emits the shared agent.
+    first = await _run(src)
+    assert first.kind == "suspended"
+    gate_key = next(e.call_key for e in first.emitted if e.capability_id == "gate")
+    b1_agent_key = next(e.call_key for e in first.emitted if e.capability_id == "agent")
+
+    # Drive 2 (gate resolved, b1's agent answered): b0 fast-forwards its gate and
+    # reaches the shared agent — under its OWN branch path, a key distinct from b1's.
+    second = await _run(src, memo={gate_key: {"ok": "g"}, b1_agent_key: {"ok": "rb1"}})
+    assert second.kind == "suspended"
+    new_keys = [e.call_key for e in second.emitted]
+    assert b1_agent_key not in new_keys  # b1's key stayed memoized, not re-stolen
+    assert len(new_keys) == 1  # only b0's own agent key
+    b0_agent_key = new_keys[0]
+    assert b0_agent_key != b1_agent_key  # branch-local — no ordinal swap
+
+    # Drive 3: resolve b0's agent too → results correctly bound to their branches.
+    out = await _run(
+        src,
+        memo={gate_key: {"ok": "g"}, b1_agent_key: {"ok": "rb1"}, b0_agent_key: {"ok": "rb0"}},
+    )
+    assert out.kind == "returned"
+    assert out.value == ["rb0", "rb1"]
 
 
 # ─── isolation (B1.1 — security-critical) ────────────────────────────────────

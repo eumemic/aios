@@ -12175,6 +12175,26 @@
             "title": "Focal Locked",
             "default": false
           },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "foreground",
+              "background"
+            ],
+            "title": "Origin",
+            "default": "foreground"
+          },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
+          },
           "last_event_at": {
             "anyOf": [
               {

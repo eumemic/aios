@@ -119,6 +119,8 @@ def mock_step_dependencies() -> Any:
         agent_id="agt_x",
         agent_version=None,
         focal_channel=None,
+        origin="foreground",
+        parent_run_id=None,
     )
     agent = SimpleNamespace(
         model="openrouter/x",
@@ -212,11 +214,20 @@ def mock_step_dependencies() -> Any:
             "aios.harness.loop.defer_wake",
             AsyncMock(),
         ) as defer_wake_mock,
+        # The terminal-error branch errors the errored child's open requests on its
+        # behalf. The session here is a non-child, so the real call would no-op;
+        # mock it to keep this unit focused on the retry state machine and assert
+        # whether the hook fired.
+        patch(
+            "aios.harness.loop.fail_all_open_requests",
+            AsyncMock(return_value=0),
+        ) as fail_all_open_requests_mock,
     ):
         yield SimpleNamespace(
             set_stop_reason=set_stop_reason,
             append_event=append_event,
             defer_wake=defer_wake_mock,
+            fail_all_open_requests=fail_all_open_requests_mock,
         )
 
 
@@ -241,6 +252,9 @@ class TestRunSessionStepOnModelError:
         ]
         assert {"type": "rescheduling"} in stop_reasons
         assert {"type": "end_turn"} not in stop_reasons
+        # The retry branch never reaches the terminal landing pad, so it must not
+        # fail the session's requests — a reschedulable error is not terminal.
+        mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
 
     async def test_exhausted_budget_records_error_stop_reason_without_raising(
         self, mock_step_dependencies: Any
@@ -266,3 +280,9 @@ class TestRunSessionStepOnModelError:
         ]
         assert {"type": "error"} in stop_reasons
         assert {"type": "end_turn"} not in stop_reasons
+        # The terminal landing pad fails the session's open requests on its behalf:
+        # a workflow child's owed requests get a monotonic child_errored response so
+        # the invoking runs resolve instead of hanging (a no-op for non-children).
+        mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
+            ANY, "sess_x", account_id=ANY, error={"kind": "child_errored"}
+        )

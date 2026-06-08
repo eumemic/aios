@@ -45,6 +45,7 @@ DEFAULT_ADDRESS_SPACE_BYTES: int | None = 4 * 1024**3
 HostOutcomeKind = Literal["suspended", "returned", "raised"]
 HostErrorKind = Literal[
     "author_exception",
+    "too_wide_fanout",  # a single parallel()/pipeline() exceeded MAX_PARALLEL_FANOUT
     "script_host_crash",
     "script_host_timeout",
     "script_host_spawn_failed",
@@ -84,7 +85,9 @@ _CHILD_ENV_ALLOWLIST: frozenset[str] = frozenset(
 @dataclass(frozen=True)
 class EmittedCapability:
     capability_id: str
-    call_key: str  # "sha:<hex>#<ordinal>" — content_hash + ordinal are derivable from this
+    # "sha:<hex>#<ordinal>", optionally prefixed by a parallel branch path
+    # ("0.0/sha:<hex>#<ordinal>"). Treated as an opaque, deterministic key.
+    call_key: str
     spec: Any
 
 
@@ -146,7 +149,9 @@ def _outcome_from_frames(
         kind="raised",
         emitted=emitted,
         error_repr=terminal.get("repr"),
-        error_kind="author_exception",
+        # The host stamps a specific kind on structural failures it detects itself
+        # (e.g. the fan-out cap); an uncaught author exception carries none → generic.
+        error_kind=terminal.get("kind") or "author_exception",
         stderr=stderr,
     )
 

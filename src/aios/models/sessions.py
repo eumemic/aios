@@ -88,6 +88,13 @@ special case of ``idle``: it reads ``idle`` with ``stop_reason.type == "error"``
 and will not wake until a user message arrives.
 """
 
+
+SessionOrigin = Literal["foreground", "background"]
+"""How the session was created. ``foreground`` (default) — by the API/UI/a
+connector. ``background`` — spawned by a workflow run's ``agent()`` (carries a
+``parent_run_id``); the completion tools (``return``/``error``) are injected only
+into background children, and the totality backstop supervises them."""
+
 MAX_USER_MESSAGE_CHARS = 1_000_000
 
 
@@ -265,6 +272,8 @@ class Session(BaseModel):
     archived_at: datetime | None = None
     focal_channel: str | None = None
     focal_locked: bool = False
+    origin: SessionOrigin = "foreground"
+    parent_run_id: str | None = None  # set for a workflow-spawned (background) child
     last_event_at: datetime | None = None
     total_events: int = 0
 

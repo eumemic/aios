@@ -141,7 +141,12 @@ class TestEntrySweepSpan:
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
-            id="sess_x", agent_id="agt_x", agent_version=None, focal_channel=None
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            origin="foreground",
+            parent_run_id=None,
         )
         agent = SimpleNamespace(
             model="openrouter/x",
@@ -203,6 +208,10 @@ class TestEntrySweepSpan:
                 "aios.harness.loop.sessions_service.append_event",
                 AsyncMock(return_value=start_event),
             ) as append_event,
+            patch(
+                "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
+                AsyncMock(return_value=(False, None)),
+            ),
             patch(
                 "aios.harness.loop.call_litellm",
                 AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),

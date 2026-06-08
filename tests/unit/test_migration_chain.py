@@ -26,15 +26,18 @@ def _script_directory() -> ScriptDirectory:
 
 
 def test_single_head() -> None:
-    """The migration ladder has exactly one head: ``0066``."""
+    """The migration ladder has exactly one head: ``0069``."""
     script = _script_directory()
-    assert script.get_heads() == ["0066"]
+    assert script.get_heads() == ["0069"]
 
 
-def test_chain_is_linear_0054_to_0060() -> None:
-    """``0054 -> … -> 0060 -> 0061`` is a plain linear chain."""
+def test_chain_is_linear_0054_to_head() -> None:
+    """``0054 -> … -> 0069`` (the current head) is a plain linear chain."""
     script = _script_directory()
 
+    rev_0069 = script.get_revision("0069")
+    rev_0068 = script.get_revision("0068")
+    rev_0067 = script.get_revision("0067")
     rev_0066 = script.get_revision("0066")
     rev_0065 = script.get_revision("0065")
     rev_0064 = script.get_revision("0064")
@@ -48,6 +51,9 @@ def test_chain_is_linear_0054_to_0060() -> None:
     rev_0056 = script.get_revision("0056")
     rev_0055 = script.get_revision("0055")
 
+    assert rev_0069.down_revision == "0068"
+    assert rev_0068.down_revision == "0067"
+    assert rev_0067.down_revision == "0066"
     assert rev_0066.down_revision == "0065"
     assert rev_0065.down_revision == "0064"
     assert rev_0064.down_revision == "0063"
@@ -70,7 +76,7 @@ def test_revision_0055_resolvable() -> None:
     """``0055`` resolves — the precise assertion reproducing the prod failure.
 
     Production DBs are stamped ``alembic_version = 0055``; if the revision is
-    missing, ``alembic upgrade`` raises and every deploy fails.
+    missing, ``aios migrate`` raises and every deploy fails.
     """
     script = _script_directory()
     revision = script.get_revision("0055")

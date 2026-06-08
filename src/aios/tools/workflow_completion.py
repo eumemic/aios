@@ -1,0 +1,216 @@
+"""The **response edge** of `invoke_session` — a workflow child answering the
+request it was invoked with (a response is NEVER inferred from idle).
+
+A child is spawned with a **request** (its first user message, stamped
+``metadata.request``; see ``create_child_session``). Exactly one response is ever
+captured for it, by whichever of these writes first:
+
+* the ``return`` / ``error`` tools (the model's own answer — injected ONLY into a
+  workflow child, ``origin='background'`` with a ``parent_run_id``; see
+  ``compute_step_prelude``) and the harness erroring path
+  (``fail_all_open_requests``, when the model fails past its retry budget) both go
+  through :func:`respond_to_request`,
+* the run's totality backstop (``services.sessions`` quiescence guard) writes
+  ``write_response_if_absent`` directly — it runs inside the guard's open
+  transaction, so it can't acquire its own connection.
+
+The common, load-bearing seam is therefore ``write_response_if_absent`` (the
+exactly-once, first-writer-wins guard), not :func:`respond_to_request`: a
+``return``+``error`` batch, a model double-call, a model-failure racing a late
+``return``, or the backstop racing any of them all collapse to one response there.
+:func:`respond_to_request` adds the caller-wake on top for the pool-level callers.
+
+It does **not** archive or terminate the child. Responding resumes the caller
+regardless of the child's subsequent fate; the child carries on (a fresh
+``agent()`` child has nothing else to do, so it quiesces, and run-end reclaim
+archives it — off the correctness path). The response is the durable record the
+caller's harvest reads; the periodic ``wf_runs`` sweep is the lost-wake backstop.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from aios.db import queries
+from aios.harness import runtime
+from aios.services.wake import defer_run_wake
+from aios.tools.registry import ToolResult, openai_tool_entry, registry
+
+RETURN_TOOL_NAME = "return"
+ERROR_TOOL_NAME = "error"
+
+RETURN_DESCRIPTION = (
+    "Answer a request you were given with a successful result. `request_id` is the "
+    "id shown with the request you're answering; `value` is the result the caller "
+    "receives. Answer each open request exactly once."
+)
+ERROR_DESCRIPTION = (
+    "Answer a request you were given with a failure. `request_id` is the id shown "
+    "with the request you're answering; `message` explains why you couldn't "
+    "complete it. Answer each open request exactly once."
+)
+
+_REQUEST_ID_PROP = {"type": "string", "description": "the id of the request you're answering"}
+_RETURN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "request_id": _REQUEST_ID_PROP,
+        "value": {"description": "the result returned to the caller (any JSON)"},
+    },
+    "required": ["request_id", "value"],
+    "additionalProperties": False,
+}
+_ERROR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "request_id": _REQUEST_ID_PROP,
+        "message": {"type": "string", "description": "why the request failed"},
+    },
+    "required": ["request_id", "message"],
+    "additionalProperties": False,
+}
+
+_NOT_A_CHILD = ToolResult(
+    content="return/error is only available to a workflow agent child", is_error=True
+)
+_UNKNOWN_REQUEST = ToolResult(
+    content="no open request with that request_id — answer a request using the request_id "
+    "shown in its message",
+    is_error=True,
+)
+
+
+async def respond_to_request(
+    pool: Any,
+    session_id: str,
+    *,
+    request_id: str,
+    is_error: bool,
+    result: Any,
+    error: dict[str, Any] | None,
+) -> str:
+    """Write one request's response and wake its caller — the shared core behind
+    every `invoke_session` response (``return``/``error``, the harness erroring
+    path, the no_return backstop).
+
+    Responding does **not** archive or terminate the target; it resumes the caller
+    regardless of the target's fate. The response is captured **exactly once per
+    request** (``write_response_if_absent`` — first-writer-wins); the caller is woken
+    only when this call actually wrote (a duplicate is a no-op — the first response
+    already woke it; the periodic ``wf_runs`` sweep is the lost-wake backstop).
+
+    Returns one of ``responded`` | ``duplicate`` | ``not_a_child`` |
+    ``unknown_request`` (the ``request_id`` isn't an open request of this session)
+    so callers can shape their own result.
+    """
+    async with pool.acquire() as conn:
+        ctx = await queries.get_session_workflow_context(conn, session_id)
+        if ctx is None:
+            return "not_a_child"
+        account_id, parent_run_id = ctx
+        if parent_run_id is None:
+            return "not_a_child"  # fail closed — never signal a NULL parent run
+        if request_id not in await queries.get_open_request_ids(
+            conn, session_id, account_id=account_id
+        ):
+            return "unknown_request"  # already answered, never asked, or a typo from the model
+        wrote = await queries.write_response_if_absent(
+            conn,
+            session_id,
+            account_id=account_id,
+            request_id=request_id,
+            is_error=is_error,
+            result=result,
+            error=error,
+        )
+    if wrote:
+        await defer_run_wake(parent_run_id)
+    return "responded" if wrote else "duplicate"
+
+
+async def fail_all_open_requests(
+    pool: Any, session_id: str, *, account_id: str, error: dict[str, Any]
+) -> None:
+    """Error **every** still-open request on a session that can no longer answer
+    them — the harness erroring path, where the model failed past its retry budget,
+    so a dead child must not leave its callers hung.
+
+    Each request is funnelled through :func:`respond_to_request` (the pool-level
+    response edge), so the child-ness / fail-closed / wake logic lives in exactly
+    one place. A no-op for any session that owes nothing — its open set is empty,
+    including every non-child session.
+    """
+    async with pool.acquire() as conn:
+        open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
+    for request_id in open_ids:
+        await respond_to_request(
+            pool, session_id, request_id=request_id, is_error=True, result=None, error=error
+        )
+
+
+async def _finish(
+    session_id: str, *, request_id: Any, is_error: bool, result: Any, error: dict[str, Any] | None
+) -> dict[str, Any] | ToolResult:
+    # ``request_id`` is model-supplied (possibly missing or wrong-typed); a value
+    # that isn't an open request resolves to ``unknown_request`` → a tool error the
+    # model self-corrects from.
+    status = await respond_to_request(
+        runtime.require_pool(),
+        session_id,
+        request_id=request_id,
+        is_error=is_error,
+        result=result,
+        error=error,
+    )
+    if status == "not_a_child":
+        return _NOT_A_CHILD
+    if status == "unknown_request":
+        return _UNKNOWN_REQUEST
+    # responded | duplicate — either way the request now has exactly one response.
+    return {"status": "errored" if is_error else "returned"}
+
+
+async def return_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    return await _finish(
+        session_id,
+        request_id=arguments.get("request_id"),
+        is_error=False,
+        result=arguments.get("value"),
+        error=None,
+    )
+
+
+async def error_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    return await _finish(
+        session_id,
+        request_id=arguments.get("request_id"),
+        is_error=True,
+        result=None,
+        error={"message": arguments.get("message")},
+    )
+
+
+def workflow_completion_tool_specs() -> list[dict[str, Any]]:
+    """The chat-completions tool entries for ``return``/``error`` — injected into
+    a workflow child's tool list by ``compute_step_prelude``."""
+    return [openai_tool_entry(registry.get(name)) for name in (RETURN_TOOL_NAME, ERROR_TOOL_NAME)]
+
+
+def _register() -> None:
+    registry.register(
+        name=RETURN_TOOL_NAME,
+        description=RETURN_DESCRIPTION,
+        parameters_schema=_RETURN_SCHEMA,
+        handler=return_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name=ERROR_TOOL_NAME,
+        description=ERROR_DESCRIPTION,
+        parameters_schema=_ERROR_SCHEMA,
+        handler=error_handler,
+        transport="agent_tool",
+    )
+
+
+_register()

@@ -23,7 +23,7 @@ watermark and proceeds.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
@@ -41,7 +41,8 @@ from aios.models.agents import (
 )
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
-from aios.services.wake import defer_wake
+from aios.services.wake import defer_run_wake, defer_wake
+from aios.tools.workflow_completion import fail_all_open_requests
 
 if TYPE_CHECKING:
     import asyncpg
@@ -69,6 +70,25 @@ def _retry_delay_for_attempt(attempt: int) -> float | None:
     if attempt >= len(_RETRY_BACKOFF_SECONDS):
         return None
     return _RETRY_BACKOFF_SECONDS[attempt]
+
+
+class _StepResult(NamedTuple):
+    """What a step asks ``run_session_step`` to defer **after** ``step_end``.
+
+    Every wake a step provokes is deferred here, never inside the body, so its
+    ``wake_deferred`` span lands in step N+1's window — the "all wake_deferred since
+    the previous step_end" pairing rule the profiler relies on (#132).
+
+    * ``retry_delay`` — a model-error backoff reschedule (``defer_wake``).
+    * ``nudge_session`` — the quiescence guard nudged an owed request; re-wake the
+      session so the model gets another turn (``defer_wake``).
+    * ``autoerror_caller_run_id`` — the guard auto-errored a request past its budget;
+      wake that caller run to harvest the ``no_return`` (``defer_run_wake``).
+    """
+
+    retry_delay: float | None = None
+    nudge_session: bool = False
+    autoerror_caller_run_id: str | None = None
 
 
 async def refresh_session_mount_state(
@@ -108,8 +128,15 @@ async def run_session_step(
     ``lock`` parameter guarantees only one step runs per session at a
     time.
     """
-    account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     pool = runtime.require_pool()
+    # Entry guard (mirrors run_workflow_step's terminal early-return): a wake for a
+    # session that has been archived or deleted is an idempotent no-op. Without it
+    # the unconditional step_start append below would hit append_event's archived
+    # guard and fail the job — e.g. a sweep wake racing an operator archive, or a
+    # workflow child reclaimed after answering.
+    account_id = await sessions_service.load_live_session_account_id(pool, session_id)
+    if account_id is None:
+        return
     task_registry = runtime.require_task_registry()
 
     # Outermost span pair: brackets the entire step (issue #131).  Emitted
@@ -127,10 +154,10 @@ async def run_session_step(
     current_task = asyncio.current_task()
     assert current_task is not None
     task_registry.register_step(session_id, current_task)
-    retry_delay: float | None = None
+    result = _StepResult()
     try:
         try:
-            retry_delay = await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 _run_session_step_body(
                     pool,
                     task_registry,
@@ -145,7 +172,9 @@ async def run_session_step(
             # fire. Force a reschedulable error state so the next wake can
             # proceed (matches what the body's litellm-error handler does).
             log.exception("step.job_timeout", session_id=session_id, timeout=_JOB_TIMEOUT_S)
-            retry_delay = await _handle_step_timeout(pool, session_id, account_id=account_id)
+            result = _StepResult(
+                retry_delay=await _handle_step_timeout(pool, session_id, account_id=account_id)
+            )
         except Exception:
             # Unexpected harness error (not a model/tool error — those are caught
             # inside _run_session_step_body). Emit a span so the event log has a
@@ -159,8 +188,9 @@ async def run_session_step(
                 {"event": "harness_error", "is_error": True},
                 account_id=account_id,
             )
-            retry_delay = await _apply_retry_or_failure(pool, session_id, account_id=account_id)
-            if retry_delay is None:
+            delay = await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+            result = _StepResult(retry_delay=delay)
+            if delay is None:
                 raise
     finally:
         task_registry.unregister_step(session_id)
@@ -172,16 +202,24 @@ async def run_session_step(
             account_id=account_id,
         )
 
-    # Fire retry deferral AFTER ``step_end`` so its ``wake_deferred`` lands
-    # in step N+1's temporal window, not step N's. Under the "all
-    # wake_deferred since previous step_end" pairing rule, emitting
-    # inside the body would make the reschedule invisible to the next
-    # step's queue-latency calculation — the one path where delay is
-    # a known quantity (the retry backoff).
-    if retry_delay is not None:
+    # Every wake fires AFTER ``step_end`` so its ``wake_deferred`` span lands in
+    # step N+1's temporal window, not step N's — the "all wake_deferred since the
+    # previous step_end" pairing rule the profiler keys off (#132). Emitting inside
+    # the body would mis-attribute the gap. ``reschedule`` carries a known backoff
+    # delay; the ``request_nudge`` re-wakes the session for another answer turn; the
+    # auto-error wakes the caller run to harvest the ``no_return``.
+    if result.retry_delay is not None:
         await defer_wake(
-            pool, session_id, cause="reschedule", delay_seconds=retry_delay, account_id=account_id
+            pool,
+            session_id,
+            cause="reschedule",
+            delay_seconds=result.retry_delay,
+            account_id=account_id,
         )
+    if result.nudge_session:
+        await defer_wake(pool, session_id, cause="request_nudge", account_id=account_id)
+    if result.autoerror_caller_run_id is not None:
+        await defer_run_wake(result.autoerror_caller_run_id)
 
 
 async def _run_session_step_body(
@@ -191,12 +229,11 @@ async def _run_session_step_body(
     *,
     cause: str,
     account_id: str,
-) -> float | None:
-    """Returns the retry backoff delay when the model errored and the
-    outer function should defer a ``cause="reschedule"`` wake after
-    ``step_end``; ``None`` otherwise.  Keeping the actual ``defer_wake``
-    call outside the body is what makes the reschedule's
-    ``wake_deferred`` land in the next step's temporal window."""
+) -> _StepResult:
+    """Returns the wakes ``run_session_step`` should defer **after** ``step_end``
+    (see :class:`_StepResult`): a model-error backoff reschedule, and/or the
+    quiescence guard's nudge / auto-error wakes. Keeping every ``defer_wake`` out of
+    the body is what makes each ``wake_deferred`` land in the next step's window."""
     # Sweep-based guard: does this session actually need work?
     # Prevents wasted DB/model calls from stale or duplicate wakes.
     #
@@ -230,7 +267,7 @@ async def _run_session_step_body(
         )
     if session_id not in needs:
         log.debug("step.early_out", session_id=session_id, cause=cause)
-        return None
+        return _StepResult()
 
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
 
@@ -303,7 +340,7 @@ async def _run_session_step_body(
             session_id=session_id,
             count=len(pending),
         )
-        return None
+        return _StepResult()
 
     # Span the remainder of the prologue so "why is the step slow?"
     # can separate context-build cost from model-call cost (issue #78).
@@ -420,7 +457,9 @@ async def _run_session_step_body(
             },
             account_id=account_id,
         )
-        return await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+        return _StepResult(
+            retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+        )
 
     # ``local_tokens`` costs the full payload (messages + tools) so it
     # matches what the provider counts.  The error branch above stays
@@ -465,10 +504,23 @@ async def _run_session_step_body(
     # wake. ``find_sessions_needing_inference`` uses it as the watermark.
     assistant_msg["reacting_to"] = step_ctx.reacting_to
 
-    # Append assistant message to the session log (unfenced — procrastinate
-    # lock provides mutual exclusion).
-    await sessions_service.append_event(
-        pool, session_id, "message", assistant_msg, account_id=account_id
+    # Append assistant message to the session log (unfenced — procrastinate lock
+    # provides mutual exclusion) and, in the SAME transaction, enforce request
+    # totality: if this tool-call-free turn would leave the session idle while it
+    # owes a request response, a nudge (or a no_return error once the budget is
+    # spent) is written atomically with the idling event — so no reader ever
+    # observes the session idle with an open request. A strict no-op for any
+    # session that owes nothing (the common case).
+    # The resulting wakes (nudge → re-wake the session; auto-error → wake the
+    # caller run) are deferred by run_session_step AFTER step_end via _StepResult,
+    # so their wake_deferred spans land in the next step's window (see the §wakes
+    # block in run_session_step).
+    nudged, autoerror_caller_run_id = await sessions_service.append_assistant_and_guard_quiescence(
+        pool,
+        session_id,
+        assistant_msg,
+        account_id=account_id,
+        parent_run_id=session.parent_run_id,
     )
 
     # Partition tool calls into dispatch buckets. Immediate builtin/MCP
@@ -550,7 +602,11 @@ async def _run_session_step_body(
         pool, session_id, "turn_ended", "idle", "end_turn", account_id=account_id
     )
     log.info("step.turn_ended", session_id=session_id, cause=cause)
-    return None
+    # Hand the quiescence guard's wakes to run_session_step to defer after step_end.
+    return _StepResult(
+        nudge_session=nudged,
+        autoerror_caller_run_id=autoerror_caller_run_id,
+    )
 
 
 def _switch_channel_tool_spec() -> dict[str, Any]:
@@ -561,17 +617,10 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
     to list it in their ``tools`` declaration — it's focal-machinery
     scope, not agent scope.
     """
+    from aios.tools.registry import openai_tool_entry
     from aios.tools.registry import registry as tool_registry
 
-    tool = tool_registry.get("switch_channel")
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.parameters_schema,
-        },
-    }
+    return openai_tool_entry(tool_registry.get("switch_channel"))
 
 
 async def _dump_context_if_enabled(
@@ -840,6 +889,19 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
     # the sweep skips (see ``sweep.ERRORED_SESSIONS_SQL``); any in-flight tool
     # task that completes after this point sits unreaped until a user message
     # recovers the session (its seq overtakes the error event).
+    #
+    # A workflow child whose model errored past its retry budget can no longer
+    # answer the requests it was invoked with. Error every one on its behalf with a
+    # monotonic response so each invoking run resolves (and can raise AgentError)
+    # instead of hanging forever on a dead child (no-op for a non-child / nothing
+    # owed). This MUST land BEFORE the error latch below: the latch makes the sweep
+    # skip the session, so a crash after latching-but-before-responding would strand
+    # the child errored-and-unanswered, with no path to ever resolve its callers.
+    # Responses-before-latch means a crash leaves the child un-latched (recoverable —
+    # the sweep re-wakes it, it re-errors, and the now-written responses no-op).
+    await fail_all_open_requests(
+        pool, session_id, account_id=account_id, error={"kind": "child_errored"}
+    )
     await sessions_service.set_session_stop_reason(
         pool, session_id, {"type": "error"}, account_id=account_id
     )

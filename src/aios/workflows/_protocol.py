@@ -5,10 +5,12 @@ Wire format: a 4-byte big-endian length prefix followed by that many bytes of
 UTF-8 JSON. Stdlib-only — imported by the credential-free child, so it must never
 pull in anything from ``aios.harness``/``aios.db``/``aios.crypto``.
 
-Block 1 message flow (the child emits at most one frontier, then a terminal):
+Message flow (the child emits zero or more frontier capabilities, then a terminal;
+a single-coroutine run emits at most one, a ``parallel``/``pipeline`` fan-out emits
+one EMIT per open branch capability before the terminal):
 
     parent → child:  INIT {source, input, memo}
-    child  → parent: [EMIT {capability_id, call_key, spec}]
+    child  → parent: EMIT {capability_id, call_key, spec} *  (zero or more)
                      then exactly one of SUSPENDED | RETURNED {value} | RAISED {repr, traceback}
 """
 

@@ -10,7 +10,8 @@ Covers:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import contextlib
+from collections.abc import AsyncIterator, Iterator
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -185,7 +186,12 @@ class TestStepStartEndSpans:
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
-            id="sess_x", agent_id="agt_x", agent_version=None, focal_channel=None
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            origin="foreground",
+            parent_run_id=None,
         )
         agent = SimpleNamespace(
             model="openrouter/x",
@@ -288,7 +294,12 @@ class TestStepStartEndSpans:
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
-            id="sess_x", agent_id="agt_x", agent_version=None, focal_channel=None
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            origin="foreground",
+            parent_run_id=None,
         )
         agent = SimpleNamespace(
             model="openrouter/x",
@@ -351,6 +362,10 @@ class TestStepStartEndSpans:
                 AsyncMock(return_value=start_event),
             ) as append_event,
             patch(
+                "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
+                AsyncMock(return_value=(False, None)),
+            ),
+            patch(
                 "aios.harness.loop.call_litellm",
                 AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
             ),
@@ -385,7 +400,12 @@ class TestStepStartEndSpans:
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
-            id="sess_x", agent_id="agt_x", agent_version=None, focal_channel=None
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            origin="foreground",
+            parent_run_id=None,
         )
         agent = SimpleNamespace(
             model="openrouter/x",
@@ -449,6 +469,10 @@ class TestStepStartEndSpans:
                 AsyncMock(side_effect=RuntimeError("provider boom")),
             ),
             patch("aios.harness.loop.defer_wake", AsyncMock()),
+            # The terminal-error branch fails the errored child's open requests;
+            # this non-child session would no-op in production, so mock the DB-backed
+            # collaborator out to keep the span-ordering assertion pool-free.
+            patch("aios.harness.loop.fail_all_open_requests", AsyncMock(return_value=0)),
             patch(
                 "aios.harness.loop._count_consecutive_rescheduling",
                 AsyncMock(return_value=4),  # budget exhausted — no re-raise, returns None
@@ -459,3 +483,123 @@ class TestStepStartEndSpans:
         span_names = _span_event_names(append_event)
         assert span_names[0] == "step_start"
         assert span_names[-1] == "step_end"
+
+
+@contextlib.asynccontextmanager
+async def _harness_with_guard(
+    guard_result: tuple[bool, str | None],
+) -> AsyncIterator[tuple[AsyncMock, AsyncMock, MagicMock]]:
+    """Drive ``run_session_step`` past a clean (tool-call-free) model turn with the
+    quiescence guard mocked to ``guard_result``. Yields ``(defer_wake,
+    defer_run_wake, manager)`` — the manager records ``append_event`` and
+    ``defer_wake`` calls in order so a test can assert the post-guard wiring AND
+    that the wakes fire after ``step_end`` (loop.py: nudge -> defer_wake(
+    request_nudge); autoerror -> defer_run_wake)."""
+    session = SimpleNamespace(
+        id="sess_x",
+        agent_id="agt_x",
+        agent_version=None,
+        focal_channel=None,
+        origin="background",
+        parent_run_id="run_x",
+    )
+    agent = SimpleNamespace(
+        model="openrouter/x",
+        tools=[],
+        mcp_servers=[],
+        http_servers=[],
+        skills=[],
+        system="sys",
+        litellm_extra={},
+        window_min=1000,
+        window_max=10000,
+    )
+    manager = MagicMock()
+    append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
+    defer_wake = AsyncMock()
+    defer_run_wake = AsyncMock()
+    manager.attach_mock(append_event, "append_event")
+    manager.attach_mock(defer_wake, "defer_wake")
+    with (
+        patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
+        patch("aios.harness.loop.runtime.require_task_registry", return_value=MagicMock()),
+        patch(
+            "aios.harness.loop.find_sessions_needing_inference", AsyncMock(return_value={"sess_x"})
+        ),
+        patch(
+            "aios.harness.loop.sessions_service.get_session_basic", AsyncMock(return_value=session)
+        ),
+        patch("aios.harness.loop.agents_service.get_agent", AsyncMock(return_value=agent)),
+        patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
+        patch(
+            "aios.harness.loop.sessions_service.read_windowed_events", AsyncMock(return_value=[])
+        ),
+        patch("aios.harness.loop._dispatch_confirmed_tools", AsyncMock(return_value=[])),
+        patch(
+            "aios.harness.loop.compose_step_context",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    model="openrouter/x", messages=[], tools=[], reacting_to=0, skill_versions=[]
+                )
+            ),
+        ),
+        patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock()),
+        patch("aios.harness.loop.sessions_service.append_event", append_event),
+        patch(
+            "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
+            AsyncMock(return_value=guard_result),
+        ),
+        patch(
+            "aios.harness.loop.stream_litellm",
+            AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+        ),
+        patch("aios.harness.loop.sessions_service.increment_usage", AsyncMock()),
+        patch("aios.db.sse_lock.has_subscriber", AsyncMock(return_value=False)),
+        patch("aios.harness.loop.defer_wake", defer_wake),
+        patch("aios.harness.loop.defer_run_wake", defer_run_wake),
+    ):
+        yield defer_wake, defer_run_wake, manager
+
+
+class TestRequestTotalityWiring:
+    """The loop's post-guard wiring (loop.py) — covers the True branches the rest of
+    the suite leaves untested (every other loop-driving test mocks the guard to the
+    all-False no-op)."""
+
+    async def test_nudge_defers_a_session_wake_after_step_end(self) -> None:
+        """guard says nudged -> the harness wakes the session (so the model gets
+        another turn to answer), AFTER step_end so its wake_deferred lands in the
+        next step's window (#132), and does NOT wake a caller run."""
+        from aios.harness.loop import run_session_step
+
+        async with _harness_with_guard((True, None)) as (
+            defer_wake,
+            defer_run_wake,
+            manager,
+        ):
+            await run_session_step("sess_x")
+        defer_wake.assert_awaited_once_with(ANY, "sess_x", account_id=ANY, cause="request_nudge")
+        defer_run_wake.assert_not_awaited()
+        # Ordering fence (mirrors the reschedule path): the nudge wake fires after
+        # the step_end span append, never inside the body.
+        last_step_end = max(
+            i
+            for i, (name, args, _kw) in enumerate(manager.mock_calls)
+            if name == "append_event" and args[2] == "span" and args[3].get("event") == "step_end"
+        )
+        first_defer = [name for name, _a, _kw in manager.mock_calls].index("defer_wake")
+        assert first_defer > last_step_end
+
+    async def test_autoerror_defers_the_caller_run_wake(self) -> None:
+        """guard says autoerrored -> the harness wakes the caller run to harvest the
+        no_return response, and does NOT inject a session (nudge) wake."""
+        from aios.harness.loop import run_session_step
+
+        async with _harness_with_guard((False, "run_x")) as (
+            defer_wake,
+            defer_run_wake,
+            _mgr,
+        ):
+            await run_session_step("sess_x")
+        defer_run_wake.assert_awaited_once_with("run_x")
+        defer_wake.assert_not_awaited()
