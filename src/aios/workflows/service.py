@@ -55,11 +55,14 @@ async def resume_gate(
     call_key: str,
     result: Any,
 ) -> None:
-    """Deliver an external resume for a suspended gate.
+    """Deliver an external resume for a suspended gate, keyed by ``call_key``.
 
-    The Block-1 internal stand-in for the (deferred) HTTP resume endpoint: record
-    a durable ``wf_run_signals`` row and defer a wake. The run's next step harvests
-    the signal into the journal — keeping ``wf_run_events`` single-writer.
+    The internal/trusted variant: it keys off ``call_key`` directly and does NOT
+    account-scope, so it must never be the HTTP path. The HTTP face is
+    :func:`aios.services.workflows.resume_gate_by_nonce`, which scopes the run and
+    resolves the public ``gate_nonce`` to a ``call_key`` before calling through here.
+    Both record a durable ``wf_run_signals`` row and defer a wake; the run's next
+    step harvests the signal into the journal — keeping ``wf_run_events`` single-writer.
     """
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)

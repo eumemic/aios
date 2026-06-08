@@ -231,14 +231,31 @@ async def wf_run_event_stream(
             if payload["type"] == "run_completed":
                 yield ServerSentEvent(data="{}", event="done")
                 return
-        # A terminal run never NOTIFYs again. If its run_completed was already past
-        # ``after_seq`` (a reconnect that consumed the terminal frame, or a high
-        # after_seq), the backfill is empty and tailing would block forever — so end
-        # the stream now rather than hang. (run_completed is written for BOTH
-        # completed and errored, so a terminal status implies it exists.)
+        # A terminal run never NOTIFYs again, so we must not block the live tail on an
+        # event that will never come. But the run may have gone terminal in the window
+        # between the backfill SELECT's snapshot and this status read — committing
+        # run_completed (and queueing its NOTIFY) that the backfill could not see. A
+        # terminal run's journal is frozen (append_run_event no-ops once status is
+        # terminal), so a final catch-up read past the cursor delivers any such tail —
+        # notably the run_completed frame carrying output/error — which we'd otherwise
+        # drop by emitting `done` before draining the queue. An empty catch-up (the
+        # genuine reconnect-past-terminal case) just falls through to `done`.
         async with pool.acquire() as conn:
             status = await conn.fetchval("SELECT status FROM wf_runs WHERE id = $1", run_id)
+            terminal_tail = (
+                await conn.fetch(
+                    "SELECT * FROM wf_run_events WHERE run_id = $1 AND seq > $2 ORDER BY seq ASC",
+                    run_id,
+                    cursor,
+                )
+                if status in ("completed", "errored")
+                else []
+            )
         if status in ("completed", "errored"):
+            for row in terminal_tail:
+                payload = _serialize_wf_event(row)
+                cursor = max(cursor, payload["seq"])
+                yield _event_to_sse(payload)
             yield ServerSentEvent(data="{}", event="done")
             return
         # Tail live notifications; dedup against the backfill cursor (an event can

@@ -180,7 +180,7 @@ def cred_list(
             columns=_CRED_COLS,
             all_=all_,
             limit=limit,
-            vault_id=vault_id,
+            path_params={"vault_id": vault_id},
         )
 
     run_or_die(_run)
