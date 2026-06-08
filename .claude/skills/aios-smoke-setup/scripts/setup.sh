@@ -148,6 +148,14 @@ overrides = {
     # path"); the source .env ships `./workspaces`.  Resolve it under the
     # worktree so api + worker agree on the same absolute path.
     "AIOS_WORKSPACE_ROOT": f"{worktree}/workspaces",
+    # Neutralise the one JSON-valued var: every phase below does `set -a;
+    # source .env`, and bash strips the inner double-quotes of a JSON value
+    # (`[{"match":…}]` -> `[{match:…}]`), so the exported var becomes invalid
+    # JSON and shadows the correct .env-file value pydantic would have read.
+    # Smoke runtimes don't exercise operator OAuth apps, so `[]` is correct and
+    # bash-source-safe. (The app itself never sources .env — pydantic reads the
+    # file directly — so this only bites the shell-sourcing the script does.)
+    "AIOS_OAUTH_PROVIDER_APPS": "[]",
 }
 if connector == "telegram" and token:
     overrides["AIOS_TELEGRAM_BOT_TOKEN"] = token
