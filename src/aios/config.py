@@ -308,6 +308,22 @@ class Settings(BaseSettings):
         "reminders.",
     )
 
+    # ── connectors ─────────────────────────────────────────────────────────
+    connector_backfill_max_age_seconds: int = Field(
+        default=60 * 60,  # 1 hour
+        ge=60,
+        description="Age ceiling, in seconds, on connector sends surfaced by the "
+        "SSE subscribe-time backfill (``list_pending_calls_for_connector``). A "
+        "pending connector send whose parent assistant turn is older than this is "
+        "SKIPPED — excluded from the backfill, not expired (the event log is left "
+        "untouched). A legitimately in-flight send executes within seconds of the "
+        "connector reconnecting, so the default 1h never touches a real one; the "
+        "bound only suppresses dormant, weeks-stale sends from being re-transmitted "
+        "on a worker restart (#744). Does NOT affect ``Session.awaiting`` / the "
+        "unresolved-tool-call read-model, which surfaces all unresolved calls "
+        "regardless of age (#741).",
+    )
+
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
 
