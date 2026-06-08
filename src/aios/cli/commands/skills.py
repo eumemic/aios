@@ -113,7 +113,7 @@ def versions(
             max_widths={"description": 60, "name": 32},
             all_=all_,
             limit=limit,
-            skill_id=skill_id,
+            path_params={"skill_id": skill_id},
         )
 
     run_or_die(_run)

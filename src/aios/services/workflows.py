@@ -142,19 +142,7 @@ async def resume_gate_by_nonce(
     """
     async with pool.acquire() as conn:
         await wf_queries.get_wf_run(conn, run_id, account_id=account_id)  # 404s cross-tenant
-        events = await wf_queries.list_run_events(conn, run_id)
-        resolved = {e.call_key for e in events if e.type == "call_result"}
-        call_key = None
-        for event in events:
-            if (
-                event.type == "call_started"
-                and event.payload.get("capability") == "gate"
-                and event.payload.get("gate_nonce") == gate_nonce
-                and event.call_key is not None
-                and event.call_key not in resolved
-            ):
-                call_key = event.call_key
-                break
+        call_key = await wf_queries.find_open_gate_call_key(conn, run_id, gate_nonce=gate_nonce)
         if call_key is None:
             raise NotFoundError(
                 "no open gate matches that nonce on this run", detail={"run_id": run_id}

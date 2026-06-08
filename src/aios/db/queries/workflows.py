@@ -401,6 +401,46 @@ async def list_run_events_scoped(
     return [_row_to_wf_run_event(r) for r in rows]
 
 
+async def find_open_gate_call_key(
+    conn: asyncpg.Connection[Any], run_id: str, *, gate_nonce: str
+) -> str | None:
+    """Resolve a gate's capability ``nonce`` to the ``call_key`` of its OPEN gate.
+
+    A gate is open when its ``call_started`` has no matching ``call_result`` yet; an
+    already-resolved nonce (or one that never existed) returns ``None``. The earliest
+    such gate wins (``ORDER BY seq``), though a nonce is unique per run in practice.
+
+    Unscoped — the caller (:func:`aios.services.workflows.resume_gate_by_nonce`)
+    account-checks the run via :func:`get_wf_run` first. Pushing the predicate into
+    SQL (vs. materializing the whole journal and scanning in Python) keeps the cost a
+    single indexed row instead of growing with journal length — the gate resolver,
+    like the session ``lookup_tool_name_by_call_id`` it mirrors, lives in the query
+    layer.
+    """
+    call_key: str | None = await conn.fetchval(
+        """
+        SELECT e.call_key
+        FROM wf_run_events e
+        WHERE e.run_id = $1
+          AND e.type = 'call_started'
+          AND e.payload->>'capability' = 'gate'
+          AND e.payload->>'gate_nonce' = $2
+          AND e.call_key IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM wf_run_events r
+              WHERE r.run_id = e.run_id
+                AND r.type = 'call_result'
+                AND r.call_key = e.call_key
+          )
+        ORDER BY e.seq ASC
+        LIMIT 1
+        """,
+        run_id,
+        gate_nonce,
+    )
+    return call_key
+
+
 # ─── wf_run_signals (external-resume side markers — idempotent) ───────────────
 
 
