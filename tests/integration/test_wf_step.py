@@ -1563,6 +1563,13 @@ async def test_service_create_and_resume_by_nonce_roundtrip(wf_runtime: asyncpg.
     done = await wf_service.get_run(pool, run.id, account_id="acc_wf")
     assert done.status == "completed" and done.output == {"answer": "yes"}
 
+    # The gate is now resolved — re-resuming with the same (valid) nonce 404s
+    # ("no OPEN gate matches") rather than writing an orphaned signal nothing harvests.
+    with pytest.raises(NotFoundError):
+        await wf_service.resume_gate_by_nonce(
+            pool, run_id=run.id, account_id="acc_wf", gate_nonce=nonce, result="again"
+        )
+
 
 async def test_service_resume_by_nonce_rejects_bad_nonce_and_cross_tenant(
     wf_runtime: asyncpg.Pool[Any],

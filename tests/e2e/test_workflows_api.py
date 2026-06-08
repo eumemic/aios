@@ -50,14 +50,32 @@ async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[http
     app.state.procrastinate = mock.MagicMock()
 
     transport = httpx.ASGITransport(app=app)
-    # create_run defers a wake; the procrastinate app isn't open in this ASGI test
-    # (the worker drives steps separately), so mock it out — the convention the e2e
-    # conftest uses for session defer_wake.
-    with mock.patch("aios.workflows.service.defer_run_wake", new=mock.AsyncMock()):
+    # create_run + resume defer a wake; the procrastinate app isn't open in this ASGI
+    # test (the worker drives steps separately), so mock BOTH bindings out — the
+    # convention the e2e conftest uses for session defer_wake. (create_run uses the
+    # binding in aios.workflows.service; resume_gate_by_nonce uses its own copy in
+    # aios.services.workflows.)
+    with (
+        mock.patch("aios.workflows.service.defer_run_wake", new=mock.AsyncMock()),
+        mock.patch("aios.services.workflows.defer_run_wake", new=mock.AsyncMock()),
+    ):
         async with authed_client(
             "http://testserver", aios_env["AIOS_API_KEY"], transport=transport
         ) as client:
             yield client
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _mint_tenant(http_client: httpx.AsyncClient, name: str) -> str:
+    """Mint a child tenant under the root account; return its plaintext API key."""
+    r = await http_client.post(
+        "/v1/accounts/children", json={"display_name": name, "can_mint_children": False}
+    )
+    assert r.status_code in (200, 201), r.text
+    return str(r.json()["plaintext_key"])
 
 
 async def _create_env(http_client: httpx.AsyncClient) -> str:
@@ -101,6 +119,40 @@ async def test_create_workflow_run_and_observe(http_client: httpx.AsyncClient) -
     # isn't running in this ASGI test).
     r = await http_client.get(f"/v1/runs/{run['id']}/events")
     assert r.status_code == 200 and r.json()["data"] == []
+
+
+async def test_runs_cross_tenant_isolated(http_client: httpx.AsyncClient) -> None:
+    """A run owned by tenant A is invisible to tenant B over the HTTP surface — the
+    end-to-end proof that AccountIdDep threads into the scoped reads/ops (a router
+    regression that dropped account_id would leak here, where the query/service tests
+    can't see it)."""
+    key_b = await _mint_tenant(http_client, f"tenant-b-{_uniq()}")
+
+    # Tenant A (the default bearer) creates a workflow + run.
+    env_a = await _create_env(http_client)
+    wf = (
+        await http_client.post("/v1/workflows", json={"name": f"a-{_uniq()}", "script": _SCRIPT})
+    ).json()
+    run = (
+        await http_client.post("/v1/runs", json={"workflow_id": wf["id"], "environment_id": env_a})
+    ).json()
+
+    # Tenant B sees none of it: 404 on the point reads + resume, empty list.
+    assert (
+        await http_client.get(f"/v1/runs/{run['id']}", headers=_bearer(key_b))
+    ).status_code == 404
+    assert (
+        await http_client.get(f"/v1/runs/{run['id']}/events", headers=_bearer(key_b))
+    ).status_code == 404
+    resume_b = await http_client.post(
+        f"/v1/runs/{run['id']}/resume", headers=_bearer(key_b), json={"gate_nonce": "x"}
+    )
+    assert resume_b.status_code == 404, resume_b.text
+    list_b = await http_client.get("/v1/runs", headers=_bearer(key_b))
+    assert list_b.status_code == 200 and run["id"] not in [x["id"] for x in list_b.json()["data"]]
+
+    # Tenant A still owns it.
+    assert (await http_client.get(f"/v1/runs/{run['id']}")).status_code == 200
 
 
 async def test_create_run_with_unknown_workflow_404s(http_client: httpx.AsyncClient) -> None:

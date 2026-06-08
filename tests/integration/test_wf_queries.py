@@ -259,6 +259,52 @@ async def test_append_run_event_notifies(
         await listener.close()
 
 
+async def test_append_run_event_notify_defers_to_outer_commit(
+    wf_conn: asyncpg.Connection[Any], migrated_db_url: str
+) -> None:
+    """pg_notify is transactional: when an OUTER txn wraps append_run_event (the real
+    _complete_run path), the notify is NOT delivered until that txn commits, and is
+    not delivered at all on rollback. This guards the NOTIFY-after-commit invariant
+    against a refactor moving the notify inside the txn (which the autocommit test
+    can't catch)."""
+    run_id = await _seed_run(wf_conn)
+    listener = await asyncpg.connect(migrated_db_url)
+    try:
+        received: asyncio.Queue[str] = asyncio.Queue()
+        await listener.add_listener(
+            f"wf_run_events_{run_id}",
+            lambda _conn, _pid, _channel, payload: received.put_nowait(payload),
+        )
+
+        async with wf_conn.transaction():
+            event = await wf_queries.append_run_event(
+                wf_conn, account_id="acc_root", run_id=run_id, type="run_started", payload={}
+            )
+            assert event is not None
+            # Inside the open outer txn: the notify is queued, NOT yet delivered.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(received.get(), timeout=0.5)
+        # Outer txn committed → now it arrives.
+        assert await asyncio.wait_for(received.get(), timeout=5) == event.id
+
+        # Rollback path: the insert AND the notify are both undone → nothing delivered.
+        with pytest.raises(RuntimeError):
+            async with wf_conn.transaction():
+                await wf_queries.append_run_event(
+                    wf_conn,
+                    account_id="acc_root",
+                    run_id=run_id,
+                    type="call_started",
+                    call_key="sha:g#0",
+                    payload={"capability": "gate"},
+                )
+                raise RuntimeError("force rollback")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(received.get(), timeout=0.5)
+    finally:
+        await listener.close()
+
+
 async def test_wf_run_event_stream_backfills_tails_and_terminates(
     wf_conn: asyncpg.Connection[Any], migrated_db_url: str
 ) -> None:

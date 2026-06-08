@@ -22,6 +22,7 @@ from aios.api.sse import (
     management_calls_stream,
     runtime_connector_calls_stream,
     sse_event_stream,
+    wf_run_event_stream,
 )
 from aios.db.listen import ListenSubscription
 
@@ -75,6 +76,26 @@ def _install_session_event_backfill(
     pool.acquire = MagicMock(return_value=acquire_cm)
 
 
+def _install_wf_run_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+    pool: MagicMock,
+    exc: Exception | None,
+) -> None:
+    """``wf_run_event_stream`` backfills via ``conn.fetch`` then status-checks via
+    ``conn.fetchval``. With no exc, return an empty backfill + a non-terminal status
+    so it falls through to the live tail; with exc, the backfill ``fetch`` raises."""
+    conn = MagicMock()
+    if exc is None:
+        conn.fetch = AsyncMock(return_value=[])
+        conn.fetchval = AsyncMock(return_value="running")  # non-terminal → live tail
+    else:
+        conn.fetch = AsyncMock(side_effect=exc)
+    acquire_cm = MagicMock()
+    acquire_cm.__aenter__ = AsyncMock(return_value=conn)
+    acquire_cm.__aexit__ = AsyncMock(return_value=None)
+    pool.acquire = MagicMock(return_value=acquire_cm)
+
+
 # Each case: (build_generator, install_backfill).
 #  - build_generator(subscription, pool) returns the async generator under test.
 #  - install_backfill(monkeypatch, pool, exc) wires up the backfill path:
@@ -106,6 +127,11 @@ _CASES = [
         lambda sub, pool: connection_discovery_stream(sub, pool, "telegram", account_id="acct_X"),
         lambda mp, pool, exc: _install_query_backfill(mp, "list_connections", pool, exc),
         id="connection_discovery_stream",
+    ),
+    pytest.param(
+        lambda sub, pool: wf_run_event_stream(sub, pool, "wfr_X", after_seq=0),
+        lambda mp, pool, exc: _install_wf_run_backfill(mp, pool, exc),
+        id="wf_run_event_stream",
     ),
 ]
 

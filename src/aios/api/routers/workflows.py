@@ -162,7 +162,11 @@ async def list_run_events(
     items = await service.list_run_events(
         pool, run_id, account_id=account_id, after_seq=after_seq, limit=page_limit + 1
     )
-    return ListResponse[WfRunEvent].paginate(items, page_limit, cursor=lambda x: x.seq)
+    # Forward (ascending seq) read — label the cursor accordingly (paginate defaults
+    # to "backward", which is right only for the id-DESC list endpoints).
+    return ListResponse[WfRunEvent].paginate(
+        items, page_limit, cursor=lambda x: x.seq, direction="forward"
+    )
 
 
 @runs_router.post("/{run_id}/resume", operation_id="resume_gate")
@@ -170,8 +174,9 @@ async def resume_gate(
     run_id: str, body: GateResume, pool: PoolDep, account_id: AccountIdDep
 ) -> WfRun:
     """Resume a suspended gate by its ``gate_nonce``, delivering ``result``. Returns
-    the updated run (its status flips back toward ``running``). A bad nonce or a
-    cross-tenant run 404s."""
+    the run (still ``suspended`` here — the recorded resume signal is harvested on the
+    next wake, which replays past the gate). A nonce that matches no OPEN gate, or a
+    cross-tenant run, 404s."""
     await service.resume_gate_by_nonce(
         pool, run_id=run_id, account_id=account_id, gate_nonce=body.gate_nonce, result=body.result
     )

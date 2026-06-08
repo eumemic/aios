@@ -17,7 +17,7 @@ import typer
 
 from aios.cli.commands._shared import call_single, render_paginated
 from aios.cli.coverage import covers
-from aios.cli.files import load_payload
+from aios.cli.files import PayloadError, load_payload
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk import stream_run
 from aios_sdk._generated.api.runs import (
@@ -41,8 +41,17 @@ runs_app = typer.Typer(name="runs", help="Launch and observe workflow runs.", no
 
 
 def _json_arg(value: str | None) -> Any:
-    """Parse a JSON CLI argument (``--input`` / ``--result``); ``None`` stays ``None``."""
-    return json.loads(value) if value is not None else None
+    """Parse a JSON CLI argument (``--input`` / ``--result``); ``None`` stays ``None``.
+
+    A malformed value raises :class:`PayloadError` so ``run_or_die`` prints a clean
+    one-line message + exit 64, rather than letting ``json.loads`` bubble a traceback.
+    """
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise PayloadError(f"invalid JSON: {exc}") from exc
 
 
 # ─── aios workflows (definitions) ────────────────────────────────────────────
@@ -167,7 +176,7 @@ def run_events_(
             columns=("seq", "type", "call_key"),
             all_=all_,
             limit=limit,
-            run_id=run_id,
+            path_params={"run_id": run_id},
         )
 
     run_or_die(_run)

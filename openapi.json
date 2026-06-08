@@ -8649,7 +8649,7 @@
           "runs"
         ],
         "summary": "Resume Gate",
-        "description": "Resume a suspended gate by its ``gate_nonce``, delivering ``result``. Returns\nthe updated run (its status flips back toward ``running``). A bad nonce or a\ncross-tenant run 404s.",
+        "description": "Resume a suspended gate by its ``gate_nonce``, delivering ``result``. Returns\nthe run (still ``suspended`` here \u2014 the recorded resume signal is harvested on the\nnext wake, which replays past the gate). A nonce that matches no OPEN gate, or a\ncross-tenant run, 404s.",
         "operationId": "resume_gate",
         "parameters": [
           {

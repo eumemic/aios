@@ -133,24 +133,32 @@ async def resume_gate_by_nonce(
     The HTTP-facing gate resume: account-scope the run first (the internal
     :func:`aios.workflows.service.resume_gate` keys off ``call_key`` and does NOT
     scope, so it must never be the HTTP path), then resolve ``gate_nonce`` →
-    ``call_key`` by scanning the run's ``call_started`` events for the gate whose
-    payload carries that nonce. ``insert_run_signal`` is idempotent, so a repeated
-    resume is a no-op. Raises ``NotFoundError`` if no gate matches the nonce.
+    ``call_key`` by scanning the run's **open** gate ``call_started`` events for the
+    one whose payload carries that nonce. Only an OPEN gate (no ``call_result`` yet)
+    matches — a nonce for an already-resolved gate (or any gate on a terminal run)
+    raises ``NotFoundError`` rather than writing an orphaned signal nothing harvests.
+    ``insert_run_signal`` is idempotent, so a concurrent double-resume of a
+    still-open gate is a no-op.
     """
     async with pool.acquire() as conn:
         await wf_queries.get_wf_run(conn, run_id, account_id=account_id)  # 404s cross-tenant
+        events = await wf_queries.list_run_events(conn, run_id)
+        resolved = {e.call_key for e in events if e.type == "call_result"}
         call_key = None
-        for event in await wf_queries.list_run_events(conn, run_id):
+        for event in events:
             if (
                 event.type == "call_started"
                 and event.payload.get("capability") == "gate"
                 and event.payload.get("gate_nonce") == gate_nonce
                 and event.call_key is not None
+                and event.call_key not in resolved
             ):
                 call_key = event.call_key
                 break
         if call_key is None:
-            raise NotFoundError("no gate matches that nonce on this run", detail={"run_id": run_id})
+            raise NotFoundError(
+                "no open gate matches that nonce on this run", detail={"run_id": run_id}
+            )
         await wf_queries.insert_run_signal(
             conn, run_id=run_id, call_key=call_key, kind="gate_resume", result=result
         )

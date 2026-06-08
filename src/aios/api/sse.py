@@ -231,6 +231,16 @@ async def wf_run_event_stream(
             if payload["type"] == "run_completed":
                 yield ServerSentEvent(data="{}", event="done")
                 return
+        # A terminal run never NOTIFYs again. If its run_completed was already past
+        # ``after_seq`` (a reconnect that consumed the terminal frame, or a high
+        # after_seq), the backfill is empty and tailing would block forever — so end
+        # the stream now rather than hang. (run_completed is written for BOTH
+        # completed and errored, so a terminal status implies it exists.)
+        async with pool.acquire() as conn:
+            status = await conn.fetchval("SELECT status FROM wf_runs WHERE id = $1", run_id)
+        if status in ("completed", "errored"):
+            yield ServerSentEvent(data="{}", event="done")
+            return
         # Tail live notifications; dedup against the backfill cursor (an event can
         # appear in BOTH if it committed during the backfill SELECT's snapshot).
         while True:

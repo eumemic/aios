@@ -77,8 +77,9 @@ def sync_detailed(
     """Resume Gate
 
      Resume a suspended gate by its ``gate_nonce``, delivering ``result``. Returns
-    the updated run (its status flips back toward ``running``). A bad nonce or a
-    cross-tenant run 404s.
+    the run (still ``suspended`` here — the recorded resume signal is harvested on the
+    next wake, which replays past the gate). A nonce that matches no OPEN gate, or a
+    cross-tenant run, 404s.
 
     Args:
         run_id (str):
@@ -121,8 +122,9 @@ def sync(
     """Resume Gate
 
      Resume a suspended gate by its ``gate_nonce``, delivering ``result``. Returns
-    the updated run (its status flips back toward ``running``). A bad nonce or a
-    cross-tenant run 404s.
+    the run (still ``suspended`` here — the recorded resume signal is harvested on the
+    next wake, which replays past the gate). A nonce that matches no OPEN gate, or a
+    cross-tenant run, 404s.
 
     Args:
         run_id (str):
@@ -160,8 +162,9 @@ async def asyncio_detailed(
     """Resume Gate
 
      Resume a suspended gate by its ``gate_nonce``, delivering ``result``. Returns
-    the updated run (its status flips back toward ``running``). A bad nonce or a
-    cross-tenant run 404s.
+    the run (still ``suspended`` here — the recorded resume signal is harvested on the
+    next wake, which replays past the gate). A nonce that matches no OPEN gate, or a
+    cross-tenant run, 404s.
 
     Args:
         run_id (str):
@@ -202,8 +205,9 @@ async def asyncio(
     """Resume Gate
 
      Resume a suspended gate by its ``gate_nonce``, delivering ``result``. Returns
-    the updated run (its status flips back toward ``running``). A bad nonce or a
-    cross-tenant run 404s.
+    the run (still ``suspended`` here — the recorded resume signal is harvested on the
+    next wake, which replays past the gate). A nonce that matches no OPEN gate, or a
+    cross-tenant run, 404s.
 
     Args:
         run_id (str):
