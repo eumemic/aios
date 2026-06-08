@@ -29,7 +29,10 @@ caller's harvest reads; the periodic ``wf_runs`` sweep is the lost-wake backstop
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+import jsonschema  # type: ignore[import-untyped]
 
 from aios.db import queries
 from aios.harness import runtime
@@ -170,7 +173,56 @@ async def _finish(
     return {"status": "errored" if is_error else "returned"}
 
 
+def _validate_value(value: Any, schema: dict[str, Any]) -> str | None:
+    """Validate a ``return`` ``value`` against the request's ``output_schema``.
+
+    ``None`` on success; otherwise a model-facing error enumerating every failure
+    (mirrors :func:`aios.tools.invoke.validate_arguments`' formatting) so the child
+    self-corrects and calls ``return`` again through the normal tool-error loop.
+    """
+    errors = sorted(
+        jsonschema.Draft202012Validator(schema).iter_errors(value),
+        key=lambda e: list(e.absolute_path),
+    )
+    if not errors:
+        return None
+    lines = [
+        f"`value` does not match the request's required schema. You sent: {json.dumps(value)}",
+        "Errors:",
+    ]
+    for err in errors:
+        path = ".".join(str(p) for p in err.absolute_path)
+        lines.append(f"  - at {'value.' + path if path else 'value'}: {err.message}")
+    lines.append("Fix `value` to match the schema shown with the request and call return again.")
+    return "\n".join(lines)
+
+
+async def _enforce_output_schema(session_id: str, request_id: Any, value: Any) -> str | None:
+    """Validate ``value`` against the schema this request demands, if any.
+
+    Returns a model-facing error string to bounce back (the child retries), or
+    ``None`` to proceed. A non-str ``request_id`` (or one matching no request) and a
+    non-child session resolve to no schema, leaving the rejection to
+    :func:`respond_to_request` (``unknown_request`` / ``not_a_child``); a request with
+    no ``output_schema`` (the common case) also passes.
+    """
+    if not isinstance(request_id, str):
+        return None
+    async with runtime.require_pool().acquire() as conn:
+        schema = await queries.get_request_output_schema(conn, session_id, request_id=request_id)
+    return None if schema is None else _validate_value(value, schema)
+
+
 async def return_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    # Structured output: when the request demanded an output_schema, the value must
+    # match it. A mismatch is a tool error the child retries on (no response written),
+    # exactly like a malformed tool arg — so the workflow only ever harvests a
+    # schema-valid value. error() is unconstrained (a child that can't conform bails).
+    schema_error = await _enforce_output_schema(
+        session_id, arguments.get("request_id"), arguments.get("value")
+    )
+    if schema_error is not None:
+        return ToolResult(content=schema_error, is_error=True)
     return await _finish(
         session_id,
         request_id=arguments.get("request_id"),

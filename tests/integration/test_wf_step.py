@@ -104,7 +104,13 @@ async def wf_agent_id(wf_runtime: asyncpg.Pool[Any]) -> str:
     return agent.id
 
 
-async def _spawn_child(pool: asyncpg.Pool[Any], agent_id: str, ordinal: str) -> tuple[str, str]:
+async def _spawn_child(
+    pool: asyncpg.Pool[Any],
+    agent_id: str,
+    ordinal: str,
+    *,
+    output_schema: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     """Make a run + idempotently spawn one child for ``ordinal``; return (run_id, cid)."""
     run_id = await _make_run(pool, "async def main(input):\n    return 1")
     cid = child_session_id(run_id, ordinal)
@@ -118,6 +124,7 @@ async def _spawn_child(pool: asyncpg.Pool[Any], agent_id: str, ordinal: str) -> 
         parent_run_id=run_id,
         request_id=ordinal,
         input="hi",
+        output_schema=output_schema,
     )
     return run_id, cid
 
@@ -1604,3 +1611,269 @@ async def test_service_resume_by_nonce_rejects_bad_nonce_and_cross_tenant(
         await wf_service.get_run(pool, run.id, account_id="acc_intruder")
     # The run is untouched — still suspended, resumable by its owner.
     assert (await wf_service.get_run(pool, run.id, account_id="acc_wf")).status == "suspended"
+
+
+# ─── B3 slice 2 — agent() structured output (output_schema) ───────────────────
+
+_OBJ_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+    "additionalProperties": False,
+}
+
+
+async def test_get_request_output_schema_is_per_request(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The schema is keyed by request_id: a child owing several requests with
+    different schemas resolves each independently (unknown id / schema-less → None).
+    The workflow path is 1:1 today, but the query is per-request by design."""
+    pool = wf_runtime
+    schema_b = {"type": "number"}
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "req:a", output_schema=_OBJ_SCHEMA)
+    async with pool.acquire() as conn:
+        for rid, schema in (("req:b", schema_b), ("req:none", None)):
+            request: dict[str, Any] = {"request_id": rid, "caller": {"kind": "run", "id": run_id}}
+            if schema is not None:
+                request["output_schema"] = schema
+            await db_queries.append_event(
+                conn,
+                account_id="acc_wf",
+                session_id=cid,
+                kind="message",
+                data={"role": "user", "content": "x", "metadata": {"request": request}},
+            )
+        get = db_queries.get_request_output_schema
+        assert await get(conn, cid, request_id="req:a") == _OBJ_SCHEMA
+        assert await get(conn, cid, request_id="req:b") == schema_b
+        assert await get(conn, cid, request_id="req:none") is None
+        assert await get(conn, cid, request_id="req:nope") is None
+
+
+async def test_return_enforces_output_schema(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A non-conforming value bounces back as a tool error with NO response written
+    (the request stays open for the child to retry); a conforming value is answered."""
+    from aios.tools import workflow_completion
+    from aios.tools.registry import ToolResult
+
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "se:1", output_schema=_OBJ_SCHEMA)
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
+        bad = await workflow_completion.return_handler(
+            cid,
+            {"request_id": "se:1", "value": {"answer": 42}},  # answer must be a string
+        )
+    assert isinstance(bad, ToolResult) and bad.is_error and "schema" in bad.content.lower()
+    wake.assert_not_awaited()  # nothing answered → caller not woken
+    async with pool.acquire() as conn:
+        assert (
+            await db_queries.read_request_response(
+                conn, cid, account_id="acc_wf", request_id="se:1"
+            )
+            is None  # request stays open for a retry
+        )
+
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
+        good = await workflow_completion.return_handler(
+            cid, {"request_id": "se:1", "value": {"answer": "yes"}}
+        )
+    assert good == {"status": "returned"}
+    wake.assert_awaited_once_with(run_id)
+    async with pool.acquire() as conn:
+        resp = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="se:1"
+        )
+    assert resp is not None and resp["result"] == {"answer": "yes"}
+
+
+async def test_malformed_output_schema_errors_the_run(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A malformed output_schema fails the run cleanly (author-facing bad_agent_call)
+    and never spawns a child."""
+    pool = wf_runtime
+    bad_schema = {"type": "not-a-real-type"}
+    script = (
+        f"async def main(input):\n"
+        f"    return await agent({wf_agent_id!r}, 'hi', output_schema={bad_schema!r})\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "errored"
+    completed = [e for e in events if e.type == "run_completed"]
+    assert completed and completed[0].payload["error"]["kind"] == "bad_agent_call"
+    assert children == 0  # rejected before any spawn
+
+
+async def test_non_object_output_schema_errors_the_run(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A non-object output_schema (a bare boolean — valid JSON Schema, but ``false``
+    rejects every value and ``true`` disables enforcement) is a degenerate author input:
+    fail the run cleanly as bad_agent_call rather than spawn a child that can never
+    return (or one with no enforcement)."""
+    pool = wf_runtime
+    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'hi', output_schema=False)\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "errored"
+    completed = [e for e in events if e.type == "run_completed"]
+    assert completed and completed[0].payload["error"]["kind"] == "bad_agent_call"
+    assert "object schema" in completed[0].payload["output"]
+    assert children == 0  # rejected before any spawn
+
+
+async def test_agent_output_schema_end_to_end(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """Full slice: the spawn carries the schema (request metadata + call_started
+    audit), the child must return a conforming value (a bad one is rejected with no
+    response), and the run harvests the validated value as the agent() result."""
+    from aios.tools import workflow_completion
+    from aios.tools.registry import ToolResult
+
+    pool = wf_runtime
+    script = (
+        f"async def main(input):\n"
+        f"    return await agent({wf_agent_id!r}, 'task', output_schema={_OBJ_SCHEMA!r})\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "suspended"
+    started = next(e for e in events if e.type == "call_started")
+    request_id = started.call_key
+    child_id = started.payload["child_session_id"]
+    assert started.payload["output_schema"] == _OBJ_SCHEMA  # journaled for audit
+    assert request_id is not None
+
+    # The request message carries the schema (for both the model and the validator).
+    async with pool.acquire() as conn:
+        seen = await db_queries.get_request_output_schema(conn, child_id, request_id=request_id)
+    assert seen == _OBJ_SCHEMA
+
+    # The child must conform: a bad value is rejected, a good one answers.
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        rejected = await workflow_completion.return_handler(
+            child_id, {"request_id": request_id, "value": {"answer": 7}}
+        )
+        assert isinstance(rejected, ToolResult) and rejected.is_error
+        ok = await workflow_completion.return_handler(
+            child_id, {"request_id": request_id, "value": {"answer": "done"}}
+        )
+    assert ok == {"status": "returned"}
+
+    await run_workflow_step(run_id)  # harvest → complete
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {"answer": "done"}
+
+
+async def test_float_bearing_output_schema_spawns_and_enforces(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A schema with a decimal numeric constraint (a legitimate, common JSON Schema)
+    must NOT crash the run at call_key time: output_schema is canonicalized as a string
+    so the determinism float-ban (which guards input DATA) doesn't reject it. The floats
+    survive the round-trip and enforcement honors them."""
+    from aios.tools import workflow_completion
+    from aios.tools.registry import ToolResult
+
+    pool = wf_runtime
+    schema = {"type": "number", "minimum": 1.5, "maximum": 9.5}
+    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'pick', output_schema={schema!r})\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "suspended"  # spawned, not crashed on the float
+    started = next(e for e in events if e.type == "call_started")
+    child_id = started.payload["child_session_id"]
+    assert started.payload["output_schema"] == schema  # floats intact in the audit stamp
+    assert started.call_key is not None
+
+    async with pool.acquire() as conn:
+        seen = await db_queries.get_request_output_schema(
+            conn, child_id, request_id=started.call_key
+        )
+    assert seen == schema  # floats survive the request round-trip
+
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        bad = await workflow_completion.return_handler(
+            child_id,
+            {"request_id": started.call_key, "value": 0.5},  # below minimum
+        )
+        assert isinstance(bad, ToolResult) and bad.is_error
+        ok = await workflow_completion.return_handler(
+            child_id, {"request_id": started.call_key, "value": 5.0}
+        )
+    assert ok == {"status": "returned"}
+
+
+async def test_valid_local_ref_output_schema_spawns(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A self-contained schema using ``$ref`` into ``$defs`` is valid and must spawn —
+    the unresolvable-ref gate rejects only refs that DON'T resolve, not all refs."""
+    pool = wf_runtime
+    schema = {
+        "$defs": {"Name": {"type": "string"}},
+        "type": "object",
+        "properties": {"name": {"$ref": "#/$defs/Name"}},
+        "required": ["name"],
+    }
+    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'x', output_schema={schema!r})\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "suspended"  # valid local $ref → spawned
+    assert children == 1
+
+
+async def test_dangling_ref_output_schema_errors_the_run(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A schema whose ``$ref`` doesn't resolve passes check_schema but would raise at
+    the child's validation time (bricking it until the deadline). Reject it
+    author-facing at the spawn gate, before any child spawns."""
+    pool = wf_runtime
+    schema = {"type": "object", "properties": {"a": {"$ref": "#/$defs/missing"}}, "required": ["a"]}
+    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'x', output_schema={schema!r})\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "errored"
+    completed = [e for e in events if e.type == "run_completed"]
+    assert completed and completed[0].payload["error"]["kind"] == "bad_agent_call"
+    assert "reference" in completed[0].payload["output"].lower()
+    assert children == 0  # rejected before any spawn

@@ -341,6 +341,15 @@ def render_user_event(
     if isinstance(request, dict) and isinstance(request.get("request_id"), str):
         rid = request["request_id"]
         marker = f"[request_id: {rid} — reply with return/error using this request_id]"
+        output_schema = request.get("output_schema")
+        if output_schema is not None:
+            # The request demands a typed `value`; show the shape so the model
+            # conforms first-try (return enforces it regardless). Per-request — each
+            # request carries its own schema.
+            marker += (
+                "\nYour return `value` must match this JSON Schema:\n"
+                f"```json\n{json.dumps(output_schema, indent=2)}\n```"
+            )
         existing = msg.get("content") or ""
         msg["content"] = f"{marker}\n{existing}" if existing else marker
 

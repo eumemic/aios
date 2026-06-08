@@ -73,6 +73,28 @@ def canonical_json(x: Any) -> str:
     return json.dumps(x, separators=(",", ":"), sort_keys=True, ensure_ascii=True, allow_nan=False)
 
 
+def canonical_schema_json(schema: Any) -> str:
+    """Deterministic JSON for a JSON Schema carried in a capability spec.
+
+    Unlike :func:`canonical_json` (which serves the **data** domain and rejects floats
+    — a workflow input's ``1.0`` vs ``1`` must never desync the call key), a JSON
+    *Schema* legitimately carries decimal numeric constraints (``minimum`` /
+    ``multipleOf`` / …). Those are author-written literals that serialize
+    deterministically (the ``json.dumps`` float repr is stable for a given value), so
+    they are admitted here; ``allow_nan=False`` still rejects the genuinely
+    non-deterministic NaN/Inf. ``sort_keys`` keeps the string — and thus the call key —
+    independent of the schema's key order.
+
+    ``agent()`` stores this string in the spec so a float-bearing schema never reaches
+    the float-banning :func:`canonical_json`; the worker reconstructs the schema with
+    ``json.loads``. Raises ``TypeError`` for a non-JSON-serialisable schema (e.g. a set
+    value) — a loud author error, surfaced like any other bad ``agent()`` argument.
+    """
+    return json.dumps(
+        schema, separators=(",", ":"), sort_keys=True, ensure_ascii=True, allow_nan=False
+    )
+
+
 def content_hash(capability_id: str, spec: Any) -> str:
     """``sha256(capability_id ‖ "\\0" ‖ canonical_json(spec))`` as hex."""
     payload = f"{capability_id}\0{canonical_json(spec)}"

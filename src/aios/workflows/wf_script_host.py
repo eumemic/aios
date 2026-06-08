@@ -42,7 +42,7 @@ from aios.workflows._protocol import (
     read_frame_sync,
     write_frame_sync,
 )
-from aios.workflows.determinism import CallKeyer
+from aios.workflows.determinism import CallKeyer, canonical_schema_json
 
 
 class WorkflowScriptError(Exception):
@@ -138,8 +138,19 @@ def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
     """
     if input is None:
         raise ValueError("agent() requires a non-None input (the child's first message)")
+    # Carry output_schema as a canonical JSON *string* so a schema's decimal numeric
+    # constraints (minimum/multipleOf/…) survive the call_key hash — canonical_json (the
+    # spec serializer) bans floats in the data domain; a schema is metadata. The worker
+    # reconstructs the dict with json.loads. None stays None (no schema demanded).
     return _Capability(
-        "agent", {"agent_id": agent_id, "input": input, "output_schema": output_schema}
+        "agent",
+        {
+            "agent_id": agent_id,
+            "input": input,
+            "output_schema": None
+            if output_schema is None
+            else canonical_schema_json(output_schema),
+        },
     )
 
 

@@ -247,6 +247,7 @@ async def create_child_session(
     parent_run_id: str,
     request_id: str,
     input: Any,
+    output_schema: dict[str, Any] | None = None,
 ) -> bool:
     """Idempotently spawn a workflow ``agent()`` child and inject the first request.
 
@@ -257,6 +258,11 @@ async def create_child_session(
     ``return``/``error`` (exactly once); the ``request_id`` is surfaced to the model
     as a render-time marker on the message (see ``render_user_event``) so it knows
     which id to echo back.
+
+    ``output_schema`` (optional) is the JSON Schema the request demands of the
+    response ``value``. It rides ``metadata.request.output_schema`` — per-request, so
+    a child owing several requests can carry a distinct schema for each — surfaced to
+    the model alongside the request and enforced when it calls ``return``.
 
     One transaction: insert the child row (``ON CONFLICT (id) DO NOTHING``) and,
     **only on a real insert**, deliver the request — without a stimulus the child
@@ -277,6 +283,12 @@ async def create_child_session(
         )
         if child is None:
             return False  # replay: row exists — do NOT re-deliver the request
+        request_meta: dict[str, Any] = {
+            "request_id": request_id,
+            "caller": {"kind": "run", "id": parent_run_id},
+        }
+        if output_schema is not None:
+            request_meta["output_schema"] = output_schema
         await queries.append_event(
             conn,
             account_id=account_id,
@@ -285,12 +297,7 @@ async def create_child_session(
             data={
                 "role": "user",
                 "content": content,
-                "metadata": {
-                    "request": {
-                        "request_id": request_id,
-                        "caller": {"kind": "run", "id": parent_run_id},
-                    }
-                },
+                "metadata": {"request": request_meta},
             },
         )
         return True

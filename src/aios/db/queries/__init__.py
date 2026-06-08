@@ -1078,6 +1078,32 @@ async def get_open_request_ids(
     return [r["rid"] for r in rows]
 
 
+async def get_request_output_schema(
+    conn: asyncpg.Connection[Any], session_id: str, *, request_id: str
+) -> dict[str, Any] | None:
+    """The JSON Schema a request demands of its response ``value``, or ``None``.
+
+    Reads ``metadata.request.output_schema`` off the request's user message. Keyed on
+    ``(session_id, request_id)`` — a child can owe several requests, each with its own
+    schema — so the ``return`` enforcement validates a ``value`` against *its* request's
+    schema. Like :func:`get_session_workflow_context` (the other return-path read),
+    ``session_id`` is a unique PK and so is sufficient scope on its own — no
+    ``account_id`` predicate, which lets the tool path resolve the schema without first
+    looking up the session's account. ``None`` when the request demands no schema (the
+    common case) or the id matches nothing.
+    """
+    schema = await conn.fetchval(
+        "SELECT req.data->'metadata'->'request'->'output_schema' FROM events req "
+        "WHERE req.session_id = $1 "
+        "AND req.kind = 'message' AND req.role = 'user' "
+        "AND req.data->'metadata'->'request'->>'request_id' = $2 "
+        "ORDER BY req.seq ASC LIMIT 1",  # oldest-first, like get_open_request_ids — deterministic
+        session_id,
+        request_id,
+    )
+    return parse_jsonb(schema) if schema is not None else None
+
+
 async def count_request_nudges(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
 ) -> int:
