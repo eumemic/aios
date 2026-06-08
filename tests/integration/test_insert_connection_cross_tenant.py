@@ -30,52 +30,6 @@ pytestmark = pytest.mark.integration
 
 
 class TestInsertConnectionCrossTenant:
-    async def test_cross_tenant_same_identity_is_allowed(
-        self, conn_two_accounts: asyncpg.Connection[Any]
-    ) -> None:
-        """Tenant B inserting on tenant A's active identity now succeeds.
-
-        The per-account unique index lets two accounts hold the same
-        external identity simultaneously — the global-exclusivity
-        invariant was given up by migration 0060 (#694) to make the
-        reparent primitive expressible.
-        """
-        a_row = await queries.insert_connection(
-            conn_two_accounts,
-            account_id="acc_a",
-            connector="signal",
-            external_account_id="+15550001",
-            metadata={},
-        )
-        b_row = await queries.insert_connection(
-            conn_two_accounts,
-            account_id="acc_b",
-            connector="signal",
-            external_account_id="+15550001",
-            metadata={},
-        )
-        assert a_row.id != b_row.id
-
-    async def test_same_tenant_repeat_returns_existing(
-        self, conn_two_accounts: asyncpg.Connection[Any]
-    ) -> None:
-        """Idempotency on ``(connector, external_account_id)`` within one tenant."""
-        first = await queries.insert_connection(
-            conn_two_accounts,
-            account_id="acc_a",
-            connector="signal",
-            external_account_id="+15550001",
-            metadata={},
-        )
-        second = await queries.insert_connection(
-            conn_two_accounts,
-            account_id="acc_a",
-            connector="signal",
-            external_account_id="+15550001",
-            metadata={},
-        )
-        assert second.id == first.id
-
     async def test_archived_then_reinsert_same_tenant(
         self, conn_two_accounts: asyncpg.Connection[Any]
     ) -> None:

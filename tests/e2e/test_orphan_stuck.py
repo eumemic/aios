@@ -92,6 +92,26 @@ class TestOrphanRecovery:
         assert len(repaired) == 1
         assert repaired[0] == (session.id, "call_b")
 
+        # #685 branch assertion: tool B's handler had already begun executing
+        # (tool_b_started fired) before the SIGKILL, so a ``tool_execute_start``
+        # span exists and the synthetic result must take the over-pessimistic
+        # "may have completed" branch — distinct from the "did not run" wording
+        # for never-dispatched ghosts. Without this, the test is a near-subset of
+        # test_sweep.py's ghost-recovery cases; with it, this scenario (a single
+        # batch where one sibling's real result is logged AND the other is a
+        # started-then-killed ghost, reaching inference via the batch-completion
+        # branch with no user-message bypass) carries its own weight.
+        events = await harness.events(session.id)
+        ghost_result = next(
+            e
+            for e in events
+            if e.kind == "message"
+            and e.data.get("role") == "tool"
+            and e.data.get("tool_call_id") == "call_b"
+        )
+        assert ghost_result.data.get("is_error") is True
+        assert "may have completed" in ghost_result.data.get("content", "")
+
         # Session should now need inference.
         needs = await harness.sessions_needing_inference(session.id)
         assert session.id in needs, (

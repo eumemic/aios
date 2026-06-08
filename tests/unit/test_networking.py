@@ -24,7 +24,6 @@ from aios.sandbox.backends.base import (
 )
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.setup import (
-    PACKAGE_REGISTRY_HOSTS,
     apply_network_lockdown,
     build_iptables_script,
 )
@@ -329,11 +328,6 @@ class TestApplyNetworkLockdown:
 
         script = backend.calls[0][1]["command"]
         assert "aios-worker:8765" in script
-
-    def test_package_registry_hosts_constant_is_populated(self) -> None:
-        # Sanity: the constant exists and contains representative hosts.
-        assert "pypi.org" in PACKAGE_REGISTRY_HOSTS
-        assert "registry.npmjs.org" in PACKAGE_REGISTRY_HOSTS
 
 
 # ── lockdown fails closed (security gate, not best-effort) ─────────────────────

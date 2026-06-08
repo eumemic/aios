@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from aios.harness.channels import (
+    FOCAL_CHANNEL_META_KEY,
     SWITCH_CHANNEL_METADATA_KEY,
     derive_last_seen,
     derive_unread_counts,
@@ -288,3 +289,7 @@ class TestFocalChannelPath:
     def test_trailing_slash_yields_empty_suffix_is_none(self) -> None:
         # "signal/bot/" → 3 segments but chat_id is empty → None.
         assert focal_channel_path("signal/bot/") is None
+
+    def test_meta_key_constant_is_stable(self) -> None:
+        # External connectors snapshot this string; flag any rename.
+        assert FOCAL_CHANNEL_META_KEY == "aios.focal_channel_path"

@@ -30,10 +30,8 @@ import pytest
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.harness.channels import (
-    FOCAL_CHANNEL_META_KEY,
     MONOLOGUE_PREFIX,
     SWITCH_CHANNEL_METADATA_KEY,
-    focal_channel_path,
 )
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
@@ -246,31 +244,3 @@ class TestFocalChannelE2E:
         content = asst.data.get("content")
         assert isinstance(content, str)
         assert content.startswith(MONOLOGUE_PREFIX), content
-
-
-class TestFocalChannelPathHelper:
-    """Pure unit tests for the helper that strips the connector segment
-    from a focal address before injection into MCP ``_meta``.  Lives
-    here so the e2e file is the single home for focal-channel coverage;
-    the helper is otherwise covered indirectly by the dispatch path.
-
-    Account is preserved in the meta value so multi-account connectors
-    can route by it; single-account connectors take the chat suffix only.
-    """
-
-    def test_strips_only_connector_preserves_account(self) -> None:
-        assert focal_channel_path("signal/+1/chat-a") == "+1/chat-a"
-
-    def test_preserves_trailing_segments(self) -> None:
-        assert focal_channel_path("telegram/bot/group/thread-1") == "bot/group/thread-1"
-
-    def test_returns_none_when_focal_unset(self) -> None:
-        assert focal_channel_path(None) is None
-
-    def test_returns_none_for_two_segment_addresses(self) -> None:
-        # Less than 3 segments means no chat suffix to inject.
-        assert focal_channel_path("signal/+1") is None
-
-    def test_meta_key_constant_is_stable(self) -> None:
-        # External connectors snapshot this string; flag any rename.
-        assert FOCAL_CHANNEL_META_KEY == "aios.focal_channel_path"

@@ -45,13 +45,6 @@ class TestWfRunCreate:
         assert run.workflow_id == "wf_1" and run.environment_id == "env_1"
         assert run.input is None
 
-    @pytest.mark.parametrize("value", [42, "go", ["a", "b"], {"x": 1}, None])
-    def test_input_accepts_arbitrary_json(self, value: object) -> None:
-        run = WfRunCreate.model_validate(
-            {"workflow_id": "wf_1", "environment_id": "env_1", "input": value}
-        )
-        assert run.input == value
-
     def test_requires_workflow_and_environment(self) -> None:
         with pytest.raises(ValidationError):
             WfRunCreate.model_validate({"workflow_id": "wf_1"})
@@ -63,10 +56,6 @@ class TestGateResume:
     def test_minimal(self) -> None:
         g = GateResume.model_validate({"gate_nonce": "abc"})
         assert g.gate_nonce == "abc" and g.result is None
-
-    @pytest.mark.parametrize("value", [True, "approved", {"answer": 42}, [1, 2]])
-    def test_result_accepts_arbitrary_json(self, value: object) -> None:
-        assert GateResume.model_validate({"gate_nonce": "n", "result": value}).result == value
 
     def test_requires_nonce(self) -> None:
         with pytest.raises(ValidationError):

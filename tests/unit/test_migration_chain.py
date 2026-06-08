@@ -31,45 +31,30 @@ def test_single_head() -> None:
     assert script.get_heads() == ["0069"]
 
 
-def test_chain_is_linear_0054_to_head() -> None:
-    """``0054 -> … -> 0069`` (the current head) is a plain linear chain."""
+def test_chain_is_linear() -> None:
+    """The whole migration ladder is a plain linear chain: every revision has a
+    single parent and there is exactly one base.
+
+    Walking the chain generically (rather than pinning each ``down_revision``
+    pointer as a literal) keeps this from being a maintenance tax that forces an
+    edit on every new migration, and it catches a merge point *anywhere* in the
+    chain rather than only within a hardcoded window. The single-head half of
+    linearity is covered by :func:`test_single_head`.
+    """
     script = _script_directory()
 
-    rev_0069 = script.get_revision("0069")
-    rev_0068 = script.get_revision("0068")
-    rev_0067 = script.get_revision("0067")
-    rev_0066 = script.get_revision("0066")
-    rev_0065 = script.get_revision("0065")
-    rev_0064 = script.get_revision("0064")
-    rev_0063 = script.get_revision("0063")
-    rev_0062 = script.get_revision("0062")
-    rev_0061 = script.get_revision("0061")
-    rev_0060 = script.get_revision("0060")
-    rev_0059 = script.get_revision("0059")
-    rev_0058 = script.get_revision("0058")
-    rev_0057 = script.get_revision("0057")
-    rev_0056 = script.get_revision("0056")
-    rev_0055 = script.get_revision("0055")
+    revisions = list(script.walk_revisions())  # head → base
 
-    assert rev_0069.down_revision == "0068"
-    assert rev_0068.down_revision == "0067"
-    assert rev_0067.down_revision == "0066"
-    assert rev_0066.down_revision == "0065"
-    assert rev_0065.down_revision == "0064"
-    assert rev_0064.down_revision == "0063"
-    assert rev_0063.down_revision == "0062"
-    assert rev_0062.down_revision == "0061"
-    assert rev_0061.down_revision == "0060"
-    assert rev_0060.down_revision == "0059"
-    assert rev_0059.down_revision == "0058"
-    assert rev_0058.down_revision == "0057"
-    assert rev_0057.down_revision == "0056"
-    assert rev_0056.down_revision == "0055"
-    assert rev_0055.down_revision == "0054"
+    # A tuple down_revision is a merge point (multiple parents); only ``str``
+    # (a single parent) or ``None`` (the base) keeps the chain linear.
+    for rev in revisions:
+        assert rev.down_revision is None or isinstance(rev.down_revision, str), (
+            f"revision {rev.revision} has a non-linear down_revision: {rev.down_revision!r}"
+        )
 
-    # A tuple/list down_revision would mean a merge/branch point.
-    for rev in (rev_0061, rev_0060, rev_0059, rev_0058, rev_0057, rev_0056, rev_0055):
-        assert isinstance(rev.down_revision, str)
+    # Exactly one base (down_revision is None); a second base is a detached sub-chain.
+    bases = [rev.revision for rev in revisions if rev.down_revision is None]
+    assert len(bases) == 1, f"expected a single base revision, found {bases}"
 
 
 def test_revision_0055_resolvable() -> None:
