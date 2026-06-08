@@ -44,104 +44,115 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     # ── add columns ──────────────────────────────────────────────────────
     op.execute(
-        "ALTER TABLE sessions "
-        "ADD COLUMN IF NOT EXISTS last_reacted_seq BIGINT NOT NULL DEFAULT 0"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_reacted_seq BIGINT NOT NULL DEFAULT 0"
     )
     op.execute(
-        "ALTER TABLE sessions "
-        "ADD COLUMN IF NOT EXISTS open_tool_call_count INT NOT NULL DEFAULT 0"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS open_tool_call_count INT NOT NULL DEFAULT 0"
     )
     op.execute(
-        "ALTER TABLE sessions "
-        "ADD COLUMN IF NOT EXISTS last_error_seq BIGINT NOT NULL DEFAULT 0"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_error_seq BIGINT NOT NULL DEFAULT 0"
     )
     op.execute(
-        "ALTER TABLE sessions "
-        "ADD COLUMN IF NOT EXISTS last_user_seq BIGINT NOT NULL DEFAULT 0"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_user_seq BIGINT NOT NULL DEFAULT 0"
     )
     op.execute(
-        "ALTER TABLE sessions "
-        "ADD COLUMN IF NOT EXISTS last_stimulus_seq BIGINT NOT NULL DEFAULT 0"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_stimulus_seq BIGINT NOT NULL DEFAULT 0"
     )
 
-    # ── backfill last_user_seq ───────────────────────────────────────────
+    # ── backfill all five scalars: ONE set-based statement ───────────────
+    #
+    # This MUST be a single set-based pass, NOT five correlated per-session
+    # subqueries. The obvious correlated form (``SELECT MAX(...) WHERE
+    # e.session_id = s.id`` per column, one of them a ``COUNT(*)`` over
+    # ``jsonb_array_elements`` with a ``NOT EXISTS`` anti-join) re-runs the
+    # exact O(session-size) event-log scan this very feature exists to
+    # eliminate — once per session, under ``ACCESS EXCLUSIVE``. On prod it
+    # hung for minutes on a 320k-event session and took ``/v1/sessions`` down
+    # during deploy (#748/#749 reintroduced as a one-time migration cost).
+    # CI never caught it because testcontainer DBs are tiny. The set-based
+    # form below scans ``events`` a handful of times TOTAL (each CTE is one
+    # grouped aggregate), independent of any single session's size.
+    #
+    # Each CTE is the authoritative definition of one scalar, matched to how
+    # ``append_event`` maintains it forward (src/aios/db/queries/__init__.py):
+    #
+    #   last_user_seq      MAX(seq) over user messages (the error-clear latch)
+    #   last_stimulus_seq  MAX(seq) over NON-assistant messages (user + tool);
+    #                      the unreacted-stimulus watermark that drives the
+    #                      active predicate — see the module docstring on why
+    #                      this excludes the session's own assistant replies
+    #   last_error_seq     MAX(seq) over error lifecycle events
+    #   last_reacted_seq   MAX(COALESCE(reacting_to, seq)) over assistant
+    #                      messages — the pre-#732 ``session_max_reacting``
+    #                      CTE; turn_ended lifecycle events do NOT advance it
+    #   open_tool_call_count  assistant tool_call ids with no paired tool-role
+    #                      result, per-id anti-join. The ``tool_calls`` JSON is
+    #                      unwrapped with the codebase-canonical
+    #                      ``COALESCE(NULLIF(...,'null'),'[]')`` guard (the same
+    #                      form ``_unresolved_tool_calls`` uses) so a stored
+    #                      ``"tool_calls": null`` yields zero rows instead of
+    #                      "cannot extract elements from a scalar" — the bare
+    #                      ``jsonb_array_elements(data->'tool_calls')`` form
+    #                      ERRORS on that shape and would abort the migration.
     op.execute(
         """
+        WITH
+        user_s AS (
+            SELECT session_id, MAX(seq) AS m FROM events
+             WHERE kind = 'message' AND role = 'user'
+             GROUP BY session_id
+        ),
+        stim_s AS (
+            SELECT session_id, MAX(seq) AS m FROM events
+             WHERE kind = 'message' AND role <> 'assistant'
+             GROUP BY session_id
+        ),
+        err_s AS (
+            SELECT session_id, MAX(seq) AS m FROM events
+             WHERE kind = 'lifecycle' AND data->>'stop_reason' = 'error'
+             GROUP BY session_id
+        ),
+        react_s AS (
+            SELECT session_id,
+                   MAX(COALESCE((data->>'reacting_to')::bigint, seq)) AS m
+              FROM events
+             WHERE kind = 'message' AND role = 'assistant'
+             GROUP BY session_id
+        ),
+        asst AS (
+            SELECT session_id,
+                   jsonb_array_elements(
+                       COALESCE(NULLIF(data->'tool_calls', 'null'::jsonb),
+                                '[]'::jsonb)
+                   )->>'id' AS tcid
+              FROM events
+             WHERE kind = 'message' AND role = 'assistant'
+               AND data ? 'tool_calls'
+        ),
+        res AS (
+            SELECT session_id, data->>'tool_call_id' AS tcid FROM events
+             WHERE kind = 'message' AND role = 'tool'
+        ),
+        open_s AS (
+            SELECT a.session_id,
+                   COUNT(*) FILTER (WHERE r.tcid IS NULL) AS m
+              FROM asst a
+              LEFT JOIN res r USING (session_id, tcid)
+             GROUP BY a.session_id
+        )
         UPDATE sessions s
-           SET last_user_seq = COALESCE((
-               SELECT MAX(e.seq) FROM events e
-                WHERE e.session_id = s.id
-                  AND e.kind = 'message' AND e.role = 'user'
-           ), 0)
-        """
-    )
-
-    # ── backfill last_stimulus_seq ───────────────────────────────────────
-    # Max seq of the stimuli the assistant must react to: message events
-    # whose role is NOT 'assistant' (user + tool). Excludes the session's
-    # own assistant replies — that exclusion is the whole point of the
-    # column (see module docstring).
-    op.execute(
-        """
-        UPDATE sessions s
-           SET last_stimulus_seq = COALESCE((
-               SELECT MAX(e.seq) FROM events e
-                WHERE e.session_id = s.id
-                  AND e.kind = 'message' AND e.role <> 'assistant'
-           ), 0)
-        """
-    )
-
-    # ── backfill last_error_seq ──────────────────────────────────────────
-    op.execute(
-        """
-        UPDATE sessions s
-           SET last_error_seq = COALESCE((
-               SELECT MAX(e.seq) FROM events e
-                WHERE e.session_id = s.id
-                  AND e.kind = 'lifecycle' AND e.data->>'stop_reason' = 'error'
-           ), 0)
-        """
-    )
-
-    # ── backfill last_reacted_seq ────────────────────────────────────────
-    # The reaction watermark: MAX(COALESCE(reacting_to, seq)) over assistant
-    # messages — exactly the pre-#732 ``session_max_reacting`` CTE. NOT bumped
-    # by ``turn_ended`` lifecycle events: a rescheduling ``turn_ended`` has no
-    # assistant reaction, and folding it in would falsely mark an unreacted
-    # user message as reacted-to (flipping a retry-pending session to idle).
-    op.execute(
-        """
-        UPDATE sessions s
-           SET last_reacted_seq = COALESCE((
-               SELECT MAX(COALESCE((e.data->>'reacting_to')::bigint, e.seq))
-                 FROM events e
-                WHERE e.session_id = s.id
-                  AND e.kind = 'message' AND e.role = 'assistant'
-           ), 0)
-        """
-    )
-
-    # ── backfill open_tool_call_count ────────────────────────────────────
-    # Count tool_call_ids from assistant messages that have no paired
-    # tool-role result event, using per-tool_call_id anti-join.
-    op.execute(
-        """
-        UPDATE sessions s
-           SET open_tool_call_count = COALESCE((
-               SELECT COUNT(*)
-                 FROM events ate
-                CROSS JOIN LATERAL jsonb_array_elements(ate.data->'tool_calls') tc
-                WHERE ate.session_id = s.id
-                  AND ate.kind = 'message' AND ate.role = 'assistant'
-                  AND ate.data ? 'tool_calls'
-                  AND NOT EXISTS (
-                      SELECT 1 FROM events tr
-                       WHERE tr.session_id = s.id
-                         AND tr.kind = 'message' AND tr.role = 'tool'
-                         AND tr.data->>'tool_call_id' = tc->>'id'
-                  )
-           ), 0)
+           SET last_user_seq        = COALESCE(u.m, 0),
+               last_stimulus_seq     = COALESCE(st.m, 0),
+               last_error_seq        = COALESCE(e.m, 0),
+               last_reacted_seq      = COALESCE(rc.m, 0),
+               open_tool_call_count  = COALESCE(o.m, 0)
+          FROM sessions s2
+          LEFT JOIN user_s  u  ON u.session_id  = s2.id
+          LEFT JOIN stim_s  st ON st.session_id = s2.id
+          LEFT JOIN err_s   e  ON e.session_id  = s2.id
+          LEFT JOIN react_s rc ON rc.session_id = s2.id
+          LEFT JOIN open_s  o  ON o.session_id  = s2.id
+         WHERE s.id = s2.id
         """
     )
 
