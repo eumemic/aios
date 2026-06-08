@@ -1,22 +1,17 @@
-"""Partial index on the ``workflow_child_done`` completion marker.
+"""Partial index on the workflow child's request-response event.
 
-A workflow agent child signals logical completion by appending a single
-``workflow_child_done`` lifecycle event (see ``tools/workflow_completion.py``).
-Three readers resolve that exact predicate and all benefit:
+A workflow agent child answers its request with a single ``workflow_child_done``
+lifecycle event (see ``tools/workflow_completion.py`` /
+``queries.write_response_if_absent``). ``queries.read_workflow_child_done`` reads
+that one event on every parent run-step harvest to resolve the ``agent()`` call;
+this partial index keeps that a point lookup instead of a per-wake history scan.
+The same index serves ``write_response_if_absent``'s exactly-once absent-recheck.
 
-* ``sweep.COMPLETED_CHILD_SESSIONS_SQL`` (``find_sessions_needing_inference``)
-  scans marker rows **cross-session** every sweep pass to subtract soft-terminal
-  children from the wake set — previously unindexed for this predicate.
-* the in-worker workflow-child reaper's candidate query (Block 2.F) selects
-  marker-present children to archive.
-* ``queries.read_workflow_child_done`` reads one child's marker on every parent
-  run-step harvest.
-
-Markers are rare relative to total events (one per finished workflow child), so
-this is a small partial index. Built with ``CREATE INDEX CONCURRENTLY`` (outside
-a transaction via ``autocommit_block``) so it never takes an ACCESS EXCLUSIVE
-lock on the live-written ``events`` table — same pattern as migrations 0023 /
-0062 / 0065.
+Responses are rare relative to total events (one per finished child), so this is a
+small partial index. Built with ``CREATE INDEX CONCURRENTLY`` (outside a
+transaction via ``autocommit_block``) so it never takes an ACCESS EXCLUSIVE lock
+on the live-written ``events`` table — same pattern as migrations 0023 / 0062 /
+0065.
 
 Revision ID: 0067
 Revises: 0066

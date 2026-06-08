@@ -1043,23 +1043,6 @@ async def get_session_workflow_context(
     return (row["account_id"], row["parent_run_id"]) if row is not None else None
 
 
-async def set_session_archived(
-    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
-) -> None:
-    """Idempotently soft-archive a session (no-op if already archived).
-
-    Unlike :func:`archive_session` this never raises ``NotFound`` — used by the
-    workflow completion tools (self-archive on ``return``) and run-termination
-    teardown, where a double-archive is benign.
-    """
-    await conn.execute(
-        "UPDATE sessions SET archived_at = now() "
-        "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL",
-        session_id,
-        account_id,
-    )
-
-
 async def read_workflow_child_done(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> dict[str, Any] | None:
@@ -1069,9 +1052,9 @@ async def read_workflow_child_done(
     The single explicit response a workflow child gives its request (`return`/
     `error`) — never inferred from idle. The run-step harvest reads it to resolve
     the `agent()` call. ``data`` is ``{event, request_id, is_error, result, error}``.
-    Exactly one exists per request (see :func:`write_response_if_absent`), so the
-    ``LIMIT 1`` is unambiguous; the ``seq DESC`` index walk just stops at the first
-    (only) match instead of scanning history forward on every parent wake.
+    Exactly one exists per request (see :func:`write_response_if_absent`), so
+    ``LIMIT 1`` returns it directly; the ``events_workflow_child_done_idx`` partial
+    index (0067) keeps this a point lookup rather than a per-wake history scan.
     """
     row = await conn.fetchrow(
         "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
