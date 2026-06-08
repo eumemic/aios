@@ -27,12 +27,16 @@ One wake:
 from __future__ import annotations
 
 import contextlib
+import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
 import asyncpg
 import jsonschema  # type: ignore[import-untyped]
+from referencing import Registry, Resource
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import DRAFT202012
 
 from aios.config import get_settings
 from aios.db import queries as db_queries
@@ -49,6 +53,44 @@ from aios.workflows.host_launcher import EmittedCapability, run_script_host
 log = get_logger("aios.workflows.step")
 
 _TERMINAL = ("completed", "errored")
+
+
+def _collect_refs(node: Any) -> list[str]:
+    """Every ``$ref`` / ``$dynamicRef`` / ``$recursiveRef`` string anywhere in a schema."""
+    refs: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("$ref", "$dynamicRef", "$recursiveRef") and isinstance(value, str):
+                refs.append(value)
+            refs.extend(_collect_refs(value))
+    elif isinstance(node, list):
+        for item in node:
+            refs.extend(_collect_refs(item))
+    return refs
+
+
+def _unresolvable_ref(schema: dict[str, Any]) -> str | None:
+    """The first reference in ``schema`` that does not resolve within the schema itself,
+    or ``None`` if every reference resolves.
+
+    A dangling local ``$ref`` or a remote ``$ref`` passes ``check_schema`` but raises a
+    referencing error when the child *applies* the schema — bricking the child (it can
+    never ``return`` a conforming value) until its wall-clock deadline. Rejecting it at
+    the spawn gate turns that into a clean author-facing error. Remote refs are
+    unresolvable by design: a sandboxed child must not fetch a schema over the network.
+    Valid self-contained refs (``#/$defs/…``) resolve and are left alone.
+    """
+    refs = _collect_refs(schema)
+    if not refs:
+        return None
+    resource = Resource.from_contents(schema, default_specification=DRAFT202012)
+    resolver = Registry().with_resource("", resource).resolver(base_uri="")
+    for ref in refs:
+        try:
+            resolver.lookup(ref)
+        except Unresolvable:
+            return ref
+    return None
 
 
 def _memo_outcome(call_result_payload: dict[str, Any]) -> dict[str, Any]:
@@ -332,14 +374,20 @@ async def _open_agent_capability(
     """
     account_id = run.account_id
     spec = cap.spec if isinstance(cap.spec, dict) else {}
-    output_schema = spec.get("output_schema")
+    # agent() carries output_schema as a canonical JSON *string* (so a schema's floats
+    # survive the call_key hash); reconstruct the dict. None means no schema demanded.
+    output_schema_raw = spec.get("output_schema")
+    output_schema = (
+        json.loads(output_schema_raw) if isinstance(output_schema_raw, str) else output_schema_raw
+    )
     if output_schema is not None:
         # Structured output: the child must return a value matching this schema (the
         # return tool enforces it; see workflow_completion). Reject a bad schema here —
-        # author-facing — rather than letting it explode when the child builds its
-        # validator. Require an *object* schema: a bare boolean (valid JSON Schema, but
-        # `false` rejects every value and `true` disables enforcement) is a degenerate
-        # author input, better surfaced as a bad call than a child that can never return.
+        # author-facing — rather than letting it brick the child when it applies the
+        # schema. Three author-facing failures: a non-object schema (a bare boolean is
+        # valid JSON Schema, but `false` rejects every value and `true` disables
+        # enforcement), a structurally-invalid schema, and one with an unresolvable
+        # reference (passes check_schema but raises at validation time).
         schema_error: str | None = None
         if not isinstance(output_schema, dict):
             schema_error = (
@@ -350,6 +398,12 @@ async def _open_agent_capability(
                 jsonschema.Draft202012Validator.check_schema(output_schema)
             except jsonschema.SchemaError as exc:
                 schema_error = f"output_schema is not a valid JSON Schema: {exc.message}"
+            else:
+                if (bad_ref := _unresolvable_ref(output_schema)) is not None:
+                    schema_error = (
+                        f"output_schema has an unresolvable reference {bad_ref!r} "
+                        "(references must resolve within the schema; remote refs are unsupported)"
+                    )
         if schema_error is not None:
             await _complete_run(
                 conn,

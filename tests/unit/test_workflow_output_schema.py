@@ -8,8 +8,14 @@ context builder renders into the child's request message.
 
 from __future__ import annotations
 
+import math
+
+import pytest
+
 from aios.harness.context import render_user_event
 from aios.tools.workflow_completion import _validate_value
+from aios.workflows.determinism import canonical_schema_json
+from aios.workflows.step import _unresolvable_ref
 
 _SCHEMA = {
     "type": "object",
@@ -55,3 +61,35 @@ def test_render_without_schema_is_unchanged() -> None:
     msg = render_user_event(event, None, None)
     assert "request_id: r1" in msg["content"]
     assert "JSON Schema" not in msg["content"]
+
+
+def test_canonical_schema_json_admits_floats_deterministically() -> None:
+    # A schema's decimal numeric constraints (which canonical_json bans for data) are
+    # admitted here and serialized stably + key-order-independent.
+    a = canonical_schema_json({"type": "number", "minimum": 1.5, "maximum": 9.9})
+    b = canonical_schema_json({"maximum": 9.9, "minimum": 1.5, "type": "number"})
+    assert a == b  # sort_keys → key order irrelevant
+    assert "1.5" in a and "9.9" in a
+    # NaN/Inf stay rejected (genuinely non-deterministic).
+    with pytest.raises(ValueError):
+        canonical_schema_json({"const": math.inf})
+
+
+def test_unresolvable_ref_accepts_valid_rejects_broken() -> None:
+    # No refs / valid self-contained local ref → resolves → None.
+    assert _unresolvable_ref({"type": "object", "properties": {"a": {"type": "number"}}}) is None
+    assert (
+        _unresolvable_ref(
+            {
+                "$defs": {"N": {"type": "string"}},
+                "properties": {"a": {"$ref": "#/$defs/N"}},
+            }
+        )
+        is None
+    )
+    # Dangling local ref, remote ref, dangling $dynamicRef → the offending ref.
+    assert (
+        _unresolvable_ref({"properties": {"a": {"$ref": "#/$defs/missing"}}}) == "#/$defs/missing"
+    )
+    assert _unresolvable_ref({"$ref": "https://example.com/s.json"}) == "https://example.com/s.json"
+    assert _unresolvable_ref({"properties": {"a": {"$dynamicRef": "#nope"}}}) == "#nope"
