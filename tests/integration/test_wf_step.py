@@ -402,12 +402,16 @@ async def test_return_writes_response_and_wakes_caller_without_archiving(
     pool = wf_runtime
     run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:d2#0")
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
-        res = await workflow_completion.return_handler(cid, {"value": {"answer": 42}})
+        res = await workflow_completion.return_handler(
+            cid, {"request_id": "sha:d2#0", "value": {"answer": 42}}
+        )
     assert res == {"status": "returned"}
     wake.assert_awaited_once_with(run_id)
 
     async with pool.acquire() as conn:
-        response = await db_queries.read_workflow_child_done(conn, cid, account_id="acc_wf")
+        response = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="sha:d2#0"
+        )
     assert response is not None
     assert response["is_error"] is False and response["result"] == {"answer": 42}
     child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
@@ -422,10 +426,14 @@ async def test_error_marker_carries_message(
     pool = wf_runtime
     _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:d2e#0")
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
-        res = await workflow_completion.error_handler(cid, {"message": "nope"})
+        res = await workflow_completion.error_handler(
+            cid, {"request_id": "sha:d2e#0", "message": "nope"}
+        )
     assert res == {"status": "errored"}
     async with pool.acquire() as conn:
-        marker = await db_queries.read_workflow_child_done(conn, cid, account_id="acc_wf")
+        marker = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="sha:d2e#0"
+        )
     assert marker is not None and marker["is_error"] is True
     assert marker["error"] == {"message": "nope"}
 
@@ -446,33 +454,43 @@ async def test_return_from_non_child_fails_closed(
         metadata={},
     )
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
-        res = await workflow_completion.return_handler(fg.id, {"value": 1})
+        res = await workflow_completion.return_handler(fg.id, {"request_id": "x", "value": 1})
     assert isinstance(res, ToolResult) and res.is_error
     wake.assert_not_awaited()  # never signal a NULL parent run
     async with pool.acquire() as conn:
-        marker = await db_queries.read_workflow_child_done(conn, fg.id, account_id="acc_wf")
+        marker = await db_queries.read_request_response(
+            conn, fg.id, account_id="acc_wf", request_id="x"
+        )
     assert marker is None
 
 
 async def test_request_is_answered_exactly_once(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
-    """A child that responds twice (return then return, or return racing error)
-    yields exactly ONE response — first-writer-wins — and wakes the caller once."""
+    """A request is answered exactly once. The first response wins and wakes the
+    caller; a second answer to the now-closed request is rejected as
+    ``unknown_request`` (it's no longer open). The genuinely-concurrent race is
+    still caught one layer down by ``write_response_if_absent``."""
     from aios.tools import workflow_completion
+    from aios.tools.registry import ToolResult
 
     pool = wf_runtime
     run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:once#0")
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
-        r1 = await workflow_completion.return_handler(cid, {"value": "first"})
-        r2 = await workflow_completion.error_handler(cid, {"message": "too late"})
-    assert r1 == {"status": "returned"} and r2 == {"status": "errored"}
+        r1 = await workflow_completion.return_handler(
+            cid, {"request_id": "sha:once#0", "value": "first"}
+        )
+        r2 = await workflow_completion.error_handler(
+            cid, {"request_id": "sha:once#0", "message": "too late"}
+        )
+    assert r1 == {"status": "returned"}
+    assert isinstance(r2, ToolResult) and r2.is_error  # request already answered → not open
     wake.assert_awaited_once_with(run_id)  # only the first response woke the caller
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
-            "AND kind = 'lifecycle' AND data->>'event' = 'workflow_child_done'",
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_response'",
             cid,
             "acc_wf",
         )
@@ -501,7 +519,10 @@ async def test_return_real_dispatch_appends_result_and_does_not_archive(
     run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:rd#0")
     call = {
         "id": "call_ret",
-        "function": {"name": "return", "arguments": _json.dumps({"value": "ok"})},
+        "function": {
+            "name": "return",
+            "arguments": _json.dumps({"request_id": "sha:rd#0", "value": "ok"}),
+        },
     }
 
     prev_reg = runtime.task_registry
@@ -518,7 +539,9 @@ async def test_return_real_dispatch_appends_result_and_does_not_archive(
     wake.assert_awaited_once_with(run_id)
     async with pool.acquire() as conn:
         result = await db_queries.find_tool_result_event(conn, cid, "call_ret", account_id="acc_wf")
-        marker = await db_queries.read_workflow_child_done(conn, cid, account_id="acc_wf")
+        marker = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="sha:rd#0"
+        )
         events = await db_queries.read_events(conn, cid, account_id="acc_wf", limit=1000)
     # invariant #4: exactly one tool_result for the call; both spans balanced.
     assert result is not None and not bool(result.data.get("is_error"))
@@ -565,7 +588,7 @@ async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
     from aios.tools import workflow_completion
 
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
-        await workflow_completion.return_handler(cid, {"value": "r"})
+        await workflow_completion.return_handler(cid, {"request_id": call_key, "value": "r"})
 
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
@@ -585,6 +608,13 @@ async def _child_id_of(pool: asyncpg.Pool[Any], run_id: str) -> str:
     return next(e.payload["child_session_id"] for e in events if e.type == "call_started")
 
 
+async def _open_request_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
+    """The child's single open request id (= the agent() call_key it answers)."""
+    async with pool.acquire() as conn:
+        ids = await db_queries.get_open_request_ids(conn, session_id, account_id="acc_wf")
+    return ids[0]
+
+
 async def test_agent_round_trip_harvest_completes_run(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
@@ -595,9 +625,12 @@ async def test_agent_round_trip_harvest_completes_run(
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
 
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
-        await workflow_completion.return_handler(child_id, {"value": "child-result"})
+        await workflow_completion.return_handler(
+            child_id, {"request_id": rid, "value": "child-result"}
+        )
 
     await run_workflow_step(run_id)  # harvest marker -> call_result -> replay -> complete
     async with pool.acquire() as conn:
@@ -628,8 +661,9 @@ async def test_uncaught_agent_error_bubbles_and_errors_the_run(
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
     child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
-        await workflow_completion.error_handler(child_id, {"message": "boom"})
+        await workflow_completion.error_handler(child_id, {"request_id": rid, "message": "boom"})
 
     await run_workflow_step(run_id)  # harvest -> throw AgentError -> uncaught -> RAISED
     async with pool.acquire() as conn:
@@ -662,8 +696,9 @@ async def test_workflow_try_except_agent_error_continues(
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
     child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
-        await workflow_completion.error_handler(child_id, {"message": "nope"})
+        await workflow_completion.error_handler(child_id, {"request_id": rid, "message": "nope"})
 
     await run_workflow_step(run_id)  # harvest -> throw AgentError -> caught -> return
     async with pool.acquire() as conn:
@@ -685,8 +720,11 @@ async def test_workflow_uses_agent_return_value(
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
     child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
-        await workflow_completion.return_handler(child_id, {"value": "the-answer"})
+        await workflow_completion.return_handler(
+            child_id, {"request_id": rid, "value": "the-answer"}
+        )
 
     await run_workflow_step(run_id)
     async with pool.acquire() as conn:
@@ -708,6 +746,7 @@ async def test_model_failure_writes_error_response_and_run_resolves(
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)  # capture before the erroring path answers it
 
     # Drive the child to its terminal-error landing pad: seed a full rescheduling
     # streak so the next failure spends the retry budget, then run the erroring path.
@@ -721,7 +760,9 @@ async def test_model_failure_writes_error_response_and_run_resolves(
     wake.assert_awaited_once_with(run_id)  # the caller was woken to harvest
 
     async with pool.acquire() as conn:
-        response = await db_queries.read_workflow_child_done(conn, child_id, account_id="acc_wf")
+        response = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
     assert response is not None
     assert response["is_error"] is True and response["error"] == {"kind": "child_errored"}
 
@@ -751,7 +792,7 @@ async def test_model_failure_does_not_clobber_a_prior_response(
     pool = wf_runtime
     _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:prec#0")
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
-        await workflow_completion.return_handler(cid, {"value": "real"})
+        await workflow_completion.return_handler(cid, {"request_id": "sha:prec#0", "value": "real"})
 
     for _ in range(len(loop._RETRY_BACKOFF_SECONDS)):
         await loop._append_lifecycle(
@@ -764,13 +805,147 @@ async def test_model_failure_does_not_clobber_a_prior_response(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
-            "AND kind = 'lifecycle' AND data->>'event' = 'workflow_child_done'",
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_response'",
             cid,
             "acc_wf",
         )
     assert len(rows) == 1  # still exactly one response
     response = db_queries.parse_jsonb(rows[0]["data"])
     assert response["is_error"] is False and response["result"] == "real"  # the return() won
+
+
+# ─── R4 — the session-quiescence totality guard (nudge → no_return) ───────────
+
+
+async def _idle_assistant_turn(pool: asyncpg.Pool[Any], session_id: str) -> dict[str, Any]:
+    """An assistant message that reacts to everything so far and calls no tools —
+    i.e. a pure-text turn that would leave the session idle (the guard's trigger)."""
+    child = await sessions_service.get_session_basic(pool, session_id, account_id="acc_wf")
+    return {"role": "assistant", "content": "thinking…", "reacting_to": child.last_event_seq}
+
+
+async def test_idle_with_open_request_is_nudged(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A child that ends a tool-call-free turn while still owing a request is nudged
+    in the same transaction as the idling assistant event — so it never goes idle
+    with a debt — and the nudge (a user message) keeps it active for another turn."""
+    pool = wf_runtime
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:n#0")
+
+    assistant = await _idle_assistant_turn(pool, cid)
+    nudged, autoerrored, caller = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, cid, assistant, account_id="acc_wf"
+    )
+    assert nudged and not autoerrored and caller is None
+
+    async with pool.acquire() as conn:
+        open_ids = await db_queries.get_open_request_ids(conn, cid, account_id="acc_wf")
+        nudges = await db_queries.count_request_nudges(
+            conn, cid, account_id="acc_wf", request_id="sha:n#0"
+        )
+        status = await db_queries.derive_session_status(conn, cid, account_id="acc_wf")
+    assert open_ids == ["sha:n#0"]  # still open — nudging is not answering
+    assert nudges == 1
+    assert status == "active"  # the nudge user message keeps it alive, no idle window
+
+
+async def test_quiescence_guard_is_noop_without_open_requests(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The guard is a strict no-op for an ordinary session (no requests owed): the
+    assistant message is appended and the session goes idle, with no nudge."""
+    pool = wf_runtime
+    fg = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+    )
+    assistant = await _idle_assistant_turn(pool, fg.id)
+    nudged, autoerrored, caller = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, fg.id, assistant, account_id="acc_wf"
+    )
+    assert not nudged and not autoerrored and caller is None
+    async with pool.acquire() as conn:
+        status = await db_queries.derive_session_status(conn, fg.id, account_id="acc_wf")
+        nudge_msgs = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'message' AND role = 'user'",
+            fg.id,
+            "acc_wf",
+        )
+    assert status == "idle"  # an ordinary session is free to rest
+    assert nudge_msgs == 0  # no nudge injected
+
+
+async def test_open_request_is_auto_errored_after_nudge_budget(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """After REQUEST_NUDGE_BUDGET nudges, a still-unanswered request is auto-errored
+    with a monotonic no_return response — so totality holds even for a model that
+    ignores every nudge — and the session is then free to go idle."""
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:nr#0")
+
+    for _ in range(sessions_service.REQUEST_NUDGE_BUDGET):
+        nudged, autoerrored, _caller = await sessions_service.append_assistant_and_guard_quiescence(
+            pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf"
+        )
+        assert nudged and not autoerrored  # still under budget — keep nudging
+
+    # Budget spent: the next pure-text turn auto-errors the request instead.
+    nudged, autoerrored, caller = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf"
+    )
+    assert autoerrored and not nudged
+    assert caller == run_id  # the caller run is woken to harvest the no_return
+
+    async with pool.acquire() as conn:
+        resp = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="sha:nr#0"
+        )
+        open_ids = await db_queries.get_open_request_ids(conn, cid, account_id="acc_wf")
+        status = await db_queries.derive_session_status(conn, cid, account_id="acc_wf")
+    assert resp is not None and resp["is_error"] is True and resp["error"] == {"kind": "no_return"}
+    assert open_ids == []  # answered (by the backstop) → no longer open
+    assert status == "idle"  # nothing owed → free to rest
+
+
+async def test_non_answering_child_resolves_run_via_agent_no_return_error(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """R4 headline — a child that never answers does not hang the run. After the
+    nudge budget the request is auto-errored (no_return); the run harvests it and
+    the script's ``agent()`` raises ``AgentNoReturnError``, which the workflow can
+    catch and continue past."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent({wf_agent_id!r}, 'go')\n"
+        "    except AgentNoReturnError:\n"
+        "        return 'gave-up'\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+
+    # The child ignores every nudge: BUDGET nudges, then the auto-error turn.
+    for _ in range(sessions_service.REQUEST_NUDGE_BUDGET + 1):
+        await sessions_service.append_assistant_and_guard_quiescence(
+            pool, child_id, await _idle_assistant_turn(pool, child_id), account_id="acc_wf"
+        )
+
+    await run_workflow_step(run_id)  # harvest no_return -> AgentNoReturnError -> caught -> return
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["is_error"] is True and cr.payload["error"] == {"kind": "no_return"}
+    assert run is not None and run.status == "completed" and run.output == "gave-up"
 
 
 async def test_agent_stays_suspended_until_marker(

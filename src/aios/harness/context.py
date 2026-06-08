@@ -333,6 +333,17 @@ def render_user_event(
     metadata = event_data.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else None
 
+    # A request injected via invoke_session (e.g. a workflow agent child's first
+    # message) carries metadata.request.request_id. return/error require that id, so
+    # surface it on the rendered message — this is where the model reads what to echo
+    # back. Deterministic function of the event, so the context stays monotonic.
+    request = metadata.get("request") if metadata else None
+    if isinstance(request, dict) and isinstance(request.get("request_id"), str):
+        rid = request["request_id"]
+        marker = f"[request_id: {rid} — reply with return/error using this request_id]"
+        existing = msg.get("content") or ""
+        msg["content"] = f"{marker}\n{existing}" if existing else marker
+
     if orig_channel is None:
         return msg
 

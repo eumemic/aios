@@ -41,8 +41,8 @@ from aios.models.agents import (
 )
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
-from aios.services.wake import defer_wake
-from aios.tools.workflow_completion import respond_to_request
+from aios.services.wake import defer_run_wake, defer_wake
+from aios.tools.workflow_completion import fail_all_open_requests
 
 if TYPE_CHECKING:
     import asyncpg
@@ -466,11 +466,27 @@ async def _run_session_step_body(
     # wake. ``find_sessions_needing_inference`` uses it as the watermark.
     assistant_msg["reacting_to"] = step_ctx.reacting_to
 
-    # Append assistant message to the session log (unfenced — procrastinate
-    # lock provides mutual exclusion).
-    await sessions_service.append_event(
-        pool, session_id, "message", assistant_msg, account_id=account_id
+    # Append assistant message to the session log (unfenced — procrastinate lock
+    # provides mutual exclusion) and, in the SAME transaction, enforce request
+    # totality: if this tool-call-free turn would leave the session idle while it
+    # owes a request response, a nudge (or a no_return error once the budget is
+    # spent) is written atomically with the idling event — so no reader ever
+    # observes the session idle with an open request. A strict no-op for any
+    # session that owes nothing (the common case).
+    (
+        nudged,
+        autoerrored,
+        caller_run_id,
+    ) = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, session_id, assistant_msg, account_id=account_id
     )
+    if nudged:
+        # The nudge is a fresh user message (delay-less, like any user-message wake,
+        # so — unlike the retry deferral — it has no queue-latency window to land in);
+        # wake promptly to give the model another turn to answer.
+        await defer_wake(pool, session_id, account_id=account_id, cause="request_nudge")
+    if autoerrored and caller_run_id is not None:
+        await defer_run_wake(caller_run_id)
 
     # Partition tool calls into dispatch buckets. Immediate builtin/MCP
     # launch now; ``needs_confirm`` and ``custom`` sit unresolved in the
@@ -841,12 +857,12 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
         pool, session_id, "turn_ended", "errored", "error", account_id=account_id
     )
     # A workflow child whose model errored past its retry budget can no longer
-    # answer the request it was invoked with. Respond on its behalf with a
-    # monotonic error so the invoking run resolves (and can raise AgentError)
+    # answer the requests it was invoked with. Error every one on its behalf with a
+    # monotonic response so each invoking run resolves (and can raise AgentError)
     # instead of hanging forever on a dead child. No-op for any session that isn't
-    # a workflow child owing an open request.
-    await respond_to_request(
-        pool, session_id, is_error=True, result=None, error={"kind": "child_errored"}
+    # a workflow child owing open requests.
+    await fail_all_open_requests(
+        pool, session_id, account_id=account_id, error={"kind": "child_errored"}
     )
     return None
 

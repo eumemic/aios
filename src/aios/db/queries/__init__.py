@@ -1043,48 +1043,96 @@ async def get_session_workflow_context(
     return (row["account_id"], row["parent_run_id"]) if row is not None else None
 
 
-async def read_workflow_child_done(
-    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+async def read_request_response(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
 ) -> dict[str, Any] | None:
-    """The child's request **response** (`workflow_child_done`), or ``None`` if the
-    request is still open.
+    """A specific request's **response** (`request_response` event), or ``None`` if
+    the request is still open.
 
-    The single explicit response a workflow child gives its request (`return`/
-    `error`) — never inferred from idle. The run-step harvest reads it to resolve
+    The single explicit response a session gives a request it was invoked with —
+    a `return`/`error` from the model, the harness erroring path, or the no_return
+    backstop — never inferred from idle. The run-step harvest reads it to resolve
     the `agent()` call. ``data`` is ``{event, request_id, is_error, result, error}``.
     Exactly one exists per request (see :func:`write_response_if_absent`), so
-    ``LIMIT 1`` returns it directly; the ``events_workflow_child_done_idx`` partial
+    ``LIMIT 1`` returns it directly; the ``events_request_response_idx`` partial
     index (0067) keeps this a point lookup rather than a per-wake history scan.
     """
     row = await conn.fetchrow(
         "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
-        "AND kind = 'lifecycle' AND data->>'event' = 'workflow_child_done' "
-        "ORDER BY seq DESC LIMIT 1",
+        "AND kind = 'lifecycle' AND data->>'event' = 'request_response' "
+        "AND data->>'request_id' = $3 ORDER BY seq DESC LIMIT 1",
         session_id,
         account_id,
+        request_id,
     )
     return parse_jsonb(row["data"]) if row is not None else None
 
 
-async def get_open_request_id(
+async def get_open_request_ids(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
-) -> str | None:
-    """The ``request_id`` of the session's open request, or ``None`` if it has none.
+) -> list[str]:
+    """The ``request_id``s of the session's still-open requests, oldest first.
 
     A request is a user message stamped ``metadata.request.request_id`` (see
-    ``create_child_session`` / `invoke_session`). v1 injects exactly one per child,
-    so this returns that one; multi-request `invoke_session` will refine "open" to
-    "no response yet" and let `return`/`error` name an explicit ``request_id``.
+    ``create_child_session`` / `invoke_session`); it is *open* until a
+    ``request_response`` event answers it. Returns the asked-minus-answered set, so
+    an ordinary session (no requests) returns ``[]`` and the quiescence guard
+    no-ops for it. v1 injects one request per child, so this is ``[]`` or one id;
+    the set shape is ready for multi-request `invoke_session`.
     """
-    request_id: str | None = await conn.fetchval(
-        "SELECT data->'metadata'->'request'->>'request_id' FROM events "
-        "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' AND role = 'user' "
-        "AND data->'metadata'->'request'->>'request_id' IS NOT NULL "
-        "ORDER BY seq ASC LIMIT 1",
+    rows: list[asyncpg.Record] = await conn.fetch(
+        "SELECT req.data->'metadata'->'request'->>'request_id' AS rid FROM events req "
+        "WHERE req.session_id = $1 AND req.account_id = $2 "
+        "AND req.kind = 'message' AND req.role = 'user' "
+        "AND req.data->'metadata'->'request'->>'request_id' IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM events resp "
+        "    WHERE resp.session_id = $1 AND resp.account_id = $2 "
+        "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
+        "    AND resp.data->>'request_id' = req.data->'metadata'->'request'->>'request_id') "
+        "ORDER BY req.seq ASC",
         session_id,
         account_id,
     )
-    return request_id
+    return [r["rid"] for r in rows]
+
+
+async def count_request_nudges(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
+) -> int:
+    """How many times this request has been nudged — the count of nudge user
+    messages whose ``metadata.nudged_request_ids`` include it.
+
+    The per-request retry budget is *derived* from the log, not stored — so it is
+    crash-safe and needs no counter to keep in sync (the same stance as
+    ``_count_consecutive_rescheduling`` for model-error backoff).
+    """
+    n: int | None = await conn.fetchval(
+        "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
+        "AND kind = 'message' AND role = 'user' "
+        "AND data->'metadata'->'nudged_request_ids' @> to_jsonb($3::text)",
+        session_id,
+        account_id,
+        request_id,
+    )
+    return n or 0
+
+
+async def derive_session_status(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> str:
+    """The session's derived ``{active, idle}`` status via the single
+    ``_SESSION_STATUS_EXPR`` source of truth.
+
+    The quiescence guard calls this in the same transaction as the just-appended
+    assistant event — so it sees that event — to decide whether the session would
+    now go idle while still owing a request response.
+    """
+    status: str | None = await conn.fetchval(
+        f"SELECT ({_SESSION_STATUS_EXPR}) FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    return status or "idle"
 
 
 async def write_response_if_absent(
@@ -1097,17 +1145,17 @@ async def write_response_if_absent(
     result: Any,
     error: dict[str, Any] | None,
 ) -> bool:
-    """Write a workflow child's request response, **exactly once** (first-writer-wins).
+    """Write a request's response, **exactly once per request** (first-writer-wins).
 
-    A child answers its request via `return`/`error`; concurrent or repeated calls
-    (`return`+`error` in one assistant batch, a model double-call) must still yield
-    **exactly one** response. ``FOR UPDATE`` on the session row + an absent-recheck
-    makes the first writer win; the rest no-op. Returns ``True`` iff this call wrote
-    the response. (Later writers — the model-failure path and the totality backstop —
-    will reuse this same guard so they never clobber a real response.)
+    A session answers a request via `return`/`error`; concurrent or repeated writes
+    for the same ``request_id`` (`return`+`error` in one assistant batch, a model
+    double-call, a late `return` racing the model-failure path or the no_return
+    backstop) must still yield **exactly one** response. ``FOR UPDATE`` on the
+    session row + a per-``request_id`` absent-recheck makes the first writer win;
+    the rest no-op. Returns ``True`` iff this call wrote the response.
 
-    v1 has one open request per child, so the guard is per-child; the ``request_id``
-    is carried on the event for the multi-request `invoke_session` case.
+    The guard is per ``request_id``, so a session with several open requests can
+    answer each independently without clobbering the others.
     """
     async with conn.transaction():
         await conn.execute(
@@ -1115,7 +1163,12 @@ async def write_response_if_absent(
             session_id,
             account_id,
         )
-        if await read_workflow_child_done(conn, session_id, account_id=account_id) is not None:
+        if (
+            await read_request_response(
+                conn, session_id, account_id=account_id, request_id=request_id
+            )
+            is not None
+        ):
             return False
         await append_event(
             conn,
@@ -1123,7 +1176,7 @@ async def write_response_if_absent(
             session_id=session_id,
             kind="lifecycle",
             data={
-                "event": "workflow_child_done",
+                "event": "request_response",
                 "request_id": request_id,
                 "is_error": is_error,
                 "result": result,

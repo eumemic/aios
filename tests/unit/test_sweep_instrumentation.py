@@ -209,6 +209,10 @@ class TestEntrySweepSpan:
                 AsyncMock(return_value=start_event),
             ) as append_event,
             patch(
+                "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
+                AsyncMock(return_value=(False, False, None)),
+            ),
+            patch(
                 "aios.harness.loop.call_litellm",
                 AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
             ),

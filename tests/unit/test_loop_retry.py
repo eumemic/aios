@@ -214,20 +214,20 @@ def mock_step_dependencies() -> Any:
             "aios.harness.loop.defer_wake",
             AsyncMock(),
         ) as defer_wake_mock,
-        # The terminal-error branch responds to an open request on the errored
-        # child's behalf. The session here is a non-child, so the real call would
-        # no-op; mock it to keep this unit focused on the retry state machine and
-        # assert whether the hook fired.
+        # The terminal-error branch errors the errored child's open requests on its
+        # behalf. The session here is a non-child, so the real call would no-op;
+        # mock it to keep this unit focused on the retry state machine and assert
+        # whether the hook fired.
         patch(
-            "aios.harness.loop.respond_to_request",
-            AsyncMock(return_value="not_a_child"),
-        ) as respond_to_request_mock,
+            "aios.harness.loop.fail_all_open_requests",
+            AsyncMock(return_value=0),
+        ) as fail_all_open_requests_mock,
     ):
         yield SimpleNamespace(
             set_stop_reason=set_stop_reason,
             append_event=append_event,
             defer_wake=defer_wake_mock,
-            respond_to_request=respond_to_request_mock,
+            fail_all_open_requests=fail_all_open_requests_mock,
         )
 
 
@@ -253,8 +253,8 @@ class TestRunSessionStepOnModelError:
         assert {"type": "rescheduling"} in stop_reasons
         assert {"type": "end_turn"} not in stop_reasons
         # The retry branch never reaches the terminal landing pad, so it must not
-        # respond on the session's behalf — a reschedulable error is not terminal.
-        mock_step_dependencies.respond_to_request.assert_not_awaited()
+        # fail the session's requests — a reschedulable error is not terminal.
+        mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
 
     async def test_exhausted_budget_records_error_stop_reason_without_raising(
         self, mock_step_dependencies: Any
@@ -280,9 +280,9 @@ class TestRunSessionStepOnModelError:
         ]
         assert {"type": "error"} in stop_reasons
         assert {"type": "end_turn"} not in stop_reasons
-        # The terminal landing pad responds on the session's behalf: a workflow
-        # child owing an open request gets a monotonic child_errored response so
-        # its invoking run resolves instead of hanging (a no-op for non-children).
-        mock_step_dependencies.respond_to_request.assert_awaited_once_with(
-            ANY, "sess_x", is_error=True, result=None, error={"kind": "child_errored"}
+        # The terminal landing pad fails the session's open requests on its behalf:
+        # a workflow child's owed requests get a monotonic child_errored response so
+        # the invoking runs resolve instead of hanging (a no-op for non-children).
+        mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
+            ANY, "sess_x", account_id=ANY, error={"kind": "child_errored"}
         )

@@ -10,9 +10,9 @@ One wake:
    and ``inflight`` (opened-but-unresolved capabilities) from the log.
 2. On the first wake, append ``run_started`` and flip to ``running``.
 3. **Pre-replay harvest**: for any inflight capability now done — a gate with a
-   delivered resume signal, or an agent child with a ``workflow_child_done``
-   marker — journal its ``call_result`` and fold it into ``memo`` so replay sees
-   a maximal memo and fast-forwards past it.
+   delivered resume signal, or an agent child with a ``request_response`` for the
+   call's request — journal its ``call_result`` and fold it into ``memo`` so replay
+   sees a maximal memo and fast-forwards past it.
 4. Drive one wake of the pinned script in the credential-free subprocess.
 5. Raised → ``errored`` (except a transient ``script_host_spawn_failed``, which
    re-raises so the sweep retries — an infra hiccup must not terminally error the
@@ -97,8 +97,13 @@ async def run_workflow_step(run_id: str) -> None:
         # marker — and fold its result into memo so replay fast-forwards past it.
         for call_key, cap_payload in list(inflight.items()):
             if cap_payload.get("capability") == "agent":
-                marker = await db_queries.read_workflow_child_done(
-                    conn, cap_payload["child_session_id"], account_id=account_id
+                # The child was invoked with request_id = call_key (the agent() call
+                # IS the request), so its response is read under that same id.
+                marker = await db_queries.read_request_response(
+                    conn,
+                    cap_payload["child_session_id"],
+                    account_id=account_id,
+                    request_id=call_key,
                 )
                 if marker is None:
                     continue  # child not done yet — stay suspended
@@ -298,7 +303,9 @@ async def _open_agent_capability(
         # pre-replay harvest (which only scans inflight call_started events) could
         # not have seen its marker. Ask for a self-wake so the next step harvests
         # it now, rather than waiting up to one periodic run-sweep tick.
-        marker = await db_queries.read_workflow_child_done(conn, child_id, account_id=account_id)
+        marker = await db_queries.read_request_response(
+            conn, child_id, account_id=account_id, request_id=cap.call_key
+        )
         needs_rewake = marker is not None
     await wf_queries.append_run_event(
         conn,
