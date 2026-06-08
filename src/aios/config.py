@@ -179,6 +179,14 @@ class Settings(BaseSettings):
         description="Maximum bytes of stdout+stderr returned from a bash tool call. "
         "Output beyond this is truncated with a [truncated] marker.",
     )
+    tool_result_max_chars: int = Field(
+        default=200_000,
+        ge=1_000,
+        description="Maximum characters of a tool result stored inline in the "
+        "event log. A larger result is spilled to a file under the session's "
+        "attachments mount and replaced inline with a stub pointing the model "
+        "to read it, so a single oversized result can't exceed the context window.",
+    )
     upload_max_size_bytes: int = Field(
         default=50 * 1024 * 1024,
         ge=1,
@@ -324,6 +332,69 @@ class Settings(BaseSettings):
         "catchable ``AgentError`` and keeping the run total. Generous by default "
         "— a child doing real model+tool work can legitimately run for minutes; "
         "this is the never-resolves backstop, not a tight SLA.",
+    )
+
+    # ── connectors ─────────────────────────────────────────────────────────
+    connector_backfill_max_age_seconds: int = Field(
+        default=60 * 60,  # 1 hour
+        ge=60,
+        description="Age ceiling, in seconds, on connector sends surfaced by the "
+        "SSE subscribe-time backfill (``list_pending_calls_for_connector``). A "
+        "pending connector send whose parent assistant turn is older than this is "
+        "SKIPPED — excluded from the backfill, not expired (the event log is left "
+        "untouched). A legitimately in-flight send executes within seconds of the "
+        "connector reconnecting, so the default 1h never touches a real one; the "
+        "bound only suppresses dormant, weeks-stale sends from being re-transmitted "
+        "on a worker restart (#744). Does NOT affect ``Session.awaiting`` / the "
+        "unresolved-tool-call read-model, which surfaces all unresolved calls "
+        "regardless of age (#741).",
+    )
+    confirmed_dispatch_max_age_seconds: int = Field(
+        default=60 * 60,  # 1 hour
+        ge=60,
+        description="Age ceiling, in seconds, on the confirmation of an "
+        "operator-confirmed-but-unresolved tool call surfaced for auto-dispatch "
+        "on resume (``list_confirmed_unresolved_tool_calls`` / sweep "
+        "``CONFIRMED_ROWS_SQL``). A confirmed call whose ``tool_confirmed`` event "
+        "is older than this is SKIPPED — excluded from re-dispatch, not expired "
+        "(the event log is left untouched, no synthetic result). The bound is on "
+        "the CONFIRM event's ``created_at``, NOT the assistant turn: an operator "
+        "can confirm an OLD proposal, which is a FRESH intent to dispatch, so the "
+        "dispatchable-since timestamp is when confirmation was granted. A "
+        "legitimately confirmed call dispatches within seconds, so the default 1h "
+        "never touches a real one; the bound only suppresses weeks-stale "
+        "confirmations from re-running a side-effecting tool on a worker restart "
+        "(#746). Parallel to ``connector_backfill_max_age_seconds`` (#744); both "
+        "detection (sweep) and dispatch (resolver) apply this same bound in sync "
+        "so they resolve the identical condition (no wake-with-no-progress loop, "
+        "the #155 symptom).",
+    )
+
+    client_tool_call_max_age_seconds: int = Field(
+        default=24 * 60 * 60,  # 24 hours
+        ge=60,
+        description="Age ceiling, in seconds, after which an unresolved "
+        "CLIENT-result-pending tool call (a tool the harness never dispatches "
+        "because the CLIENT executes it and returns the result — the non-MCP, "
+        "not-in-registry branch of ``sweep._was_dispatched``) is treated as "
+        "ABANDONED by ghost repair: a synthetic timeout/abandoned error result is "
+        "appended, resolving the call. Unlike "
+        "``connector_backfill_max_age_seconds`` / "
+        "``confirmed_dispatch_max_age_seconds`` (which only SKIP, leaving the log "
+        "untouched), this bound EXPIRES the call — without it the call's "
+        "``open_tool_call_count`` contribution keeps the session a permanent wake "
+        "candidate (``CANDIDATE_ROWS_SQL`` / ``_SESSION_ACTIVE_EXPR``) with no "
+        "progress to make (the #155 wake-no-progress loop; regression from the "
+        "open-tool-call-count predicate added in #750). The bound is on the "
+        "ASSISTANT turn's ``created_at`` (when the call was emitted), consistent "
+        "with the dispatched-ghost age semantics. The default 24h is deliberately "
+        "generous — a legitimate slow client (a human-driven connector, a "
+        "long-running custom tool) returns its result well within a day, so the "
+        "bound only fires for a client that disconnected and will never return. "
+        "Confirmation-pending calls (``always_ask`` tools awaiting a "
+        "``tool_confirmed`` event) are EXCLUDED: those wait on the USER, not a "
+        "client, and erroring them would kill a slow human-in-the-loop "
+        "confirmation.",
     )
 
     # ── observability ──────────────────────────────────────────────────────
