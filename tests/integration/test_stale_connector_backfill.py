@@ -39,23 +39,24 @@ A connector send that is
 
 MUST NOT be surfaced by ``list_pending_calls_for_connector`` for transmission.
 
-Assertions:
+Assertions (after the fix):
 
-  * ``test_stale_connector_send_excluded`` — the RED proof: ``tc_stale`` is
-    NOT in the backfill output.  **FAILS on b7bcbf2** (no age guard → it IS
-    surfaced).  That failure is the repro.
-  * ``test_characterize_current_backfill_surfaces_stale_and_fresh`` — pins
-    today's behavior: BOTH ``tc_stale`` (21 days old) AND ``tc_fresh`` (a
-    fresh non-latest pending send) are surfaced.  ``tc_fresh`` proves the
-    #741 all-assistants behavior is real and intended; the only missing
-    piece is the age bound.
+  * ``test_stale_connector_send_excluded`` — the fixed contract: ``tc_stale``
+    is NOT in the backfill output (the ~21-day-old send is dropped by the age
+    guard).  This was the RED repro before the fix; it is GREEN now.
+  * ``test_fresh_pending_send_still_surfaced`` — the over-reach guard: a fresh,
+    unresolved send on a NON-latest assistant (``tc_fresh``) is STILL surfaced
+    while ``tc_stale`` is excluded.  ``tc_fresh`` proves the #741 all-assistants
+    backfill is preserved for non-stale calls — the fix bounds by age only, it
+    does not collapse back to latest-assistant-only.
 
-Remediation is an open design choice scoped to the transmit/backfill path
-(e.g. a query-level age filter in ``_unresolved_tool_calls`` / the connector
-backfill, a per-tool expiry policy, or a one-time backlog cleanup) — NOT a
-change to ``Session.awaiting`` (the read-model sibling, which legitimately
-wants to show all unresolved calls regardless of age).  This test asserts only
-the user-facing contract so it stays valid for whichever remediation lands.
+The remediation (commit on top of this repro) is an age guard scoped to the
+transmit/backfill path ONLY (``list_pending_calls_for_connector`` passes an
+``max_age_seconds`` to ``_unresolved_tool_calls``; ~1h via
+``settings.connector_backfill_max_age_seconds``) — skip-not-expire (the event
+log is untouched) and NOT a change to ``Session.awaiting`` (the read-model
+sibling, which legitimately surfaces all unresolved calls regardless of age,
+#741).  These tests assert only the user-facing connector-backfill contract.
 """
 
 from __future__ import annotations
@@ -195,7 +196,7 @@ async def bound_signal_session_with_stale_send(
         # tc_stale so the call is ~21 days old — well past any sane transmit
         # window.  created_at is the ONLY signal an age guard could key on; the
         # backfill path currently ignores it entirely.
-        old = dt.datetime.now(dt.timezone.utc) - STALE_AGE
+        old = dt.datetime.now(dt.UTC) - STALE_AGE
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE events SET created_at = $1 "
@@ -218,16 +219,18 @@ class TestStaleConnectorBackfill:
         self,
         bound_signal_session_with_stale_send: tuple[asyncpg.Pool[Any], str],
     ) -> None:
-        """RED (the #744 proof): a ~21-day-old, unresolved ``signal_send`` on a
+        """#744 fixed contract: a ~21-day-old, unresolved ``signal_send`` on a
         non-latest assistant MUST NOT be surfaced by the connector backfill for
         transmission.
 
-        FAILS on b7bcbf2: ``list_pending_calls_for_connector`` →
-        ``_unresolved_tool_calls`` has no ``created_at`` / age guard, so the
-        dormant send is recovered and (at SSE subscribe time, sse.py:218)
-        re-transmitted on the next connector reconnect.  This is exactly the
-        metals-factchecker incident (17 weeks-old signal_send messages
-        re-sent on a worker restart).
+        Was RED before the fix: ``list_pending_calls_for_connector`` →
+        ``_unresolved_tool_calls`` had no ``created_at`` / age guard, so the
+        dormant send was recovered and (at SSE subscribe time, sse.py:218)
+        re-transmitted on the next connector reconnect — exactly the
+        metals-factchecker incident (17 weeks-old signal_send messages re-sent
+        on a worker restart).  GREEN now: the backfill passes an age bound
+        (``settings.connector_backfill_max_age_seconds``, ~1h) to
+        ``_unresolved_tool_calls``, which excludes the stale parent turn.
         """
         pool, account_id = bound_signal_session_with_stale_send
         async with pool.acquire() as conn:
@@ -244,26 +247,25 @@ class TestStaleConnectorBackfill:
             f"backfill surfaced: {sorted(surfaced)}"
         )
 
-    async def test_characterize_current_backfill_surfaces_stale_and_fresh(
+    async def test_fresh_pending_send_still_surfaced(
         self,
         bound_signal_session_with_stale_send: tuple[asyncpg.Pool[Any], str],
     ) -> None:
-        """Characterization (PASS on b7bcbf2): pin today's behavior.
+        """Over-reach guard: the age fix excludes ``tc_stale`` but must NOT
+        collapse the backfill back to latest-assistant-only.
 
-        BOTH sends are surfaced by ``list_pending_calls_for_connector`` today:
+        ``list_pending_calls_for_connector`` surfaces EXACTLY ``tc_fresh`` and
+        not ``tc_stale``:
 
-        * ``tc_fresh`` — a fresh, unresolved send on the latest assistant; its
-          presence proves the #741 all-assistants backfill is real and intended
-          (the connector-side facet ``list_pending_calls_for_connector`` was
-          built for).
-        * ``tc_stale`` — the same shape but ~21 days old; it is surfaced too,
-          which is the bug: the ONLY missing piece is an age bound on the
-          transmit/backfill path.
+        * ``tc_fresh`` — a fresh, unresolved send; it is STILL surfaced, which
+          proves the #741 all-assistants backfill is preserved for non-stale
+          calls (the fix bounds by age, it does not re-introduce the
+          latest-assistant-only window).
+        * ``tc_stale`` — the same shape but ~21 days old; excluded by the age
+          guard, which is the #744 fix.
 
-        When the remediation lands, ``tc_stale`` drops out (and the RED test
-        above flips green) while ``tc_fresh`` stays — so this assertion will
-        need its ``tc_stale`` expectation relaxed at that point.  It exists to
-        make the *delta* the fix introduces explicit.
+        Pairs with ``test_stale_connector_send_excluded``: together they pin
+        the exact delta — age-bounded, not behavior-collapsed.
         """
         pool, account_id = bound_signal_session_with_stale_send
         async with pool.acquire() as conn:
@@ -271,16 +273,16 @@ class TestStaleConnectorBackfill:
                 conn, CONNECTOR, account_id=account_id
             )
         surfaced = {c["tool_call_id"] for c in backfill}
-        assert surfaced == {"tc_stale", "tc_fresh"}, (
-            "expected the current (b7bcbf2) connector backfill to surface BOTH "
-            "the fresh send (tc_fresh, latest assistant) AND the ~21-day-old "
-            "dormant send (tc_stale, non-latest assistant A1) — the "
-            "all-assistants predicate (#741) with no age guard. "
+        assert surfaced == {"tc_fresh"}, (
+            "expected the fixed connector backfill to surface ONLY the fresh "
+            "send (tc_fresh) and exclude the ~21-day-old dormant send "
+            "(tc_stale): the age guard (#744) drops tc_stale while the #741 "
+            "all-assistants behavior is preserved for non-stale calls. "
             f"got: {sorted(surfaced)}"
         )
-        # Each surfaced record is transmit-ready: it carries the connection_id
+        # The surfaced record is transmit-ready: it carries the connection_id
         # the runtime fans out on and the original tool arguments.
         by_id = {c["tool_call_id"]: c for c in backfill}
-        assert by_id["tc_stale"]["name"] == SEND_TOOL
-        assert by_id["tc_stale"]["connection_id"]
-        assert by_id["tc_stale"]["arguments"] == '{"text": "hi"}'
+        assert by_id["tc_fresh"]["name"] == SEND_TOOL
+        assert by_id["tc_fresh"]["connection_id"]
+        assert by_id["tc_fresh"]["arguments"] == '{"text": "hi"}'

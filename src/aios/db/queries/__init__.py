@@ -2339,7 +2339,18 @@ async def list_pending_calls_for_connector(
         )
         workspace_path_by_session[row["session_id"]] = row["workspace_path"]
 
-    raw_by_sid = await _unresolved_tool_calls(conn, list(by_session.keys()), account_id=account_id)
+    # Age guard scoped to the transmit/backfill path ONLY (#744): a pending
+    # send whose parent assistant turn is older than the threshold is skipped
+    # — excluded here, not expired (the event log is left untouched). The
+    # sibling read-model (Session.awaiting via _unresolved_tool_calls with no
+    # bound) still surfaces stale calls; this only stops the connector from
+    # re-transmitting weeks-dormant sends on a reconnect after a worker restart.
+    from aios.config import get_settings
+
+    max_age_seconds = get_settings().connector_backfill_max_age_seconds
+    raw_by_sid = await _unresolved_tool_calls(
+        conn, list(by_session.keys()), account_id=account_id, max_age_seconds=max_age_seconds
+    )
     out: list[dict[str, Any]] = []
     for sid, calls in raw_by_sid.items():
         workspace_path = workspace_path_by_session[sid]
@@ -2429,6 +2440,7 @@ async def _unresolved_tool_calls(
     session_ids: list[str],
     *,
     account_id: str,
+    max_age_seconds: int | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Return ``{session_id: [tool_call_dict]}`` for EVERY assistant's
     tool_calls (per session) that have no paired tool_result event, in
@@ -2445,6 +2457,15 @@ async def _unresolved_tool_calls(
     Pending-ness is purely an event-log property — the session row's
     ``status`` and ``stop_reason`` are irrelevant. Tool_call dicts are
     returned as-is from the assistant's ``data->'tool_calls'`` array.
+
+    ``max_age_seconds`` is an OPTIONAL age bound on the parent assistant
+    turn's ``created_at`` — when set, tool_calls whose assistant event is
+    older than that many seconds are excluded.  It defaults to ``None``
+    (no age filter) so the ``Session.awaiting`` / unresolved-read-model
+    callers keep surfacing ALL unresolved calls regardless of age (#741).
+    Only the connector SSE subscribe-time backfill
+    (:func:`list_pending_calls_for_connector`) passes a bound, to keep it
+    from re-transmitting weeks-dormant connector sends on reconnect (#744).
     """
     if not session_ids:
         return {}
@@ -2453,6 +2474,12 @@ async def _unresolved_tool_calls(
     # post-filter narrows to non-empty arrays (the index admits
     # ``null`` / ``[]`` too).  Without the ``?`` conjunct the planner
     # falls back to the wider ``events_session_seq_idx``.
+    #
+    # ``$3`` carries the optional age bound (seconds); NULL disables it so
+    # the awaiting read-model path is byte-for-byte unchanged (#741), while
+    # the connector backfill (#744) passes a positive value to drop stale
+    # sends.  ``make_interval`` keeps the bound parameterized rather than
+    # string-interpolated into the SQL.
     asst_rows = await conn.fetch(
         """
         SELECT session_id, data
@@ -2465,10 +2492,15 @@ async def _unresolved_tool_calls(
            AND jsonb_array_length(
                  COALESCE(NULLIF(data->'tool_calls','null'::jsonb), '[]'::jsonb)
                ) > 0
+           AND (
+                 $3::bigint IS NULL
+                 OR created_at >= now() - make_interval(secs => $3::bigint)
+               )
          ORDER BY session_id, seq ASC
         """,
         session_ids,
         account_id,
+        max_age_seconds,
     )
     if not asst_rows:
         return {}
