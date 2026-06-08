@@ -1046,16 +1046,20 @@ async def get_session_workflow_context(
 async def read_request_response(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
 ) -> dict[str, Any] | None:
-    """A specific request's **response** (`request_response` event), or ``None`` if
-    the request is still open.
+    """A specific request's written **response** (`request_response` event), or
+    ``None`` if none has been written.
 
-    The single explicit response a session gives a request it was invoked with —
-    a `return`/`error` from the model, the harness erroring path, or the no_return
-    backstop — never inferred from idle. The run-step harvest reads it to resolve
-    the `agent()` call. ``data`` is ``{event, request_id, is_error, result, error}``.
-    Exactly one exists per request (see :func:`write_response_if_absent`), so
-    ``LIMIT 1`` returns it directly; the ``events_request_response_idx`` partial
-    index (0067) keeps this a point lookup rather than a per-wake history scan.
+    The response-only primitive: it reflects only an explicit `return`/`error`,
+    harness-erroring, or no_return write — NOT liveness. It backs
+    :func:`write_response_if_absent`'s exactly-once absent-recheck (its only caller);
+    the run-step harvest instead uses :func:`derive_response`, which additionally
+    folds in `child_gone` liveness. Keeping this response-only is load-bearing — a
+    liveness check here would make the recheck treat a never-answered gone session
+    as already-answered and suppress the totality write. ``data`` is
+    ``{event, request_id, is_error, result, error}``. Exactly one exists per request
+    (see :func:`write_response_if_absent`), so ``LIMIT 1`` returns it directly; the
+    ``events_request_response_idx`` partial index (mig 0068) keeps this a point
+    lookup rather than a per-wake history scan.
     """
     row = await conn.fetchrow(
         "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "

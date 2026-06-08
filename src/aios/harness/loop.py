@@ -515,12 +515,12 @@ async def _run_session_step_body(
     # caller run) are deferred by run_session_step AFTER step_end via _StepResult,
     # so their wake_deferred spans land in the next step's window (see the §wakes
     # block in run_session_step).
-    (
-        nudged,
-        autoerrored,
-        caller_run_id,
-    ) = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, session_id, assistant_msg, account_id=account_id
+    nudged, autoerror_caller_run_id = await sessions_service.append_assistant_and_guard_quiescence(
+        pool,
+        session_id,
+        assistant_msg,
+        account_id=account_id,
+        parent_run_id=session.parent_run_id,
     )
 
     # Partition tool calls into dispatch buckets. Immediate builtin/MCP
@@ -605,7 +605,7 @@ async def _run_session_step_body(
     # Hand the quiescence guard's wakes to run_session_step to defer after step_end.
     return _StepResult(
         nudge_session=nudged,
-        autoerror_caller_run_id=caller_run_id if autoerrored else None,
+        autoerror_caller_run_id=autoerror_caller_run_id,
     )
 
 

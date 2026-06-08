@@ -1,17 +1,14 @@
 """Transition the request-response partial index across the event rename.
 
-Block-2 R1 (revision 0067, committed earlier on this branch) created
-``events_workflow_child_done_idx`` keyed on the ``workflow_child_done`` lifecycle
-event. R4 renamed that event to ``request_response`` and reworked the index to
-``events_request_response_idx`` on ``(session_id, (data->>'request_id'))``.
-
-A fresh database gets the new index directly from 0067 (its file now creates it),
-so for that DB this revision is a no-op. But a database that applied the *original*
-0067 records ``alembic_version = 0067`` and would never pick up the rename — it
-would keep the now-dead ``workflow_child_done`` index and miss the new one. This
-revision makes the transition robust for both: drop the old index if present, and
-create the new one if absent. Both statements are idempotent, so it is safe on a
-fresh DB too.
+Block-2 R1 (revision 0067) created ``events_workflow_child_done_idx`` keyed on the
+``workflow_child_done`` lifecycle event. R4 renamed that event to
+``request_response`` and reworked the index to ``events_request_response_idx`` on
+``(session_id, (data->>'request_id'))``. 0067's own body was left untouched (it
+still creates the old index), so this revision does the whole transition for EVERY
+database — fresh or already stamped at 0067: drop the old index if present, create
+the new one if absent. On a fresh DB the chain runs 0067 (old index) → 0068 (drop
+it, create new); on a DB that applied the original 0067, only 0068 runs and flips
+it. Both statements are idempotent, so re-running is safe.
 
 ``CREATE``/``DROP INDEX CONCURRENTLY`` run outside a transaction via
 ``autocommit_block`` so they never take an ACCESS EXCLUSIVE lock on the

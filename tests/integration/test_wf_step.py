@@ -834,10 +834,10 @@ async def test_idle_with_open_request_is_nudged(
     _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:n#0")
 
     assistant = await _idle_assistant_turn(pool, cid)
-    nudged, autoerrored, caller = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, assistant, account_id="acc_wf"
+    nudged, caller = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, cid, assistant, account_id="acc_wf", parent_run_id=_run_id
     )
-    assert nudged and not autoerrored and caller is None
+    assert nudged and caller is None
 
     async with pool.acquire() as conn:
         open_ids = await db_queries.get_open_request_ids(conn, cid, account_id="acc_wf")
@@ -850,11 +850,12 @@ async def test_idle_with_open_request_is_nudged(
     assert status == "active"  # the nudge user message keeps it alive, no idle window
 
 
-async def test_quiescence_guard_is_noop_without_open_requests(
+async def test_quiescence_guard_is_noop_for_non_child(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
-    """The guard is a strict no-op for an ordinary session (no requests owed): the
-    assistant message is appended and the session goes idle, with no nudge."""
+    """The guard is a strict no-op for an ordinary (non-child) session: it cannot
+    owe a request, so the assistant is appended, the session goes idle, no nudge —
+    and the parent_run_id gate skips the open-request scan entirely."""
     pool = wf_runtime
     fg = await sessions_service.create_session(
         pool,
@@ -865,10 +866,10 @@ async def test_quiescence_guard_is_noop_without_open_requests(
         metadata={},
     )
     assistant = await _idle_assistant_turn(pool, fg.id)
-    nudged, autoerrored, caller = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, fg.id, assistant, account_id="acc_wf"
+    nudged, caller = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, fg.id, assistant, account_id="acc_wf", parent_run_id=None
     )
-    assert not nudged and not autoerrored and caller is None
+    assert not nudged and caller is None
     async with pool.acquire() as conn:
         status = await db_queries.derive_session_status(conn, fg.id, account_id="acc_wf")
         nudge_msgs = await conn.fetchval(
@@ -891,17 +892,21 @@ async def test_open_request_is_auto_errored_after_nudge_budget(
     run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:nr#0")
 
     for _ in range(sessions_service.REQUEST_NUDGE_BUDGET):
-        nudged, autoerrored, _caller = await sessions_service.append_assistant_and_guard_quiescence(
-            pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf"
+        nudged, _caller = await sessions_service.append_assistant_and_guard_quiescence(
+            pool,
+            cid,
+            await _idle_assistant_turn(pool, cid),
+            account_id="acc_wf",
+            parent_run_id=run_id,
         )
-        assert nudged and not autoerrored  # still under budget — keep nudging
+        assert nudged  # still under budget — keep nudging
 
     # Budget spent: the next pure-text turn auto-errors the request instead.
-    nudged, autoerrored, caller = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf"
+    nudged, caller = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
     )
-    assert autoerrored and not nudged
-    assert caller == run_id  # the caller run is woken to harvest the no_return
+    assert not nudged
+    assert caller == run_id  # auto-errored → the caller run is woken to harvest the no_return
 
     async with pool.acquire() as conn:
         resp = await db_queries.read_request_response(
@@ -936,7 +941,11 @@ async def test_non_answering_child_resolves_run_via_agent_no_return_error(
     # The child ignores every nudge: BUDGET nudges, then the auto-error turn.
     for _ in range(sessions_service.REQUEST_NUDGE_BUDGET + 1):
         await sessions_service.append_assistant_and_guard_quiescence(
-            pool, child_id, await _idle_assistant_turn(pool, child_id), account_id="acc_wf"
+            pool,
+            child_id,
+            await _idle_assistant_turn(pool, child_id),
+            account_id="acc_wf",
+            parent_run_id=run_id,
         )
 
     await run_workflow_step(run_id)  # harvest no_return -> AgentNoReturnError -> caught -> return

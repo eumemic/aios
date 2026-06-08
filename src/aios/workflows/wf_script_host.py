@@ -55,6 +55,7 @@ class AgentError(Exception):
     can ``try/except AgentError`` and continue, or let it propagate to fail the run
     (the bubble). ``kind`` distinguishes the failure mode: ``None`` for an explicit
     ``error()`` from the child, ``"child_errored"`` for a model failure,
+    ``"child_gone"`` if the child was archived/deleted before answering, and
     ``"no_return"`` for no response (see :class:`AgentNoReturnError`).
     """
 

@@ -542,50 +542,52 @@ async def append_assistant_and_guard_quiescence(
     assistant_msg: dict[str, Any],
     *,
     account_id: str,
-) -> tuple[bool, bool, str | None]:
+    parent_run_id: str | None,
+) -> tuple[bool, str | None]:
     """Append the model's assistant message and, **atomically**, enforce the
     request-totality invariant: a session may not go idle while it owes a response.
 
-    In one transaction: append the assistant message; if the session would now be
-    idle (the model produced a tool-call-free turn — ``derive_session_status``
+    Only a workflow child (``parent_run_id`` set) can ever owe a request, so for any
+    other session this is a plain assistant append — the totality machinery (and its
+    per-turn open-request scan) is skipped entirely.
+
+    For a workflow child, in one transaction: append the assistant message; if the
+    session would now be idle (a tool-call-free turn — ``derive_session_status``
     reads the just-appended event) and it still owes request responses, then for
     each open request either append a **nudge** (a user message that re-triggers
-    inference, so the session stays active) when under
-    :data:`REQUEST_NUDGE_BUDGET`, or write its **no_return** error response when the
-    budget is spent. Because the nudge commits in the same transaction as the
-    idling assistant event, no reader can ever observe the session idle while a
-    request is open — the invariant holds at write time, with no sweep backstop.
+    inference, so the session stays active) when under :data:`REQUEST_NUDGE_BUDGET`,
+    or write its **no_return** error response when the budget is spent. Because the
+    nudge commits in the same transaction as the idling assistant event, no reader
+    can ever observe the session idle while a request is open — the invariant holds
+    at write time, with no sweep backstop.
 
-    Returns ``(nudged, autoerrored, caller_run_id)``; the caller (the harness loop)
-    does the post-commit wakes — ``defer_wake(session)`` if nudged,
-    ``defer_run_wake(caller_run_id)`` if autoerrored. A strict no-op
-    ``(False, False, None)`` for any session with no open requests, i.e. every
-    ordinary session — the open-request query is the gate.
+    Returns ``(nudged, autoerror_caller_run_id)``; the caller (the harness loop) does
+    the post-commit wakes — ``defer_wake(session)`` if nudged,
+    ``defer_run_wake(run_id)`` if a run id is returned (a request was auto-errored
+    and its caller run must harvest the no_return). The run id is the child's
+    ``parent_run_id`` — the single caller of every request in v1.
     """
     nudged = False
-    autoerrored = False
-    caller_run_id: str | None = None
+    autoerror_caller_run_id: str | None = None
     async with pool.acquire() as conn, conn.transaction():
         await queries.append_event(
             conn, session_id=session_id, kind="message", data=assistant_msg, account_id=account_id
         )
         # Gates, cheapest first (this runs on EVERY end-of-turn append):
-        #   1. tool calls present → unresolved tool_call → active by construction
-        #      (the tools haven't run yet), so it can't be idle — settle in memory,
-        #      no query.
-        #   2. nothing owed → the common case for every ordinary session → one
-        #      indexed anti-join.
-        #   3. only now pay the multi-EXISTS idleness derivation (the same
-        #      _SESSION_STATUS_EXPR every external reader uses), and only for a
-        #      session that actually owes a response — it could still be active via
-        #      a user message that arrived during inference.
-        if assistant_msg.get("tool_calls"):
-            return (False, False, None)
+        #   1. not a workflow child → cannot owe a request → plain append, done.
+        #   2. tool calls present → unresolved tool_call → active by construction
+        #      (the tools haven't run yet), so it can't be idle — settle in memory.
+        #   3. nothing owed → every request already answered → one indexed anti-join.
+        #   4. only now pay the multi-EXISTS idleness derivation (the same
+        #      _SESSION_STATUS_EXPR every external reader uses) — it could still be
+        #      active via a user message that arrived during inference.
+        if parent_run_id is None or assistant_msg.get("tool_calls"):
+            return (False, None)
         open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
         if not open_ids:
-            return (False, False, None)  # ordinary session, or every request answered
+            return (False, None)  # every request answered
         if await queries.derive_session_status(conn, session_id, account_id=account_id) != "idle":
-            return (False, False, None)
+            return (False, None)
         to_nudge: list[str] = []
         for request_id in open_ids:
             nudges = await queries.count_request_nudges(
@@ -601,7 +603,7 @@ async def append_assistant_and_guard_quiescence(
                     result=None,
                     error={"kind": "no_return"},
                 ):
-                    autoerrored = True
+                    autoerror_caller_run_id = parent_run_id
             else:
                 to_nudge.append(request_id)
         if to_nudge:
@@ -617,10 +619,7 @@ async def append_assistant_and_guard_quiescence(
                 account_id=account_id,
             )
             nudged = True
-        if autoerrored:
-            ctx = await queries.get_session_workflow_context(conn, session_id)
-            caller_run_id = ctx[1] if ctx is not None else None
-    return (nudged, autoerrored, caller_run_id)
+    return (nudged, autoerror_caller_run_id)
 
 
 async def append_tool_result(
