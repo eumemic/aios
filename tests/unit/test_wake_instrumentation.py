@@ -464,6 +464,10 @@ class TestStepStartEndSpans:
                 AsyncMock(side_effect=RuntimeError("provider boom")),
             ),
             patch("aios.harness.loop.defer_wake", AsyncMock()),
+            # The terminal-error branch responds on the errored child's behalf;
+            # this non-child session would no-op in production, so mock the DB-backed
+            # collaborator out to keep the span-ordering assertion pool-free.
+            patch("aios.harness.loop.respond_to_request", AsyncMock(return_value="not_a_child")),
             patch(
                 "aios.harness.loop._count_consecutive_rescheduling",
                 AsyncMock(return_value=4),  # budget exhausted — no re-raise, returns None

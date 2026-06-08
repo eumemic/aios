@@ -42,6 +42,7 @@ from aios.models.agents import (
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services.wake import defer_wake
+from aios.tools.workflow_completion import respond_to_request
 
 if TYPE_CHECKING:
     import asyncpg
@@ -838,6 +839,14 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
     )
     await _append_lifecycle(
         pool, session_id, "turn_ended", "errored", "error", account_id=account_id
+    )
+    # A workflow child whose model errored past its retry budget can no longer
+    # answer the request it was invoked with. Respond on its behalf with a
+    # monotonic error so the invoking run resolves (and can raise AgentError)
+    # instead of hanging forever on a dead child. No-op for any session that isn't
+    # a workflow child owing an open request.
+    await respond_to_request(
+        pool, session_id, is_error=True, result=None, error={"kind": "child_errored"}
     )
     return None
 

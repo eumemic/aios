@@ -637,6 +637,80 @@ async def test_agent_error_surfaces_in_call_result(
     assert run is not None and run.status == "completed" and run.output == "done"
 
 
+async def test_model_failure_writes_error_response_and_run_resolves(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """R2 — the totality hole: a child whose model errors past its retry budget can
+    no longer answer its request. The harness erroring path responds on its behalf
+    with a monotonic ``child_errored`` response, so the invoking run harvests it and
+    resolves — instead of hanging forever on a dead child."""
+    from aios.harness import loop
+
+    pool = wf_runtime
+    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+
+    # Drive the child to its terminal-error landing pad: seed a full rescheduling
+    # streak so the next failure spends the retry budget, then run the erroring path.
+    for _ in range(len(loop._RETRY_BACKOFF_SECONDS)):
+        await loop._append_lifecycle(
+            pool, child_id, "turn_ended", "rescheduling", "rescheduling", account_id="acc_wf"
+        )
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
+        delay = await loop._apply_retry_or_failure(pool, child_id, account_id="acc_wf")
+    assert delay is None  # terminal — retry budget spent
+    wake.assert_awaited_once_with(run_id)  # the caller was woken to harvest
+
+    async with pool.acquire() as conn:
+        response = await db_queries.read_workflow_child_done(conn, child_id, account_id="acc_wf")
+    assert response is not None
+    assert response["is_error"] is True and response["error"] == {"kind": "child_errored"}
+
+    await run_workflow_step(run_id)  # harvest the error response -> resolve -> complete
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["is_error"] is True and cr.payload["error"] == {"kind": "child_errored"}
+    assert run is not None and run.status == "completed" and run.output == "done"
+
+
+async def test_model_failure_does_not_clobber_a_prior_response(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """R2 first-writer-wins: a child that already ``return``ed keeps that response
+    even if its model later errors out. The erroring path's ``child_errored``
+    response no-ops and does NOT re-wake the caller (it was woken by the return)."""
+    from aios.harness import loop
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:prec#0")
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(cid, {"value": "real"})
+
+    for _ in range(len(loop._RETRY_BACKOFF_SECONDS)):
+        await loop._append_lifecycle(
+            pool, cid, "turn_ended", "rescheduling", "rescheduling", account_id="acc_wf"
+        )
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
+        await loop._apply_retry_or_failure(pool, cid, account_id="acc_wf")
+    wake.assert_not_awaited()  # duplicate response is a no-op — caller already woken
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'lifecycle' AND data->>'event' = 'workflow_child_done'",
+            cid,
+            "acc_wf",
+        )
+    assert len(rows) == 1  # still exactly one response
+    response = db_queries.parse_jsonb(rows[0]["data"])
+    assert response["is_error"] is False and response["result"] == "real"  # the return() won
+
+
 async def test_agent_stays_suspended_until_marker(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
