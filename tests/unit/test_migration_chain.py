@@ -31,8 +31,8 @@ def test_single_head() -> None:
     assert script.get_heads() == ["0067"]
 
 
-def test_chain_is_linear_0054_to_0060() -> None:
-    """``0054 -> … -> 0060 -> 0061`` is a plain linear chain."""
+def test_chain_is_linear_0054_to_head() -> None:
+    """``0054 -> … -> 0067`` (the current head) is a plain linear chain."""
     script = _script_directory()
 
     rev_0067 = script.get_revision("0067")

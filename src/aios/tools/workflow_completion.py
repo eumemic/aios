@@ -56,6 +56,7 @@ _ERROR_SCHEMA: dict[str, Any] = {
 _NOT_A_CHILD = ToolResult(
     content="return/error is only available to a workflow agent child", is_error=True
 )
+_NO_OPEN_REQUEST = ToolResult(content="there is no open request to answer", is_error=True)
 
 
 async def _finish(
@@ -71,7 +72,7 @@ async def _finish(
             return _NOT_A_CHILD  # fail closed — never signal a NULL parent run
         request_id = await queries.get_open_request_id(conn, session_id, account_id=account_id)
         if request_id is None:
-            return _NOT_A_CHILD  # no open request to answer
+            return _NO_OPEN_REQUEST  # a child, but its request is already answered / absent
         # Respond to the request — exactly once (first-writer-wins). NOT archive,
         # NOT terminate: responding resumes the caller; the child carries on (a
         # fresh agent() child simply has nothing else to do and quiesces; run-end

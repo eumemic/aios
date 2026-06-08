@@ -95,11 +95,13 @@ def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
 
 
 def parallel(_thunks: Any) -> Any:
-    raise NotImplementedError("parallel() lands in Block 2")
+    # Message is run-visible (folded into the run's errored output), so it carries
+    # no dev-world block label — only a stable runtime concept the author can act on.
+    raise NotImplementedError("parallel() is not supported yet")
 
 
 def pipeline(_items: Any, *_stages: Any) -> Any:
-    raise NotImplementedError("pipeline() lands in Block 2")
+    raise NotImplementedError("pipeline() is not supported yet")
 
 
 def log(*args: Any) -> None:

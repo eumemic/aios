@@ -1099,15 +1099,15 @@ async def write_response_if_absent(
 ) -> bool:
     """Write a workflow child's request response, **exactly once** (first-writer-wins).
 
-    A child answers its request via `return`/`error`; the harness model-failure path
-    and the totality backstop can also produce a response. All of them must yield
-    **exactly one** response — `return`+`error` in the same assistant batch, a model
-    double-call, or a `return` racing the no_return backstop must not double-write.
-    ``FOR UPDATE`` on the session row + an absent-recheck makes the first writer win;
-    the rest no-op. Returns ``True`` iff this call wrote the response.
+    A child answers its request via `return`/`error`; concurrent or repeated calls
+    (`return`+`error` in one assistant batch, a model double-call) must still yield
+    **exactly one** response. ``FOR UPDATE`` on the session row + an absent-recheck
+    makes the first writer win; the rest no-op. Returns ``True`` iff this call wrote
+    the response. (Later writers — the model-failure path and the totality backstop —
+    will reuse this same guard so they never clobber a real response.)
 
-    (v1 has one open request per child, so the guard is per-child; the ``request_id``
-    is carried on the event for the multi-request `invoke_session` case.)
+    v1 has one open request per child, so the guard is per-child; the ``request_id``
+    is carried on the event for the multi-request `invoke_session` case.
     """
     async with conn.transaction():
         await conn.execute(

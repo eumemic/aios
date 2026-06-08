@@ -391,13 +391,12 @@ async def _check_completion_injection(
     assert "return" not in fg_tools and "error" not in fg_tools
 
 
-async def test_return_writes_marker_and_wakes_parent_without_archiving(
+async def test_return_writes_response_and_wakes_caller_without_archiving(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
-    """Two-phase termination: the handler writes the marker + wakes the parent but
-    does NOT archive. Archive must be a session's last write, yet this handler runs
-    mid tool-lifecycle (the tool_result append follows); physical reap is the
-    in-worker reaper's job once the child is quiescent."""
+    """return() writes the request's response + wakes the caller, but does NOT
+    archive the child — responding is not terminating. Reclamation is run-end
+    (off the correctness path), so right after responding the child is unarchived."""
     from aios.tools import workflow_completion
 
     pool = wf_runtime
@@ -408,11 +407,11 @@ async def test_return_writes_marker_and_wakes_parent_without_archiving(
     wake.assert_awaited_once_with(run_id)
 
     async with pool.acquire() as conn:
-        marker = await db_queries.read_workflow_child_done(conn, cid, account_id="acc_wf")
-    assert marker is not None
-    assert marker["is_error"] is False and marker["result"] == {"answer": 42}
+        response = await db_queries.read_workflow_child_done(conn, cid, account_id="acc_wf")
+    assert response is not None
+    assert response["is_error"] is False and response["result"] == {"answer": 42}
     child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
-    assert child.archived_at is None  # NOT archived by the handler — the reaper does that
+    assert child.archived_at is None  # NOT archived by the handler — run-end reclaim does that
 
 
 async def test_error_marker_carries_message(
