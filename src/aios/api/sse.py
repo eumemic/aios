@@ -204,6 +204,18 @@ async def runtime_connector_calls_stream(
     Backfills any pending calls at subscribe time, then tails the
     ``connector_calls_<connector>`` NOTIFY channel.
 
+    Both emit paths are age-bounded by the SAME ceiling
+    (``settings.connector_backfill_max_age_seconds``, #744): the
+    subscribe-time backfill via ``list_pending_calls_for_connector`` and
+    the NOTIFY tail via ``list_pending_calls_for_session_and_connection``.
+    The tail is NOT inherently fresh — a session carrying a weeks-stale
+    unresolved connector send re-fires the per-session NOTIFY the instant
+    it emits any new event, and the ``emitted`` dedup below only suppresses
+    calls the backfill already yielded (and the backfill now SKIPS stale
+    ones, so they are absent from ``emitted``).  Bounding both paths by the
+    same setting is what stops a dormant send from being transmitted out of
+    nowhere on session re-activation, mirroring the connector-reconnect harm.
+
     When ``connection_ids`` is non-``None`` (#350), backfill and tail
     both filter to that allowlist — out-of-scope calls are silently
     omitted.  The tail-side check parses the NOTIFY payload directly

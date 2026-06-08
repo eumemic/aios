@@ -2385,6 +2385,21 @@ async def list_pending_calls_for_session_and_connection(
     to one session.  Used by the SSE NOTIFY tail to fetch calls only for
     the session that just emitted, instead of re-scanning all bound
     sessions.
+
+    Age-bounded identically to the subscribe-time backfill (#744): the
+    NOTIFY tail is a second transmit path into ``runtime_connector_calls_stream``,
+    so it passes the same ``settings.connector_backfill_max_age_seconds``
+    ceiling to ``_unresolved_tool_calls``.  Without it the tail would
+    re-transmit a weeks-stale dormant connector send the instant its
+    session emits any new event (firing the per-session NOTIFY) — the
+    ``emitted`` dedup in the stream only suppresses calls the backfill
+    already yielded, and the backfill now SKIPS stale calls, so they are
+    absent from ``emitted`` and would slip through here unbounded.  Both
+    emit paths must be bounded by the same setting; neither transmits a
+    connector send older than the threshold.  Like the backfill this is
+    skip-not-expire (the event log is untouched) and does NOT touch
+    ``Session.awaiting`` (the read-model sibling surfaces all unresolved
+    calls regardless of age, #741).
     """
     conn_row = await conn.fetchrow(
         f"""
@@ -2412,7 +2427,15 @@ async def list_pending_calls_for_session_and_connection(
     if not name_set:
         return []
 
-    raw_by_sid = await _unresolved_tool_calls(conn, [session_id], account_id=account_id)
+    # Same age guard as the subscribe-time backfill (#744): the NOTIFY tail
+    # is the second transmit path, so it must bound by the same setting or a
+    # stale send re-transmits the moment its session emits a new event.
+    from aios.config import get_settings
+
+    max_age_seconds = get_settings().connector_backfill_max_age_seconds
+    raw_by_sid = await _unresolved_tool_calls(
+        conn, [session_id], account_id=account_id, max_age_seconds=max_age_seconds
+    )
     focal = conn_row["focal_channel"]
     workspace_path = conn_row["workspace_path"]
     out: list[dict[str, Any]] = []
@@ -2463,9 +2486,11 @@ async def _unresolved_tool_calls(
     older than that many seconds are excluded.  It defaults to ``None``
     (no age filter) so the ``Session.awaiting`` / unresolved-read-model
     callers keep surfacing ALL unresolved calls regardless of age (#741).
-    Only the connector SSE subscribe-time backfill
-    (:func:`list_pending_calls_for_connector`) passes a bound, to keep it
-    from re-transmitting weeks-dormant connector sends on reconnect (#744).
+    BOTH connector-SSE transmit paths pass a bound (#744): the
+    subscribe-time backfill (:func:`list_pending_calls_for_connector`)
+    AND the NOTIFY tail (:func:`list_pending_calls_for_session_and_connection`),
+    so neither re-transmits a weeks-dormant connector send — on reconnect
+    (backfill) or on session re-activation (tail).
     """
     if not session_ids:
         return {}

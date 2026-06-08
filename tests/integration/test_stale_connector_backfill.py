@@ -101,9 +101,9 @@ def _assistant(tool_call_id: str, name: str = SEND_TOOL) -> dict[str, Any]:
 @pytest.fixture
 async def bound_signal_session_with_stale_send(
     migrated_db_url: str, _reset_db_state: None
-) -> AsyncIterator[tuple[asyncpg.Pool[Any], str]]:
-    """Yield ``(pool, account_id)`` for a ``signal`` connection bound to a
-    session whose event log is::
+) -> AsyncIterator[tuple[asyncpg.Pool[Any], str, str, str]]:
+    """Yield ``(pool, account_id, session_id, connection_id)`` for a ``signal``
+    connection bound to a session whose event log is::
 
         A1[tc_stale signal_send]  → user → A2[tc_fresh signal_send]
 
@@ -112,6 +112,10 @@ async def bound_signal_session_with_stale_send(
     ``tc_fresh`` is on the latest assistant A2 and is fresh.  The connector
     type's ``tools_schema`` registers ``signal_send`` so the backfill's
     name-gate admits both.
+
+    ``session_id`` and ``connection_id`` are exposed so the NOTIFY-tail test
+    can call ``list_pending_calls_for_session_and_connection`` directly (the
+    tail's per-session fetch), not just the subscribe-time backfill.
     """
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
     try:
@@ -209,7 +213,7 @@ async def bound_signal_session_with_stale_send(
                 account_id,
             )
 
-        yield pool, account_id
+        yield pool, account_id, sid, connection.id
     finally:
         await pool.close()
 
@@ -217,7 +221,7 @@ async def bound_signal_session_with_stale_send(
 class TestStaleConnectorBackfill:
     async def test_stale_connector_send_excluded(
         self,
-        bound_signal_session_with_stale_send: tuple[asyncpg.Pool[Any], str],
+        bound_signal_session_with_stale_send: tuple[asyncpg.Pool[Any], str, str, str],
     ) -> None:
         """#744 fixed contract: a ~21-day-old, unresolved ``signal_send`` on a
         non-latest assistant MUST NOT be surfaced by the connector backfill for
@@ -232,7 +236,7 @@ class TestStaleConnectorBackfill:
         (``settings.connector_backfill_max_age_seconds``, ~1h) to
         ``_unresolved_tool_calls``, which excludes the stale parent turn.
         """
-        pool, account_id = bound_signal_session_with_stale_send
+        pool, account_id, _sid, _conn_id = bound_signal_session_with_stale_send
         async with pool.acquire() as conn:
             backfill = await queries.list_pending_calls_for_connector(
                 conn, CONNECTOR, account_id=account_id
@@ -249,7 +253,7 @@ class TestStaleConnectorBackfill:
 
     async def test_fresh_pending_send_still_surfaced(
         self,
-        bound_signal_session_with_stale_send: tuple[asyncpg.Pool[Any], str],
+        bound_signal_session_with_stale_send: tuple[asyncpg.Pool[Any], str, str, str],
     ) -> None:
         """Over-reach guard: the age fix excludes ``tc_stale`` but must NOT
         collapse the backfill back to latest-assistant-only.
@@ -267,7 +271,7 @@ class TestStaleConnectorBackfill:
         Pairs with ``test_stale_connector_send_excluded``: together they pin
         the exact delta — age-bounded, not behavior-collapsed.
         """
-        pool, account_id = bound_signal_session_with_stale_send
+        pool, account_id, _sid, _conn_id = bound_signal_session_with_stale_send
         async with pool.acquire() as conn:
             backfill = await queries.list_pending_calls_for_connector(
                 conn, CONNECTOR, account_id=account_id
@@ -285,4 +289,71 @@ class TestStaleConnectorBackfill:
         by_id = {c["tool_call_id"]: c for c in backfill}
         assert by_id["tc_fresh"]["name"] == SEND_TOOL
         assert by_id["tc_fresh"]["connection_id"]
+        assert by_id["tc_fresh"]["arguments"] == '{"text": "hi"}'
+
+
+class TestStaleConnectorTail:
+    """The SSE NOTIFY *tail* — the second transmit path — must be age-bounded
+    identically to the subscribe-time backfill (#744).
+
+    ``runtime_connector_calls_stream`` (api/sse.py) has TWO emit paths sharing
+    one ``emitted`` dedup set:
+
+    1. subscribe-time backfill → ``list_pending_calls_for_connector`` (bounded).
+    2. the NOTIFY tail (the ``while True`` loop) →
+       ``list_pending_calls_for_session_and_connection``.
+
+    The ``emitted`` set only suppresses calls the *backfill* already yielded.
+    Because the backfill now SKIPS stale calls, a stale send is NOT in
+    ``emitted`` — so if the tail's per-session fetch were unbounded, a session
+    that carries a weeks-stale unresolved connector send and then emits a new
+    event (firing the per-session NOTIFY) would hit the tail, fetch the stale
+    send, find it absent from ``emitted``, and transmit it: the exact #744 harm
+    (a weeks-stale send delivered out of nowhere), triggered by session
+    re-activation instead of connector reconnect.  This test exercises that
+    tail fetch directly and asserts the stale send is excluded while the fresh
+    one is surfaced.
+    """
+
+    async def test_tail_excludes_stale_surfaces_fresh(
+        self,
+        bound_signal_session_with_stale_send: tuple[asyncpg.Pool[Any], str, str, str],
+    ) -> None:
+        """The tail fetch (``list_pending_calls_for_session_and_connection``)
+        for the re-activated session surfaces EXACTLY ``tc_fresh`` and excludes
+        ``tc_stale``.
+
+        Was RED before the tail fix: that function called
+        ``_unresolved_tool_calls`` with NO ``max_age_seconds``, returning ALL
+        unresolved calls for the session unbounded — so ``tc_stale`` (~21 days
+        old, absent from the stream's ``emitted`` set because the backfill
+        skipped it) slipped through and was transmitted on the next per-session
+        NOTIFY.  GREEN now: the tail passes the same
+        ``settings.connector_backfill_max_age_seconds`` bound the backfill does,
+        so the stale parent turn is excluded on BOTH transmit paths.
+        """
+        pool, account_id, sid, conn_id = bound_signal_session_with_stale_send
+        async with pool.acquire() as conn:
+            pending = await queries.list_pending_calls_for_session_and_connection(
+                conn,
+                session_id=sid,
+                connection_id=conn_id,
+                account_id=account_id,
+            )
+        surfaced = {c["tool_call_id"] for c in pending}
+        assert surfaced == {"tc_fresh"}, (
+            "expected the SSE NOTIFY-tail fetch "
+            "(list_pending_calls_for_session_and_connection) to surface ONLY "
+            "the fresh send (tc_fresh) and exclude the ~21-day-old dormant send "
+            "(tc_stale): the tail is the second transmit path into "
+            "runtime_connector_calls_stream and must be age-bounded identically "
+            "to the backfill (#744). The stale send is absent from the stream's "
+            "`emitted` dedup (the backfill skipped it), so an unbounded tail "
+            "would re-transmit it the instant the session emits a new event. "
+            f"got: {sorted(surfaced)}"
+        )
+        # The surfaced record is transmit-ready, exactly as the backfill path's.
+        by_id = {c["tool_call_id"]: c for c in pending}
+        assert by_id["tc_fresh"]["name"] == SEND_TOOL
+        assert by_id["tc_fresh"]["connection_id"] == conn_id
         assert by_id["tc_fresh"]["arguments"] == '{"text": "hi"}'
