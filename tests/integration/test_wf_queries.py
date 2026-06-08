@@ -6,6 +6,7 @@ gapless, idempotent journal writer the runtime depends on.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -13,7 +14,7 @@ import asyncpg
 import pytest
 
 from aios.db.queries import workflows as wf_queries
-from aios.errors import ConflictError
+from aios.errors import ConflictError, NotFoundError
 
 
 @pytest.fixture
@@ -170,3 +171,85 @@ async def test_run_signal_idempotent(wf_conn: asyncpg.Connection[Any]) -> None:
     assert s2.result == {"answer": "yes"}
     signals = await wf_queries.list_run_signals(wf_conn, run_id)
     assert len(signals) == 1
+
+
+# ─── Block 3 surface: account-scoped reads + the stream NOTIFY ────────────────
+
+
+async def test_account_scoped_reads_isolate_tenants(wf_conn: asyncpg.Connection[Any]) -> None:
+    """The public reads (get_wf_run / list_wf_runs / list_workflows /
+    list_run_events_scoped) never surface another account's data."""
+    # A second tenant (a child account — only one active ROOT is allowed).
+    await wf_conn.execute(
+        "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+        "VALUES ('acc_other', 'acc_root', FALSE, 'tenant-other')"
+    )
+    run_id = await _seed_run(wf_conn)  # one workflow 'demo' + one run, under acc_root
+    await wf_queries.append_run_event(
+        wf_conn, account_id="acc_root", run_id=run_id, type="run_started", payload={"input": None}
+    )
+
+    # Owner sees everything.
+    assert (await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_root")).id == run_id
+    assert [r.id for r in await wf_queries.list_wf_runs(wf_conn, account_id="acc_root")] == [run_id]
+    assert len(await wf_queries.list_workflows(wf_conn, account_id="acc_root")) == 1
+    assert len(await wf_queries.list_run_events_scoped(wf_conn, run_id, account_id="acc_root")) == 1
+
+    # The other tenant sees nothing — a 404 on the point read, empty lists otherwise.
+    with pytest.raises(NotFoundError):
+        await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_other")
+    assert await wf_queries.list_wf_runs(wf_conn, account_id="acc_other") == []
+    assert await wf_queries.list_workflows(wf_conn, account_id="acc_other") == []
+    assert await wf_queries.list_run_events_scoped(wf_conn, run_id, account_id="acc_other") == []
+
+
+async def test_list_run_events_scoped_paginates_forward(wf_conn: asyncpg.Connection[Any]) -> None:
+    run_id = await _seed_run(wf_conn)
+    for i in range(3):
+        await wf_queries.append_run_event(
+            wf_conn,
+            account_id="acc_root",
+            run_id=run_id,
+            type="call_started",
+            call_key=f"sha:k#{i}",
+            payload={"capability": "gate"},
+        )
+    page1 = await wf_queries.list_run_events_scoped(
+        wf_conn, run_id, account_id="acc_root", after_seq=0, limit=2
+    )
+    assert [e.seq for e in page1] == [1, 2]
+    page2 = await wf_queries.list_run_events_scoped(
+        wf_conn, run_id, account_id="acc_root", after_seq=page1[-1].seq, limit=2
+    )
+    assert [e.seq for e in page2] == [3]
+
+
+async def test_append_run_event_notifies(
+    wf_conn: asyncpg.Connection[Any], migrated_db_url: str
+) -> None:
+    """append_run_event fires a pg_notify on wf_run_events_<run_id> with the event
+    id — the load-bearing signal the /runs/{id}/stream endpoint tails."""
+    run_id = await _seed_run(wf_conn)
+    listener = await asyncpg.connect(migrated_db_url)
+    try:
+        received: asyncio.Queue[str] = asyncio.Queue()
+        await listener.add_listener(
+            f"wf_run_events_{run_id}",
+            lambda _conn, _pid, _channel, payload: received.put_nowait(payload),
+        )
+        event = await wf_queries.append_run_event(
+            wf_conn, account_id="acc_root", run_id=run_id, type="run_started", payload={"input": 1}
+        )
+        assert event is not None
+        payload = await asyncio.wait_for(received.get(), timeout=5)
+        assert payload == event.id
+
+        # An idempotent no-op append (deduped) must NOT notify.
+        dup = await wf_queries.append_run_event(
+            wf_conn, account_id="acc_root", run_id=run_id, type="run_started", payload={"input": 1}
+        )
+        assert dup is None
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(received.get(), timeout=0.5)
+    finally:
+        await listener.close()
