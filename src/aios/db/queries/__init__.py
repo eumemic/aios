@@ -780,64 +780,42 @@ async def list_agent_versions(
 
 # ─── sessions ─────────────────────────────────────────────────────────────────
 
-# Read-time derivation of the session ``status`` ({active, idle}) from the event
-# log — there is no persisted status column (#728-era status collapse). A
-# session is ``active`` when it has owed/in-flight work that will advance
-# WITHOUT a new unprompted user message:
-#   * an unreacted stimulus  — a non-assistant message event past the assistant
-#     ``reacting_to`` watermark (queued/generating/tool-completed-awaiting-step), OR
-#   * an unresolved tool_call — an assistant tool_call with no tool-role result
-#     (harness tool in-flight, or blocked on an approval/custom-tool result).
-# ...EXCEPT when ``errored`` (retry budget exhausted, not yet recovered): the
-# latest ``turn_ended``/``error`` lifecycle event is more recent than the latest
-# user message. Errored forces ``idle`` (a special case of idle) and the sweep
-# skips it — see ``sweep.ERRORED_SESSIONS_SQL`` (the same predicate, used to
-# exclude errored sessions from inference; keep the two in sync).
+# O(1) session status derivation from five maintained scalar columns
+# (``last_reacted_seq``, ``open_tool_call_count``, ``last_error_seq``,
+# ``last_user_seq``, ``last_stimulus_seq``). These scalars are updated
+# transactionally inside ``append_event`` and backfilled by migration 0066.
+# The status predicate is pure column arithmetic — no correlated subqueries
+# over ``events``.
 #
-# Correlated on ``sessions.id``/``sessions.account_id`` so it drops into any
-# query with ``sessions`` in scope. Each EXISTS rides a partial index
-# (events_session_message_seq_idx, events_assistant_tool_calls_idx,
-# events_tool_result_idx, events_turn_error_idx). For single reads and
-# keyset-limited list pages it evaluates on O(page) rows.
+# ``errored`` = last_error_seq > 0 AND last_error_seq > last_user_seq
+# ``active``  = (last_stimulus_seq > last_reacted_seq OR open_tool_call_count > 0)
+#               AND NOT errored
+# ``idle``    = otherwise
 #
-# ``_SESSION_ACTIVE_EXPR`` — has owed/in-flight work (unreacted stimulus OR
-# unresolved tool_call). ``_SESSION_ERRORED_EXPR`` — parked-errored latch
-# (also reused by ``lock_active_session_for_update`` and the clone gate).
-_SESSION_ACTIVE_EXPR = """(
-        EXISTS (
-            SELECT 1 FROM events ev
-             WHERE ev.session_id = sessions.id AND ev.account_id = sessions.account_id
-               AND ev.kind = 'message' AND ev.role <> 'assistant'
-               AND ev.seq > COALESCE((
-                   SELECT MAX(COALESCE((ae.data->>'reacting_to')::bigint, ae.seq))
-                     FROM events ae
-                    WHERE ae.session_id = sessions.id AND ae.account_id = sessions.account_id
-                      AND ae.kind = 'message' AND ae.role = 'assistant'), 0))
-        OR EXISTS (
-            SELECT 1 FROM events ate
-             CROSS JOIN LATERAL jsonb_array_elements(ate.data->'tool_calls') tc
-             WHERE ate.session_id = sessions.id AND ate.account_id = sessions.account_id
-               AND ate.kind = 'message' AND ate.role = 'assistant' AND ate.data ? 'tool_calls'
-               AND NOT EXISTS (
-                   SELECT 1 FROM events tr
-                    WHERE tr.session_id = sessions.id AND tr.account_id = sessions.account_id
-                      AND tr.kind = 'message' AND tr.role = 'tool'
-                      AND tr.data->>'tool_call_id' = tc->>'id'))
-    )"""
-
-_SESSION_ERRORED_EXPR = """EXISTS (
-        SELECT 1 FROM events le
-         WHERE le.session_id = sessions.id AND le.account_id = sessions.account_id
-           AND le.kind = 'lifecycle' AND le.data->>'stop_reason' = 'error'
-           AND le.seq > COALESCE((
-               SELECT MAX(ue.seq) FROM events ue
-                WHERE ue.session_id = sessions.id AND ue.account_id = sessions.account_id
-                  AND ue.kind = 'message' AND ue.role = 'user'), 0))"""
-
-_SESSION_STATUS_EXPR = (
-    f"CASE WHEN {_SESSION_ACTIVE_EXPR} AND NOT {_SESSION_ERRORED_EXPR} "
-    "THEN 'active' ELSE 'idle' END"
+# ``last_stimulus_seq`` — NOT ``last_event_seq`` — is the unreacted-stimulus
+# watermark: it is the max seq of non-assistant messages (role <> 'assistant';
+# user + tool). ``last_event_seq`` includes the session's OWN assistant replies,
+# so after a normal idle turn (user → assistant reply) ``last_event_seq >
+# last_reacted_seq`` and the session would read wrongly as ``active`` — driving
+# one extra model step (#749). This expr is exactly the pre-#732 derivation
+# ``EXISTS(non-assistant message with seq > last_reacted_seq)``, as a scalar.
+# Must stay byte-for-byte in sync with ``CANDIDATE_ROWS_SQL`` in
+# ``harness/sweep.py`` — the sweep candidate filter and the read-path status
+# predicate MUST agree, or the worker wakes with no progress / vice-versa.
+#
+# ``_SESSION_ERRORED_EXPR`` is also reused by ``lock_active_session_for_update``
+# and the clone gate.
+_SESSION_ERRORED_EXPR = (
+    "(sessions.last_error_seq > 0 AND sessions.last_error_seq > sessions.last_user_seq)"
 )
+
+_SESSION_ACTIVE_EXPR = (
+    "((sessions.last_stimulus_seq > sessions.last_reacted_seq"
+    " OR sessions.open_tool_call_count > 0)"
+    f" AND NOT {_SESSION_ERRORED_EXPR})"
+)
+
+_SESSION_STATUS_EXPR = f"CASE WHEN {_SESSION_ACTIVE_EXPR} THEN 'active' ELSE 'idle' END"
 
 
 def _row_to_session(row: asyncpg.Record) -> Session:
@@ -1478,11 +1456,17 @@ async def clone_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 stop_reason, workspace_volume_path, env, last_event_seq,
-                focal_channel, focal_locked, account_id
+                focal_channel, focal_locked,
+                last_reacted_seq, open_tool_call_count,
+                last_error_seq, last_user_seq, last_stimulus_seq,
+                account_id
             )
             SELECT $1, agent_id, environment_id, agent_version, title, metadata,
                    stop_reason, $2, env, last_event_seq, focal_channel,
-                   focal_locked, account_id
+                   focal_locked,
+                   last_reacted_seq, open_tool_call_count,
+                   last_error_seq, last_user_seq, last_stimulus_seq,
+                   account_id
               FROM sessions WHERE id = $3
             RETURNING *
             """,
@@ -2164,17 +2148,56 @@ async def append_event(
     # (its seq exceeds the latest error lifecycle event — see
     # ``_SESSION_ERRORED_EXPR``), and the sweep stops skipping it (#39, #353).
     is_user_message = kind == "message" and role == "user"
+    # A *stimulus* is any message the assistant must react to: user OR tool
+    # (role <> 'assistant'). ``last_stimulus_seq`` tracks its max seq and drives
+    # the active predicate. This is deliberately broader than ``is_user_message``
+    # (the error latch) — an unreacted tool result keeps the session active, but
+    # must NOT clear an error. See ``_SESSION_ACTIVE_EXPR``.
+    is_stimulus = kind == "message" and role != "assistant"
+    is_error_lifecycle = kind == "lifecycle" and data.get("stop_reason") == "error"
+    is_assistant_message = kind == "message" and role == "assistant"
+    tool_call_count_delta = (
+        len(data.get("tool_calls") or [])
+        if is_assistant_message
+        else (-1 if kind == "message" and role == "tool" else 0)
+    )
+    # The reaction watermark advances to MAX(COALESCE(reacting_to, seq)) over
+    # assistant messages — exactly the pre-#732 ``session_max_reacting`` CTE. An
+    # assistant message with an explicit ``reacting_to`` uses it; one without
+    # (seeded data, or an unprompted assistant turn) falls back to the
+    # assistant's OWN new seq (``last_event_seq + 1``). ``turn_ended`` lifecycle
+    # events do NOT bump it: a rescheduling ``turn_ended`` appends with no
+    # assistant reaction, and bumping the watermark there would falsely mark the
+    # still-unreacted user message as reacted-to, flipping a retry-pending
+    # session to idle (breaks the litellm/harness-error retry loop — the
+    # session must stay active so the sweep re-picks it). Reaction is tracked by
+    # assistant ``reacting_to``, never by turn boundaries.
+    reacting_to_seq = int(data.get("reacting_to") or 0) if is_assistant_message else 0
 
     async with conn.transaction():
         seq_row = await conn.fetchrow(
             "UPDATE sessions "
             "SET last_event_seq = last_event_seq + 1, "
-            "    updated_at = CASE WHEN $3 THEN now() ELSE updated_at END "
+            "    updated_at = CASE WHEN $3 THEN now() ELSE updated_at END, "
+            "    last_user_seq = CASE WHEN $3 THEN last_event_seq + 1 ELSE last_user_seq END, "
+            "    last_stimulus_seq = CASE WHEN $8 THEN last_event_seq + 1 "
+            "        ELSE last_stimulus_seq END, "
+            "    last_error_seq = CASE WHEN $4 THEN last_event_seq + 1 ELSE last_error_seq END, "
+            "    open_tool_call_count = GREATEST(open_tool_call_count + $5, 0), "
+            "    last_reacted_seq = CASE "
+            "        WHEN $7 THEN GREATEST(last_reacted_seq, "
+            "            CASE WHEN $6 > 0 THEN $6 ELSE last_event_seq + 1 END) "
+            "        ELSE last_reacted_seq END "
             "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL "
             "RETURNING last_event_seq, focal_channel",
             session_id,
             account_id,
             is_user_message,
+            is_error_lifecycle,
+            tool_call_count_delta,
+            reacting_to_seq,
+            is_assistant_message,
+            is_stimulus,
         )
         if seq_row is None:
             # Treat archived as "session no longer exists for write purposes."

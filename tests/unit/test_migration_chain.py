@@ -26,15 +26,16 @@ def _script_directory() -> ScriptDirectory:
 
 
 def test_single_head() -> None:
-    """The migration ladder has exactly one head: ``0065``."""
+    """The migration ladder has exactly one head: ``0066``."""
     script = _script_directory()
-    assert script.get_heads() == ["0065"]
+    assert script.get_heads() == ["0066"]
 
 
 def test_chain_is_linear_0054_to_0060() -> None:
     """``0054 -> … -> 0060 -> 0061`` is a plain linear chain."""
     script = _script_directory()
 
+    rev_0066 = script.get_revision("0066")
     rev_0065 = script.get_revision("0065")
     rev_0064 = script.get_revision("0064")
     rev_0063 = script.get_revision("0063")
@@ -47,6 +48,7 @@ def test_chain_is_linear_0054_to_0060() -> None:
     rev_0056 = script.get_revision("0056")
     rev_0055 = script.get_revision("0055")
 
+    assert rev_0066.down_revision == "0065"
     assert rev_0065.down_revision == "0064"
     assert rev_0064.down_revision == "0063"
     assert rev_0063.down_revision == "0062"

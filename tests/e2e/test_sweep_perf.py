@@ -1,16 +1,16 @@
 """Perf regression tests for sweep queries (issue #140).
 
-The sweep path ran correlated subqueries against ``events`` that computed
-``MAX(reacting_to)`` per session inside a per-row SubPlan — an N+1 pattern
-that on JN's live data made one sweep pass cost ~7.5s on a 10k-event
-table. The fix in this PR hoists the aggregation to a CTE and swaps
-``data->>'role'`` for the normalized ``role`` column (from migration 0022).
+The sweep path originally ran correlated subqueries against ``events`` that
+computed ``MAX(reacting_to)`` per session inside a per-row SubPlan — an N+1
+pattern that on JN's live data made one sweep pass cost ~7.5s on a 10k-event
+table. ``CANDIDATE_ROWS_SQL`` and ``ERRORED_SESSIONS_SQL`` now use scalar
+columns maintained on the ``sessions`` row (migration 0066) — simple column
+arithmetic with no event-log scan at all.
 
 These tests encode the fix as a **structural** invariant: after
 ``EXPLAIN (FORMAT JSON)``, no node in the plan tree is a SubPlan scanning
 ``events``. Deterministic, no wall-clock assertion, no flake on slow CI.
-A regression from a well-meaning refactor ("why is this a CTE?") fails
-this test immediately.
+A regression from a well-meaning refactor fails this test immediately.
 
 The budget smoke test (``@pytest.mark.slow``) is a secondary fence: on
 the same seeded fixture, assert the rewritten queries actually complete
@@ -225,6 +225,53 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
                 rows,
             )
 
+        # Backfill the scalar columns on sessions to match the seeded events.
+        # The production path maintains these in append_event; this test inserts
+        # events directly, so it must reconcile the sessions rows manually.
+        # The backfill SQL below intentionally mirrors migration 0066's
+        # backfill logic — keep them in sync if either changes.
+        await conn.execute(
+            """
+            UPDATE sessions s
+               SET last_event_seq = COALESCE((
+                       SELECT MAX(e.seq) FROM events e WHERE e.session_id = s.id
+                   ), 0),
+                   last_user_seq = COALESCE((
+                       SELECT MAX(e.seq) FROM events e
+                        WHERE e.session_id = s.id AND e.kind = 'message' AND e.role = 'user'
+                   ), 0),
+                   last_stimulus_seq = COALESCE((
+                       SELECT MAX(e.seq) FROM events e
+                        WHERE e.session_id = s.id AND e.kind = 'message' AND e.role <> 'assistant'
+                   ), 0),
+                   last_error_seq = COALESCE((
+                       SELECT MAX(e.seq) FROM events e
+                        WHERE e.session_id = s.id
+                          AND e.kind = 'lifecycle' AND e.data->>'stop_reason' = 'error'
+                   ), 0),
+                   last_reacted_seq = COALESCE((
+                       SELECT MAX(COALESCE((e.data->>'reacting_to')::bigint, e.seq))
+                         FROM events e
+                        WHERE e.session_id = s.id
+                          AND e.kind = 'message' AND e.role = 'assistant'
+                   ), 0),
+                   open_tool_call_count = COALESCE((
+                       SELECT COUNT(*)
+                         FROM events ate
+                        CROSS JOIN LATERAL jsonb_array_elements(ate.data->'tool_calls') tc
+                        WHERE ate.session_id = s.id
+                          AND ate.kind = 'message' AND ate.role = 'assistant'
+                          AND ate.data ? 'tool_calls'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM events tr
+                               WHERE tr.session_id = s.id
+                                 AND tr.kind = 'message' AND tr.role = 'tool'
+                                 AND tr.data->>'tool_call_id' = tc->>'id'
+                          )
+                   ), 0)
+            """
+        )
+
         # ANALYZE so the planner has fresh stats matching the fixture.
         await conn.execute("ANALYZE events")
         await conn.execute("ANALYZE sessions")
@@ -265,14 +312,12 @@ class TestNoCorrelatedSubplanOverEvents:
     a correlated SubPlan. That shape was the N+1 pathology behind #140."""
 
     async def test_candidate_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
-        plan = await _explain(
-            seeded_pool, CANDIDATE_ROWS_SQL.format(scope_clause="", cte_scope_clause="")
-        )
+        plan = await _explain(seeded_pool, CANDIDATE_ROWS_SQL.format(scope_clause=""))
         found = find_subplans_over_events(plan)
         assert not found, (
             f"N+1 regression in find_sessions_needing_inference candidate query: "
             f"{len(found)} correlated subplan(s) over events. "
-            f"See PR #145 — this query must hoist MAX(reacting_to) via a CTE."
+            f"CANDIDATE_ROWS_SQL should use session scalar columns, not event-log scans."
         )
 
     async def test_unreacted_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
@@ -294,7 +339,7 @@ class TestNoCorrelatedSubplanOverEvents:
         assert not found, (
             f"N+1 regression in errored-session derivation: "
             f"{len(found)} correlated subplan(s) over events. This query must "
-            f"hoist MAX(seq) per session via CTEs (see session_max_reacting)."
+            f"use maintained scalar columns on sessions (migration 0066), not event-log scans."
         )
 
     async def test_span_start_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
@@ -328,7 +373,7 @@ class TestSweepQueryBudget:
     async def test_candidate_rows_buffer_budget(self, seeded_pool: asyncpg.Pool[Any]) -> None:
         async with seeded_pool.acquire() as conn:
             result = await conn.fetchval(
-                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CANDIDATE_ROWS_SQL.format(scope_clause='', cte_scope_clause='')}"
+                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CANDIDATE_ROWS_SQL.format(scope_clause='')}"
             )
         if isinstance(result, str):
             result = json.loads(result)
