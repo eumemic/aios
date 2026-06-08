@@ -300,6 +300,32 @@ class Settings(BaseSettings):
         "reminders.",
     )
 
+    # ── workflows ──────────────────────────────────────────────────────────
+    workflow_max_agent_calls: int = Field(
+        default=1000,
+        ge=1,
+        description="Per-run lifetime ceiling on the number of ``agent()`` "
+        "children a workflow may spawn. Counted from the run's ``call_started`` "
+        "journal (monotonic), checked before each step's spawns: a step that "
+        "would push the total past the cap errors the run (``too_many_agents``) "
+        "before spawning any of that step's new children. Bounds a runaway "
+        "script that spawns children in an unbounded loop. The per-call "
+        "single-``parallel()`` fan-out width is bounded separately, in the "
+        "host (``wf_script_host.MAX_PARALLEL_FANOUT``).",
+    )
+    workflow_agent_deadline_seconds: float = Field(
+        default=60 * 60,  # 1 hour
+        gt=0,
+        description="Wall-clock budget for a single ``agent()`` call, measured "
+        "from its ``call_started``. A child that never goes idle (e.g. loops on "
+        "tools forever) never trips the quiescence nudge, so without this its "
+        "caller would suspend forever; past the deadline the harvest writes a "
+        "``timeout`` error response (exactly-once), resolving the call as a "
+        "catchable ``AgentError`` and keeping the run total. Generous by default "
+        "— a child doing real model+tool work can legitimately run for minutes; "
+        "this is the never-resolves backstop, not a tight SLA.",
+    )
+
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
 

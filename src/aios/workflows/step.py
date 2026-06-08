@@ -26,17 +26,20 @@ One wake:
 
 from __future__ import annotations
 
+import contextlib
 import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.db import queries as db_queries
 from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
-from aios.models.workflows import WfRun
+from aios.models.workflows import WfRun, WfRunEvent
 from aios.services.sessions import create_child_session
 from aios.services.wake import defer_run_wake, defer_wake
 from aios.workflows.child_id import child_session_id
@@ -58,6 +61,53 @@ def _memo_outcome(call_result_payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": call_result_payload.get("result")}
 
 
+async def _resolve_agent_call(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    child_id: str,
+    request_id: str,
+    started_at: datetime,
+    now: datetime,
+    deadline: timedelta,
+) -> dict[str, Any] | None:
+    """The outcome of one inflight ``agent()`` call, or ``None`` if it is still
+    pending and within its wall-clock deadline.
+
+    ``derive_response`` returns the child's written response or a ``child_gone``
+    outcome, else ``None`` (live and unanswered). A still-pending call past its
+    deadline is force-resolved with a ``timeout`` error response (H3): a child that
+    never goes idle — e.g. it loops on tools forever — never trips R4's quiescence
+    nudge, so without this its caller would suspend forever. The write is
+    exactly-once and we re-derive, so a real response that raced in wins; and a child
+    archived/deleted in the derive→write window surfaces as ``child_gone`` on the
+    re-derive (``write_response_if_absent`` raises ``NotFoundError`` against the gone
+    row — the same graceful resolution the non-timeout harvest path gives a gone
+    child, never a crash)."""
+    resolved = await db_queries.derive_response(
+        conn, child_id, account_id=account_id, request_id=request_id
+    )
+    if resolved is not None:
+        return resolved
+    if now - started_at < deadline:
+        return None  # pending, within deadline
+    with contextlib.suppress(NotFoundError):
+        await db_queries.write_response_if_absent(
+            conn,
+            child_id,
+            account_id=account_id,
+            request_id=request_id,
+            is_error=True,
+            result=None,
+            error={"kind": "timeout"},
+        )
+    resolved = await db_queries.derive_response(
+        conn, child_id, account_id=account_id, request_id=request_id
+    )
+    assert resolved is not None  # a response now exists (timeout/child) or child_gone
+    return resolved
+
+
 async def run_workflow_step(run_id: str) -> None:
     pool = runtime.require_pool()
 
@@ -74,10 +124,11 @@ async def run_workflow_step(run_id: str) -> None:
             for e in events
             if e.type == "call_result" and e.call_key is not None
         }
-        # call_key -> call_started payload (capability + child_session_id), so the
-        # harvest can read a gate's signal or an agent child's marker.
-        inflight: dict[str, dict[str, Any]] = {
-            e.call_key: e.payload
+        # call_key -> the call_started event, so the harvest can read a gate's signal
+        # or an agent child's response, and measure an agent call's age against its
+        # wall-clock deadline (off the event's created_at).
+        inflight: dict[str, WfRunEvent] = {
+            e.call_key: e
             for e in events
             if e.type == "call_started" and e.call_key is not None and e.call_key not in memo
         }
@@ -93,21 +144,27 @@ async def run_workflow_step(run_id: str) -> None:
             await wf_queries.set_run_status(conn, run_id, "running", account_id=account_id)
 
         # Pre-replay harvest: resolve any inflight capability that is now done — a
-        # gate with a delivered resume signal, or an agent child with a completion
-        # marker — and fold its result into memo so replay fast-forwards past it.
-        for call_key, cap_payload in list(inflight.items()):
+        # gate with a delivered resume signal, or an agent child with a response (or a
+        # past-deadline timeout) — and fold its result into memo so replay
+        # fast-forwards past it.
+        now = datetime.now(UTC)
+        agent_deadline = timedelta(seconds=get_settings().workflow_agent_deadline_seconds)
+        for call_key, cap_event in list(inflight.items()):
+            cap_payload = cap_event.payload
             if cap_payload.get("capability") == "agent":
                 # The child was invoked with request_id = call_key (the agent() call
                 # IS the request), so its outcome is derived under that same id.
-                resolved = await db_queries.derive_response(
+                result_payload = await _resolve_agent_call(
                     conn,
-                    cap_payload["child_session_id"],
                     account_id=account_id,
+                    child_id=cap_payload["child_session_id"],
                     request_id=call_key,
+                    started_at=cap_event.created_at,
+                    now=now,
+                    deadline=agent_deadline,
                 )
-                if resolved is None:
-                    continue  # still pending — stay suspended
-                result_payload = resolved
+                if result_payload is None:
+                    continue  # still pending, within deadline — stay suspended
             else:  # gate: the resume value lives in the signal
                 sig = signals.get(call_key)
                 if sig is None:
@@ -163,6 +220,38 @@ async def run_workflow_step(run_id: str) -> None:
 
         if outcome.kind == "returned":
             await _complete_run(conn, run, output=outcome.value, is_error=False)
+            return
+
+        # Lifetime agent-call cap (H1): bound a runaway that spawns children in an
+        # unbounded loop. Counted from the monotonic call_started journal plus this
+        # step's new agent frontier, checked BEFORE any spawn so an over-cap step
+        # errors atomically — never leaving a partial fan-out of orphan children.
+        # (A single parallel()'s width is bounded separately in the host.) Gated on
+        # there BEING new spawns: a harvest-only re-suspend (no new agents) must never
+        # error — else lowering the cap mid-flight would retroactively kill a run whose
+        # children are already all inflight, orphaning them. H1 blocks NEW spawns only.
+        new_agent_caps = [
+            cap
+            for cap in outcome.emitted
+            if cap.capability_id == "agent"
+            and cap.call_key not in memo
+            and cap.call_key not in inflight
+        ]
+        prior_agent_calls = sum(
+            1 for e in events if e.type == "call_started" and e.payload.get("capability") == "agent"
+        )
+        max_agent_calls = get_settings().workflow_max_agent_calls
+        if new_agent_caps and prior_agent_calls + len(new_agent_caps) > max_agent_calls:
+            await _complete_run(
+                conn,
+                run,
+                output=(
+                    f"workflow exceeded the {max_agent_calls}-agent call cap "
+                    f"({prior_agent_calls} started, {len(new_agent_caps)} more requested)"
+                ),
+                is_error=True,
+                error_kind="too_many_agents",
+            )
             return
 
         # Suspended: open any *new* frontier capability, then park.

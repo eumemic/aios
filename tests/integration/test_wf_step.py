@@ -1119,6 +1119,265 @@ async def test_parallel_barrier_yields_none_for_an_errored_child(
     assert run.output == ["ok", None]  # the errored branch → None, barrier still returns
 
 
+# ─── H — runaway caps + the per-call wall-clock deadline ──────────────────────
+
+
+async def test_lifetime_agent_cap_errors_atomically_before_spawning(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A fan-out that would push the run past its lifetime agent-call cap errors
+    BEFORE spawning any of that step's children — no partial fan-out of orphans."""
+    from aios.config import get_settings
+
+    capped = get_settings().model_copy(update={"workflow_max_agent_calls": 2})
+    monkeypatch.setattr("aios.workflows.step.get_settings", lambda: capped)
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(3)])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # 3 > cap 2 → error, nothing spawned
+
+    assert await _children_of(pool, run_id) == []  # no call_started journaled
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        # the invariant at its real surface: no child session rows exist for the run
+        orphans = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert orphans == 0  # atomic: no partial fan-out of orphan children
+    assert run is not None and run.status == "errored"
+    assert events[-1].type == "run_completed"
+    assert events[-1].payload["error"]["kind"] == "too_many_agents"
+    assert "2-agent call cap" in events[-1].payload["output"]
+
+
+async def test_agent_cap_at_boundary_is_allowed(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """Exactly at the cap is allowed: a fan-out of N with cap N spawns all N children
+    and suspends (the boundary is strict ``>``, mirroring H2's at-cap host test)."""
+    from aios.config import get_settings
+
+    capped = get_settings().model_copy(update={"workflow_max_agent_calls": 3})
+    monkeypatch.setattr("aios.workflows.step.get_settings", lambda: capped)
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(3)])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # 3 == cap 3 → allowed
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "suspended"
+    assert len(await _children_of(pool, run_id)) == 3  # all spawned
+
+
+async def test_lowering_cap_mid_flight_does_not_kill_a_harvest_only_step(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """H1 gates NEW spawns only: a harvest-only re-suspend (no new agents) must never
+    error, even after the cap is lowered below the already-spawned count — otherwise a
+    config reduction would retroactively kill in-flight runs and orphan their
+    children."""
+    from aios.config import get_settings
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(2)])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn 2 under the default (high) cap
+    children = await _children_of(pool, run_id)
+    assert len(children) == 2
+
+    # Now lower the cap below the 2 already-spawned, and resolve only one child so the
+    # next step is harvest-only (the other stays inflight → zero new agent caps).
+    capped = get_settings().model_copy(update={"workflow_max_agent_calls": 1})
+    monkeypatch.setattr("aios.workflows.step.get_settings", lambda: capped)
+    rid0 = await _open_request_id(pool, children[0])
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(children[0], {"request_id": rid0, "value": "r0"})
+
+    await run_workflow_step(run_id)  # harvest child0; child1 inflight; new_agent_caps == []
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "suspended"  # NOT errored — no new spawns
+
+
+async def test_agent_call_times_out_when_child_never_responds(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A child that never responds past its wall-clock deadline resolves the agent()
+    call as a catchable AgentError(timeout) — totality even for a child that never
+    goes idle (so the quiescence nudge never fires). The child is NOT terminated:
+    the timeout writes a response, it doesn't end the target (responding ≠ ending)."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        return await agent({wf_agent_id!r}, 'go')\n"
+        "    except AgentError as e:\n"
+        "        return {'timed_out': e.kind}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
+
+    # Age the call_started past the (default 1h) deadline — deterministic, no sleep.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = created_at - interval '2 hours' "
+            "WHERE run_id = $1 AND type = 'call_started'",
+            run_id,
+        )
+
+    await run_workflow_step(run_id)  # harvest: past deadline → timeout response → resolve
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        resp = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
+        child = await db_queries.get_session_bare(conn, child_id, account_id="acc_wf")
+    assert run is not None and run.status == "completed"
+    assert run.output == {"timed_out": "timeout"}
+    assert resp is not None and resp["is_error"] is True and resp["error"] == {"kind": "timeout"}
+    assert child.archived_at is None  # left running — responding ≠ terminating
+
+
+async def test_past_deadline_child_that_already_responded_keeps_its_real_response(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A child that answered before the deadline harvest keeps its real value: the
+    harvest's first derive_response is non-None, so the timeout branch is never
+    entered and no clobbering timeout is written (the deadline never overrides an
+    existing response)."""
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        return await agent({wf_agent_id!r}, 'go')\n"
+        "    except AgentError as e:\n"
+        "        return {'timed_out': e.kind}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
+
+    # The child answers for real, THEN we also age the call past the deadline.
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(child_id, {"request_id": rid, "value": "real"})
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = created_at - interval '2 hours' "
+            "WHERE run_id = $1 AND type = 'call_started'",
+            run_id,
+        )
+
+    await run_workflow_step(run_id)  # derive_response already non-None → no timeout written
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        resp = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
+    assert run is not None and run.status == "completed" and run.output == "real"
+    assert resp is not None and resp["is_error"] is False and resp["result"] == "real"
+
+
+async def test_past_deadline_gone_child_resolves_as_child_gone_not_timeout(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A child that is BOTH archived AND past its deadline resolves as child_gone, not
+    timeout: derive_response folds in liveness, so a gone child returns non-None
+    before the deadline branch — and even a child archived in the derive→write window
+    surfaces as child_gone (write_response_if_absent's NotFoundError is absorbed, no
+    crash)."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        return await agent({wf_agent_id!r}, 'go')\n"
+        "    except AgentError as e:\n"
+        "        return {'kind': e.kind}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+
+    # Archive the child (it never answered) AND age the call past the deadline.
+    async with pool.acquire() as conn:
+        await db_queries.archive_session(conn, child_id, account_id="acc_wf")
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = created_at - interval '2 hours' "
+            "WHERE run_id = $1 AND type = 'call_started'",
+            run_id,
+        )
+
+    await run_workflow_step(run_id)  # gone wins over the deadline — no timeout, no crash
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {"kind": "child_gone"}
+
+
+async def test_child_archived_in_timeout_write_window_resolves_as_child_gone(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The narrow TOCTOU the H3 timeout guards against: a child live at the harvest's
+    derive (None) but archived before the timeout write. write_response_if_absent
+    raises NotFoundError against the gone row; the helper absorbs it and the re-derive
+    resolves the call as child_gone — never a step crash."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        return await agent({wf_agent_id!r}, 'go')\n"
+        "    except AgentError as e:\n"
+        "        return {'kind': e.kind}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn the child
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = created_at - interval '2 hours' "
+            "WHERE run_id = $1 AND type = 'call_started'",
+            run_id,
+        )
+
+    # Inject the race: the first derive observes the child live (returns None) but
+    # archives it in the same breath, so the subsequent timeout write hits a gone row.
+    real_derive = db_queries.derive_response
+    calls = {"n": 0}
+
+    async def racing_derive(conn: Any, sid: str, *, account_id: str, request_id: str) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await db_queries.archive_session(conn, sid, account_id=account_id)
+            return None  # "live at the snapshot" — but now archived under us
+        return await real_derive(conn, sid, account_id=account_id, request_id=request_id)
+
+    monkeypatch.setattr(db_queries, "derive_response", racing_derive)
+    await run_workflow_step(run_id)  # must NOT crash on the gone-row write
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {"kind": "child_gone"}  # resolved gracefully, no crash
+
+
 async def test_agent_stays_suspended_until_marker(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:

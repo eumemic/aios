@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from aios.workflows.host_launcher import HostOutcome, run_script_host
+from aios.workflows.wf_script_host import MAX_PARALLEL_FANOUT
 
 
 async def _run(
@@ -260,6 +261,36 @@ async def test_empty_parallel_returns_empty_list() -> None:
     out = await _run("async def main(input):\n    return await parallel([])")
     assert out.kind == "returned"
     assert out.value == []
+
+
+async def test_parallel_fanout_over_cap_raises_before_spawning() -> None:
+    """A single parallel() wider than MAX_PARALLEL_FANOUT fails the run in the host —
+    deterministically, before any child capability is emitted (none to spawn). The
+    lifetime total across calls is bounded separately, parent-side."""
+    n = MAX_PARALLEL_FANOUT + 1
+    src = (
+        "async def main(input):\n"
+        f"    return await parallel([(lambda: agent('a', 'x')) for _ in range({n})])"
+    )
+    out = await _run(src)
+    assert out.kind == "raised"
+    assert out.error_kind == "too_wide_fanout"  # a distinct, machine-parseable kind
+    assert out.error_repr is not None
+    assert "fan-out" in out.error_repr and str(n) in out.error_repr
+    assert out.emitted == []  # nothing to spawn — failed before opening the frontier
+
+
+async def test_parallel_fanout_at_cap_is_allowed() -> None:
+    """Exactly MAX_PARALLEL_FANOUT branches is within the cap: the run suspends on the
+    full frontier rather than raising (the boundary is strict ``>``)."""
+    n = MAX_PARALLEL_FANOUT
+    src = (
+        "async def main(input):\n"
+        f"    return await parallel([(lambda: agent('a', str(i))) for i in range({n})])"
+    )
+    out = await _run(src)
+    assert out.kind == "suspended"
+    assert len(out.emitted) == n
 
 
 async def test_pipeline_runs_each_item_through_stages() -> None:

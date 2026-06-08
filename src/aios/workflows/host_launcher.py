@@ -45,6 +45,7 @@ DEFAULT_ADDRESS_SPACE_BYTES: int | None = 4 * 1024**3
 HostOutcomeKind = Literal["suspended", "returned", "raised"]
 HostErrorKind = Literal[
     "author_exception",
+    "too_wide_fanout",  # a single parallel()/pipeline() exceeded MAX_PARALLEL_FANOUT
     "script_host_crash",
     "script_host_timeout",
     "script_host_spawn_failed",
@@ -148,7 +149,9 @@ def _outcome_from_frames(
         kind="raised",
         emitted=emitted,
         error_repr=terminal.get("repr"),
-        error_kind="author_exception",
+        # The host stamps a specific kind on structural failures it detects itself
+        # (e.g. the fan-out cap); an uncaught author exception carries none → generic.
+        error_kind=terminal.get("kind") or "author_exception",
         stderr=stderr,
     )
 

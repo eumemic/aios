@@ -57,8 +57,10 @@ class AgentError(Exception):
     can ``try/except AgentError`` and continue, or let it propagate to fail the run
     (the bubble). ``kind`` distinguishes the failure mode: ``None`` for an explicit
     ``error()`` from the child, ``"child_errored"`` for a model failure,
-    ``"child_gone"`` if the child was archived/deleted before answering, and
-    ``"no_return"`` for no response (see :class:`AgentNoReturnError`).
+    ``"child_gone"`` if the child was archived/deleted before answering,
+    ``"timeout"`` if the call outran its wall-clock budget without responding, and
+    ``"no_return"`` for an idle-without-responding child (see
+    :class:`AgentNoReturnError`).
     """
 
     def __init__(self, message: str, *, kind: str | None = None) -> None:
@@ -289,11 +291,13 @@ def _exc_repr(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _emit_error(emit: Any, repr_: str, tb: str = "") -> None:
+def _emit_error(emit: Any, repr_: str, tb: str = "", *, kind: str | None = None) -> None:
     """Emit the host's single error terminal (``RAISED``). The sole shape for every
     failure the driver reports — an escaped exception or a driver-detected invariant
-    breach — so the parent always parses one frame layout."""
-    emit({"type": RAISED, "repr": repr_, "traceback": tb})
+    breach — so the parent always parses one frame layout. ``kind`` lets the host
+    label a structural failure it detects itself (e.g. the fan-out cap) so the parent
+    sees a specific ``error_kind``; an uncaught author exception carries none."""
+    emit({"type": RAISED, "repr": repr_, "traceback": tb, "kind": kind})
 
 
 def _emit_raised(emit: Any, exc: BaseException) -> None:
@@ -304,6 +308,7 @@ _AGENT_ERROR_DEFAULT_MESSAGES: dict[str | None, str] = {
     "child_errored": "the agent errored before responding to the request",
     "no_return": "the agent went idle without responding to the request",
     "child_gone": "the agent was archived or deleted before responding to the request",
+    "timeout": "the agent did not respond within its wall-clock deadline",
 }
 
 
@@ -320,6 +325,13 @@ def _agent_error_from(error_info: Any) -> AgentError:
 
 
 # ─── the manual .send() driver (a deterministic cooperative scheduler) ────────
+
+# Width ceiling for a single ``parallel()``/``pipeline()`` fan-out: the run RAISES
+# before spawning any of an over-wide fan-out's children. A host-side CONSTANT (not
+# config) so it is identical across replays — the decision to RAISE is a pure
+# function of the script. The lifetime total across all calls is bounded separately,
+# parent-side, by ``Settings.workflow_max_agent_calls``.
+MAX_PARALLEL_FANOUT = 1000
 
 
 class _Branch:
@@ -449,6 +461,16 @@ def _drive(root_coro: Any, memo: dict[str, Any], emit: Any) -> None:
                 if not yielded.branches:
                     branch.send = []  # empty parallel resumes immediately with []
                     continue
+                if len(yielded.branches) > MAX_PARALLEL_FANOUT:
+                    # Fail before spawning any child — a deterministic, structural
+                    # (memo-independent) limit, so it RAISES identically on replay.
+                    _emit_error(
+                        emit,
+                        f"parallel() fan-out of {len(yielded.branches)} exceeds the "
+                        f"{MAX_PARALLEL_FANOUT} cap",
+                        kind="too_wide_fanout",
+                    )
+                    return
                 join = _Join(branch, len(yielded.branches))
                 branch.blocked = True  # unblocks when its children all finish
                 # Children's paths are deterministic — "{parent}{kth_parallel}.{i}/"
