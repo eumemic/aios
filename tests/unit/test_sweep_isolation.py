@@ -6,12 +6,19 @@ their wake deferred or their ghost repaired."""
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aios.harness.sweep import find_and_repair_ghosts, wake_sessions_needing_inference
 from aios.harness.task_registry import TaskRegistry
 from tests.unit.conftest import fake_pool_yielding_conn
+
+# Assistant-turn emit time carried on each GHOST_ASST_SQL row (the column added
+# for the abandoned-client-call age bound, #752). These tests exercise the
+# DISPATCHED-ghost branches, so the value only needs to be present; "now" keeps
+# every candidate well inside any age bound.
+_NOW = dt.datetime.now(dt.UTC)
 
 
 async def test_defer_wake_failure_does_not_abort_sweep_batch() -> None:
@@ -42,6 +49,7 @@ async def test_ghost_repair_failure_does_not_abort_batch(monkeypatch: Any) -> No
     ghost_rows = [
         {
             "session_id": "sess_a",
+            "created_at": _NOW,
             "data": {
                 "role": "assistant",
                 "tool_calls": [{"id": "tc_a", "type": "function", "function": {"name": "bash"}}],
@@ -49,6 +57,7 @@ async def test_ghost_repair_failure_does_not_abort_batch(monkeypatch: Any) -> No
         },
         {
             "session_id": "sess_b",
+            "created_at": _NOW,
             "data": {
                 "role": "assistant",
                 "tool_calls": [{"id": "tc_b", "type": "function", "function": {"name": "bash"}}],
@@ -113,6 +122,7 @@ async def test_ghost_repair_branch_may_have_completed(monkeypatch: Any) -> None:
     ghost_rows = [
         {
             "session_id": "sess_a",
+            "created_at": _NOW,
             "data": {
                 "role": "assistant",
                 "tool_calls": [{"id": "tc_a", "type": "function", "function": {"name": "bash"}}],
@@ -165,6 +175,7 @@ async def test_ghost_repair_branch_did_not_run(monkeypatch: Any) -> None:
     ghost_rows = [
         {
             "session_id": "sess_a",
+            "created_at": _NOW,
             "data": {
                 "role": "assistant",
                 "tool_calls": [{"id": "tc_a", "type": "function", "function": {"name": "bash"}}],
