@@ -344,6 +344,33 @@ class Settings(BaseSettings):
         "the #155 symptom).",
     )
 
+    client_tool_call_max_age_seconds: int = Field(
+        default=24 * 60 * 60,  # 24 hours
+        ge=60,
+        description="Age ceiling, in seconds, after which an unresolved "
+        "CLIENT-result-pending tool call (a tool the harness never dispatches "
+        "because the CLIENT executes it and returns the result — the non-MCP, "
+        "not-in-registry branch of ``sweep._was_dispatched``) is treated as "
+        "ABANDONED by ghost repair: a synthetic timeout/abandoned error result is "
+        "appended, resolving the call. Unlike "
+        "``connector_backfill_max_age_seconds`` / "
+        "``confirmed_dispatch_max_age_seconds`` (which only SKIP, leaving the log "
+        "untouched), this bound EXPIRES the call — without it the call's "
+        "``open_tool_call_count`` contribution keeps the session a permanent wake "
+        "candidate (``CANDIDATE_ROWS_SQL`` / ``_SESSION_ACTIVE_EXPR``) with no "
+        "progress to make (the #155 wake-no-progress loop; regression from the "
+        "open-tool-call-count predicate added in #750). The bound is on the "
+        "ASSISTANT turn's ``created_at`` (when the call was emitted), consistent "
+        "with the dispatched-ghost age semantics. The default 24h is deliberately "
+        "generous — a legitimate slow client (a human-driven connector, a "
+        "long-running custom tool) returns its result well within a day, so the "
+        "bound only fires for a client that disconnected and will never return. "
+        "Confirmation-pending calls (``always_ask`` tools awaiting a "
+        "``tool_confirmed`` event) are EXCLUDED: those wait on the USER, not a "
+        "client, and erroring them would kill a slow human-in-the-loop "
+        "confirmation.",
+    )
+
     # ── observability ──────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
 

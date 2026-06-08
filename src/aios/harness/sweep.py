@@ -18,6 +18,7 @@ Called from three sites:
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -52,6 +53,21 @@ class SweepResult:
     woken_sessions: int
 
 
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    """A tool_call with no result and no in-flight task — a ghost-repair
+    candidate before its dispatch status is known.
+
+    ``created_at`` is the assistant turn's emit time; the abandoned-client-call
+    branch (#752) age-bounds off it.
+    """
+
+    session_id: str
+    tool_call_id: str
+    tool_name: str
+    created_at: dt.datetime
+
+
 # ─── query constants ─────────────────────────────────────────────────────────
 #
 # Sweep SQL lives here as module constants so tests/e2e/test_sweep_perf.py
@@ -63,7 +79,7 @@ class SweepResult:
 
 
 GHOST_ASST_SQL = """
-    SELECT e.session_id, e.data
+    SELECT e.session_id, e.data, e.created_at
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE s.archived_at IS NULL
@@ -220,8 +236,25 @@ async def find_and_repair_ghosts(
       custom tool or an unconfirmed ``always_ask`` tool still waiting
       for client action).
 
+    Plus a second, age-bounded category — **abandoned client-side tool
+    calls** (#752). A *client-result-pending* call (the non-MCP,
+    not-in-registry branch of :func:`_was_dispatched` — a tool the
+    *client* runs and returns a result for) is normally left alone: it's
+    legitimately waiting for the client. But if its assistant turn is
+    older than ``client_tool_call_max_age_seconds`` (default 24h) with
+    still no result and no in-flight task, the client has disconnected and
+    will never return — so we synthesise an abandoned/timeout error
+    result. Without this the call's ``open_tool_call_count`` contribution
+    keeps the session a permanent wake candidate
+    (``CANDIDATE_ROWS_SQL``) with no progress to make — the #155
+    wake-no-progress loop, a regression from the open-tool-call-count
+    predicate added in #750. *Confirmation-pending* ``always_ask`` calls
+    (awaiting a ``tool_confirmed`` event) are EXCLUDED: those wait on the
+    USER, not a client, and erroring them would kill a slow
+    human-in-the-loop confirmation.
+
     Returns a list of ``(session_id, tool_call_id)`` pairs that were
-    repaired.
+    repaired (both categories count as repairs).
     """
     in_flight = task_registry.all_in_flight_tool_call_ids()
 
@@ -261,11 +294,14 @@ async def find_and_repair_ghosts(
 
     # First pass: find candidate ghosts (no result, no in-flight task).
     # We don't yet know their dispatch status — that requires agent config.
-    candidates: list[tuple[str, str, str]] = []  # (session_id, tool_call_id, tool_name)
+    # ``created_at`` is the assistant turn's emit time, carried so the
+    # abandoned-client-call branch can age-bound off it (#752).
+    candidates: list[_Candidate] = []
 
     for row in asst_rows:
         sid = row["session_id"]
         data = parse_jsonb(row["data"])
+        created_at = row["created_at"]
         existing_results = results_by_session.get(sid, set())
         session_in_flight = in_flight.get(sid, set())
 
@@ -274,14 +310,16 @@ async def find_and_repair_ghosts(
             if not tcid or tcid in existing_results or tcid in session_in_flight:
                 continue
             name = (tc.get("function") or {}).get("name", "")
-            candidates.append((sid, tcid, name))
+            candidates.append(_Candidate(sid, tcid, name, created_at))
 
     if not candidates:
         return []
 
     # Second pass: load agent config only for sessions with candidates,
-    # then filter to actually-dispatched tools.
-    candidate_sids = list({sid for sid, _, _ in candidates})
+    # then classify each candidate into one of two repairable buckets
+    # (dispatched ghost, or abandoned client-result-pending call past the age
+    # bound). All other candidates are left alone (legitimately waiting).
+    candidate_sids = list({c.session_id for c in candidates})
     async with pool.acquire() as conn:
         # LEFT JOIN agent_versions to respect version pinning.
         agent_rows = await conn.fetch(
@@ -306,12 +344,31 @@ async def find_and_repair_ghosts(
             ToolSpec.model_validate(t) for t in (tools_list or [])
         ]
 
-    ghosts: list[tuple[str, str, str]] = []
-    for sid, tcid, name in candidates:
-        confirmed = confirmed_by_session.get(sid, set())
-        agent_tools = agent_tools_by_session.get(sid, [])
-        if _was_dispatched(name, tcid, confirmed, agent_tools):
-            ghosts.append((sid, tcid, name))
+    # Abandoned-client-call bound (#752): a client-result-pending call whose
+    # assistant turn is older than this is treated as abandoned. The cutoff is
+    # computed once per sweep against ``created_at`` (the assistant turn's emit
+    # time), consistent with the dispatched-ghost age semantics.
+    client_max_age = get_settings().client_tool_call_max_age_seconds
+    abandoned_cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=client_max_age)
+
+    ghosts: list[_Candidate] = []
+    abandoned: list[_Candidate] = []
+    for c in candidates:
+        confirmed = confirmed_by_session.get(c.session_id, set())
+        agent_tools = agent_tools_by_session.get(c.session_id, [])
+        if _was_dispatched(c.tool_name, c.tool_call_id, confirmed, agent_tools):
+            ghosts.append(c)
+        elif (
+            _is_client_result_pending(c.tool_name, agent_tools) and c.created_at < abandoned_cutoff
+        ):
+            # Not dispatched AND client-result-pending AND older than the bound:
+            # the client disconnected and will never return a result. Without
+            # resolving it, the call's open_tool_call_count contribution keeps
+            # the session a permanent wake candidate with no progress (#155 loop,
+            # regression from #750). Confirmation-pending always_ask calls are
+            # NOT client-result-pending, so they fall through here and are left
+            # to wait on the user.
+            abandoned.append(c)
 
     # ``tool_execute_start`` span presence per (session, tcid) — drives the
     # two-branch recovery message below (#685).  Tcids missing from this set
@@ -319,19 +376,20 @@ async def find_and_repair_ghosts(
     # tcids present may have executed and committed side effects.  Scope to
     # the post-``_was_dispatched`` ghost set (not the wider candidate set) so
     # the seq-scan touches only the tcids the per-ghost loop will actually
-    # consult.
+    # consult.  Abandoned client calls are never dispatched by the harness, so
+    # they have no ``tool_execute_start`` span and don't need this lookup.
     started: set[tuple[str, str]] = set()
     if ghosts:
-        ghost_sids = list({sid for sid, _, _ in ghosts})
-        ghost_tcids = list({tcid for _, tcid, _ in ghosts})
+        ghost_sids = list({c.session_id for c in ghosts})
+        ghost_tcids = list({c.tool_call_id for c in ghosts})
         async with pool.acquire() as conn:
             span_rows = await conn.fetch(GHOST_SPAN_START_SQL, ghost_sids, ghost_tcids)
         started = {(r["session_id"], r["tool_call_id"]) for r in span_rows}
 
-    # Per-ghost isolation; see ``wake_sessions_needing_inference`` below
-    # for the rationale.
-    repaired: list[tuple[str, str]] = []
-    for sid, tcid, name in ghosts:
+    # Build the unified repair worklist: each item carries its candidate, an
+    # operational ``branch`` tag (for the log), and the synthetic error text.
+    repair_items: list[tuple[_Candidate, str, str]] = []
+    for c in ghosts:
         # Don't lie: distinguish "never dispatched" (safe to retry) from
         # "may have executed" (verify before retrying).  The previous
         # single fabricated "No result was received" message double-fired
@@ -347,19 +405,45 @@ async def find_and_repair_ghosts(
         # design eliminates.  Tighter classification would require a second
         # marker written immediately before each tool's side-effectful call
         # — deferred until the over-pessimism is shown to matter.
-        if (sid, tcid) in started:
-            branch = "may_have_completed"
-            error_text = (
-                "Tool dispatch was interrupted after execution began. "
-                "The tool may have completed and side effects may have "
-                "committed. Verify the outcome before retrying."
+        if (c.session_id, c.tool_call_id) in started:
+            repair_items.append(
+                (
+                    c,
+                    "may_have_completed",
+                    "Tool dispatch was interrupted after execution began. "
+                    "The tool may have completed and side effects may have "
+                    "committed. Verify the outcome before retrying.",
+                )
             )
         else:
-            branch = "did_not_run"
-            error_text = (
-                "Tool dispatch was lost before execution began; "
-                "the tool did not run. You may retry."
+            repair_items.append(
+                (
+                    c,
+                    "did_not_run",
+                    "Tool dispatch was lost before execution began; "
+                    "the tool did not run. You may retry.",
+                )
             )
+    for c in abandoned:
+        # Distinct wording from the dispatched-ghost branches: this tool is run
+        # by the CLIENT, which never returned a result within the bound.
+        repair_items.append(
+            (
+                c,
+                "client_abandoned",
+                f"Tool call abandoned: the client returned no result within "
+                f"{client_max_age}s. The client is no longer connected; do not "
+                f"wait for this result.",
+            )
+        )
+
+    # Per-ghost isolation; see ``wake_sessions_needing_inference`` below
+    # for the rationale.
+    repaired: list[tuple[str, str]] = []
+    for c, branch, error_text in repair_items:
+        sid = c.session_id
+        tcid = c.tool_call_id
+        name = c.tool_name
         content = json.dumps({"error": error_text}, ensure_ascii=False)
         # Load each ghost's session account_id individually so the
         # cross-session sweeper (session_id=None) doesn't stamp empty
@@ -436,6 +520,31 @@ def _was_dispatched(
     if perm == "always_ask":
         return tool_call_id in confirmed_ids
     return True
+
+
+def _is_client_result_pending(name: str, agent_tools: list[ToolSpec]) -> bool:
+    """True if ``name`` is a CLIENT-result-pending tool.
+
+    A client-result-pending tool is one the harness never dispatches because
+    the *client* executes it and returns the result — the non-MCP,
+    not-in-registry branch of :func:`_was_dispatched` (a custom tool, or a tool
+    the model emitted under a bare name the harness can't resolve to a registry
+    entry or an MCP toolset). When the client disconnects, such a call sits
+    unresolved forever; the abandoned-client-call repair (#752) errors it past
+    an age bound.
+
+    Deliberately NARROW — it must EXCLUDE confirmation-pending calls
+    (``always_ask`` registered tools, or non-``always_allow`` MCP tools, awaiting
+    a ``tool_confirmed`` event). Those wait on the USER, not a client, and
+    erroring them would kill a slow human-in-the-loop confirmation. Both
+    excluded classes are reached only when ``is_mcp_tool_name`` is true or
+    ``registry.has`` is true, so testing the negation of both is exactly the
+    client-result-pending set.
+    """
+    from aios.models.agents import is_mcp_tool_name
+    from aios.tools.registry import registry
+
+    return not is_mcp_tool_name(name) and not registry.has(name)
 
 
 # ─── sessions needing inference ──────────────────────────────────────────────
