@@ -225,6 +225,54 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
                 rows,
             )
 
+        # Backfill the scalar columns on sessions to match the seeded events.
+        # The production path maintains these in append_event; this test inserts
+        # events directly, so it must reconcile the sessions rows manually.
+        await conn.execute(
+            """
+            UPDATE sessions s
+               SET last_event_seq = COALESCE((
+                       SELECT MAX(e.seq) FROM events e WHERE e.session_id = s.id
+                   ), 0),
+                   last_user_seq = COALESCE((
+                       SELECT MAX(e.seq) FROM events e
+                        WHERE e.session_id = s.id AND e.kind = 'message' AND e.role = 'user'
+                   ), 0),
+                   last_error_seq = COALESCE((
+                       SELECT MAX(e.seq) FROM events e
+                        WHERE e.session_id = s.id
+                          AND e.kind = 'lifecycle' AND e.data->>'stop_reason' = 'error'
+                   ), 0),
+                   last_reacted_seq = GREATEST(
+                       COALESCE((
+                           SELECT MAX(COALESCE((e.data->>'reacting_to')::bigint, e.seq))
+                             FROM events e
+                            WHERE e.session_id = s.id
+                              AND e.kind = 'message' AND e.role = 'assistant'
+                       ), 0),
+                       COALESCE((
+                           SELECT MAX(e.seq) FROM events e
+                            WHERE e.session_id = s.id
+                              AND e.kind = 'lifecycle' AND e.data->>'event' = 'turn_ended'
+                       ), 0)
+                   ),
+                   open_tool_call_count = COALESCE((
+                       SELECT COUNT(*)
+                         FROM events ate
+                        CROSS JOIN LATERAL jsonb_array_elements(ate.data->'tool_calls') tc
+                        WHERE ate.session_id = s.id
+                          AND ate.kind = 'message' AND ate.role = 'assistant'
+                          AND ate.data ? 'tool_calls'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM events tr
+                               WHERE tr.session_id = s.id
+                                 AND tr.kind = 'message' AND tr.role = 'tool'
+                                 AND tr.data->>'tool_call_id' = tc->>'id'
+                          )
+                   ), 0)
+            """
+        )
+
         # ANALYZE so the planner has fresh stats matching the fixture.
         await conn.execute("ANALYZE events")
         await conn.execute("ANALYZE sessions")
@@ -265,14 +313,12 @@ class TestNoCorrelatedSubplanOverEvents:
     a correlated SubPlan. That shape was the N+1 pathology behind #140."""
 
     async def test_candidate_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
-        plan = await _explain(
-            seeded_pool, CANDIDATE_ROWS_SQL.format(scope_clause="", cte_scope_clause="")
-        )
+        plan = await _explain(seeded_pool, CANDIDATE_ROWS_SQL.format(scope_clause=""))
         found = find_subplans_over_events(plan)
         assert not found, (
             f"N+1 regression in find_sessions_needing_inference candidate query: "
             f"{len(found)} correlated subplan(s) over events. "
-            f"See PR #145 — this query must hoist MAX(reacting_to) via a CTE."
+            f"CANDIDATE_ROWS_SQL should use session scalar columns, not event-log scans."
         )
 
     async def test_unreacted_rows_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
@@ -328,7 +374,7 @@ class TestSweepQueryBudget:
     async def test_candidate_rows_buffer_budget(self, seeded_pool: asyncpg.Pool[Any]) -> None:
         async with seeded_pool.acquire() as conn:
             result = await conn.fetchval(
-                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CANDIDATE_ROWS_SQL.format(scope_clause='', cte_scope_clause='')}"
+                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CANDIDATE_ROWS_SQL.format(scope_clause='')}"
             )
         if isinstance(result, str):
             result = json.loads(result)

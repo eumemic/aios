@@ -55,13 +55,11 @@ class SweepResult:
 # ─── query constants ─────────────────────────────────────────────────────────
 #
 # Sweep SQL lives here as module constants so tests/e2e/test_sweep_perf.py
-# can EXPLAIN the exact production query text — a structural assertion
-# guards against accidental reintroduction of the correlated-subquery
-# N+1 pattern that #140 fixed. Column predicates use ``role`` (from
-# migration 0022) instead of ``data->>'role'``; partial indexes were
-# re-predicated to match in migration 0023. The two MAX(reacting_to)
-# queries use a CTE to hoist the aggregation out of the outer scan —
-# see PR #145 for the ~800-900x speedup that revealed.
+# can EXPLAIN the exact production query text. ``CANDIDATE_ROWS_SQL``
+# and ``ERRORED_SESSIONS_SQL`` now use the four maintained scalar columns
+# on ``sessions`` (migration 0066) — pure column arithmetic, no event-log
+# scans. Ghost-repair queries still scan ``events`` because they need
+# per-tool_call_id resolution the scalars don't carry.
 
 
 GHOST_ASST_SQL = """
@@ -103,22 +101,12 @@ GHOST_SPAN_START_SQL = """
 """
 
 CANDIDATE_ROWS_SQL = """
-    WITH session_max_reacting AS (
-        SELECT session_id,
-               MAX(COALESCE((data->>'reacting_to')::bigint, seq)) AS max_reacting
-          FROM events
-         WHERE kind = 'message' AND role = 'assistant'
-         {cte_scope_clause}
-         GROUP BY session_id
-    )
-    SELECT DISTINCT e.session_id
-      FROM events e
-      JOIN sessions s ON s.id = e.session_id
-      LEFT JOIN session_max_reacting smr ON smr.session_id = e.session_id
+    SELECT s.id AS session_id
+      FROM sessions s
      WHERE s.archived_at IS NULL
-       AND e.kind = 'message'
-       AND e.role <> 'assistant'
-       AND (smr.max_reacting IS NULL OR e.seq > smr.max_reacting)
+       AND (s.last_event_seq > s.last_reacted_seq
+            OR s.open_tool_call_count > 0)
+       AND NOT (s.last_error_seq > 0 AND s.last_error_seq > s.last_user_seq)
        {scope_clause}
 """
 
@@ -191,39 +179,17 @@ ALL_ASST_ROWS_SQL = """
        AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
 """
 
-# Sessions currently in the terminal "errored" state, derived from the event
-# log (there is no denormalized ``status`` column). A session is errored when
-# its most recent ``turn_ended``/``error`` lifecycle event is more recent than
-# its most recent user message — i.e. a model-call failure exhausted the retry
-# budget and no user message has since arrived to recover it. A later user
-# message flips the inequality (``user_seq > err_seq``), which is exactly the
-# recovery semantics the pre-derivation ``append_event`` ``idle/errored →
-# pending`` flip provided.
-#
-# Shape: two ``MAX(seq)``-per-session CTEs joined — the same hoisted-aggregation
-# pattern as ``session_max_reacting`` above, so no correlated SubPlan re-scans
-# ``events`` (the #140 pathology). The error CTE is backed by the partial index
-# ``events_turn_error_idx`` (migration 0062); the user CTE reuses
-# ``events_session_message_seq_idx`` (migration 0001).
+# Sessions currently in the terminal "errored" state, derived from the
+# maintained scalar columns on ``sessions`` (migration 0066). A session is
+# errored when ``last_error_seq > 0 AND last_error_seq > last_user_seq``.
+# A later user message bumps ``last_user_seq``, flipping the inequality —
+# exactly the recovery semantics the pre-derivation status flip provided.
 ERRORED_SESSIONS_SQL = """
-    WITH err_max AS (
-        SELECT session_id, MAX(seq) AS err_seq
-          FROM events
-         WHERE kind = 'lifecycle' AND data->>'stop_reason' = 'error'
-         {scope_clause}
-         GROUP BY session_id
-    ),
-    user_max AS (
-        SELECT session_id, MAX(seq) AS user_seq
-          FROM events
-         WHERE kind = 'message' AND role = 'user'
-         {scope_clause}
-         GROUP BY session_id
-    )
-    SELECT em.session_id
-      FROM err_max em
-      LEFT JOIN user_max um ON um.session_id = em.session_id
-     WHERE um.user_seq IS NULL OR em.err_seq > um.user_seq
+    SELECT s.id AS session_id
+      FROM sessions s
+     WHERE s.last_error_seq > 0
+       AND s.last_error_seq > s.last_user_seq
+       {scope_clause}
 """
 
 
@@ -477,7 +443,7 @@ async def _errored_session_ids(
     message recovers it (mirrors the pre-derivation ``status = 'errored'``
     skip + the ``append_event`` recovery flip).
     """
-    scope_clause = "AND session_id = $1" if session_id else ""
+    scope_clause = "AND s.id = $1" if session_id else ""
     params: list[Any] = [session_id] if session_id else []
     rows = await conn.fetch(ERRORED_SESSIONS_SQL.format(scope_clause=scope_clause), *params)
     return {r["session_id"] for r in rows}
@@ -506,15 +472,11 @@ async def find_sessions_needing_inference(
     yet ready. Case (c) sessions bypass this filter.
     """
     scope_clause = "AND s.id = $1" if session_id else ""
-    # CANDIDATE_ROWS_SQL's CTE aggregates per-session; when scoped, prune it
-    # to the target session too so the planner isn't leaning on predicate-
-    # pushdown-through-GROUP-BY to rescue an unscoped scan at scale.
-    cte_scope_clause = "AND session_id = $1" if session_id else ""
     scope_params: list[Any] = [session_id] if session_id else []
 
     async with pool.acquire() as conn:
         candidate_rows = await conn.fetch(
-            CANDIDATE_ROWS_SQL.format(scope_clause=scope_clause, cte_scope_clause=cte_scope_clause),
+            CANDIDATE_ROWS_SQL.format(scope_clause=scope_clause),
             *scope_params,
         )
 
