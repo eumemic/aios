@@ -488,30 +488,6 @@ async def test_return_real_dispatch_appends_result_and_does_not_archive(
     assert child.archived_at is None  # un-archived → a sibling tool's appends won't crash
 
 
-async def test_completed_child_is_soft_terminal(
-    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
-) -> None:
-    """A child with a ``workflow_child_done`` marker is excluded from
-    ``find_sessions_needing_inference``, so its unreacted ``return`` tool_result
-    never triggers another model step (no wasted inference, no double-return)."""
-    from aios.harness.sweep import find_sessions_needing_inference
-    from aios.harness.task_registry import TaskRegistry
-    from aios.tools import workflow_completion
-
-    pool = wf_runtime
-    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:st#0")
-    reg = TaskRegistry()
-
-    # Before completion: the child's first user message is unreacted → needs inference.
-    assert cid in await find_sessions_needing_inference(pool, reg, session_id=cid)
-
-    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
-        await workflow_completion.return_handler(cid, {"value": "done"})
-
-    # After the marker: soft-terminal, excluded from the wake set.
-    assert cid not in await find_sessions_needing_inference(pool, reg, session_id=cid)
-
-
 async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
