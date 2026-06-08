@@ -55,7 +55,7 @@ async def _scalars(conn: asyncpg.Connection[Any], session_id: str) -> dict[str, 
     """Read the four scalar columns directly from the sessions row."""
     row = await conn.fetchrow(
         "SELECT last_reacted_seq, open_tool_call_count, "
-        "last_error_seq, last_user_seq "
+        "last_error_seq, last_user_seq, last_stimulus_seq "
         "FROM sessions WHERE id = $1",
         session_id,
     )
@@ -118,10 +118,18 @@ class TestScalarMaintenance:
             s = await _scalars(conn, session_id)
         assert s["last_reacted_seq"] == 1
 
-    async def test_turn_ended_bumps_last_reacted_seq(
+    async def test_turn_ended_does_not_bump_last_reacted_seq(
         self,
         pool_and_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
+        """``last_reacted_seq`` tracks the assistant's ``reacting_to`` watermark
+        ONLY — ``turn_ended`` lifecycle events must NOT advance it.
+
+        Bumping it on turn_ended (as #749's first cut did) breaks the retry
+        loop: a rescheduling ``turn_ended`` appends with no assistant reaction,
+        so bumping the watermark falsely marks the unreacted user message as
+        reacted-to, flipping a retry-pending session to idle (see
+        ``test_litellm_502_recovery``)."""
         pool, account_id, session_id = pool_and_session
         async with pool.acquire() as conn:
             await queries.append_event(
@@ -146,8 +154,35 @@ class TestScalarMaintenance:
                 data={"event": "turn_ended"},
             )
             s = await _scalars(conn, session_id)
-        # turn_ended is seq 3; last_reacted_seq should be 3
-        assert s["last_reacted_seq"] == 3
+        # The assistant reacted to seq 1; turn_ended (seq 3) does NOT bump it.
+        assert s["last_reacted_seq"] == 1
+
+    async def test_assistant_without_reacting_to_uses_own_seq(
+        self,
+        pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """An assistant message with no explicit ``reacting_to`` advances the
+        watermark to its OWN seq (mirrors the pre-#732
+        ``MAX(COALESCE(reacting_to, seq))`` fallback)."""
+        pool, account_id, session_id = pool_and_session
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "user", "content": "hello"},
+            )
+            # assistant reply, no reacting_to → watermark = its own seq (2)
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "assistant", "content": "hi"},
+            )
+            s = await _scalars(conn, session_id)
+        assert s["last_reacted_seq"] == 2
 
     async def test_assistant_with_tool_calls_increments_open_count(
         self,
@@ -327,6 +362,171 @@ class TestDerivedStatus:
             session = await queries.get_session(conn, session_id, account_id=account_id)
         assert session.status == "idle"
 
+    async def test_status_idle_after_assistant_reply(
+        self,
+        pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """The canonical idle state (#749 regression): a user message followed
+        by a plain assistant reply (no tool calls), with NO ``turn_ended``
+        lifecycle event yet.
+
+        ``last_event_seq`` (=2, the assistant reply) exceeds
+        ``last_reacted_seq`` (=1, what the assistant reacted to), so the OLD
+        predicate ``last_event_seq > last_reacted_seq`` reads this as ACTIVE
+        and the harness does one extra model step — the bug that fails the
+        whole e2e suite. The fix keys the active predicate on
+        ``last_stimulus_seq`` (non-assistant messages only): the assistant's
+        own reply is not a stimulus, so ``last_stimulus_seq`` (=1) ==
+        ``last_reacted_seq`` (=1) → idle.
+        """
+        pool, account_id, session_id = pool_and_session
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "user", "content": "hello"},
+            )
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "assistant", "content": "hi", "reacting_to": 1},
+            )
+            session = await queries.get_session(conn, session_id, account_id=account_id)
+        assert session.status == "idle"
+
+    async def test_status_active_tool_result_after_assistant_reply(
+        self,
+        pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """Over-correction guard for #749: a tool result that lands AFTER a
+        plain assistant reply is an unreacted stimulus — the assistant must
+        react to it, so the session is ACTIVE.
+
+        This proves ``last_stimulus_seq`` tracks tool messages (role <>
+        'assistant'), not just user messages: keying the predicate on
+        ``last_user_seq`` instead would wrongly read this idle.
+        """
+        pool, account_id, session_id = pool_and_session
+        async with pool.acquire() as conn:
+            # user message (seq 1)
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "user", "content": "run a tool"},
+            )
+            # assistant reply that reacted to the user (seq 2)
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "assistant", "content": "hi", "reacting_to": 1},
+            )
+            # a tool result lands after the reply (seq 3) — an unreacted
+            # stimulus the assistant must now react to.
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "tool", "tool_call_id": "tc_late", "content": "ok"},
+            )
+            session = await queries.get_session(conn, session_id, account_id=account_id)
+        # last_stimulus_seq=3 (tool) > last_reacted_seq=1 → active.
+        assert session.status == "active"
+
+    async def test_last_stimulus_seq_tracks_user_and_tool_not_assistant(
+        self,
+        pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """``last_stimulus_seq`` advances on user + tool messages but never on
+        the assistant's own reply."""
+        pool, account_id, session_id = pool_and_session
+        async with pool.acquire() as conn:
+            # user (seq 1) → last_stimulus_seq = 1
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "user", "content": "hello"},
+            )
+            row = await conn.fetchrow(
+                "SELECT last_stimulus_seq FROM sessions WHERE id = $1", session_id
+            )
+            assert row is not None and row["last_stimulus_seq"] == 1
+
+            # assistant reply (seq 2) → last_stimulus_seq stays 1
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "assistant", "content": "hi", "reacting_to": 1},
+            )
+            row = await conn.fetchrow(
+                "SELECT last_stimulus_seq FROM sessions WHERE id = $1", session_id
+            )
+            assert row is not None and row["last_stimulus_seq"] == 1
+
+            # tool result (seq 3) → last_stimulus_seq advances to 3
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "tool", "tool_call_id": "tc_1", "content": "ok"},
+            )
+            row = await conn.fetchrow(
+                "SELECT last_stimulus_seq FROM sessions WHERE id = $1", session_id
+            )
+            assert row is not None and row["last_stimulus_seq"] == 3
+
+    async def test_status_active_rescheduling_after_failed_step(
+        self,
+        pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """A retry-pending session (user message, NO assistant reaction, then a
+        rescheduling ``turn_ended``) stays ACTIVE so the sweep re-picks it.
+
+        This is the harness/litellm error-retry path: the step fails before any
+        assistant message is appended, ``_apply_retry_or_failure`` writes a
+        rescheduling ``turn_ended``, and the unreacted user message must keep
+        the session active. If ``turn_ended`` bumped ``last_reacted_seq``, this
+        would flip idle and the retry would never fire (#749 over-correction).
+        """
+        pool, account_id, session_id = pool_and_session
+        async with pool.acquire() as conn:
+            # user message (seq 1) — never reacted to (the step failed)
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "user", "content": "hello"},
+            )
+            # rescheduling turn_ended (seq 2), no assistant reaction
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="lifecycle",
+                data={
+                    "event": "turn_ended",
+                    "status": "rescheduling",
+                    "stop_reason": "rescheduling",
+                },
+            )
+            session = await queries.get_session(conn, session_id, account_id=account_id)
+        # last_stimulus_seq=1 (user) > last_reacted_seq=0 → active.
+        assert session.status == "active"
+
     async def test_status_active_with_open_tools(
         self,
         pool_and_session: tuple[asyncpg.Pool[Any], str, str],
@@ -416,7 +616,7 @@ class TestDerivedStatus:
         pool_and_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
         """Tool results land after turn_ended but before the model reacts
-        — last_event_seq > last_reacted_seq so the session is active."""
+        — last_stimulus_seq > last_reacted_seq so the session is active."""
         pool, account_id, session_id = pool_and_session
         async with pool.acquire() as conn:
             # assistant with tool call
@@ -454,8 +654,8 @@ class TestDerivedStatus:
                 data={"role": "tool", "tool_call_id": "tc_1", "content": "ok"},
             )
             session = await queries.get_session(conn, session_id, account_id=account_id)
-        # last_event_seq=3 (tool result) > last_reacted_seq=2 (turn_ended)
-        # AND open_tool_call_count went 1 -> 0 (but last_event_seq > last_reacted_seq)
+        # last_stimulus_seq=3 (tool result) > last_reacted_seq=2 (turn_ended)
+        # AND open_tool_call_count went 1 -> 0 (but last_stimulus_seq > last_reacted_seq)
         assert session.status == "active"
 
     async def test_errored_hides_active(
@@ -528,6 +728,7 @@ class TestCloneAndListFilter:
         assert clone_scalars["open_tool_call_count"] == parent_scalars["open_tool_call_count"]
         assert clone_scalars["last_error_seq"] == parent_scalars["last_error_seq"]
         assert clone_scalars["last_user_seq"] == parent_scalars["last_user_seq"]
+        assert clone_scalars["last_stimulus_seq"] == parent_scalars["last_stimulus_seq"]
 
     async def test_list_sessions_status_filter(
         self,

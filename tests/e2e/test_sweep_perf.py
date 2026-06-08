@@ -240,24 +240,21 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
                        SELECT MAX(e.seq) FROM events e
                         WHERE e.session_id = s.id AND e.kind = 'message' AND e.role = 'user'
                    ), 0),
+                   last_stimulus_seq = COALESCE((
+                       SELECT MAX(e.seq) FROM events e
+                        WHERE e.session_id = s.id AND e.kind = 'message' AND e.role <> 'assistant'
+                   ), 0),
                    last_error_seq = COALESCE((
                        SELECT MAX(e.seq) FROM events e
                         WHERE e.session_id = s.id
                           AND e.kind = 'lifecycle' AND e.data->>'stop_reason' = 'error'
                    ), 0),
-                   last_reacted_seq = GREATEST(
-                       COALESCE((
-                           SELECT MAX(COALESCE((e.data->>'reacting_to')::bigint, e.seq))
-                             FROM events e
-                            WHERE e.session_id = s.id
-                              AND e.kind = 'message' AND e.role = 'assistant'
-                       ), 0),
-                       COALESCE((
-                           SELECT MAX(e.seq) FROM events e
-                            WHERE e.session_id = s.id
-                              AND e.kind = 'lifecycle' AND e.data->>'event' = 'turn_ended'
-                       ), 0)
-                   ),
+                   last_reacted_seq = COALESCE((
+                       SELECT MAX(COALESCE((e.data->>'reacting_to')::bigint, e.seq))
+                         FROM events e
+                        WHERE e.session_id = s.id
+                          AND e.kind = 'message' AND e.role = 'assistant'
+                   ), 0),
                    open_tool_call_count = COALESCE((
                        SELECT COUNT(*)
                          FROM events ate

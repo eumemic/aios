@@ -100,11 +100,18 @@ GHOST_SPAN_START_SQL = """
        AND e.data->>'tool_call_id' = ANY($2::text[])
 """
 
+# Candidate filter — MUST stay byte-for-byte in sync (modulo table alias) with
+# ``queries._SESSION_ACTIVE_EXPR``: the read-path status predicate and this wake
+# predicate have to agree, or the worker either wakes a session with no progress
+# to make (#155 symptom) or skips one that needs inference. ``last_stimulus_seq``
+# (non-assistant messages — user + tool), NOT ``last_event_seq`` (which includes
+# the session's own assistant replies): the latter classifies an idle turn
+# (user → assistant reply) as a candidate and drives one extra model step (#749).
 CANDIDATE_ROWS_SQL = """
     SELECT s.id AS session_id
       FROM sessions s
      WHERE s.archived_at IS NULL
-       AND (s.last_event_seq > s.last_reacted_seq
+       AND (s.last_stimulus_seq > s.last_reacted_seq
             OR s.open_tool_call_count > 0)
        AND NOT (s.last_error_seq > 0 AND s.last_error_seq > s.last_user_seq)
        {scope_clause}
