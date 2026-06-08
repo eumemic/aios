@@ -31,9 +31,15 @@ def test_render_table_applies_max_width_with_ellipsis():
 def test_render_table_missing_keys_render_as_empty():
     rows = [{"id": "x"}, {}]
     out = render_table(rows, ("id", "name"))
-    # The second data row has no id or name — both cells render as empty,
-    # so after splitting we get only the header-style blank row.
-    assert "x" in out
+    lines = out.split("\n")  # header, separator, row-with-id, blank row, trailing ""
+    # The populated row still shows its value …
+    assert "x" in lines[2]
+    # … and the row missing every key renders as blank cells — not "None", not a
+    # KeyError, not a value bleeding in from the other row. This is the actual
+    # contract (_stringify(None) -> ""); the old assertion only checked the
+    # populated row and would not have caught a None -> "None" regression.
+    assert lines[3].strip() == "", f"missing-key row should be blank, got {lines[3]!r}"
+    assert "None" not in out
 
 
 def test_print_table_empty_prints_empty_message():

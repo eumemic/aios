@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from aios.models.agents import PermissionPolicy, ToolSpec
+from aios.models.agents import ToolSpec
 
 
 class TestDefaults:
@@ -99,9 +99,3 @@ class TestBackwardCompat:
         specs = [ToolSpec.model_validate(t) for t in raw]
         assert all(s.enabled is True for s in specs)
         assert all(s.permission is None for s in specs)
-
-
-class TestPermissionPolicyType:
-    def test_type_alias_values(self) -> None:
-        # Just verify the type alias is accessible and correct.
-        assert PermissionPolicy.__args__ == ("always_allow", "always_ask")  # type: ignore[attr-defined]

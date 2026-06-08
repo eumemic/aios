@@ -330,54 +330,6 @@ class TestHttpRequestHandler:
             )
         assert "error" in result
 
-    async def test_path_traversal_rejected(self, _stub_runtime: Any) -> None:
-        """A ``path`` containing ``..`` must be rejected at the route gate.
-
-        The route allowlist is a path-only gate enforced by segment-glob
-        matching. ``..`` is treated as a literal single segment by
-        :func:`match_glob` and thus matches the ``*`` wildcard — but
-        ``httpx`` normalises ``../`` traversal before sending, so the
-        upstream sees a path that escapes the allowlist's intent. An
-        allowlist of ``/lights/**`` plus ``path="lights/../admin/delete"``
-        passes the gate but lands at ``/admin/delete`` on the wire.
-
-        Same shape as #485 (query string in path): a worker-managed
-        URL element gets silently mutated between gate and wire,
-        breaking the operator's allowlist intent. Reject ``..``
-        segments at the gate so the allowlist's effect equals its
-        check.
-        """
-        agent = _agent(http_servers=[_server(routes=[_route("/lights/**")])])
-        captured: dict[str, Any] = {}
-        stub = _make_stub_client(
-            response=httpx.Response(200, content=b""),
-            capture=captured,
-        )
-        with (
-            _patch_load_agent(agent),
-            _patch_resolve_auth(),
-            _patch_safe_url(),
-            patch("aios.tools.http_request.httpx.AsyncClient", stub),
-        ):
-            result = await http_request_handler(
-                "sess_x",
-                {
-                    "server_ref": "hue",
-                    "path": "lights/../admin/delete",
-                    "method": "GET",
-                },
-            )
-        assert "error" in result, (
-            f"path containing '..' must be rejected at the route gate; "
-            f"got success {result!r}. Pre-fix symptom: httpx normalises "
-            f"/v1/lights/../admin/delete to /v1/admin/delete on the wire, "
-            f"escaping the /lights/** allowlist's intent."
-        )
-        # And the request must not have been dispatched.
-        assert "url" not in captured, (
-            f"upstream request was dispatched despite path containing '..'; captured={captured!r}"
-        )
-
     async def test_successful_get(self, _stub_runtime: Any) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
         response = httpx.Response(

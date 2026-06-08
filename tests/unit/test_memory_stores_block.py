@@ -69,20 +69,14 @@ def test_augment_with_empty_base() -> None:
 
 def test_playbook_content_when_stores_attached() -> None:
     block = build_memory_stores_block([_echo("scratch")])
-    assert "Check memory first" in block
-    assert "Write early, write often" in block
-    assert "What not to bother saving" in block
-    assert "Never save" in block
-    assert "memory_precondition_failed_error" in block
-    assert "content_sha256" in block
+    # Only pin the two substrings that cross-reference code constants — a drift
+    # between the model-facing copy and what the harness actually enforces/raises
+    # is a real bug: "100 KiB" derives from MAX_CONTENT_BYTES // 1024, and
+    # "memory_precondition_failed_error" from MemoryPreconditionFailedError.error_type.
+    # The rest of the playbook is prose; its structure/ordering is guarded by
+    # test_playbook_appears_after_per_mount_sections, so we don't golden-pin wording here.
     assert "100 KiB" in block
-    assert "Secrets" in block
-    assert "credentials" in block
-    assert "`write`" in block
-    assert "`edit`" in block
-    assert "version log" in block
-    assert "Re-check memory when you get stuck" in block
-    assert "instructions on those points" in block
+    assert "memory_precondition_failed_error" in block
 
 
 def test_playbook_appears_after_per_mount_sections() -> None:

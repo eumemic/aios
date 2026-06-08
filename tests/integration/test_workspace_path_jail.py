@@ -77,33 +77,22 @@ async def two_accounts_with_agent_env(
         await pool.close()
 
 
-async def test_create_session_rejects_arbitrary_host_path(
-    two_accounts_with_agent_env: tuple[asyncpg.Pool[Any], str, str, str, str],
-) -> None:
-    """``workspace_path="/etc"`` (or any host path outside the
-    workspace root) must be rejected before the row lands in the DB
-    and before the sandbox provisioner gets a chance to bind-mount
-    it."""
-    pool, acc_a, _acc_b, agent_id, env_id = two_accounts_with_agent_env
-
-    with pytest.raises(ForbiddenError):
-        await sessions_service.create_session(
-            pool,
-            account_id=acc_a,
-            agent_id=agent_id,
-            environment_id=env_id,
-            title=None,
-            metadata={},
-            workspace_path="/etc",
-        )
-
-
 async def test_create_session_rejects_cross_tenant_workspace_path(
     two_accounts_with_agent_env: tuple[asyncpg.Pool[Any], str, str, str, str],
 ) -> None:
     """A workspace_path that resolves into another account's
     subdirectory must be rejected.  Closes the per-account-subdir
-    invariant ``insert_session`` enforces by default."""
+    invariant ``insert_session`` enforces by default.
+
+    This is the one integration-tier reject case retained: it proves
+    ``create_session`` actually *invokes* ``validate_workspace_path``
+    before touching the DB.  The per-input-class rejection logic
+    (host-FS escape, ``..`` traversal, cross-tenant) is unit-tested
+    directly against ``validate_workspace_path`` in
+    ``tests/unit/test_volumes_workspace_jail.py::TestStrictJail`` —
+    re-running those classes through the testcontainer here added no
+    wiring coverage, since every reject path returns before
+    ``pool.acquire()``."""
     pool, acc_a, acc_b, agent_id, env_id = two_accounts_with_agent_env
     other_account_dir = str(get_settings().workspace_root / acc_b / "any_session")
 
@@ -116,29 +105,6 @@ async def test_create_session_rejects_cross_tenant_workspace_path(
             title=None,
             metadata={},
             workspace_path=other_account_dir,
-        )
-
-
-async def test_create_session_rejects_dotdot_traversal_back_to_other_tenant(
-    two_accounts_with_agent_env: tuple[asyncpg.Pool[Any], str, str, str, str],
-) -> None:
-    """A ``..``-laced path that resolves into another account's subdir
-    must be rejected.  ``Path.resolve()`` collapses ``..`` segments
-    before the ``is_relative_to`` check; pinning this case ensures a
-    future refactor swapping ``.resolve()`` for ``.absolute()`` (which
-    preserves ``..``) is caught by the suite."""
-    pool, acc_a, acc_b, agent_id, env_id = two_accounts_with_agent_env
-    traversed = str(get_settings().workspace_root / acc_a / ".." / acc_b / "sneaky")
-
-    with pytest.raises(ForbiddenError):
-        await sessions_service.create_session(
-            pool,
-            account_id=acc_a,
-            agent_id=agent_id,
-            environment_id=env_id,
-            title=None,
-            metadata={},
-            workspace_path=traversed,
         )
 
 

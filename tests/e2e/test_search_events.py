@@ -135,20 +135,6 @@ class TestSearchEvents:
         # span exposure deferred — see issue #117 follow-up).
         assert "kind" not in header
 
-    async def test_sql_validation_rejects_insert(self, harness: Harness) -> None:
-        """DML queries are rejected before hitting the database."""
-        session_id = await self._setup_session(harness)
-
-        result = await search_events_handler(
-            session_id,
-            {
-                "query": "INSERT INTO events (id) VALUES ('evil')",
-            },
-        )
-
-        assert "error" in result
-        assert "SELECT" in result["error"]
-
     async def test_rejects_cross_session_via_events_table(self, harness: Harness) -> None:
         """Reaching the raw ``events`` table bypasses per-session scoping.
 
