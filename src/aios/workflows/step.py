@@ -44,15 +44,13 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
-from aios.models.workflows import WfRun, WfRunEvent
+from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
 from aios.services.sessions import create_child_session
 from aios.services.wake import defer_run_wake, defer_wake
 from aios.workflows.child_id import child_session_id
 from aios.workflows.host_launcher import EmittedCapability, run_script_host
 
 log = get_logger("aios.workflows.step")
-
-_TERMINAL = ("completed", "errored", "cancelled")
 
 
 def _collect_refs(node: Any) -> list[str]:
@@ -156,7 +154,7 @@ async def run_workflow_step(run_id: str) -> None:
 
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
-        if run is None or run.status in _TERMINAL:
+        if run is None or run.status in TERMINAL_RUN_STATUSES:
             return  # vanished or already terminal — a stray/duplicate wake is a no-op
         account_id = run.account_id
 
@@ -169,7 +167,7 @@ async def run_workflow_step(run_id: str) -> None:
         # terminal event from the request handler would race the gapless-seq
         # allocation). Checked before replay so a pending/suspended/running run is
         # stopped without driving the script. A cancel that lost the race to a
-        # natural terminal already returned at the ``_TERMINAL`` guard above.
+        # natural terminal already returned at the ``TERMINAL_RUN_STATUSES`` guard above.
         if (cancel_sig := signals.get(wf_queries.CANCEL_SIGNAL_CALL_KEY)) is not None:
             await _cancel_run(conn, run, reason=cancel_sig.result)
             return

@@ -22,6 +22,11 @@ WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored",
 WfRunEventType = Literal["run_started", "call_started", "call_result", "run_completed"]
 WfRunSignalKind = Literal["gate_resume", "child_done", "cancel"]
 
+# The terminal run statuses — monotonic: once here, a run never leaves. The one source for
+# every "is this run done?" check (the step loop's early-out, the SSE stream's close, the await
+# predicate). ``cancelled`` is terminal too (a user cancel finalizes the run).
+TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"completed", "errored", "cancelled"})
+
 
 class Workflow(BaseModel):
     """An immutable, versioned workflow definition."""
@@ -91,6 +96,24 @@ class WfRunSignal(BaseModel):
     kind: WfRunSignalKind
     result: Any = None  # arbitrary JSON: the externally-delivered resume value
     delivered_at: datetime
+
+
+class WfRunWaitResponse(BaseModel):
+    """Response for ``GET /v1/runs/{run_id}/wait`` — the run's completion record, or its
+    current (non-terminal) state if the wait timed out.
+
+    Deliberately mirrors the ``{result, is_error, error}`` shape of a request response
+    (``derive_response``) so the ``await`` primitive's two backings (run-terminal and, later,
+    session-request) share one envelope. Poll until ``done``: a still-running run returns
+    ``done=False`` with its live ``run_status`` (``running``/``suspended``/…); call again to
+    keep blocking.
+    """
+
+    run_status: WfRunStatus
+    done: bool  # run_status in {completed, errored} — terminal, never reverts
+    output: Any = None  # the run's return value (on completed; None on error)
+    is_error: bool = False  # run_status == errored
+    error: dict[str, Any] | None = None  # the run_completed event's {kind} (on errored)
 
 
 # ─── request models (the public HTTP surface) ────────────────────────────────

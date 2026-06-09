@@ -146,6 +146,9 @@ def test_apply_mcp_polish_populates_annotations_and_instructions(polished_mcp: A
     assert by_name["list_agents"].annotations is not None
     assert by_name["list_agents"].annotations.readOnlyHint is True
     assert by_name["get_health"].annotations.readOnlyHint is True
+    # await_run is MCP-included (no x-codegen opt-out) — an agent awaits a sub-run as a
+    # read-only tool. Its whole reason to exist is reachability over MCP.
+    assert by_name["await_run"].annotations.readOnlyHint is True
 
     # DELETE → destructiveHint
     assert by_name["delete_vault"].annotations.destructiveHint is True

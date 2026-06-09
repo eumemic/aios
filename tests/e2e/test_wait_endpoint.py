@@ -206,3 +206,67 @@ class TestWaitEndpoint:
         assert any(
             e["kind"] == "message" and e["data"].get("content") == "real" for e in body["events"]
         ), body
+
+
+@pytest.fixture
+async def run_id(pool: Any) -> str:
+    """A freshly created (``pending``, never-stepped) run for the run-wait endpoint.
+
+    ``defer_run_wake`` is patched out so creation doesn't need a procrastinate worker;
+    the run stays ``pending`` (nothing steps it), which is exactly the non-terminal state
+    the timeout test exercises."""
+    account_id = "acc_test_stub"  # PR 3 scaffolding
+    from aios.db import queries
+    from aios.services import workflows as wf_svc
+
+    async with pool.acquire() as conn:
+        env = await queries.insert_environment(
+            conn, name=f"runwait-env-{_uniq()}", account_id=account_id
+        )
+    wf = await wf_svc.create_workflow(
+        pool,
+        account_id=account_id,
+        name=f"runwait-wf-{_uniq()}",
+        script="async def main(input):\n    return 1",
+    )
+    with mock.patch("aios.workflows.service.defer_run_wake", new=mock.AsyncMock()):
+        run = await wf_svc.create_run(
+            pool, account_id=account_id, workflow_id=wf.id, environment_id=env.id, input=None
+        )
+    return run.id
+
+
+class TestRunWaitEndpoint:
+    """``GET /v1/runs/{id}/wait`` — the await-a-completion endpoint (runs backing).
+
+    Exercises the HTTP wiring (route registration, the ``timeout`` query alias, the
+    ``WfRunWaitResponse`` serialization, account scoping) over a real ASGI client. The
+    blocking/completion behavior of the service itself is covered in
+    ``tests/integration/test_wf_step.py``; here ``timeout=0`` keeps every case non-blocking."""
+
+    async def test_timeout_returns_done_false_for_pending_run(
+        self, http_client: httpx.AsyncClient, run_id: str
+    ) -> None:
+        """A never-stepped run is non-terminal; ``timeout=0`` returns at once with the live
+        status and ``done=false`` (the re-poll contract) — proving the alias + model wiring."""
+        r = await http_client.get(f"/v1/runs/{run_id}/wait", params={"timeout": 0})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["done"] is False
+        assert body["run_status"] == "pending"
+        assert body["is_error"] is False and body["error"] is None
+
+    async def test_rejects_timeout_above_cap(
+        self, http_client: httpx.AsyncClient, run_id: str
+    ) -> None:
+        """The ``le=60`` bound on the ``timeout`` query param is enforced (422)."""
+        r = await http_client.get(f"/v1/runs/{run_id}/wait", params={"timeout": 3600})
+        assert r.status_code == 422, r.text
+
+    async def test_unknown_run_404s_before_subscribing(
+        self, http_client: httpx.AsyncClient
+    ) -> None:
+        """A run id the caller can't see 404s — and (post-review) the scope check runs BEFORE
+        any LISTEN is opened, so an unauthorized caller never opens a connection on the channel."""
+        r = await http_client.get("/v1/runs/wf_run_nope/wait", params={"timeout": 0})
+        assert r.status_code == 404, r.text
