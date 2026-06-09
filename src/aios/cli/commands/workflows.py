@@ -21,6 +21,7 @@ from aios.cli.files import PayloadError, load_payload
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk import stream_run
 from aios_sdk._generated.api.runs import (
+    cancel_run,
     create_run,
     get_run,
     list_run_events,
@@ -178,6 +179,15 @@ def run_events_(
             limit=limit,
             path_params={"run_id": run_id},
         )
+
+    run_or_die(_run)
+
+
+@runs_app.command("cancel", help="Cancel a run (it finalizes 'cancelled' on its next wake).")
+@covers("cancel_run")
+def cancel_run_(ctx: typer.Context, run_id: str) -> None:
+    def _run() -> None:
+        call_single(ctx, cancel_run.sync_detailed, run_id=run_id)
 
     run_or_die(_run)
 

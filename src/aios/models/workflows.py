@@ -18,9 +18,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored"]
+WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal["run_started", "call_started", "call_result", "run_completed"]
-WfRunSignalKind = Literal["gate_resume", "child_done"]
+WfRunSignalKind = Literal["gate_resume", "child_done", "cancel"]
 
 
 class Workflow(BaseModel):
@@ -33,6 +33,7 @@ class Workflow(BaseModel):
     script: str
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+    description: str | None = None  # optional human blurb (the agent ``description`` analog)
     created_at: datetime
     updated_at: datetime
 
@@ -102,6 +103,7 @@ class WorkflowCreate(BaseModel):
     script: str
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+    description: str | None = None
 
 
 class WfRunCreate(BaseModel):

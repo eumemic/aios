@@ -16,6 +16,7 @@ def _get_kwargs(
     cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
@@ -47,6 +48,13 @@ def _get_kwargs(
     else:
         json_status = status
     params["status"] = json_status
+
+    json_parent_run_id: None | str | Unset
+    if isinstance(parent_run_id, Unset):
+        json_parent_run_id = UNSET
+    else:
+        json_parent_run_id = parent_run_id
+    params["parent_run_id"] = json_parent_run_id
 
     json_limit: int | None | Unset
     if isinstance(limit, Unset):
@@ -103,6 +111,7 @@ def sync_detailed(
     cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
@@ -112,6 +121,7 @@ def sync_detailed(
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
+        parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -127,6 +137,7 @@ def sync_detailed(
         cursor=cursor,
         agent_id=agent_id,
         status=status,
+        parent_run_id=parent_run_id,
         limit=limit,
         authorization=authorization,
     )
@@ -144,6 +155,7 @@ def sync(
     cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
@@ -153,6 +165,7 @@ def sync(
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
+        parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -169,6 +182,7 @@ def sync(
         cursor=cursor,
         agent_id=agent_id,
         status=status,
+        parent_run_id=parent_run_id,
         limit=limit,
         authorization=authorization,
     ).parsed
@@ -180,6 +194,7 @@ async def asyncio_detailed(
     cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
@@ -189,6 +204,7 @@ async def asyncio_detailed(
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
+        parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -204,6 +220,7 @@ async def asyncio_detailed(
         cursor=cursor,
         agent_id=agent_id,
         status=status,
+        parent_run_id=parent_run_id,
         limit=limit,
         authorization=authorization,
     )
@@ -219,6 +236,7 @@ async def asyncio(
     cursor: None | str | Unset = UNSET,
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
@@ -228,6 +246,7 @@ async def asyncio(
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
+        parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -245,6 +264,7 @@ async def asyncio(
             cursor=cursor,
             agent_id=agent_id,
             status=status,
+            parent_run_id=parent_run_id,
             limit=limit,
             authorization=authorization,
         )

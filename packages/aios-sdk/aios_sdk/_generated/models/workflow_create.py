@@ -29,12 +29,14 @@ class WorkflowCreate:
         script (str):
         input_schema (None | Unset | WorkflowCreateInputSchemaType0):
         output_schema (None | Unset | WorkflowCreateOutputSchemaType0):
+        description (None | str | Unset):
     """
 
     name: str
     script: str
     input_schema: None | Unset | WorkflowCreateInputSchemaType0 = UNSET
     output_schema: None | Unset | WorkflowCreateOutputSchemaType0 = UNSET
+    description: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,6 +67,12 @@ class WorkflowCreate:
         else:
             output_schema = self.output_schema
 
+        description: None | str | Unset
+        if isinstance(self.description, Unset):
+            description = UNSET
+        else:
+            description = self.description
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -77,6 +85,8 @@ class WorkflowCreate:
             field_dict["input_schema"] = input_schema
         if output_schema is not UNSET:
             field_dict["output_schema"] = output_schema
+        if description is not UNSET:
+            field_dict["description"] = description
 
         return field_dict
 
@@ -132,11 +142,21 @@ class WorkflowCreate:
 
         output_schema = _parse_output_schema(d.pop("output_schema", UNSET))
 
+        def _parse_description(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        description = _parse_description(d.pop("description", UNSET))
+
         workflow_create = cls(
             name=name,
             script=script,
             input_schema=input_schema,
             output_schema=output_schema,
+            description=description,
         )
 
         workflow_create.additional_properties = d

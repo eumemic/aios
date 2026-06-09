@@ -1392,6 +1392,7 @@ async def list_sessions(
     account_id: str,
     agent_id: str | None = None,
     status: SessionStatus | None = None,
+    parent_run_id: str | None = None,
     limit: int = 50,
     after: str | None = None,
 ) -> list[Session]:
@@ -1404,6 +1405,10 @@ async def list_sessions(
     pagination stays correct (post-filtering the page would conflate "few
     matches in this window" with "no more results"). ``status`` and
     ``last_event_at`` are derived in ``extra_select``.
+
+    ``parent_run_id`` is a plain column filter (the session is a workflow run's
+    ``agent()`` child) — the session-side analog of filtering runs by their
+    parent, so a run can list the agent sessions it spawned.
     """
     return await _list_scoped(
         conn,
@@ -1412,7 +1417,11 @@ async def list_sessions(
         row=_row_to_session,
         limit=limit,
         after=after,
-        filters=[("agent_id", agent_id), (f"({_SESSION_STATUS_EXPR})", status)],
+        filters=[
+            ("agent_id", agent_id),
+            (f"({_SESSION_STATUS_EXPR})", status),
+            ("parent_run_id", parent_run_id),
+        ],
         # last_event_at: timestamp of the session's newest event. ``ORDER BY
         # seq DESC LIMIT 1`` rides the (session_id, seq) index — O(log n) even
         # for huge sessions (unlike MAX(created_at), which has no index).

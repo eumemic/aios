@@ -263,6 +263,124 @@ async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool
     assert await _events(pool, run_id) == before  # journal unchanged
 
 
+# ─── cancel — user-requested termination via the cancel signal ───────────────
+
+
+async def test_cancel_suspended_run_finalizes_cancelled(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """A suspended run is cancelled on its next wake: the cancel API records a signal
+    (journal untouched, run still suspended), then the wake harvests it under the lock
+    and finalizes ``cancelled`` with a non-error ``run_completed`` bookend (so a live
+    ``/stream`` closes on the event). A further wake / re-cancel is an idempotent
+    no-op."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    await run_workflow_step(run_id)  # → suspended at the gate
+    async with pool.acquire() as conn:
+        suspended = await wf_queries.get_run_for_step(conn, run_id)
+    assert suspended is not None and suspended.status == "suspended"
+
+    # Request cancel: signal recorded, run still suspended (the flip lands on the wake).
+    run = await wf_service.cancel_run(pool, run_id=run_id, account_id="acc_wf")
+    assert run.status == "suspended"
+    assert [t for _s, t, _k in await _events(pool, run_id)] == ["run_started", "call_started"]
+
+    # Wake: harvest the cancel → cancelled.
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "cancelled" and run.output is None
+    rc = events[-1]
+    assert rc.type == "run_completed"
+    assert rc.payload["cancelled"] is True and rc.payload["is_error"] is False
+
+    # Idempotent: a wake on a cancelled run is a no-op; a re-cancel returns it unchanged.
+    before = await _events(pool, run_id)
+    await run_workflow_step(run_id)
+    again = await wf_service.cancel_run(pool, run_id=run_id, account_id="acc_wf")
+    assert again.status == "cancelled"
+    assert await _events(pool, run_id) == before  # journal frozen
+
+
+async def test_cancel_pending_run_finalizes_before_it_starts(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """A run cancelled before its first wake never runs the script: its journal is a
+    lone terminal ``run_completed`` and the status is ``cancelled``."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)  # pending — no events yet
+    run = await wf_service.cancel_run(pool, run_id=run_id, account_id="acc_wf")
+    assert run.status == "pending"
+
+    await run_workflow_step(run_id)  # harvest cancel before run_started
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "cancelled"
+    assert [t for _s, t, _k in await _events(pool, run_id)] == ["run_completed"]
+
+
+async def test_cancel_is_noop_on_an_already_terminal_run(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """Cancelling a run that already completed is a pure no-op: it returns the run
+    unchanged, records no ``cancel`` signal, and a subsequent wake stays a no-op."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    await run_workflow_step(run_id)  # → completed
+    before = await _events(pool, run_id)
+
+    run = await wf_service.cancel_run(pool, run_id=run_id, account_id="acc_wf")
+    assert run.status == "completed"  # returned unchanged
+    async with pool.acquire() as conn:
+        signals = await wf_queries.list_run_signals(conn, run_id)
+    assert all(s.kind != "cancel" for s in signals)  # no cancel marker written
+    await run_workflow_step(run_id)
+    assert await _events(pool, run_id) == before  # journal unchanged
+
+
+# ─── parent_run_id filters — a run's child runs + child agent-sessions ────────
+
+
+async def test_children_listable_by_parent_run_id(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A run's children are listable by ``parent_run_id`` on both surfaces: child
+    agent-sessions via ``list_sessions`` and nested child runs via ``list_wf_runs``,
+    each scoped to the parent and excluding an unrelated run's children."""
+    pool = wf_runtime
+    parent_id, child_sid = await _spawn_child(pool, wf_agent_id, "sha:pf#0")
+    # An unrelated foreground session (parent_run_id is None) that must be excluded.
+    other = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+    )
+
+    async with pool.acquire() as conn:
+        scoped = await db_queries.list_sessions(
+            conn, account_id="acc_wf", parent_run_id=parent_id, limit=50
+        )
+        parent_run = await wf_queries.get_run_for_step(conn, parent_id)
+        assert parent_run is not None
+        # A nested child run under the parent (the parent run itself is parentless).
+        child_run = await wf_queries.insert_wf_run(
+            conn,
+            account_id="acc_wf",
+            workflow_id=parent_run.workflow_id,
+            environment_id="env_wf",
+            script="async def main(i):\n    return 1",
+            script_sha="sha",
+            parent_run_id=parent_id,
+        )
+        child_runs = await wf_queries.list_wf_runs(
+            conn, account_id="acc_wf", parent_run_id=parent_id, limit=50
+        )
+
+    scoped_ids = [s.id for s in scoped]
+    assert scoped_ids == [child_sid]  # only the parent's child session
+    assert other.id not in scoped_ids  # the foreground session is excluded
+    assert [r.id for r in child_runs] == [child_run.id]  # only the nested child run
+
+
 # ─── B2.C — the agent spawn arm + crash matrix ───────────────────────────────
 
 

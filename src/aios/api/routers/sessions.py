@@ -115,18 +115,29 @@ async def list_(
         SessionStatus | None,
         Query(alias="status"),
     ] = None,
+    parent_run_id: str | None = None,
     limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[Session]:
-    st = page_cursor(cursor, {"agent_id": agent_id, "status": status_filter, "limit": limit})
+    st = page_cursor(
+        cursor,
+        {
+            "agent_id": agent_id,
+            "status": status_filter,
+            "parent_run_id": parent_run_id,
+            "limit": limit,
+        },
+    )
     after = str(st.cursor) if st is not None else None
     page_limit = st.limit if st is not None else (limit if limit is not None else 50)
     if st is not None:
         agent_id = st.filters.get("agent_id")
         status_filter = st.filters.get("status")
+        parent_run_id = st.filters.get("parent_run_id")
     items = await service.list_sessions(
         pool,
         agent_id=agent_id,
         status=status_filter,
+        parent_run_id=parent_run_id,
         limit=page_limit + 1,
         after=after,
         account_id=account_id,
@@ -135,7 +146,7 @@ async def list_(
         items,
         page_limit,
         cursor=lambda x: x.id,
-        filters={"agent_id": agent_id, "status": status_filter},
+        filters={"agent_id": agent_id, "status": status_filter, "parent_run_id": parent_run_id},
     )
 
 

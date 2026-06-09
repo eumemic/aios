@@ -24,6 +24,7 @@ from aios.services.wake import defer_run_wake
 from aios.workflows.service import create_run, resume_gate
 
 __all__ = [
+    "cancel_run",
     "create_run",
     "create_workflow",
     "get_run",
@@ -47,6 +48,7 @@ async def create_workflow(
     script: str,
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
+    description: str | None = None,
 ) -> Workflow:
     async with pool.acquire() as conn:
         return await wf_queries.insert_workflow(
@@ -56,6 +58,7 @@ async def create_workflow(
             script=script,
             input_schema=input_schema,
             output_schema=output_schema,
+            description=description,
         )
 
 
@@ -94,6 +97,7 @@ async def list_runs(
     after: str | None = None,
     workflow_id: str | None = None,
     status: str | None = None,
+    parent_run_id: str | None = None,
 ) -> list[WfRun]:
     async with pool.acquire() as conn:
         return await wf_queries.list_wf_runs(
@@ -103,6 +107,7 @@ async def list_runs(
             after=after,
             workflow_id=workflow_id,
             status=status,
+            parent_run_id=parent_run_id,
         )
 
 
@@ -151,3 +156,33 @@ async def resume_gate_by_nonce(
             conn, run_id=run_id, call_key=call_key, kind="gate_resume", result=result
         )
     await defer_run_wake(run_id)
+
+
+async def cancel_run(
+    pool: asyncpg.Pool[Any], *, run_id: str, account_id: str, reason: Any = None
+) -> WfRun:
+    """Request cancellation of a run, returning it (still in its pre-cancel status).
+
+    Signal-driven, mirroring :func:`resume_gate_by_nonce`: record a ``cancel``
+    side-marker and wake the run; the next ``run_workflow_step`` harvests it under
+    the lock and finalizes ``cancelled`` (so the journal keeps a single writer and
+    any live ``/stream`` closes on the terminal ``run_completed``). The flip lands
+    on the wake, so the returned run still shows its current status — as gate-resume
+    returns a still-``suspended`` run.
+
+    Idempotent: an already-terminal run is returned unchanged, with no signal or
+    wake. A cross-tenant / missing run 404s (via :func:`get_wf_run`).
+    """
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_wf_run(conn, run_id, account_id=account_id)  # 404s cross-tenant
+        if run.status in ("completed", "errored", "cancelled"):
+            return run  # already terminal — nothing to cancel
+        await wf_queries.insert_run_signal(
+            conn,
+            run_id=run_id,
+            call_key=wf_queries.CANCEL_SIGNAL_CALL_KEY,
+            kind="cancel",
+            result=reason,
+        )
+    await defer_run_wake(run_id)
+    return run

@@ -52,7 +52,7 @@ from aios.workflows.host_launcher import EmittedCapability, run_script_host
 
 log = get_logger("aios.workflows.step")
 
-_TERMINAL = ("completed", "errored")
+_TERMINAL = ("completed", "errored", "cancelled")
 
 
 def _collect_refs(node: Any) -> list[str]:
@@ -162,6 +162,18 @@ async def run_workflow_step(run_id: str) -> None:
 
         events = await wf_queries.list_run_events(conn, run_id)
         signals = {s.call_key: s for s in await wf_queries.list_run_signals(conn, run_id)}
+
+        # User-requested cancel (signal-driven): the cancel API records a ``cancel``
+        # side-marker + wakes the run, and we finalize it here — under the
+        # procrastinate lock, so the journal keeps its single writer (appending a
+        # terminal event from the request handler would race the gapless-seq
+        # allocation). Checked before replay so a pending/suspended/running run is
+        # stopped without driving the script. A cancel that lost the race to a
+        # natural terminal already returned at the ``_TERMINAL`` guard above.
+        if (cancel_sig := signals.get(wf_queries.CANCEL_SIGNAL_CALL_KEY)) is not None:
+            await _cancel_run(conn, run, reason=cancel_sig.result)
+            return
+
         memo: dict[str, Any] = {
             e.call_key: _memo_outcome(e.payload)
             for e in events
@@ -527,4 +539,26 @@ async def _complete_run(
             status="errored" if is_error else "completed",
             output=None if is_error else output,
             account_id=run.account_id,
+        )
+
+
+async def _cancel_run(conn: asyncpg.Connection[Any], run: WfRun, *, reason: Any = None) -> None:
+    """Finalize a run as ``cancelled`` — the terminal path for a user cancel.
+
+    Structurally :func:`_complete_run` for cancellation: a non-error
+    ``run_completed`` bookend (``cancelled: True``, so a live ``/stream`` closes on
+    the event) + a ``cancelled`` terminal status, atomically. Reached only from the
+    pre-replay cancel harvest, so it runs under the lock as the journal's single
+    writer. Like a natural completion, child reclaim is left to the deferred
+    quiescence sweep (see :func:`_complete_run`).
+    """
+    payload: dict[str, Any] = {"output": None, "is_error": False, "cancelled": True}
+    if reason is not None:
+        payload["reason"] = reason
+    async with conn.transaction():
+        await wf_queries.append_run_event(
+            conn, account_id=run.account_id, run_id=run.id, type="run_completed", payload=payload
+        )
+        await wf_queries.set_run_terminal(
+            conn, run.id, status="cancelled", output=None, account_id=run.account_id
         )

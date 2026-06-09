@@ -1731,6 +1731,22 @@
             }
           },
           {
+            "name": "parent_run_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Parent Run Id"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -8381,7 +8397,7 @@
           "runs"
         ],
         "summary": "List Runs",
-        "description": "List the account's runs, newest first. First page: optional ``workflow_id`` /\n``status`` filters + ``limit``; subsequent pages: ``?cursor=<next_cursor>``.",
+        "description": "List the account's runs, newest first. First page: optional ``workflow_id`` /\n``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:\n``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.",
         "operationId": "list_runs",
         "parameters": [
           {
@@ -8430,6 +8446,22 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "name": "parent_run_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Parent Run Id"
             }
           },
           {
@@ -8688,6 +8720,65 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WfRun"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{run_id}/cancel": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Cancel Run",
+        "description": "Cancel a run (pending/running/suspended). Records a cancel marker + wakes the\nrun; it finalizes ``cancelled`` on its next wake (so the returned run may still\nshow its pre-cancel status \u2014 like ``resume``). Idempotent on an already-terminal\nrun; a cross-tenant run 404s.",
+        "operationId": "cancel_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -14993,7 +15084,8 @@
               "running",
               "suspended",
               "completed",
-              "errored"
+              "errored",
+              "cancelled"
             ],
             "title": "Status"
           },
@@ -15289,6 +15381,17 @@
             ],
             "title": "Output Schema"
           },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -15346,6 +15449,17 @@
               }
             ],
             "title": "Output Schema"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
           }
         },
         "type": "object",
