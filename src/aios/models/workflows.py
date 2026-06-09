@@ -16,7 +16,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal["run_started", "call_started", "call_result", "run_completed"]
@@ -39,6 +41,12 @@ class Workflow(BaseModel):
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     description: str | None = None  # optional human blurb (the agent ``description`` analog)
+    # The declared tool surface — the verbatim agent envelope. A run reaches these
+    # (authed MCP / http_request / builtins) directly via ``tool()`` (a later slice);
+    # an agent authoring a workflow may only declare a subset of its own surface.
+    tools: list[ToolSpec] = Field(default_factory=list)
+    mcp_servers: list[McpServerSpec] = Field(default_factory=list)
+    http_servers: list[HttpServerSpec] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -127,6 +135,12 @@ class WorkflowCreate(BaseModel):
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     description: str | None = None
+    # The declared tool surface (verbatim agent envelope). When an agent authors a
+    # workflow, these must be a subset of the creating agent's own surface; the HTTP
+    # path is unattenuated operator authority.
+    tools: list[ToolSpec] = Field(default_factory=list)
+    mcp_servers: list[McpServerSpec] = Field(default_factory=list)
+    http_servers: list[HttpServerSpec] = Field(default_factory=list)
 
 
 class WfRunCreate(BaseModel):
@@ -140,6 +154,14 @@ class WfRunCreate(BaseModel):
     workflow_id: str
     environment_id: str
     input: Any = None
+    vault_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Vault ids to bind to the run for credential resolution. When an agent "
+            "launches the run, these must be a subset of the launcher's own vaults; "
+            "the HTTP path is unattenuated operator authority."
+        ),
+    )
 
 
 class GateResume(BaseModel):

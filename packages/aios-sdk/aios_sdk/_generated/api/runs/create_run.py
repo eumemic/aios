@@ -72,8 +72,10 @@ def sync_detailed(
     """Create Run
 
      Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there), and wakes
-    it. A missing workflow or environment 404s.
+    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
+    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
+    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+    ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).
 
     Args:
         authorization (None | str | Unset):
@@ -112,8 +114,10 @@ def sync(
     """Create Run
 
      Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there), and wakes
-    it. A missing workflow or environment 404s.
+    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
+    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
+    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+    ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).
 
     Args:
         authorization (None | str | Unset):
@@ -147,8 +151,10 @@ async def asyncio_detailed(
     """Create Run
 
      Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there), and wakes
-    it. A missing workflow or environment 404s.
+    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
+    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
+    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+    ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).
 
     Args:
         authorization (None | str | Unset):
@@ -185,8 +191,10 @@ async def asyncio(
     """Create Run
 
      Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there), and wakes
-    it. A missing workflow or environment 404s.
+    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
+    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
+    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+    ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).
 
     Args:
         authorization (None | str | Unset):

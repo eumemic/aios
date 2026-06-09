@@ -73,6 +73,10 @@ def sync_detailed(
 
      Create a workflow definition (version 1). Versioning/update is deferred.
 
+    The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
+    declared tool surface is not subset-checked against any agent (an agent authoring a
+    workflow goes through the create-time-attenuated builtin, a later slice).
+
     Args:
         authorization (None | str | Unset):
         body (WorkflowCreate): Request body for ``POST /v1/workflows`` — a new workflow definition
@@ -108,6 +112,10 @@ def sync(
 
      Create a workflow definition (version 1). Versioning/update is deferred.
 
+    The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
+    declared tool surface is not subset-checked against any agent (an agent authoring a
+    workflow goes through the create-time-attenuated builtin, a later slice).
+
     Args:
         authorization (None | str | Unset):
         body (WorkflowCreate): Request body for ``POST /v1/workflows`` — a new workflow definition
@@ -137,6 +145,10 @@ async def asyncio_detailed(
     """Create Workflow
 
      Create a workflow definition (version 1). Versioning/update is deferred.
+
+    The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
+    declared tool surface is not subset-checked against any agent (an agent authoring a
+    workflow goes through the create-time-attenuated builtin, a later slice).
 
     Args:
         authorization (None | str | Unset):
@@ -170,6 +182,10 @@ async def asyncio(
     """Create Workflow
 
      Create a workflow definition (version 1). Versioning/update is deferred.
+
+    The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
+    declared tool surface is not subset-checked against any agent (an agent authoring a
+    workflow goes through the create-time-attenuated builtin, a later slice).
 
     Args:
         authorization (None | str | Unset):

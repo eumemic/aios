@@ -178,6 +178,9 @@ def create_run_(
     workflow_id: Annotated[str, typer.Option("--workflow-id")],
     environment_id: Annotated[str, typer.Option("--environment-id")],
     input_: Annotated[str | None, typer.Option("--input", help="The run's input as JSON.")] = None,
+    vault_id: Annotated[
+        list[str] | None, typer.Option("--vault-id", help="Vault id to bind (repeatable).")
+    ] = None,
 ) -> None:
     def _run() -> int | None:
         body = WfRunCreate.from_dict(
@@ -185,6 +188,7 @@ def create_run_(
                 "workflow_id": workflow_id,
                 "environment_id": environment_id,
                 "input": _json_arg(input_),
+                "vault_ids": vault_id or [],
             }
         )
         call_single(ctx, create_run.sync_detailed, body=body)

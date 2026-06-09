@@ -28,7 +28,7 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import InitializeResult
 
-from aios.crypto.vault import CryptoBox
+from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.db import queries
 from aios.logging import get_logger
 from aios.mcp.pool import HttpErrorSink
@@ -229,33 +229,76 @@ async def resolve_auth_for_target_url(
     to the stale token.
     """
     async with pool.acquire() as conn:
-        session_result = await queries.resolve_session_credential(
+        cred = await queries.resolve_session_credential(
             conn, session_id, target_url, account_id=account_id
         )
-        if session_result is None:
+        if cred is None:
             return None, {}
-        blob, auth_type, vault_id = session_result
-        subkey = crypto_box.derive_account_subkey(account_id)
+        return await _auth_from_credential(
+            conn, crypto_box, cred, target_url, account_id=account_id
+        )
 
-        if auth_type == "oauth2_refresh":
+
+async def resolve_auth_for_target_url_run(
+    pool: asyncpg.Pool[Any],
+    crypto_box: CryptoBox,
+    run_id: str,
+    target_url: str,
+    *,
+    account_id: str,
+) -> tuple[str | None, dict[str, str]]:
+    """Resolve auth identity + headers for ``target_url`` via a *run*'s bound vaults.
+
+    The run analog of :func:`resolve_auth_for_target_url`: it differs only in the
+    credential lookup (``wf_run_vaults`` instead of ``session_vaults``), reusing the
+    same decrypt + OAuth-refresh + header-render engine — so a run resolves
+    credentials exactly as a session does, scoped to the vaults bound at launch.
+    """
+    async with pool.acquire() as conn:
+        cred = await queries.resolve_run_credential(conn, run_id, target_url, account_id=account_id)
+        if cred is None:
+            return None, {}
+        return await _auth_from_credential(
+            conn, crypto_box, cred, target_url, account_id=account_id
+        )
+
+
+async def _auth_from_credential(
+    conn: asyncpg.Connection[Any],
+    crypto_box: CryptoBox,
+    cred: tuple[EncryptedBlob, AuthType, str],
+    target_url: str,
+    *,
+    account_id: str,
+) -> tuple[str | None, dict[str, str]]:
+    """Decrypt → (OAuth-refresh) → render headers for an already-resolved credential.
+
+    The owner-agnostic engine shared by the session and run resolvers: it keys off
+    ``account_id`` + ``vault_id`` only, never the owner. Returns ``(vault_id, headers)``
+    or ``(None, {})`` when there is no header to send (empty secret / missed refresh).
+    """
+    blob, auth_type, vault_id = cred
+    subkey = crypto_box.derive_account_subkey(account_id)
+
+    if auth_type == "oauth2_refresh":
+        payload = json.loads(subkey.decrypt(blob))
+        if is_expiring(payload):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id=vault_id,
+                target_url=target_url,
+                account_id=account_id,
+            )
+            refreshed = await queries.resolve_vault_credential(
+                conn, vault_id=vault_id, target_url=target_url, account_id=account_id
+            )
+            if refreshed is None:
+                return None, {}
+            blob = refreshed[0]
             payload = json.loads(subkey.decrypt(blob))
-            if is_expiring(payload):
-                await refresh_credential(
-                    crypto_box,
-                    conn,
-                    vault_id=vault_id,
-                    target_url=target_url,
-                    account_id=account_id,
-                )
-                refreshed = await queries.resolve_vault_credential(
-                    conn, vault_id=vault_id, target_url=target_url, account_id=account_id
-                )
-                if refreshed is None:
-                    return None, {}
-                blob = refreshed[0]
-                payload = json.loads(subkey.decrypt(blob))
-        else:
-            payload = json.loads(subkey.decrypt(blob))
+    else:
+        payload = json.loads(subkey.decrypt(blob))
 
     headers = _auth_headers_from_payload(payload, auth_type)
     if not headers:
