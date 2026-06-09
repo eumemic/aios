@@ -31,6 +31,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
+from aios.db import queries
 from aios.logging import get_logger
 from aios.sandbox.backends.base import CommandResult, SandboxBackend, SandboxHandle
 from aios.sandbox.git_proxy import GitProxy
@@ -107,6 +108,21 @@ class SandboxRegistry:
         resources are recycled and a fresh sandbox provisioned under the
         per-session lock.
 
+        A second warm-hit probe re-reads ``sessions.spec_version`` and
+        recycles the (still-alive) sandbox when it has drifted past the
+        snapshot stamped on the handle (issue #713). A memory store or
+        github repo attached/detached between steps bumps ``spec_version``
+        via a Postgres trigger; the next step would otherwise reuse a
+        sandbox whose mounts no longer match
+        :func:`build_spec_from_session`. The version probe only runs when
+        a ``pool`` is supplied (the cold-start span path already passes
+        one) and is best-effort — a transient DB error returns the live
+        handle rather than churning a healthy sandbox. A drifted version
+        triggers a recycle: the alive container is explicitly destroyed
+        via ``_destroy_quietly`` before re-provisioning so it doesn't
+        run until the next worker restart the way a dead-container evict
+        would.
+
         Best-effort, not a hard guarantee. The probe runs lock-free, so a
         container can still die between the probe and the caller's use,
         and a concurrent ``release``/reaper (which DO hold the per-session
@@ -117,16 +133,26 @@ class SandboxRegistry:
         not every TOCTOU window.
         """
         handle = self._handles.get(session_id)
+        spec_version_drifted = False
         if handle is not None and await self._backend.is_alive(handle):
-            self._last_used[session_id] = time.monotonic()
-            return handle
+            if pool is None or not await self._spec_version_changed(session_id, handle, pool):
+                self._last_used[session_id] = time.monotonic()
+                return handle
+            spec_version_drifted = True
+            log.info(
+                "sandbox.spec_version_drift_recycling",
+                session_id=session_id,
+                container_id=handle.sandbox_id[:12],
+                handle_spec_version=handle.spec_version,
+            )
 
-        # ``handle`` is the dead reference we just probed (or None on a cold
-        # miss). Capture it: under the lock, a *different* cached handle means
-        # a concurrent caller already recycled+reprovisioned while we waited,
-        # and we trust theirs without a second probe (they validated it micro-
-        # seconds ago via backend.create). Only when the cached handle is still
-        # the same dead one do we recycle it.
+        # ``handle`` is the dead or spec-version-drifted reference we just
+        # probed (or None on a cold miss). Capture it: under the lock, a
+        # *different* cached handle means a concurrent caller already
+        # recycled+reprovisioned while we waited, and we trust theirs without
+        # a second probe (they validated it micro-seconds ago via
+        # backend.create). Only when the cached handle is still the same one
+        # do we recycle it.
         stale = handle
         async with self._lock_for(session_id):
             current = self._handles.get(session_id)
@@ -134,24 +160,58 @@ class SandboxRegistry:
                 self._last_used[session_id] = time.monotonic()
                 return current
             if current is not None:
-                log.warning(
-                    "sandbox.stale_handle_recycling",
-                    session_id=session_id,
-                    container_id=current.sandbox_id[:12],
-                )
-                # Recycle the dead container's host-side resources (proxy,
-                # broker secret) but DELIBERATELY keep the session-level
-                # runtime caches: we're mid-step and about to hand a fresh
-                # sandbox back to the same step. ``_session_memory_mounts``
-                # in particular is consumed by the bash memory-reconcile that
-                # runs right after this returns (bash.py snapshots it *after*
-                # get_or_provision); clearing it here would make the before/
-                # after diff empty and silently drop the step's memory writes.
-                self.evict(session_id, unload_session_caches=False)
+                if spec_version_drifted:
+                    # Container is still alive — must destroy it, not just
+                    # evict (evict drops the cache entry but skips
+                    # backend.destroy, which is correct for dead containers
+                    # but would leak a live one). _destroy_quietly is
+                    # best-effort so a Docker hiccup doesn't block
+                    # re-provisioning (#713).
+                    self.evict(session_id, unload_session_caches=False)
+                    await self._destroy_quietly(current, session_id)
+                else:
+                    log.warning(
+                        "sandbox.stale_handle_recycling",
+                        session_id=session_id,
+                        container_id=current.sandbox_id[:12],
+                    )
+                    # Recycle the dead container's host-side resources (proxy,
+                    # broker secret) but DELIBERATELY keep the session-level
+                    # runtime caches: we're mid-step and about to hand a fresh
+                    # sandbox back to the same step. ``_session_memory_mounts``
+                    # in particular is consumed by the bash memory-reconcile
+                    # that runs right after this returns (bash.py snapshots it
+                    # *after* get_or_provision); clearing it here would make
+                    # the before/after diff empty and silently drop the step's
+                    # memory writes.
+                    self.evict(session_id, unload_session_caches=False)
             handle = await self._provision_with_span(session_id, pool=pool)
             self._handles[session_id] = handle
             self._last_used[session_id] = time.monotonic()
             return handle
+
+    async def _spec_version_changed(
+        self, session_id: str, handle: SandboxHandle, pool: asyncpg.Pool[Any]
+    ) -> bool:
+        """Return True iff ``sessions.spec_version`` drifted past the handle's
+        snapshot (issue #713).
+
+        Best-effort: any exception (transient DB error, session vanished)
+        returns ``False`` so a healthy sandbox isn't recycled over a blip.
+        One unscoped round-trip — this runs on every warm hit (every tool
+        call reusing a live sandbox), so it must stay a single query.
+        """
+        try:
+            async with pool.acquire() as conn:
+                current = await queries.unscoped_get_session_spec_version(conn, session_id)
+        except Exception as err:
+            log.warning(
+                "sandbox.spec_version_probe_failed",
+                session_id=session_id,
+                error=str(err),
+            )
+            return False
+        return current != handle.spec_version
 
     async def _provision_with_span(
         self, session_id: str, *, pool: asyncpg.Pool[Any] | None

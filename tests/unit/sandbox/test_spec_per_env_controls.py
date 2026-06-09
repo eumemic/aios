@@ -117,7 +117,8 @@ def _patch_build_spec_deps(
         ),
         patch(
             "aios.sandbox.spec._load_session_provisioning",
-            AsyncMock(return_value=("/tmp/w", {})),
+            # (workspace_path, env, spec_version) since #713.
+            AsyncMock(return_value=("/tmp/w", {}, 0)),
         ),
         # ``build_spec_from_session`` imports these function-locally from
         # ``aios.sandbox.volumes`` (deferred import to avoid a cycle), so

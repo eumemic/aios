@@ -657,3 +657,153 @@ class TestStaleHandleDetection:
         assert len(create_calls) == 1, (
             f"expected exactly one re-provision; got {len(create_calls)} (calls={backend.calls})"
         )
+
+
+def _seed_versioned(
+    registry: SandboxRegistry, session_id: str, *, spec_version: int
+) -> SandboxHandle:
+    """Seed a live cached handle stamped with ``spec_version`` (#713)."""
+    handle = make_handle(session_id=session_id, spec_version=spec_version)
+    registry._handles[session_id] = handle
+    registry._last_used[session_id] = 0.0
+    return handle
+
+
+class TestSpecVersionDrift:
+    """``get_or_provision`` recycles a live cached sandbox when the
+    session's ``spec_version`` has drifted past the snapshot stamped on
+    the handle (#713).
+
+    The version probe is the API-process / direct-SQL safety net behind
+    the worker-only write-path eviction: a memory store or github repo
+    attached/detached between steps bumps ``sessions.spec_version`` via a
+    Postgres trigger, and the next warm hit notices the mismatch and
+    re-provisions even though the cached container is still alive.
+
+    The probe only runs when ``get_or_provision`` is passed a ``pool``
+    (the cold-start span path already passes one); without a pool the
+    version check is skipped so the existing lock/liveness tests keep
+    their no-DB behavior. All tests patch the registry's provisioning
+    helpers so the cold path runs without DB or Docker.
+    """
+
+    async def test_warm_hit_recycles_when_spec_version_changed(self) -> None:
+        """Live handle, current spec_version > snapshot ⇒ recycle."""
+        backend = FakeBackend(next_handle_id="fresh_sandbox_id")
+        registry = SandboxRegistry(backend=backend)
+        stale = _seed_versioned(registry, "sess_X", spec_version=1)
+
+        with (
+            patch(
+                "aios.sandbox.registry.queries.unscoped_get_session_spec_version",
+                AsyncMock(return_value=2),
+            ),
+            # The recycle path re-provisions via the span wrapper, which
+            # looks up the account and appends a sandbox_provision span
+            # pair; stub both so the MagicMock pool isn't driven through
+            # real SQL.
+            patch(
+                "aios.services.sessions.load_session_account_id",
+                AsyncMock(return_value="acct_x"),
+            ),
+            patch("aios.services.sessions.append_event", AsyncMock()),
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_provisioning_plan("sess_X")),
+            ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+        ):
+            result = await registry.get_or_provision("sess_X", pool=cast(Any, MagicMock()))
+
+        assert result is not stale
+        assert result.sandbox_id == "fresh_sandbox_id"
+        create_calls = [c for c in backend.calls if c[0] == "create"]
+        assert len(create_calls) == 1, "spec-version drift must re-provision exactly once"
+        # The alive-but-drifted container must be destroyed (not just evicted):
+        # evict() skips backend.destroy (designed for dead containers), but a
+        # spec-version drift recycles a LIVE container — not destroying it would
+        # leave it running until the next worker restart (#713 fix).
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        assert len(destroys) == 1, "spec-version drift must backend.destroy the live old container"
+
+    async def test_warm_hit_returns_handle_when_spec_version_matches(self) -> None:
+        """Live handle, current spec_version == snapshot ⇒ cached returned."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        cached = _seed_versioned(registry, "sess_X", spec_version=3)
+
+        with patch(
+            "aios.sandbox.registry.queries.unscoped_get_session_spec_version",
+            AsyncMock(return_value=3),
+        ):
+            result = await registry.get_or_provision("sess_X", pool=cast(Any, MagicMock()))
+
+        assert result is cached
+        assert not any(c[0] == "create" for c in backend.calls), (
+            "matching spec_version must not re-provision"
+        )
+
+    async def test_warm_hit_without_pool_skips_version_check(self) -> None:
+        """No pool ⇒ the version query is never called; cached handle returned."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        cached = _seed_versioned(registry, "sess_X", spec_version=1)
+
+        version_query = AsyncMock(return_value=99)
+        with patch(
+            "aios.sandbox.registry.queries.unscoped_get_session_spec_version", version_query
+        ):
+            result = await registry.get_or_provision("sess_X")
+
+        assert result is cached
+        version_query.assert_not_awaited()
+        assert not any(c[0] == "create" for c in backend.calls)
+
+    async def test_spec_version_probe_failure_does_not_recycle(self) -> None:
+        """A transient version-read error must not churn a healthy sandbox."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        cached = _seed_versioned(registry, "sess_X", spec_version=1)
+
+        with patch(
+            "aios.sandbox.registry.queries.unscoped_get_session_spec_version",
+            AsyncMock(side_effect=RuntimeError("db hiccup")),
+        ):
+            result = await registry.get_or_provision("sess_X", pool=cast(Any, MagicMock()))
+
+        assert result is cached, "a failed probe must return the live cached handle"
+        assert not any(c[0] == "create" for c in backend.calls)
+
+    async def test_handle_carries_spec_version_from_spec(self) -> None:
+        """Cold provision stamps the plan's spec_version onto the cached handle."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        plan = _provisioning_plan("sess_X")
+        # Rebuild the spec with a non-default spec_version to prove the
+        # backend copies it through to the handle.
+        from dataclasses import replace
+
+        plan = ProvisioningPlan(
+            spec=replace(plan.spec, spec_version=7),
+            env_config=plan.env_config,
+            memory_echoes=plan.memory_echoes,
+            github_echoes=plan.github_echoes,
+            git_proxy=plan.git_proxy,
+        )
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=plan),
+            ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+        ):
+            await registry.get_or_provision("sess_X")
+
+        handle = registry.peek("sess_X")
+        assert handle is not None
+        assert handle.spec_version == 7

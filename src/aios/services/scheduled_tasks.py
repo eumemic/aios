@@ -7,6 +7,12 @@ granular add/remove/update/list operations to the API + tool layers.
 
 Deliberately no whole-list-replace primitive; per #270, the only
 mutation surface is granular ops.
+
+Scheduled tasks do NOT feed :func:`aios.sandbox.spec.build_spec_from_session`
+(the scheduled-task runner reads them per-turn), so mutations here force
+no sandbox eviction and get no Layer 2 ``spec_version`` trigger (#713).
+The existing NOTIFY trigger on ``session_scheduled_tasks`` (migration 0059)
+is untouched.
 """
 
 from __future__ import annotations

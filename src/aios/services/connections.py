@@ -29,6 +29,7 @@ from aios.models.connections import (
     ConnectionMode,
     RecentChat,
 )
+from aios.services.sessions import _evict_sandbox_for_resource_change
 
 
 def _encrypt_secrets(
@@ -239,6 +240,11 @@ async def attach_connection(
             event="added",
             account_id=account_id,
         )
+    # Connection session-bindings don't feed the sandbox spec (they reach
+    # the agent via the per-step tool provider, not build_spec_from_session);
+    # eviction is defense-in-depth so the next step re-reads cleanly (#713).
+    # Post-commit, worker-only — no-op from the API process.
+    _evict_sandbox_for_resource_change(session_id)
     return connection
 
 
@@ -250,12 +256,20 @@ async def detach_connection(
 
     Refuses (404 / 409) if the connection is missing, archived, or not
     in single_session mode.
+
+    Evicts the previously-bound session's sandbox (#713) so a step that
+    was about to provision against the now-removed binding re-reads the
+    spec. The archived binding row carries the ``session_id``; we recover
+    it from ``_archive_binding_or_raise`` and evict post-commit.
     """
     async with pool.acquire() as conn:
-        await _archive_binding_or_raise(
+        archived = await _archive_binding_or_raise(
             conn, connection_id, expected_mode="single_session", account_id=account_id
         )
-        return await queries.get_connection(conn, connection_id, account_id=account_id)
+        connection = await queries.get_connection(conn, connection_id, account_id=account_id)
+    if archived.session_id is not None:
+        _evict_sandbox_for_resource_change(archived.session_id)
+    return connection
 
 
 async def configure_per_chat(
@@ -270,6 +284,10 @@ async def configure_per_chat(
     and the ``insert_binding`` — that race would otherwise leave an
     archived connection with an active binding (the
     ``bindings.connection_id`` FK accepts archived rows).
+
+    No sandbox eviction (#713): per_chat mode binds a session *template*,
+    not a live session — there is no provisioned sandbox to recycle.
+    Sessions spawned per-chat cold-start from the template at spawn time.
     """
     async with pool.acquire() as conn, conn.transaction():
         locked = await conn.fetchrow(
@@ -305,6 +323,9 @@ async def unconfigure_connection(
 
     Refuses (404 / 409) if the connection is missing, archived, or not
     in per_chat mode.
+
+    No sandbox eviction (#713): a per_chat binding targets a session
+    *template*, never a live session — no provisioned sandbox to recycle.
     """
     async with pool.acquire() as conn:
         await _archive_binding_or_raise(
@@ -319,8 +340,11 @@ async def _archive_binding_or_raise(
     *,
     account_id: str,
     expected_mode: BindingMode,
-) -> None:
+) -> queries.ActiveBinding:
     """Archive the connection's active binding, raising on a mode mismatch.
+
+    Returns the now-archived binding so callers can recover its
+    ``session_id`` (e.g. for sandbox eviction, #713).
 
     Happy path is a single mode-guarded UPDATE-RETURNING.  On miss we
     follow up with a connection read to diagnose: NotFound > archived
@@ -330,7 +354,7 @@ async def _archive_binding_or_raise(
         conn, connection_id, expected_mode=expected_mode, account_id=account_id
     )
     if archived is not None:
-        return
+        return archived
     existing = await queries.get_connection(conn, connection_id, account_id=account_id)
     if existing.archived_at is not None:
         raise ConflictError(

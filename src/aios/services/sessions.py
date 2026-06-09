@@ -120,6 +120,33 @@ async def _batch_list_all_echoes(
     return {sid: [*memory_map[sid], *github_map[sid]] for sid in session_ids}
 
 
+def _evict_sandbox_for_resource_change(session_id: str) -> None:
+    """Force a fresh sandbox provision after a session-scoped resource
+    mutation commits (#713).
+
+    No-op in the API process (the registry global is worker-only); the
+    worker process recycles so the NEXT step re-reads build_spec_from_session.
+    unload_session_caches=False: a between-steps mutation re-provisions
+    cleanly on the next step.
+
+    Memory-store and github-repository bindings feed build_spec_from_session
+    and MUST evict. Vault session-bindings do NOT feed the sandbox spec (they
+    reach the agent via the MCP pool, keyed on (url, vault_id)); we evict
+    anyway as defense-in-depth so 'any session-resource mutation forces a
+    clean re-read' holds — harmless, one extra cold-start. In-place vault
+    credential rotation (refresh_credential / ciphertext overwrite) does NOT
+    evict: the pool keys on (url, vault_id) and a rotation overwrites the row
+    contents, so the stable key already serves the new secret. Layer 2's
+    spec_version triggers are deliberately NOT placed on vault/connection
+    tables (they don't change the spec) — this Layer1/Layer2 asymmetry is
+    intentional.
+    """
+    from aios.harness import runtime
+
+    if runtime.sandbox_registry is not None:
+        runtime.sandbox_registry.evict(session_id, unload_session_caches=False)
+
+
 async def create_session(
     pool: asyncpg.Pool[Any],
     *,
@@ -158,6 +185,10 @@ async def create_session(
     """
     if workspace_path is not None:
         validate_workspace_path(workspace_path, account_id)
+    # No sandbox eviction here (#713): a brand-new session has no cached
+    # sandbox to recycle — its first step cold-starts from the freshly
+    # written spec. Eviction is only meaningful for mutations to an
+    # already-provisioned session (see update_session / connections).
     async with pool.acquire() as conn, conn.transaction():
         session = await queries.insert_session(
             conn,
@@ -940,37 +971,53 @@ async def update_session(
             metadata=metadata,
             account_id=account_id,
         )
+        changed = False
         if vault_ids is not None:
-            await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
+            old_vault_ids = await queries.get_session_vault_ids(
+                conn, session_id, account_id=account_id
+            )
+            if vault_ids != old_vault_ids:
+                await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
+                changed = True
         if resources is not None:
             # Wire-level semantics is full-list-replace across all
             # resource types, so an incoming list that omits a type
             # detaches every existing attachment of that type.
             memory_resources, github_resources = split_resources_by_type(resources)
-            await memory_service.set_session_resources(
+            changed |= await memory_service.set_session_resources(
                 conn, session_id, memory_resources, account_id=account_id
             )
             if github_resources:
                 assert crypto_box is not None, (
                     "API surface requires CryptoBox when attaching github_repository"
                 )
-                await github_repo_service.set_session_resources(
+                changed |= await github_repo_service.set_session_resources(
                     conn, session_id, github_resources, crypto_box, account_id=account_id
                 )
             else:
-                await github_repo_service.detach_all_from_session(
+                changed |= await github_repo_service.detach_all_from_session(
                     conn, session_id, account_id=account_id
                 )
         vids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
         task_echoes = await queries.list_scheduled_tasks(conn, session_id, account_id=account_id)
-        return session.model_copy(
+        result = session.model_copy(
             update={
                 "vault_ids": vids,
                 "resources": echoes,
                 "scheduled_tasks": task_echoes,
             }
         )
+
+    # Eviction fires AFTER the transaction commits — recycling mid-transaction
+    # could re-provision against an uncommitted spec (#713). A resource or
+    # vault-binding change forces the worker to re-read build_spec_from_session
+    # on the next step; no-op in the API process (registry global is
+    # worker-only). An idempotent re-PUT (same vaults, same resources) writes
+    # nothing and must not recycle the sandbox.
+    if changed:
+        _evict_sandbox_for_resource_change(session_id)
+    return result
 
 
 # ─── tool confirmations ────────────────────────────────────────────────────

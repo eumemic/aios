@@ -31,6 +31,7 @@ def make_handle(
     sandbox_id: str = "abc123def456abc123def456",
     workspace_path: Path | None = None,
     mount_snapshot: frozenset[tuple[str, ...]] = frozenset(),
+    spec_version: int = 0,
 ) -> SandboxHandle:
     """Construct a :class:`SandboxHandle` with sensible defaults for tests."""
     return SandboxHandle(
@@ -38,6 +39,7 @@ def make_handle(
         sandbox_id=sandbox_id,
         workspace_path=workspace_path or Path("/tmp/aios-test-workspace"),
         mount_snapshot=mount_snapshot,
+        spec_version=spec_version,
     )
 
 
@@ -73,6 +75,7 @@ class FakeBackend:
             sandbox_id=self.next_handle_id,
             workspace_path=spec.workspace.host_path,
             mount_snapshot=spec.mount_snapshot,
+            spec_version=spec.spec_version,
         )
 
     async def is_alive(self, handle: SandboxHandle) -> bool:

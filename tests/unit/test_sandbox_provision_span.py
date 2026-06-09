@@ -71,12 +71,20 @@ class TestSandboxProvisionSpan:
     async def test_warm_hit_emits_no_span(self) -> None:
         backend = FakeBackend()
         registry = SandboxRegistry(backend=backend)
-        cached = make_handle(sandbox_id="warmcache_id")
+        cached = make_handle(sandbox_id="warmcache_id", spec_version=0)
         registry._handles["sess_01TEST"] = cached
         pool = MagicMock()
         append_event = AsyncMock()
 
-        with patch("aios.services.sessions.append_event", append_event):
+        # The warm path now also probes ``sessions.spec_version`` (#713);
+        # report no drift so the cached handle is returned without a span.
+        with (
+            patch("aios.services.sessions.append_event", append_event),
+            patch(
+                "aios.sandbox.registry.queries.unscoped_get_session_spec_version",
+                AsyncMock(return_value=0),
+            ),
+        ):
             result = await registry.get_or_provision("sess_01TEST", pool=pool)
 
         assert result is cached

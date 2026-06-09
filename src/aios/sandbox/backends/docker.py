@@ -150,6 +150,7 @@ class DockerBackend:
             sandbox_id=container_id,
             workspace_path=spec.workspace.host_path,
             mount_snapshot=spec.mount_snapshot,
+            spec_version=spec.spec_version,
         )
 
     async def exec(
