@@ -33,6 +33,7 @@ from typing import Any
 
 import asyncpg
 
+from aios.errors import AiosError
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.agents import McpServerSpec
@@ -75,6 +76,29 @@ class _ToolCall:
     raw_args: Any
     bound_log: Any
     is_error: bool = False
+
+
+def _classify_tool_error(err: BaseException) -> tuple[bool, str]:
+    """Decide how a tool handler exception is reported: ``(should_evict, message)``.
+
+    Expected, model-visible refusals do NOT evict the sandbox — the model reads the
+    error and self-corrects:
+      * a :class:`ToolBail` (bad args, unknown tool, schema mismatch), and
+      * a client-class (``status_code < 500``) :class:`AiosError` — a permission denial,
+        not-found, conflict, rate-limit, or any tool ``*ArgumentError``.
+    A server-class (``>= 500``) ``AiosError`` or any other exception is a genuine failure
+    that also evicts the sandbox, which may have been left in a bad state. (The eviction
+    itself is still gated on the caller's ``on_exception`` — the MCP path passes none.)
+    """
+    if isinstance(err, ToolBail):
+        return False, str(err)
+    if isinstance(err, AiosError):
+        # ``default=str`` keeps the serialization total: this runs in an except clause,
+        # so a raise here would skip the tool-result append and ghost the call (invariant
+        # #4). A non-JSON-serializable ``detail`` value renders as its ``str()`` instead.
+        detail = f" ({json.dumps(err.detail, default=str)})" if err.detail else ""
+        return err.status_code >= 500, f"{err.message}{detail}"
+    return True, f"{type(err).__name__}: {err}"
 
 
 @asynccontextmanager
@@ -133,24 +157,17 @@ async def _tool_lifecycle(
         await _append_tool_result(
             pool, session_id, call_id, name, account_id=account_id, error="cancelled"
         )
-    except ToolBail as err:
-        bound_log.info(f"{log_prefix}.bail", error=str(err))
-        tc.is_error = True
-        await _append_tool_result(
-            pool, session_id, call_id, name, account_id=account_id, error=str(err)
-        )
     except Exception as err:
-        bound_log.exception(f"{log_prefix}.handler_failed")
         tc.is_error = True
-        if on_exception is not None:
-            on_exception(session_id)
+        evict, message = _classify_tool_error(err)
+        if evict:
+            bound_log.exception(f"{log_prefix}.handler_failed")
+            if on_exception is not None:
+                on_exception(session_id)
+        else:
+            bound_log.info(f"{log_prefix}.refused", error=message)
         await _append_tool_result(
-            pool,
-            session_id,
-            call_id,
-            name,
-            account_id=account_id,
-            error=f"{type(err).__name__}: {err}",
+            pool, session_id, call_id, name, account_id=account_id, error=message
         )
     finally:
         await sessions_service.append_event(

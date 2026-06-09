@@ -38,7 +38,6 @@ from aios.services import agents as agents_service
 from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
 from aios.tools import workflow_management as wm
-from aios.tools.invoke import ToolBail
 from aios.workflows.service import WORKFLOW_RUN_MAX_DEPTH, WorkflowRunDepthExceededError
 
 pytestmark = pytest.mark.integration
@@ -430,8 +429,9 @@ async def test_create_workflow_builtin_attenuates(vault_pool: asyncpg.Pool[Any])
     )
     assert out["name"] == "wf-bi-ok" and "script" not in out  # heavy field trimmed
 
-    # A server the agent lacks → model-visible ToolBail (the ForbiddenError, converted).
-    with pytest.raises(ToolBail):
+    # A server the agent lacks → ForbiddenError, which the dispatch layer renders as a
+    # clean model-visible refusal (the handler propagates it; see test_tool_dispatch).
+    with pytest.raises(ForbiddenError):
         await wm.create_workflow_handler(
             sess,
             {"name": "wf-bi-bad", "script": _SCRIPT, "mcp_servers": [s2.model_dump(mode="json")]},
@@ -456,9 +456,10 @@ async def test_create_run_builtin_vault_attenuation_and_env(
     async with pool.acquire() as conn:
         assert await wf_queries.get_run_vault_ids(conn, out["id"], account_id=ACC) == [vx]
 
-    # A vault the session doesn't hold → ToolBail, no run row leaks.
+    # A vault the session doesn't hold → ForbiddenError (dispatch renders it model-visible),
+    # no run row leaks.
     before = await _run_count(pool)
-    with pytest.raises(ToolBail):
+    with pytest.raises(ForbiddenError):
         await wm.create_run_handler(sess, {"workflow_id": wf.id, "vault_ids": [vy]})
     assert await _run_count(pool) == before
 
