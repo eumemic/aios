@@ -9,6 +9,7 @@ non-vision models and oversize images, and the legacy-stub path.
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +17,29 @@ import pytest
 
 from aios.config import get_settings
 from aios.harness import vision
-from aios.harness.context import render_user_event
+from aios.harness.context import (
+    _apply_attachments,
+)
+from aios.harness.context import (
+    render_user_event as _render_user_event_impl,
+)
 from aios.sandbox.volumes import session_attachments_dir
+
+# These tests exercise attachment/vision rendering, not the `received=` envelope
+# (their assertions are substring checks). Inject a fixed created_at so callers
+# needn't thread one through; the resulting `received` field is inert here.
+_CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+
+def render_user_event(
+    event_data: dict[str, Any],
+    orig_channel: str | None,
+    focal_channel_at_arrival: str | None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return _render_user_event_impl(
+        event_data, orig_channel, focal_channel_at_arrival, _CREATED_AT, **kwargs
+    )
 
 
 @pytest.fixture
@@ -328,62 +350,45 @@ class TestVisionAwareRendering:
         assert isinstance(msg["content"], str)
         assert "[image: photo.jpg" in msg["content"]
 
-    def test_image_only_no_caption_no_header_omits_empty_text(
-        self, temp_workspace_root: Path
-    ) -> None:
-        """An image-only event with no caption AND no channel header must
-        NOT emit ``{"type":"text","text":""}`` — Anthropic rejects empty
-        text blocks (``text content blocks must be non-empty``).  The
-        common path is fine because the channel header populates the
-        leading text, but legacy events with metadata-stripped headers
-        would 400 against Anthropic-routed models.  Regression test for
+    def test_apply_attachments_omits_empty_text_block(self, temp_workspace_root: Path) -> None:
+        """``_apply_attachments`` must NOT emit ``{"type":"text","text":""}``
+        when the leading text is empty — Anthropic rejects empty text blocks
+        (``text content blocks must be non-empty``), which would 400 and wedge
+        the session on a caption-less image-only inbound.  Regression test for
         PR #218.
+
+        Tested at ``_apply_attachments``'s own boundary with an empty
+        ``leading_text``: the render path always prepends a non-empty
+        ``[received=…]`` envelope now, so the function's self-guard must stay
+        correct independent of what its caller happens to prepend.
         """
         sandbox_path = _stage_image(
             temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", b"PNG"
         )
-        # Construct an event whose metadata has attachments but lacks
-        # ``channel`` — _format_channel_header returns "" so leading_text
-        # stays empty.  Content is also empty (image-only inbound).
-        event: dict[str, Any] = {
-            "role": "user",
-            "content": "",
-            "metadata": {
-                "channel": "echo/acct/chat-1",
-                "attachments": [
-                    {
-                        "filename": "photo.jpg",
-                        "content_type": "image/jpeg",
-                        "size": 3,
-                        "in_sandbox_path": sandbox_path,
-                    }
-                ],
-            },
-        }
-        # Strip the channel header by zeroing all the fields _format_channel_header
-        # consumes after the bare "channel" key: the header is the channel marker
-        # plus the inbound content, both empty here, so leading_text is just the
-        # bare ``[channel=...]`` line.  To exercise the no-header branch we drop
-        # ``channel`` from metadata entirely below.
-        event["metadata"].pop("channel")
-        # Re-add ``attachments`` only — _format_channel_header returns "" when
-        # channel is absent, leaving leading_text empty for the image-only path.
-        msg = render_user_event(
-            event,
-            "echo/acct/chat-1",
-            "echo/acct/chat-1",
+        msg: dict[str, Any] = {"role": "user", "content": ""}  # empty leading text
+        _apply_attachments(
+            msg,
+            [
+                {
+                    "filename": "photo.jpg",
+                    "content_type": "image/jpeg",
+                    "size": 3,
+                    "in_sandbox_path": sandbox_path,
+                }
+            ],
             model="model/vision",
             session_id="sess-1",
         )
         content = msg["content"]
         assert isinstance(content, list), (
-            "image_only message must still emit content parts when image is inlined"
+            "image-only message must still emit content parts when the image inlines"
         )
-        # No empty text block in the parts.
+        # The guard: an empty leading text must yield NO text part at all, never
+        # an empty one. If the omission broke, content would carry
+        # {"type":"text","text":""} and this assertion would fire.
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text":
                 assert part.get("text"), f"empty text part rejected by Anthropic — got {part!r}"
-        # And the image_url part is preserved.
         assert any(p.get("type") == "image_url" for p in content)
 
     def test_mime_corrected_when_event_declares_wrong_type(self, temp_workspace_root: Path) -> None:

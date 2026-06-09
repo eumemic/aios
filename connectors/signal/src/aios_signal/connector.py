@@ -472,7 +472,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         The target message is identified by ``(target_author_uuid,
         target_timestamp_ms)``.  Every inbound Signal message in your
         conversation starts with a header line like ``[channel=... ·
-        from=... · sender_uuid=<uuid> · timestamp_ms=<ms> (<iso>)]``;
+        from=... · sender_uuid=<uuid> · timestamp_ms=<ms> · received=<iso>]``;
         copy ``sender_uuid`` and the raw ``timestamp_ms`` integer from
         that header.
 

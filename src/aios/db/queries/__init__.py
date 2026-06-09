@@ -17,7 +17,7 @@ import json
 import math
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from types import EllipsisType
 from typing import Any, NamedTuple, NoReturn, cast
 
@@ -2562,7 +2562,7 @@ async def append_event(
         cum_tokens: int | None = None
         if kind == "message":
             prev = await _latest_cumulative_tokens(conn, session_id)
-            if is_user_message and orig_channel is not None:
+            if is_user_message:
                 # TODO(vision): plumb ``agent.model`` through here so
                 # :func:`render_user_event` matches build-time output for
                 # image-bearing events.  Today this call site renders without
@@ -2573,7 +2573,14 @@ async def append_event(
                 # ``model_token_ratio`` calibration in
                 # :func:`read_windowed_events`; see PR #218 for the
                 # follow-up plan to make append-time vision-aware.
-                rendered = render_user_event(data, orig_channel, focal_at_arrival)
+                #
+                # ``created_at`` isn't assigned until the INSERT below (DB
+                # DEFAULT now()), so pass a now() stand-in: the count only needs
+                # the rendered length, and the ``received`` envelope is
+                # fixed-width, so it matches the build-time render's token count.
+                rendered = render_user_event(
+                    data, orig_channel, focal_at_arrival, datetime.now(UTC)
+                )
                 cum_tokens = (prev or 0) + approx_tokens([rendered])
             else:
                 cum_tokens = (prev or 0) + approx_tokens([data])

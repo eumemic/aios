@@ -35,6 +35,12 @@ def _full_pipeline(
     return separate_adjacent_user_messages(ctx.messages)
 
 
+# Fixed receipt time so the per-message ``received=`` envelope field
+# (see ``_format_received``) renders deterministically across assertions.
+_FIXED_CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+RECEIVED = "2026-01-02T03:04:05Z"  # _format_received(_FIXED_CREATED_AT)
+
+
 def _evt(
     seq: int,
     role: str,
@@ -45,6 +51,7 @@ def _evt(
     metadata: dict[str, Any] | None = None,
     orig_channel: str | None = None,
     focal_channel_at_arrival: str | None = None,
+    created_at: datetime | None = None,
 ) -> Event:
     """Build a minimal message Event for testing.
 
@@ -53,6 +60,9 @@ def _evt(
     way :func:`aios.services.sessions.append_user_message` does at the
     real append site, so focal-aware rendering kicks in for these
     events just as it would in production.
+
+    ``created_at`` defaults to :data:`_FIXED_CREATED_AT` so the
+    ``received=`` envelope field is a stable :data:`RECEIVED` constant.
     """
     data: dict[str, Any] = {"role": role, "content": content}
     if tool_calls is not None:
@@ -71,7 +81,7 @@ def _evt(
         seq=seq,
         kind="message",
         data=data,
-        created_at=datetime.now(tz=UTC),
+        created_at=created_at if created_at is not None else _FIXED_CREATED_AT,
         orig_channel=orig_channel,
         focal_channel_at_arrival=focal_channel_at_arrival,
     )
@@ -151,12 +161,12 @@ class TestBuildMessages:
         ).messages
         # Should be: user, assistant+tool_calls, tool_result_x, user_injection
         assert msgs[0]["role"] == "user"
-        assert msgs[0]["content"] == "do X"
+        assert msgs[0]["content"] == f"[received={RECEIVED}]\ndo X"
         assert msgs[1]["role"] == "assistant"
         assert msgs[2]["role"] == "tool"
         assert msgs[2]["tool_call_id"] == "x"
         assert msgs[3]["role"] == "user"
-        assert msgs[3]["content"] == "how goes?"
+        assert msgs[3]["content"] == f"[received={RECEIVED}]\nhow goes?"
 
     def test_no_system_prompt_when_none(self) -> None:
         events = [_evt(1, "user", content="hi")]
@@ -311,7 +321,7 @@ class TestBuildMessages:
         ]
         msgs = build_messages(events, system_prompt=None).messages
         assert msgs[0]["role"] == "user"
-        assert msgs[0]["content"] == "next question"
+        assert msgs[0]["content"] == f"[received={RECEIVED}]\nnext question"
         assert msgs[1]["role"] == "assistant"
 
     def test_user_metadata_excluded_from_messages(self) -> None:
@@ -320,7 +330,7 @@ class TestBuildMessages:
         e = _evt(1, "user", content="hello")
         e.data["metadata"] = {"run_id": "abc123"}
         msgs = build_messages([e], system_prompt=None).messages
-        assert msgs[0] == {"role": "user", "content": "hello"}
+        assert msgs[0] == {"role": "user", "content": f"[received={RECEIVED}]\nhello"}
 
     def test_prune_partial_assistant_tool_group(self) -> None:
         """If DB windowing keeps an assistant with tool_calls but dropped
@@ -360,7 +370,7 @@ class TestBuildMessages:
         ]
         msgs = build_messages(events, system_prompt=None).messages
         assert [m["role"] for m in msgs] == ["user"]
-        assert msgs[0]["content"] == "next"
+        assert msgs[0]["content"] == f"[received={RECEIVED}]\nnext"
 
 
 # ─── monotonicity ──────────────────────────────────────────────────────────
@@ -1042,10 +1052,11 @@ class TestFocalRendering:
     _CHAN_B = "signal/bot/bob"
 
     def test_legacy_null_event_phase2_rendering(self) -> None:
-        """orig_channel=None: no header, no marker — same as Phase 2."""
+        """orig_channel=None: only the uniform ``received=`` envelope, no
+        connector header, no notification marker."""
         events = [_evt(1, "user", content="hi")]
         msg = build_messages(events, system_prompt=None).messages[0]
-        assert msg["content"] == "hi"
+        assert msg["content"] == f"[received={RECEIVED}]\nhi"
         assert "metadata" not in msg
         assert "🔔" not in msg["content"]
 
@@ -1212,29 +1223,15 @@ class TestFocalRendering:
         assert "revoke_target_message_id='3EB0ORIGINAL'" in content
 
     def test_focal_match_iso_timestamp(self) -> None:
+        """The raw origin ``timestamp_ms`` int is surfaced for connector tool
+        args; its human-readable ISO now lives in the uniform ``received=``
+        envelope field (receipt time), not as a parenthetical."""
         md = {"channel": self._CHAN_A, "timestamp_ms": 1776401210703}
         events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
         content = build_messages(events, system_prompt=None).messages[0]["content"]
         assert "timestamp_ms=1776401210703" in content
-        assert "(2026-04-17T" in content
-
-    def test_focal_match_timestamp_ms_out_of_range_does_not_brick_session(self) -> None:
-        """An int ``timestamp_ms`` outside the valid millisecond-Unix
-        range (a connector sending micro/nanoseconds, say) makes
-        ``datetime.fromtimestamp`` raise. ``_format_channel_header`` runs
-        on every wake, so an unguarded raise bricks the session
-        permanently (same failure class as #446)."""
-        # 1776401210703 ms is a sane 2026 timestamp; 1000x larger
-        # (microseconds mistaken for milliseconds) lands the divided
-        # value past datetime's MAXYEAR.
-        md = {"channel": self._CHAN_A, "timestamp_ms": 1_776_401_210_703_000}
-        events = [_evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival=self._CHAN_A)]
-        content = build_messages(events, system_prompt=None).messages[0]["content"]
-        # The raw int is still surfaced — connector tools need it as an
-        # argument — but the unconvertible value yields no ISO
-        # parenthetical (the success path appends " (<iso>)").
-        assert "timestamp_ms=1776401210703000" in content
-        assert "timestamp_ms=1776401210703000 (" not in content
+        assert "timestamp_ms=1776401210703 (" not in content  # no parenthetical ISO
+        assert f"received={RECEIVED}" in content
 
     def test_focal_match_message_id_inlined(self) -> None:
         """The ``message_id`` lets the model react/edit/delete the user
@@ -1673,7 +1670,7 @@ class TestSeparateAdjacentUserMessagesPipeline:
         )
         assert msgs[injection_idx + 1] == {"role": "assistant", "content": "."}
         assert msgs[injection_idx + 2]["role"] == "user"
-        assert msgs[injection_idx + 2]["content"] == "anything else?"
+        assert msgs[injection_idx + 2]["content"] == f"[received={RECEIVED}]\nanything else?"
 
     def test_alternating_events_no_tail_block_no_separator(self) -> None:
         """Guards against a future change that inserts a separator when
