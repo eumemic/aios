@@ -112,7 +112,6 @@ async def insert_workflow(
     account_id: str,
     name: str,
     script: str,
-    version: int = 1,
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
     description: str | None = None,
@@ -120,8 +119,8 @@ async def insert_workflow(
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
 ) -> Workflow:
-    """Insert an immutable workflow definition. Raises ``ConflictError`` on a
-    duplicate ``(account_id, name, version)``."""
+    """Insert a workflow definition at version 1. Raises ``ConflictError`` on a
+    duplicate ``(account_id, name)``."""
     new_id = make_id(WORKFLOW)
     try:
         row = await conn.fetchrow(
@@ -129,13 +128,12 @@ async def insert_workflow(
             INSERT INTO workflows
                 (id, account_id, name, version, script, input_schema, output_schema,
                  description, tools, mcp_servers, http_servers)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11::jsonb)
+            VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6::jsonb, $7, $8::jsonb, $9::jsonb, $10::jsonb)
             RETURNING *
             """,
             new_id,
             account_id,
             name,
-            version,
             script,
             json.dumps(input_schema) if input_schema is not None else None,
             json.dumps(output_schema) if output_schema is not None else None,
@@ -146,10 +144,117 @@ async def insert_workflow(
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
-            f"workflow {name!r} v{version} already exists",
-            detail={"name": name, "version": version},
+            f"workflow {name!r} already exists",
+            detail={"name": name},
         ) from exc
     assert row is not None
+    return _row_to_workflow(row)
+
+
+async def update_workflow(
+    conn: asyncpg.Connection[Any],
+    workflow_id: str,
+    *,
+    account_id: str,
+    expected_version: int,
+    name: str | None = None,
+    script: str | None = None,
+    input_schema: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
+    description: str | None = None,
+    tools: list[ToolSpec] | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
+) -> Workflow:
+    """Update a workflow in place, bumping ``version`` (the ``update_agent`` shape,
+    minus the version-snapshot — runs pin script + surface onto themselves at launch).
+
+    Requires ``expected_version`` to match the current version (optimistic
+    concurrency). Omitted fields are preserved. If nothing changed, the current row
+    is returned without a bump (no-op). The version match is enforced by the
+    UPDATE's ``AND version = $expected`` — the authoritative serialization point;
+    exactly one of two racing writers matches, the other gets a clean 409.
+    """
+    current = await get_workflow(conn, workflow_id, account_id=account_id)
+    if expected_version != current.version:
+        # Validate the token up front so the contract is uniform — without this, the
+        # write-free no-op path below would return 200 for a stale token + identical
+        # values. This is *in addition to* the UPDATE's ``WHERE version`` (which stays
+        # the authoritative write-time serializer), not instead of it — the pre-check
+        # alone would be racy for the write path (the update_agent lesson).
+        raise ConflictError(
+            f"version mismatch: expected {expected_version}, current is {current.version}",
+            detail={
+                "expected": expected_version,
+                "current": current.version,
+                "id": workflow_id,
+            },
+        )
+
+    # Resolve final values (omitted = preserve current).
+    new_name = name if name is not None else current.name
+    new_script = script if script is not None else current.script
+    new_input_schema = input_schema if input_schema is not None else current.input_schema
+    new_output_schema = output_schema if output_schema is not None else current.output_schema
+    new_desc = description if description is not None else current.description
+    new_tools = tools if tools is not None else current.tools
+    new_mcp = mcp_servers if mcp_servers is not None else current.mcp_servers
+    new_http = http_servers if http_servers is not None else current.http_servers
+
+    if (
+        new_name == current.name
+        and new_script == current.script
+        and new_input_schema == current.input_schema
+        and new_output_schema == current.output_schema
+        and new_desc == current.description
+        and new_tools == current.tools
+        and new_mcp == current.mcp_servers
+        and new_http == current.http_servers
+    ):
+        return current
+
+    try:
+        row = await conn.fetchrow(
+            """
+            UPDATE workflows
+               SET version = workflows.version + 1, name = $3, script = $4,
+                   input_schema = $5::jsonb, output_schema = $6::jsonb, description = $7,
+                   tools = $8::jsonb, mcp_servers = $9::jsonb, http_servers = $10::jsonb,
+                   updated_at = now()
+             WHERE id = $1 AND account_id = $2 AND version = $11
+            RETURNING *
+            """,
+            workflow_id,
+            account_id,
+            new_name,
+            new_script,
+            json.dumps(new_input_schema) if new_input_schema is not None else None,
+            json.dumps(new_output_schema) if new_output_schema is not None else None,
+            new_desc,
+            json.dumps([t.model_dump() for t in new_tools]),
+            json.dumps([s.model_dump() for s in new_mcp]),
+            json.dumps([s.model_dump() for s in new_http]),
+            expected_version,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        # A rename onto another live workflow's name (UNIQUE(account_id, name)).
+        raise ConflictError(
+            f"workflow {new_name!r} already exists",
+            detail={"name": new_name},
+        ) from exc
+    if row is None:
+        # No row matched (id, account_id, version): a stale/raced ``expected_version``.
+        # The re-read makes the 409 message accurate (and would 404 a vanished row,
+        # though workflows have no delete path today).
+        fresh = await get_workflow(conn, workflow_id, account_id=account_id)
+        raise ConflictError(
+            f"version mismatch: expected {expected_version}, current is {fresh.version}",
+            detail={
+                "expected": expected_version,
+                "current": fresh.version,
+                "id": workflow_id,
+            },
+        )
     return _row_to_workflow(row)
 
 
@@ -177,9 +282,8 @@ async def list_workflows(
     """Keyset-paginated list of an account's workflows, newest first.
 
     Hand-written (not ``_list_scoped``) because the ``workflows`` table has no
-    ``archived_at`` column — workflow definitions are immutable and never archived.
-    Each returned row is one ``(name, version)``; versioning/update is deferred, so
-    today there is one row per name.
+    ``archived_at`` column — workflows are never archived. One row per name
+    (``UNIQUE(account_id, name)``); ``version`` bumps in place on update.
     """
     args: list[Any] = [account_id]
     where = ["account_id = $1"]

@@ -244,6 +244,9 @@ from .workflow_create_input_schema_type_0 import WorkflowCreateInputSchemaType0
 from .workflow_create_output_schema_type_0 import WorkflowCreateOutputSchemaType0
 from .workflow_input_schema_type_0 import WorkflowInputSchemaType0
 from .workflow_output_schema_type_0 import WorkflowOutputSchemaType0
+from .workflow_update import WorkflowUpdate
+from .workflow_update_input_schema_type_0 import WorkflowUpdateInputSchemaType0
+from .workflow_update_output_schema_type_0 import WorkflowUpdateOutputSchemaType0
 
 __all__ = (
     "Account",
@@ -476,4 +479,7 @@ __all__ = (
     "WorkflowCreateOutputSchemaType0",
     "WorkflowInputSchemaType0",
     "WorkflowOutputSchemaType0",
+    "WorkflowUpdate",
+    "WorkflowUpdateInputSchemaType0",
+    "WorkflowUpdateOutputSchemaType0",
 )

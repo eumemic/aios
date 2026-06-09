@@ -29,6 +29,7 @@ from aios.models.workflows import (
     WfRunWaitResponse,
     Workflow,
     WorkflowCreate,
+    WorkflowUpdate,
 )
 from aios.services import workflows as service
 
@@ -45,7 +46,7 @@ runs_router = APIRouter(prefix="/v1/runs", tags=["runs"])
 async def create_workflow(
     body: WorkflowCreate, pool: PoolDep, account_id: AccountIdDep
 ) -> Workflow:
-    """Create a workflow definition (version 1). Versioning/update is deferred.
+    """Create a workflow definition (version 1).
 
     The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
     declared tool surface is not subset-checked against any agent (an agent authoring a
@@ -53,6 +54,32 @@ async def create_workflow(
     return await service.create_workflow(
         pool,
         account_id=account_id,
+        name=body.name,
+        script=body.script,
+        input_schema=body.input_schema,
+        output_schema=body.output_schema,
+        description=body.description,
+        tools=body.tools,
+        mcp_servers=body.mcp_servers,
+        http_servers=body.http_servers,
+    )
+
+
+@router.put("/{workflow_id}", operation_id="update_workflow")
+async def update_workflow(
+    workflow_id: str, body: WorkflowUpdate, pool: PoolDep, account_id: AccountIdDep
+) -> Workflow:
+    """Update a workflow in place, bumping ``version``.
+
+    ``body.version`` must match the current version (optimistic concurrency — 409 on a
+    stale token; re-fetch and retry). Omitted fields are preserved; an identical update
+    is a no-op. In-flight runs are unaffected (a run snapshots script + surface at
+    launch). The HTTP path is unattenuated operator authority — no ``actor_session_id``."""
+    return await service.update_workflow(
+        pool,
+        workflow_id,
+        account_id=account_id,
+        expected_version=body.version,
         name=body.name,
         script=body.script,
         input_schema=body.input_schema,

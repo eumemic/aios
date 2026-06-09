@@ -246,3 +246,28 @@ async def test_runs_parent_run_id_filter(http_client: httpx.AsyncClient, pool: A
 async def test_requires_auth(http_client: httpx.AsyncClient) -> None:
     r = await http_client.get("/v1/workflows", headers={"Authorization": ""})
     assert r.status_code == 401, r.text
+
+
+async def test_update_workflow_roundtrip_and_stale_409(http_client: httpx.AsyncClient) -> None:
+    name = f"upd-{_uniq()}"
+    r = await http_client.post("/v1/workflows", json={"name": name, "script": _SCRIPT})
+    assert r.status_code == 201
+    wf = r.json()
+    assert wf["version"] == 1
+
+    # PUT with the current version token → 200, version bumps, omitted fields preserved.
+    r = await http_client.put(
+        f"/v1/workflows/{wf['id']}",
+        json={"version": 1, "script": "async def main(input):\n    return 'v2'\n"},
+    )
+    assert r.status_code == 200
+    updated = r.json()
+    assert updated["version"] == 2
+    assert "v2" in updated["script"]
+    assert updated["name"] == name
+
+    # Stale token → 409; unknown id → 404.
+    r = await http_client.put(f"/v1/workflows/{wf['id']}", json={"version": 1, "script": "x"})
+    assert r.status_code == 409
+    r = await http_client.put("/v1/workflows/wf_nope", json={"version": 1, "script": "x"})
+    assert r.status_code == 404

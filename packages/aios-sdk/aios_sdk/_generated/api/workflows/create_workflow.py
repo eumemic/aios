@@ -71,7 +71,7 @@ def sync_detailed(
 ) -> Response[HTTPValidationError | Workflow]:
     """Create Workflow
 
-     Create a workflow definition (version 1). Versioning/update is deferred.
+     Create a workflow definition (version 1).
 
     The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
     declared tool surface is not subset-checked against any agent (an agent authoring a
@@ -110,7 +110,7 @@ def sync(
 ) -> HTTPValidationError | Workflow | None:
     """Create Workflow
 
-     Create a workflow definition (version 1). Versioning/update is deferred.
+     Create a workflow definition (version 1).
 
     The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
     declared tool surface is not subset-checked against any agent (an agent authoring a
@@ -144,7 +144,7 @@ async def asyncio_detailed(
 ) -> Response[HTTPValidationError | Workflow]:
     """Create Workflow
 
-     Create a workflow definition (version 1). Versioning/update is deferred.
+     Create a workflow definition (version 1).
 
     The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
     declared tool surface is not subset-checked against any agent (an agent authoring a
@@ -181,7 +181,7 @@ async def asyncio(
 ) -> HTTPValidationError | Workflow | None:
     """Create Workflow
 
-     Create a workflow definition (version 1). Versioning/update is deferred.
+     Create a workflow definition (version 1).
 
     The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
     declared tool surface is not subset-checked against any agent (an agent authoring a

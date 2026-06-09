@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from aios.models.workflows import GateResume, WfRunCreate, WorkflowCreate
+from aios.models.workflows import GateResume, WfRunCreate, WorkflowCreate, WorkflowUpdate
 
 
 class TestWorkflowCreate:
@@ -54,6 +54,15 @@ class TestWorkflowCreate:
             WorkflowCreate.model_validate({"name": "w"})
         with pytest.raises(ValidationError):
             WorkflowCreate.model_validate({"script": "x"})
+
+
+class TestWorkflowUpdate:
+    def test_version_required_fields_optional(self) -> None:
+        upd = WorkflowUpdate.model_validate({"version": 3, "script": "async def main(i): pass"})
+        assert upd.version == 3 and upd.script is not None
+        assert upd.name is None and upd.tools is None  # omitted = preserved
+        with pytest.raises(ValidationError):
+            WorkflowUpdate.model_validate({"script": "x"})  # version is mandatory
 
 
 class TestWfRunCreate:

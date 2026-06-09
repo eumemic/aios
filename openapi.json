@@ -8122,7 +8122,7 @@
           "workflows"
         ],
         "summary": "Create Workflow",
-        "description": "Create a workflow definition (version 1). Versioning/update is deferred.\n\nThe HTTP path is unattenuated operator authority \u2014 no ``creator_session_id``, so the\ndeclared tool surface is not subset-checked against any agent (an agent authoring a\nworkflow goes through the create-time-attenuated builtin, a later slice).",
+        "description": "Create a workflow definition (version 1).\n\nThe HTTP path is unattenuated operator authority \u2014 no ``creator_session_id``, so the\ndeclared tool surface is not subset-checked against any agent (an agent authoring a\nworkflow goes through the create-time-attenuated builtin, a later slice).",
         "operationId": "create_workflow",
         "parameters": [
           {
@@ -8275,6 +8275,73 @@
       }
     },
     "/v1/workflows/{workflow_id}": {
+      "put": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Update Workflow",
+        "description": "Update a workflow in place, bumping ``version``.\n\n``body.version`` must match the current version (optimistic concurrency \u2014 409 on a\nstale token; re-fetch and retry). Omitted fields are preserved; an identical update\nis a no-op. In-flight runs are unaffected (a run snapshots script + surface at\nlaunch). The HTTP path is unattenuated operator authority \u2014 no ``actor_session_id``.",
+        "operationId": "update_workflow",
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workflow Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "get": {
         "tags": [
           "workflows"
@@ -15582,12 +15649,14 @@
           "updated_at"
         ],
         "title": "Workflow",
-        "description": "An immutable, versioned workflow definition."
+        "description": "A versioned workflow definition (updated in place; ``version`` bumps per change)."
       },
       "WorkflowCreate": {
         "properties": {
           "name": {
             "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
             "title": "Name"
           },
           "script": {
@@ -15651,6 +15720,7 @@
             "title": "Http Servers"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name",
@@ -15658,6 +15728,122 @@
         ],
         "title": "WorkflowCreate",
         "description": "Request body for ``POST /v1/workflows`` \u2014 a new workflow definition at v1."
+      },
+      "WorkflowUpdate": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "script": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Script"
+          },
+          "input_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Schema"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Schema"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ToolSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tools"
+          },
+          "mcp_servers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/McpServerSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp Servers"
+          },
+          "http_servers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/HttpServerSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Servers"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "WorkflowUpdate",
+        "description": "Request body for ``PUT /v1/workflows/{id}`` \u2014 update in place, bumping ``version``.\n\n``version`` is the optimistic-concurrency token: it must match the workflow's\ncurrent version or the update 409s (re-fetch and retry). Omitted fields are\npreserved \u2014 nullable fields (``input_schema``/``output_schema``/``description``)\ncan therefore be replaced but never cleared back to null, as on ``AgentUpdate``.\nAn identical update is a no-op (no bump). There is no version-snapshot table \u2014\na run pins ``script`` + the declared surface onto itself at launch, so in-flight\nruns never observe an update. (The ``AgentUpdate`` shape, minus history.)"
       }
     }
   }

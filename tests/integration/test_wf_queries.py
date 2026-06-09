@@ -19,6 +19,7 @@ from aios.db.listen import open_listen_for_run_events
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, NotFoundError
+from aios.models.agents import ToolSpec
 
 
 @pytest.fixture
@@ -71,7 +72,7 @@ async def test_insert_and_get_workflow(wf_conn: asyncpg.Connection[Any]) -> None
     assert fetched.input_schema == {"type": "object"}
 
 
-async def test_duplicate_workflow_version_conflicts(wf_conn: asyncpg.Connection[Any]) -> None:
+async def test_duplicate_workflow_name_conflicts(wf_conn: asyncpg.Connection[Any]) -> None:
     await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="dup", script="x")
     with pytest.raises(ConflictError):
         await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="dup", script="y")
@@ -349,3 +350,68 @@ async def test_wf_run_event_stream_backfills_tails_and_terminates(
         ("event", "run_completed"),  # live tail
         ("done", None),  # terminal
     ]
+
+
+# ─── update_workflow — in-place versioned updates (optimistic concurrency) ────
+
+
+async def test_update_workflow_merges_and_bumps(wf_conn: asyncpg.Connection[Any]) -> None:
+    wf = await wf_queries.insert_workflow(
+        wf_conn, account_id="acc_root", name="up", script="A", description="d1"
+    )
+    updated = await wf_queries.update_workflow(
+        wf_conn,
+        wf.id,
+        account_id="acc_root",
+        expected_version=1,
+        script="B",
+        tools=[ToolSpec(type="web_search")],
+    )
+    assert updated.version == 2
+    assert updated.script == "B"
+    assert [t.type for t in updated.tools] == ["web_search"]
+    # Omitted fields preserved; id stable.
+    assert updated.name == "up" and updated.description == "d1" and updated.id == wf.id
+
+
+async def test_update_workflow_noop_keeps_version(wf_conn: asyncpg.Connection[Any]) -> None:
+    wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="noop", script="A")
+    same = await wf_queries.update_workflow(
+        wf_conn, wf.id, account_id="acc_root", expected_version=1, script="A"
+    )
+    assert same.version == 1  # identical values → no bump
+    assert (await wf_queries.get_workflow(wf_conn, wf.id, account_id="acc_root")).version == 1
+
+
+async def test_update_workflow_stale_version_conflicts(wf_conn: asyncpg.Connection[Any]) -> None:
+    wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="stale", script="A")
+    await wf_queries.update_workflow(
+        wf_conn, wf.id, account_id="acc_root", expected_version=1, script="B"
+    )  # → v2
+    with pytest.raises(ConflictError):
+        await wf_queries.update_workflow(
+            wf_conn, wf.id, account_id="acc_root", expected_version=1, script="C"
+        )
+    # The contract is uniform: a stale token 409s even when the values are identical
+    # (the write-free no-op path must not skip token validation).
+    with pytest.raises(ConflictError):
+        await wf_queries.update_workflow(
+            wf_conn, wf.id, account_id="acc_root", expected_version=1, script="B"
+        )
+    with pytest.raises(NotFoundError):
+        await wf_queries.update_workflow(
+            wf_conn, "wf_does_not_exist", account_id="acc_root", expected_version=1, script="C"
+        )
+
+
+async def test_update_workflow_rename_collision_conflicts(
+    wf_conn: asyncpg.Connection[Any],
+) -> None:
+    await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="taken", script="A")
+    other = await wf_queries.insert_workflow(
+        wf_conn, account_id="acc_root", name="renameme", script="A"
+    )
+    with pytest.raises(ConflictError):
+        await wf_queries.update_workflow(
+            wf_conn, other.id, account_id="acc_root", expected_version=1, name="taken"
+        )
