@@ -47,6 +47,7 @@ async def create(
         vault_ids=body.vault_ids,
         memory_store_ids=body.memory_store_ids,
         metadata=body.metadata,
+        archive_when_idle=body.archive_when_idle,
         account_id=account_id,
     )
 
@@ -98,6 +99,7 @@ async def update(
         vault_ids=body.vault_ids,
         memory_store_ids=body.memory_store_ids,
         metadata=body.metadata,
+        archive_when_idle=body.archive_when_idle,
         account_id=account_id,
     )
 

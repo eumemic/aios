@@ -405,8 +405,9 @@ async def test_return_writes_response_and_wakes_caller_without_archiving(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
     """return() writes the request's response + wakes the caller, but does NOT
-    archive the child — responding is not terminating. Reclamation is run-end
-    (off the correctness path), so right after responding the child is unarchived."""
+    archive the child — responding is not terminating. Archive-on-quiescence reclaims
+    the child only at its next idle end-of-step, so right after responding (still mid-turn,
+    a tool_result just landed) the child is unarchived."""
     from aios.tools import workflow_completion
 
     pool = wf_runtime
@@ -425,7 +426,8 @@ async def test_return_writes_response_and_wakes_caller_without_archiving(
     assert response is not None
     assert response["is_error"] is False and response["result"] == {"answer": 42}
     child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
-    assert child.archived_at is None  # NOT archived by the handler — run-end reclaim does that
+    # NOT archived by the handler — archive-on-quiescence reclaims at the next idle step.
+    assert child.archived_at is None
 
 
 async def test_error_marker_carries_message(
@@ -1003,6 +1005,154 @@ async def test_archived_session_wake_is_a_noop(
     async with pool.acquire() as conn:
         after = await conn.fetchval("SELECT last_event_seq FROM sessions WHERE id = $1", sess.id)
     assert after == before  # nothing appended — a clean no-op
+
+
+# ─── archive-on-quiescence: the general reclaim hook + its workflow-child use ──
+
+
+async def test_reclaim_session_if_idle_archives_only_when_idle(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """``reclaim_session_if_idle`` is the atomic conditional behind archive-on-quiescence:
+    it archives an idle session, no-ops on an active one (a stimulus racing the idle
+    transition flips ``_SESSION_ACTIVE_EXPR`` and wins), and no-ops once archived."""
+    pool = wf_runtime
+
+    # Active session (an unreacted user stimulus) → reclaim is a no-op.
+    active = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+        archive_when_idle=True,
+    )
+    await sessions_service.append_user_message(pool, active.id, "hi", account_id="acc_wf")
+    async with pool.acquire() as conn:
+        assert (
+            await db_queries.derive_session_status(conn, active.id, account_id="acc_wf") == "active"
+        )
+        assert (
+            await db_queries.reclaim_session_if_idle(conn, active.id, account_id="acc_wf") is False
+        )
+    assert (
+        await sessions_service.get_session_basic(pool, active.id, account_id="acc_wf")
+    ).archived_at is None
+
+    # Idle session → archived; a second call is an idempotent no-op.
+    idle = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+        archive_when_idle=True,
+    )
+    async with pool.acquire() as conn:
+        assert await db_queries.derive_session_status(conn, idle.id, account_id="acc_wf") == "idle"
+        assert await db_queries.reclaim_session_if_idle(conn, idle.id, account_id="acc_wf") is True
+        assert await db_queries.reclaim_session_if_idle(conn, idle.id, account_id="acc_wf") is False
+    assert (
+        await sessions_service.get_session_basic(pool, idle.id, account_id="acc_wf")
+    ).archived_at is not None
+
+
+async def test_child_reclaimed_on_quiescence_and_parent_still_harvests(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The workflow-child use of the general feature: a child is born ephemeral
+    (``insert_child_session`` sets ``archive_when_idle`` TRUE), answers its request,
+    and on its first genuine idle is reclaimed — yet the parent's harvest still returns
+    the answer, because ``derive_response`` reads the response *event* (which survives
+    archival), not the live row."""
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:reclaim#0")
+
+    # Born ephemeral — the workflow-child wiring, no per-call plumbing.
+    born = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
+    assert born.archive_when_idle is True
+
+    # It answers its request, then ends a tool-free turn → idle owing nothing. The guard
+    # does not nudge an already-answered child, so it is free to rest.
+    async with pool.acquire() as conn:
+        await db_queries.write_response_if_absent(
+            conn,
+            cid,
+            account_id="acc_wf",
+            request_id="sha:reclaim#0",
+            is_error=False,
+            result={"answer": 42},
+            error=None,
+        )
+    nudged, caller = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
+    )
+    assert not nudged and caller is None
+
+    # End-of-step reclaim (what loop._run_step does for an archive_when_idle session).
+    assert await sessions_service.reclaim_session_if_idle(pool, cid, account_id="acc_wf") is True
+    child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
+    assert child.archived_at is not None
+
+    # The parent harvest still resolves to the answer — archival did not lose it.
+    async with pool.acquire() as conn:
+        resp = await db_queries.derive_response(
+            conn, cid, account_id="acc_wf", request_id="sha:reclaim#0"
+        )
+    assert resp is not None and resp["is_error"] is False and resp["result"] == {"answer": 42}
+
+
+async def test_archive_when_idle_persists_across_launch_surfaces(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The launch flag round-trips on every surface: SessionCreate carries it onto the
+    row (default False), and a session_template stores + updates it — the value the
+    per-chat resolver copies into ``create_session``."""
+    from aios.services import session_templates as st_service
+
+    pool = wf_runtime
+    fg = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+        archive_when_idle=True,
+    )
+    assert fg.archive_when_idle is True
+    fg_default = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+    )
+    assert fg_default.archive_when_idle is False
+
+    tmpl = await st_service.create_session_template(
+        pool,
+        account_id="acc_wf",
+        name="ephemeral-tmpl",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        agent_version=None,
+        vault_ids=[],
+        memory_store_ids=[],
+        metadata={},
+        archive_when_idle=True,
+    )
+    assert tmpl.archive_when_idle is True
+    assert (
+        await st_service.get_session_template(pool, tmpl.id, account_id="acc_wf")
+    ).archive_when_idle is True
+    updated = await st_service.update_session_template(
+        pool, tmpl.id, account_id="acc_wf", archive_when_idle=False
+    )
+    assert updated.archive_when_idle is False
 
 
 async def test_operator_archived_child_resolves_run_as_child_gone(

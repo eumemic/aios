@@ -32,6 +32,7 @@ class SessionTemplate:
         metadata (SessionTemplateMetadata):
         created_at (datetime.datetime):
         updated_at (datetime.datetime):
+        archive_when_idle (bool | Unset):  Default: False.
         archived_at (datetime.datetime | None | Unset):
     """
 
@@ -45,6 +46,7 @@ class SessionTemplate:
     metadata: SessionTemplateMetadata
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    archive_when_idle: bool | Unset = False
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -70,6 +72,8 @@ class SessionTemplate:
 
         updated_at = self.updated_at.isoformat()
 
+        archive_when_idle = self.archive_when_idle
+
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
             archived_at = UNSET
@@ -94,6 +98,8 @@ class SessionTemplate:
                 "updated_at": updated_at,
             }
         )
+        if archive_when_idle is not UNSET:
+            field_dict["archive_when_idle"] = archive_when_idle
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -129,6 +135,8 @@ class SessionTemplate:
 
         updated_at = isoparse(d.pop("updated_at"))
 
+        archive_when_idle = d.pop("archive_when_idle", UNSET)
+
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -157,6 +165,7 @@ class SessionTemplate:
             metadata=metadata,
             created_at=created_at,
             updated_at=updated_at,
+            archive_when_idle=archive_when_idle,
             archived_at=archived_at,
         )
 

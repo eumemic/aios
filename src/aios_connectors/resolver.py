@@ -230,6 +230,7 @@ async def _spawn_per_chat_session(
         vault_ids=template.vault_ids or None,
         focal_channel=focal_channel,
         focal_locked=True,
+        archive_when_idle=template.archive_when_idle,
         account_id=account_id,
     )
 

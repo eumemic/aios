@@ -26,6 +26,7 @@ async def create_session_template(
     vault_ids: list[str],
     memory_store_ids: list[str],
     metadata: dict[str, Any],
+    archive_when_idle: bool = False,
 ) -> SessionTemplate:
     async with pool.acquire() as conn:
         return await queries.insert_session_template(
@@ -37,6 +38,7 @@ async def create_session_template(
             vault_ids=vault_ids,
             memory_store_ids=memory_store_ids,
             metadata=metadata,
+            archive_when_idle=archive_when_idle,
             account_id=account_id,
         )
 
@@ -69,6 +71,7 @@ async def update_session_template(
     vault_ids: list[str] | None = None,
     memory_store_ids: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    archive_when_idle: bool | None = None,
 ) -> SessionTemplate:
     async with pool.acquire() as conn:
         return await queries.update_session_template(
@@ -81,6 +84,7 @@ async def update_session_template(
             vault_ids=vault_ids,
             memory_store_ids=memory_store_ids,
             metadata=metadata,
+            archive_when_idle=archive_when_idle,
             account_id=account_id,
         )
 

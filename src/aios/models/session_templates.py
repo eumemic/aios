@@ -38,6 +38,13 @@ class SessionTemplateCreate(BaseModel):
     vault_ids: list[str] = Field(default_factory=list)
     memory_store_ids: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    archive_when_idle: bool = Field(
+        default=False,
+        description=(
+            "Copied down to every session this template spawns: when true, each "
+            "spawned session self-archives the first time it goes idle."
+        ),
+    )
 
 
 class SessionTemplateUpdate(BaseModel):
@@ -56,6 +63,7 @@ class SessionTemplateUpdate(BaseModel):
     vault_ids: list[str] | None = None
     memory_store_ids: list[str] | None = None
     metadata: dict[str, Any] | None = None
+    archive_when_idle: bool | None = None
 
 
 class SessionTemplate(BaseModel):
@@ -69,6 +77,7 @@ class SessionTemplate(BaseModel):
     vault_ids: list[str]
     memory_store_ids: list[str]
     metadata: dict[str, Any]
+    archive_when_idle: bool = False
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

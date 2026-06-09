@@ -137,6 +137,7 @@ async def create_session(
     env: dict[str, str] | None = None,
     focal_channel: str | None = None,
     focal_locked: bool = False,
+    archive_when_idle: bool = False,
 ) -> Session:
     """Create a session row and return it.
 
@@ -169,6 +170,7 @@ async def create_session(
             env=env,
             focal_channel=focal_channel,
             focal_locked=focal_locked,
+            archive_when_idle=archive_when_idle,
             account_id=account_id,
         )
         if vault_ids:
@@ -823,6 +825,14 @@ async def set_session_stop_reason(
     writes a status column."""
     async with pool.acquire() as conn:
         await queries.set_session_stop_reason(conn, session_id, stop_reason, account_id=account_id)
+
+
+async def reclaim_session_if_idle(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> bool:
+    """Pool wrapper for :func:`queries.reclaim_session_if_idle` — soft-archive iff idle."""
+    async with pool.acquire() as conn:
+        return await queries.reclaim_session_if_idle(conn, session_id, account_id=account_id)
 
 
 async def increment_usage(
