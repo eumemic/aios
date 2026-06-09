@@ -35,9 +35,6 @@ def test_canonical_json_accepts_allowed_types() -> None:
 @pytest.mark.parametrize(
     "bad",
     [
-        1.0,
-        {"n": 1.5},
-        [1, 2.0],
         {1, 2},
         (1, 2),
         b"bytes",
@@ -49,6 +46,37 @@ def test_canonical_json_accepts_allowed_types() -> None:
 def test_canonical_json_rejects_disallowed_types(bad: object) -> None:
     with pytest.raises(WorkflowInputTypeError):
         canonical_json(bad)
+
+
+def test_canonical_json_accepts_finite_floats() -> None:
+    assert canonical_json(1.5) == "1.5"
+    assert canonical_json({"x": 3.14}) == '{"x":3.14}'
+    assert canonical_json([0.5, 2.5]) == "[0.5,2.5]"
+
+
+def test_canonical_json_normalises_integer_floats() -> None:
+    # 1.0 and 1 must hash identically — the stated invariant.
+    assert canonical_json(1.0) == canonical_json(1) == "1"
+    assert canonical_json({"n": 2.0}) == canonical_json({"n": 2}) == '{"n":2}'
+    assert canonical_json([1.0, 2.0]) == canonical_json([1, 2]) == "[1,2]"
+    # content_hash must reflect this too.
+    assert content_hash("agent", {"x": 1}) == content_hash("agent", {"x": 1.0})
+
+
+def test_canonical_json_rejects_nan_inf() -> None:
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(WorkflowInputTypeError, match="non-finite"):
+            canonical_json(bad)
+    # Nested too.
+    with pytest.raises(WorkflowInputTypeError, match="input\\.x"):
+        canonical_json({"x": float("nan")})
+
+
+def test_canonical_json_float_repr_stability() -> None:
+    # json.dumps float repr is stable for a given value (documented guarantee).
+    val = 0.1 + 0.2  # classic float imprecision — still stable across calls
+    assert canonical_json(val) == canonical_json(val)
+    assert canonical_json(0.95) == "0.95"
 
 
 def test_canonical_json_rejects_non_str_dict_keys() -> None:

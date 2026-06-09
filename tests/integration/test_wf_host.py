@@ -149,8 +149,8 @@ async def test_agent_requires_non_none_input() -> None:
 
 async def test_bad_capability_input_is_raised() -> None:
     out = await _run(
-        "async def main(input):\n    return await gate({'t': 1.5})"
-    )  # float spec rejected
+        "async def main(input):\n    return await gate({'t': (1, 2)})"
+    )  # tuple spec rejected
     assert out.kind == "raised"
     assert "WorkflowInputTypeError" in (out.error_repr or "")
 
