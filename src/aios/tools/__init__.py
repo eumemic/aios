@@ -37,4 +37,5 @@ from aios.tools import wake_session as _wake_session  # noqa: F401
 from aios.tools import web_fetch as _web_fetch  # noqa: F401
 from aios.tools import web_search as _web_search  # noqa: F401
 from aios.tools import workflow_completion as _workflow_completion  # noqa: F401
+from aios.tools import workflow_management as _workflow_management  # noqa: F401
 from aios.tools import write as _write  # noqa: F401
