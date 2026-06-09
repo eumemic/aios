@@ -5,13 +5,15 @@ Replay-with-memo only works if re-running a deterministic script produces the
 that:
 
 - :func:`canonical_json` — a total, order-independent serialization over a
-  **restricted** input domain. Floats, sets, tuples, bytes, datetimes, and
-  arbitrary objects are **rejected** at the call site (raising
-  :class:`WorkflowInputTypeError`) rather than silently coerced — these are
-  exactly the types whose serialization is ambiguous (``1.0`` vs ``1``) or whose
-  iteration order is ``PYTHONHASHSEED``-sensitive (``set``), which would desync
-  the key across a worker restart. ``sort_keys`` makes dict key order
-  irrelevant.
+  **restricted** input domain. Non-finite floats (NaN/Inf), sets, tuples, bytes,
+  datetimes, and arbitrary objects are **rejected** at the call site (raising
+  :class:`WorkflowInputTypeError`). Finite floats are accepted; integer-valued
+  floats (``1.0``, ``2.0``) are normalized to their ``int`` form so ``1`` and
+  ``1.0`` produce the same JSON token — the call key is stable even when an
+  upstream agent returns ``{"count": 1.0}`` and the script author wrote
+  ``{"count": 1}``. Sets and dicts with non-str keys are rejected because their
+  iteration order is ``PYTHONHASHSEED``-sensitive, which would desync the key
+  across a worker restart. ``sort_keys`` makes dict key order irrelevant.
 
 - :class:`CallKeyer` — turns ``(capability_id, input)`` into
   ``"sha:<hex>#<n>"`` where ``n`` is the count of *prior* emissions in this run
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any
 
 
@@ -36,14 +39,20 @@ class WorkflowInputTypeError(TypeError):
 
     Raised deterministically at the call site (same input → same rejection on
     every replay), so a bad input is a loud author error, never a silent hash
-    desync. Allowed: ``None``, ``bool``, ``int``, ``str``, and ``list``/``dict``
-    of those. Authors needing a float pass a string or scaled int; a set, a
-    sorted list.
+    desync. Allowed: ``None``, ``bool``, ``int``, ``float`` (finite only),
+    ``str``, and ``list``/``dict`` of those. NaN/Inf floats, sets, tuples,
+    bytes, datetimes, and arbitrary objects are rejected.
     """
 
 
 def _validate(x: Any, *, path: str = "input") -> None:
     if x is None or isinstance(x, (bool, int, str)):
+        return
+    if isinstance(x, float):
+        if not math.isfinite(x):
+            raise WorkflowInputTypeError(
+                f"{path}: non-finite float {x!r} (NaN/Inf have no canonical form)"
+            )
         return
     if isinstance(x, list):
         for i, item in enumerate(x):
@@ -59,36 +68,53 @@ def _validate(x: Any, *, path: str = "input") -> None:
         return
     raise WorkflowInputTypeError(
         f"{path}: unsupported workflow input type {type(x).__name__} "
-        f"(allowed: None, bool, int, str, list, dict)"
+        f"(allowed: None, bool, int, float, str, list, dict)"
     )
+
+
+def _canon_numbers(x: Any) -> Any:
+    """Collapse integer-valued floats so ``1.0`` and ``1`` produce the same JSON token."""
+    if isinstance(x, float):
+        return int(x) if x.is_integer() else x
+    if isinstance(x, list):
+        return [_canon_numbers(i) for i in x]
+    if isinstance(x, dict):
+        return {k: _canon_numbers(v) for k, v in x.items()}
+    return x
 
 
 def canonical_json(x: Any) -> str:
     """Deterministic, order-independent JSON over the allowed input domain.
 
     Raises :class:`WorkflowInputTypeError` for any disallowed type *before*
-    serializing.
+    serializing. Integer-valued floats (``1.0``, ``2.0``) are collapsed to their
+    ``int`` form so ``1`` and ``1.0`` produce the same JSON token — the call key is
+    content-hash-stable even when an upstream agent returns ``{"count": 1.0}`` and
+    the script author wrote ``{"count": 1}``.
     """
     _validate(x)
-    return json.dumps(x, separators=(",", ":"), sort_keys=True, ensure_ascii=True, allow_nan=False)
+    return json.dumps(
+        _canon_numbers(x), separators=(",", ":"), sort_keys=True, ensure_ascii=True, allow_nan=False
+    )
 
 
 def canonical_schema_json(schema: Any) -> str:
     """Deterministic JSON for a JSON Schema carried in a capability spec.
 
-    Unlike :func:`canonical_json` (which serves the **data** domain and rejects floats
-    — a workflow input's ``1.0`` vs ``1`` must never desync the call key), a JSON
-    *Schema* legitimately carries decimal numeric constraints (``minimum`` /
-    ``multipleOf`` / …). Those are author-written literals that serialize
+    Unlike :func:`canonical_json` (which serves the **data** domain and normalises
+    integer-valued floats to their ``int`` form), a JSON *Schema* legitimately carries
+    decimal numeric constraints (``minimum`` / ``multipleOf`` / …) that must be
+    preserved verbatim — normalising ``"minimum": 1.0`` to ``1`` would silently alter
+    the schema's meaning. Those are author-written literals that serialize
     deterministically (the ``json.dumps`` float repr is stable for a given value), so
     they are admitted here; ``allow_nan=False`` still rejects the genuinely
     non-deterministic NaN/Inf. ``sort_keys`` keeps the string — and thus the call key —
     independent of the schema's key order.
 
-    ``agent()`` stores this string in the spec so a float-bearing schema never reaches
-    the float-banning :func:`canonical_json`; the worker reconstructs the schema with
-    ``json.loads``. Raises ``TypeError`` for a non-JSON-serialisable schema (e.g. a set
-    value) — a loud author error, surfaced like any other bad ``agent()`` argument.
+    ``agent()`` stores this string in the spec so schema floats are preserved verbatim;
+    the worker reconstructs the schema with ``json.loads``. Raises ``TypeError`` for a
+    non-JSON-serialisable schema (e.g. a set value) — a loud author error, surfaced
+    like any other bad ``agent()`` argument.
     """
     return json.dumps(
         schema, separators=(",", ":"), sort_keys=True, ensure_ascii=True, allow_nan=False

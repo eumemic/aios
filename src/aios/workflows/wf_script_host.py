@@ -138,9 +138,10 @@ def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
     """
     if input is None:
         raise ValueError("agent() requires a non-None input (the child's first message)")
-    # Carry output_schema as a canonical JSON *string* so a schema's decimal numeric
-    # constraints (minimum/multipleOf/…) survive the call_key hash — canonical_json (the
-    # spec serializer) bans floats in the data domain; a schema is metadata. The worker
+    # Carry output_schema as a canonical JSON *string* so a schema's numeric literals
+    # (minimum/multipleOf/…) are preserved verbatim — canonical_json normalises
+    # integer-valued floats (1.0 → 1), which would alter schema constraints like
+    # "minimum": 1.0. A schema is metadata, not workflow data. The worker
     # reconstructs the dict with json.loads. None stays None (no schema demanded).
     return _Capability(
         "agent",
