@@ -20,6 +20,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from aios.errors import CryptoDecryptError, ForbiddenError
 from aios.models.agents import (
     McpPermissionPolicy,
     McpServerSpec,
@@ -305,6 +306,50 @@ class TestBuiltinInvoke:
         body = r.json()
         assert body["code"] == "internal_error"
         assert "RuntimeError" in body["error"]
+
+    async def test_typed_client_error_uses_real_status_and_code(
+        self,
+        broker: ToolBroker,
+        hijack_tool: Callable[[str, Callable[[str, dict[str, Any]], Awaitable[Any]]], None],
+    ) -> None:
+        """A 4xx AiosError surfaces with its real status + ``error_type`` code (not 500),
+        matching the model dispatch path's clean-refusal treatment."""
+
+        async def handler(_session_id: str, _args: dict[str, Any]) -> dict[str, Any]:
+            raise ForbiddenError("denied", detail={"x": 1})
+
+        hijack_tool("web_search", handler)
+        broker.register_session("sess_X", "s")
+        agent = _agent(tools=[ToolSpec(type="web_search")])
+        with _patch_agent(agent):
+            async with httpx.AsyncClient() as c:
+                r = await c.post(
+                    _url(broker, "s", "builtins", "web_search"), json={"arguments": {}}
+                )
+        assert r.status_code == 403
+        assert r.json() == {"error": 'denied ({"x": 1})', "code": "forbidden"}
+
+    async def test_typed_server_error_keeps_500_but_typed_code(
+        self,
+        broker: ToolBroker,
+        hijack_tool: Callable[[str, Callable[[str, dict[str, Any]], Awaitable[Any]]], None],
+    ) -> None:
+        """A 5xx AiosError stays 500 but carries its typed code, not the opaque
+        ``internal_error`` reserved for genuinely untyped exceptions."""
+
+        async def handler(_session_id: str, _args: dict[str, Any]) -> dict[str, Any]:
+            raise CryptoDecryptError("boom")
+
+        hijack_tool("web_search", handler)
+        broker.register_session("sess_X", "s")
+        agent = _agent(tools=[ToolSpec(type="web_search")])
+        with _patch_agent(agent):
+            async with httpx.AsyncClient() as c:
+                r = await c.post(
+                    _url(broker, "s", "builtins", "web_search"), json={"arguments": {}}
+                )
+        assert r.status_code == 500
+        assert r.json() == {"error": "boom", "code": "crypto_decrypt_error"}
 
     async def test_bad_json_400(self, broker: ToolBroker) -> None:
         broker.register_session("sess_X", "s")

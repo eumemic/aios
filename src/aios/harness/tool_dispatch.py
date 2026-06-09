@@ -93,11 +93,8 @@ def _classify_tool_error(err: BaseException) -> tuple[bool, str]:
     if isinstance(err, ToolBail):
         return False, str(err)
     if isinstance(err, AiosError):
-        # ``default=str`` keeps the serialization total: this runs in an except clause,
-        # so a raise here would skip the tool-result append and ghost the call (invariant
-        # #4). A non-JSON-serializable ``detail`` value renders as its ``str()`` instead.
-        detail = f" ({json.dumps(err.detail, default=str)})" if err.detail else ""
-        return err.status_code >= 500, f"{err.message}{detail}"
+        # ``to_message`` is total even here in the except clause (see AiosError.to_message).
+        return err.status_code >= 500, err.to_message()
     return True, f"{type(err).__name__}: {err}"
 
 
