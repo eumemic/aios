@@ -2471,7 +2471,7 @@ async def append_event(
     this event belong to?" once and for all; downstream filters become
     a single column read.
     """
-    from aios.harness.context import render_user_event
+    from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, render_user_event
     from aios.harness.tokens import approx_tokens
 
     new_id = make_id(EVENT)
@@ -2582,10 +2582,23 @@ async def append_event(
                 # ``model_token_ratio`` calibration — and exact matching is
                 # impossible anyway, since a later tz config change re-renders
                 # history regardless of what was counted here.
+                #
+                # The count also pre-pays the separator assistant message that
+                # ``separate_adjacent_user_messages`` inserts when this user
+                # message follows another user message at compose time.
+                # Separators exist only because of user messages, so charging
+                # each user event its potential separator keeps the windowing
+                # budget an upper bound — without it, the post-window payload
+                # can exceed ``window_max`` by ~5 local tokens per kept
+                # adjacent-user pair (unbudgeted, since separators are not
+                # events). Non-adjacent user messages overcount by the same
+                # ~5 — the same keep-fewer-never-overshoot asymmetry as the
+                # ceil in ``read_windowed_events``.
                 rendered = render_user_event(
                     data, orig_channel, focal_at_arrival, datetime.now(UTC)
                 )
-                cum_tokens = (prev or 0) + approx_tokens([rendered])
+                separator = {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}
+                cum_tokens = (prev or 0) + approx_tokens([rendered, separator])
             else:
                 cum_tokens = (prev or 0) + approx_tokens([data])
 

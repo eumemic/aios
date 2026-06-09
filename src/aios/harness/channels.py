@@ -153,6 +153,7 @@ def max_tail_block_local(channels: list[str]) -> int:
     Returns 0 when there are no channels: :func:`build_channels_tail_block`
     returns ``None`` in that case and the composer appends nothing.
     """
+    from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
     from aios.harness.tokens import approx_tokens
 
     if not channels:
@@ -162,7 +163,15 @@ def max_tail_block_local(channels: list[str]) -> int:
         # Preview length matches the 60-char truncation + ellipsis in
         # build_channels_tail_block above.
         lines.append(f'○ channel_id={addr} — 9999 unread: "{"x" * 61}"')
-    return approx_tokens([{"role": "user", "content": "\n".join(lines)}])
+    # The tail is user-role and lands after the log's final message; when
+    # that message is also user-role, ``separate_adjacent_user_messages``
+    # inserts a separator the reservation must cover too.
+    return approx_tokens(
+        [
+            {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT},
+            {"role": "user", "content": "\n".join(lines)},
+        ]
+    )
 
 
 def build_channels_tail_block(
