@@ -695,16 +695,17 @@ class TestSpecVersionDrift:
 
         with (
             patch(
-                "aios.sandbox.registry.queries.get_session_spec_version",
+                "aios.sandbox.registry.queries.unscoped_get_session_spec_version",
                 AsyncMock(return_value=2),
             ),
+            # The recycle path re-provisions via the span wrapper, which
+            # looks up the account and appends a sandbox_provision span
+            # pair; stub both so the MagicMock pool isn't driven through
+            # real SQL.
             patch(
                 "aios.services.sessions.load_session_account_id",
                 AsyncMock(return_value="acct_x"),
             ),
-            # The recycle path re-provisions via the span wrapper, which
-            # appends a sandbox_provision span pair; stub the event append
-            # so the MagicMock pool isn't driven through real SQL.
             patch("aios.services.sessions.append_event", AsyncMock()),
             patch(
                 "aios.sandbox.registry.build_spec_from_session",
@@ -733,15 +734,9 @@ class TestSpecVersionDrift:
         registry = SandboxRegistry(backend=backend)
         cached = _seed_versioned(registry, "sess_X", spec_version=3)
 
-        with (
-            patch(
-                "aios.sandbox.registry.queries.get_session_spec_version",
-                AsyncMock(return_value=3),
-            ),
-            patch(
-                "aios.services.sessions.load_session_account_id",
-                AsyncMock(return_value="acct_x"),
-            ),
+        with patch(
+            "aios.sandbox.registry.queries.unscoped_get_session_spec_version",
+            AsyncMock(return_value=3),
         ):
             result = await registry.get_or_provision("sess_X", pool=cast(Any, MagicMock()))
 
@@ -757,7 +752,9 @@ class TestSpecVersionDrift:
         cached = _seed_versioned(registry, "sess_X", spec_version=1)
 
         version_query = AsyncMock(return_value=99)
-        with patch("aios.sandbox.registry.queries.get_session_spec_version", version_query):
+        with patch(
+            "aios.sandbox.registry.queries.unscoped_get_session_spec_version", version_query
+        ):
             result = await registry.get_or_provision("sess_X")
 
         assert result is cached
@@ -770,15 +767,9 @@ class TestSpecVersionDrift:
         registry = SandboxRegistry(backend=backend)
         cached = _seed_versioned(registry, "sess_X", spec_version=1)
 
-        with (
-            patch(
-                "aios.sandbox.registry.queries.get_session_spec_version",
-                AsyncMock(side_effect=RuntimeError("db hiccup")),
-            ),
-            patch(
-                "aios.services.sessions.load_session_account_id",
-                AsyncMock(return_value="acct_x"),
-            ),
+        with patch(
+            "aios.sandbox.registry.queries.unscoped_get_session_spec_version",
+            AsyncMock(side_effect=RuntimeError("db hiccup")),
         ):
             result = await registry.get_or_provision("sess_X", pool=cast(Any, MagicMock()))
 

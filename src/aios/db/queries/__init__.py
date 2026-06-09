@@ -1393,28 +1393,6 @@ async def get_session_provisioning(
     return row["workspace_volume_path"], env, row["spec_version"]
 
 
-async def get_session_spec_version(
-    conn: asyncpg.Connection[Any],
-    session_id: str,
-    *,
-    account_id: str,
-) -> int:
-    """Return the session's current ``spec_version`` (issue #713).
-
-    Used by the registry's warm-hit staleness probe to compare the live
-    value against the snapshot stamped onto the cached
-    :class:`SandboxHandle`.
-    """
-    row = await conn.fetchrow(
-        "SELECT spec_version FROM sessions WHERE id = $1 AND account_id = $2",
-        session_id,
-        account_id,
-    )
-    if row is None:
-        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
-    return int(row["spec_version"])
-
-
 async def list_sessions(
     conn: asyncpg.Connection[Any],
     *,
@@ -7203,6 +7181,26 @@ async def unscoped_live_session_account_id(
         session_id,
     )
     return account_id
+
+
+async def unscoped_get_session_spec_version(conn: asyncpg.Connection[Any], session_id: str) -> int:
+    """Return the session's current ``spec_version`` (issue #713).
+
+    Used by the registry's warm-hit staleness probe to compare the live
+    value against the snapshot stamped onto the cached
+    :class:`SandboxHandle`. Unscoped for the same reason as the account-id
+    bootstrap above: the probe runs worker-internal, keyed only by the
+    session_id the worker already holds — deriving ``account_id`` from the
+    row just to filter the same row by it would cost a second round-trip
+    on every warm tool call for no added protection.
+    """
+    row = await conn.fetchrow(
+        "SELECT spec_version FROM sessions WHERE id = $1",
+        session_id,
+    )
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return int(row["spec_version"])
 
 
 # ─── account management (#367 PR 7) ───────────────────────────────────────────

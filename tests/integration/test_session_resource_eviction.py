@@ -244,9 +244,7 @@ async def test_update_session_idempotent_memory_resources_does_not_evict(
         pool, session_id, account_id=_ACCOUNT_ID, resources=resources
     )
     async with pool.acquire() as conn:
-        version_before = await queries.get_session_spec_version(
-            conn, session_id, account_id=_ACCOUNT_ID
-        )
+        version_before = await queries.unscoped_get_session_spec_version(conn, session_id)
     spy = _install_spy(monkeypatch)
 
     await sessions_service.update_session(
@@ -255,9 +253,7 @@ async def test_update_session_idempotent_memory_resources_does_not_evict(
 
     spy.evict.assert_not_called()
     async with pool.acquire() as conn:
-        version_after = await queries.get_session_spec_version(
-            conn, session_id, account_id=_ACCOUNT_ID
-        )
+        version_after = await queries.unscoped_get_session_spec_version(conn, session_id)
     assert version_after == version_before
 
 

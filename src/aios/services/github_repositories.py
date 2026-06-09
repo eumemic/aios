@@ -107,7 +107,7 @@ async def set_session_resources(
     crypto_box: CryptoBox,
     *,
     account_id: str,
-) -> None:
+) -> bool:
     """Replace attached repositories atomically.
 
     A failed attach rolls back the delete (parent transaction is the
@@ -117,6 +117,12 @@ async def set_session_resources(
     the embedded auth token, so leaving them on disk after detach would
     be a slow plaintext-token leak.
 
+    Always returns True (the changed signal, mirroring the memory-store
+    sibling): a github re-PUT is never idempotent — the incoming
+    ``authorization_token`` is re-encrypted (fresh ciphertext, new
+    ``updated_at``), and ``updated_at`` is deliberately part of the mount
+    snapshot so token rotation reaches the sandbox.
+
     Conn-scoped: sandbox eviction is fired post-commit by
     :func:`aios.services.sessions.update_session`, not here (#713).
     """
@@ -125,6 +131,7 @@ async def set_session_resources(
         await queries.delete_session_github_repos(conn, session_id, account_id=account_id)
         await attach_to_session(conn, session_id, resources, crypto_box, account_id=account_id)
     _purge_working_trees(session_id, old_ids)
+    return True
 
 
 async def detach_all_from_session(

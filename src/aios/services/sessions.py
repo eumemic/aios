@@ -991,14 +991,9 @@ async def update_session(
                 assert crypto_box is not None, (
                     "API surface requires CryptoBox when attaching github_repository"
                 )
-                await github_repo_service.set_session_resources(
+                changed |= await github_repo_service.set_session_resources(
                     conn, session_id, github_resources, crypto_box, account_id=account_id
                 )
-                # A github re-PUT is never idempotent: the incoming
-                # authorization_token is re-encrypted (fresh ciphertext, new
-                # updated_at), and updated_at is deliberately part of the
-                # mount snapshot so token rotation reaches the sandbox.
-                changed = True
             else:
                 changed |= await github_repo_service.detach_all_from_session(
                     conn, session_id, account_id=account_id

@@ -81,11 +81,7 @@ class TestSandboxProvisionSpan:
         with (
             patch("aios.services.sessions.append_event", append_event),
             patch(
-                "aios.services.sessions.load_session_account_id",
-                AsyncMock(return_value="acct_x"),
-            ),
-            patch(
-                "aios.sandbox.registry.queries.get_session_spec_version",
+                "aios.sandbox.registry.queries.unscoped_get_session_spec_version",
                 AsyncMock(return_value=0),
             ),
         ):

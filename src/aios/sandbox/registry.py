@@ -198,19 +198,12 @@ class SandboxRegistry:
 
         Best-effort: any exception (transient DB error, session vanished)
         returns ``False`` so a healthy sandbox isn't recycled over a blip.
-        The deferred ``sessions`` import matches the cycle-avoidance pattern
-        in :meth:`_provision_with_span` (the runtime module lists this
-        module under ``TYPE_CHECKING``); ``queries`` is imported at module
-        top, same as :mod:`aios.sandbox.spec`.
+        One unscoped round-trip — this runs on every warm hit (every tool
+        call reusing a live sandbox), so it must stay a single query.
         """
-        from aios.services import sessions as sessions_service
-
         try:
-            account_id = await sessions_service.load_session_account_id(pool, session_id)
             async with pool.acquire() as conn:
-                current = await queries.get_session_spec_version(
-                    conn, session_id, account_id=account_id
-                )
+                current = await queries.unscoped_get_session_spec_version(conn, session_id)
         except Exception as err:
             log.warning(
                 "sandbox.spec_version_probe_failed",
