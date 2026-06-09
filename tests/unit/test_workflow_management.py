@@ -5,9 +5,10 @@ two identity-load-bearing invariants that don't depend on the DB:
 
 * **F1** — a trusted id smuggled into the arguments is rejected by the tool schema
   (``additionalProperties: false``) before the handler ever runs.
-* **S2** — a 4xx service refusal (or a pydantic semantic error the JSON schema can't
-  encode) becomes a model-visible ``ToolBail``, never a raised exception (which would
-  evict the sandbox); a genuine 5xx still propagates.
+* **Error handling** — a bad-argument pydantic error the JSON schema can't encode (e.g.
+  an ``McpServerSpec`` name rule) bails locally as a ``ToolBail``; a service ``AiosError``
+  propagates unconverted, leaving the dispatch layer (``_classify_tool_error``) to decide
+  eviction vs. a clean model-visible result (see ``test_tool_dispatch``).
 
 Plus the ``await_run`` wiring (it sources ``db_url`` from settings) and the
 script-trimming of returned dicts. Full attenuation/depth behavior is covered by the
@@ -88,24 +89,29 @@ class TestSchemaRejectsInjectedTrustedIds:
             )
 
 
-class TestErrorConversion:
+class TestErrorPropagation:
     async def test_pydantic_semantic_error_becomes_toolbail(self) -> None:
         # An mcp server named after a builtin passes the JSON schema but fails the
-        # McpServerSpec custom validator — must surface as ToolBail, not a raw exception.
+        # McpServerSpec custom validator — _parse surfaces it as ToolBail (the only
+        # error the handler converts locally; service errors propagate to the dispatch
+        # layer — see test_tool_dispatch).
         with pytest.raises(ToolBail, match="invalid arguments"):
             await wm.create_workflow_handler(
                 "ses_1",
                 {"name": "w", "script": "s", "mcp_servers": [{"name": "bash", "url": "https://x"}]},
             )
 
-    async def test_forbidden_becomes_toolbail(self, monkeypatch: Any) -> None:
+    async def test_service_aios_error_propagates_unconverted(self, monkeypatch: Any) -> None:
+        # The handler no longer converts service errors itself — it lets the AiosError
+        # propagate so the dispatch layer (_classify_tool_error) decides eviction vs a
+        # clean model-visible result. A 4xx ForbiddenError reaches the caller as-is here.
         monkeypatch.setattr(
             "aios.services.workflows.create_workflow",
             AsyncMock(
                 side_effect=ForbiddenError("nope", detail={"ungranted": {"tools": ["bash"]}})
             ),
         )
-        with pytest.raises(ToolBail, match="nope"):
+        with pytest.raises(ForbiddenError, match="nope"):
             await wm.create_workflow_handler("ses_1", {"name": "w", "script": "s"})
 
     async def test_internal_5xx_propagates(self, monkeypatch: Any) -> None:

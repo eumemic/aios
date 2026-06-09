@@ -32,16 +32,12 @@ builtins attenuate, therefore agent X is contained" if X also holds it.
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
-from aios.errors import AiosError
 from aios.harness import runtime
 from aios.models.workflows import WorkflowCreate, WorkflowUpdate
 from aios.services import sessions as sessions_service
@@ -90,25 +86,12 @@ class _AwaitRunArgs(BaseModel):
 
 
 # ─── handler plumbing ────────────────────────────────────────────────────────
-
-
-@contextmanager
-def _service_errors() -> Iterator[None]:
-    """Map a client-class (4xx) service refusal to a clean, model-visible ``ToolBail``.
-
-    A raised ``Exception`` from a handler triggers sandbox eviction on the model path
-    (``tool_dispatch._tool_lifecycle``); ``ToolBail`` instead lands as a normal
-    ``is_error`` tool result the model can read and self-correct from. A genuine 5xx is
-    an internal failure and propagates unchanged. Wrap only the service call — the
-    explicit kwarg mapping (the F1 invariant) stays inline inside the ``with`` body.
-    """
-    try:
-        yield
-    except AiosError as exc:
-        if exc.status_code >= 500:
-            raise
-        msg = exc.message if not exc.detail else f"{exc.message} ({json.dumps(exc.detail)})"
-        raise ToolBail(msg) from exc
+#
+# Handlers map service kwargs explicitly (F1) and otherwise just let service errors
+# propagate: the dispatch layer (``tool_dispatch._classify_tool_error``) turns a
+# client-class (4xx) ``AiosError`` — a denied attenuation, a stale-version conflict, a
+# depth-cap hit — into a clean, model-visible result without evicting the sandbox, and
+# a 5xx into a genuine failure. Only argument parsing bails locally (``_parse``).
 
 
 def _parse[M: BaseModel](model: type[M], arguments: dict[str, Any]) -> M:
@@ -124,20 +107,19 @@ async def create_workflow_handler(session_id: str, arguments: dict[str, Any]) ->
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     body = _parse(WorkflowCreate, arguments)
-    with _service_errors():
-        wf = await wf_service.create_workflow(
-            pool,
-            account_id=account_id,
-            name=body.name,
-            script=body.script,
-            input_schema=body.input_schema,
-            output_schema=body.output_schema,
-            description=body.description,
-            tools=body.tools,
-            mcp_servers=body.mcp_servers,
-            http_servers=body.http_servers,
-            creator_session_id=session_id,
-        )
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id=account_id,
+        name=body.name,
+        script=body.script,
+        input_schema=body.input_schema,
+        output_schema=body.output_schema,
+        description=body.description,
+        tools=body.tools,
+        mcp_servers=body.mcp_servers,
+        http_servers=body.http_servers,
+        creator_session_id=session_id,
+    )
     return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
 
 
@@ -145,22 +127,21 @@ async def update_workflow_handler(session_id: str, arguments: dict[str, Any]) ->
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_UpdateWorkflowArgs, arguments)
-    with _service_errors():
-        wf = await wf_service.update_workflow(
-            pool,
-            args.workflow_id,
-            account_id=account_id,
-            expected_version=args.version,
-            name=args.name,
-            script=args.script,
-            input_schema=args.input_schema,
-            output_schema=args.output_schema,
-            description=args.description,
-            tools=args.tools,
-            mcp_servers=args.mcp_servers,
-            http_servers=args.http_servers,
-            actor_session_id=session_id,
-        )
+    wf = await wf_service.update_workflow(
+        pool,
+        args.workflow_id,
+        account_id=account_id,
+        expected_version=args.version,
+        name=args.name,
+        script=args.script,
+        input_schema=args.input_schema,
+        output_schema=args.output_schema,
+        description=args.description,
+        tools=args.tools,
+        mcp_servers=args.mcp_servers,
+        http_servers=args.http_servers,
+        actor_session_id=session_id,
+    )
     return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
 
 
@@ -169,17 +150,16 @@ async def create_run_handler(session_id: str, arguments: dict[str, Any]) -> dict
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_CreateRunArgs, arguments)
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
-    with _service_errors():
-        run = await wf_service.create_run(
-            pool,
-            account_id=account_id,
-            workflow_id=args.workflow_id,
-            environment_id=session.environment_id,  # inherit caller's env (F2)
-            input=args.input,
-            vault_ids=args.vault_ids,
-            launcher_session_id=session_id,
-            parent_run_id=session.parent_run_id,  # lineage + depth cap
-        )
+    run = await wf_service.create_run(
+        pool,
+        account_id=account_id,
+        workflow_id=args.workflow_id,
+        environment_id=session.environment_id,  # inherit caller's env (F2)
+        input=args.input,
+        vault_ids=args.vault_ids,
+        launcher_session_id=session_id,
+        parent_run_id=session.parent_run_id,  # lineage + depth cap
+    )
     return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
 
 
@@ -187,14 +167,13 @@ async def await_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_AwaitRunArgs, arguments)
-    with _service_errors():
-        resp = await wf_service.await_run(
-            pool,
-            get_settings().db_url,
-            args.run_id,
-            account_id=account_id,
-            timeout_seconds=args.timeout_seconds,
-        )
+    resp = await wf_service.await_run(
+        pool,
+        get_settings().db_url,
+        args.run_id,
+        account_id=account_id,
+        timeout_seconds=args.timeout_seconds,
+    )
     return resp.model_dump(mode="json")
 
 
