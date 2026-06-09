@@ -9,6 +9,7 @@ context builder renders into the child's request message.
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 
 import pytest
 
@@ -16,6 +17,8 @@ from aios.harness.context import render_user_event
 from aios.tools.workflow_completion import _validate_value
 from aios.workflows.determinism import canonical_schema_json
 from aios.workflows.step import _unresolvable_ref
+
+_CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 _SCHEMA = {
     "type": "object",
@@ -45,7 +48,7 @@ def test_render_surfaces_request_schema_per_request() -> None:
         "content": "do the thing",
         "metadata": {"request": {"request_id": "r1", "output_schema": _SCHEMA}},
     }
-    msg = render_user_event(event, None, None)
+    msg = render_user_event(event, None, None, _CREATED_AT)
     assert "request_id: r1" in msg["content"]
     assert "must match this JSON Schema" in msg["content"]
     assert '"answer"' in msg["content"]  # the schema itself is rendered
@@ -58,7 +61,7 @@ def test_render_without_schema_is_unchanged() -> None:
         "content": "hi",
         "metadata": {"request": {"request_id": "r1"}},
     }
-    msg = render_user_event(event, None, None)
+    msg = render_user_event(event, None, None, _CREATED_AT)
     assert "request_id: r1" in msg["content"]
     assert "JSON Schema" not in msg["content"]
 

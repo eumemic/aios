@@ -348,6 +348,7 @@ def _render_recap_event(
             event.data,
             event.orig_channel,
             event.orig_channel,
+            event.created_at,
             model=model,
             session_id=session_id,
             workspace_path=workspace_path,

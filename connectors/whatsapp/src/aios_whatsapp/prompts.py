@@ -129,10 +129,11 @@ Header shape (newlines added for clarity):
 
     [channel=whatsapp/<account>/<chat_id> · chat_type=<dm|group> ·
      chat_name='Group Name' · from=Alice · sender_jid=<jid> ·
-     timestamp_ms=<ms> (<iso>) · message_id='<id>']
+     timestamp_ms=<ms> · message_id='<id>' · received=<iso>]
 
 WhatsApp message ids are hex strings like ``3EB0E03B46303C22D750E2``
-— pass them verbatim.
+— pass them verbatim.  ``received`` is the message's receipt time
+(UTC ISO-8601) for your temporal awareness only — never a tool argument.
 
 ## Sending messages — `whatsapp_send`
 

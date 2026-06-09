@@ -89,7 +89,24 @@ def _extract_reaction_emoji(reaction: dict[str, Any]) -> str | None:
     return None
 
 
-def _format_channel_header(metadata: dict[str, Any]) -> str:
+def _format_received(created_at: datetime) -> str:
+    """Absolute receipt timestamp for the message envelope.
+
+    Sourced from the event's immutable ``created_at`` (DB-commit time, UTC),
+    so it renders byte-identical on every rebuild — deterministic and
+    prompt-cache-stable, unlike a relative or render-time clock.  This is
+    the uniform envelope field every user message carries, connector or not.
+    """
+    return created_at.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _prepend_header(msg: dict[str, Any], header: str) -> None:
+    """Prepend a bracketed header line above the message's existing content."""
+    existing = msg.get("content") or ""
+    msg["content"] = f"{header}\n{existing}" if existing else header
+
+
+def _format_channel_header(metadata: dict[str, Any], received: str) -> str:
     """Render a one-line header describing the origin of an inbound message.
 
     When a user message carries channel metadata, the raw fields are
@@ -97,11 +114,13 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
     ever sees them (see ``_ALLOWED_FIELDS``).  That leaves the model
     with no way to know the sender or timestamp — values the connector
     tools need as arguments.  Inline the salient fields into the
-    visible ``content`` so the model can read them natively.
+    visible ``content`` so the model can read them natively.  The
+    ``received`` envelope field is always appended (see
+    :func:`_format_received`); the connector fields are added when present.
     """
-    if not isinstance(metadata, dict) or "channel" not in metadata:
-        return ""
-    parts: list[str] = [f"channel={metadata['channel']}"]
+    parts: list[str] = []
+    if "channel" in metadata:
+        parts.append(f"channel={metadata['channel']}")
     chat_type = metadata.get("chat_type")
     if isinstance(chat_type, str) and chat_type:
         parts.append(f"chat_type={chat_type}")
@@ -119,18 +138,10 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         parts.append(f"sender_id={sender_id}")
     timestamp_ms = metadata.get("timestamp_ms")
     if isinstance(timestamp_ms, int):
-        try:
-            iso = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat(
-                timespec="milliseconds"
-            )
-            parts.append(f"timestamp_ms={timestamp_ms} ({iso})")
-        except (ValueError, OverflowError, OSError):
-            # An int outside the valid Unix-millisecond range (a connector
-            # sending micro/nanoseconds, say) makes datetime.fromtimestamp
-            # raise. The renderer runs on every wake, so an unguarded raise
-            # bricks the session permanently — same failure class as #446.
-            # The raw int still goes to the model; only the ISO is dropped.
-            parts.append(f"timestamp_ms={timestamp_ms}")
+        # Raw origin-time int — the model copies it verbatim into signal_send /
+        # react / edit / delete tool args. The human-readable ISO now lives in
+        # the envelope's `received=` field (receipt time), so no parenthetical.
+        parts.append(f"timestamp_ms={timestamp_ms}")
     message_id = metadata.get("message_id")
     # Telegram surfaces ints; WhatsApp's whatsmeow IDs are hex strings
     # like "3EB0E03B46303C22D750E2".  Both render the same — the model
@@ -183,6 +194,7 @@ def _format_channel_header(metadata: dict[str, Any]) -> str:
         # value still signals "a sticker arrived" without breaking
         # the established field-name pattern.
         parts.append(f"sticker_emoji={sticker_emoji!r}")
+    parts.append(f"received={received}")
     header = "[" + " · ".join(parts) + "]"
     mentions = metadata.get("mentions")
     if isinstance(mentions, list) and mentions:
@@ -295,6 +307,7 @@ def render_user_event(
     event_data: dict[str, Any],
     orig_channel: str | None,
     focal_channel_at_arrival: str | None,
+    created_at: datetime,
     *,
     model: str | None = None,
     session_id: str | None = None,
@@ -303,35 +316,46 @@ def render_user_event(
     """Render a user event into its chat-completions message form.
 
     Rendering is a deterministic function of the event's stamped
-    ``orig_channel``, ``focal_channel_at_arrival``, and the optional
-    vision policy inputs ``model`` / ``session_id``.  ``build_messages``
-    threads vision policy through; the append-time token counter in
-    ``queries.append_event`` does not (and pays a small under-count
-    per inlined image, absorbed by ``model_token_ratio`` calibration).
+    ``orig_channel``, ``focal_channel_at_arrival``, ``created_at``, and
+    the optional vision policy inputs ``model`` / ``session_id``.
+    ``build_messages`` threads vision policy through; the append-time
+    token counter in ``queries.append_event`` does not (and pays a small
+    under-count per inlined image, absorbed by ``model_token_ratio``
+    calibration).
+
+    Every user message carries a ``received`` envelope field (the absolute
+    receipt timestamp, from the immutable ``created_at``; see
+    :func:`_format_received`) — so even the metadata-less ``channel=None``
+    path is structured, not raw.
 
     Branches:
 
-    * ``orig_channel`` is ``None`` → legacy / non-connector event;
-      metadata stripped, no header, no notification.  Covers direct
-      ``POST /sessions/{id}/messages`` traffic and pre-migration rows.
+    * ``orig_channel`` is ``None`` → non-connector event; the only header
+      is the ``received`` envelope.  Covers direct
+      ``POST /sessions/{id}/messages`` traffic, workflow children, and
+      pre-migration rows.
     * ``orig == focal_at_arrival`` (non-NULL) → full content with a
-      metadata header inlined.  When the focal event's metadata
-      carries ``attachments`` and the bound model supports vision,
-      inlinable images are emitted as ``image_url`` content parts;
-      everything else gets a text marker referencing the in-sandbox
-      path.
+      metadata header inlined (connector fields + ``received``).  When the
+      focal event's metadata carries ``attachments`` and the bound model
+      supports vision, inlinable images are emitted as ``image_url``
+      content parts; everything else gets a text marker referencing the
+      in-sandbox path.
     * Otherwise (focal is NULL, or focal differs from orig) →
       notification marker: a short, emoji-prefixed one-liner surfacing
-      the origin channel, sender, and a truncated content preview.
-      Any attachments are appended as ``text_marker`` lines (images →
-      ``[image: … at <path>]``, others → ``[attachment: …]``) — never
-      inlined off-channel — so the model can ``read`` the in-sandbox
-      path now, or ``switch_channel`` to recover pixels via the
-      reorient recap.  Before #718 they were silently dropped here.
+      the origin channel, sender, and a truncated content preview.  Kept
+      deliberately terse — no ``received`` envelope; the per-message
+      timestamp surfaces when the model ``switch_channel``s in and reads
+      the full-content recap.  Any attachments are appended as
+      ``text_marker`` lines (images → ``[image: … at <path>]``, others →
+      ``[attachment: …]``) — never inlined off-channel — so the model can
+      ``read`` the in-sandbox path now, or ``switch_channel`` to recover
+      pixels via the reorient recap.  Before #718 they were silently
+      dropped here.
     """
     msg = {k: v for k, v in event_data.items() if k != "metadata"}
     metadata = event_data.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else None
+    received = _format_received(created_at)
 
     # A request injected via invoke_session (e.g. a workflow agent child's first
     # message) carries metadata.request.request_id. return/error require that id, so
@@ -350,18 +374,18 @@ def render_user_event(
                 "\nYour return `value` must match this JSON Schema:\n"
                 f"```json\n{json.dumps(output_schema, indent=2)}\n```"
             )
-        existing = msg.get("content") or ""
-        msg["content"] = f"{marker}\n{existing}" if existing else marker
+        _prepend_header(msg, marker)
 
     if orig_channel is None:
+        _prepend_header(msg, f"[received={received}]")
         return msg
 
     if orig_channel == focal_channel_at_arrival:
+        header = (
+            _format_channel_header(metadata, received) if metadata else f"[received={received}]"
+        )
+        _prepend_header(msg, header)
         if metadata:
-            header = _format_channel_header(metadata)
-            if header:
-                existing = msg.get("content") or ""
-                msg["content"] = f"{header}\n{existing}" if existing else header
             attachments = metadata.get("attachments")
             if isinstance(attachments, list) and attachments:
                 _apply_attachments(
@@ -710,6 +734,7 @@ def build_messages(
                 e.data,
                 e.orig_channel,
                 e.focal_channel_at_arrival,
+                e.created_at,
                 model=model,
                 session_id=session_id,
                 workspace_path=workspace_path,

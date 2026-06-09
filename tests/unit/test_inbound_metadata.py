@@ -225,10 +225,13 @@ async def test_inbound_sender_display_name_reaches_renderer(
     channel = metadata["channel"]
 
     # 1. Renderer's full-content header must include the sender clause.
+    from datetime import UTC, datetime
+
     rendered = render_user_event(
         data,
         orig_channel=channel,
         focal_channel_at_arrival=channel,
+        created_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
     )
     assert "from=Alice" in rendered["content"], (
         f"focal-render must include from=Alice; got content={rendered['content']!r}. "

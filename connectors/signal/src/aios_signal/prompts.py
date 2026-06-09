@@ -103,7 +103,11 @@ Header shape (newlines added for clarity):
 
     [channel=signal/<account>/<chat_id> · chat_type=<dm|group> ·
      chat_name='Group Name' · from=Alice · sender_uuid=<uuid> ·
-     timestamp_ms=<ms> (<iso>)]
+     timestamp_ms=<ms> · received=<iso>]
+
+``timestamp_ms`` is the raw value the tools consume (copy it verbatim).
+``received`` is the message's receipt time (UTC ISO-8601) for your temporal
+awareness only — it is never a tool argument.
 
 When the inbound is a reply, a second line follows:
 
@@ -116,7 +120,7 @@ When it's a reaction:
 So a reply to message 1700000000000 from Alice would look like:
 
     [channel=signal/.../grp_id · chat_type=group · from=Alice ·
-     sender_uuid=fb2c91e2-... · timestamp_ms=1700000000999 (...)]
+     sender_uuid=fb2c91e2-... · timestamp_ms=1700000000999 · received=<iso>]
     [reply_to: author_uuid=22334455-... · timestamp_ms=1700000000000]
      > earlier message text...
 
@@ -213,7 +217,7 @@ of the message you're reacting to:
 For example, if you see:
 
     [channel=... · from=Alice · sender_uuid=fb2c91e2-aaaa-... ·
-     timestamp_ms=1700000000000 (...)]
+     timestamp_ms=1700000000000 · received=<iso>]
     Done with the deploy!
 
 react with:

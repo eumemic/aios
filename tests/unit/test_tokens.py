@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from aios.harness.context import render_user_event
 from aios.harness.tokens import approx_tokens
+
+_CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
 class TestApproxTokens:
@@ -75,17 +78,19 @@ class TestApproxTokensUnderFocalRendering:
         }
         data = {"role": "user", "content": long_text, "metadata": metadata}
 
-        focal_render = render_user_event(data, self._CHAN, self._CHAN)
-        notif_render = render_user_event(data, self._CHAN, "signal/bot/other")
+        focal_render = render_user_event(data, self._CHAN, self._CHAN, _CREATED_AT)
+        notif_render = render_user_event(data, self._CHAN, "signal/bot/other", _CREATED_AT)
 
         assert approx_tokens([notif_render]) < approx_tokens([focal_render])
 
-    def test_legacy_null_matches_raw_data(self) -> None:
-        """orig=None → Phase 2 rendering: tokens match the raw data
-        (minus metadata stripping, which is content-preserving)."""
+    def test_legacy_null_render_adds_received_envelope(self) -> None:
+        """orig=None now carries the uniform ``received=`` envelope, so the
+        rendered form costs a few tokens more than the raw data (was: equal
+        — the channel=None path used to pass content through untouched)."""
         data = {"role": "user", "content": "hello"}
-        rendered = render_user_event(data, None, None)
-        assert approx_tokens([rendered]) == approx_tokens([data])
+        rendered = render_user_event(data, None, None, _CREATED_AT)
+        assert rendered["content"].startswith("[received=")
+        assert approx_tokens([rendered]) > approx_tokens([data])
 
 
 class TestApproxTokensWithTools:

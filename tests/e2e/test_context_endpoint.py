@@ -118,12 +118,14 @@ class TestContextEndpoint:
         assert r.status_code == 200
         messages = r.json()["messages"]
 
+        # The content carries a leading ``[received=<iso>]`` envelope line
+        # (uniform on every user message), so match the body as a substring.
         user_msgs = [m for m in messages if m.get("role") == "user"]
         assert any(
-            (isinstance(m.get("content"), str) and m["content"] == "hello")
+            (isinstance(m.get("content"), str) and "hello" in m["content"])
             or (
                 isinstance(m.get("content"), list)
-                and any(isinstance(b, dict) and b.get("text") == "hello" for b in m["content"])
+                and any(isinstance(b, dict) and "hello" in b.get("text", "") for b in m["content"])
             )
             for m in user_msgs
         ), messages
