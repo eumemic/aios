@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from aios.harness._text import join_blocks
 from aios.harness.context import (
     build_messages,
+    message_is_notification_marker,
     separate_adjacent_user_messages,
     stub_missing_reasoning_content,
 )
@@ -271,17 +272,29 @@ def _build_http_servers_block(http_servers: list[HttpServerSpec]) -> str:
 
 
 def _agent_owes_response(messages: list[dict[str, Any]]) -> bool:
-    """True when the conversation ends with a user or tool turn.
+    """True when the conversation ends with a *direct* stimulus to answer.
 
-    Used to gate the ephemeral channels tail block: if the last event-sourced
-    message is a user inbound or a tool result, the agent owes a response and the
-    tail must not be appended (it would become the literal final message and mute
-    literal-minded models). If the last message is an assistant turn, this is an
-    idle/sweep re-check where the channel-status listing is the useful signal.
+    Gates the ephemeral channels tail block. Two trailing cases are a direct
+    stimulus the agent must engage with in focal context, where appending the
+    tail would make a status listing the literal final message and mute
+    literal-minded models (claude-fable-5): a **focal user inbound** (full
+    content) and a **tool result**. Keep the real stimulus last for those.
+
+    Two trailing cases are NOT a direct stimulus, so keep the tail:
+    * a non-focal **notification marker** (``🔔 …``) — the tail's channel
+      listing is its navigation companion (how to ``switch_channel`` to it);
+    * an **assistant** turn — an idle/sweep re-check where the channel-status
+      listing is the useful signal.
     """
     if not messages:
         return False
-    return messages[-1].get("role") in ("user", "tool")
+    last = messages[-1]
+    role = last.get("role")
+    if role == "tool":
+        return True
+    if role == "user":
+        return not message_is_notification_marker(last)
+    return False
 
 
 async def compose_step_context(
