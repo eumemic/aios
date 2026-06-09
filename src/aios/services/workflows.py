@@ -19,7 +19,7 @@ import asyncpg
 
 from aios.db.listen import open_listen_for_run_events
 from aios.db.queries import workflows as wf_queries
-from aios.errors import ForbiddenError, NotFoundError
+from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
@@ -46,6 +46,7 @@ __all__ = [
     "list_workflows",
     "resume_gate",
     "resume_gate_by_nonce",
+    "update_workflow",
 ]
 
 
@@ -65,20 +66,21 @@ async def _enforce_surface_attenuation(
     pool: asyncpg.Pool[Any],
     *,
     account_id: str,
-    creator_session_id: str,
+    actor_session_id: str,
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerSpec],
 ) -> None:
-    """Raise ``ForbiddenError`` if the declared surface exceeds the creator agent's.
+    """Raise ``ForbiddenError`` if the declared surface exceeds the acting agent's.
 
-    Subset by identity key: ``mcp_servers`` by url, ``http_servers`` by base_url,
-    ``tools`` by (builtin type / custom name / toolset server). The HTTP path passes no
-    creator and skips this — operator authority. (No-widen on permission/transport/routes
-    is a deliberate follow-up; this slice gates membership.)
+    Serves both create (the creator declaring a surface) and update (the editor's merged
+    final surface). Subset by identity key: ``mcp_servers`` by url, ``http_servers`` by
+    base_url, ``tools`` by (builtin type / custom name / toolset server). The HTTP path
+    passes no actor and skips this — operator authority. (No-widen on
+    permission/transport/routes is a deliberate follow-up; this slice gates membership.)
     """
     session = await sessions_service.get_session_basic(
-        pool, creator_session_id, account_id=account_id
+        pool, actor_session_id, account_id=account_id
     )
     agent = await agents_service.load_for_session(pool, session, account_id=account_id)
     allowed_mcp = {s.url for s in agent.mcp_servers}
@@ -127,7 +129,7 @@ async def create_workflow(
         await _enforce_surface_attenuation(
             pool,
             account_id=account_id,
-            creator_session_id=creator_session_id,
+            actor_session_id=creator_session_id,
             tools=tools or [],
             mcp_servers=mcp_servers or [],
             http_servers=http_servers or [],
@@ -136,6 +138,76 @@ async def create_workflow(
         return await wf_queries.insert_workflow(
             conn,
             account_id=account_id,
+            name=name,
+            script=script,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            description=description,
+            tools=tools,
+            mcp_servers=mcp_servers,
+            http_servers=http_servers,
+        )
+
+
+async def update_workflow(
+    pool: asyncpg.Pool[Any],
+    workflow_id: str,
+    *,
+    account_id: str,
+    expected_version: int,
+    name: str | None = None,
+    script: str | None = None,
+    input_schema: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
+    description: str | None = None,
+    tools: list[ToolSpec] | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
+    actor_session_id: str | None = None,
+) -> Workflow:
+    """Update a workflow in place (optimistic concurrency on ``expected_version``).
+
+    **Update-time attenuation:** when ``actor_session_id`` is set (an agent editing the
+    workflow), the **merged final surface** must be a subset of the acting agent's own —
+    checked even when the update doesn't touch the surface fields, because an agent that
+    rewrites the *script* of a workflow with a broader surface would wield that surface
+    through it. An agent may only update a workflow whose resulting surface it could have
+    declared itself. With no actor (the HTTP/operator path) anything may be updated.
+
+    In-flight runs are unaffected: a run snapshots ``script`` + the declared surface at
+    launch; only runs created after the update see the new definition.
+    """
+    if actor_session_id is not None:
+        current = await get_workflow(pool, workflow_id, account_id=account_id)
+        if current.version != expected_version:
+            # Pin the attenuation read to the caller's token. Without this, an actor
+            # could send a FUTURE token: attenuation passes against today's surface,
+            # a concurrent update broadens it and bumps to exactly that token, and the
+            # optimistic UPDATE then matches — landing the actor's script on a surface
+            # that was never checked. With the pin, the UPDATE's ``WHERE version``
+            # guarantees nothing changed between this read and the write.
+            raise ConflictError(
+                f"version mismatch: expected {expected_version}, current is {current.version}",
+                detail={
+                    "expected": expected_version,
+                    "current": current.version,
+                    "id": workflow_id,
+                },
+            )
+        await _enforce_surface_attenuation(
+            pool,
+            account_id=account_id,
+            actor_session_id=actor_session_id,
+            tools=tools if tools is not None else current.tools,
+            mcp_servers=mcp_servers if mcp_servers is not None else current.mcp_servers,
+            http_servers=http_servers if http_servers is not None else current.http_servers,
+        )
+    async with pool.acquire() as conn:
+        return await wf_queries.update_workflow(
+            conn,
+            workflow_id,
+            account_id=account_id,
+            expected_version=expected_version,
             name=name,
             script=script,
             input_schema=input_schema,

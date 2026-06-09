@@ -2521,3 +2521,56 @@ async def test_tool_http_request_credential_e2e(wf_runtime: asyncpg.Pool[Any]) -
         assert run.output["status"] == 200
     finally:
         runtime.crypto_box = prev_box
+
+
+# ─── update_workflow — in-flight runs are immune (snapshot pinning) ───────────
+
+
+async def test_update_workflow_does_not_disturb_inflight_runs(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The load-bearing update proof: a run executes the script + surface it snapshotted
+    at launch, even when the workflow is updated mid-flight; a NEW run gets the update."""
+    pool = wf_runtime
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name="w-immune",
+            script="async def main(input):\n    return 'OLD'\n",
+            tools=[ToolSpec(type="web_search")],
+        )
+    old_run = await service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+    )
+
+    # Update the workflow mid-flight: new script, surface dropped.
+    updated = await wf_service.update_workflow(
+        pool,
+        wf.id,
+        account_id="acc_wf",
+        expected_version=1,
+        script="async def main(input):\n    return 'NEW'\n",
+        tools=[],
+    )
+    assert updated.version == 2
+
+    # The in-flight run still carries (and executes) its launch snapshot.
+    async with pool.acquire() as conn:
+        old_run_row = await wf_queries.get_wf_run(conn, old_run.id, account_id="acc_wf")
+    assert "OLD" in old_run_row.script
+    assert [t.type for t in old_run_row.tools] == ["web_search"]
+    await run_workflow_step(old_run.id)
+    async with pool.acquire() as conn:
+        finished = await wf_queries.get_wf_run(conn, old_run.id, account_id="acc_wf")
+    assert finished.status == "completed" and finished.output == "OLD"
+
+    # A run launched after the update gets the new definition.
+    new_run = await service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+    )
+    await run_workflow_step(new_run.id)
+    async with pool.acquire() as conn:
+        fresh = await wf_queries.get_wf_run(conn, new_run.id, account_id="acc_wf")
+    assert fresh.status == "completed" and fresh.output == "NEW"
+    assert fresh.tools == []

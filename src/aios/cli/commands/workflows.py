@@ -33,10 +33,12 @@ from aios_sdk._generated.api.workflows import (
     create_workflow,
     get_workflow,
     list_workflows,
+    update_workflow,
 )
 from aios_sdk._generated.models.gate_resume import GateResume
 from aios_sdk._generated.models.wf_run_create import WfRunCreate
 from aios_sdk._generated.models.workflow_create import WorkflowCreate
+from aios_sdk._generated.models.workflow_update import WorkflowUpdate
 
 app = typer.Typer(name="workflows", help="Manage workflow definitions.", no_args_is_help=True)
 runs_app = typer.Typer(name="runs", help="Launch and observe workflow runs.", no_args_is_help=True)
@@ -101,6 +103,24 @@ def create_workflow_(
     def _run() -> int | None:
         payload = load_payload(file, stdin, data)
         call_single(ctx, create_workflow.sync_detailed, body=WorkflowCreate.from_dict(payload))
+        return None
+
+    run_or_die(_run)
+
+
+@app.command("update", help="Update a workflow (WorkflowUpdate shape; include 'version').")
+@covers("update_workflow")
+def update_workflow_(
+    ctx: typer.Context,
+    workflow_id: str,
+    file: Annotated[Path | None, typer.Option("--file", help="Read JSON body from a file.")] = None,
+    stdin: Annotated[bool, typer.Option("--stdin", help="Read JSON body from stdin.")] = False,
+    data: Annotated[str | None, typer.Option("--data", help="Inline JSON body.")] = None,
+) -> None:
+    def _run() -> int | None:
+        payload = load_payload(file, stdin, data)
+        body = WorkflowUpdate.from_dict(payload)
+        call_single(ctx, update_workflow.sync_detailed, workflow_id=workflow_id, body=body)
         return None
 
     run_or_die(_run)

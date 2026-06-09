@@ -1,10 +1,11 @@
 """Workflows: read models for the durable runtime core (Block 1).
 
 A *workflow* is a deterministic-Python orchestrator (the dual of an agent):
-``workflows`` are immutable versioned definitions; a ``WfRun`` is a durable
-execution instance whose state lives entirely in its append-only journal
-(``WfRunEvent``); ``WfRunSignal`` is the side-marker an external resume writes
-so the journal keeps a single writer.
+``workflows`` are versioned definitions (updated in place, agent-style); a ``WfRun``
+is a durable execution instance whose state lives entirely in its append-only journal
+(``WfRunEvent``) and which pins its workflow's script + declared surface at launch;
+``WfRunSignal`` is the side-marker an external resume writes so the journal keeps a
+single writer.
 
 The read views below carry ``account_id`` (internal); the ``*Create`` / resume
 request models at the bottom back the public HTTP surface (Block 3). Responses
@@ -16,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 
@@ -31,7 +32,7 @@ TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"completed", "errored", "canc
 
 
 class Workflow(BaseModel):
-    """An immutable, versioned workflow definition."""
+    """A versioned workflow definition (updated in place; ``version`` bumps per change)."""
 
     id: str
     account_id: str
@@ -136,7 +137,9 @@ class WfRunWaitResponse(BaseModel):
 class WorkflowCreate(BaseModel):
     """Request body for ``POST /v1/workflows`` — a new workflow definition at v1."""
 
-    name: str
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
     script: str
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
@@ -147,6 +150,31 @@ class WorkflowCreate(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+
+
+class WorkflowUpdate(BaseModel):
+    """Request body for ``PUT /v1/workflows/{id}`` — update in place, bumping ``version``.
+
+    ``version`` is the optimistic-concurrency token: it must match the workflow's
+    current version or the update 409s (re-fetch and retry). Omitted fields are
+    preserved — nullable fields (``input_schema``/``output_schema``/``description``)
+    can therefore be replaced but never cleared back to null, as on ``AgentUpdate``.
+    An identical update is a no-op (no bump). There is no version-snapshot table —
+    a run pins ``script`` + the declared surface onto itself at launch, so in-flight
+    runs never observe an update. (The ``AgentUpdate`` shape, minus history.)
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    script: str | None = None
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+    description: str | None = None
+    tools: list[ToolSpec] | None = None
+    mcp_servers: list[McpServerSpec] | None = None
+    http_servers: list[HttpServerSpec] | None = None
 
 
 class WfRunCreate(BaseModel):

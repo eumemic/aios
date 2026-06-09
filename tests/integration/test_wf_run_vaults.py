@@ -29,7 +29,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
-from aios.errors import ForbiddenError, NotFoundError
+from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.harness import runtime
 from aios.mcp.client import resolve_auth_for_target_url_run
 from aios.models.agents import Agent, HttpServerSpec, McpServerSpec
@@ -331,3 +331,77 @@ async def test_run_cannot_bind_foreign_or_missing_vault(vault_pool: asyncpg.Pool
             vault_ids=["vlt_does_not_exist"],
         )
     assert await _run_count(pool) == before
+
+
+async def test_update_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
+    """An agent-actor may only update a workflow whose merged final surface it could have
+    declared itself — enforced even for a script-only edit (else an agent could rewrite the
+    script of an operator-created workflow with a broader surface and wield it). The
+    operator path (no actor) updates anything."""
+    pool = vault_pool
+    s1 = McpServerSpec(name="s1", url="https://s1.example")
+    s2 = McpServerSpec(name="s2", url="https://s2.example")
+    agent = await _make_agent(pool, "updater-agent", mcp_servers=[s1])
+    actor = await _make_session(pool, agent)
+
+    # Operator creates a workflow whose surface exceeds the agent's (s2 ∉ agent's).
+    broad = await wf_service.create_workflow(
+        pool, account_id=ACC, name="w-broad", script=_SCRIPT, mcp_servers=[s2]
+    )
+    # Script-only edit by the agent → ForbiddenError (merged surface still ⊉ agent's).
+    with pytest.raises(ForbiddenError):
+        await wf_service.update_workflow(
+            pool,
+            broad.id,
+            account_id=ACC,
+            expected_version=1,
+            script="async def main(i):\n    return 2\n",
+            actor_session_id=actor,
+        )
+
+    # On a workflow within the agent's surface, the same edit succeeds.
+    narrow = await wf_service.create_workflow(
+        pool, account_id=ACC, name="w-narrow", script=_SCRIPT, mcp_servers=[s1]
+    )
+    ok = await wf_service.update_workflow(
+        pool,
+        narrow.id,
+        account_id=ACC,
+        expected_version=1,
+        script="async def main(i):\n    return 2\n",
+        actor_session_id=actor,
+    )
+    assert ok.version == 2
+
+    # The agent cannot widen a surface beyond its own.
+    with pytest.raises(ForbiddenError):
+        await wf_service.update_workflow(
+            pool,
+            narrow.id,
+            account_id=ACC,
+            expected_version=2,
+            mcp_servers=[s1, s2],
+            actor_session_id=actor,
+        )
+
+    # An actor's token must match the version the attenuation read observes — a FUTURE
+    # token 409s up front (else: pass attenuation against today's surface, let a
+    # concurrent broadening update bump to exactly that token, and land unchecked).
+    # Probed against the BROAD workflow so the assertion discriminates the service-layer
+    # pin specifically: with the pin, ConflictError fires before attenuation; without
+    # it, attenuation against the broad surface would raise ForbiddenError instead.
+    with pytest.raises(ConflictError):
+        await wf_service.update_workflow(
+            pool,
+            broad.id,
+            account_id=ACC,
+            expected_version=2,
+            script="async def main(i):\n    return 3\n",
+            actor_session_id=actor,
+        )
+
+    # Operator (no actor) updates anything, including the broad workflow.
+    op = await wf_service.update_workflow(
+        pool, broad.id, account_id=ACC, expected_version=1, description="op-edit"
+    )
+    assert op.version == 2

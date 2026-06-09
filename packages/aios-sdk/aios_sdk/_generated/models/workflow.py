@@ -23,7 +23,7 @@ T = TypeVar("T", bound="Workflow")
 
 @_attrs_define
 class Workflow:
-    """An immutable, versioned workflow definition.
+    """A versioned workflow definition (updated in place; ``version`` bumps per change).
 
     Attributes:
         id (str):
