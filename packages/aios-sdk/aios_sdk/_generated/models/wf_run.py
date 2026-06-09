@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
@@ -10,6 +10,12 @@ from dateutil.parser import isoparse
 
 from ..models.wf_run_status import WfRunStatus
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.http_server_spec import HttpServerSpec
+    from ..models.mcp_server_spec import McpServerSpec
+    from ..models.tool_spec import ToolSpec
+
 
 T = TypeVar("T", bound="WfRun")
 
@@ -20,6 +26,9 @@ class WfRun:
 
     ``script`` is the run's own immutable snapshot of the workflow source at
     creation time (``script_sha`` is its hash); every wake execs exactly this.
+    ``tools``/``mcp_servers``/``http_servers`` are the matching snapshot of the
+    declared tool surface — pinned at launch like ``script``, so a later
+    ``update_workflow`` never shifts an in-flight run's authority.
     ``status`` is persisted (unlike sessions): the run loop writes
     ``suspended``/``completed``/``errored``.
 
@@ -35,6 +44,9 @@ class WfRun:
             created_at (datetime.datetime):
             updated_at (datetime.datetime):
             parent_run_id (None | str | Unset):
+            tools (list[ToolSpec] | Unset):
+            mcp_servers (list[McpServerSpec] | Unset):
+            http_servers (list[HttpServerSpec] | Unset):
             input_ (Any | Unset):
             output (Any | Unset):
             archived_at (datetime.datetime | None | Unset):
@@ -51,6 +63,9 @@ class WfRun:
     created_at: datetime.datetime
     updated_at: datetime.datetime
     parent_run_id: None | str | Unset = UNSET
+    tools: list[ToolSpec] | Unset = UNSET
+    mcp_servers: list[McpServerSpec] | Unset = UNSET
+    http_servers: list[HttpServerSpec] | Unset = UNSET
     input_: Any | Unset = UNSET
     output: Any | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
@@ -83,6 +98,27 @@ class WfRun:
         else:
             parent_run_id = self.parent_run_id
 
+        tools: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.tools, Unset):
+            tools = []
+            for tools_item_data in self.tools:
+                tools_item = tools_item_data.to_dict()
+                tools.append(tools_item)
+
+        mcp_servers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.mcp_servers, Unset):
+            mcp_servers = []
+            for mcp_servers_item_data in self.mcp_servers:
+                mcp_servers_item = mcp_servers_item_data.to_dict()
+                mcp_servers.append(mcp_servers_item)
+
+        http_servers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.http_servers, Unset):
+            http_servers = []
+            for http_servers_item_data in self.http_servers:
+                http_servers_item = http_servers_item_data.to_dict()
+                http_servers.append(http_servers_item)
+
         input_ = self.input_
 
         output = self.output
@@ -113,6 +149,12 @@ class WfRun:
         )
         if parent_run_id is not UNSET:
             field_dict["parent_run_id"] = parent_run_id
+        if tools is not UNSET:
+            field_dict["tools"] = tools
+        if mcp_servers is not UNSET:
+            field_dict["mcp_servers"] = mcp_servers
+        if http_servers is not UNSET:
+            field_dict["http_servers"] = http_servers
         if input_ is not UNSET:
             field_dict["input"] = input_
         if output is not UNSET:
@@ -124,6 +166,10 @@ class WfRun:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.http_server_spec import HttpServerSpec
+        from ..models.mcp_server_spec import McpServerSpec
+        from ..models.tool_spec import ToolSpec
+
         d = dict(src_dict)
         id = d.pop("id")
 
@@ -153,6 +199,33 @@ class WfRun:
             return cast(None | str | Unset, data)
 
         parent_run_id = _parse_parent_run_id(d.pop("parent_run_id", UNSET))
+
+        _tools = d.pop("tools", UNSET)
+        tools: list[ToolSpec] | Unset = UNSET
+        if _tools is not UNSET:
+            tools = []
+            for tools_item_data in _tools:
+                tools_item = ToolSpec.from_dict(tools_item_data)
+
+                tools.append(tools_item)
+
+        _mcp_servers = d.pop("mcp_servers", UNSET)
+        mcp_servers: list[McpServerSpec] | Unset = UNSET
+        if _mcp_servers is not UNSET:
+            mcp_servers = []
+            for mcp_servers_item_data in _mcp_servers:
+                mcp_servers_item = McpServerSpec.from_dict(mcp_servers_item_data)
+
+                mcp_servers.append(mcp_servers_item)
+
+        _http_servers = d.pop("http_servers", UNSET)
+        http_servers: list[HttpServerSpec] | Unset = UNSET
+        if _http_servers is not UNSET:
+            http_servers = []
+            for http_servers_item_data in _http_servers:
+                http_servers_item = HttpServerSpec.from_dict(http_servers_item_data)
+
+                http_servers.append(http_servers_item)
 
         input_ = d.pop("input", UNSET)
 
@@ -187,6 +260,9 @@ class WfRun:
             created_at=created_at,
             updated_at=updated_at,
             parent_run_id=parent_run_id,
+            tools=tools,
+            mcp_servers=mcp_servers,
+            http_servers=http_servers,
             input_=input_,
             output=output,
             archived_at=archived_at,

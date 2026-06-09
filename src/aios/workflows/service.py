@@ -65,6 +65,11 @@ async def create_run(
             script=workflow.script,
             script_sha=script_sha,
             input=input,
+            # Snapshot the declared surface at launch (like script), so a later
+            # update_workflow never shifts this run's tool-authority.
+            tools=workflow.tools,
+            mcp_servers=workflow.mcp_servers,
+            http_servers=workflow.http_servers,
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)

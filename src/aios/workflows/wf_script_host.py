@@ -155,6 +155,19 @@ def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
     )
 
 
+def tool(name: str, input: Any) -> _Capability:
+    """Invoke one of the workflow's declared network/credential tools (``http_request``,
+    ``web_search``, ``web_fetch``) and await its result.
+
+    ``input`` is the tool's arguments (a JSON-serialisable dict). The result is the tool's
+    own return value — a plain dict the script branches on (e.g. ``{"status": 200, …}`` or
+    ``{"error": "…"}``); a tool error resolves as a value, it does **not** raise. The tool runs
+    in the worker against the run's bound vaults and declared surface; the script subprocess
+    only emits the request.
+    """
+    return _Capability("tool", {"tool_name": name, "input": input})
+
+
 async def _branch(thunk: Any) -> Any:
     """Run one parallel branch: call the thunk, await whatever it returns. Wrapping
     it in a coroutine lets the driver schedule a uniform set of branches and lets a
@@ -280,6 +293,7 @@ def _build_coroutine(source: str, input_value: Any) -> Any:
         "__builtins__": SAFE_BUILTINS,
         "gate": gate,
         "agent": agent,
+        "tool": tool,
         "parallel": parallel,
         "pipeline": pipeline,
         "log": log,

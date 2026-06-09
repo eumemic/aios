@@ -68,6 +68,9 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         parent_run_id=row["parent_run_id"],
         script=row["script"],
         script_sha=row["script_sha"],
+        tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
+        mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
+        http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
         status=row["status"],
         input=parse_jsonb(row["input"]),
         output=parse_jsonb(row["output"]),
@@ -249,16 +252,21 @@ async def insert_wf_run(
     script_sha: str,
     input: Any = None,
     parent_run_id: str | None = None,
+    tools: list[ToolSpec] | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
 ) -> WfRun:
-    """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``)."""
+    """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
+    declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch."""
     new_id = make_id(WORKFLOW_RUN)
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
-                 script, script_sha, status, input)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb)
+                 script, script_sha, status, input, tools, mcp_servers, http_servers)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb,
+                    $9::jsonb, $10::jsonb, $11::jsonb)
             RETURNING *
             """,
             new_id,
@@ -269,6 +277,9 @@ async def insert_wf_run(
             script,
             script_sha,
             json.dumps(input) if input is not None else None,
+            json.dumps([t.model_dump() for t in (tools or [])]),
+            json.dumps([s.model_dump() for s in (mcp_servers or [])]),
+            json.dumps([s.model_dump() for s in (http_servers or [])]),
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -586,3 +597,20 @@ async def insert_run_signal(
 async def list_run_signals(conn: asyncpg.Connection[Any], run_id: str) -> list[WfRunSignal]:
     rows = await conn.fetch("SELECT * FROM wf_run_signals WHERE run_id = $1", run_id)
     return [_row_to_wf_run_signal(r) for r in rows]
+
+
+async def read_run_signal(
+    conn: asyncpg.Connection[Any], run_id: str, call_key: str
+) -> WfRunSignal | None:
+    """A fresh point-read of one signal — used to disambiguate the harvest's stale snapshot.
+
+    A fire-and-forget tool task commits its ``tool_result`` signal **before** it pops the
+    in-flight registry, and it runs outside the run lock; so when a step's signal *snapshot*
+    shows nothing yet the task is no longer in-flight, the signal may have just landed. This
+    point-read tells "crashed" (None → re-dispatch) from "just finished" (resolve) without
+    re-dispatching a tool that already ran.
+    """
+    row = await conn.fetchrow(
+        "SELECT * FROM wf_run_signals WHERE run_id = $1 AND call_key = $2", run_id, call_key
+    )
+    return _row_to_wf_run_signal(row) if row is not None else None

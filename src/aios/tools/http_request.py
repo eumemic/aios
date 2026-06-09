@@ -12,6 +12,7 @@ On error: ``{"error": "..."}``.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -93,8 +94,8 @@ HTTP_REQUEST_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
-def _find_server(agent: Agent | AgentVersion, server_ref: str) -> HttpServerSpec | None:
-    for s in agent.http_servers:
+def _find_server(servers: list[HttpServerSpec], server_ref: str) -> HttpServerSpec | None:
+    for s in servers:
         if s.name == server_ref:
             return s
     return None
@@ -164,7 +165,7 @@ def _classify_permission(
         return None
     if _path_rejected_reason(path) is not None:
         return None
-    server = _find_server(agent, server_ref)
+    server = _find_server(agent.http_servers, server_ref)
     if server is None:
         return None
     route = _match_route(server, path)
@@ -198,7 +199,17 @@ def _decode_body(response: httpx.Response) -> str:
     )
 
 
-async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+async def _do_http_request(
+    *,
+    servers: list[HttpServerSpec],
+    arguments: dict[str, Any],
+    resolve_auth: Callable[[str], Awaitable[tuple[str | None, dict[str, str]]]],
+) -> dict[str, Any]:
+    """The owner-agnostic core: match a path against ``servers``' route allowlist,
+    author the ``Authorization`` header via the injected ``resolve_auth``, and make the
+    request. Shared by the session handler (servers = agent's) and the workflow-run
+    dispatcher (servers = run's snapshot); the core never learns which principal it serves.
+    """
     server_ref = arguments["server_ref"]
     path = arguments["path"]
     method = arguments["method"]
@@ -213,10 +224,9 @@ async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> di
     if reason is not None:
         return {"error": reason}
 
-    agent, account_id = await _load_session_agent(session_id)
-    server = _find_server(agent, server_ref)
+    server = _find_server(servers, server_ref)
     if server is None:
-        return {"error": (f"unknown server_ref {server_ref!r}; not declared on agent.http_servers")}
+        return {"error": (f"unknown server_ref {server_ref!r}; not declared on http_servers")}
     if _match_route(server, path) is None:
         return {
             "error": (
@@ -228,15 +238,11 @@ async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> di
     if not is_safe_url(full_url):
         return {"error": f"Blocked: URL targets a private/internal address: {full_url}"}
 
-    pool = runtime.require_pool()
-    crypto_box = runtime.require_crypto_box()
-    _vault_id, auth_headers = await resolve_auth_for_target_url(
-        pool, crypto_box, session_id, server.base_url, account_id=account_id
-    )
+    _vault_id, auth_headers = await resolve_auth(server.base_url)
 
-    # Strip headers the worker manages on the agent's behalf. ``Authorization``
-    # is rendered from the session vault below. ``Host`` is derived from the
-    # request URL by httpx; an agent override would land the request on a
+    # Strip headers the worker manages on the caller's behalf. ``Authorization``
+    # is rendered from the bound vault by ``resolve_auth``. ``Host`` is derived
+    # from the request URL by httpx; a caller override would land the request on a
     # different name-based virtual host than the operator's base_url scopes
     # to (NGINX, Cloudflare, ALB, Ingress — all route by Host header), so
     # leaving it caller-controlled effectively defeats the route allowlist.
@@ -261,6 +267,22 @@ async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> di
         "headers": dict(response.headers),
         "body": _decode_body(response),
     }
+
+
+async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Session entry: resolve the agent's ``http_servers`` + a session-scoped vault resolver."""
+    agent, account_id = await _load_session_agent(session_id)
+    pool = runtime.require_pool()
+    crypto_box = runtime.require_crypto_box()
+
+    async def resolve_auth(base_url: str) -> tuple[str | None, dict[str, str]]:
+        return await resolve_auth_for_target_url(
+            pool, crypto_box, session_id, base_url, account_id=account_id
+        )
+
+    return await _do_http_request(
+        servers=agent.http_servers, arguments=arguments, resolve_auth=resolve_auth
+    )
 
 
 def _register() -> None:
