@@ -4,8 +4,41 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class AccountConfig(BaseModel):
+    """Per-account configuration bag.
+
+    An unset item inherits from the parent account; see
+    ``queries.resolve_effective_timezone``. Update semantics (per-item merge)
+    are documented on ``UpdateAccountRequest``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    timezone: str | None = Field(
+        default=None,
+        description=(
+            "IANA timezone name (e.g. 'America/Los_Angeles') used to render the "
+            "per-message received-at timestamp for this account's agents. Unset "
+            "inherits the parent account's timezone; the root falls back to UTC."
+        ),
+    )
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, v: str | None) -> str | None:
+        # Fail hard at config-set time so the render path (which runs on every
+        # wake) never has to defend against an unknown zone.
+        if v is not None:
+            try:
+                ZoneInfo(v)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ValueError(f"unknown IANA timezone: {v!r}") from exc
+        return v
 
 
 class Account(BaseModel):
@@ -14,6 +47,7 @@ class Account(BaseModel):
     can_mint_children: bool
     display_name: str
     metadata: dict[str, Any]
+    config: AccountConfig = Field(default_factory=AccountConfig)
     created_at: datetime
     archived_at: datetime | None = None
 
@@ -87,12 +121,15 @@ class AccountKeySummary(BaseModel):
 class UpdateAccountRequest(BaseModel):
     """Body for ``PATCH /v1/accounts/{id}``.
 
-    Partial update: omitted fields are preserved. Both fields are
-    optional; at least one must be non-null. Submitting both as null
-    is a no-op that returns the account row unchanged.
+    Partial update: omitted fields are preserved. All fields are optional;
+    submitting none is a no-op that returns the account row unchanged.
+    ``config`` is *merged* into the stored config (only the keys present in
+    the submitted object are written), so setting one config item never
+    disturbs the others.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
     can_mint_children: bool | None = None
+    config: AccountConfig | None = None

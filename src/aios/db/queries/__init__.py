@@ -54,7 +54,7 @@ from aios.ids import (
     VAULT_CREDENTIAL,
     make_id,
 )
-from aios.models.accounts import Account
+from aios.models.accounts import Account, AccountConfig
 from aios.models.agents import Agent, AgentVersion, HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.environments import Environment, EnvironmentConfig
@@ -2575,9 +2575,13 @@ async def append_event(
                 # follow-up plan to make append-time vision-aware.
                 #
                 # ``created_at`` isn't assigned until the INSERT below (DB
-                # DEFAULT now()), so pass a now() stand-in: the count only needs
-                # the rendered length, and the ``received`` envelope is
-                # fixed-width, so it matches the build-time render's token count.
+                # DEFAULT now()), so pass a now() stand-in and render in the
+                # default UTC zone. For a non-UTC account the build-time
+                # envelope is a few tokens wider (variable-length IANA name);
+                # like the vision undercount above, the drift is absorbed by
+                # ``model_token_ratio`` calibration — and exact matching is
+                # impossible anyway, since a later tz config change re-renders
+                # history regardless of what was counted here.
                 rendered = render_user_event(
                     data, orig_channel, focal_at_arrival, datetime.now(UTC)
                 )
@@ -7007,14 +7011,26 @@ async def insert_file(
 
 
 def _row_to_account(row: asyncpg.Record) -> Account:
-    raw_metadata = row["metadata"]
-    metadata = parse_jsonb(raw_metadata)
+    metadata = parse_jsonb(row["metadata"])
+    raw_config = parse_jsonb(row["config"])
+    # Lenient hydration: the strict model (extra="forbid" + IANA validation)
+    # guards WRITES; re-running it here would make stored config a hard schema
+    # constraint on every account read — including bearer auth
+    # (lookup_account_by_key_hash) — so an unknown key (version rollback) or a
+    # zone dropped by tzdata drift would 500 the account's entire API,
+    # including the PATCH that could repair it. Hydrate known fields without
+    # validating; the render path guards values separately
+    # (services.accounts.resolve_effective_timezone).
+    config = AccountConfig.model_construct(
+        **{k: raw_config[k] for k in AccountConfig.model_fields if k in raw_config}
+    )
     return Account(
         id=row["id"],
         parent_account_id=row["parent_account_id"],
         can_mint_children=row["can_mint_children"],
         display_name=row["display_name"],
         metadata=metadata,
+        config=config,
         created_at=row["created_at"],
         archived_at=row["archived_at"],
     )
@@ -7160,6 +7176,30 @@ async def get_account(conn: asyncpg.Connection[Any], account_id: str) -> Account
     """
     row = await conn.fetchrow("SELECT * FROM accounts WHERE id = $1", account_id)
     return _row_to_account(row) if row is not None else None
+
+
+async def resolve_effective_timezone(conn: asyncpg.Connection[Any], account_id: str) -> str | None:
+    """Resolve an account's effective IANA timezone by walking the parent chain.
+
+    The nearest ancestor (self first) whose ``config.timezone`` is set wins;
+    ``None`` if no ancestor up to the root has one set (the caller falls back
+    to UTC). ``config->>'timezone'`` is NULL for both an absent key and an
+    explicit JSON ``null``, so clearing a tz transparently re-enables
+    inheritance. Archived accounts break the chain.
+    """
+    tz: str | None = await conn.fetchval(
+        "WITH RECURSIVE chain AS ("
+        "  SELECT parent_account_id, config->>'timezone' AS tz, 0 AS depth "
+        "    FROM accounts WHERE id = $1 AND archived_at IS NULL "
+        "  UNION ALL "
+        "  SELECT a.parent_account_id, a.config->>'timezone', c.depth + 1 "
+        "    FROM accounts a JOIN chain c ON a.id = c.parent_account_id "
+        "    WHERE a.archived_at IS NULL"
+        ") "
+        "SELECT tz FROM chain WHERE tz IS NOT NULL ORDER BY depth ASC LIMIT 1",
+        account_id,
+    )
+    return tz
 
 
 async def resolve_account_by_path(
@@ -7369,15 +7409,20 @@ async def update_account(
     *,
     display_name: str | None = None,
     can_mint_children: bool | None = None,
+    config: AccountConfig | None = None,
 ) -> Account | None:
     """Apply a partial update to ``account_id``. Returns the new row.
 
-    ``None`` for either field means "leave as-is". Returns ``None`` if
-    the account doesn't exist or is archived (callers map to 404). The
+    ``None`` for any field means "leave as-is". Returns ``None`` if the
+    account doesn't exist or is archived (callers map to 404). The
     ``accounts_sibling_unique_display_name`` partial unique index fires
     on a same-parent rename collision — wrapped as ``ConflictError``.
+
+    ``config`` is *merged* (``config = config || $n::jsonb``) using only the
+    keys explicitly set on the submitted model, so setting one config item
+    never disturbs the others.
     """
-    if display_name is None and can_mint_children is None:
+    if display_name is None and can_mint_children is None and config is None:
         # No-op: re-read for a no-change response.
         row = await conn.fetchrow(
             "SELECT * FROM accounts WHERE id = $1 AND archived_at IS NULL",
@@ -7393,6 +7438,9 @@ async def update_account(
     if can_mint_children is not None:
         args.append(can_mint_children)
         sets.append(f"can_mint_children = ${len(args)}")
+    if config is not None:
+        args.append(json.dumps(config.model_dump(exclude_unset=True, mode="json")))
+        sets.append(f"config = config || ${len(args)}::jsonb")
     args.append(account_id)
     sql = (
         f"UPDATE accounts SET {', '.join(sets)} "

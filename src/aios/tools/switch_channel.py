@@ -31,6 +31,7 @@ from aios.harness.channels import (
 from aios.harness.context import render_user_event
 from aios.harness.tokens import approx_tokens
 from aios.models.events import Event
+from aios.services import accounts as accounts_service
 from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, registry
 
@@ -164,11 +165,20 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
                 is_error=True,
             )
 
+        # Resolve the recap's timezone on the held conn, BEFORE the focal
+        # UPDATE: every DB input is gathered pre-mutation, so the post-commit
+        # window stays pure rendering (a post-commit failure would report the
+        # switch as failed when it already committed, and the no-op
+        # short-circuit makes the recap unrecoverable on retry). Same
+        # effective zone the live render uses (compose_step_context).
+        tz_name = await accounts_service.resolve_effective_timezone_on(conn, account_id)
         await queries.set_session_focal_channel(conn, session_id, target, account_id=account_id)
         all_events = await queries.read_message_events(conn, session_id, account_id=account_id)
         model = await queries.get_session_model(conn, session_id, account_id=account_id)
 
-    content = render_reorient_block(all_events, target, model=model, session_id=session_id)
+    content = render_reorient_block(
+        all_events, target, model=model, session_id=session_id, tz_name=tz_name
+    )
     return ToolResult(
         content=content,
         metadata={
@@ -183,6 +193,7 @@ def render_reorient_block(
     *,
     model: str | None = None,
     session_id: str | None = None,
+    tz_name: str = "UTC",
 ) -> str | list[dict[str, Any]]:
     """Render the recap block for ``target`` from the event log.
 
@@ -260,7 +271,7 @@ def render_reorient_block(
     rendered_msgs: list[dict[str, Any]] = []
     token_total = 0
     for e in reversed(target_events):
-        msg = _render_recap_event(e, model=model, session_id=session_id)
+        msg = _render_recap_event(e, model=model, session_id=session_id, tz_name=tz_name)
         if msg is None:
             continue
         rendered_msgs.append(msg)
@@ -304,6 +315,7 @@ def _render_recap_event(
     model: str | None = None,
     session_id: str | None = None,
     workspace_path: Path | None = None,
+    tz_name: str = "UTC",
 ) -> dict[str, Any] | None:
     """Render a single event into a chat-completions message dict for
     the recap body, or ``None`` if the event contributes nothing.
@@ -349,6 +361,7 @@ def _render_recap_event(
             event.orig_channel,
             event.orig_channel,
             event.created_at,
+            tz_name=tz_name,
             model=model,
             session_id=session_id,
             workspace_path=workspace_path,

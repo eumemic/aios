@@ -40,6 +40,7 @@ from aios_sdk._generated.api.accounts import (
     revoke_account_key,
     update_account,
 )
+from aios_sdk._generated.models.account_config import AccountConfig
 from aios_sdk._generated.models.mint_account_request import MintAccountRequest
 from aios_sdk._generated.models.mint_key_request import MintKeyRequest
 from aios_sdk._generated.models.update_account_request import UpdateAccountRequest
@@ -164,14 +165,27 @@ def update(
             help="Toggle the can-mint-children capability.",
         ),
     ] = None,
+    timezone: Annotated[
+        str | None,
+        typer.Option(
+            "--timezone",
+            help=(
+                "IANA timezone (e.g. America/Los_Angeles) for this account's "
+                "received-at timestamps. Pass '' to clear (inherit the parent's)."
+            ),
+        ),
+    ] = None,
 ) -> None:
-    """Both options are optional; omitted fields stay as-is. With no
-    options, the call is a no-op that just re-reads the account row."""
+    """All options are optional; omitted fields stay as-is. With no options,
+    the call is a no-op that just re-reads the account row."""
 
     def _run() -> None:
+        # --timezone '' clears the zone: an explicit JSON null merges over the
+        # stored value, re-enabling parent inheritance.
         body = UpdateAccountRequest(
             display_name=display_name if display_name is not None else UNSET,
             can_mint_children=can_mint_children if can_mint_children is not None else UNSET,
+            config=AccountConfig(timezone=timezone or None) if timezone is not None else UNSET,
         )
         call_single(ctx, update_account.sync_detailed, target_id=target_id, body=body)
 

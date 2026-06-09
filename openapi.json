@@ -9044,6 +9044,9 @@
             "type": "object",
             "title": "Metadata"
           },
+          "config": {
+            "$ref": "#/components/schemas/AccountConfig"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -9072,6 +9075,26 @@
           "created_at"
         ],
         "title": "Account"
+      },
+      "AccountConfig": {
+        "properties": {
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone",
+            "description": "IANA timezone name (e.g. 'America/Los_Angeles') used to render the per-message received-at timestamp for this account's agents. Unset inherits the parent account's timezone; the root falls back to UTC."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AccountConfig",
+        "description": "Per-account configuration bag.\n\nAn unset item inherits from the parent account; see\n``queries.resolve_effective_timezone``. Update semantics (per-item merge)\nare documented on ``UpdateAccountRequest``."
       },
       "AccountKeySummary": {
         "properties": {
@@ -14475,12 +14498,22 @@
               }
             ],
             "title": "Can Mint Children"
+          },
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "UpdateAccountRequest",
-        "description": "Body for ``PATCH /v1/accounts/{id}``.\n\nPartial update: omitted fields are preserved. Both fields are\noptional; at least one must be non-null. Submitting both as null\nis a no-op that returns the account row unchanged."
+        "description": "Body for ``PATCH /v1/accounts/{id}``.\n\nPartial update: omitted fields are preserved. All fields are optional;\nsubmitting none is a no-op that returns the account row unchanged.\n``config`` is *merged* into the stored config (only the keys present in\nthe submitted object are written), so setting one config item never\ndisturbs the others."
       },
       "ValidationError": {
         "properties": {

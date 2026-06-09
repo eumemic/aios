@@ -132,8 +132,9 @@ Header shape (newlines added for clarity):
      timestamp_ms=<ms> · message_id='<id>' · received=<iso>]
 
 WhatsApp message ids are hex strings like ``3EB0E03B46303C22D750E2``
-— pass them verbatim.  ``received`` is the message's receipt time
-(UTC ISO-8601) for your temporal awareness only — never a tool argument.
+— pass them verbatim.  ``received`` is the message's receipt time —
+ISO-8601 with UTC offset plus the zone name — for your temporal
+awareness only; never a tool argument.
 
 ## Sending messages — `whatsapp_send`
 

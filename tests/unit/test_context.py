@@ -38,7 +38,7 @@ def _full_pipeline(
 # Fixed receipt time so the per-message ``received=`` envelope field
 # (see ``_format_received``) renders deterministically across assertions.
 _FIXED_CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
-RECEIVED = "2026-01-02T03:04:05Z"  # _format_received(_FIXED_CREATED_AT)
+RECEIVED = "2026-01-02T03:04:05+00:00 (UTC)"  # _format_received(_FIXED_CREATED_AT, "UTC")
 
 
 def _evt(
@@ -371,6 +371,21 @@ class TestBuildMessages:
         msgs = build_messages(events, system_prompt=None).messages
         assert [m["role"] for m in msgs] == ["user"]
         assert msgs[0]["content"] == f"[received={RECEIVED}]\nnext"
+
+
+class TestTimezoneRendering:
+    """The ``received=`` envelope renders in the account's effective timezone
+    (threaded as ``tz_name``), with both the UTC offset and the IANA name."""
+
+    def test_renders_in_account_timezone_with_name(self) -> None:
+        ev = _evt(1, "user", content="hi", created_at=datetime(2026, 7, 1, 16, 0, tzinfo=UTC))
+        content = build_messages([ev], system_prompt=None, tz_name="America/Los_Angeles").messages[
+            0
+        ]["content"]
+        # July → PDT (-07:00); zone name appended. (DST-correct by stdlib:
+        # an absolute instant formatted in a ZoneInfo gets that instant's
+        # offset — not re-tested here to avoid coupling to calendar data.)
+        assert content == "[received=2026-07-01T09:00:00-07:00 (America/Los_Angeles)]\nhi"
 
 
 # ─── monotonicity ──────────────────────────────────────────────────────────

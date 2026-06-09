@@ -26,9 +26,10 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from aios.harness.vision import (
     can_inline_image,
@@ -89,15 +90,18 @@ def _extract_reaction_emoji(reaction: dict[str, Any]) -> str | None:
     return None
 
 
-def _format_received(created_at: datetime) -> str:
-    """Absolute receipt timestamp for the message envelope.
+def _format_received(created_at: datetime, tz_name: str) -> str:
+    """Absolute receipt timestamp for the message envelope, in the account's
+    effective timezone — UTC offset plus IANA name, e.g.
+    ``2026-06-06T09:00:00-07:00 (America/Los_Angeles)``.
 
-    Sourced from the event's immutable ``created_at`` (DB-commit time, UTC),
-    so it renders byte-identical on every rebuild — deterministic and
-    prompt-cache-stable, unlike a relative or render-time clock.  This is
-    the uniform envelope field every user message carries, connector or not.
+    Sourced from the event's immutable ``created_at``; ``tz_name`` is resolved
+    once per step (a static function of account config) and pre-validated (see
+    ``services.accounts.resolve_effective_timezone``), so this renders
+    byte-identical on every rebuild — deterministic and prompt-cache-stable.
     """
-    return created_at.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    stamp = created_at.astimezone(ZoneInfo(tz_name)).isoformat(timespec="seconds")
+    return f"{stamp} ({tz_name})"
 
 
 def _prepend_header(msg: dict[str, Any], header: str) -> None:
@@ -309,6 +313,7 @@ def render_user_event(
     focal_channel_at_arrival: str | None,
     created_at: datetime,
     *,
+    tz_name: str = "UTC",
     model: str | None = None,
     session_id: str | None = None,
     workspace_path: Path | None = None,
@@ -355,7 +360,7 @@ def render_user_event(
     msg = {k: v for k, v in event_data.items() if k != "metadata"}
     metadata = event_data.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else None
-    received = _format_received(created_at)
+    received = _format_received(created_at, tz_name)
 
     # A request injected via invoke_session (e.g. a workflow agent child's first
     # message) carries metadata.request.request_id. return/error require that id, so
@@ -671,6 +676,7 @@ def build_messages(
     session_id: str | None = None,
     workspace_path: Path | None = None,
     in_flight_tool_call_ids: frozenset[str] = frozenset(),
+    tz_name: str = "UTC",
 ) -> ContextResult:
     """Assemble a chat-completions message list from pre-windowed events.
 
@@ -735,6 +741,7 @@ def build_messages(
                 e.orig_channel,
                 e.focal_channel_at_arrival,
                 e.created_at,
+                tz_name=tz_name,
                 model=model,
                 session_id=session_id,
                 workspace_path=workspace_path,

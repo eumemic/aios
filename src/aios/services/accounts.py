@@ -5,19 +5,24 @@ from __future__ import annotations
 import hashlib
 import secrets
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
 
 from aios.db import queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError
+from aios.logging import get_logger
 from aios.models.accounts import (
     Account,
+    AccountConfig,
     AccountKeySummary,
     AccountUsage,
     BootstrapResponse,
     MintAccountResponse,
     MintKeyResponse,
 )
+
+log = get_logger("aios.services.accounts")
 
 _KEY_PREFIX = "aios_"
 _KEY_BODY_BYTES = 32
@@ -216,12 +221,14 @@ async def update_account(
     caller_account_id: str,
     display_name: str | None,
     can_mint_children: bool | None,
+    config: AccountConfig | None = None,
 ) -> Account:
     """Apply a partial update to a caller-or-direct-child account.
 
-    Both fields are optional; omitted ones are preserved. Raises
-    :class:`NotFoundError` if the target is missing, archived, or out
-    of scope — the API doesn't distinguish out-of-scope from missing.
+    All fields are optional; omitted ones are preserved. ``config`` is merged
+    (set keys only). Raises :class:`NotFoundError` if the target is missing,
+    archived, or out of scope — the API doesn't distinguish out-of-scope from
+    missing.
     """
     await get_account_in_scope(pool, target_account_id, caller_account_id=caller_account_id)
     async with pool.acquire() as conn:
@@ -230,6 +237,7 @@ async def update_account(
             target_account_id,
             display_name=display_name,
             can_mint_children=can_mint_children,
+            config=config,
         )
     if updated is None:
         raise NotFoundError(
@@ -237,6 +245,32 @@ async def update_account(
             detail={"id": target_account_id},
         )
     return updated
+
+
+async def resolve_effective_timezone_on(conn: asyncpg.Connection[Any], account_id: str) -> str:
+    """The account's effective IANA timezone, inherited up the parent chain,
+    or ``"UTC"`` when none is set or the stored value can't be resolved.
+
+    The single guard point for the render path: a stored name that fails to
+    construct a ``ZoneInfo`` (e.g. tzdata drift after a once-valid write)
+    degrades to UTC here, so the per-message renderer — which runs on every
+    wake — never raises (the #446 failure class).
+    """
+    name = await queries.resolve_effective_timezone(conn, account_id)
+    if name is None:
+        return "UTC"
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("account.timezone_unresolvable", account_id=account_id, timezone=name)
+        return "UTC"
+    return name
+
+
+async def resolve_effective_timezone(pool: asyncpg.Pool[Any], account_id: str) -> str:
+    """Pool-level wrapper for :func:`resolve_effective_timezone_on`."""
+    async with pool.acquire() as conn:
+        return await resolve_effective_timezone_on(conn, account_id)
 
 
 async def purge_account(

@@ -130,6 +130,30 @@ class TestContextEndpoint:
             for m in user_msgs
         ), messages
 
+    async def test_received_envelope_renders_in_account_timezone(
+        self, http_client: httpx.AsyncClient, pool: Any, seeded_session: dict[str, Any]
+    ) -> None:
+        """The account's effective timezone reaches the rendered context — the
+        ``compose_step_context`` → ``resolve_effective_timezone`` →
+        ``build_messages`` seam the worker and this preview share. (Dropping
+        the ``tz_name`` threading at either end would revert this stamp to
+        UTC and only this test would notice.)"""
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE accounts SET config = \'{"timezone": "Asia/Tokyo"}\'::jsonb '
+                "WHERE id = 'acc_test_stub'"
+            )
+        try:
+            r = await http_client.get(f"/v1/sessions/{seeded_session['session_id']}/context")
+            assert r.status_code == 200, r.text
+            user_msgs = [m for m in r.json()["messages"] if m.get("role") == "user"]
+            assert any("(Asia/Tokyo)" in str(m.get("content")) for m in user_msgs), user_msgs
+        finally:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE accounts SET config = '{}'::jsonb WHERE id = 'acc_test_stub'"
+                )
+
     async def test_system_message_first(
         self, http_client: httpx.AsyncClient, seeded_session: dict[str, Any]
     ) -> None:

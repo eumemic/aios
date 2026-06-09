@@ -87,9 +87,11 @@ def sync_detailed(
         authorization (None | str | Unset):
         body (UpdateAccountRequest): Body for ``PATCH /v1/accounts/{id}``.
 
-            Partial update: omitted fields are preserved. Both fields are
-            optional; at least one must be non-null. Submitting both as null
-            is a no-op that returns the account row unchanged.
+            Partial update: omitted fields are preserved. All fields are optional;
+            submitting none is a no-op that returns the account row unchanged.
+            ``config`` is *merged* into the stored config (only the keys present in
+            the submitted object are written), so setting one config item never
+            disturbs the others.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -132,9 +134,11 @@ def sync(
         authorization (None | str | Unset):
         body (UpdateAccountRequest): Body for ``PATCH /v1/accounts/{id}``.
 
-            Partial update: omitted fields are preserved. Both fields are
-            optional; at least one must be non-null. Submitting both as null
-            is a no-op that returns the account row unchanged.
+            Partial update: omitted fields are preserved. All fields are optional;
+            submitting none is a no-op that returns the account row unchanged.
+            ``config`` is *merged* into the stored config (only the keys present in
+            the submitted object are written), so setting one config item never
+            disturbs the others.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -172,9 +176,11 @@ async def asyncio_detailed(
         authorization (None | str | Unset):
         body (UpdateAccountRequest): Body for ``PATCH /v1/accounts/{id}``.
 
-            Partial update: omitted fields are preserved. Both fields are
-            optional; at least one must be non-null. Submitting both as null
-            is a no-op that returns the account row unchanged.
+            Partial update: omitted fields are preserved. All fields are optional;
+            submitting none is a no-op that returns the account row unchanged.
+            ``config`` is *merged* into the stored config (only the keys present in
+            the submitted object are written), so setting one config item never
+            disturbs the others.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -215,9 +221,11 @@ async def asyncio(
         authorization (None | str | Unset):
         body (UpdateAccountRequest): Body for ``PATCH /v1/accounts/{id}``.
 
-            Partial update: omitted fields are preserved. Both fields are
-            optional; at least one must be non-null. Submitting both as null
-            is a no-op that returns the account row unchanged.
+            Partial update: omitted fields are preserved. All fields are optional;
+            submitting none is a no-op that returns the account row unchanged.
+            ``config`` is *merged* into the stored config (only the keys present in
+            the submitted object are written), so setting one config item never
+            disturbs the others.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

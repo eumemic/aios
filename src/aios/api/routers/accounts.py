@@ -172,6 +172,7 @@ async def update_account(
         caller_account_id=account_id,
         display_name=body.display_name,
         can_mint_children=body.can_mint_children,
+        config=body.config,
     )
     log.info(
         "account.operation",
