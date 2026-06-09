@@ -1877,3 +1877,36 @@ async def test_dangling_ref_output_schema_errors_the_run(
     assert completed and completed[0].payload["error"]["kind"] == "bad_agent_call"
     assert "reference" in completed[0].payload["output"].lower()
     assert children == 0  # rejected before any spawn
+
+
+async def test_defer_wake_priority_reflects_real_origin(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """Foreground protection end-to-end: against real sessions, defer_wake demotes a
+    workflow background child's wake below a user-facing foreground session's, so a
+    fan-out can't starve a user's message. Validates the real origin lookup → priority
+    (the unit tests mock the lookup); the in-memory connector captures the priority."""
+    from procrastinate.testing import InMemoryConnector
+
+    from aios.harness.procrastinate_app import app
+    from aios.services.wake import _BACKGROUND_PRIORITY, _FOREGROUND_PRIORITY, defer_wake
+
+    pool = wf_runtime
+    fg = await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+    )  # origin='foreground', no parent run
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "prio:1")  # origin='background'
+
+    with app.replace_connector(InMemoryConnector()) as patched:
+        await defer_wake(pool, fg.id, account_id="acc_wf", cause="message")
+        await defer_wake(pool, cid, account_id="acc_wf", cause="message")
+        priorities = {
+            j["args"]["session_id"]: j["priority"] for j in patched.connector.jobs.values()
+        }
+    assert priorities[fg.id] == _FOREGROUND_PRIORITY  # real foreground → default
+    assert priorities[cid] == _BACKGROUND_PRIORITY  # real background child → demoted
