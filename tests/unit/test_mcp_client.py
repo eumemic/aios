@@ -13,7 +13,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aios.crypto.vault import CryptoBox
-from aios.mcp.client import call_mcp_tool, discover_mcp_tools, resolve_auth_for_target_url
+from aios.mcp.client import (
+    call_mcp_tool,
+    discover_mcp_tools,
+    resolve_auth_for_target_url,
+    resolve_auth_for_target_url_run,
+)
 from tests.unit.conftest import fake_pool_yielding_conn
 
 # ── resolve_auth_for_target_url ──────────────────────────────────────────────────────
@@ -234,6 +239,49 @@ class TestResolveAuthForTargetUrl:
             await resolve_auth_for_target_url(
                 pool, crypto_box, "sess_123", "https://mcp.example.com", account_id="acc_test_stub"
             )
+
+
+class TestResolveAuthForTargetUrlRun:
+    """The run arm resolves through a *run*'s bound vaults via ``resolve_run_credential``,
+    reusing the same decrypt/render engine as the session arm — so a run resolves
+    credentials identically, scoped to ``wf_run_vaults`` instead of ``session_vaults``."""
+
+    @pytest.fixture
+    def crypto_box(self) -> CryptoBox:
+        import os
+
+        return CryptoBox(os.urandom(32))
+
+    async def test_resolves_via_run_vaults(self, crypto_box: CryptoBox) -> None:
+        payload = json.dumps({"token": "run-token"})
+        blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
+        pool = fake_pool_yielding_conn(MagicMock())
+        with patch(
+            "aios.mcp.client.queries.resolve_run_credential",
+            new_callable=AsyncMock,
+        ) as r:
+            r.return_value = (blob, "bearer_header", "vlt_r1")
+            vault_id, result = await resolve_auth_for_target_url_run(
+                pool, crypto_box, "wfr_123", "https://mcp.example.com", account_id="acc_test_stub"
+            )
+        # Proves: the run arm calls the run query (not the session one) and the shared
+        # engine renders the header identically to the session path.
+        assert vault_id == "vlt_r1"
+        assert result == {"Authorization": "Bearer run-token"}
+        r.assert_awaited_once()
+
+    async def test_no_credential_returns_empty(self, crypto_box: CryptoBox) -> None:
+        pool = fake_pool_yielding_conn(MagicMock())
+        with patch(
+            "aios.mcp.client.queries.resolve_run_credential",
+            new_callable=AsyncMock,
+        ) as r:
+            r.return_value = None
+            vault_id, result = await resolve_auth_for_target_url_run(
+                pool, crypto_box, "wfr_123", "https://mcp.example.com", account_id="acc_test_stub"
+            )
+        assert vault_id is None
+        assert result == {}
 
 
 # ── discover_mcp_tools ────────────────────────────────────────────────────────

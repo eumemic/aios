@@ -3980,6 +3980,46 @@ async def resolve_session_credential(
     )
 
 
+async def resolve_run_credential(
+    conn: asyncpg.Connection[Any],
+    run_id: str,
+    target_url: str,
+    *,
+    account_id: str,
+) -> tuple[EncryptedBlob, AuthType, str] | None:
+    """Find the first matching credential across a *run*'s bound vaults.
+
+    The run analog of :func:`resolve_session_credential` — identical query with
+    ``wf_run_vaults``/``run_id`` swapped for ``session_vaults``/``session_id``. The
+    decrypt + OAuth-refresh + header-render tail downstream is owner-agnostic (it
+    keys off ``account_id`` + ``vault_id``), so only this lookup differs by owner.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT vc.ciphertext, vc.nonce, vc.auth_type, vc.vault_id
+          FROM wf_run_vaults rv
+          JOIN vault_credentials vc ON vc.vault_id = rv.vault_id
+         WHERE rv.run_id = $1
+           AND vc.target_url = $2
+           AND vc.archived_at IS NULL
+           AND rv.account_id = $3
+           AND vc.account_id = $3
+         ORDER BY rv.rank
+         LIMIT 1
+        """,
+        run_id,
+        target_url,
+        account_id,
+    )
+    if row is None:
+        return None
+    return (
+        EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
+        cast(AuthType, str(row["auth_type"])),
+        str(row["vault_id"]),
+    )
+
+
 # ─── skills ──────────────────────────────────────────────────────────────────
 
 

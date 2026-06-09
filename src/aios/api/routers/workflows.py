@@ -45,7 +45,11 @@ runs_router = APIRouter(prefix="/v1/runs", tags=["runs"])
 async def create_workflow(
     body: WorkflowCreate, pool: PoolDep, account_id: AccountIdDep
 ) -> Workflow:
-    """Create a workflow definition (version 1). Versioning/update is deferred."""
+    """Create a workflow definition (version 1). Versioning/update is deferred.
+
+    The HTTP path is unattenuated operator authority — no ``creator_session_id``, so the
+    declared tool surface is not subset-checked against any agent (an agent authoring a
+    workflow goes through the create-time-attenuated builtin, a later slice)."""
     return await service.create_workflow(
         pool,
         account_id=account_id,
@@ -54,6 +58,9 @@ async def create_workflow(
         input_schema=body.input_schema,
         output_schema=body.output_schema,
         description=body.description,
+        tools=body.tools,
+        mcp_servers=body.mcp_servers,
+        http_servers=body.http_servers,
     )
 
 
@@ -92,14 +99,17 @@ async def get_workflow(workflow_id: str, pool: PoolDep, account_id: AccountIdDep
 @runs_router.post("", operation_id="create_run", status_code=status.HTTP_201_CREATED)
 async def create_run(body: WfRunCreate, pool: PoolDep, account_id: AccountIdDep) -> WfRun:
     """Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there), and wakes
-    it. A missing workflow or environment 404s."""
+    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
+    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
+    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+    ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped)."""
     return await service.create_run(
         pool,
         account_id=account_id,
         workflow_id=body.workflow_id,
         environment_id=body.environment_id,
         input=body.input,
+        vault_ids=body.vault_ids,
     )
 
 

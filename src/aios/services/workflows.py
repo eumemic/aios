@@ -19,7 +19,8 @@ import asyncpg
 
 from aios.db.listen import open_listen_for_run_events
 from aios.db.queries import workflows as wf_queries
-from aios.errors import NotFoundError
+from aios.errors import ForbiddenError, NotFoundError
+from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     WfRun,
@@ -27,6 +28,8 @@ from aios.models.workflows import (
     WfRunWaitResponse,
     Workflow,
 )
+from aios.services import agents as agents_service
+from aios.services import sessions as sessions_service
 from aios.services.await_completion import await_completion
 from aios.services.wake import defer_run_wake
 from aios.workflows.service import create_run, resume_gate
@@ -49,6 +52,55 @@ __all__ = [
 # ─── workflow definitions ────────────────────────────────────────────────────
 
 
+def _tool_key(t: ToolSpec) -> tuple[str, str | None]:
+    """A tool's attenuation identity: builtins by type, custom by name, toolsets by server."""
+    if t.type == "mcp_toolset":
+        return ("mcp_toolset", t.mcp_server_name)
+    if t.type == "custom":
+        return ("custom", t.name)
+    return ("builtin", t.type)
+
+
+async def _enforce_surface_attenuation(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    creator_session_id: str,
+    tools: list[ToolSpec],
+    mcp_servers: list[McpServerSpec],
+    http_servers: list[HttpServerSpec],
+) -> None:
+    """Raise ``ForbiddenError`` if the declared surface exceeds the creator agent's.
+
+    Subset by identity key: ``mcp_servers`` by url, ``http_servers`` by base_url,
+    ``tools`` by (builtin type / custom name / toolset server). The HTTP path passes no
+    creator and skips this — operator authority. (No-widen on permission/transport/routes
+    is a deliberate follow-up; this slice gates membership.)
+    """
+    session = await sessions_service.get_session_basic(
+        pool, creator_session_id, account_id=account_id
+    )
+    agent = await agents_service.load_for_session(pool, session, account_id=account_id)
+    allowed_mcp = {s.url for s in agent.mcp_servers}
+    allowed_http = {s.base_url for s in agent.http_servers}
+    allowed_tools = {_tool_key(t) for t in agent.tools if t.enabled}
+
+    offending: dict[str, list[str]] = {}
+    if bad := [s.name for s in mcp_servers if s.url not in allowed_mcp]:
+        offending["mcp_servers"] = bad
+    if bad := [s.name for s in http_servers if s.base_url not in allowed_http]:
+        offending["http_servers"] = bad
+    if bad := [
+        t.name or t.mcp_server_name or t.type for t in tools if _tool_key(t) not in allowed_tools
+    ]:
+        offending["tools"] = bad
+    if offending:
+        raise ForbiddenError(
+            "workflow declares servers or tools the creating agent does not have",
+            detail={"ungranted": offending},
+        )
+
+
 async def create_workflow(
     pool: asyncpg.Pool[Any],
     *,
@@ -58,7 +110,28 @@ async def create_workflow(
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
     description: str | None = None,
+    tools: list[ToolSpec] | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
+    creator_session_id: str | None = None,
 ) -> Workflow:
+    """Create a workflow definition.
+
+    **Create-time attenuation:** when ``creator_session_id`` is set (an agent authoring
+    the workflow), the declared surface (``tools``/``mcp_servers``/``http_servers``) must
+    be a subset of the creating agent's own — an agent cannot grant a workflow a tool or
+    server it does not itself have; a breach raises :class:`ForbiddenError`. With no
+    creator (the HTTP/operator path) any surface may be declared, account-scoped.
+    """
+    if creator_session_id is not None:
+        await _enforce_surface_attenuation(
+            pool,
+            account_id=account_id,
+            creator_session_id=creator_session_id,
+            tools=tools or [],
+            mcp_servers=mcp_servers or [],
+            http_servers=http_servers or [],
+        )
     async with pool.acquire() as conn:
         return await wf_queries.insert_workflow(
             conn,
@@ -68,6 +141,9 @@ async def create_workflow(
             input_schema=input_schema,
             output_schema=output_schema,
             description=description,
+            tools=tools,
+            mcp_servers=mcp_servers,
+            http_servers=http_servers,
         )
 
 

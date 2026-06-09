@@ -24,6 +24,7 @@ import asyncpg
 from aios.db.queries import _get_scoped, _list_scoped, parse_jsonb
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
+from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.workflows import (
     WfRun,
     WfRunEvent,
@@ -50,6 +51,9 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         input_schema=parse_jsonb(row["input_schema"]),
         output_schema=parse_jsonb(row["output_schema"]),
         description=row["description"],
+        tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
+        mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
+        http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -109,6 +113,9 @@ async def insert_workflow(
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
     description: str | None = None,
+    tools: list[ToolSpec] | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
 ) -> Workflow:
     """Insert an immutable workflow definition. Raises ``ConflictError`` on a
     duplicate ``(account_id, name, version)``."""
@@ -117,8 +124,9 @@ async def insert_workflow(
         row = await conn.fetchrow(
             """
             INSERT INTO workflows
-                (id, account_id, name, version, script, input_schema, output_schema, description)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+                (id, account_id, name, version, script, input_schema, output_schema,
+                 description, tools, mcp_servers, http_servers)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11::jsonb)
             RETURNING *
             """,
             new_id,
@@ -129,6 +137,9 @@ async def insert_workflow(
             json.dumps(input_schema) if input_schema is not None else None,
             json.dumps(output_schema) if output_schema is not None else None,
             description,
+            json.dumps([t.model_dump() for t in (tools or [])]),
+            json.dumps([s.model_dump() for s in (mcp_servers or [])]),
+            json.dumps([s.model_dump() for s in (http_servers or [])]),
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -266,6 +277,68 @@ async def insert_wf_run(
         ) from exc
     assert row is not None
     return _row_to_wf_run(row)
+
+
+async def set_run_vaults(
+    conn: asyncpg.Connection[Any],
+    run_id: str,
+    vault_ids: list[str],
+    *,
+    account_id: str,
+) -> None:
+    """Bind vaults to a run, rank-ordered (first-match credential resolution).
+
+    The run analog of :func:`set_session_vaults`, with a tighter ownership guard: each
+    vault must exist **and belong to ``account_id``** — a foreign or unknown vault id
+    raises ``NotFoundError``, so a run can never bind another account's vault. (The
+    ``vault_id`` FK alone checks existence, not ownership — the same tenant-confusion the
+    ``create_vault_credential`` lock guards against; we mirror that here rather than
+    inherit the gap.) Duplicate ids are de-duplicated (a binding is a set). Called inside
+    ``create_run``'s transaction, so its inner ``conn.transaction()`` is a savepoint.
+    """
+    deduped = list(dict.fromkeys(vault_ids))
+    async with conn.transaction():
+        await conn.execute(
+            "DELETE FROM wf_run_vaults WHERE run_id = $1 AND account_id = $2",
+            run_id,
+            account_id,
+        )
+        if not deduped:
+            return
+        owned = {
+            str(r["id"])
+            for r in await conn.fetch(
+                "SELECT id FROM vaults WHERE id = ANY($1) AND account_id = $2",
+                deduped,
+                account_id,
+            )
+        }
+        missing = [v for v in deduped if v not in owned]
+        if missing:
+            raise NotFoundError(
+                f"vault(s) not found in this account: {missing}",
+                detail={"vault_ids": missing},
+            )
+        for rank, vault_id in enumerate(deduped):
+            await conn.execute(
+                "INSERT INTO wf_run_vaults (run_id, vault_id, rank, account_id) "
+                "VALUES ($1, $2, $3, $4)",
+                run_id,
+                vault_id,
+                rank,
+                account_id,
+            )
+
+
+async def get_run_vault_ids(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
+) -> list[str]:
+    rows = await conn.fetch(
+        "SELECT vault_id FROM wf_run_vaults WHERE run_id = $1 AND account_id = $2 ORDER BY rank",
+        run_id,
+        account_id,
+    )
+    return [str(r["vault_id"]) for r in rows]
 
 
 async def get_run_for_step(conn: asyncpg.Connection[Any], run_id: str) -> WfRun | None:

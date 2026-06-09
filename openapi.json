@@ -8122,7 +8122,7 @@
           "workflows"
         ],
         "summary": "Create Workflow",
-        "description": "Create a workflow definition (version 1). Versioning/update is deferred.",
+        "description": "Create a workflow definition (version 1). Versioning/update is deferred.\n\nThe HTTP path is unattenuated operator authority \u2014 no ``creator_session_id``, so the\ndeclared tool surface is not subset-checked against any agent (an agent authoring a\nworkflow goes through the create-time-attenuated builtin, a later slice).",
         "operationId": "create_workflow",
         "parameters": [
           {
@@ -8339,7 +8339,7 @@
           "runs"
         ],
         "summary": "Create Run",
-        "description": "Launch a run of a workflow. Snapshots the workflow's current script, binds\nthe run to ``environment_id`` (its ``agent()`` children spawn there), and wakes\nit. A missing workflow or environment 404s.",
+        "description": "Launch a run of a workflow. Snapshots the workflow's current script, binds\nthe run to ``environment_id`` (its ``agent()`` children spawn there) and to\n``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing\nworkflow or environment 404s. The HTTP path is unattenuated operator authority \u2014 no\n``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).",
         "operationId": "create_run",
         "parameters": [
           {
@@ -15221,6 +15221,14 @@
           },
           "input": {
             "title": "Input"
+          },
+          "vault_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Vault Ids",
+            "description": "Vault ids to bind to the run for credential resolution. When an agent launches the run, these must be a subset of the launcher's own vaults; the HTTP path is unattenuated operator authority."
           }
         },
         "type": "object",
@@ -15510,6 +15518,27 @@
             ],
             "title": "Description"
           },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": "array",
+            "title": "Tools"
+          },
+          "mcp_servers": {
+            "items": {
+              "$ref": "#/components/schemas/McpServerSpec"
+            },
+            "type": "array",
+            "title": "Mcp Servers"
+          },
+          "http_servers": {
+            "items": {
+              "$ref": "#/components/schemas/HttpServerSpec"
+            },
+            "type": "array",
+            "title": "Http Servers"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -15578,6 +15607,27 @@
               }
             ],
             "title": "Description"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": "array",
+            "title": "Tools"
+          },
+          "mcp_servers": {
+            "items": {
+              "$ref": "#/components/schemas/McpServerSpec"
+            },
+            "type": "array",
+            "title": "Mcp Servers"
+          },
+          "http_servers": {
+            "items": {
+              "$ref": "#/components/schemas/HttpServerSpec"
+            },
+            "type": "array",
+            "title": "Http Servers"
           }
         },
         "type": "object",
