@@ -270,6 +270,20 @@ def _build_http_servers_block(http_servers: list[HttpServerSpec]) -> str:
     return "\n\n".join(sections)
 
 
+def _agent_owes_response(messages: list[dict[str, Any]]) -> bool:
+    """True when the conversation ends with a user or tool turn.
+
+    Used to gate the ephemeral channels tail block: if the last event-sourced
+    message is a user inbound or a tool result, the agent owes a response and the
+    tail must not be appended (it would become the literal final message and mute
+    literal-minded models). If the last message is an assistant turn, this is an
+    idle/sweep re-check where the channel-status listing is the useful signal.
+    """
+    if not messages:
+        return False
+    return messages[-1].get("role") in ("user", "tool")
+
+
 async def compose_step_context(
     *,
     pool: asyncpg.Pool[Any],
@@ -331,8 +345,16 @@ async def compose_step_context(
     # Tail block lives *after* build_messages so its per-step mutations
     # (unread counts, previews) don't bust the prefix cache.  Paradigm
     # prose stays in the cache-stable system prompt above.
+    #
+    # Only append it when the conversation already ends with an assistant turn
+    # (an idle/sweep re-check, where the channel-status listing is the useful
+    # signal). When the last message is a user or tool turn, the agent owes a
+    # response: appending the tail makes a "0 unread" status block the literal
+    # final message, and literal-minded models (claude-fable-5) anchor on it and
+    # emit an empty turn instead of answering (opus looks back past it; fable does
+    # not). Keep the real stimulus last in that case.
     tail = build_channels_tail_block(channels, events, session.focal_channel)
-    if tail is not None:
+    if tail is not None and not _agent_owes_response(ctx.messages):
         ctx.messages.append(tail)
 
     # Block LiteLLM's adjacent-same-role merge on Anthropic so the tail
