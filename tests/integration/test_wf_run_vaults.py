@@ -37,6 +37,9 @@ from aios.models.vaults import VaultCredentialCreate
 from aios.services import agents as agents_service
 from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
+from aios.tools import workflow_management as wm
+from aios.tools.invoke import ToolBail
+from aios.workflows.service import WORKFLOW_RUN_MAX_DEPTH, WorkflowRunDepthExceededError
 
 pytestmark = pytest.mark.integration
 
@@ -405,3 +408,120 @@ async def test_update_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
         pool, broad.id, account_id=ACC, expected_version=1, description="op-edit"
     )
     assert op.version == 2
+
+
+# ─── agent-acting workflow builtins (slice 3) ────────────────────────────────
+#
+# The handlers call the same attenuated services, supplying the executing session as
+# the trusted actor. These drive the handlers directly (the model dispatch path is
+# what passes session_id; here the test plays that role).
+
+
+async def test_create_workflow_builtin_attenuates(vault_pool: asyncpg.Pool[Any]) -> None:
+    """create_workflow via the builtin: the declared surface ⊆ the executing agent's."""
+    pool = vault_pool
+    s1 = McpServerSpec(name="s1", url="https://s1.example")
+    s2 = McpServerSpec(name="s2", url="https://s2.example")
+    agent = await _make_agent(pool, "builtin-author", mcp_servers=[s1])
+    sess = await _make_session(pool, agent)
+
+    out = await wm.create_workflow_handler(
+        sess, {"name": "wf-bi-ok", "script": _SCRIPT, "mcp_servers": [s1.model_dump(mode="json")]}
+    )
+    assert out["name"] == "wf-bi-ok" and "script" not in out  # heavy field trimmed
+
+    # A server the agent lacks → model-visible ToolBail (the ForbiddenError, converted).
+    with pytest.raises(ToolBail):
+        await wm.create_workflow_handler(
+            sess,
+            {"name": "wf-bi-bad", "script": _SCRIPT, "mcp_servers": [s2.model_dump(mode="json")]},
+        )
+
+
+async def test_create_run_builtin_vault_attenuation_and_env(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """create_run via the builtin: vaults ⊆ the session's; the run inherits the caller's env."""
+    pool = vault_pool
+    vx = await _make_vault(pool, "vx")
+    vy = await _make_vault(pool, "vy")
+    agent = await _make_agent(pool, "builtin-launcher")
+    sess = await _make_session(pool, agent, vault_ids=[vx])
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-bi-run", script=_SCRIPT)
+
+    out = await wm.create_run_handler(sess, {"workflow_id": wf.id, "vault_ids": [vx]})
+    assert out["status"] == "pending"
+    assert out["environment_id"] == ENV  # inherited from the caller session (not model input)
+    assert out["parent_run_id"] is None  # a foreground session launches a root run
+    async with pool.acquire() as conn:
+        assert await wf_queries.get_run_vault_ids(conn, out["id"], account_id=ACC) == [vx]
+
+    # A vault the session doesn't hold → ToolBail, no run row leaks.
+    before = await _run_count(pool)
+    with pytest.raises(ToolBail):
+        await wm.create_run_handler(sess, {"workflow_id": wf.id, "vault_ids": [vy]})
+    assert await _run_count(pool) == before
+
+
+async def test_create_run_builtin_threads_parent_run_id(vault_pool: asyncpg.Pool[Any]) -> None:
+    """The handler threads the caller session's parent_run_id, recording run lineage."""
+    pool = vault_pool
+    agent = await _make_agent(pool, "builtin-nested")
+    sess = await _make_session(pool, agent)
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-bi-nest", script=_SCRIPT)
+    root = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+
+    # Set the parent_run_id column directly (the run-spawn machinery is what populates
+    # it on a real child session); this asserts the handler READS it and threads it.
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE sessions SET parent_run_id = $1 WHERE id = $2", root.id, sess)
+
+    out = await wm.create_run_handler(sess, {"workflow_id": wf.id})
+    assert out["parent_run_id"] == root.id
+
+
+async def test_create_run_depth_cap(vault_pool: asyncpg.Pool[Any]) -> None:
+    """The vertical depth cap: a parent_run_id chain may nest WORKFLOW_RUN_MAX_DEPTH deep, no more."""
+    pool = vault_pool
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-depth", script=_SCRIPT)
+
+    # Build a chain of runs at depths 1..MAX (the root has parent_run_id=None, uncapped).
+    parent: str | None = None
+    for _ in range(WORKFLOW_RUN_MAX_DEPTH):
+        run = await wf_service.create_run(
+            pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=parent
+        )
+        parent = run.id
+
+    # One more would be depth MAX+1 → refused, and no run row leaks.
+    before = await _run_count(pool)
+    with pytest.raises(WorkflowRunDepthExceededError):
+        await wf_service.create_run(
+            pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=parent
+        )
+    assert await _run_count(pool) == before
+
+
+async def test_create_run_rejects_foreign_environment(vault_pool: asyncpg.Pool[Any]) -> None:
+    """F2: a run's environment_id must be account-owned — a bare FK would accept a
+    foreign tenant's env and leak its image/env-vars. Bounds the HTTP path too."""
+    pool = vault_pool
+    async with pool.acquire() as conn:
+        # A second tenant (a child account — ACC is already the one active root).
+        await conn.execute(
+            "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+            "VALUES ('acc_foreign', $1, FALSE, 'foreign')",
+            ACC,
+        )
+        await conn.execute(
+            "INSERT INTO environments (id, name, config, account_id) "
+            "VALUES ('env_foreign', 'fe', '{}'::jsonb, 'acc_foreign')"
+        )
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-env", script=_SCRIPT)
+
+    before = await _run_count(pool)
+    with pytest.raises(NotFoundError):
+        await wf_service.create_run(
+            pool, account_id=ACC, workflow_id=wf.id, environment_id="env_foreign"
+        )
+    assert await _run_count(pool) == before

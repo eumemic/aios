@@ -394,6 +394,33 @@ async def insert_wf_run(
     return _row_to_wf_run(row)
 
 
+async def run_ancestor_depth(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> int:
+    """Depth of ``run_id`` in the ``parent_run_id`` chain (a root run = 1).
+
+    Walks ``wf_runs.parent_run_id`` upward via a recursive CTE, account-scoped on
+    every hop. Returns 0 if ``run_id`` doesn't exist for the account (defensive; the
+    depth cap passes a live ancestor). The chain is immutable once written, so the
+    count is race-free without locking — concurrent sibling inserts can't change an
+    ancestor's depth.
+    """
+    depth: int | None = await conn.fetchval(
+        """
+        WITH RECURSIVE chain AS (
+            SELECT id, parent_run_id, 1 AS depth
+              FROM wf_runs WHERE id = $1 AND account_id = $2
+            UNION ALL
+            SELECT r.id, r.parent_run_id, c.depth + 1
+              FROM wf_runs r JOIN chain c ON r.id = c.parent_run_id
+             WHERE r.account_id = $2
+        )
+        SELECT max(depth) FROM chain
+        """,
+        run_id,
+        account_id,
+    )
+    return depth or 0
+
+
 async def set_run_vaults(
     conn: asyncpg.Connection[Any],
     run_id: str,

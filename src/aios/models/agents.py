@@ -35,6 +35,10 @@ BuiltinToolType = Literal[
     "schedule_task_add",
     "schedule_task_remove",
     "schedule_task_update",
+    "create_workflow",
+    "update_workflow",
+    "create_run",
+    "await_run",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled
