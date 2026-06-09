@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from procrastinate import exceptions as procrastinate_exceptions
 from procrastinate.types import JSONValue
 
+from aios.db import queries
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
 
@@ -19,6 +20,14 @@ if TYPE_CHECKING:
     import asyncpg
 
 log = get_logger("aios.services.wake")
+
+# Foreground protection: procrastinate fetches todo jobs in (priority DESC, id ASC)
+# order, so a negative priority makes a job yield to higher-priority ones. Background
+# workflow work — agent() children + run steps — is demoted below user-facing
+# (foreground) sessions so a workflow's fan-out can't starve a user's message.
+# Foreground stays at the procrastinate default; only background is demoted.
+_FOREGROUND_PRIORITY = 0
+_BACKGROUND_PRIORITY = -10
 
 
 async def defer_wake(
@@ -48,6 +57,18 @@ async def defer_wake(
     """
     from aios.harness.procrastinate_app import app
 
+    # Foreground protection: a workflow agent() child yields to user-facing sessions so a
+    # fan-out can't starve a user's message. The signal is a non-null parent_run_id — set
+    # (together with origin='background') only by create_child_session — read here from the
+    # session's immutable row, so every wake of the child (first spawn, each tool-completion,
+    # the sweep) is demoted uniformly at this single chokepoint, with no caller plumbing. A
+    # missing row (deleted-session race) → foreground default; the wake then no-ops harmlessly.
+    # Resolved before the span/enqueue so it isn't a new failure point between them.
+    async with pool.acquire() as conn:
+        ctx = await queries.get_session_workflow_context(conn, session_id)
+    parent_run_id = ctx[1] if ctx is not None else None  # (account_id, parent_run_id) | None
+    priority = _BACKGROUND_PRIORITY if parent_run_id is not None else _FOREGROUND_PRIORITY
+
     span_data: dict[str, Any] = {"event": "wake_deferred", "cause": cause}
     if delay_seconds is not None:
         span_data["delay_seconds"] = delay_seconds
@@ -60,6 +81,7 @@ async def defer_wake(
             "harness.wake_session",
             lock=session_id,
             queueing_lock=session_id,
+            priority=priority,
             schedule_in={"seconds": delay_seconds},
         )
     else:
@@ -67,6 +89,7 @@ async def defer_wake(
             "harness.wake_session",
             lock=session_id,
             queueing_lock=session_id,
+            priority=priority,
         )
 
     try:
@@ -93,6 +116,7 @@ async def defer_run_wake(run_id: str) -> None:
         "harness.wake_workflow",
         lock=run_id,
         queueing_lock=run_id,
+        priority=_BACKGROUND_PRIORITY,  # workflow run steps yield to foreground too
     )
     try:
         await deferrer.defer_async(run_id=run_id)
