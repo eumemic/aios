@@ -31,6 +31,7 @@ class SessionTemplateUpdate:
             vault_ids (list[str] | None | Unset):
             memory_store_ids (list[str] | None | Unset):
             metadata (None | SessionTemplateUpdateMetadataType0 | Unset):
+            archive_when_idle (bool | None | Unset):
     """
 
     name: None | str | Unset = UNSET
@@ -40,6 +41,7 @@ class SessionTemplateUpdate:
     vault_ids: list[str] | None | Unset = UNSET
     memory_store_ids: list[str] | None | Unset = UNSET
     metadata: None | SessionTemplateUpdateMetadataType0 | Unset = UNSET
+    archive_when_idle: bool | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.session_template_update_metadata_type_0 import (
@@ -96,6 +98,12 @@ class SessionTemplateUpdate:
         else:
             metadata = self.metadata
 
+        archive_when_idle: bool | None | Unset
+        if isinstance(self.archive_when_idle, Unset):
+            archive_when_idle = UNSET
+        else:
+            archive_when_idle = self.archive_when_idle
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -113,6 +121,8 @@ class SessionTemplateUpdate:
             field_dict["memory_store_ids"] = memory_store_ids
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
+        if archive_when_idle is not UNSET:
+            field_dict["archive_when_idle"] = archive_when_idle
 
         return field_dict
 
@@ -213,6 +223,15 @@ class SessionTemplateUpdate:
 
         metadata = _parse_metadata(d.pop("metadata", UNSET))
 
+        def _parse_archive_when_idle(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        archive_when_idle = _parse_archive_when_idle(d.pop("archive_when_idle", UNSET))
+
         session_template_update = cls(
             name=name,
             agent_id=agent_id,
@@ -221,6 +240,7 @@ class SessionTemplateUpdate:
             vault_ids=vault_ids,
             memory_store_ids=memory_store_ids,
             metadata=metadata,
+            archive_when_idle=archive_when_idle,
         )
 
         return session_template_update

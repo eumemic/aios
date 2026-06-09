@@ -58,6 +58,7 @@ class Session:
             focal_locked (bool | Unset):  Default: False.
             origin (SessionOrigin | Unset):  Default: SessionOrigin.FOREGROUND.
             parent_run_id (None | str | Unset):
+            archive_when_idle (bool | Unset):  Default: False.
             last_event_at (datetime.datetime | None | Unset):
             total_events (int | Unset):  Default: 0.
     """
@@ -85,6 +86,7 @@ class Session:
     focal_locked: bool | Unset = False
     origin: SessionOrigin | Unset = SessionOrigin.FOREGROUND
     parent_run_id: None | str | Unset = UNSET
+    archive_when_idle: bool | Unset = False
     last_event_at: datetime.datetime | None | Unset = UNSET
     total_events: int | Unset = 0
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -181,6 +183,8 @@ class Session:
         else:
             parent_run_id = self.parent_run_id
 
+        archive_when_idle = self.archive_when_idle
+
         last_event_at: None | str | Unset
         if isinstance(self.last_event_at, Unset):
             last_event_at = UNSET
@@ -228,6 +232,8 @@ class Session:
             field_dict["origin"] = origin
         if parent_run_id is not UNSET:
             field_dict["parent_run_id"] = parent_run_id
+        if archive_when_idle is not UNSET:
+            field_dict["archive_when_idle"] = archive_when_idle
         if last_event_at is not UNSET:
             field_dict["last_event_at"] = last_event_at
         if total_events is not UNSET:
@@ -395,6 +401,8 @@ class Session:
 
         parent_run_id = _parse_parent_run_id(d.pop("parent_run_id", UNSET))
 
+        archive_when_idle = d.pop("archive_when_idle", UNSET)
+
         def _parse_last_event_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -436,6 +444,7 @@ class Session:
             focal_locked=focal_locked,
             origin=origin,
             parent_run_id=parent_run_id,
+            archive_when_idle=archive_when_idle,
             last_event_at=last_event_at,
             total_events=total_events,
         )

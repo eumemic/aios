@@ -30,6 +30,9 @@ class SessionCreate:
         title (None | str | Unset):
         metadata (SessionCreateMetadata | Unset):
         vault_ids (list[str] | Unset): Vault ids to bind to this session for MCP credential resolution.
+        archive_when_idle (bool | Unset): When true, the session is soft-archived the first time it goes idle owing
+            nothing — a self-reclaiming, one-shot session. Immutable after launch. Workflow agent() children launch with
+            this set. Default: False.
         workspace_path (None | str | Unset): Absolute host path to use as the session workspace. If omitted, defaults to
             workspace_root/<account_id>/<session_id>. Must resolve within the account's workspace subdirectory. The
             directory must exist; aios will not create it.
@@ -54,6 +57,7 @@ class SessionCreate:
     title: None | str | Unset = UNSET
     metadata: SessionCreateMetadata | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
+    archive_when_idle: bool | Unset = False
     workspace_path: None | str | Unset = UNSET
     env: SessionCreateEnv | Unset = UNSET
     initial_message: None | str | Unset = UNSET
@@ -86,6 +90,8 @@ class SessionCreate:
         vault_ids: list[str] | Unset = UNSET
         if not isinstance(self.vault_ids, Unset):
             vault_ids = self.vault_ids
+
+        archive_when_idle = self.archive_when_idle
 
         workspace_path: None | str | Unset
         if isinstance(self.workspace_path, Unset):
@@ -138,6 +144,8 @@ class SessionCreate:
             field_dict["metadata"] = metadata
         if vault_ids is not UNSET:
             field_dict["vault_ids"] = vault_ids
+        if archive_when_idle is not UNSET:
+            field_dict["archive_when_idle"] = archive_when_idle
         if workspace_path is not UNSET:
             field_dict["workspace_path"] = workspace_path
         if env is not UNSET:
@@ -190,6 +198,8 @@ class SessionCreate:
             metadata = SessionCreateMetadata.from_dict(_metadata)
 
         vault_ids = cast(list[str], d.pop("vault_ids", UNSET))
+
+        archive_when_idle = d.pop("archive_when_idle", UNSET)
 
         def _parse_workspace_path(data: object) -> None | str | Unset:
             if data is None:
@@ -261,6 +271,7 @@ class SessionCreate:
             title=title,
             metadata=metadata,
             vault_ids=vault_ids,
+            archive_when_idle=archive_when_idle,
             workspace_path=workspace_path,
             env=env,
             initial_message=initial_message,

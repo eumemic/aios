@@ -192,6 +192,7 @@ class TestStepStartEndSpans:
             focal_channel=None,
             origin="foreground",
             parent_run_id=None,
+            archive_when_idle=False,
         )
         agent = SimpleNamespace(
             model="openrouter/x",
@@ -300,6 +301,7 @@ class TestStepStartEndSpans:
             focal_channel=None,
             origin="foreground",
             parent_run_id=None,
+            archive_when_idle=False,
         )
         agent = SimpleNamespace(
             model="openrouter/x",
@@ -395,6 +397,201 @@ class TestStepStartEndSpans:
             "step_end",
         ]
 
+    async def test_archive_when_idle_reclaims_after_step_end(self) -> None:
+        """Regression fence: an ``archive_when_idle`` session is reclaimed as the LAST
+        session write of the step — strictly AFTER ``step_end``. If the reclaim ran inside
+        the step body (before the ``step_end`` append in run_session_step's finally), the
+        archive would fence that append on ``archived_at IS NULL`` and the step would crash."""
+        from aios.harness.loop import run_session_step
+
+        session = SimpleNamespace(
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            origin="background",
+            parent_run_id="run_x",
+            archive_when_idle=True,
+        )
+        agent = SimpleNamespace(
+            model="openrouter/x",
+            tools=[],
+            mcp_servers=[],
+            http_servers=[],
+            skills=[],
+            system="sys",
+            litellm_extra={},
+            window_min=1000,
+            window_max=10000,
+        )
+        start_event = SimpleNamespace(id="ev_step")
+
+        manager = MagicMock()
+        append_event = AsyncMock(return_value=start_event)
+        reclaim = AsyncMock(return_value=True)
+        manager.attach_mock(append_event, "append_event")
+        manager.attach_mock(reclaim, "reclaim")
+
+        with (
+            patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
+            patch("aios.harness.loop.runtime.require_task_registry", return_value=MagicMock()),
+            patch(
+                "aios.harness.loop.find_sessions_needing_inference",
+                AsyncMock(return_value={"sess_x"}),
+            ),
+            patch(
+                "aios.harness.loop.sessions_service.get_session_basic",
+                AsyncMock(return_value=session),
+            ),
+            patch("aios.harness.loop.agents_service.get_agent", AsyncMock(return_value=agent)),
+            patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
+            patch(
+                "aios.harness.loop.sessions_service.read_windowed_events",
+                AsyncMock(return_value=[]),
+            ),
+            patch("aios.harness.loop._dispatch_confirmed_tools", AsyncMock(return_value=[])),
+            patch(
+                "aios.harness.loop.compose_step_context",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        model="openrouter/x",
+                        messages=[],
+                        tools=[],
+                        reacting_to=0,
+                        skill_versions=[],
+                    )
+                ),
+            ),
+            patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock()),
+            patch("aios.harness.loop.sessions_service.append_event", append_event),
+            patch(
+                "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
+                AsyncMock(return_value=(False, None)),
+            ),
+            patch("aios.harness.loop.sessions_service.reclaim_session_if_idle", reclaim),
+            patch(
+                "aios.harness.loop.stream_litellm",
+                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+            ),
+            patch("aios.harness.loop.sessions_service.increment_usage", AsyncMock()),
+            patch("aios.db.sse_lock.has_subscriber", AsyncMock(return_value=False)),
+        ):
+            await run_session_step("sess_x")
+
+        # Reclaim is awaited exactly once, against the live pool + session.
+        reclaim.assert_awaited_once_with(ANY, "sess_x", account_id=ANY)
+        # …and strictly AFTER the step_end span append (the bug: reclaim-before-step_end).
+        last_step_end = max(
+            i
+            for i, (name, args, _kw) in enumerate(manager.mock_calls)
+            if name == "append_event" and args[2] == "span" and args[3].get("event") == "step_end"
+        )
+        reclaim_idx = next(
+            i for i, (name, *_rest) in enumerate(manager.mock_calls) if name == "reclaim"
+        )
+        assert reclaim_idx > last_step_end, (
+            f"reclaim must run after step_end; step_end at {last_step_end}, reclaim at {reclaim_idx}"
+        )
+
+    async def test_archive_when_idle_reclaim_follows_the_nudge_wake(self) -> None:
+        """When the quiescence guard nudges (re-activating the session), the reclaim still
+        runs AFTER the ``request_nudge`` defer_wake — which appends a ``wake_deferred`` span.
+        If reclaim ran first it would archive the row and that span append would crash; here
+        the reclaim no-ops (the nudged session is active) but the ORDERING is the fence."""
+        from aios.harness.loop import run_session_step
+
+        session = SimpleNamespace(
+            id="sess_x",
+            agent_id="agt_x",
+            agent_version=None,
+            focal_channel=None,
+            origin="background",
+            parent_run_id="run_x",
+            archive_when_idle=True,
+        )
+        agent = SimpleNamespace(
+            model="openrouter/x",
+            tools=[],
+            mcp_servers=[],
+            http_servers=[],
+            skills=[],
+            system="sys",
+            litellm_extra={},
+            window_min=1000,
+            window_max=10000,
+        )
+        start_event = SimpleNamespace(id="ev_step")
+
+        manager = MagicMock()
+        defer_wake_mock = AsyncMock()
+        reclaim = AsyncMock(return_value=False)  # nudged → active → reclaim no-ops
+        manager.attach_mock(defer_wake_mock, "defer_wake")
+        manager.attach_mock(reclaim, "reclaim")
+
+        with (
+            patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
+            patch("aios.harness.loop.runtime.require_task_registry", return_value=MagicMock()),
+            patch(
+                "aios.harness.loop.find_sessions_needing_inference",
+                AsyncMock(return_value={"sess_x"}),
+            ),
+            patch(
+                "aios.harness.loop.sessions_service.get_session_basic",
+                AsyncMock(return_value=session),
+            ),
+            patch("aios.harness.loop.agents_service.get_agent", AsyncMock(return_value=agent)),
+            patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
+            patch(
+                "aios.harness.loop.sessions_service.read_windowed_events",
+                AsyncMock(return_value=[]),
+            ),
+            patch("aios.harness.loop._dispatch_confirmed_tools", AsyncMock(return_value=[])),
+            patch(
+                "aios.harness.loop.compose_step_context",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        model="openrouter/x",
+                        messages=[],
+                        tools=[],
+                        reacting_to=0,
+                        skill_versions=[],
+                    )
+                ),
+            ),
+            patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock()),
+            patch(
+                "aios.harness.loop.sessions_service.append_event",
+                AsyncMock(return_value=start_event),
+            ),
+            patch(
+                "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
+                AsyncMock(return_value=(True, None)),  # guard nudged
+            ),
+            patch("aios.harness.loop.sessions_service.reclaim_session_if_idle", reclaim),
+            patch("aios.harness.loop.defer_wake", defer_wake_mock),
+            patch(
+                "aios.harness.loop.stream_litellm",
+                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+            ),
+            patch("aios.harness.loop.sessions_service.increment_usage", AsyncMock()),
+            patch("aios.db.sse_lock.has_subscriber", AsyncMock(return_value=False)),
+        ):
+            await run_session_step("sess_x")
+
+        defer_wake_mock.assert_awaited_once_with(
+            ANY, "sess_x", cause="request_nudge", account_id=ANY
+        )
+        reclaim.assert_awaited_once_with(ANY, "sess_x", account_id=ANY)
+        nudge_idx = next(
+            i for i, (name, *_r) in enumerate(manager.mock_calls) if name == "defer_wake"
+        )
+        reclaim_idx = next(
+            i for i, (name, *_r) in enumerate(manager.mock_calls) if name == "reclaim"
+        )
+        assert reclaim_idx > nudge_idx, (
+            f"reclaim must run after the nudge defer_wake; nudge at {nudge_idx}, reclaim at {reclaim_idx}"
+        )
+
     async def test_step_end_emitted_when_budget_exhausted(self) -> None:
         """If the model-call budget is exhausted, ``step_end`` still fires."""
         from aios.harness.loop import run_session_step
@@ -406,6 +603,7 @@ class TestStepStartEndSpans:
             focal_channel=None,
             origin="foreground",
             parent_run_id=None,
+            archive_when_idle=False,
         )
         agent = SimpleNamespace(
             model="openrouter/x",
@@ -502,6 +700,7 @@ async def _harness_with_guard(
         focal_channel=None,
         origin="background",
         parent_run_id="run_x",
+        archive_when_idle=False,
     )
     agent = SimpleNamespace(
         model="openrouter/x",

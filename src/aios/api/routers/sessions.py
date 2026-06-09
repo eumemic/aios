@@ -93,6 +93,7 @@ async def create(
         crypto_box=crypto_box,
         workspace_path=body.workspace_path,
         env=body.env or None,
+        archive_when_idle=body.archive_when_idle,
         account_id=account_id,
     )
     if body.initial_message is not None:

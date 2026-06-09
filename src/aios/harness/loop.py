@@ -84,11 +84,15 @@ class _StepResult(NamedTuple):
       session so the model gets another turn (``defer_wake``).
     * ``autoerror_caller_run_id`` — the guard auto-errored a request past its budget;
       wake that caller run to harvest the ``no_return`` (``defer_run_wake``).
+    * ``archive_when_idle`` — the session was launched self-reclaiming; archive it
+      (iff still idle) as the LAST write of the step, after ``step_end`` and the wakes
+      (once archived, any further ``append_event`` hits the ``archived_at IS NULL`` fence).
     """
 
     retry_delay: float | None = None
     nudge_session: bool = False
     autoerror_caller_run_id: str | None = None
+    archive_when_idle: bool = False
 
 
 async def refresh_session_mount_state(
@@ -220,6 +224,19 @@ async def run_session_step(
         await defer_wake(pool, session_id, cause="request_nudge", account_id=account_id)
     if result.autoerror_caller_run_id is not None:
         await defer_run_wake(result.autoerror_caller_run_id)
+
+    # Archive-on-quiescence, performed LAST: a session launched ``archive_when_idle``
+    # self-archives the first time it goes idle. It runs after ``step_end`` and every
+    # wake span so it is the step's final session write — once archived, ``append_event``
+    # rejects writes (``archived_at IS NULL`` fence). ``reclaim_session_if_idle`` is
+    # conditional on still-idle, so a nudge or a user message that re-activated the
+    # session (its ``defer_wake`` span already appended just above) wins and the archive
+    # no-ops. Only the clean end-of-turn return sets the flag (error/reschedule paths
+    # leave it False), so a rescheduling session is never reclaimed out from under a retry.
+    if result.archive_when_idle and await sessions_service.reclaim_session_if_idle(
+        pool, session_id, account_id=account_id
+    ):
+        log.info("step.session_reclaimed", session_id=session_id, cause=cause)
 
 
 async def _run_session_step_body(
@@ -602,10 +619,14 @@ async def _run_session_step_body(
         pool, session_id, "turn_ended", "idle", "end_turn", account_id=account_id
     )
     log.info("step.turn_ended", session_id=session_id, cause=cause)
-    # Hand the quiescence guard's wakes to run_session_step to defer after step_end.
+    # Hand the quiescence guard's wakes — and the archive-on-quiescence reclaim — to
+    # run_session_step to perform AFTER step_end (the reclaim must be the step's last
+    # session write; see _StepResult.archive_when_idle). The flag is the session's
+    # immutable launch property, read once from the start-of-step ``session``.
     return _StepResult(
         nudge_session=nudged,
         autoerror_caller_run_id=autoerror_caller_run_id,
+        archive_when_idle=session.archive_when_idle,
     )
 
 

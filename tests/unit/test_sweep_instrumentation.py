@@ -147,6 +147,7 @@ class TestEntrySweepSpan:
             focal_channel=None,
             origin="foreground",
             parent_run_id=None,
+            archive_when_idle=False,
         )
         agent = SimpleNamespace(
             model="openrouter/x",

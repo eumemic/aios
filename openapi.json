@@ -12990,6 +12990,11 @@
             ],
             "title": "Parent Run Id"
           },
+          "archive_when_idle": {
+            "type": "boolean",
+            "title": "Archive When Idle",
+            "default": false
+          },
           "last_event_at": {
             "anyOf": [
               {
@@ -13090,6 +13095,12 @@
             "type": "array",
             "title": "Vault Ids",
             "description": "Vault ids to bind to this session for MCP credential resolution."
+          },
+          "archive_when_idle": {
+            "type": "boolean",
+            "title": "Archive When Idle",
+            "description": "When true, the session is soft-archived the first time it goes idle owing nothing \u2014 a self-reclaiming, one-shot session. Immutable after launch. Workflow agent() children launch with this set.",
+            "default": false
           },
           "workspace_path": {
             "anyOf": [
@@ -13233,6 +13244,11 @@
             "type": "object",
             "title": "Metadata"
           },
+          "archive_when_idle": {
+            "type": "boolean",
+            "title": "Archive When Idle",
+            "default": false
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -13318,6 +13334,12 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
+          },
+          "archive_when_idle": {
+            "type": "boolean",
+            "title": "Archive When Idle",
+            "description": "Copied down to every session this template spawns: when true, each spawned session self-archives the first time it goes idle.",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -13417,6 +13439,17 @@
               }
             ],
             "title": "Metadata"
+          },
+          "archive_when_idle": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archive When Idle"
           }
         },
         "additionalProperties": false,

@@ -27,6 +27,8 @@ class SessionTemplateCreate:
         vault_ids (list[str] | Unset):
         memory_store_ids (list[str] | Unset):
         metadata (SessionTemplateCreateMetadata | Unset):
+        archive_when_idle (bool | Unset): Copied down to every session this template spawns: when true, each spawned
+            session self-archives the first time it goes idle. Default: False.
     """
 
     name: str
@@ -36,6 +38,7 @@ class SessionTemplateCreate:
     vault_ids: list[str] | Unset = UNSET
     memory_store_ids: list[str] | Unset = UNSET
     metadata: SessionTemplateCreateMetadata | Unset = UNSET
+    archive_when_idle: bool | Unset = False
 
     def to_dict(self) -> dict[str, Any]:
         name = self.name
@@ -62,6 +65,8 @@ class SessionTemplateCreate:
         if not isinstance(self.metadata, Unset):
             metadata = self.metadata.to_dict()
 
+        archive_when_idle = self.archive_when_idle
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -79,6 +84,8 @@ class SessionTemplateCreate:
             field_dict["memory_store_ids"] = memory_store_ids
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
+        if archive_when_idle is not UNSET:
+            field_dict["archive_when_idle"] = archive_when_idle
 
         return field_dict
 
@@ -115,6 +122,8 @@ class SessionTemplateCreate:
         else:
             metadata = SessionTemplateCreateMetadata.from_dict(_metadata)
 
+        archive_when_idle = d.pop("archive_when_idle", UNSET)
+
         session_template_create = cls(
             name=name,
             agent_id=agent_id,
@@ -123,6 +132,7 @@ class SessionTemplateCreate:
             vault_ids=vault_ids,
             memory_store_ids=memory_store_ids,
             metadata=metadata,
+            archive_when_idle=archive_when_idle,
         )
 
         return session_template_create

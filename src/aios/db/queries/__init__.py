@@ -872,6 +872,7 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         # explicit-column reads that don't select them.
         origin=row.get("origin") or "foreground",
         parent_run_id=row.get("parent_run_id"),
+        archive_when_idle=bool(row.get("archive_when_idle")),
         # Present only when the query derives it (list_sessions); other callers
         # (single read, INSERT ... RETURNING) leave it None.
         last_event_at=row.get("last_event_at"),
@@ -903,6 +904,7 @@ async def insert_session(
     env: dict[str, str] | None = None,
     focal_channel: str | None = None,
     focal_locked: bool = False,
+    archive_when_idle: bool = False,
 ) -> Session:
     """Insert a fresh session row.
 
@@ -927,9 +929,9 @@ async def insert_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 workspace_volume_path, env,
-                focal_channel, focal_locked, account_id
+                focal_channel, focal_locked, account_id, archive_when_idle
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12)
             RETURNING *
             """,
             new_id,
@@ -943,6 +945,7 @@ async def insert_session(
             focal_channel,
             focal_locked,
             account_id,
+            archive_when_idle,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -983,10 +986,10 @@ async def insert_child_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 workspace_volume_path, env, focal_channel, focal_locked,
-                account_id, parent_run_id, origin
+                account_id, parent_run_id, origin, archive_when_idle
             )
             VALUES ($1, $2, $3, $4, NULL, '{}'::jsonb, $5, '{}'::jsonb,
-                    NULL, FALSE, $6, $7, 'background')
+                    NULL, FALSE, $6, $7, 'background', TRUE)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -1186,6 +1189,30 @@ async def derive_session_status(
         account_id,
     )
     return status or "idle"
+
+
+async def reclaim_session_if_idle(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> bool:
+    """Soft-archive the session **iff it is currently idle** — the archive-on-quiescence reclaim.
+
+    One conditional UPDATE reusing ``_SESSION_ACTIVE_EXPR`` (the same predicate every reader and
+    the sweep use): a stimulus arriving as the session idles flips the predicate to active → no
+    row matches → no-op, so a late user/tool message always wins over reclaim. Idempotent via
+    ``archived_at IS NULL``. Returns ``True`` iff this call archived the row.
+
+    The caller gates on the session's immutable ``archive_when_idle`` launch flag; this query
+    enforces the idle condition atomically and must be the **last** session write of the step
+    (no write may follow — ``append_event`` fences on ``archived_at IS NULL``).
+    """
+    row = await conn.fetchrow(
+        "UPDATE sessions SET archived_at = now(), updated_at = now() "
+        f"WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND NOT {_SESSION_ACTIVE_EXPR} "
+        "RETURNING id",
+        session_id,
+        account_id,
+    )
+    return row is not None
 
 
 async def write_response_if_absent(
@@ -5239,6 +5266,7 @@ def _row_to_session_template(row: asyncpg.Record) -> SessionTemplate:
         vault_ids=list(row["vault_ids"] or []),
         memory_store_ids=list(row["memory_store_ids"] or []),
         metadata=metadata,
+        archive_when_idle=row["archive_when_idle"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -5256,6 +5284,7 @@ async def insert_session_template(
     vault_ids: list[str],
     memory_store_ids: list[str],
     metadata: dict[str, Any],
+    archive_when_idle: bool = False,
 ) -> SessionTemplate:
     new_id = make_id(SESSION_TEMPLATE)
     try:
@@ -5263,8 +5292,8 @@ async def insert_session_template(
             """
             INSERT INTO session_templates
                 (id, name, agent_id, agent_version, environment_id,
-                 vault_ids, memory_store_ids, metadata, account_id)
-            VALUES ($1, $2, $3, $4, $5, $6::text[], $7::text[], $8::jsonb, $9)
+                 vault_ids, memory_store_ids, metadata, account_id, archive_when_idle)
+            VALUES ($1, $2, $3, $4, $5, $6::text[], $7::text[], $8::jsonb, $9, $10)
             RETURNING *
             """,
             new_id,
@@ -5276,6 +5305,7 @@ async def insert_session_template(
             memory_store_ids,
             json.dumps(metadata),
             account_id,
+            archive_when_idle,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -5329,6 +5359,7 @@ async def update_session_template(
     vault_ids: list[str] | None = None,
     memory_store_ids: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    archive_when_idle: bool | None = None,
 ) -> SessionTemplate:
     # Refuse updates to archived templates: the resolver's
     # ``_spawn_per_chat_session`` already drops inbounds that target an
@@ -5361,6 +5392,8 @@ async def update_session_template(
         fields.append(("memory_store_ids", memory_store_ids, "text[]"))
     if metadata is not None:
         fields.append(("metadata", metadata, "jsonb"))
+    if archive_when_idle is not None:
+        fields.append(("archive_when_idle", archive_when_idle, None))
     sets = _build_set_assignments(fields, args)
     if not sets:
         return await get_session_template(conn, template_id, account_id=account_id)

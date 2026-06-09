@@ -148,6 +148,14 @@ class SessionCreate(BaseModel):
         default_factory=list,
         description="Vault ids to bind to this session for MCP credential resolution.",
     )
+    archive_when_idle: bool = Field(
+        default=False,
+        description=(
+            "When true, the session is soft-archived the first time it goes idle "
+            "owing nothing — a self-reclaiming, one-shot session. Immutable after "
+            "launch. Workflow agent() children launch with this set."
+        ),
+    )
 
     workspace_path: str | None = Field(
         default=None,
@@ -274,6 +282,7 @@ class Session(BaseModel):
     focal_locked: bool = False
     origin: SessionOrigin = "foreground"
     parent_run_id: str | None = None  # set for a workflow-spawned (background) child
+    archive_when_idle: bool = False  # self-archive on first idle (immutable launch property)
     last_event_at: datetime | None = None
     total_events: int = 0
 
