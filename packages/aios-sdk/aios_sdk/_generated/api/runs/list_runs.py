@@ -15,6 +15,7 @@ def _get_kwargs(
     cursor: None | str | Unset = UNSET,
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
@@ -44,6 +45,13 @@ def _get_kwargs(
     else:
         json_status = status
     params["status"] = json_status
+
+    json_parent_run_id: None | str | Unset
+    if isinstance(parent_run_id, Unset):
+        json_parent_run_id = UNSET
+    else:
+        json_parent_run_id = parent_run_id
+    params["parent_run_id"] = json_parent_run_id
 
     json_limit: int | None | Unset
     if isinstance(limit, Unset):
@@ -100,18 +108,21 @@ def sync_detailed(
     cursor: None | str | Unset = UNSET,
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseWfRun]:
     """List Runs
 
      List the account's runs, newest first. First page: optional ``workflow_id`` /
-    ``status`` filters + ``limit``; subsequent pages: ``?cursor=<next_cursor>``.
+    ``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.
 
     Args:
         cursor (None | str | Unset):
         workflow_id (None | str | Unset):
         status (None | str | Unset):
+        parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -127,6 +138,7 @@ def sync_detailed(
         cursor=cursor,
         workflow_id=workflow_id,
         status=status,
+        parent_run_id=parent_run_id,
         limit=limit,
         authorization=authorization,
     )
@@ -144,18 +156,21 @@ def sync(
     cursor: None | str | Unset = UNSET,
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseWfRun | None:
     """List Runs
 
      List the account's runs, newest first. First page: optional ``workflow_id`` /
-    ``status`` filters + ``limit``; subsequent pages: ``?cursor=<next_cursor>``.
+    ``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.
 
     Args:
         cursor (None | str | Unset):
         workflow_id (None | str | Unset):
         status (None | str | Unset):
+        parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -172,6 +187,7 @@ def sync(
         cursor=cursor,
         workflow_id=workflow_id,
         status=status,
+        parent_run_id=parent_run_id,
         limit=limit,
         authorization=authorization,
     ).parsed
@@ -183,18 +199,21 @@ async def asyncio_detailed(
     cursor: None | str | Unset = UNSET,
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseWfRun]:
     """List Runs
 
      List the account's runs, newest first. First page: optional ``workflow_id`` /
-    ``status`` filters + ``limit``; subsequent pages: ``?cursor=<next_cursor>``.
+    ``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.
 
     Args:
         cursor (None | str | Unset):
         workflow_id (None | str | Unset):
         status (None | str | Unset):
+        parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -210,6 +229,7 @@ async def asyncio_detailed(
         cursor=cursor,
         workflow_id=workflow_id,
         status=status,
+        parent_run_id=parent_run_id,
         limit=limit,
         authorization=authorization,
     )
@@ -225,18 +245,21 @@ async def asyncio(
     cursor: None | str | Unset = UNSET,
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
+    parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseWfRun | None:
     """List Runs
 
      List the account's runs, newest first. First page: optional ``workflow_id`` /
-    ``status`` filters + ``limit``; subsequent pages: ``?cursor=<next_cursor>``.
+    ``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.
 
     Args:
         cursor (None | str | Unset):
         workflow_id (None | str | Unset):
         status (None | str | Unset):
+        parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -254,6 +277,7 @@ async def asyncio(
             cursor=cursor,
             workflow_id=workflow_id,
             status=status,
+            parent_run_id=parent_run_id,
             limit=limit,
             authorization=authorization,
         )

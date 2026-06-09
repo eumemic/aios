@@ -52,6 +52,7 @@ async def create_workflow(
         script=body.script,
         input_schema=body.input_schema,
         output_schema=body.output_schema,
+        description=body.description,
     )
 
 
@@ -108,16 +109,27 @@ async def list_runs(
     cursor: str | None = None,
     workflow_id: str | None = None,
     status: str | None = None,
+    parent_run_id: str | None = None,
     limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[WfRun]:
     """List the account's runs, newest first. First page: optional ``workflow_id`` /
-    ``status`` filters + ``limit``; subsequent pages: ``?cursor=<next_cursor>``."""
-    st = page_cursor(cursor, {"workflow_id": workflow_id, "status": status, "limit": limit})
+    ``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs."""
+    st = page_cursor(
+        cursor,
+        {
+            "workflow_id": workflow_id,
+            "status": status,
+            "parent_run_id": parent_run_id,
+            "limit": limit,
+        },
+    )
     after = str(st.cursor) if st is not None else None
     page_limit = st.limit if st is not None else (limit if limit is not None else 50)
     if st is not None:
         workflow_id = st.filters.get("workflow_id")
         status = st.filters.get("status")
+        parent_run_id = st.filters.get("parent_run_id")
     items = await service.list_runs(
         pool,
         account_id=account_id,
@@ -125,12 +137,13 @@ async def list_runs(
         after=after,
         workflow_id=workflow_id,
         status=status,
+        parent_run_id=parent_run_id,
     )
     return ListResponse[WfRun].paginate(
         items,
         page_limit,
         cursor=lambda x: x.id,
-        filters={"workflow_id": workflow_id, "status": status},
+        filters={"workflow_id": workflow_id, "status": status, "parent_run_id": parent_run_id},
     )
 
 
@@ -181,6 +194,15 @@ async def resume_gate(
         pool, run_id=run_id, account_id=account_id, gate_nonce=body.gate_nonce, result=body.result
     )
     return await service.get_run(pool, run_id, account_id=account_id)
+
+
+@runs_router.post("/{run_id}/cancel", operation_id="cancel_run")
+async def cancel_run(run_id: str, pool: PoolDep, account_id: AccountIdDep) -> WfRun:
+    """Cancel a run (pending/running/suspended). Records a cancel marker + wakes the
+    run; it finalizes ``cancelled`` on its next wake (so the returned run may still
+    show its pre-cancel status — like ``resume``). Idempotent on an already-terminal
+    run; a cross-tenant run 404s."""
+    return await service.cancel_run(pool, run_id=run_id, account_id=account_id)
 
 
 @runs_router.get("/{run_id}/stream", openapi_extra={"x-codegen": {"targets": []}})

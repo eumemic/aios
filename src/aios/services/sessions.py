@@ -444,13 +444,20 @@ async def list_sessions(
     account_id: str,
     agent_id: str | None = None,
     status: SessionStatus | None = None,
+    parent_run_id: str | None = None,
     limit: int = 50,
     after: str | None = None,
 ) -> list[Session]:
     # See ``get_session`` for the rationale on the snapshot wrap.
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         sessions = await queries.list_sessions(
-            conn, agent_id=agent_id, status=status, limit=limit, after=after, account_id=account_id
+            conn,
+            agent_id=agent_id,
+            status=status,
+            parent_run_id=parent_run_id,
+            limit=limit,
+            after=after,
+            account_id=account_id,
         )
         if not sessions:
             return sessions

@@ -30,6 +30,7 @@ class TestWorkflowCreate:
             **payload,
             "input_schema": {"type": "object"},
             "output_schema": {"type": "integer"},
+            "description": None,
         }
 
     def test_requires_name_and_script(self) -> None:

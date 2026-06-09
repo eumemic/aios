@@ -170,6 +170,79 @@ async def test_run_reads_and_resume_404_on_unknown(http_client: httpx.AsyncClien
     assert r.status_code == 404, r.text
 
 
+async def test_workflow_description_round_trips(http_client: httpx.AsyncClient) -> None:
+    """The optional ``description`` (agent-parity blurb) survives create → get → list,
+    and stays ``None`` when omitted."""
+    name = f"wf-{_uniq()}"
+    r = await http_client.post(
+        "/v1/workflows", json={"name": name, "script": _SCRIPT, "description": "does a thing"}
+    )
+    assert r.status_code == 201, r.text
+    wf_id = r.json()["id"]
+    assert r.json()["description"] == "does a thing"
+    assert (await http_client.get(f"/v1/workflows/{wf_id}")).json()["description"] == "does a thing"
+    listed = (await http_client.get("/v1/workflows", params={"name": name})).json()["data"]
+    assert listed[0]["description"] == "does a thing"
+    # Omitting it is allowed (nullable).
+    r2 = await http_client.post("/v1/workflows", json={"name": f"wf-{_uniq()}", "script": _SCRIPT})
+    assert r2.status_code == 201 and r2.json()["description"] is None
+
+
+async def test_cancel_run_endpoint(http_client: httpx.AsyncClient) -> None:
+    """The cancel endpoint is wired + account-scoped + idempotent. (The terminal flip
+    lands on a worker wake — mocked out here, as for create/resume — so the returned
+    run still shows its pre-cancel status; the finalize-to-``cancelled`` path is the
+    step integration test's job.)"""
+    env_id = await _create_env(http_client)
+    wf = (
+        await http_client.post("/v1/workflows", json={"name": f"c-{_uniq()}", "script": _SCRIPT})
+    ).json()
+    run = (
+        await http_client.post("/v1/runs", json={"workflow_id": wf["id"], "environment_id": env_id})
+    ).json()
+
+    r = await http_client.post(f"/v1/runs/{run['id']}/cancel")
+    assert r.status_code == 200 and r.json()["id"] == run["id"], r.text
+    # Idempotent: a second cancel is still 200.
+    assert (await http_client.post(f"/v1/runs/{run['id']}/cancel")).status_code == 200
+    # Unknown + cross-tenant both 404.
+    assert (await http_client.post("/v1/runs/wfr_nope/cancel")).status_code == 404
+    key_b = await _mint_tenant(http_client, f"tenant-b-{_uniq()}")
+    cross = await http_client.post(f"/v1/runs/{run['id']}/cancel", headers=_bearer(key_b))
+    assert cross.status_code == 404, cross.text
+
+
+async def test_runs_parent_run_id_filter(http_client: httpx.AsyncClient, pool: Any) -> None:
+    """``GET /v1/runs?parent_run_id=`` scopes to a run's children. Child runs are
+    spawned internally (a nested ``workflow()``), so seed one via the query layer and
+    assert only it comes back for the parent."""
+    from aios.db.queries import workflows as wf_queries
+
+    env_id = await _create_env(http_client)
+    wf = (
+        await http_client.post("/v1/workflows", json={"name": f"p-{_uniq()}", "script": _SCRIPT})
+    ).json()
+    parent = (
+        await http_client.post("/v1/runs", json={"workflow_id": wf["id"], "environment_id": env_id})
+    ).json()
+    async with pool.acquire() as conn:
+        child = await wf_queries.insert_wf_run(
+            conn,
+            account_id=parent["account_id"],
+            workflow_id=wf["id"],
+            environment_id=env_id,
+            script=_SCRIPT,
+            script_sha="sha",
+            parent_run_id=parent["id"],
+        )
+    # An unrelated (parentless) run that must be excluded.
+    await http_client.post("/v1/runs", json={"workflow_id": wf["id"], "environment_id": env_id})
+
+    r = await http_client.get("/v1/runs", params={"parent_run_id": parent["id"]})
+    assert r.status_code == 200, r.text
+    assert [x["id"] for x in r.json()["data"]] == [child.id]  # only the child
+
+
 async def test_requires_auth(http_client: httpx.AsyncClient) -> None:
     r = await http_client.get("/v1/workflows", headers={"Authorization": ""})
     assert r.status_code == 401, r.text

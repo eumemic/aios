@@ -33,6 +33,12 @@ from aios.models.workflows import (
     Workflow,
 )
 
+# A reserved ``call_key`` for the run-cancel side-marker. Real call_keys are
+# call-site hashes, so this sentinel never collides; the ``(run_id, call_key)`` PK
+# makes it one cancel signal per run — i.e. cancellation is idempotent. The next
+# ``run_workflow_step`` harvests it (under the lock) and finalizes ``cancelled``.
+CANCEL_SIGNAL_CALL_KEY = "__cancel__"
+
 
 def _row_to_workflow(row: asyncpg.Record) -> Workflow:
     return Workflow(
@@ -43,6 +49,7 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         script=row["script"],
         input_schema=parse_jsonb(row["input_schema"]),
         output_schema=parse_jsonb(row["output_schema"]),
+        description=row["description"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -101,6 +108,7 @@ async def insert_workflow(
     version: int = 1,
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
+    description: str | None = None,
 ) -> Workflow:
     """Insert an immutable workflow definition. Raises ``ConflictError`` on a
     duplicate ``(account_id, name, version)``."""
@@ -109,8 +117,8 @@ async def insert_workflow(
         row = await conn.fetchrow(
             """
             INSERT INTO workflows
-                (id, account_id, name, version, script, input_schema, output_schema)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                (id, account_id, name, version, script, input_schema, output_schema, description)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
             RETURNING *
             """,
             new_id,
@@ -120,6 +128,7 @@ async def insert_workflow(
             script,
             json.dumps(input_schema) if input_schema is not None else None,
             json.dumps(output_schema) if output_schema is not None else None,
+            description,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -196,8 +205,14 @@ async def list_wf_runs(
     after: str | None = None,
     workflow_id: str | None = None,
     status: str | None = None,
+    parent_run_id: str | None = None,
 ) -> list[WfRun]:
-    """Keyset-paginated list of an account's runs (non-archived), newest first."""
+    """Keyset-paginated list of an account's runs (non-archived), newest first.
+
+    ``parent_run_id`` scopes to a run's children (the runs a workflow's nested
+    ``workflow()`` calls spawned) — the run-side analog of filtering sessions by
+    ``parent_run_id`` for a run's ``agent()`` children.
+    """
     return await _list_scoped(
         conn,
         table="wf_runs",
@@ -205,7 +220,11 @@ async def list_wf_runs(
         row=_row_to_wf_run,
         limit=limit,
         after=after,
-        filters=[("workflow_id", workflow_id), ("status", status)],
+        filters=[
+            ("workflow_id", workflow_id),
+            ("status", status),
+            ("parent_run_id", parent_run_id),
+        ],
     )
 
 
@@ -339,7 +358,7 @@ async def append_run_event(
             SELECT $1, r.id, r.last_event_seq + 1, $4, $5, $6::jsonb
             FROM wf_runs r
             WHERE r.id = $2 AND r.account_id = $3 AND r.archived_at IS NULL
-              AND r.status NOT IN ('completed', 'errored')
+              AND r.status NOT IN ('completed', 'errored', 'cancelled')
             ON CONFLICT (run_id, call_key, type) DO NOTHING
             RETURNING *
             """,

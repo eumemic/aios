@@ -32,6 +32,7 @@ class Workflow:
         updated_at (datetime.datetime):
         input_schema (None | Unset | WorkflowInputSchemaType0):
         output_schema (None | Unset | WorkflowOutputSchemaType0):
+        description (None | str | Unset):
     """
 
     id: str
@@ -43,6 +44,7 @@ class Workflow:
     updated_at: datetime.datetime
     input_schema: None | Unset | WorkflowInputSchemaType0 = UNSET
     output_schema: None | Unset | WorkflowOutputSchemaType0 = UNSET
+    description: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -79,6 +81,12 @@ class Workflow:
         else:
             output_schema = self.output_schema
 
+        description: None | str | Unset
+        if isinstance(self.description, Unset):
+            description = UNSET
+        else:
+            description = self.description
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -96,6 +104,8 @@ class Workflow:
             field_dict["input_schema"] = input_schema
         if output_schema is not UNSET:
             field_dict["output_schema"] = output_schema
+        if description is not UNSET:
+            field_dict["description"] = description
 
         return field_dict
 
@@ -157,6 +167,15 @@ class Workflow:
 
         output_schema = _parse_output_schema(d.pop("output_schema", UNSET))
 
+        def _parse_description(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        description = _parse_description(d.pop("description", UNSET))
+
         workflow = cls(
             id=id,
             account_id=account_id,
@@ -167,6 +186,7 @@ class Workflow:
             updated_at=updated_at,
             input_schema=input_schema,
             output_schema=output_schema,
+            description=description,
         )
 
         workflow.additional_properties = d

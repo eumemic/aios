@@ -248,10 +248,10 @@ async def wf_run_event_stream(
                     run_id,
                     cursor,
                 )
-                if status in ("completed", "errored")
+                if status in ("completed", "errored", "cancelled")
                 else []
             )
-        if status in ("completed", "errored"):
+        if status in ("completed", "errored", "cancelled"):
             for row in terminal_tail:
                 payload = _serialize_wf_event(row)
                 cursor = max(cursor, payload["seq"])
