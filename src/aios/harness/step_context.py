@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from aios.harness._text import join_blocks
 from aios.harness.context import (
     build_messages,
+    message_is_notification_marker,
     separate_adjacent_user_messages,
     stub_missing_reasoning_content,
 )
@@ -270,6 +271,32 @@ def _build_http_servers_block(http_servers: list[HttpServerSpec]) -> str:
     return "\n\n".join(sections)
 
 
+def _agent_owes_response(messages: list[dict[str, Any]]) -> bool:
+    """True when the conversation ends with a *direct* stimulus to answer.
+
+    Gates the ephemeral channels tail block. Two trailing cases are a direct
+    stimulus the agent must engage with in focal context, where appending the
+    tail would make a status listing the literal final message and mute
+    literal-minded models (claude-fable-5): a **focal user inbound** (full
+    content) and a **tool result**. Keep the real stimulus last for those.
+
+    Two trailing cases are NOT a direct stimulus, so keep the tail:
+    * a non-focal **notification marker** (``🔔 …``) — the tail's channel
+      listing is its navigation companion (how to ``switch_channel`` to it);
+    * an **assistant** turn — an idle/sweep re-check where the channel-status
+      listing is the useful signal.
+    """
+    if not messages:
+        return False
+    last = messages[-1]
+    role = last.get("role")
+    if role == "tool":
+        return True
+    if role == "user":
+        return not message_is_notification_marker(last)
+    return False
+
+
 async def compose_step_context(
     *,
     pool: asyncpg.Pool[Any],
@@ -331,8 +358,16 @@ async def compose_step_context(
     # Tail block lives *after* build_messages so its per-step mutations
     # (unread counts, previews) don't bust the prefix cache.  Paradigm
     # prose stays in the cache-stable system prompt above.
+    #
+    # Only append it when the conversation already ends with an assistant turn
+    # (an idle/sweep re-check, where the channel-status listing is the useful
+    # signal). When the last message is a user or tool turn, the agent owes a
+    # response: appending the tail makes a "0 unread" status block the literal
+    # final message, and literal-minded models (claude-fable-5) anchor on it and
+    # emit an empty turn instead of answering (opus looks back past it; fable does
+    # not). Keep the real stimulus last in that case.
     tail = build_channels_tail_block(channels, events, session.focal_channel)
-    if tail is not None:
+    if tail is not None and not _agent_owes_response(ctx.messages):
         ctx.messages.append(tail)
 
     # Block LiteLLM's adjacent-same-role merge on Anthropic so the tail

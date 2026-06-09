@@ -276,6 +276,9 @@ def _notification_preview(content: str, metadata: dict[str, Any] | None) -> str:
     return ""
 
 
+_NOTIFICATION_MARKER_PREFIX = "🔔"
+
+
 def _format_notification_marker(
     orig_channel: str,
     metadata: dict[str, Any] | None,
@@ -294,7 +297,7 @@ def _format_notification_marker(
     emitted — it tells the reader how to turn this notification into
     full-content context.
     """
-    parts = [f"🔔 channel_id={orig_channel}"]
+    parts = [f"{_NOTIFICATION_MARKER_PREFIX} channel_id={orig_channel}"]
     if isinstance(metadata, dict):
         sender_name = metadata.get("sender_name")
         if isinstance(sender_name, str) and sender_name:
@@ -305,6 +308,30 @@ def _format_notification_marker(
     header = " · ".join(parts)
     hint = f"(to respond, call switch_channel(channel_id={orig_channel!r}) first)"
     return f"{header}\n{hint}"
+
+
+def message_is_notification_marker(msg: dict[str, Any]) -> bool:
+    """True if *msg* is a non-focal-channel notification marker (``🔔 …``).
+
+    Mirrors the shape produced by :func:`_format_notification_marker`: a
+    user-role message whose (text) content begins with the bell prefix. The
+    composer uses this to tell a *direct* trailing stimulus the agent must
+    answer (a focal inbound or tool result — keep it last, suppress the
+    channels tail block so a literal model doesn't anchor on the tail) apart
+    from a *navigation* prompt (a non-focal notification, whose companion is
+    the tail listing — keep the tail).
+    """
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content.startswith(_NOTIFICATION_MARKER_PREFIX)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                return isinstance(text, str) and text.startswith(_NOTIFICATION_MARKER_PREFIX)
+    return False
 
 
 def render_user_event(
