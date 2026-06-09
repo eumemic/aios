@@ -106,8 +106,9 @@ Header shape (newlines added for clarity):
      timestamp_ms=<ms> · received=<iso>]
 
 ``timestamp_ms`` is the raw value the tools consume (copy it verbatim).
-``received`` is the message's receipt time (UTC ISO-8601) for your temporal
-awareness only — it is never a tool argument.
+``received`` is the message's receipt time — ISO-8601 with UTC offset plus
+the zone name, e.g. ``2026-06-09T09:00:00-07:00 (America/Los_Angeles)`` —
+for your temporal awareness only; it is never a tool argument.
 
 When the inbound is a reply, a second line follows:
 

@@ -296,6 +296,7 @@ async def compose_step_context(
     (custom, awaiting-confirm) gets the "external action" wording.
     """
     from aios.harness.channels import build_channels_tail_block
+    from aios.services import accounts as accounts_service
     from aios.services import sessions as sessions_service
 
     # Issue #630 follow-up: the renderer's ``/workspace`` attachment branch
@@ -310,6 +311,12 @@ async def compose_step_context(
     workspace_path = await sessions_service.load_session_workspace_path(
         pool, session.id, account_id=account_id
     )
+    # Effective account timezone for the ``received=`` envelope — see
+    # ``services.accounts.resolve_effective_timezone``. Stable across rebuilds
+    # while the config is unchanged; a tz config change re-renders history
+    # once (a deliberate one-time prompt-cache bust, same class as any
+    # renderer change).
+    tz_name = await accounts_service.resolve_effective_timezone(pool, account_id)
 
     ctx = build_messages(
         events,
@@ -318,6 +325,7 @@ async def compose_step_context(
         session_id=session.id,
         workspace_path=workspace_path,
         in_flight_tool_call_ids=in_flight_tool_call_ids,
+        tz_name=tz_name,
     )
 
     # Tail block lives *after* build_messages so its per-step mutations

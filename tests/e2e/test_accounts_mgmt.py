@@ -371,6 +371,43 @@ class TestUpdate:
         assert r.status_code == 200
         assert r.json()["id"] == "acc_test_stub"
 
+    async def test_update_config_timezone(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """Setting config.timezone echoes on PATCH, persists through GET, and
+        does not disturb the other fields (the partial-merge contract)."""
+        m = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "tz-acct"},
+        )
+        child_id = m.json()["account_id"]
+        r = await http_client.patch(
+            f"/v1/accounts/{child_id}",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"config": {"timezone": "America/Los_Angeles"}},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["config"]["timezone"] == "America/Los_Angeles"
+        g = await http_client.get(
+            f"/v1/accounts/{child_id}", headers=_bearer(aios_env["AIOS_API_KEY"])
+        )
+        assert g.status_code == 200
+        body = g.json()
+        assert body["display_name"] == "tz-acct"
+        assert body["config"]["timezone"] == "America/Los_Angeles"
+
+    async def test_update_invalid_timezone_422(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        # Unknown IANA zone is rejected at the body boundary — never stored.
+        r = await http_client.patch(
+            "/v1/accounts/acc_test_stub",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"config": {"timezone": "Not/AZone"}},
+        )
+        assert r.status_code == 422, r.text
+
 
 class TestSiblingNameRecycle:
     """Once a sibling is archived, the display_name should be free to

@@ -11,6 +11,7 @@ from dateutil.parser import isoparse
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.account_config import AccountConfig
     from ..models.account_metadata import AccountMetadata
 
 
@@ -27,6 +28,11 @@ class Account:
         display_name (str):
         metadata (AccountMetadata):
         created_at (datetime.datetime):
+        config (AccountConfig | Unset): Per-account configuration bag.
+
+            An unset item inherits from the parent account; see
+            ``queries.resolve_effective_timezone``. Update semantics (per-item merge)
+            are documented on ``UpdateAccountRequest``.
         archived_at (datetime.datetime | None | Unset):
     """
 
@@ -36,6 +42,7 @@ class Account:
     display_name: str
     metadata: AccountMetadata
     created_at: datetime.datetime
+    config: AccountConfig | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -52,6 +59,10 @@ class Account:
         metadata = self.metadata.to_dict()
 
         created_at = self.created_at.isoformat()
+
+        config: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.config, Unset):
+            config = self.config.to_dict()
 
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
@@ -73,6 +84,8 @@ class Account:
                 "created_at": created_at,
             }
         )
+        if config is not UNSET:
+            field_dict["config"] = config
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -80,6 +93,7 @@ class Account:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.account_config import AccountConfig
         from ..models.account_metadata import AccountMetadata
 
         d = dict(src_dict)
@@ -99,6 +113,13 @@ class Account:
         metadata = AccountMetadata.from_dict(d.pop("metadata"))
 
         created_at = isoparse(d.pop("created_at"))
+
+        _config = d.pop("config", UNSET)
+        config: AccountConfig | Unset
+        if isinstance(_config, Unset):
+            config = UNSET
+        else:
+            config = AccountConfig.from_dict(_config)
 
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -124,6 +145,7 @@ class Account:
             display_name=display_name,
             metadata=metadata,
             created_at=created_at,
+            config=config,
             archived_at=archived_at,
         )
 
