@@ -10,6 +10,7 @@ The ``type`` is a stable machine-readable string clients can branch on. The
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -48,6 +49,20 @@ class AiosError(Exception):
         if self.detail:
             body["error"]["detail"] = self.detail
         return body
+
+    def to_message(self) -> str:
+        """Flat single-string rendering — the message, with ``detail`` appended.
+
+        For places that need one error string rather than the nested HTTP envelope of
+        :meth:`to_body`: the model-path tool result (``_classify_tool_error``) and the
+        sandbox broker envelope. ``default=str`` keeps it total — a non-JSON-serializable
+        ``detail`` value renders as its ``str()`` rather than raising mid-render.
+        ``ensure_ascii=False`` keeps non-ASCII raw, matching the agent-facing tool-result
+        convention (the model reads ``café``, not ``caf\\u00e9``).
+        """
+        if not self.detail:
+            return self.message
+        return f"{self.message} ({json.dumps(self.detail, default=str, ensure_ascii=False)})"
 
 
 class NotFoundError(AiosError):

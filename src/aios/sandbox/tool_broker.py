@@ -61,6 +61,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from aios.errors import AiosError
 from aios.logging import get_logger
 from aios.mcp.client import call_mcp_tool, discover_mcp_tools
 from aios.models.agents import (
@@ -544,9 +545,17 @@ class ToolBroker:
             result = await invoke_builtin(session_id, name, arguments)
         except ToolBail as bail:
             return _err(400, str(bail), code="tool_bail")
+        except AiosError as exc:
+            # A typed aios error (a permission denial, not-found, conflict, rate-limit, or
+            # a tool *ArgumentError) carries its real status + ``error_type`` code, not an
+            # opaque 500 — matching the model dispatch path, which renders a client-class
+            # error as a clean refusal (harness/tool_dispatch._classify_tool_error). The
+            # broker doesn't (can't) evict; here it's purely the response envelope.
+            return _err(exc.status_code, exc.to_message(), code=exc.error_type)
         except Exception as exc:
-            # Handler exceptions go to bash as a 500 envelope; the model
-            # path's lifecycle would have caught + logged + sandbox-evicted.
+            # A truly untyped handler exception is an internal failure → opaque 500. (On
+            # the model path its lifecycle would also have sandbox-evicted; the broker,
+            # running inside the sandbox, cannot.)
             log.exception("tool_broker.invoke_failed", session_id=session_id, name=name)
             return _err(500, f"{type(exc).__name__}: {exc}", code="internal_error")
 
