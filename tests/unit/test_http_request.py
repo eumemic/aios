@@ -14,6 +14,7 @@ from aios.models.agents import HttpPermissionPolicy, HttpRouteSpec, HttpServerSp
 from aios.tools.http_request import (
     _classify_permission,
     _decode_body,
+    _do_http_request,
     http_request_handler,
 )
 
@@ -595,3 +596,47 @@ class TestHttpRequestHandler:
             f"upstream request was dispatched despite embedded '..' "
             f"traversal; captured={captured!r}"
         )
+
+
+# ── _do_http_request (owner-agnostic core; the session/run shared entry) ───────
+
+
+class TestDoHttpRequest:
+    """The extracted core takes ``servers`` + an injected ``resolve_auth`` directly, so the
+    session handler and the workflow-run dispatcher exercise one code path."""
+
+    async def test_authors_header_from_injected_resolver(self) -> None:
+        servers = [
+            _server(name="api", base_url="https://api.example.com/v1", routes=[_route("/lights/*")])
+        ]
+        capture: dict[str, Any] = {}
+
+        async def resolve_auth(base_url: str) -> tuple[str | None, dict[str, str]]:
+            assert base_url == "https://api.example.com/v1"
+            return ("vlt", {"Authorization": "Bearer RUNTOKEN"})
+
+        with (
+            _patch_safe_url(True),
+            patch(
+                "aios.tools.http_request.httpx.AsyncClient",
+                _make_stub_client(response=httpx.Response(200, json={"ok": True}), capture=capture),
+            ),
+        ):
+            out = await _do_http_request(
+                servers=servers,
+                arguments={"server_ref": "api", "path": "/lights/1", "method": "GET"},
+                resolve_auth=resolve_auth,
+            )
+        assert out["status"] == 200
+        assert capture["kwargs"]["headers"]["Authorization"] == "Bearer RUNTOKEN"
+
+    async def test_unknown_server_ref_is_an_error_value(self) -> None:
+        async def resolve_auth(base_url: str) -> tuple[str | None, dict[str, str]]:
+            return (None, {})
+
+        out = await _do_http_request(
+            servers=[],
+            arguments={"server_ref": "missing", "path": "/x", "method": "GET"},
+            resolve_auth=resolve_auth,
+        )
+        assert "error" in out and "unknown server_ref" in out["error"]

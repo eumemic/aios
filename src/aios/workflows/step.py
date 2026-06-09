@@ -47,6 +47,7 @@ from aios.logging import get_logger
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
 from aios.services.sessions import create_child_session
 from aios.services.wake import defer_run_wake, defer_wake
+from aios.workflows import run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.host_launcher import EmittedCapability, run_script_host
 
@@ -218,6 +219,28 @@ async def run_workflow_step(run_id: str) -> None:
                 )
                 if result_payload is None:
                     continue  # still pending, within deadline — stay suspended
+            elif cap_payload.get("capability") == "tool":
+                sig = signals.get(call_key)
+                if sig is None and not run_tools.has_inflight(run_id, call_key):
+                    # No signal in the snapshot AND no live task — but the snapshot can be
+                    # stale: a task running outside the run lock commits its signal *before*
+                    # it leaves the registry, so "not in-flight" may mean "just finished" as
+                    # easily as "crashed". A fresh point-read disambiguates — so a tool that
+                    # already ran is never re-dispatched (which would double-execute a
+                    # non-idempotent http_request).
+                    sig = await wf_queries.read_run_signal(conn, run_id, call_key)
+                    if sig is None:
+                        run_tools.launch_tool_task(
+                            pool,
+                            run,
+                            call_key=call_key,
+                            tool_name=cap_payload["tool_name"],
+                            tool_input=cap_payload.get("input"),
+                        )
+                        continue
+                if sig is None:
+                    continue  # a live task is still running — stay suspended, it will signal
+                result_payload = {"result": sig.result, "is_error": False}
             else:  # gate: the resume value lives in the signal
                 sig = signals.get(call_key)
                 if sig is None:
@@ -240,6 +263,9 @@ async def run_workflow_step(run_id: str) -> None:
     outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
 
     needs_rewake = False
+    # (call_key, tool_name, input) for tool frontiers opened this wake — launched AFTER
+    # the txn commits (below), so call_started is visible before a task can signal+wake.
+    tools_to_launch: list[tuple[str, str, Any]] = []
     async with pool.acquire() as conn:
         if outcome.kind == "raised":
             if outcome.error_kind == "script_host_spawn_failed":
@@ -333,6 +359,34 @@ async def run_workflow_step(run_id: str) -> None:
                     return  # the frontier was terminally rejected (bad call) — run errored
                 if spawn.needs_rewake:
                     needs_rewake = True  # C1'/C4: harvest the already-present marker next step
+            elif cap.capability_id == "tool":
+                spec = cap.spec if isinstance(cap.spec, dict) else {}
+                tool_name = spec.get("tool_name")
+                if not isinstance(tool_name, str):
+                    # A malformed spec is a deterministic author bug (replay-identical),
+                    # so it terminally errors the run — unlike an undeclared/unknown tool
+                    # name, which the dispatcher returns as a recoverable error value.
+                    await _complete_run(
+                        conn,
+                        run,
+                        output=f"tool() requires a string tool name, got {tool_name!r}",
+                        is_error=True,
+                        error_kind="bad_tool_call",
+                    )
+                    return
+                await wf_queries.append_run_event(
+                    conn,
+                    account_id=account_id,
+                    run_id=run_id,
+                    type="call_started",
+                    call_key=cap.call_key,
+                    payload={
+                        "capability": "tool",
+                        "tool_name": tool_name,
+                        "input": spec.get("input"),
+                    },
+                )
+                tools_to_launch.append((cap.call_key, tool_name, spec.get("input")))
             else:
                 # parallel/pipeline reach the step as their `agent` leaves (B2.G);
                 # any other capability id is unknown.
@@ -346,8 +400,14 @@ async def run_workflow_step(run_id: str) -> None:
                 return
         await wf_queries.set_run_status(conn, run_id, "suspended", account_id=account_id)
 
-    # Outside the txn (after the suspend commits): a self-wake so the next step
-    # harvests an already-delivered resume for a gate opened this wake.
+    # Outside the txn (after the suspend commits): launch this wake's tool tasks — now
+    # that their call_started rows are committed, a task that signals+wakes lands a step
+    # that sees them (no double-dispatch) — then self-wake so the next step harvests an
+    # already-delivered gate resume opened this wake.
+    for launch_key, launch_name, launch_input in tools_to_launch:
+        run_tools.launch_tool_task(
+            pool, run, call_key=launch_key, tool_name=launch_name, tool_input=launch_input
+        )
     if needs_rewake:
         await defer_run_wake(run_id)
 

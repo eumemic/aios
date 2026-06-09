@@ -12,23 +12,30 @@ directly, which is exactly the surface under test.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
 
 import asyncpg
+import httpx
 import pytest
+from pydantic import SecretStr
 
+from aios.crypto.vault import CryptoBox
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError
 from aios.harness import runtime
+from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
+from aios.models.vaults import VaultCredentialCreate
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
+from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
-from aios.workflows import service
+from aios.workflows import run_tools, service
 from aios.workflows.child_id import child_session_id
 from aios.workflows.determinism import CallKeyer
 from aios.workflows.host_launcher import HostOutcome
@@ -60,14 +67,19 @@ async def wf_runtime(
                 "INSERT INTO environments (id, name, config, account_id) "
                 "VALUES ('env_wf', 'wf-env', '{}'::jsonb, 'acc_wf')"
             )
+        run_tools._INFLIGHT.clear()  # no leaked tasks from a prior (possibly failed) test
         with (
             mock.patch("aios.workflows.service.defer_run_wake", new=AsyncMock()),
             mock.patch("aios.services.workflows.defer_run_wake", new=AsyncMock()),
             mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()),
             mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()),
+            # The fire-and-forget tool task's own wake — patch it too, else it enqueues a
+            # real wake_workflow job against the test DB (the harvest is driven manually).
+            mock.patch("aios.workflows.run_tools.defer_run_wake", new=AsyncMock()),
         ):
             yield pool
     finally:
+        run_tools._INFLIGHT.clear()
         runtime.pool = prev
         await pool.close()
 
@@ -2260,3 +2272,252 @@ async def test_await_run_cross_tenant_404(
         await wf_service.await_run(
             pool, migrated_db_url, run_id, account_id="acc_other", timeout_seconds=1
         )
+
+
+# ─── tool() — a run invokes its declared network/credential tools (slice 2) ───
+
+_WEB_SCRIPT = (
+    "async def main(input):\n    r = await tool('web_search', {'query': 'q'})\n    return r\n"
+)
+
+
+async def _make_tool_run(
+    pool: asyncpg.Pool[Any],
+    script: str,
+    *,
+    tools: list[ToolSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
+    vault_ids: list[str] | None = None,
+    name: str = "wt",
+) -> str:
+    """A run whose workflow declares ``tools``/``http_servers``; the run snapshots them."""
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name=name,
+            script=script,
+            tools=tools,
+            http_servers=http_servers,
+        )
+    run = await service.create_run(
+        pool,
+        account_id="acc_wf",
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        vault_ids=vault_ids,
+    )
+    return run.id
+
+
+async def _drain_tool_tasks() -> None:
+    """Await any fire-and-forget tool tasks (``defer_run_wake`` is patched, so they don't
+    self-wake; the test drives the harvest step itself)."""
+    tasks = list(run_tools._INFLIGHT.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _capturing_client(captured: dict[str, Any]) -> type:
+    """A stand-in for ``httpx.AsyncClient`` that records the outbound request + returns 200."""
+
+    class _Client:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_: Any) -> bool:
+            return False
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+            captured["method"] = method
+            captured["url"] = url
+            captured["headers"] = kwargs.get("headers", {})
+            return httpx.Response(200, json={"ok": True})
+
+    return _Client
+
+
+async def _get_run(pool: asyncpg.Pool[Any], run_id: str) -> Any:
+    async with pool.acquire() as conn:
+        return await wf_queries.get_run_for_step(conn, run_id)
+
+
+async def _call_starteds(pool: asyncpg.Pool[Any], run_id: str) -> list[Any]:
+    async with pool.acquire() as conn:
+        return [
+            e for e in await wf_queries.list_run_events(conn, run_id) if e.type == "call_started"
+        ]
+
+
+async def test_tool_web_search_park_harvest_replay(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    run_id = await _make_tool_run(pool, _WEB_SCRIPT, tools=[ToolSpec(type="web_search")])
+    with mock.patch(
+        "aios.workflows.run_tools.web_search_handler",
+        new=AsyncMock(return_value={"results": ["R"]}),
+    ):
+        # Wake 1: drive to the tool and park; the worker task is launched after commit.
+        await run_workflow_step(run_id)
+        run = await _get_run(pool, run_id)
+        assert run is not None and run.status == "suspended"
+        assert [t for _s, t, _k in await _events(pool, run_id)] == ["run_started", "call_started"]
+        cs = (await _call_starteds(pool, run_id))[0]
+        assert cs.payload["capability"] == "tool" and cs.payload["tool_name"] == "web_search"
+
+        await _drain_tool_tasks()  # the task writes its tool_result signal
+
+        # Wake 2: harvest the signal → fast-forward past the tool → complete.
+        await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {"results": ["R"]}
+    assert [t for _s, t, _k in await _events(pool, run_id)] == [
+        "run_started",
+        "call_started",
+        "call_result",
+        "run_completed",
+    ]
+
+
+async def test_tool_undeclared_resolves_as_recoverable_error(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    # web_search is NOT declared on the workflow → a recoverable error value; run COMPLETES.
+    run_id = await _make_tool_run(pool, _WEB_SCRIPT, tools=[], name="wt-undeclared")
+    await run_workflow_step(run_id)  # park at the tool (no handler patch — gating short-circuits)
+    await _drain_tool_tasks()  # task: invoke_run_tool → gating error → signal {"error": …}
+    await run_workflow_step(run_id)  # harvest → complete with the error value
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"  # recoverable, NOT errored
+    assert isinstance(run.output, dict) and "error" in run.output
+
+
+async def test_tool_parallel_fanout(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    rs = await parallel([\n"
+        "        lambda: tool('web_search', {'query': 'a'}),\n"
+        "        lambda: tool('web_search', {'query': 'b'}),\n"
+        "        lambda: tool('web_search', {'query': 'c'}),\n"
+        "    ])\n"
+        "    return rs\n"
+    )
+    run_id = await _make_tool_run(
+        pool, script, tools=[ToolSpec(type="web_search")], name="wt-fanout"
+    )
+
+    def _echo(_sid: str, args: dict[str, Any]) -> dict[str, Any]:
+        return {"q": args["query"]}
+
+    with mock.patch(
+        "aios.workflows.run_tools.web_search_handler", new=AsyncMock(side_effect=_echo)
+    ):
+        await run_workflow_step(run_id)  # parks with 3 tool frontiers, 3 tasks launched
+        cs = await _call_starteds(pool, run_id)
+        assert len(cs) == 3 and all(e.payload["capability"] == "tool" for e in cs)
+        await _drain_tool_tasks()  # 3 tasks signal
+        await run_workflow_step(run_id)  # harvest all 3 → complete
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == [{"q": "a"}, {"q": "b"}, {"q": "c"}]
+
+
+async def test_tool_crash_redispatches(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    run_id = await _make_tool_run(
+        pool, _WEB_SCRIPT, tools=[ToolSpec(type="web_search")], name="wt-crash"
+    )
+
+    block = asyncio.Event()  # never set — the first task blocks until cancelled
+
+    async def _blocked(_sid: str, _args: dict[str, Any]) -> dict[str, Any]:
+        await block.wait()
+        return {"never": True}
+
+    with mock.patch("aios.workflows.run_tools.web_search_handler", new=_blocked):
+        await run_workflow_step(run_id)  # parks; the task blocks before it can signal
+        # Simulate a hard worker crash: cancel the in-flight task + drop the registry.
+        for task in list(run_tools._INFLIGHT.values()):
+            task.cancel()
+        await asyncio.gather(*list(run_tools._INFLIGHT.values()), return_exceptions=True)
+        run_tools._INFLIGHT.clear()
+
+    # No signal exists. Wake 2 (the periodic-sweep re-wake): harvest finds no signal + no
+    # live task → re-dispatch — without journaling a second call_started.
+    with mock.patch(
+        "aios.workflows.run_tools.web_search_handler", new=AsyncMock(return_value={"ok": 1})
+    ):
+        await run_workflow_step(run_id)
+        assert len(await _call_starteds(pool, run_id)) == 1  # exactly one — no double-open
+        await _drain_tool_tasks()  # the re-dispatched task signals
+        await run_workflow_step(run_id)  # harvest → complete
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {"ok": 1}
+    assert [t for _s, t, _k in await _events(pool, run_id)] == [
+        "run_started",
+        "call_started",
+        "call_result",
+        "run_completed",
+    ]
+
+
+async def test_tool_http_request_credential_e2e(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """The payoff: a run calls http_request and the Authorization header is authored from the
+    run's OWN bound vault, via resolve_auth_for_target_url_run, with no agent in the loop."""
+    pool = wf_runtime
+    box = CryptoBox(os.urandom(32))
+    prev_box = runtime.crypto_box
+    runtime.crypto_box = box
+    try:
+        base_url = "https://api.example/v1"
+        vault = await vaults_service.create_vault(
+            pool, account_id="acc_wf", display_name="v", metadata={}
+        )
+        await vaults_service.create_vault_credential(
+            pool,
+            box,
+            account_id="acc_wf",
+            vault_id=vault.id,
+            body=VaultCredentialCreate(
+                target_url=base_url, auth_type="bearer_header", token=SecretStr("tok-XYZ")
+            ),
+        )
+        http_servers = [
+            HttpServerSpec(
+                name="api", base_url=base_url, routes=[HttpRouteSpec(path_pattern="/things/*")]
+            )
+        ]
+        script = (
+            "async def main(input):\n"
+            "    r = await tool('http_request',"
+            " {'server_ref': 'api', 'path': '/things/1', 'method': 'GET'})\n"
+            "    return r\n"
+        )
+        run_id = await _make_tool_run(
+            pool,
+            script,
+            tools=[ToolSpec(type="http_request")],
+            http_servers=http_servers,
+            vault_ids=[vault.id],
+            name="wt-http",
+        )
+        captured: dict[str, Any] = {}
+        with (
+            mock.patch("aios.tools.http_request.httpx.AsyncClient", _capturing_client(captured)),
+            mock.patch("aios.tools.http_request.is_safe_url", return_value=True),
+        ):
+            await run_workflow_step(run_id)  # park at the tool
+            await (
+                _drain_tool_tasks()
+            )  # task: _do_http_request → run resolver authors header → httpx
+            await run_workflow_step(run_id)  # harvest → complete
+        assert captured["headers"]["Authorization"] == "Bearer tok-XYZ"
+        run = await _get_run(pool, run_id)
+        assert run is not None and run.status == "completed"
+        assert run.output["status"] == 200
+    finally:
+        runtime.crypto_box = prev_box

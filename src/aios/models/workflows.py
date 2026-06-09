@@ -22,7 +22,7 @@ from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal["run_started", "call_started", "call_result", "run_completed"]
-WfRunSignalKind = Literal["gate_resume", "child_done", "cancel"]
+WfRunSignalKind = Literal["gate_resume", "child_done", "cancel", "tool_result"]
 
 # The terminal run statuses — monotonic: once here, a run never leaves. The one source for
 # every "is this run done?" check (the step loop's early-out, the SSE stream's close, the await
@@ -56,6 +56,9 @@ class WfRun(BaseModel):
 
     ``script`` is the run's own immutable snapshot of the workflow source at
     creation time (``script_sha`` is its hash); every wake execs exactly this.
+    ``tools``/``mcp_servers``/``http_servers`` are the matching snapshot of the
+    declared tool surface — pinned at launch like ``script``, so a later
+    ``update_workflow`` never shifts an in-flight run's authority.
     ``status`` is persisted (unlike sessions): the run loop writes
     ``suspended``/``completed``/``errored``.
     """
@@ -67,6 +70,9 @@ class WfRun(BaseModel):
     parent_run_id: str | None = None
     script: str
     script_sha: str
+    tools: list[ToolSpec] = Field(default_factory=list)
+    mcp_servers: list[McpServerSpec] = Field(default_factory=list)
+    http_servers: list[HttpServerSpec] = Field(default_factory=list)
     status: WfRunStatus
     input: Any = None  # arbitrary JSON: a workflow's input need not be an object
     output: Any = None  # arbitrary JSON: the script's return value

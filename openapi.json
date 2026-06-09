@@ -15148,6 +15148,27 @@
             "type": "string",
             "title": "Script Sha"
           },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": "array",
+            "title": "Tools"
+          },
+          "mcp_servers": {
+            "items": {
+              "$ref": "#/components/schemas/McpServerSpec"
+            },
+            "type": "array",
+            "title": "Mcp Servers"
+          },
+          "http_servers": {
+            "items": {
+              "$ref": "#/components/schemas/HttpServerSpec"
+            },
+            "type": "array",
+            "title": "Http Servers"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -15207,7 +15228,7 @@
           "updated_at"
         ],
         "title": "WfRun",
-        "description": "A durable workflow execution instance.\n\n``script`` is the run's own immutable snapshot of the workflow source at\ncreation time (``script_sha`` is its hash); every wake execs exactly this.\n``status`` is persisted (unlike sessions): the run loop writes\n``suspended``/``completed``/``errored``."
+        "description": "A durable workflow execution instance.\n\n``script`` is the run's own immutable snapshot of the workflow source at\ncreation time (``script_sha`` is its hash); every wake execs exactly this.\n``tools``/``mcp_servers``/``http_servers`` are the matching snapshot of the\ndeclared tool surface \u2014 pinned at launch like ``script``, so a later\n``update_workflow`` never shifts an in-flight run's authority.\n``status`` is persisted (unlike sessions): the run loop writes\n``suspended``/``completed``/``errored``."
       },
       "WfRunCreate": {
         "properties": {
