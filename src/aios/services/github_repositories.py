@@ -129,10 +129,13 @@ async def set_session_resources(
 
 async def detach_all_from_session(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
-) -> None:
+) -> bool:
     """Detach every github_repository from a session and clean up the
     working trees. Used by the full-list-replace path when the new
     resource list contains no github entries.
+
+    Returns whether any attachment was actually removed, so the caller
+    can skip the Layer 1 eviction when there was nothing to detach (#713).
 
     Conn-scoped: sandbox eviction is fired post-commit by
     :func:`aios.services.sessions.update_session`, not here (#713).
@@ -141,6 +144,7 @@ async def detach_all_from_session(
         old_ids = await _list_attached_resource_ids(conn, session_id, account_id=account_id)
         await queries.delete_session_github_repos(conn, session_id, account_id=account_id)
     _purge_working_trees(session_id, old_ids)
+    return bool(old_ids)
 
 
 async def list_session_echoes(

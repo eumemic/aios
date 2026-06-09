@@ -21,6 +21,9 @@ Coverage:
   defense-in-depth (they do NOT feed the spec, but Layer 1 evicts on any
   session-resource mutation).
 - a title-only ``update_session`` and ``create_session`` do NOT evict.
+- an idempotent re-PUT (same memory resources, same vault ids, or an
+  empty list on an empty session) writes nothing: no eviction AND no
+  ``spec_version`` bump, so neither layer recycles the sandbox.
 - connection attach/detach evict the bound session (defense-in-depth).
 - in-place vault credential rotation does NOT evict (the MCP pool keys on
   ``(url, vault_id)`` and the row contents are overwritten in place).
@@ -213,6 +216,81 @@ async def test_create_session_does_not_evict(
         ],
         crypto_box=crypto_box,
     )
+
+    spy.evict.assert_not_called()
+
+
+async def test_update_session_idempotent_memory_resources_does_not_evict(
+    env: tuple[asyncpg.Pool[Any], str, CryptoBox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-PUT of the current resource list writes nothing: no Layer-1
+    eviction and no Layer-2 ``spec_version`` bump (the triggers fire per
+    affected row, and a no-op touches zero rows). Companion to the e2e
+    ``test_idempotent_update_does_not_recycle``."""
+    pool, session_id, _crypto_box = env
+    store = await memory_stores_service.create_store(
+        pool, account_id=_ACCOUNT_ID, name="idem-notes", description="d", metadata={}
+    )
+    resources = [
+        MemoryStoreResource(
+            type="memory_store",
+            memory_store_id=store.id,
+            access="read_write",
+            instructions="keep",
+        )
+    ]
+    await sessions_service.update_session(
+        pool, session_id, account_id=_ACCOUNT_ID, resources=resources
+    )
+    async with pool.acquire() as conn:
+        version_before = await queries.get_session_spec_version(
+            conn, session_id, account_id=_ACCOUNT_ID
+        )
+    spy = _install_spy(monkeypatch)
+
+    await sessions_service.update_session(
+        pool, session_id, account_id=_ACCOUNT_ID, resources=resources
+    )
+
+    spy.evict.assert_not_called()
+    async with pool.acquire() as conn:
+        version_after = await queries.get_session_spec_version(
+            conn, session_id, account_id=_ACCOUNT_ID
+        )
+    assert version_after == version_before
+
+
+async def test_update_session_idempotent_vault_binding_does_not_evict(
+    env: tuple[asyncpg.Pool[Any], str, CryptoBox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool, session_id, _crypto_box = env
+    vault = await vaults_service.create_vault(
+        pool, account_id=_ACCOUNT_ID, display_name="idem-creds", metadata={}
+    )
+    await sessions_service.update_session(
+        pool, session_id, account_id=_ACCOUNT_ID, vault_ids=[vault.id]
+    )
+    spy = _install_spy(monkeypatch)
+
+    await sessions_service.update_session(
+        pool, session_id, account_id=_ACCOUNT_ID, vault_ids=[vault.id]
+    )
+
+    spy.evict.assert_not_called()
+
+
+async def test_update_session_empty_resources_on_empty_session_does_not_evict(
+    env: tuple[asyncpg.Pool[Any], str, CryptoBox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``resources=[]`` against a session with no attachments detaches
+    nothing — no eviction."""
+    pool, session_id, _crypto_box = env
+    spy = _install_spy(monkeypatch)
+
+    await sessions_service.update_session(pool, session_id, account_id=_ACCOUNT_ID, resources=[])
 
     spy.evict.assert_not_called()
 

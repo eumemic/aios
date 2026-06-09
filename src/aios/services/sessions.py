@@ -971,14 +971,20 @@ async def update_session(
             metadata=metadata,
             account_id=account_id,
         )
+        changed = False
         if vault_ids is not None:
-            await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
+            old_vault_ids = await queries.get_session_vault_ids(
+                conn, session_id, account_id=account_id
+            )
+            if vault_ids != old_vault_ids:
+                await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
+                changed = True
         if resources is not None:
             # Wire-level semantics is full-list-replace across all
             # resource types, so an incoming list that omits a type
             # detaches every existing attachment of that type.
             memory_resources, github_resources = split_resources_by_type(resources)
-            await memory_service.set_session_resources(
+            changed |= await memory_service.set_session_resources(
                 conn, session_id, memory_resources, account_id=account_id
             )
             if github_resources:
@@ -988,8 +994,13 @@ async def update_session(
                 await github_repo_service.set_session_resources(
                     conn, session_id, github_resources, crypto_box, account_id=account_id
                 )
+                # A github re-PUT is never idempotent: the incoming
+                # authorization_token is re-encrypted (fresh ciphertext, new
+                # updated_at), and updated_at is deliberately part of the
+                # mount snapshot so token rotation reaches the sandbox.
+                changed = True
             else:
-                await github_repo_service.detach_all_from_session(
+                changed |= await github_repo_service.detach_all_from_session(
                     conn, session_id, account_id=account_id
                 )
         vids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
@@ -1007,8 +1018,9 @@ async def update_session(
     # could re-provision against an uncommitted spec (#713). A resource or
     # vault-binding change forces the worker to re-read build_spec_from_session
     # on the next step; no-op in the API process (registry global is
-    # worker-only).
-    if vault_ids is not None or resources is not None:
+    # worker-only). An idempotent re-PUT (same vaults, same resources) writes
+    # nothing and must not recycle the sandbox.
+    if changed:
         _evict_sandbox_for_resource_change(session_id)
     return result
 

@@ -394,14 +394,30 @@ async def set_session_resources(
     resources: list[MemoryStoreResource],
     *,
     account_id: str,
-) -> None:
+) -> bool:
     """Replace attached stores atomically. A failed attach rolls back the delete.
+
+    Returns whether the attachments changed. An incoming list that matches
+    the current rows is a complete no-op — zero rows touched, so Layer 2's
+    ``spec_version`` trigger stays quiet and the caller skips the Layer 1
+    eviction: an idempotent re-PUT must not recycle the sandbox (#713).
+    The skip also means a re-PUT does not re-snapshot ``name_at_attach``
+    from the parent store, matching the documented echo semantics
+    (snapshots don't follow renames).
 
     Conn-scoped: sandbox eviction is fired post-commit by
     :func:`aios.services.sessions.update_session`, not here (#713).
     """
+    current = await queries.list_session_memory_store_echoes(
+        conn, session_id, account_id=account_id
+    )
+    if [(e.memory_store_id, e.access, e.instructions) for e in current] == [
+        (r.memory_store_id, r.access, r.instructions) for r in resources
+    ]:
+        return False
     async with conn.transaction():
         await conn.execute("DELETE FROM session_memory_stores WHERE session_id = $1", session_id)
         await queries.attach_memory_stores_to_session(
             conn, session_id, resources, account_id=account_id
         )
+    return True
