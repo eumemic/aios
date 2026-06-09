@@ -420,6 +420,20 @@ async def list_run_events_scoped(
     return [_row_to_wf_run_event(r) for r in rows]
 
 
+async def get_run_completed_event(conn: asyncpg.Connection[Any], run_id: str) -> WfRunEvent | None:
+    """The run's terminal ``run_completed`` event, or ``None`` if it hasn't completed.
+
+    Its payload carries the authoritative ``{output, is_error, error}`` completion detail —
+    in particular ``error.kind``, which ``wf_runs`` does not store (the row keeps only
+    ``status`` + ``output``). Unscoped by account: every caller (``await_run``) pre-checks the
+    run with :func:`get_wf_run`. Exactly one ``run_completed`` bookend exists per run (the
+    ``UNIQUE NULLS NOT DISTINCT (run_id, call_key, type)`` memo), so a bare fetch is exact."""
+    row = await conn.fetchrow(
+        "SELECT * FROM wf_run_events WHERE run_id = $1 AND type = 'run_completed'", run_id
+    )
+    return _row_to_wf_run_event(row) if row is not None else None
+
+
 async def find_open_gate_call_key(
     conn: asyncpg.Connection[Any], run_id: str, *, gate_nonce: str
 ) -> str | None:

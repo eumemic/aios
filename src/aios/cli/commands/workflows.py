@@ -15,12 +15,13 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.commands._shared import call_single, render_paginated
+from aios.cli.commands._shared import call_single, render_paginated, render_single, unwrap
 from aios.cli.coverage import covers
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk import stream_run
 from aios_sdk._generated.api.runs import (
+    await_run,
     cancel_run,
     create_run,
     get_run,
@@ -136,6 +137,36 @@ def list_runs_(
 def get_run_(ctx: typer.Context, run_id: str) -> None:
     def _run() -> None:
         call_single(ctx, get_run.sync_detailed, run_id=run_id)
+
+    run_or_die(_run)
+
+
+@runs_app.command("wait", help="Block until a run completes, then print its result.")
+@covers("await_run")
+def wait_run_(
+    ctx: typer.Context,
+    run_id: str,
+    timeout: Annotated[
+        int,
+        typer.Option(
+            "--timeout",
+            min=1,
+            max=60,
+            help="Per-request long-poll budget (seconds); the command re-polls until terminal.",
+        ),
+    ] = 30,
+) -> None:
+    def _run() -> None:
+        # The endpoint blocks up to --timeout then returns done|current; re-poll the
+        # bounded call until the run is terminal so the command blocks end-to-end.
+        with get_state(ctx).sdk_client() as client:
+            while True:
+                resp = unwrap(
+                    await_run.sync_detailed(run_id=run_id, client=client, timeout=timeout)
+                )
+                if resp.done:
+                    break
+        render_single(resp.to_dict())
 
     run_or_die(_run)
 

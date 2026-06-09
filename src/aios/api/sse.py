@@ -36,6 +36,7 @@ from sse_starlette import EventSourceResponse, ServerSentEvent
 
 from aios.db import queries
 from aios.logging import get_logger
+from aios.models.workflows import TERMINAL_RUN_STATUSES
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -248,10 +249,10 @@ async def wf_run_event_stream(
                     run_id,
                     cursor,
                 )
-                if status in ("completed", "errored", "cancelled")
+                if status in TERMINAL_RUN_STATUSES
                 else []
             )
-        if status in ("completed", "errored", "cancelled"):
+        if status in TERMINAL_RUN_STATUSES:
             for row in terminal_tail:
                 payload = _serialize_wf_event(row)
                 cursor = max(cursor, payload["seq"])

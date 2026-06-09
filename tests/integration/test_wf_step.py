@@ -11,6 +11,7 @@ directly, which is exactly the surface under test.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest import mock
@@ -2178,3 +2179,84 @@ async def test_defer_wake_priority_reflects_real_origin(
         }
     assert priorities[fg.id] == _FOREGROUND_PRIORITY  # real foreground → default
     assert priorities[cid] == _BACKGROUND_PRIORITY  # real background child → demoted
+
+
+# ─── await_run — the await-a-completion primitive, runs backing ──────────────
+
+
+async def test_await_run_returns_when_already_completed(
+    wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
+) -> None:
+    """A terminal run is returned immediately (the first post-subscribe read sees it):
+    ``done`` + the script's ``output``, no error."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    await run_workflow_step(run_id)  # pure script → completed in one wake
+    resp = await wf_service.await_run(
+        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
+    )
+    assert resp.done is True and resp.run_status == "completed"
+    assert resp.output == 1 and resp.is_error is False and resp.error is None
+
+
+async def test_await_run_surfaces_error_kind(
+    wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
+) -> None:
+    """An errored run returns ``is_error`` + the ``error.kind`` lifted from the
+    ``run_completed`` payload (``author_exception`` for an uncaught script raise)."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    raise ValueError('boom')")
+    await run_workflow_step(run_id)  # raise → errored
+    resp = await wf_service.await_run(
+        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
+    )
+    assert resp.done is True and resp.run_status == "errored" and resp.is_error is True
+    assert resp.error == {"kind": "author_exception"}
+
+
+async def test_await_run_times_out_on_non_terminal_run(
+    wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
+) -> None:
+    """A never-stepped (``pending``) run that doesn't finish within the budget returns
+    ``done=False`` with its live status — the re-poll contract, no archive/mutation."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")  # created, not stepped
+    resp = await wf_service.await_run(
+        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=0.1
+    )
+    assert resp.done is False and resp.run_status == "pending"
+    assert resp.output is None and resp.is_error is False and resp.error is None
+
+
+async def test_await_run_wakes_on_completion_during_wait(
+    wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
+) -> None:
+    """Completion-during-subscribe: the await blocks on a pending run; a concurrent step
+    drives it terminal; the run_completed notify wakes the await → it returns the record
+    (not a timeout). The LISTEN-before-read ordering is what closes the race."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 7")
+
+    async def _complete_soon() -> None:
+        await asyncio.sleep(0.1)  # let await_run subscribe + first-read (pending) first
+        await run_workflow_step(run_id)
+
+    resp, _ = await asyncio.gather(
+        wf_service.await_run(
+            pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=10
+        ),
+        _complete_soon(),
+    )
+    assert resp.done is True and resp.run_status == "completed" and resp.output == 7
+
+
+async def test_await_run_cross_tenant_404(
+    wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
+) -> None:
+    """The account scope is checked up front (before subscribing): a foreign account 404s."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    with pytest.raises(NotFoundError):
+        await wf_service.await_run(
+            pool, migrated_db_url, run_id, account_id="acc_other", timeout_seconds=1
+        )

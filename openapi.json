@@ -8582,6 +8582,77 @@
         }
       }
     },
+    "/v1/runs/{run_id}/wait": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Await Run",
+        "description": "Block until the run reaches a terminal status (``completed``/``errored``), or ``timeout``.\n\nThe ``await``-a-completion primitive (runs backing): one JSON round-trip returning the\ncompletion record \u2014 ``done`` + ``output``, or ``is_error`` + ``error``. A run still running\nafter ``timeout`` seconds returns ``done=false`` with its current status; call again to keep\nblocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP\ntool \u2014 an agent can await a sub-run and join. A cross-tenant run 404s.",
+        "operationId": "await_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 60,
+              "minimum": 0,
+              "default": 30,
+              "title": "Timeout"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WfRunWaitResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/runs/{run_id}/events": {
       "get": {
         "tags": [
@@ -15217,6 +15288,53 @@
         ],
         "title": "WfRunEvent",
         "description": "One row of a run's append-only journal (the replay-with-memo source).\n\n``call_key`` is set for ``call_started``/``call_result`` (the memo key) and\n``None`` for the ``run_started``/``run_completed`` bookends."
+      },
+      "WfRunWaitResponse": {
+        "properties": {
+          "run_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "suspended",
+              "completed",
+              "errored",
+              "cancelled"
+            ],
+            "title": "Run Status"
+          },
+          "done": {
+            "type": "boolean",
+            "title": "Done"
+          },
+          "output": {
+            "title": "Output"
+          },
+          "is_error": {
+            "type": "boolean",
+            "title": "Is Error",
+            "default": false
+          },
+          "error": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_status",
+          "done"
+        ],
+        "title": "WfRunWaitResponse",
+        "description": "Response for ``GET /v1/runs/{run_id}/wait`` \u2014 the run's completion record, or its\ncurrent (non-terminal) state if the wait timed out.\n\nDeliberately mirrors the ``{result, is_error, error}`` shape of a request response\n(``derive_response``) so the ``await`` primitive's two backings (run-terminal and, later,\nsession-request) share one envelope. Poll until ``done``: a still-running run returns\n``done=False`` with its live ``run_status`` (``running``/``suspended``/\u2026); call again to\nkeep blocking."
       },
       "WhatsappConfirmPairingRequest": {
         "properties": {

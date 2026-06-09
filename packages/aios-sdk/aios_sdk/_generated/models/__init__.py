@@ -227,6 +227,9 @@ from .wf_run_event import WfRunEvent
 from .wf_run_event_payload import WfRunEventPayload
 from .wf_run_event_type import WfRunEventType
 from .wf_run_status import WfRunStatus
+from .wf_run_wait_response import WfRunWaitResponse
+from .wf_run_wait_response_error_type_0 import WfRunWaitResponseErrorType0
+from .wf_run_wait_response_run_status import WfRunWaitResponseRunStatus
 from .whatsapp_confirm_pairing_request import WhatsappConfirmPairingRequest
 from .whatsapp_confirm_pairing_response import WhatsappConfirmPairingResponse
 from .whatsapp_confirm_pairing_response_status import (
@@ -458,6 +461,9 @@ __all__ = (
     "WfRunEventPayload",
     "WfRunEventType",
     "WfRunStatus",
+    "WfRunWaitResponse",
+    "WfRunWaitResponseErrorType0",
+    "WfRunWaitResponseRunStatus",
     "WhatsappConfirmPairingRequest",
     "WhatsappConfirmPairingResponse",
     "WhatsappConfirmPairingResponseStatus",
