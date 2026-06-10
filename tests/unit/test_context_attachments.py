@@ -19,10 +19,12 @@ from aios.config import get_settings
 from aios.harness import vision
 from aios.harness.context import (
     _apply_attachments,
+    build_messages,
 )
 from aios.harness.context import (
     render_user_event as _render_user_event_impl,
 )
+from aios.models.events import Event
 from aios.sandbox.volumes import session_attachments_dir
 
 # These tests exercise attachment/vision rendering, not the `received=` envelope
@@ -541,6 +543,49 @@ class TestVisionAwareRendering:
         assert "[attachment: b.pdf" in content[0]["text"]
         assert content[1]["type"] == "image_url"
         assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    def test_vanished_staged_file_renders_normally_not_quarantined(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """The inner ``context.attachment_read_failed`` OSError guard
+        pre-empts the outer #686 quarantine: when the staged file has
+        vanished (manual cleanup, FS corruption, GC race), the renderer
+        falls back to the ``[image: …]`` text marker rather than raising —
+        so ``build_messages`` produces a normal user message with NO
+        ``[unrenderable`` quarantine marker."""
+        sandbox_path = _stage_image(
+            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", b"jpegbytes"
+        )
+        # The host path mirrors how _stage_image laid the file down.
+        host_path = session_attachments_dir("sess-1") / "echo" / "evt-1-photo.jpg"
+        event_data = _user_event(
+            content="hello",
+            attachments=[
+                {
+                    "filename": "photo.jpg",
+                    "content_type": "image/jpeg",
+                    "size": len(b"jpegbytes"),
+                    "in_sandbox_path": sandbox_path,
+                }
+            ],
+        )
+        # Delete the staged file so read_bytes raises OSError mid-render.
+        host_path.unlink()
+        event = Event(
+            id="evt_1",
+            session_id="sess-1",
+            seq=1,
+            kind="message",
+            data=event_data,
+            created_at=_CREATED_AT,
+            orig_channel="echo/acct/chat-1",
+            focal_channel_at_arrival="echo/acct/chat-1",
+        )
+        ctx = build_messages([event], system_prompt=None, model="model/vision", session_id="sess-1")
+        content = ctx.messages[0]["content"]
+        assert isinstance(content, str)
+        assert "[unrenderable" not in content
+        assert "[image: photo.jpg" in content
 
 
 class TestNonFocalAttachmentRendering:
