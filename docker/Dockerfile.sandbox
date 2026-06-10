@@ -63,6 +63,24 @@ RUN apt-get update \
 COPY bin/tool /usr/local/bin/tool
 RUN chmod 0755 /usr/local/bin/tool
 
+# Named non-root user `aios` (uid:gid 1000:1000) with a writable home.
+#
+# DELIBERATELY no top-level `USER aios` directive. The image runs on a
+# one-shot-exec model: `CMD ["tail","-f","/dev/null"]` keeps the
+# container alive as **root**, and every tool call is a separate
+# `docker exec`. The agent uid is supplied per-exec via
+# `docker exec --user 1000:1000 ...` (follow-up seam issue), never as the
+# image default. Root must remain the default exec uid because setup
+# execs run apt and the iptables networking lockdown, which require uid 0
+# (the contract test `test_runs_as_root` asserts this).
+#
+# `--create-home` makes /home/aios owned by uid 1000 so the agent exec can
+# write there; `ENV HOME=/home/aios` applies to every exec (docker
+# `--user` does not reset HOME), so both root and uid-1000 execs see it.
+# This is inert until the follow-up flips agent execs to `--user 1000:1000`.
+RUN groupadd --gid 1000 aios && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/aios aios
+ENV HOME=/home/aios
+
 # Default broker URL for bash scripts inside the sandbox that read
 # $TOOL_BROKER_URL directly (the python ``tool`` CLI has its own
 # default). Always overridden by ``docker run --env TOOL_BROKER_URL=...``

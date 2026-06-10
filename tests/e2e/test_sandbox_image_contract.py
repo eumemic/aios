@@ -64,15 +64,22 @@ def pulled_image() -> str:
 
 
 def _docker_run(
-    image: str, *args: str, volume: str | None = None, timeout: int = 30
+    image: str,
+    *args: str,
+    volume: str | None = None,
+    user: str | None = None,
+    timeout: int = 30,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``docker run --rm IMAGE *args`` and return the completed process.
 
     If *volume* is given it is passed as ``--volume <volume>`` before the image name.
+    If *user* is given it is passed as ``--user <user>`` before the image name.
     """
     cmd = ["docker", "run", "--rm"]
     if volume is not None:
         cmd += ["--volume", volume]
+    if user is not None:
+        cmd += ["--user", user]
     cmd.append(image)
     cmd.extend(args)
     return subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
@@ -169,6 +176,41 @@ class TestRuntimeBehaviour:
         r = _docker_run(pulled_image, "bash", "-c", "id -u")
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "0", f"expected uid 0, got {r.stdout.strip()!r}"
+
+    def test_named_user_1000_is_aios(self, pulled_image: str) -> None:
+        """`docker exec --user 1000:1000` (the follow-up agent-exec uid) must
+        resolve to the named `aios` user, not a bare anonymous uid. The image
+        keeps no top-level USER directive (see test_runs_as_root); the uid is
+        supplied per-exec."""
+        r = _docker_run(pulled_image, "id", "-u", user="1000:1000")
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "1000", f"expected uid 1000, got {r.stdout.strip()!r}"
+        r = _docker_run(pulled_image, "id", "-un", user="1000:1000")
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "aios", f"expected user aios, got {r.stdout.strip()!r}"
+
+    def test_user_1000_has_writable_home(self, pulled_image: str) -> None:
+        """uid 1000 owns /home/aios (created via --create-home) and ENV
+        HOME=/home/aios applies under `--user` (docker --user does not reset
+        HOME), so the agent can write to $HOME."""
+        r = _docker_run(
+            pulled_image,
+            "bash",
+            "-c",
+            "touch $HOME/.probe && echo ok",
+            user="1000:1000",
+        )
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "ok", (
+            f"expected writable $HOME, got {r.stdout.strip()!r}: {r.stderr}"
+        )
+
+    def test_home_env_is_aios_home_for_root(self, pulled_image: str) -> None:
+        """Root (default) execs inherit ENV HOME=/home/aios too — the ENV is
+        unconditional, not gated on uid."""
+        r = _docker_run(pulled_image, "bash", "-c", "echo $HOME")
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "/home/aios", f"expected /home/aios, got {r.stdout.strip()!r}"
 
     def test_tool_broker_url_default_in_image_env(self, pulled_image: str) -> None:
         """Dockerfile sets a UDS default so bash scripts reading
