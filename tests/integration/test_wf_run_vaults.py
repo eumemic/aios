@@ -32,7 +32,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.harness import runtime
 from aios.mcp.client import resolve_auth_for_target_url_run
-from aios.models.agents import Agent, HttpServerSpec, McpServerSpec
+from aios.models.agents import Agent, HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.vaults import VaultCredentialCreate
 from aios.services import agents as agents_service
 from aios.services import vaults as vaults_service
@@ -87,7 +87,12 @@ async def vault_pool(
 
 
 async def _make_agent(
-    pool: asyncpg.Pool[Any], name: str, *, mcp_servers: list[McpServerSpec] | None = None
+    pool: asyncpg.Pool[Any],
+    name: str,
+    *,
+    tools: list[ToolSpec] | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
 ) -> Agent:
     return await agents_service.create_agent(
         pool,
@@ -95,8 +100,9 @@ async def _make_agent(
         name=name,
         model="test/dummy",
         system="x",
-        tools=[],
+        tools=tools or [],
         mcp_servers=mcp_servers,
+        http_servers=http_servers,
         description=None,
         metadata={},
         window_min=1000,
@@ -277,6 +283,47 @@ async def test_create_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
         creator_session_id=None,
     )
     assert [m.url for m in op.mcp_servers] == ["https://s2.example"]
+
+
+async def test_create_time_attenuation_rejects_per_tool_widening(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """The fixpoint predicate rejects *widening* a tool's policy, not just adding tools.
+
+    The agent holds ``bash`` at ``always_ask``. A workflow declaring the same ``bash``
+    at ``always_allow`` is a looser policy on an identically-named tool — membership
+    alone would admit it, but it widens the agent's surface, so the fixpoint predicate
+    rejects it. Re-declaring ``always_ask`` is a fixpoint and passes. This is the half
+    the old membership check missed.
+    """
+    pool = vault_pool
+    agent = await _make_agent(
+        pool, "pin-agent", tools=[ToolSpec(type="bash", permission="always_ask")]
+    )
+    creator = await _make_session(pool, agent)
+
+    before = await _workflow_count(pool)
+    with pytest.raises(ForbiddenError):
+        await wf_service.create_workflow(
+            pool,
+            account_id=ACC,
+            name="w-widen",
+            script=_SCRIPT,
+            tools=[ToolSpec(type="bash", permission="always_allow")],
+            creator_session_id=creator,
+        )
+    assert await _workflow_count(pool) == before
+
+    # Re-declaring the identical policy is a fixpoint → admitted.
+    ok = await wf_service.create_workflow(
+        pool,
+        account_id=ACC,
+        name="w-pin",
+        script=_SCRIPT,
+        tools=[ToolSpec(type="bash", permission="always_ask")],
+        creator_session_id=creator,
+    )
+    assert ok.name == "w-pin"
 
 
 async def test_declared_surface_round_trips(vault_pool: asyncpg.Pool[Any]) -> None:

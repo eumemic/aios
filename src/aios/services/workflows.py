@@ -17,10 +17,12 @@ from typing import Any
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.db.listen import open_listen_for_run_events
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.attenuation import Surface, attenuate, canonicalize, surface_diff
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     WfRun,
@@ -32,6 +34,7 @@ from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services.await_completion import await_completion
 from aios.services.wake import defer_run_wake
+from aios.tools.registry import transport_defaults
 from aios.workflows.service import create_run, resume_gate
 
 __all__ = [
@@ -53,15 +56,6 @@ __all__ = [
 # ─── workflow definitions ────────────────────────────────────────────────────
 
 
-def _tool_key(t: ToolSpec) -> tuple[str, str | None]:
-    """A tool's attenuation identity: builtins by type, custom by name, toolsets by server."""
-    if t.type == "mcp_toolset":
-        return ("mcp_toolset", t.mcp_server_name)
-    if t.type == "custom":
-        return ("custom", t.name)
-    return ("builtin", t.type)
-
-
 async def _enforce_surface_attenuation(
     pool: asyncpg.Pool[Any],
     *,
@@ -71,35 +65,35 @@ async def _enforce_surface_attenuation(
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerSpec],
 ) -> None:
-    """Raise ``ForbiddenError`` if the declared surface exceeds the acting agent's.
+    """Raise ``ForbiddenError`` unless the declared surface is a fixpoint of the meet
+    against the acting agent's surface — i.e. it grants nothing the agent lacks.
 
-    Serves both create (the creator declaring a surface) and update (the editor's merged
-    final surface). Subset by identity key: ``mcp_servers`` by url, ``http_servers`` by
-    base_url, ``tools`` by (builtin type / custom name / toolset server). The HTTP path
-    passes no actor and skips this — operator authority. (No-widen on
-    permission/transport/routes is a deliberate follow-up; this slice gates membership.)
+    Serves both create (the creator's declared surface) and update (the editor's merged
+    final surface). The predicate is ``attenuate(declared, actor) ==
+    canonicalize(declared)``: equal iff the meet did not have to narrow anything, which
+    is exactly "``declared`` ≤ ``actor``" on every axis — membership *and* per-tool
+    permission/transport, MCP server identity (joint name+url), and http routes (which
+    are parent-wins-frozen, so the agent's must be declared verbatim; R1). The HTTP path
+    passes no actor and skips this — operator authority.
     """
     session = await sessions_service.get_session_basic(
         pool, actor_session_id, account_id=account_id
     )
     agent = await agents_service.load_for_session(pool, session, account_id=account_id)
-    allowed_mcp = {s.url for s in agent.mcp_servers}
-    allowed_http = {s.base_url for s in agent.http_servers}
-    allowed_tools = {_tool_key(t) for t in agent.tools if t.enabled}
-
-    offending: dict[str, list[str]] = {}
-    if bad := [s.name for s in mcp_servers if s.url not in allowed_mcp]:
-        offending["mcp_servers"] = bad
-    if bad := [s.name for s in http_servers if s.base_url not in allowed_http]:
-        offending["http_servers"] = bad
-    if bad := [
-        t.name or t.mcp_server_name or t.type for t in tools if _tool_key(t) not in allowed_tools
-    ]:
-        offending["tools"] = bad
-    if offending:
+    default_mcp = get_settings().default_mcp_permission_policy or "always_ask"
+    builtin_transports = transport_defaults()
+    declared = Surface(tools, mcp_servers, http_servers)
+    actor = Surface(agent.tools, agent.mcp_servers, agent.http_servers)
+    expected = canonicalize(
+        declared, default_mcp_permission=default_mcp, builtin_transports=builtin_transports
+    )
+    effective = attenuate(
+        declared, actor, default_mcp_permission=default_mcp, builtin_transports=builtin_transports
+    )
+    if effective != expected:
         raise ForbiddenError(
-            "workflow declares servers or tools the creating agent does not have",
-            detail={"ungranted": offending},
+            "workflow surface exceeds the acting agent's",
+            detail={"exceeds": surface_diff(expected, effective)},
         )
 
 
