@@ -1505,6 +1505,16 @@ async def decrement_open_tool_call_count(
     forever. Both dedup-skip sites call this to apply the matching -1 in the
     SAME session-row-lock transaction. ``GREATEST(..., 0)`` clamps the floor.
 
+    By design this fires on EVERY dedup-skip — including a genuine idempotent
+    retry of an already-resolved call (network blip, worker-API race), not only
+    the reused-id case. When a SIBLING tool_call is still genuinely open at that
+    moment, the unconditional -1 can transiently drive the counter below the
+    true open count. That undercount is safe and self-healing: ``GREATEST(...,
+    0)`` keeps it non-negative, and the independent ``last_stimulus_seq >
+    last_reacted_seq`` wake path re-activates the session when the sibling's real
+    result lands — so the counter is never the sole thing keeping the session
+    alive and the session is never permanently stalled.
+
     Must be called inside the caller's transaction, while it holds the
     session row lock (``SELECT ... FOR UPDATE`` /
     ``lock_active_session_for_update``).
