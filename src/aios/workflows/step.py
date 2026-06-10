@@ -162,10 +162,12 @@ async def run_workflow_step(run_id: str) -> None:
             return  # vanished or already terminal — a stray/duplicate wake is a no-op
         account_id = run.account_id
     # Bind run/tenant onto structlog contextvars so every line this step emits is
-    # attributable; cleared in the finally so it never leaks to the next job on this
-    # worker task. Bound AFTER the gone/terminal guard above — that path is an
-    # idempotent no-op with no account to attribute. ``cause`` is omitted: workflows
-    # have no per-wake cause concept (unlike a session step's message/reschedule/etc).
+    # attributable; cleared in the finally as defensive hygiene (contextvars are
+    # task-scoped and procrastinate runs each job in a fresh asyncio task, but the
+    # clear keeps the bindings from outliving the step regardless). Bound AFTER the
+    # gone/terminal guard above — that path is an idempotent no-op with no account to
+    # attribute. ``cause`` is omitted: workflows have no per-wake cause concept
+    # (unlike a session step's message/reschedule/etc).
     bind_contextvars(run_id=run_id, account_id=account_id)
     try:
         await _run_workflow_step_body(pool, run_id, run, account_id)

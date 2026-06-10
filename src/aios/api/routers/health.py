@@ -37,6 +37,11 @@ async def ready(request: Request) -> Response:
     """
     pool = request.app.state.pool
     try:
+        # The timeout intentionally covers both ``pool.acquire()`` and the query: a
+        # pool that can't hand out a connection (exhausted/stuck) is genuinely "not
+        # ready" to serve DB-backed traffic, same as a DB that won't answer — both are
+        # a correct 503. We don't distinguish the two; the probe's job is liveness of
+        # the DB path, not root-cause attribution.
         async with asyncio.timeout(2.0):
             async with pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
