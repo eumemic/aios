@@ -1,6 +1,8 @@
 """``aios accounts ...`` — multi-tenancy management plane (#367 PR 8).
 
-Surfaces the eight management endpoints from PR 7:
+Surfaces the eight management endpoints from PR 7, plus the one-shot
+deployment-bootstrap endpoint that mints the root account on a fresh DB:
+    aios accounts bootstrap                     # mint root account + first key
     aios accounts me
     aios accounts list                          # direct children
     aios accounts get <ID>                      # caller-or-child read
@@ -19,16 +21,18 @@ prefixed ``plaintext_key:`` to make it obvious what to copy and so a
 
 from __future__ import annotations
 
+import os
 from typing import Annotated
 
 import typer
 
 from aios.cli.commands._shared import call_single, render_list, render_single, unwrap
 from aios.cli.coverage import covers
-from aios.cli.output import print_json, print_note
+from aios.cli.output import print_error, print_json, print_note
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.accounts import (
     archive_account,
+    bootstrap_root_account,
     get_account,
     get_my_account,
     list_account_keys,
@@ -41,6 +45,7 @@ from aios_sdk._generated.api.accounts import (
     update_account,
 )
 from aios_sdk._generated.models.account_config import AccountConfig
+from aios_sdk._generated.models.bootstrap_request import BootstrapRequest
 from aios_sdk._generated.models.mint_account_request import MintAccountRequest
 from aios_sdk._generated.models.mint_key_request import MintKeyRequest
 from aios_sdk._generated.models.update_account_request import UpdateAccountRequest
@@ -70,6 +75,52 @@ def _envelope[T](items: list[T]) -> dict[str, object]:
         "has_more": False,
         "next_cursor": None,
     }
+
+
+@app.command(
+    "bootstrap",
+    help="Mint the root account and its first API key on a fresh deployment.",
+)
+@covers("bootstrap_root_account")
+def bootstrap(
+    ctx: typer.Context,
+    display_name: Annotated[
+        str,
+        typer.Option("--display-name", "-n", help="Human-readable name for the root account."),
+    ] = "root",
+) -> None:
+    """One-shot deployment seeding: 404s once a root account exists. Gated by
+    ``AIOS_BOOTSTRAP_TOKEN`` (sent as the bearer here, NOT the client
+    ``AIOS_API_KEY`` — that key doesn't exist yet on a fresh DB). The minted
+    ``plaintext_key`` is the operator's first API key; export it as
+    ``AIOS_API_KEY``."""
+
+    def _run() -> None:
+        token = os.environ.get("AIOS_BOOTSTRAP_TOKEN")
+        if not token:
+            print_error(
+                "AIOS_BOOTSTRAP_TOKEN is not set; it gates POST /v1/accounts/bootstrap "
+                "to mint the root account's first API key"
+            )
+            raise typer.Exit(2)
+        body = BootstrapRequest(display_name=display_name)
+        with get_state(ctx).sdk_client() as client:
+            obj = unwrap(
+                bootstrap_root_account.sync_detailed(
+                    client=client, body=body, authorization=f"Bearer {token}"
+                )
+            )
+        data = obj.to_dict()
+        if get_state(ctx).output_format == "json":
+            print_json(data)
+        else:
+            render_single({"account_id": data["account_id"], "key_id": data["key_id"]})
+            # Plaintext key is unrecoverable after this response; show it on
+            # its own line so it's hard to miss. Goes to stderr so a
+            # ``--format json`` consumer's pipe stays clean.
+            print_note(f"plaintext_key: {data['plaintext_key']}")
+
+    run_or_die(_run)
 
 
 @app.command("me")

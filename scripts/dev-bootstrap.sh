@@ -18,8 +18,8 @@
 #       --connector to bootstrap multiple at once.
 #
 #   ./scripts/dev-bootstrap.sh --reset
-#       Wipe AIOS_API_KEY, AIOS_VAULT_KEY, all *_CONNECTOR_TOKEN values
-#       in .env, then run a fresh bootstrap.
+#       Wipe AIOS_BOOTSTRAP_TOKEN, AIOS_API_KEY, AIOS_VAULT_KEY, and all
+#       *_CONNECTOR_TOKEN values in .env, then run a fresh bootstrap.
 
 set -euo pipefail
 
@@ -138,6 +138,8 @@ PY
 
 if $RESET; then
   say "--reset: clearing keys + tokens in .env"
+  env_set AIOS_BOOTSTRAP_TOKEN ""
+  # Wipe the stale minted root key too — it's re-minted from a fresh DB below.
   env_set AIOS_API_KEY ""
   env_set AIOS_VAULT_KEY ""
   env_set ECHO_HTTP_CONNECTOR_TOKEN ""
@@ -154,9 +156,9 @@ needs_gen() {
   local v="$1"
   [[ -z "$v" || "$v" == "replace-me" ]]
 }
-if needs_gen "$(env_get AIOS_API_KEY)"; then
-  say "generating AIOS_API_KEY (openssl rand -hex 32)"
-  env_set AIOS_API_KEY "$(openssl rand -hex 32)"
+if needs_gen "$(env_get AIOS_BOOTSTRAP_TOKEN)"; then
+  say "generating AIOS_BOOTSTRAP_TOKEN (openssl rand -hex 32)"
+  env_set AIOS_BOOTSTRAP_TOKEN "$(openssl rand -hex 32)"
 fi
 if needs_gen "$(env_get AIOS_VAULT_KEY)"; then
   say "generating AIOS_VAULT_KEY (openssl rand -base64 32)"
@@ -220,6 +222,25 @@ while (( SECONDS < deadline )); do
 done
 curl -fsS "$api_url_local" >/dev/null 2>&1 || fail "api didn't reach /health in 60s"
 ok "api healthy"
+
+# Mint the root account's first API key. The minting path is POST
+# /v1/accounts/bootstrap, gated by AIOS_BOOTSTRAP_TOKEN (read from the
+# environment we sourced above). It's one-shot per DB: on a non-fresh DB
+# a root already exists and the endpoint 404s, so we tolerate failure and
+# fall through to the existing dev-seed path. ``|| true`` keeps the
+# captured-substitution failure from tripping ``set -e``.
+if [[ -z "$(env_get AIOS_API_KEY)" ]]; then
+  say "minting root API key (POST /v1/accounts/bootstrap)"
+  minted="$(uv run aios -f json accounts bootstrap 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["plaintext_key"])' 2>/dev/null || true)"
+  if [[ -n "$minted" ]]; then
+    env_set AIOS_API_KEY "$minted"
+    export AIOS_API_KEY="$minted"
+    ok "minted root API key"
+  else
+    say "root already exists (or bootstrap unavailable); skipping mint"
+  fi
+fi
 
 # Seed the deterministic dev key the console auto-logs-in with. Best-effort:
 # on a brand-new DB there's no root yet, so the seed no-ops with a hint and we

@@ -11,17 +11,18 @@ uv sync --dev
 # Run checks (do all three before every commit)
 uv run mypy src tests
 uv run ruff check src tests && uv run ruff format --check src tests
-uv run pytest tests/unit -q                    # ~170 tests, <1s, no Docker needed
+uv run pytest tests/unit -q                    # ~160 test files, fast, no Docker needed (CI runs -n 4)
 
 # E2E tests (need Docker for testcontainer Postgres + sandbox)
 DOCKER_HOST=unix:///Users/tom/.docker/run/docker.sock uv run pytest tests/e2e -q
 
 # Run a single test
-uv run pytest tests/unit/test_context.py::TestBuildMessages::test_basic_user_assistant -xvs
+uv run pytest tests/unit/test_context.py::TestBuildMessages::test_simple_conversation -xvs
 
-# Migrations
+# Migrations (aios migrate also applies the procrastinate schema +
+# lock-release trigger; bare `alembic upgrade head` does not)
 set -a && source .env && set +a
-uv run alembic upgrade head
+uv run aios migrate
 
 # Start the system (two processes)
 uv run python -m aios api      # API server on :8090

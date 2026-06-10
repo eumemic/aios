@@ -140,7 +140,7 @@ docker run -d --name aios-pg -p 5433:5432 \
 
 # Configure
 cat > .env << 'EOF'
-AIOS_API_KEY=your-secret-key
+AIOS_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)
 AIOS_VAULT_KEY=$(python3 -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())")
 AIOS_DB_URL=postgresql://aios:aios@localhost:5433/aios
 AIOS_API_PORT=8090
@@ -156,7 +156,11 @@ uv run aios worker   # Worker process
 
 # Quickest path: use the CLI client
 export AIOS_URL=http://localhost:8090
-export AIOS_API_KEY=your-secret-key
+
+# Mint the root account's first API key (one-shot per DB; gated by
+# AIOS_BOOTSTRAP_TOKEN) and export it as the client bearer.
+export AIOS_API_KEY=$(uv run aios -f json accounts bootstrap \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["plaintext_key"])')
 
 uv run aios envs create --name default
 uv run aios agents create --file - <<'EOF'

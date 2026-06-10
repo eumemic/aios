@@ -50,7 +50,11 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      AIOS_API_KEY: ${AIOS_API_KEY:?AIOS_API_KEY required — run scripts/dev-bootstrap.sh}
+      # migrate doesn't read AIOS_API_KEY (no auth surface), and on a fresh DB
+      # it doesn't exist yet — it's minted via POST /v1/accounts/bootstrap after
+      # the api comes up. Relaxed to ``:-`` so compose config-time interpolation
+      # doesn't hard-fail before the key has been minted.
+      AIOS_API_KEY: ${AIOS_API_KEY:-}
       AIOS_VAULT_KEY: ${AIOS_VAULT_KEY:?AIOS_VAULT_KEY required — run scripts/dev-bootstrap.sh}
       AIOS_DB_URL: postgresql://aios:aios@postgres:5432/aios
 
