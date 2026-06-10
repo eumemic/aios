@@ -118,6 +118,37 @@ def _spec(
     )
 
 
+# ─── schedule_task_list tool ──────────────────────────────────────────────
+
+
+class TestScheduleTaskListTool:
+    async def test_schedule_task_list_handler_returns_tasks(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        from aios.harness import runtime
+        from aios.tools.schedule_task_list import schedule_task_list_handler
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+
+        await st_service.add_task(pool, sid, _spec("alpha"), account_id=account_id)
+        await st_service.add_task(pool, sid, _spec("beta"), account_id=account_id)
+
+        prev_pool = runtime.pool
+        runtime.pool = pool
+        try:
+            result = await schedule_task_list_handler(sid, {})
+        finally:
+            runtime.pool = prev_pool
+
+        assert len(result["tasks"]) == 2
+        assert {t["name"] for t in result["tasks"]} == {"alpha", "beta"}
+        for t in result["tasks"]:
+            assert t["enabled"] is True
+            assert t["consecutive_failures"] == 0
+
+
 # ─── service-layer round-trip ─────────────────────────────────────────────
 
 
@@ -511,6 +542,83 @@ class TestRecordFire:
         assert row is not None
         assert row["enabled"] is False
         assert row["next_fire"] is None
+
+    async def test_cron_auto_disable_surfaces_user_event(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """When a cron task crosses MAX_CONSECUTIVE_FAILURES and auto-disables,
+        the runner surfaces a synthetic user-role message so the agent learns
+        the task is dead instead of just going silent."""
+        from aios.harness import runtime, scheduled_task_runner
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+
+        echo = await st_service.add_task(pool, sid, _spec("doomed"), account_id=account_id)
+
+        # Pre-seed so this fire is the threshold-crosser (4 + 1 = 5 = MAX) and
+        # the row is claimed (running_since set) so the runner doesn't early-out.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE session_scheduled_tasks "
+                "SET consecutive_failures = 4, running_since = $1 WHERE id = $2",
+                datetime.now(UTC),
+                echo.id,
+            )
+
+        async def _fail_run(_self: object, _handle: object, _cmd: str, **_kw: Any) -> Any:
+            return mock.MagicMock(exit_code=2, timed_out=False, stderr="boom: cron failed")
+
+        registry = _make_fake_sandbox_registry(_fail_run)
+        prev_pool = runtime.pool
+        prev_registry = runtime.sandbox_registry
+        runtime.pool = pool
+        runtime.sandbox_registry = registry  # type: ignore[assignment]
+        with mock.patch(
+            "aios.harness.scheduled_task_runner.defer_wake",
+            new_callable=mock.AsyncMock,
+        ) as mock_defer:
+            try:
+                await scheduled_task_runner.run_scheduled_task_step(echo.id)
+            finally:
+                runtime.pool = prev_pool
+                runtime.sandbox_registry = prev_registry
+
+        # (a) A user-role message announcing the auto-disable is in the log.
+        async with pool.acquire() as conn:
+            event_rows = await conn.fetch(
+                "SELECT kind, data FROM events WHERE session_id = $1 ORDER BY seq ASC",
+                sid,
+            )
+
+        def _data(row: Any) -> dict[str, Any]:
+            return json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+
+        disable_messages = [
+            r
+            for r in event_rows
+            if r["kind"] == "message"
+            and _data(r).get("role") == "user"
+            and "auto-disabled" in _data(r).get("content", "")
+        ]
+        assert disable_messages, "expected an auto-disable user message in the session log"
+        latest_content = _data(disable_messages[-1])["content"]
+        assert "doomed" in latest_content
+        assert "5" in latest_content
+
+        # (b) A wake was deferred so the agent reacts to the message.
+        mock_defer.assert_called()
+
+        # (c) The row is disabled and the failure count landed at MAX.
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT enabled, consecutive_failures FROM session_scheduled_tasks WHERE id = $1",
+                echo.id,
+            )
+        assert row is not None
+        assert row["enabled"] is False
+        assert row["consecutive_failures"] == 5
 
 
 # ─── HTTP surface ──────────────────────────────────────────────────────────

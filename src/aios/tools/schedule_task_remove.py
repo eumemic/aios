@@ -2,8 +2,8 @@
 
 Idempotency note: removing a non-existent name raises ``NotFoundError``
 (surfaced as a tool error). The model can list and confirm before remove
-if uncertain — there is no ``list`` tool yet, but ``Session.scheduled_tasks``
-in the system context lists current entries.
+if uncertain — the ``schedule_task_list`` tool enumerates current entries,
+and ``Session.scheduled_tasks`` in the system context also lists them.
 """
 
 from __future__ import annotations
