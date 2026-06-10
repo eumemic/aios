@@ -79,8 +79,9 @@ REFUSAL_FINISH_REASON = "content_filter"
 # console's "Errored" pill (status idle + stop_reason.type == "error").
 _REFUSAL_STOP_REASON_MESSAGE = (
     "Model returned a content_filter refusal; the turn was not dispatched. "
-    "The model likely refused due to conversation content. Switch the session's "
-    "model or edit context to recover."
+    "The model likely refused due to conversation content. To recover, post a "
+    "message to the session (optionally after switching the agent's model or "
+    "trimming the conversation that triggered the refusal)."
 )
 
 

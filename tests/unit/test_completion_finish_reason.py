@@ -3,13 +3,18 @@
 The refusal-surfacing logic in ``loop.py`` keys on the standardized
 ``finish_reason`` litellm puts on each choice. These tests pin that the unpack
 helper extracts it for a normal completion, a tool-call completion, and a
-``content_filter`` refusal, and that absence degrades to ``None``.
+``content_filter`` refusal, and that absence degrades to ``None`` — and that the
+streaming path's sticky-capture restores a refusal that
+``stream_chunk_builder``'s last-wins assembly clobbers.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from aios.harness import completion
 from aios.harness.completion import _unpack_litellm_response
 
 
@@ -54,3 +59,113 @@ class TestUnpackFinishReason:
             source="test",
         )
         assert finish_reason is None
+
+
+class _FakeDelta:
+    def __init__(self, content: str | None) -> None:
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, finish_reason: str | None, content: str | None) -> None:
+        self.finish_reason = finish_reason
+        self.delta = _FakeDelta(content)
+
+
+class _FakeChunk:
+    def __init__(self, finish_reason: str | None, content: str | None = None) -> None:
+        self.choices = [_FakeChoice(finish_reason, content)]
+
+
+class _FakeStream:
+    """Async-iterable of streaming chunks, mirroring litellm's ``acompletion``."""
+
+    def __init__(self, chunks: list[_FakeChunk]) -> None:
+        self._it = iter(chunks)
+
+    def __aiter__(self) -> _FakeStream:
+        return self
+
+    async def __anext__(self) -> _FakeChunk:
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+def _clobbered_builder(finish_reason: str) -> Any:
+    """A ``stream_chunk_builder`` stand-in returning a given assembled
+    ``finish_reason`` — used to simulate litellm 1.83.4's last-wins clobber."""
+    return lambda chunks: {
+        "usage": {},
+        "choices": [
+            {"message": {"role": "assistant", "content": ""}, "finish_reason": finish_reason}
+        ],
+    }
+
+
+class TestStreamStickyContentFilter:
+    """``stream_litellm`` must preserve a ``content_filter`` refusal across
+    ``stream_chunk_builder``'s last-wins assembly.
+
+    Reproduced against the pinned litellm 1.83.4 during PR review: its
+    ``stream_chunk_builder`` overwrites ``finish_reason`` from every
+    choice-bearing chunk, and the Anthropic streaming adapter defaults
+    ``finish_reason=""`` on all but the ``message_delta`` chunk — so a trailing
+    usage/stop chunk silently clobbers ``content_filter`` back to ``"stop"``,
+    defeating ``loop.REFUSAL_FINISH_REASON`` gating on the SSE/streaming path.
+    ``stream_litellm`` captures the refusal off the wire and re-asserts it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_refusal_survives_trailing_clobber(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from tests.unit.test_completion_timeouts import _StubPool
+
+        # content_filter rides a non-final chunk; a trailing "stop" chunk is
+        # what litellm's assembler would last-wins onto the result.
+        chunks = [
+            _FakeChunk(finish_reason="content_filter"),
+            _FakeChunk(finish_reason="stop"),
+        ]
+
+        async def fake_acompletion(**_kwargs: object) -> _FakeStream:
+            return _FakeStream(chunks)
+
+        monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+        monkeypatch.setattr(completion.litellm, "stream_chunk_builder", _clobbered_builder("stop"))
+
+        _msg, _usage, _cost, finish_reason = await completion.stream_litellm(
+            model="anthropic/claude-fable-5",
+            messages=[{"role": "user", "content": "hi"}],
+            pool=_StubPool(),  # type: ignore[arg-type]
+            session_id="sess_refusal",
+        )
+        # Without the sticky-capture this would be "stop" (the clobbered value).
+        assert finish_reason == "content_filter"
+
+    @pytest.mark.asyncio
+    async def test_no_spurious_override_on_normal_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The capture must not fabricate a refusal: a stream whose wire never
+        carried ``content_filter`` returns the assembled value unchanged."""
+        from tests.unit.test_completion_timeouts import _StubPool
+
+        chunks = [
+            _FakeChunk(finish_reason=None, content="hi"),
+            _FakeChunk(finish_reason="stop"),
+        ]
+
+        async def fake_acompletion(**_kwargs: object) -> _FakeStream:
+            return _FakeStream(chunks)
+
+        monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+        monkeypatch.setattr(completion.litellm, "stream_chunk_builder", _clobbered_builder("stop"))
+
+        _msg, _usage, _cost, finish_reason = await completion.stream_litellm(
+            model="anthropic/claude-fable-5",
+            messages=[{"role": "user", "content": "hi"}],
+            pool=_StubPool(),  # type: ignore[arg-type]
+            session_id="sess_ok",
+        )
+        assert finish_reason == "stop"
