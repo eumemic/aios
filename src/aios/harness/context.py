@@ -881,12 +881,40 @@ def build_messages(
     target_supports_thinking = bool(
         model and ("claude" in model.lower() or litellm.supports_reasoning(model))
     )
-    return ContextResult(
-        messages=[
-            _strip_to_spec(m, target_supports_thinking=target_supports_thinking) for m in messages
-        ],
-        reacting_to=max_stimulus_seq,
-    )
+    stripped = [
+        _strip_to_spec(m, target_supports_thinking=target_supports_thinking) for m in messages
+    ]
+    # Drop degenerate empty assistant turns (no content, no tool_calls, no
+    # thinking) before replay. They carry zero information, and replaying them
+    # teaches literal-minded models — claude-fable-5 in particular — to imitate
+    # silence: a run of empty assistant turns in the window makes fable
+    # deterministically emit another empty turn (proven: 0% empty on a clean
+    # window, 100% empty when the window holds such a run; opus-4.x is immune).
+    # LiteLLM also rewrites their empty content to a "[System: Empty message
+    # content sanitised…]" marker on the wire, so the model literally sees a wall
+    # of its own malfunction markers. Excluding them is safe for every model
+    # (nothing is lost) and breaks the imitation loop at the source.
+    stripped = [m for m in stripped if not _is_degenerate_empty_assistant(m)]
+    return ContextResult(messages=stripped, reacting_to=max_stimulus_seq)
+
+
+def _is_degenerate_empty_assistant(msg: dict[str, Any]) -> bool:
+    """True for an assistant turn carrying no content, no tool_calls, no thinking.
+
+    Such a turn is a non-event — the model produced nothing actionable. It is
+    distinct from a tool-call turn (``tool_calls`` present) or a thinking turn
+    (``thinking_blocks`` present), both of which are load-bearing and kept.
+    """
+    if msg.get("role") != "assistant":
+        return False
+    if msg.get("tool_calls") or msg.get("thinking_blocks"):
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return not content.strip()
+    if isinstance(content, list):
+        return not any(isinstance(b, dict) and (b.get("text") or "").strip() for b in content)
+    return content is None
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -979,27 +1007,56 @@ imports this constant to stay in lock-step.
 """
 
 
-def separate_adjacent_user_messages(
+def merge_adjacent_user_messages(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Insert a placeholder assistant message between any two adjacent user messages.
+    """Merge consecutive user-role messages into a single user turn.
 
-    LiteLLM's Anthropic translator enforces strict role alternation by
-    merging adjacent same-role messages into a single multi-content-block
-    payload.  When a user inbound is immediately followed by the
-    per-step channels tail block (also user-role), Anthropic sees them
-    as one message with two text blocks — and models narrate "your
-    message included the channel state" about their own scaffolding.
+    Anthropic requires alternating roles, so two adjacent user messages
+    must become one. The earlier approach inserted a placeholder
+    assistant turn (a ``"."``) between them to *force* them apart and
+    stop LiteLLM concatenating a user inbound with the channels tail
+    block (which made models narrate "your message included the channel
+    state"). That placeholder is now both unnecessary and harmful:
 
-    Inserting an assistant turn between two consecutive user messages
-    blocks the merge.  The placeholder uses
-    :data:`_USER_MESSAGE_SEPARATOR_CONTENT` (a single printable byte) so
-    it survives validators on relay routes (OpenRouter → Bedrock, etc.)
-    that reject empty non-final assistant content.
+    * Unnecessary — the channels tail block is no longer appended after
+      an unanswered user inbound (see ``compose_step_context`` /
+      ``_agent_owes_response``), so the tail-merge case it guarded
+      against no longer arises; the only remaining adjacent-user case is
+      genuine successive inbounds (feeder pings + user text that landed
+      before the agent acted), which *should* read as one block.
+    * Harmful — a ``"."`` is a degenerate assistant turn. Literal-minded
+      models imitate it: ``claude-fable-5`` pattern-completes a run of
+      ``"."`` placeholders into silence and emits empty turns
+      deterministically (a single ``"."`` before the prompt flips fable
+      from 0% to 100% empty turns in repro; opus-4.x is immune). The
+      placeholders also accreted with every feeder ping, poisoning
+      long-lived agent sessions.
+
+    Merging here (rather than letting LiteLLM do it implicitly) keeps the
+    behaviour deterministic and route-independent: no degenerate
+    placeholder ever reaches the provider, and each merged inbound keeps
+    its own channel header so the sequence stays legible.
     """
     result: list[dict[str, Any]] = []
     for msg in messages:
         if result and result[-1].get("role") == "user" and msg.get("role") == "user":
-            result.append({"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT})
-        result.append(msg)
+            result[-1] = _concat_user_messages(result[-1], msg)
+        else:
+            result.append(dict(msg))
     return result
+
+
+def _concat_user_messages(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    """Concatenate two user messages, preserving content-block structure.
+
+    String contents join with a blank line (each rendered inbound already
+    carries its ``[channel=… received=…]`` header). List contents (vision
+    parts) concatenate block-wise; mixed shapes normalise to a block list.
+    """
+    ca, cb = a.get("content"), b.get("content")
+    if isinstance(ca, str) and isinstance(cb, str):
+        return {"role": "user", "content": f"{ca}\n\n{cb}"}
+    la = ca if isinstance(ca, list) else [{"type": "text", "text": ca or ""}]
+    lb = cb if isinstance(cb, list) else [{"type": "text", "text": cb or ""}]
+    return {"role": "user", "content": [*la, *lb]}

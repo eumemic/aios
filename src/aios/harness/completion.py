@@ -49,6 +49,27 @@ _FABLE5_MODEL_COST = {
 for _fable5_key in ("claude-fable-5", "anthropic/claude-fable-5"):
     litellm.model_cost.setdefault(_fable5_key, _FABLE5_MODEL_COST)
 
+# LiteLLM 1.83.4's Anthropic adapter silently DROPS a requested ``thinking``
+# param whenever the last tool-calling assistant message in the replayed
+# history lacks ``thinking_blocks`` (guard for upstream issue #18926). The
+# guard is over-broad: Anthropic accepts a thinking-enabled request against a
+# thinking-less history (verified live against claude-fable-5 and
+# claude-opus-4-8, 2026-06-10) — the real contract only requires that
+# *previously emitted* thinking blocks be preserved, which ``_normalize_message``'s
+# lift + ``_strip_to_spec``'s whitelist now do. Left in place, the guard also
+# creates a bootstrap deadlock: thinking can never turn on for an existing
+# session because no prior turn has thinking blocks, and no turn can produce
+# them while the param keeps being dropped. Neutralize it. Remove when a
+# litellm upgrade narrows the guard upstream.
+try:  # defensive: private module path, may move across litellm versions
+    from litellm.llms.anthropic.chat import transformation as _anthropic_transformation
+
+    _anthropic_transformation.last_assistant_with_tool_calls_has_no_thinking_blocks = (  # type: ignore[attr-defined]
+        lambda *args, **kwargs: False
+    )
+except (ImportError, AttributeError):  # pragma: no cover - litellm layout drift
+    pass
+
 # Default per-call bounds. Kept here so they're visible at the wrapper boundary
 # rather than buried in defaults that drift between LiteLLM versions. Agents
 # can override either via ``litellm_extra``; the spread happens after these
@@ -69,11 +90,38 @@ def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     the key (breaks ``jsonb_array_length``), and ``content: null`` instead
     of ``content: ""`` (breaks providers like MiniMax and Gemma when the
     message is replayed in a cross-model session).
+
+    Anthropic thinking blocks are lifted from
+    ``provider_specific_fields.thinking_blocks`` to the top-level
+    ``thinking_blocks`` key. LiteLLM parks them in the former, but only the
+    latter survives replay (``_strip_to_spec`` whitelists top-level
+    ``thinking_blocks`` for thinking-capable targets). Without the lift,
+    replayed assistant turns carry no thinking blocks, which (a) violates
+    Anthropic's thinking-preservation contract across tool-use turns and
+    (b) trips LiteLLM's guard that silently drops the requested
+    ``thinking`` param — leaving models like claude-fable-5 running
+    thinking-less, where they stochastically emit literal-empty turns that
+    then poison the transcript (fable imitates degenerate turns in its own
+    history; see the empty-turn cascade incident, 2026-06-09). Blocks with
+    empty thinking text (the ``display: "omitted"`` default) are NOT
+    lifted: a signature without its content fails Anthropic-side
+    validation on replay ("Invalid `signature` in `thinking` block").
     """
     if "tool_calls" in msg and msg["tool_calls"] is None:
         del msg["tool_calls"]
     if msg.get("content") is None:
         msg["content"] = ""
+    if not msg.get("thinking_blocks"):
+        psf = msg.get("provider_specific_fields")
+        blocks = psf.get("thinking_blocks") if isinstance(psf, dict) else None
+        if isinstance(blocks, list):
+            kept = [b for b in blocks if isinstance(b, dict) and (b.get("thinking") or "").strip()]
+            if kept:
+                msg["thinking_blocks"] = kept
+            else:
+                msg.pop("thinking_blocks", None)
+        else:
+            msg.pop("thinking_blocks", None)
     return msg
 
 
@@ -249,7 +297,7 @@ def inject_cache_breakpoints(
        message, skipping the trailing channels tail block (which
        mutates every step: unread counts, previews) and any
        empty-assistant separator inserted before it by
-       :func:`separate_adjacent_user_messages`.
+       :func:`~aios.harness.context.merge_adjacent_user_messages`.
 
     Skipping the tail is load-bearing: with the breakpoint on the tail
     itself, the conversation prefix never gets its own cache entry and
@@ -282,7 +330,8 @@ def _last_stable_message_index(messages: list[dict[str, Any]]) -> int | None:
       ``━━━ Channels ━━━`` (always the last user-role message when
       present).
     * Any role-transition separator — inserted by
-      :func:`~aios.harness.context.separate_adjacent_user_messages` to
+      the former separator mechanism (now
+      :func:`~aios.harness.context.merge_adjacent_user_messages`) to
       defeat Anthropic's adjacent-user-merge; carries only a
       single-byte placeholder and would be a wasted breakpoint.
 
@@ -323,7 +372,7 @@ def _is_separator_placeholder(msg: dict[str, Any]) -> bool:
     """Detect the role-transition separator placeholder.
 
     Matches the exact shape produced by
-    :func:`~aios.harness.context.separate_adjacent_user_messages`:
+    the former separator mechanism:
     ``assistant`` role, no tool calls, content equal to
     :data:`~aios.harness.context._USER_MESSAGE_SEPARATOR_CONTENT`.
 

@@ -236,12 +236,16 @@ class TestInjectCacheBreakpoints:
         assert msgs[3]["content"] == tail["content"]
 
     def test_skips_tail_and_adjacency_separator(self) -> None:
-        """When the last stable event was user-role,
-        ``separate_adjacent_user_messages`` inserts a placeholder
-        assistant before the tail.  The breakpoint must skip *both* —
-        annotating the single-byte placeholder would be a wasted
-        breakpoint that also wouldn't survive content normalization on
-        some routes.
+        """``inject_cache_breakpoints`` must skip *both* the tail block and
+        a single-byte ``"."`` placeholder assistant separator before it —
+        annotating the placeholder would be a wasted breakpoint that also
+        wouldn't survive content normalization on some routes.
+
+        ``merge_adjacent_user_messages`` no longer *produces* this
+        placeholder (adjacent users are merged in place), but
+        ``_is_separator_placeholder`` / the breakpoint-skip logic must
+        still recognise one from any other source — pinned here against a
+        hand-constructed separator.
         """
         tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
         stable = _msg("user", "real peer message")

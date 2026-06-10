@@ -66,6 +66,20 @@ class TestBuildFocalParadigmBlock:
         block = build_focal_paradigm_block(["signal/alice/chat-1"])
         assert "INTERNAL_MONOLOGUE" in block
 
+    def test_timing_prose_requires_output_every_step(self) -> None:
+        """The ``### Timing`` prose was inverted as part of the empty-turn
+        cascade fix: it no longer tells the model that silence/no-response
+        is acceptable (literal-minded models took that as license to emit
+        empty turns). It now requires output on every step, even when
+        nothing is posted to a channel."""
+        block = build_focal_paradigm_block(["signal/alice/chat-1"])
+        # New wording present.
+        assert "Never end a step with empty output" in block
+        assert "every step must still" in block
+        # Old wording gone — its presence would re-license the empty turn.
+        assert "silence is the right choice" not in block
+        assert "no obligation to respond" not in block
+
     def test_no_per_channel_data_leakage(self) -> None:
         """The block must not name any specific bound channel — that's
         the tail block's job.  Paradigm prose stays cache-stable.

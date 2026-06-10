@@ -130,8 +130,13 @@ def build_focal_paradigm_block(channels: list[str]) -> str:
         "\n"
         "Tools run asynchronously — new user messages can arrive while "
         "a tool is in flight, and you will see them on your next step. "
-        "There is no obligation to respond on every step; silence is "
-        "the right choice when there is nothing new requiring a reply."
+        "Not every step needs a channel post — when nothing new requires "
+        "a reply, the right move is to NOT post. But every step must still "
+        "produce output: say so in one line prefixed "
+        f"{MONOLOGUE_PREFIX.strip()!r} (it stays private — no human sees "
+        "it). Never end a step with empty output: an empty step is "
+        "indistinguishable from a malfunction, and a run of them derails "
+        "the conversation."
     )
 
 
@@ -163,9 +168,10 @@ def max_tail_block_local(channels: list[str]) -> int:
         # Preview length matches the 60-char truncation + ellipsis in
         # build_channels_tail_block above.
         lines.append(f'○ channel_id={addr} — 9999 unread: "{"x" * 61}"')
-    # The tail is user-role and lands after the log's final message; when
-    # that message is also user-role, ``separate_adjacent_user_messages``
-    # inserts a separator the reservation must cover too.
+    # The tail is user-role and lands after the log's final message. When
+    # that message is also user-role, ``merge_adjacent_user_messages``
+    # concatenates them; reserving an assistant-separator's worth of tokens
+    # here keeps the budget a conservative upper bound either way.
     return approx_tokens(
         [
             {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT},
