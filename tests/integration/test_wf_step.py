@@ -1726,8 +1726,9 @@ async def test_resumes_from_journaled_call_result_after_crash(
     gate_key = (await _events(pool, run_id))[1][2]
     assert gate_key is not None
 
-    # Simulate the harvest that committed just before the crash (status stays
-    # 'suspended' — the run_completed + status flip never happened).
+    # Simulate the harvest that committed just before the crash. The step's
+    # lease means a mid-step crash leaves 'running' (the park/terminal write
+    # never happened) — suspended + fully-harvested is unreachable by design.
     async with pool.acquire() as conn:
         await wf_queries.append_run_event(
             conn,
@@ -1737,6 +1738,7 @@ async def test_resumes_from_journaled_call_result_after_crash(
             call_key=gate_key,
             payload={"result": "yes", "is_error": False},
         )
+        await wf_queries.set_run_status(conn, run_id, "running", account_id="acc_wf")
 
     await run_workflow_step(run_id)  # fast-forward past the gate → complete
     async with pool.acquire() as conn:
@@ -1786,17 +1788,26 @@ async def test_host_crash_on_suspended_gate_is_not_divergence(
     the REAL infra cause, not a fabricated ``nondeterministic_replay`` — the
     divergence check runs only on a real replay, after the raised branch."""
     pool = wf_runtime
-    run_id = await _make_run(pool, _GATE_SCRIPT)
-    await run_workflow_step(run_id)  # wake 1: opens the gate, suspends
+    two_gates = (
+        "async def main(input):\n"
+        "    return await parallel([lambda: gate({'g': 1}), lambda: gate({'g': 2})])\n"
+    )
+    run_id = await _make_run(pool, two_gates)
+    await run_workflow_step(run_id)  # wake 1: opens both gates, suspends
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "suspended"
+    # Resume ONE gate so wake 2 harvests (and therefore drives — a quiet wake
+    # would skip the host); the other gate stays inflight across the crash.
+    first_key = (await _events(pool, run_id))[1][2]
+    assert first_key is not None
+    await service.resume_gate(pool, run_id=run_id, call_key=first_key, result="yes")
 
     timeout = HostOutcome(
         kind="raised", error_kind="script_host_timeout", error_repr="deadline", emitted=[]
     )
     with mock.patch("aios.workflows.step.run_script_host", new=AsyncMock(return_value=timeout)):
-        await run_workflow_step(run_id)  # wake 2: host killed before re-emitting the gate
+        await run_workflow_step(run_id)  # wake 2: host killed before re-emitting the open gate
 
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
@@ -1905,6 +1916,58 @@ async def test_child_done_signal_is_atomic_with_the_response(
     assert [(s.call_key, s.kind) for s in signals] == [("sha:at#0", "child_done")]
 
 
+async def test_lease_flips_before_the_harvest(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """Ordering pin: the 'running' lease must commit BEFORE any harvest write. If
+    the flip itself dies, nothing may have been harvested yet — the resume signal
+    is still unharvested and the sweep still sees the run. (A flip moved after
+    the harvest would leave suspended + fully-harvested on this crash: the
+    exact zombie the lease exists to prevent.)"""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    await run_workflow_step(run_id)
+    gate_key = (await _events(pool, run_id))[1][2]
+    assert gate_key is not None
+    await service.resume_gate(pool, run_id=run_id, call_key=gate_key, result="yes")
+
+    real_set_run_status = wf_queries.set_run_status
+
+    async def exploding_flip(conn: Any, rid: str, status: str, *, account_id: str) -> None:
+        if status == "running":
+            raise RuntimeError("died at the lease flip")
+        await real_set_run_status(conn, rid, status, account_id=account_id)
+
+    with (
+        mock.patch("aios.workflows.step.wf_queries.set_run_status", new=exploding_flip),
+        pytest.raises(RuntimeError),
+    ):
+        await run_workflow_step(run_id)
+
+    events = await _events(pool, run_id)
+    assert not any(t == "call_result" for _s, t, _k in events)  # nothing harvested yet
+    assert run_id in await _needing(pool)  # the resume signal is still sweep-visible
+
+
+async def test_quiet_wake_of_a_parked_run_skips_the_replay(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A wake of a parked run with nothing new must NOT reship + replay (the
+    lease/sweep resonance guard): the host is never spawned, and the run parks
+    straight back. Without this, a replay outliving the 30s sweep interval
+    re-arms the next tick's wake forever."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    await run_workflow_step(run_id)  # parks on the gate
+    with mock.patch(
+        "aios.workflows.step.run_script_host",
+        new=AsyncMock(side_effect=AssertionError("quiet wake must not drive the host")),
+    ) as host:
+        await run_workflow_step(run_id)  # a sweep-style wake with nothing to do
+    host.assert_not_awaited()
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "suspended"  # parked straight back
+
+
 async def test_large_fanout_completes_and_parks_quiet(wf_runtime: asyncpg.Pool[Any]) -> None:
     """#780 acceptance proxy: 200 resolved calls through the REAL step path. The
     discriminating assertions are the needs-step ones — a parked 200-wide fan-out
@@ -1914,7 +1977,7 @@ async def test_large_fanout_completes_and_parks_quiet(wf_runtime: asyncpg.Pool[A
     script = (
         "async def main(input):\n"
         "    results = await parallel([(lambda i=i: gate({'i': i})) for i in range(200)])\n"
-        "    return sum(r['v'] for r in results)\n"
+        "    return [r['v'] for r in results]\n"  # ordered: pins resume->branch routing
     )
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # parks on a 200-wide frontier
@@ -1937,7 +2000,7 @@ async def test_large_fanout_completes_and_parks_quiet(wf_runtime: asyncpg.Pool[A
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "completed"
-    assert run.output == sum(range(200))
+    assert run.output == list(range(200))  # each resume reached ITS branch, in order
     assert run_id not in await _needing(pool)  # terminal: out of the sweep for good
 
 

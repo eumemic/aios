@@ -28,13 +28,17 @@ log = get_logger("aios.workflows.sweep")
 
 # How long an inflight ``tool`` call may sit without a result signal before the
 # sweep re-wakes its run for re-dispatch (the task crashed / its signal write
-# failed). MUST dominate the slowest legitimate tool: tavily's 60s client
-# timeout and http_request's 60s PER-READ timeout (a trickling chunked response
-# can legitimately exceed 60s wall-clock). A tool still running when its run is
-# re-woken is absorbed same-worker by the in-process task registry (one wasted
-# wake) — but CROSS-worker the registry doesn't apply, and a premature horizon
-# would double-dispatch a non-idempotent http_request. 180s clears the 60s
-# bounds with margin while keeping crashed-task recovery within a few ticks.
+# failed). Sized against the slowest BOUNDED legitimate tool: tavily's 60s client
+# timeout; 180s clears it with margin while keeping crashed-task recovery within
+# a few ticks. A still-running tool past the horizon costs a cheap quiet wake per
+# tick same-worker (the in-process registry suppresses re-dispatch and the step's
+# quiet-wake early-exit skips the replay). Named residual: http_request's 60s
+# read timeout is PER-READ, so a trickling chunked response is wall-clock
+# UNBOUNDED — no finite horizon dominates it, and a cross-worker wake (where the
+# registry can't be consulted) would re-dispatch the still-running call,
+# double-executing a non-idempotent request. Closing that needs a total-time
+# bound on run tools or idempotency keys (the at-least-once caveat run_tools.py
+# already documents).
 TOOL_REDISPATCH_STALE_SECONDS = 180.0
 
 

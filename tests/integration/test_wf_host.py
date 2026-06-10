@@ -665,6 +665,27 @@ async def test_big_memo_replay_outlives_a_tiny_base_deadline() -> None:
     assert out.value == 1
 
 
+async def test_cpu_rlimit_derives_from_the_scaled_deadline() -> None:
+    """The child's CPU budget must track the SCALED wall deadline (int(deadline)+1),
+    not the base — pinned end-to-end by reading the env the child was handed (via
+    the documented builtins-escape, like the env-scrub test). A base-derived
+    mutation would hand a multi-MiB replay a 1s CPU budget."""
+    source = (
+        "async def main(input):\n"
+        "    return gate.__globals__['os'].environ['AIOS_WF_RLIMIT_CPU_S']\n"
+    )
+    tiny = await _run(source, deadline_seconds=2.0)
+    assert tiny.kind == "returned"
+    assert tiny.value == "3"  # tiny INIT: int(~2.0) + 1
+    big = await _run(
+        source,
+        memo={"pad": {"ok": "x" * (2 * 1024 * 1024)}},  # ~2MiB INIT → ~60s wall
+        deadline_seconds=0.01,
+    )
+    assert big.kind == "returned"
+    assert 61 <= int(big.value) <= 62  # int(0.01 + ~2*30) + 1
+
+
 async def test_log_goes_to_stderr_not_the_frame_stream() -> None:
     out = await _run("async def main(input):\n    log('diagnostic')\n    return 7")
     assert out.kind == "returned"

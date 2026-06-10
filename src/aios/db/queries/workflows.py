@@ -558,8 +558,15 @@ async def get_run_for_step(conn: asyncpg.Connection[Any], run_id: str) -> WfRun 
 async def set_run_status(
     conn: asyncpg.Connection[Any], run_id: str, status: str, *, account_id: str
 ) -> None:
+    """Set a NON-terminal status transition. Never overwrites a terminal status:
+    under procrastinate dual execution (a reaped stale worker resuming next to its
+    replacement), a stale step's lease flip or park must not resurrect a run the
+    replacement already completed. Terminal writes go through
+    :func:`set_run_terminal`."""
     await conn.execute(
-        "UPDATE wf_runs SET status = $3, updated_at = now() WHERE id = $1 AND account_id = $2",
+        "UPDATE wf_runs SET status = $3, updated_at = now() "
+        "WHERE id = $1 AND account_id = $2 "
+        "AND status NOT IN ('completed','errored','cancelled')",
         run_id,
         account_id,
         status,
@@ -611,9 +618,13 @@ async def list_run_ids_needing_step(
       ``defer_run_wake`` is always visible here.
     - a stale inflight call: an ``agent`` past the wall-clock deadline (the step
       must force-resolve its timeout — this clause DRIVES that backstop) or a
-      ``tool`` past the re-dispatch horizon (its task crashed without a signal;
-      re-dispatch is idempotent). A ``gate`` maps to NULL — resume-driven only,
-      never stale.
+      ``tool`` past the re-dispatch horizon (its task crashed without a signal).
+      A ``gate`` maps to NULL — resume-driven only, never stale. The agent
+      deadline is also the (deliberately slow) backstop for a child archived or
+      deleted BEFORE answering: that path writes no signal, so the run waits out
+      the deadline before the harvest resolves ``child_gone`` — acceptable for a
+      rare operator action, but a recall mode this filter covers only at the
+      horizon, not within a tick.
 
     (No ``account_id``: ``defer_run_wake`` needs none and appends no journal span.)
     """

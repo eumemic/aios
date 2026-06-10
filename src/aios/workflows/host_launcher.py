@@ -185,9 +185,12 @@ async def run_script_host(
 
     ``deadline_seconds`` is the BASE budget; the effective budget scales with the
     INIT frame size (see :func:`_scaled_seconds`). The CPU rlimit is DERIVED —
-    one second above the wall deadline — so a CPU-bound child is killed by the
-    parent's deadline (a clean ``script_host_timeout``), never by the rlimit
-    SIGKILL (an opaque host crash): true by construction, not by matching bases.
+    one second above the wall deadline — so a single-threaded CPU-bound child is
+    killed by the parent's deadline (a clean ``script_host_timeout``), never by
+    the rlimit SIGKILL (an opaque host crash). RLIMIT_CPU sums across threads, so
+    a child that escapes the restricted builtins into GIL-releasing threads can
+    still hit the rlimit first — containment holds either way (both outcomes are
+    terminal raised); only the error kind differs.
     """
     init_bytes = encode_frame({"type": INIT, "source": source, "input": input, "memo": memo})
     deadline = _scaled_seconds(deadline_seconds, len(init_bytes))

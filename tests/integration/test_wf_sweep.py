@@ -177,6 +177,32 @@ async def test_inflight_tool_wakes_past_redispatch_horizon(
     assert run_id not in await _needing(pool)
 
 
+async def test_signal_clause_correlates_by_call_key(sweep_pool: asyncpg.Pool[Any]) -> None:
+    """A harvested call must not quiet an UNRELATED unharvested signal — the
+    anti-join correlates on call_key, and dropping that correlation would zombie
+    any partially-harvested run (a recall loss, the forbidden fail direction)."""
+    pool = sweep_pool
+    run_id = await _make_run(pool)
+    await _call_started(pool, run_id, "sha:a#0", "gate")
+    await _call_result(pool, run_id, "sha:a#0")  # call A harvested...
+    await _signal(pool, run_id, "sha:b#0", "gate_resume")  # ...signal B is not
+    assert run_id in await _needing(pool)
+
+
+async def test_signal_clause_correlates_by_run(sweep_pool: asyncpg.Pool[Any]) -> None:
+    """call_keys are pure content hashes — IDENTICAL across two runs of the same
+    workflow+input — so one run's harvested call must never quiet another run's
+    unharvested signal under the same key."""
+    pool = sweep_pool
+    run1 = await _make_run(pool)
+    run2 = await _make_run(pool)
+    await _call_result(pool, run1, "sha:k#0")
+    await _signal(pool, run2, "sha:k#0", "gate_resume")
+    needing = await _needing(pool)
+    assert run2 in needing
+    assert run1 not in needing
+
+
 async def test_inflight_gate_is_never_stale(sweep_pool: asyncpg.Pool[Any]) -> None:
     """A gate is resume-driven only: a run parked on one for a day is exactly the
     run the filter exists to leave alone."""
