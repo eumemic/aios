@@ -143,12 +143,18 @@ jobs:
         # ``extend-exclude`` and ``mypy.overrides``; including the package
         # here lets ruff and mypy cover the hand-written surface so the
         # release workflow's ``no re-gate'' assumption is honored.
+        #
+        # The three ``connectors/*/src`` trees (signal/telegram/whatsapp)
+        # and ``packages/aios-connector-http/aios_connector_http`` (whose
+        # package lives at the package root, not under ``src/``) are
+        # workspace members whose source had never been linted/typed.  The
+        # echo-http connector has no ``src/`` and is omitted.
         run: |
-          uv run ruff check src tests packages/aios-sdk/aios_sdk
-          uv run ruff format --check src tests packages/aios-sdk/aios_sdk
+          uv run ruff check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
+          uv run ruff format --check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
 
       - name: Type check (mypy)
-        run: uv run mypy src tests packages/aios-sdk/aios_sdk
+        run: uv run mypy src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
 
   unit:
     needs: detect
@@ -180,6 +186,45 @@ jobs:
         # per-worker ``AIOS_INSTANCE_ID`` via tests/conftest.py.
         # Measured locally: 45 s serial → 17 s at ``-n 4``.
         run: uv run pytest tests/unit -q -n 4
+
+  connectors:
+    needs: detect
+    if: needs.detect.outputs.run_checks == 'true'
+    runs-on: ubuntu-latest
+
+    env:
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Connector tests
+        # Each connector ``tests/`` dir has its own ``__init__.py`` and no
+        # parent package, so pytest resolves every connector conftest to the
+        # module name ``tests.conftest`` — collecting two in one process is an
+        # ``ImportPathMismatchError``.  The connectors are independent uv
+        # workspace members (own ``pyproject.toml``, own pytest rootdir/
+        # config), so each runs as its own invocation, using its own config.
+        # These are pure unit tests (mocked daemons; no Postgres/Docker/
+        # network), so no ``services:`` block is needed.  Run under ``bash
+        # -e`` (the Actions default), a failing suite aborts the job.
+        run: |
+          uv run pytest connectors/signal/tests -q
+          uv run pytest connectors/telegram/tests -q
+          uv run pytest connectors/whatsapp/tests -q
+          uv run pytest packages/aios-connector-http/tests -q
 
   integration:
     needs: detect
@@ -343,14 +388,6 @@ jobs:
           }
 
       - name: E2E tests (non-docker shard)
-        # signal_connector / signal_registration / telegram_connector need
-        # external daemon RPC infrastructure (signal-cli, a live telegram
-        # bot) that GitHub Actions does not supply.  Those files carry
-        # the ``docker`` marker, so ``-m "not docker"`` excludes them
-        # here naturally — the explicit ``--ignore`` list on the docker
-        # shard below remains the source of truth for "needs daemon
-        # infrastructure, skip in CI."
-        #
         # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
         # runners.  Default ``load`` dist (not ``loadfile``): the
         # non-docker set has no module-scoped fixtures — the only one in
@@ -376,7 +413,4 @@ jobs:
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
         run: |
-          uv run pytest tests/e2e -q -m docker -n 4 --dist=loadfile \
-            --ignore=tests/e2e/test_signal_connector.py \
-            --ignore=tests/e2e/test_signal_registration.py \
-            --ignore=tests/e2e/test_telegram_connector.py
+          uv run pytest tests/e2e -q -m docker -n 4 --dist=loadfile

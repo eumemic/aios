@@ -83,6 +83,9 @@ from aios_sdk._generated.models.runtime_management_call_result_request import (
 from aios_sdk._generated.models.runtime_tool_result_request import (
     RuntimeToolResultRequest,
 )
+from aios_sdk._generated.models.runtime_tool_result_request_content_type_1_item import (
+    RuntimeToolResultRequestContentType1Item,
+)
 from aios_sdk._generated.models.tools_schema_update import ToolsSchemaUpdate
 from aios_sdk._generated.models.tools_schema_update_tools_item import (
     ToolsSchemaUpdateToolsItem,
@@ -1083,11 +1086,21 @@ class HttpConnector:
         is_error: bool = False,
     ) -> None:
         """POST one tool result via the generated runtime op."""
+        # The generated model's list branch is typed as
+        # ``list[RuntimeToolResultRequestContentType1Item]``; that item type is
+        # a thin ``additional_properties`` bag whose ``from_dict``/``to_dict``
+        # round-trips a plain dict unchanged, so adapting our ``list[dict]``
+        # here keeps the wire payload byte-identical while satisfying the type.
+        body_content: list[RuntimeToolResultRequestContentType1Item] | str = (
+            [RuntimeToolResultRequestContentType1Item.from_dict(item) for item in content]
+            if isinstance(content, list)
+            else content
+        )
         body = RuntimeToolResultRequest(
             connection_id=connection_id,
             session_id=session_id,
             tool_call_id=tool_call_id,
-            content=content,
+            content=body_content,
             is_error=is_error,
         )
         response = await _post_runtime_tool_result(client=client, body=body)

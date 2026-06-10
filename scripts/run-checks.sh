@@ -8,7 +8,7 @@
 #   scripts/run-checks.sh --fail-on-autofix # fail if ruff auto-formats (for pre-commit)
 #   scripts/run-checks.sh --fail-fast      # stop at first failure
 #
-# Checks: ruff, mypy, tests (unit only — e2e needs Docker)
+# Checks: ruff, mypy, tests (unit + connector suites — e2e needs Docker)
 
 set -uo pipefail
 
@@ -35,6 +35,17 @@ should_skip() { [[ "$SKIP" == *"$1"* ]]; }
 OVERALL=0
 fail() { OVERALL=1; [[ $FAIL_FAST -eq 1 ]] && exit 1; }
 
+# Lint/type targets, kept in lock-step with code-validation.yml's lint job:
+# the harness (src/tests), the hand-written aios-sdk surface, the three
+# connector source trees (signal/telegram/whatsapp — echo-http has no src/),
+# and the connector-http package (which lives at the package root, not src/).
+LINT_TARGETS=(
+    src tests
+    packages/aios-sdk/aios_sdk
+    connectors/signal/src connectors/telegram/src connectors/whatsapp/src
+    packages/aios-connector-http/aios_connector_http
+)
+
 # ── Ruff ───────────────────────────────────────────────────────────────────────
 
 if ! should_skip ruff; then
@@ -42,16 +53,16 @@ if ! should_skip ruff; then
 
     if [[ $FAIL_ON_AUTOFIX -eq 1 ]]; then
         # Check + format, then detect if anything changed
-        uv run ruff check --fix src tests 2>&1
-        uv run ruff format src tests 2>&1
+        uv run ruff check --fix "${LINT_TARGETS[@]}" 2>&1
+        uv run ruff format "${LINT_TARGETS[@]}" 2>&1
         if [[ -n "$(git diff --name-only)" ]]; then
             echo "ruff auto-fixed files — please re-stage:" >&2
             git diff --name-only >&2
             fail
         fi
     else
-        uv run ruff check src tests || fail
-        uv run ruff format --check src tests || fail
+        uv run ruff check "${LINT_TARGETS[@]}" || fail
+        uv run ruff format --check "${LINT_TARGETS[@]}" || fail
     fi
 fi
 
@@ -59,7 +70,7 @@ fi
 
 if ! should_skip mypy; then
     echo "── mypy ──"
-    uv run mypy src tests || fail
+    uv run mypy "${LINT_TARGETS[@]}" || fail
 fi
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
@@ -67,6 +78,19 @@ fi
 if ! should_skip tests; then
     echo "── pytest (unit) ──"
     uv run pytest tests/unit -q || fail
+
+    # Each connector suite runs as its own invocation: every connector
+    # ``tests/`` dir has an ``__init__.py`` and no parent package, so pytest
+    # resolves each conftest to the module name ``tests.conftest`` —
+    # collecting two in one process is an ``ImportPathMismatchError``.  The
+    # connectors are independent uv workspace members with their own pytest
+    # config, so per-invocation is correct-by-construction.  All mocked; no
+    # Postgres/Docker/network.
+    echo "── pytest (connectors) ──"
+    uv run pytest connectors/signal/tests -q || fail
+    uv run pytest connectors/telegram/tests -q || fail
+    uv run pytest connectors/whatsapp/tests -q || fail
+    uv run pytest packages/aios-connector-http/tests -q || fail
 fi
 
 echo ""
