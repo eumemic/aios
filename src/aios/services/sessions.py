@@ -191,6 +191,10 @@ async def create_session(
     # written spec. Eviction is only meaningful for mutations to an
     # already-provisioned session (see update_session / connections).
     async with pool.acquire() as conn, conn.transaction():
+        # Validate the environment is account-owned before binding the session to
+        # it. A bare FK would accept another tenant's env id and leak its image /
+        # env-vars / networking into this session — mirrors create_run (issue #755).
+        await queries.get_environment(conn, environment_id, account_id=account_id)
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,

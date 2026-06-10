@@ -261,6 +261,59 @@ class TestTwoTenantIsolation:
         assert list_b.status_code == 200
         assert list_b.json()["data"] == []
 
+    async def test_session_create_cross_tenant_env_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """POST /v1/sessions binding tenant B's environment_id as tenant A must 404.
+
+        ``services.sessions.create_session`` opened its insert transaction and
+        called ``insert_session`` directly — the environment was validated only
+        by its FK (existence, not ownership). Tenant A could pass tenant B's
+        ``environment_id`` and the session was created bound to B's environment
+        (its image / env-vars / networking). The sibling ``create_run`` path
+        already validates the env as account-owned; match that posture here
+        (issue #755). NotFound, not silent cross-tenant binding.
+        """
+        ka = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-sess-a")
+        kb = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-sess-b")
+
+        # Tenant B owns env_b.
+        env_b = await http_client.post(
+            "/v1/environments", headers=_bearer(kb), json={"name": "sess-env-b"}
+        )
+        assert env_b.status_code == 201, env_b.text
+        env_b_id = env_b.json()["id"]
+
+        # Tenant A owns the agent.
+        agent_a = await http_client.post(
+            "/v1/agents",
+            headers=_bearer(ka),
+            json={"name": "sess-agent-a", "model": "openrouter/test"},
+        )
+        assert agent_a.status_code == 201, agent_a.text
+        agent_a_id = agent_a.json()["id"]
+
+        # Tenant A targets tenant B's env_id; expected 404, not a bound session.
+        cross = await http_client.post(
+            "/v1/sessions",
+            headers=_bearer(ka),
+            json={"agent_id": agent_a_id, "environment_id": env_b_id},
+        )
+        assert cross.status_code == 404, cross.text
+
+        # Same-tenant control: tenant A's own env still binds a session (201).
+        env_a = await http_client.post(
+            "/v1/environments", headers=_bearer(ka), json={"name": "sess-env-a"}
+        )
+        assert env_a.status_code == 201, env_a.text
+        env_a_id = env_a.json()["id"]
+        ok = await http_client.post(
+            "/v1/sessions",
+            headers=_bearer(ka),
+            json={"agent_id": agent_a_id, "environment_id": env_a_id},
+        )
+        assert ok.status_code == 201, ok.text
+
     async def test_keys_isolated(
         self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
     ) -> None:
