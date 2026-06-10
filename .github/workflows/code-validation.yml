@@ -74,7 +74,12 @@ jobs:
           # ``bin/tool`` is a sandbox-image input (COPY-d by the Dockerfile)
           # and must invalidate the cheap-skip path alongside the source
           # tree even though it lives outside ``src/``.
-          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/|^packages/[^/]+/(pyproject\.toml|CHANGELOG\.md)$'; then
+          # The root ``Dockerfile``, ``compose.yml``, and ``openapi.json``
+          # are included so changes to those files — and to the generated
+          # SDK under ``packages/aios-sdk/aios_sdk/_generated/`` — always
+          # run CI.  ``tests/unit/test_detect_filter_sync.py`` enforces that
+          # this regex stays in sync with all committed generated artifacts.
+          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/|^packages/[^/]+/(pyproject\.toml|CHANGELOG\.md)$|^Dockerfile$|^compose\.yml$|^openapi\.json$'; then
             echo "Build-affecting changes detected — running checks."
             echo "run_checks=true" >> "$GITHUB_OUTPUT"
           else
