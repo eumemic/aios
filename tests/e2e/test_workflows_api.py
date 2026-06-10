@@ -152,6 +152,37 @@ async def test_create_run_with_unknown_workflow_404s(http_client: httpx.AsyncCli
     assert r.status_code == 404, r.text
 
 
+async def test_create_run_cross_tenant_env_404(http_client: httpx.AsyncClient) -> None:
+    """POST /v1/runs binding tenant B's environment_id as tenant A must 404.
+
+    Regression guard for the runs path (already fixed): ``create_run`` validates
+    the env as account-owned at ``services.py`` before inserting the run, so a
+    cross-tenant ``environment_id`` is rejected as NotFound. The sibling sessions
+    path is the subject of issue #755; this locks the already-correct runs side.
+    """
+    key_b = await _mint_tenant(http_client, f"tenant-b-{_uniq()}")
+
+    # Tenant B owns env_b.
+    env_b = await http_client.post(
+        "/v1/environments", json={"name": f"wf-env-{_uniq()}"}, headers=_bearer(key_b)
+    )
+    assert env_b.status_code in (200, 201), env_b.text
+    env_b_id = env_b.json()["id"]
+
+    # Tenant A (default bearer) owns the workflow.
+    wf_resp = await http_client.post(
+        "/v1/workflows", json={"name": f"a-{_uniq()}", "script": _SCRIPT}
+    )
+    assert wf_resp.status_code == 201, wf_resp.text
+    wf = wf_resp.json()
+
+    # Tenant A targets tenant B's env_id; expected 404, not a bound run.
+    cross = await http_client.post(
+        "/v1/runs", json={"workflow_id": wf["id"], "environment_id": env_b_id}
+    )
+    assert cross.status_code == 404, cross.text
+
+
 async def test_run_reads_and_resume_404_on_unknown(http_client: httpx.AsyncClient) -> None:
     assert (await http_client.get("/v1/runs/wfr_nope")).status_code == 404
     assert (await http_client.get("/v1/runs/wfr_nope/events")).status_code == 404

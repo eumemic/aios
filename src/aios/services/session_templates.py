@@ -28,7 +28,12 @@ async def create_session_template(
     metadata: dict[str, Any],
     archive_when_idle: bool = False,
 ) -> SessionTemplate:
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        # Validate the environment is account-owned before binding the template
+        # to it. A bare FK would accept another tenant's env id and leak its
+        # image / env-vars / networking into spawned sessions — mirrors
+        # create_session / create_run (issue #755).
+        await queries.get_environment(conn, environment_id, account_id=account_id)
         return await queries.insert_session_template(
             conn,
             name=name,
@@ -73,7 +78,12 @@ async def update_session_template(
     metadata: dict[str, Any] | None = None,
     archive_when_idle: bool | None = None,
 ) -> SessionTemplate:
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        # Validate ownership only when the caller supplies a new env — omitting
+        # it preserves the current binding, so no check is needed there. A bare
+        # FK would accept another tenant's env id (issue #755).
+        if environment_id is not None:
+            await queries.get_environment(conn, environment_id, account_id=account_id)
         return await queries.update_session_template(
             conn,
             template_id,
