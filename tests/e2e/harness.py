@@ -40,12 +40,23 @@ from aios.tools.registry import ToolHandler, registry
 
 
 def assistant(
-    content: str = "", *, tool_calls: list[dict[str, Any]] | None = None
+    content: str = "",
+    *,
+    tool_calls: list[dict[str, Any]] | None = None,
+    finish_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Build a scripted assistant response dict."""
+    """Build a scripted assistant response dict.
+
+    ``finish_reason`` (when set) is threaded onto the fake litellm envelope's
+    ``choices[0]`` so tests can exercise refusal handling
+    (``finish_reason="content_filter"``). It is stored under a reserved key and
+    stripped before the dict becomes the assistant message.
+    """
     d: dict[str, Any] = {"role": "assistant", "content": content}
     if tool_calls is not None:
         d["tool_calls"] = tool_calls
+    if finish_reason is not None:
+        d["_finish_reason"] = finish_reason
     return d
 
 
@@ -85,6 +96,17 @@ def cancel(tool_call_id: str | None = None, *, call_id: str | None = None) -> di
 
 
 # ─── fake litellm response ──────────────────────────────────────────────────
+
+
+def _split_finish_reason(resp: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Split a scripted response into ``(message, finish_reason)``.
+
+    The ``_finish_reason`` key (set by :func:`assistant`) is a test-only
+    envelope field, not part of the assistant message litellm returns — strip
+    it so it doesn't leak into the persisted message dict.
+    """
+    msg = {k: v for k, v in resp.items() if k != "_finish_reason"}
+    return msg, resp.get("_finish_reason")
 
 
 class _FakeMessage:
@@ -436,8 +458,9 @@ class Harness:
             )
         resp = self._responses[self._response_idx]
         self._response_idx += 1
+        msg, finish_reason = _split_finish_reason(resp)
         return {
-            "choices": [{"message": _FakeMessage(resp)}],
+            "choices": [{"message": _FakeMessage(msg), "finish_reason": finish_reason}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         }
 
@@ -482,7 +505,8 @@ class Harness:
         recent ``_pop_streaming_response`` call.
         """
         assert self._last_streaming_response is not None
+        msg, finish_reason = _split_finish_reason(self._last_streaming_response)
         return {
-            "choices": [{"message": _FakeMessage(self._last_streaming_response)}],
+            "choices": [{"message": _FakeMessage(msg), "finish_reason": finish_reason}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         }

@@ -215,11 +215,11 @@ class TestEntrySweepSpan:
             ),
             patch(
                 "aios.harness.loop.call_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
             ),
             patch(
                 "aios.harness.loop.stream_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
             ),
             patch(
                 "aios.harness.loop.sessions_service.increment_usage",

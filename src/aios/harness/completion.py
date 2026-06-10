@@ -454,20 +454,30 @@ def _build_litellm_kwargs(
 
 def _unpack_litellm_response(
     obj: Any, *, source: str
-) -> tuple[dict[str, Any], dict[str, int], float | None]:
-    """Extract ``(message, usage, cost)``; ``source`` labels the TypeError on bad message shape."""
+) -> tuple[dict[str, Any], dict[str, int], float | None, str | None]:
+    """Extract ``(message, usage, cost, finish_reason)``.
+
+    ``finish_reason`` is litellm's standardized stop reason for the choice
+    (``"stop"``, ``"tool_calls"``, ``"length"``, ``"content_filter"`` for a
+    safety refusal, …). The harness branches on ``"content_filter"`` to treat
+    a refusal as a bricked turn rather than a normal completion (see
+    ``loop.REFUSAL_FINISH_REASON``). ``source`` labels the TypeError on bad
+    message shape.
+    """
     usage_obj = obj.get("usage")
     usage = _normalize_usage(
         usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj or {}
     )
     cost = _extract_cost(obj)
-    message = obj["choices"][0]["message"]
+    choice = obj["choices"][0]
+    finish_reason: str | None = choice.get("finish_reason")
+    message = choice["message"]
     # litellm returns a Message object that supports model_dump()
     if hasattr(message, "model_dump"):
         result: dict[str, Any] = message.model_dump()
-        return _normalize_message(result), usage, cost
+        return _normalize_message(result), usage, cost, finish_reason
     if isinstance(message, dict):
-        return _normalize_message(message), usage, cost
+        return _normalize_message(message), usage, cost, finish_reason
     raise TypeError(f"unexpected message type from {source}: {type(message).__name__}")
 
 
@@ -479,14 +489,17 @@ async def call_litellm(
     api_base: str | None = None,
     extra: dict[str, Any] | None = None,
     session_id: str | None = None,
-) -> tuple[dict[str, Any], dict[str, int], float | None]:
-    """Call ``litellm.acompletion`` and return ``(message, usage, cost)``.
+) -> tuple[dict[str, Any], dict[str, int], float | None, str | None]:
+    """Call ``litellm.acompletion`` and return ``(message, usage, cost, finish_reason)``.
 
     Returns the message exactly as litellm produced it, including any
     provider-specific extensions like ``reasoning_content`` or
     ``thinking_blocks``. The harness stores the message dict opaquely.
     Usage is normalized to our canonical field names. Cost is LiteLLM's
     per-request USD figure, or ``None`` when the provider doesn't report it.
+    ``finish_reason`` is litellm's standardized stop reason for the choice
+    (notably ``"content_filter"`` for a safety refusal — see
+    ``_unpack_litellm_response``).
 
     ``session_id`` (when provided on the openai provider path) is forwarded
     as OpenAI's ``prompt_cache_key`` so successive turns of the same
@@ -515,14 +528,16 @@ async def stream_litellm(
     extra: dict[str, Any] | None = None,
     pool: asyncpg.Pool[Any],
     session_id: str,
-) -> tuple[dict[str, Any], dict[str, int], float | None]:
-    """Call ``litellm.acompletion`` with streaming, returning ``(message, usage, cost)``.
+) -> tuple[dict[str, Any], dict[str, int], float | None, str | None]:
+    """Call ``litellm.acompletion`` with streaming, returning ``(message, usage, cost, finish_reason)``.
 
     Each content delta fires a transient ``pg_notify`` on the session's
     event channel. SSE clients receive these as ``event: delta`` — no DB
     row is created. After the stream exhausts, the complete message is
     assembled via ``litellm.stream_chunk_builder`` and returned for
-    storage as a normal event.
+    storage as a normal event. ``litellm.stream_chunk_builder`` carries the
+    final chunk's ``finish_reason`` onto the assembled object's
+    ``choices[0]``, so the refusal signal survives the streaming path too.
     """
     inject_cache_breakpoints(messages, tools, model)
     kwargs = _build_litellm_kwargs(

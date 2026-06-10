@@ -369,11 +369,11 @@ class TestStepStartEndSpans:
             ),
             patch(
                 "aios.harness.loop.call_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
             ),
             patch(
                 "aios.harness.loop.stream_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
             ),
             patch(
                 "aios.harness.loop.sessions_service.increment_usage",
@@ -471,7 +471,7 @@ class TestStepStartEndSpans:
             patch("aios.harness.loop.sessions_service.reclaim_session_if_idle", reclaim),
             patch(
                 "aios.harness.loop.stream_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
             ),
             patch("aios.harness.loop.sessions_service.increment_usage", AsyncMock()),
             patch("aios.db.sse_lock.has_subscriber", AsyncMock(return_value=False)),
@@ -571,7 +571,7 @@ class TestStepStartEndSpans:
             patch("aios.harness.loop.defer_wake", defer_wake_mock),
             patch(
                 "aios.harness.loop.stream_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
             ),
             patch("aios.harness.loop.sessions_service.increment_usage", AsyncMock()),
             patch("aios.db.sse_lock.has_subscriber", AsyncMock(return_value=False)),
@@ -750,7 +750,7 @@ async def _harness_with_guard(
         ),
         patch(
             "aios.harness.loop.stream_litellm",
-            AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0)),
+            AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
         ),
         patch("aios.harness.loop.sessions_service.increment_usage", AsyncMock()),
         patch("aios.db.sse_lock.has_subscriber", AsyncMock(return_value=False)),
