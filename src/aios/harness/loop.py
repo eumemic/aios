@@ -261,7 +261,8 @@ async def run_session_step(
         if result.nudge_session:
             await defer_wake(pool, session_id, cause="request_nudge", account_id=account_id)
         if result.autoerror_caller_run_id is not None:
-            await defer_run_wake(result.autoerror_caller_run_id)
+            # batch: a no_return auto-error is a child completion like any other.
+            await defer_run_wake(result.autoerror_caller_run_id, batch=True)
 
         # Archive-on-quiescence, performed LAST: a session launched ``archive_when_idle``
         # self-archives the first time it goes idle. It runs after ``step_end`` and every

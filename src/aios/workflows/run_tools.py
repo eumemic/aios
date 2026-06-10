@@ -100,7 +100,9 @@ async def _run_tool_task(
                 await wf_queries.insert_run_signal(
                     conn, run_id=run.id, call_key=call_key, kind="tool_result", result=result
                 )
-            await defer_run_wake(run.id)
+            # batch: tool results are a high-frequency wake source, like child
+            # completions — a burst coalesces into one re-drive when the window is on.
+            await defer_run_wake(run.id, batch=True)
         except Exception:
             # The tool ran but persisting/waking failed (DB blip, pool exhaustion). No signal
             # → the run stalls 'suspended' until the periodic sweep re-wakes it and the harvest

@@ -105,21 +105,43 @@ async def defer_wake(
         )
 
 
-async def defer_run_wake(run_id: str) -> None:
+async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:
     """Enqueue a ``wake_workflow`` job for a run, swallowing ``AlreadyEnqueued``.
 
     Unlike :func:`defer_wake`, this appends **no** journal span: ``wf_run_events``
     is single-writer — only ``run_workflow_step`` (under ``lock=run_id``) writes
     it. ``queueing_lock`` dedups concurrent wakes for the same run.
+
+    ``batch`` (#780) schedules the wake ``workflow_wake_batch_seconds`` out
+    instead of immediately, so a burst of completions collapses into one
+    re-drive: the scheduled job sits in ``todo`` holding the ``queueing_lock``,
+    absorbing every further defer until it runs — including otherwise-immediate
+    wakes (a gate resume, the step's self-wake) arriving inside the window.
+    That absorption is sound because every wake source commits its signal/
+    response BEFORE deferring, so the delayed step harvests it; the cost is
+    latency bounded by the window. The high-frequency sources (child
+    completions, tool results) pass ``batch=True``; with the setting at 0
+    (the default) batching is off and every wake is immediate.
     """
+    from aios.config import get_settings
     from aios.harness.procrastinate_app import app
 
-    deferrer = app.configure_task(
-        "harness.wake_workflow",
-        lock=run_id,
-        queueing_lock=run_id,
-        priority=_BACKGROUND_PRIORITY,  # workflow run steps yield to foreground too
-    )
+    window = get_settings().workflow_wake_batch_seconds if batch else 0.0
+    if window > 0:
+        deferrer = app.configure_task(
+            "harness.wake_workflow",
+            lock=run_id,
+            queueing_lock=run_id,
+            priority=_BACKGROUND_PRIORITY,  # workflow run steps yield to foreground too
+            schedule_in={"seconds": window},
+        )
+    else:
+        deferrer = app.configure_task(
+            "harness.wake_workflow",
+            lock=run_id,
+            queueing_lock=run_id,
+            priority=_BACKGROUND_PRIORITY,  # workflow run steps yield to foreground too
+        )
     try:
         await deferrer.defer_async(run_id=run_id)
     except procrastinate_exceptions.AlreadyEnqueued:

@@ -10,7 +10,7 @@ import pytest
 from procrastinate import App
 from procrastinate.testing import InMemoryConnector
 
-from aios.services.wake import defer_wake
+from aios.services.wake import defer_run_wake, defer_wake
 
 
 @pytest.fixture(autouse=True)
@@ -86,3 +86,66 @@ class TestDeferRescheduleWake:
             {"event": "wake_deferred", "cause": "reschedule", "delay_seconds": 5},
             account_id=ANY,
         )
+
+
+@pytest.fixture
+def batch_window(monkeypatch: pytest.MonkeyPatch) -> Generator[float]:
+    """Set ``workflow_wake_batch_seconds`` to 2.0 for the test, clearing the
+    settings cache both ways (it is lru-cached; without the clears the override
+    silently tests the default — and would leak into later tests)."""
+    from aios.config import get_settings
+
+    monkeypatch.setenv("AIOS_WORKFLOW_WAKE_BATCH_SECONDS", "2.0")
+    get_settings.cache_clear()
+    yield 2.0
+    get_settings.cache_clear()
+
+
+class TestDeferRunWakeBatching:
+    """#780 — the coalescing window, dark by default (setting 0.0)."""
+
+    async def test_batch_schedules_inside_the_window(
+        self, in_memory_app: App, batch_window: float
+    ) -> None:
+        before = datetime.now(UTC)
+        await defer_run_wake("run_b", batch=True)
+        after = datetime.now(UTC)
+        connector = in_memory_app.connector
+        assert isinstance(connector, InMemoryConnector)
+        (job,) = connector.jobs.values()
+        assert job["task_name"] == "harness.wake_workflow"
+        assert job["scheduled_at"] is not None
+        window = timedelta(seconds=batch_window)
+        assert before + window <= job["scheduled_at"] <= after + window
+
+    async def test_batch_with_setting_zero_is_immediate(self, in_memory_app: App) -> None:
+        # Dark by default: batch=True with the setting at 0 behaves exactly like today.
+        await defer_run_wake("run_b", batch=True)
+        connector = in_memory_app.connector
+        assert isinstance(connector, InMemoryConnector)
+        (job,) = connector.jobs.values()
+        assert job["scheduled_at"] is None
+
+    async def test_unbatched_is_immediate_even_with_window_set(
+        self, in_memory_app: App, batch_window: float
+    ) -> None:
+        await defer_run_wake("run_b")
+        connector = in_memory_app.connector
+        assert isinstance(connector, InMemoryConnector)
+        (job,) = connector.jobs.values()
+        assert job["scheduled_at"] is None
+
+    async def test_pending_batched_wake_absorbs_further_defers(
+        self, in_memory_app: App, batch_window: float
+    ) -> None:
+        """The scheduled job holds the queueing_lock for the whole window: a burst
+        of batched completions AND an otherwise-immediate defer (a gate resume)
+        all collapse into the one pending wake. Sound because every wake source
+        commits its signal/response BEFORE deferring — the delayed step harvests
+        them; the cost is latency bounded by the window."""
+        await defer_run_wake("run_b", batch=True)
+        await defer_run_wake("run_b", batch=True)  # burst: coalesced
+        await defer_run_wake("run_b")  # "immediate" defer: absorbed by the pending wake
+        connector = in_memory_app.connector
+        assert isinstance(connector, InMemoryConnector)
+        assert len(connector.jobs) == 1

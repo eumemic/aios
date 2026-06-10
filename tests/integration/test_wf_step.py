@@ -558,7 +558,7 @@ async def test_return_writes_response_and_wakes_caller_without_archiving(
             cid, {"request_id": "sha:d2#0", "value": {"answer": 42}}
         )
     assert res == {"status": "returned"}
-    wake.assert_awaited_once_with(run_id)
+    wake.assert_awaited_once_with(run_id, batch=True)
 
     async with pool.acquire() as conn:
         response = await db_queries.read_request_response(
@@ -642,7 +642,7 @@ async def test_request_is_answered_exactly_once(
         )
     assert r1 == {"status": "returned"}
     assert isinstance(r2, ToolResult) and r2.is_error  # request already answered → not open
-    wake.assert_awaited_once_with(run_id)  # only the first response woke the caller
+    wake.assert_awaited_once_with(run_id, batch=True)  # only the first response woke the caller
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -693,7 +693,7 @@ async def test_return_real_dispatch_appends_result_and_does_not_archive(
     finally:
         runtime.task_registry = prev_reg
 
-    wake.assert_awaited_once_with(run_id)
+    wake.assert_awaited_once_with(run_id, batch=True)
     async with pool.acquire() as conn:
         result = await db_queries.find_tool_result_event(conn, cid, "call_ret", account_id="acc_wf")
         marker = await db_queries.read_request_response(
@@ -914,7 +914,7 @@ async def test_model_failure_writes_error_response_and_run_resolves(
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake:
         delay = await loop._apply_retry_or_failure(pool, child_id, account_id="acc_wf")
     assert delay is None  # terminal — retry budget spent
-    wake.assert_awaited_once_with(run_id)  # the caller was woken to harvest
+    wake.assert_awaited_once_with(run_id, batch=True)  # the caller was woken to harvest
 
     async with pool.acquire() as conn:
         response = await db_queries.read_request_response(
@@ -2103,7 +2103,7 @@ async def test_return_enforces_output_schema(
             cid, {"request_id": "se:1", "value": {"answer": "yes"}}
         )
     assert good == {"status": "returned"}
-    wake.assert_awaited_once_with(run_id)
+    wake.assert_awaited_once_with(run_id, batch=True)
     async with pool.acquire() as conn:
         resp = await db_queries.read_request_response(
             conn, cid, account_id="acc_wf", request_id="se:1"

@@ -806,5 +806,5 @@ class TestRequestTotalityWiring:
             _mgr,
         ):
             await run_session_step("sess_x")
-        defer_run_wake.assert_awaited_once_with("run_x")
+        defer_run_wake.assert_awaited_once_with("run_x", batch=True)
         defer_wake.assert_not_awaited()

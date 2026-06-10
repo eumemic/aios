@@ -137,7 +137,9 @@ async def respond_to_request(
                     conn, run_id=parent_run_id, call_key=request_id, kind="child_done"
                 )
     if wrote:
-        await defer_run_wake(parent_run_id)
+        # batch: child completions are the high-frequency wake source — a fan-out's
+        # burst coalesces into one re-drive when the window setting is on.
+        await defer_run_wake(parent_run_id, batch=True)
     return "responded" if wrote else "duplicate"
 
 
