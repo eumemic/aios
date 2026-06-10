@@ -35,8 +35,9 @@ def listener_application_name(instance_id: str | None = None) -> str:
     scoped to THIS aios instance's listeners — robust to concurrent backends
     from other xdist workers / the app pool. ``instance_id`` defaults to
     ``get_settings().instance_id``; passed explicitly only by tests.
-    Truncated to 63 bytes — Postgres silently truncates ``application_name``
-    at ``NAMEDATALEN - 1``.
+    Truncated to 63 characters; ``instance_id`` is ASCII (Settings pattern
+    ``^[a-z_][a-z0-9_]*$``), so the result stays within Postgres's 63-byte
+    ``application_name`` limit (``NAMEDATALEN - 1``).
     """
     iid = instance_id if instance_id is not None else get_settings().instance_id
     return f"aios-listener:{iid}"[:63]

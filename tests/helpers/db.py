@@ -12,8 +12,9 @@ async def count_active_backends(db_url: str, application_name: str | None = None
     ``application_name`` — used by the SSE leak e2e test to scope its count to a
     single aios instance's dedicated listener connections, so concurrent
     backends from other xdist workers or the app pool don't move the count.
-    Default ``None`` preserves the original global count (the integration
-    cancellation test relies on it).
+    Default ``None`` counts all client backends on the database (the original
+    behaviour); callers needing parallel-safe isolation pass the per-instance
+    listener ``application_name`` (see ``aios.db.pool.listener_application_name``).
     """
     conn = await asyncpg.connect(db_url)
     try:
