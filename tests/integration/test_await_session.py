@@ -22,7 +22,9 @@ import asyncpg
 import pytest
 
 from aios.db import queries
+from aios.db.listen import open_listen_for_events
 from aios.db.pool import create_pool
+from aios.db.sse_lock import has_subscriber
 from aios.errors import NotFoundError, ValidationError
 from aios.services import sessions as service
 from tests.integration.conftest import seed_agent_env_session
@@ -279,6 +281,37 @@ async def test_mode2_explicit_watermark_below_reacted_immediate(
     )
     assert resp.done is True
     assert resp.last_reacted_seq >= 2
+
+
+# ─── subscriber lock: await poller must not toggle the streaming path ─────────
+
+
+async def test_await_listen_does_not_acquire_subscriber_lock(
+    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    migrated_db_url: str,
+) -> None:
+    """An await poller consumes terminal state only, so its LISTEN must NOT
+    acquire the subscriber lock — otherwise has_subscriber() would force the
+    awaited session's worker onto the streaming model path (issue #81).
+
+    The lock lives on the listener's own dedicated connection; check
+    has_subscriber via the pool (a separate connection).
+    """
+    pool, _account_id, session_id = pool_and_session
+
+    # await-poller open: lock skipped → no subscriber observed.
+    sub = await open_listen_for_events(migrated_db_url, session_id, acquire_lock=False)
+    try:
+        assert await has_subscriber(pool, session_id) is False
+    finally:
+        sub.terminate()
+
+    # default open (SSE /stream, wait_for_events): lock held → subscriber observed.
+    sub = await open_listen_for_events(migrated_db_url, session_id)
+    try:
+        assert await has_subscriber(pool, session_id) is True
+    finally:
+        sub.terminate()
 
 
 # ─── validation + scoping ────────────────────────────────────────────────────

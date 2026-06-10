@@ -530,7 +530,13 @@ async def await_session(
         def _is_done(state: Any) -> bool:
             return bool(state >= effective_watermark)
 
-    subscription = await open_listen_for_events(db_url, session_id)
+    # An await poller consumes only the terminal completion state, never the
+    # token-by-token deltas, so it must NOT acquire the subscriber lock: doing
+    # so would make has_subscriber() return True and force the awaited
+    # session's worker into the streaming model path for the entire await
+    # window — wasted work for a consumer that ignores deltas. Mirrors how
+    # open_listen_for_run_events omits the lock (issue #81).
+    subscription = await open_listen_for_events(db_url, session_id, acquire_lock=False)
     try:
         state = await await_completion(
             subscription.queue,
