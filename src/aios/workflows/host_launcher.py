@@ -33,7 +33,6 @@ from aios.workflows._protocol import (
     encode_frame,
 )
 
-DEFAULT_CPU_SECONDS = 30
 DEFAULT_DEADLINE_SECONDS = 30.0
 # Per-wake budgets SCALE with the INIT frame (#780): a wake that replays a bigger
 # memo is entitled to proportionally more wall/CPU time, so a run can never time
@@ -179,21 +178,20 @@ async def run_script_host(
     source: str,
     input: Any,
     memo: dict[str, Any],
-    cpu_seconds: int = DEFAULT_CPU_SECONDS,
     address_space_bytes: int | None = DEFAULT_ADDRESS_SPACE_BYTES,
     deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
 ) -> HostOutcome:
     """Drive one wake of ``source`` in a fresh, credential-free subprocess.
 
-    ``deadline_seconds``/``cpu_seconds`` are the BASE budgets; the effective
-    budgets scale with the INIT frame size (see :func:`_scaled_seconds`). CPU is
-    pinned one second above the wall deadline so a CPU-bound child is killed by
-    the parent's deadline (a clean ``script_host_timeout``), never by the rlimit
-    SIGKILL (an opaque host crash).
+    ``deadline_seconds`` is the BASE budget; the effective budget scales with the
+    INIT frame size (see :func:`_scaled_seconds`). The CPU rlimit is DERIVED —
+    one second above the wall deadline — so a CPU-bound child is killed by the
+    parent's deadline (a clean ``script_host_timeout``), never by the rlimit
+    SIGKILL (an opaque host crash): true by construction, not by matching bases.
     """
     init_bytes = encode_frame({"type": INIT, "source": source, "input": input, "memo": memo})
     deadline = _scaled_seconds(deadline_seconds, len(init_bytes))
-    cpu = int(_scaled_seconds(cpu_seconds, len(init_bytes))) + 1
+    cpu = int(deadline) + 1
     # Deny-by-default env: only non-secret launch/locale essentials cross the
     # spawn (see ``_CHILD_ENV_ALLOWLIST``), plus the two rlimit knobs the child
     # self-applies. The child must stay credential-free.

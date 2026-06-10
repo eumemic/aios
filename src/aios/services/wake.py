@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from procrastinate import exceptions as procrastinate_exceptions
 from procrastinate.types import JSONValue
 
+from aios.config import get_settings
 from aios.db import queries
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
@@ -78,21 +79,14 @@ async def defer_wake(
 
     task_kwargs: dict[str, JSONValue] = {"session_id": session_id, "cause": cause}
 
-    if delay_seconds is not None:
-        deferrer = app.configure_task(
-            "harness.wake_session",
-            lock=session_id,
-            queueing_lock=session_id,
-            priority=priority,
-            schedule_in={"seconds": delay_seconds},
-        )
-    else:
-        deferrer = app.configure_task(
-            "harness.wake_session",
-            lock=session_id,
-            queueing_lock=session_id,
-            priority=priority,
-        )
+    # configure_task accepts schedule_in=None (treated as "no schedule").
+    deferrer = app.configure_task(
+        "harness.wake_session",
+        lock=session_id,
+        queueing_lock=session_id,
+        priority=priority,
+        schedule_in={"seconds": delay_seconds} if delay_seconds is not None else None,
+    )
 
     try:
         await deferrer.defer_async(**task_kwargs)
@@ -123,25 +117,16 @@ async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:
     completions, tool results) pass ``batch=True``; with the setting at 0
     (the default) batching is off and every wake is immediate.
     """
-    from aios.config import get_settings
     from aios.harness.procrastinate_app import app
 
     window = get_settings().workflow_wake_batch_seconds if batch else 0.0
-    if window > 0:
-        deferrer = app.configure_task(
-            "harness.wake_workflow",
-            lock=run_id,
-            queueing_lock=run_id,
-            priority=_BACKGROUND_PRIORITY,  # workflow run steps yield to foreground too
-            schedule_in={"seconds": window},
-        )
-    else:
-        deferrer = app.configure_task(
-            "harness.wake_workflow",
-            lock=run_id,
-            queueing_lock=run_id,
-            priority=_BACKGROUND_PRIORITY,  # workflow run steps yield to foreground too
-        )
+    deferrer = app.configure_task(
+        "harness.wake_workflow",
+        lock=run_id,
+        queueing_lock=run_id,
+        priority=_BACKGROUND_PRIORITY,  # workflow run steps yield to foreground too
+        schedule_in={"seconds": window} if window > 0 else None,
+    )
     try:
         await deferrer.defer_async(run_id=run_id)
     except procrastinate_exceptions.AlreadyEnqueued:

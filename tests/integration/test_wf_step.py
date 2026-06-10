@@ -91,6 +91,16 @@ async def _events(pool: asyncpg.Pool[Any], run_id: str) -> list[tuple[int, str, 
     return [(e.seq, e.type, e.call_key) for e in rows]
 
 
+async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
+    """Run ids the needs-step sweep filter currently matches (fixed horizons)."""
+    async with pool.acquire() as conn:
+        return set(
+            await wf_queries.list_run_ids_needing_step(
+                conn, agent_deadline_seconds=3600, tool_stale_seconds=60
+            )
+        )
+
+
 async def _make_run(pool: asyncpg.Pool[Any], script: str, *, input: Any = None) -> str:
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(conn, account_id="acc_wf", name="w", script=script)
@@ -1814,15 +1824,12 @@ async def test_spawn_failure_is_transient_not_terminal(wf_runtime: asyncpg.Pool[
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
-        needing = await wf_queries.list_run_ids_needing_step(
-            conn, agent_deadline_seconds=3600, tool_stale_seconds=60
-        )
     assert run is not None and run.status != "errored"  # retriable, not terminal
     assert not any(e.type == "run_completed" for e in events)
     # The step LEASE (#780): the crashed step left 'running', which the needs-step
     # sweep matches unconditionally — what makes the re-raise actually retriable.
     assert run.status == "running"
-    assert run_id in needing
+    assert run_id in await _needing(pool)
 
 
 async def test_post_harvest_crash_leaves_lease_for_the_sweep(
@@ -1852,12 +1859,9 @@ async def test_post_harvest_crash_leaves_lease_for_the_sweep(
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
-        needing = await wf_queries.list_run_ids_needing_step(
-            conn, agent_deadline_seconds=3600, tool_stale_seconds=60
-        )
     assert run is not None and run.status == "running"  # the lease, not 'suspended'
     assert any(e.type == "call_result" for e in events)  # the harvest DID commit
-    assert run_id in needing  # ...and the sweep still sees the run
+    assert run_id in await _needing(pool)  # ...and the sweep still sees the run
 
     # The next (healthy) step replays with the journaled memo and completes.
     await run_workflow_step(run_id)
@@ -1915,29 +1919,26 @@ async def test_large_fanout_completes_and_parks_quiet(wf_runtime: asyncpg.Pool[A
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # parks on a 200-wide frontier
 
-    async def needing() -> set[str]:
-        async with pool.acquire() as conn:
-            return set(
-                await wf_queries.list_run_ids_needing_step(
-                    conn, agent_deadline_seconds=3600, tool_stale_seconds=60
-                )
-            )
-
     gate_keys = [k for _s, t, k in await _events(pool, run_id) if t == "call_started"]
-    assert len(gate_keys) == 200
-    assert run_id not in await needing()  # parked on gates: quiet
+    assert len(gate_keys) == 200 and all(k is not None for k in gate_keys)
+    assert run_id not in await _needing(pool)  # parked on gates: quiet
 
-    for i, key in enumerate(gate_keys):
-        assert key is not None
-        await service.resume_gate(pool, run_id=run_id, call_key=key, result={"v": i})
-    assert run_id in await needing()  # unharvested resumes: hot
+    # A real fan-in IS concurrent — resume all 200 gates at once.
+    await asyncio.gather(
+        *(
+            service.resume_gate(pool, run_id=run_id, call_key=key, result={"v": i})
+            for i, key in enumerate(gate_keys)
+            if key is not None
+        )
+    )
+    assert run_id in await _needing(pool)  # unharvested resumes: hot
 
     await run_workflow_step(run_id)  # harvests all 200, replays past them, completes
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "completed"
     assert run.output == sum(range(200))
-    assert run_id not in await needing()  # terminal: out of the sweep for good
+    assert run_id not in await _needing(pool)  # terminal: out of the sweep for good
 
 
 async def test_early_gate_signal_triggers_self_rewake(wf_runtime: asyncpg.Pool[Any]) -> None:

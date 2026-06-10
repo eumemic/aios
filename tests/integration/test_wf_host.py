@@ -620,8 +620,7 @@ async def test_hash_ordering_is_pinned_across_wakes(monkeypatch: pytest.MonkeyPa
 async def test_cpu_bomb_is_killed_and_parent_survives() -> None:
     out = await _run(
         "async def main(input):\n    while True:\n        pass",
-        cpu_seconds=2,
-        deadline_seconds=2.0,
+        deadline_seconds=2.0,  # the CPU rlimit derives from this (deadline + 1s)
     )
     assert out.kind == "raised"
     assert out.error_kind in ("script_host_timeout", "script_host_crash")

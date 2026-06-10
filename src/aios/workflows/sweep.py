@@ -6,9 +6,11 @@ with something for a step to do is woken — an unharvested signal, a stale
 inflight call, or a non-parked status (the per-step ``running`` lease). A parked
 run with nothing new is skipped, because every wake costs a full memo reship +
 script replay; the old blanket every-non-terminal-run sweep made each tick O(memo)
-per parked run. A wake lost to a crash still self-heals within one sweep interval:
-every loss mode leaves SQL-visible state one of the filter clauses matches (see
-``list_run_ids_needing_step``).
+per parked run. A wake lost to a crash still self-heals: every loss mode leaves
+SQL-visible state one of the filter clauses matches (see
+``list_run_ids_needing_step``) — within one sweep interval for signal-backed and
+lease-backed modes, within the staleness horizon for a tool task that crashed
+before writing its signal.
 """
 
 from __future__ import annotations
@@ -26,11 +28,14 @@ log = get_logger("aios.workflows.sweep")
 
 # How long an inflight ``tool`` call may sit without a result signal before the
 # sweep re-wakes its run for re-dispatch (the task crashed / its signal write
-# failed). Re-dispatch is idempotent — the harvest point-reads the signal and
-# checks the in-process task registry before launching — so the only cost of a
-# false positive is one wasted wake. Run tools are network calls (seconds), so a
-# minute of grace is generous.
-TOOL_REDISPATCH_STALE_SECONDS = 60.0
+# failed). MUST dominate the slowest legitimate tool: tavily's 60s client
+# timeout and http_request's 60s PER-READ timeout (a trickling chunked response
+# can legitimately exceed 60s wall-clock). A tool still running when its run is
+# re-woken is absorbed same-worker by the in-process task registry (one wasted
+# wake) — but CROSS-worker the registry doesn't apply, and a premature horizon
+# would double-dispatch a non-idempotent http_request. 180s clears the 60s
+# bounds with margin while keeping crashed-task recovery within a few ticks.
+TOOL_REDISPATCH_STALE_SECONDS = 180.0
 
 
 async def wake_runs_needing_step(pool: asyncpg.Pool[Any]) -> int:

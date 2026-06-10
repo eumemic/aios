@@ -104,9 +104,11 @@ async def _run_tool_task(
             # completions — a burst coalesces into one re-drive when the window is on.
             await defer_run_wake(run.id, batch=True)
         except Exception:
-            # The tool ran but persisting/waking failed (DB blip, pool exhaustion). No signal
-            # → the run stalls 'suspended' until the periodic sweep re-wakes it and the harvest
-            # re-dispatches. Log so the stall is diagnosable, not a silent unretrieved-task warning.
+            # The tool ran but persisting/waking failed (DB blip, pool exhaustion). If the
+            # signal committed and only the wake failed, the sweep's unharvested-signal clause
+            # re-wakes within a tick; with no signal at all, the stale-tool clause re-wakes at
+            # the staleness horizon and the harvest re-dispatches. Log so the stall is
+            # diagnosable, not a silent unretrieved-task warning.
             log.exception(
                 "run_tool.signal_failed", run_id=run.id, call_key=call_key, tool=tool_name
             )

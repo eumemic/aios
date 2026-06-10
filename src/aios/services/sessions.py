@@ -712,6 +712,43 @@ def _nudge_content(request_ids: list[str]) -> str:
     )
 
 
+async def write_child_response(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    parent_run_id: str,
+    request_id: str,
+    is_error: bool,
+    result: Any,
+    error: dict[str, Any] | None,
+) -> bool:
+    """Write a workflow child's response AND its ``child_done`` side-marker, on the
+    caller's open connection/transaction — THE seam for every external response
+    writer (``respond_to_request`` and the quiescence guard's ``no_return``
+    backstop). The marker is what keeps a lost post-commit caller wake visible to
+    the needs-step sweep (#780, ``list_run_ids_needing_step``), so the two writes
+    must be atomic: a writer that bypassed this and forgot the marker would
+    silently re-open the permanently-stalled-run hole. The one deliberate bypass
+    is the step's own timeout force-resolve, which journals the ``call_result``
+    in the same step — there is no wake to lose, and a marker would only queue a
+    spurious wake. ``request_id`` IS the agent call's ``call_key``."""
+    wrote = await queries.write_response_if_absent(
+        conn,
+        session_id,
+        account_id=account_id,
+        request_id=request_id,
+        is_error=is_error,
+        result=result,
+        error=error,
+    )
+    if wrote:
+        await wf_queries.insert_run_signal(
+            conn, run_id=parent_run_id, call_key=request_id, kind="child_done"
+        )
+    return wrote
+
+
 async def append_assistant_and_guard_quiescence(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -770,22 +807,16 @@ async def append_assistant_and_guard_quiescence(
                 conn, session_id, account_id=account_id, request_id=request_id
             )
             if nudges >= REQUEST_NUDGE_BUDGET:
-                if await queries.write_response_if_absent(
+                if await write_child_response(
                     conn,
                     session_id,
                     account_id=account_id,
+                    parent_run_id=parent_run_id,
                     request_id=request_id,
                     is_error=True,
                     result=None,
                     error={"kind": "no_return"},
                 ):
-                    # The second of the two response-write sites (the first is
-                    # respond_to_request): the ``child_done`` side-marker commits
-                    # in the guard's own transaction, so a lost post-commit caller
-                    # wake is SQL-visible to the needs-step sweep (#780).
-                    await wf_queries.insert_run_signal(
-                        conn, run_id=parent_run_id, call_key=request_id, kind="child_done"
-                    )
                     autoerror_caller_run_id = parent_run_id
             else:
                 to_nudge.append(request_id)
