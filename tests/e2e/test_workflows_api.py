@@ -81,7 +81,7 @@ async def _mint_tenant(http_client: httpx.AsyncClient, name: str) -> str:
 async def _create_env(http_client: httpx.AsyncClient) -> str:
     r = await http_client.post("/v1/environments", json={"name": f"wf-env-{_uniq()}"})
     assert r.status_code in (200, 201), r.text
-    return r.json()["id"]
+    return str(r.json()["id"])
 
 
 async def test_create_workflow_run_and_observe(http_client: httpx.AsyncClient) -> None:

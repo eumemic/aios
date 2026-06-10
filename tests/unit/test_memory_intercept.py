@@ -6,6 +6,8 @@ Pure in-memory: we install a synthetic mount cache via
 
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import pytest
 
 from aios.harness import runtime
@@ -18,7 +20,7 @@ SESSION_ID = "sesn_01ABCDEFGHJKMNPQRSTVWXYZ12"
 def _echo(name: str, access: str = "read_write") -> MemoryStoreResourceEcho:
     return MemoryStoreResourceEcho(
         memory_store_id=f"memstore_{name}",
-        access=access,  # type: ignore[arg-type]
+        access=access,
         instructions="",
         name=name,
         description="",
@@ -27,7 +29,7 @@ def _echo(name: str, access: str = "read_write") -> MemoryStoreResourceEcho:
 
 
 @pytest.fixture(autouse=True)
-def _clear_cache() -> None:
+def _clear_cache() -> Generator[None]:
     runtime.clear_session_memory_mounts(SESSION_ID)
     yield
     runtime.clear_session_memory_mounts(SESSION_ID)

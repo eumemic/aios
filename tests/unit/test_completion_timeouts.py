@@ -14,6 +14,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+import litellm
 import pytest
 
 from aios.harness import completion
@@ -95,13 +96,13 @@ async def test_stream_litellm_raises_timeout_on_stalled_stream(
     async def fake_acompletion(**kwargs: object) -> _StallingResponse:
         return _StallingResponse()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     with pytest.raises(TimeoutError):
         await completion.stream_litellm(
             model="anthropic/claude-sonnet-4-6",
             messages=[{"role": "user", "content": "ping"}],
-            pool=_StubPool(),  # type: ignore[arg-type]
+            pool=_StubPool(),
             session_id="sess_test",
         )
 
@@ -118,9 +119,9 @@ async def test_stream_litellm_long_ttft_succeeds_when_inter_chunk_is_fast(
     async def fake_acompletion(**kwargs: object) -> AsyncIterator[object]:
         return _slow_first_chunk_response(ttft_delay_s=0.1)
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     monkeypatch.setattr(
-        completion.litellm,
+        litellm,
         "stream_chunk_builder",
         lambda chunks: {
             "usage": {},
@@ -131,7 +132,7 @@ async def test_stream_litellm_long_ttft_succeeds_when_inter_chunk_is_fast(
     message, _, _, _ = await completion.stream_litellm(
         model="anthropic/claude-sonnet-4-6",
         messages=[{"role": "user", "content": "ping"}],
-        pool=_StubPool(),  # type: ignore[arg-type]
+        pool=_StubPool(),
         session_id="sess_test",
     )
 
@@ -157,9 +158,9 @@ async def test_stream_litellm_passes_timeout_kwargs(
         captured.update(kwargs)
         return _EmptyResponse()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     monkeypatch.setattr(
-        completion.litellm,
+        litellm,
         "stream_chunk_builder",
         lambda chunks: {
             "usage": {},
@@ -170,7 +171,7 @@ async def test_stream_litellm_passes_timeout_kwargs(
     await completion.stream_litellm(
         model="anthropic/claude-sonnet-4-6",
         messages=[{"role": "user", "content": "ping"}],
-        pool=_StubPool(),  # type: ignore[arg-type]
+        pool=_StubPool(),
         session_id="sess_test",
     )
 
@@ -209,7 +210,7 @@ async def test_extra_overrides_default_timeout(
             usage={},
         )
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
         model="anthropic/claude-sonnet-4-6",
@@ -256,13 +257,13 @@ async def test_stream_litellm_tolerates_empty_choices_chunk(
             "choices": [{"message": {"role": "assistant", "content": "hello"}}],
         }
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
-    monkeypatch.setattr(completion.litellm, "stream_chunk_builder", fake_builder)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "stream_chunk_builder", fake_builder)
 
     message, _, _, _ = await completion.stream_litellm(
         model="openrouter/anthropic/claude-sonnet-4-6",
         messages=[{"role": "user", "content": "ping"}],
-        pool=_StubPool(),  # type: ignore[arg-type]
+        pool=_StubPool(),
         session_id="sess_test",
     )
 
@@ -303,7 +304,7 @@ async def test_stream_litellm_raises_typed_error_on_zero_chunks(
     async def fake_acompletion(**_kwargs: object) -> _EmptyResponse:
         return _EmptyResponse()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     # Intentionally do NOT patch ``stream_chunk_builder`` — we want the
     # real-world behavior where it returns ``None`` for an empty chunk list.
     # (Verified: ``litellm.stream_chunk_builder(chunks=[])`` returns None.)
@@ -312,7 +313,7 @@ async def test_stream_litellm_raises_typed_error_on_zero_chunks(
         await completion.stream_litellm(
             model="anthropic/claude-sonnet-4-6",
             messages=[{"role": "user", "content": "ping"}],
-            pool=_StubPool(),  # type: ignore[arg-type]
+            pool=_StubPool(),
             session_id="sess_test",
         )
 

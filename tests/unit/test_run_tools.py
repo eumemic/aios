@@ -76,8 +76,8 @@ async def test_http_request_routed_to_the_run_resolver() -> None:
 
     with (
         patch.object(run_tools, "_do_http_request", new=_fake_do),
-        patch.object(run_tools.runtime, "require_pool", return_value=object()),
-        patch.object(run_tools.runtime, "require_crypto_box", return_value=object()),
+        patch("aios.harness.runtime.require_pool", return_value=object()),
+        patch("aios.harness.runtime.require_crypto_box", return_value=object()),
         patch.object(
             run_tools,
             "resolve_auth_for_target_url_run",

@@ -66,7 +66,8 @@ async def _create_agent(http_client: httpx.AsyncClient, name: str) -> str:
         },
     )
     assert r.status_code == 201, r.text
-    return r.json()["id"]
+    agent_id: str = r.json()["id"]
+    return agent_id
 
 
 class TestListAgentsNameFilter:

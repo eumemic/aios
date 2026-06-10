@@ -6,6 +6,7 @@ via ``registry.clear()`` so tests don't poison each other.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from typing import Any
 
 import pytest
@@ -24,7 +25,7 @@ async def _noop_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
 
 
 @pytest.fixture(autouse=True)
-def _reset_registry() -> None:
+def _reset_registry() -> Generator[None]:
     """Snapshot the registry before each test and restore after.
 
     The real aios package imports ``aios.tools`` at worker startup

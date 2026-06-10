@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import asyncpg
 import pytest
@@ -300,7 +300,7 @@ async def _explain(pool: asyncpg.Pool[Any], sql: str, *args: Any) -> dict[str, A
     # asyncpg decodes JSON columns to Python lists/dicts already.
     if isinstance(result, str):
         result = json.loads(result)
-    return result[0]["Plan"]
+    return cast(dict[str, Any], result[0]["Plan"])
 
 
 # ─── structural tests (primary, always-on) ───────────────────────────────────

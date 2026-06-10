@@ -48,7 +48,7 @@ def test_run_or_die_swallows_brokenpipe_raised_from_stdout_write(
     ``json`` rendering fails mid-flush after the HTTP call succeeded."""
 
     class BrokenStream(io.StringIO):
-        def write(self, _s: str) -> int:  # type: ignore[override]
+        def write(self, _s: str) -> int:
             raise BrokenPipeError(32, "Broken pipe")
 
     monkeypatch.setattr(sys, "stdout", BrokenStream())

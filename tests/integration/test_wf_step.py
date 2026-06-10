@@ -307,9 +307,11 @@ async def test_cancel_suspended_run_finalizes_cancelled(wf_runtime: asyncpg.Pool
     # Wake: harvest the cancel → cancelled.
     await run_workflow_step(run_id)
     async with pool.acquire() as conn:
-        run = await wf_queries.get_run_for_step(conn, run_id)
+        run_or_none = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
-    assert run is not None and run.status == "cancelled" and run.output is None
+    assert run_or_none is not None
+    run = run_or_none
+    assert run.status == "cancelled" and run.output is None
     rc = events[-1]
     assert rc.type == "run_completed"
     assert rc.payload["cancelled"] is True and rc.payload["is_error"] is False
@@ -332,8 +334,9 @@ async def test_cancel_pending_run_finalizes_before_it_starts(wf_runtime: asyncpg
 
     await run_workflow_step(run_id)  # harvest cancel before run_started
     async with pool.acquire() as conn:
-        run = await wf_queries.get_run_for_step(conn, run_id)
-    assert run is not None and run.status == "cancelled"
+        run_or_none = await wf_queries.get_run_for_step(conn, run_id)
+    assert run_or_none is not None
+    assert run_or_none.status == "cancelled"
     assert [t for _s, t, _k in await _events(pool, run_id)] == ["run_completed"]
 
 
@@ -755,7 +758,7 @@ async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
 async def _child_id_of(pool: asyncpg.Pool[Any], run_id: str) -> str:
     async with pool.acquire() as conn:
         events = await wf_queries.list_run_events(conn, run_id)
-    return next(e.payload["child_session_id"] for e in events if e.type == "call_started")
+    return str(next(e.payload["child_session_id"] for e in events if e.type == "call_started"))
 
 
 async def _open_request_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
@@ -1954,7 +1957,8 @@ async def test_return_enforces_output_schema(
             cid,
             {"request_id": "se:1", "value": {"answer": 42}},  # answer must be a string
         )
-    assert isinstance(bad, ToolResult) and bad.is_error and "schema" in bad.content.lower()
+    assert isinstance(bad, ToolResult) and bad.is_error
+    assert isinstance(bad.content, str) and "schema" in bad.content.lower()
     wake.assert_not_awaited()  # nothing answered → caller not woken
     async with pool.acquire() as conn:
         assert (
@@ -2190,12 +2194,11 @@ async def test_defer_wake_priority_reflects_real_origin(
     )  # origin='foreground', no parent run
     _run_id, cid = await _spawn_child(pool, wf_agent_id, "prio:1")  # origin='background'
 
-    with app.replace_connector(InMemoryConnector()) as patched:
+    in_mem = InMemoryConnector()
+    with app.replace_connector(in_mem) as _patched:
         await defer_wake(pool, fg.id, account_id="acc_wf", cause="message")
         await defer_wake(pool, cid, account_id="acc_wf", cause="message")
-        priorities = {
-            j["args"]["session_id"]: j["priority"] for j in patched.connector.jobs.values()
-        }
+        priorities = {j["args"]["session_id"]: j["priority"] for j in in_mem.jobs.values()}
     assert priorities[fg.id] == _FOREGROUND_PRIORITY  # real foreground → default
     assert priorities[cid] == _BACKGROUND_PRIORITY  # real background child → demoted
 

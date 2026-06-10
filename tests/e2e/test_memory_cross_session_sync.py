@@ -20,6 +20,7 @@ import pytest
 import pytest_asyncio
 
 from aios.harness import runtime
+from aios.models.github_repositories import GithubRepositoryResource
 from aios.models.memory_stores import MemoryStoreResource
 from aios.services import memory_stores as memory_service
 from aios.services import sessions as sessions_service
@@ -221,7 +222,7 @@ async def _attach_store(harness: Harness, store_name: str) -> str:
 async def _start_session(
     harness: Harness,
     *,
-    resources: list[MemoryStoreResource] | None = None,
+    resources: list[MemoryStoreResource | GithubRepositoryResource] | None = None,
     tools: tuple[str, ...] = ("read", "write", "bash"),
 ) -> Any:
     """Create env+agent+session; prime the runtime mount cache via the
@@ -246,7 +247,7 @@ async def _start_session(
         name=f"test-agent-{make_id('agent')[-8:]}",
         model="fake/test",
         system="memory test",
-        tools=[ToolSpec(type=t) for t in tools],  # type: ignore[arg-type]
+        tools=[ToolSpec(type=t) for t in tools],
         description=None,
         metadata={},
         window_min=50_000,
@@ -297,6 +298,7 @@ class TestCrossSessionSync:
 
         # B's read tool sees A's content.
         b_result = await read_handler(b.id, {"path": "/mnt/memory/xsync-read/shared.md"})
+        assert isinstance(b_result, dict)
         assert "error" not in b_result, b_result
         # cat -n format: "     1\tfrom-A"
         assert "from-A" in b_result["content"]
@@ -316,6 +318,8 @@ class TestCrossSessionSync:
         # Both sessions read /seed.md — both cache the seed sha.
         a_read = await read_handler(a.id, {"path": "/mnt/memory/xsync-race/seed.md"})
         b_read = await read_handler(b.id, {"path": "/mnt/memory/xsync-race/seed.md"})
+        assert isinstance(a_read, dict)
+        assert isinstance(b_read, dict)
         assert "error" not in a_read
         assert "error" not in b_read
 
@@ -356,6 +360,7 @@ class TestCrossSessionSync:
 
         # Read primes the cache with the seed sha.
         r = await read_handler(a.id, {"path": "/mnt/memory/xsync-edit-refresh/seed.md"})
+        assert isinstance(r, dict)
         assert "error" not in r, r
 
         # Edit changes the DB content; without the cache refresh fix the next
@@ -417,6 +422,7 @@ class TestCrossSessionSync:
 
         # Session's read tool sees it via the shared FS.
         result = await read_handler(a.id, {"path": "/mnt/memory/xsync-api/api_made.md"})
+        assert isinstance(result, dict)
         assert "error" not in result, result
         assert "from-api" in result["content"]
 

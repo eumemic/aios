@@ -18,7 +18,7 @@ def _echo(
 ) -> MemoryStoreResourceEcho:
     return MemoryStoreResourceEcho(
         memory_store_id=f"memstore_{name}",
-        access=access,  # type: ignore[arg-type]
+        access=access,
         instructions=instructions,
         name=name,
         description=description,

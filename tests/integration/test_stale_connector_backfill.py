@@ -63,7 +63,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 import asyncpg
 import pytest
@@ -180,7 +180,9 @@ async def bound_signal_session_with_stale_send(
                 ],
             )
 
-        async def append(kind: str, data: dict[str, Any]) -> None:
+        async def append(
+            kind: Literal["message", "lifecycle", "span", "interrupt"], data: dict[str, Any]
+        ) -> None:
             async with pool.acquire() as conn:
                 await queries.append_event(
                     conn, account_id=account_id, session_id=sid, kind=kind, data=data

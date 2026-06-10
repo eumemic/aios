@@ -182,6 +182,7 @@ class TestScheduleWakeHandler:
 
         mock_add_task.assert_awaited_once()
         # Inspect the spec passed to add_task.
+        assert mock_add_task.await_args is not None
         spec = mock_add_task.await_args.args[2]
         assert spec.fire_at is not None
         assert spec.schedule is None

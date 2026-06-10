@@ -133,7 +133,7 @@ jobs:
           uv run ruff format --check src tests packages/aios-sdk/aios_sdk
 
       - name: Type check (mypy)
-        run: uv run mypy src packages/aios-sdk/aios_sdk
+        run: uv run mypy src tests packages/aios-sdk/aios_sdk
 
   unit:
     needs: detect

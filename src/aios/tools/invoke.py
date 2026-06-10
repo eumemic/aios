@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import jsonschema  # type: ignore[import-untyped]
+import jsonschema
 
 from aios.tools.registry import ToolNotFoundError, ToolResult, registry
 

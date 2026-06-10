@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from aios.models.agents import HttpPermissionPolicy, HttpRouteSpec, HttpServerSpec, ToolSpec
+from aios.models.agents import (
+    Agent,
+    AgentVersion,
+    HttpPermissionPolicy,
+    HttpRouteSpec,
+    HttpServerSpec,
+    ToolSpec,
+)
 from aios.tools.http_request import (
     _classify_permission,
     _decode_body,
@@ -26,8 +33,8 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 def _agent(
     *, http_servers: list[HttpServerSpec], tools: list[ToolSpec] | None = None
-) -> SimpleNamespace:
-    return SimpleNamespace(http_servers=http_servers, tools=tools or [])
+) -> Agent | AgentVersion:
+    return cast(Agent | AgentVersion, SimpleNamespace(http_servers=http_servers, tools=tools or []))
 
 
 def _server(
@@ -49,7 +56,7 @@ def _route(
     policy: str | None = None,
     description: str | None = None,
 ) -> HttpRouteSpec:
-    permission = HttpPermissionPolicy(type=policy) if policy else None  # type: ignore[arg-type]
+    permission = HttpPermissionPolicy(type=policy) if policy else None
     return HttpRouteSpec(
         path_pattern=pattern,
         enabled=enabled,
@@ -119,7 +126,7 @@ class TestClassifyToolCallArguments:
     ``function.arguments`` (providers differ on which shape they emit)."""
 
     @staticmethod
-    def _make_agent() -> SimpleNamespace:
+    def _make_agent() -> Agent | AgentVersion:
         return _agent(
             http_servers=[_server(routes=[_route("/lights/*", policy="always_allow")])],
             tools=[ToolSpec(type="http_request")],
@@ -198,7 +205,7 @@ def _stub_runtime() -> Iterator[SimpleNamespace]:
         yield SimpleNamespace(pool=pool, crypto_box=crypto_box)
 
 
-def _patch_load_agent(agent: SimpleNamespace) -> Any:
+def _patch_load_agent(agent: Agent | AgentVersion) -> Any:
     return patch(
         "aios.tools.http_request._load_session_agent",
         AsyncMock(return_value=(agent, "acc_test_stub")),

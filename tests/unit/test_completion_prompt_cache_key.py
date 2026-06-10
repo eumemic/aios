@@ -21,6 +21,7 @@ adapter).
 
 from __future__ import annotations
 
+import litellm
 import pytest
 
 from aios.harness import completion
@@ -62,7 +63,7 @@ async def test_call_litellm_openai_path_sends_prompt_cache_key(
         captured.update(kwargs)
         return _ok_response()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
         model="openai/gpt-5.5",
@@ -97,9 +98,9 @@ async def test_stream_litellm_openai_path_sends_prompt_cache_key(
         captured.update(kwargs)
         return _EmptyResponse()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     monkeypatch.setattr(
-        completion.litellm,
+        litellm,
         "stream_chunk_builder",
         lambda chunks: {
             "usage": {},
@@ -112,7 +113,7 @@ async def test_stream_litellm_openai_path_sends_prompt_cache_key(
     await completion.stream_litellm(
         model="openai/gpt-5.5",
         messages=[{"role": "user", "content": "hi"}],
-        pool=_StubPool(),  # type: ignore[arg-type]
+        pool=_StubPool(),
         session_id="sess_xyz789",
     )
 
@@ -143,7 +144,7 @@ async def test_call_litellm_openrouter_openai_route_sends_prompt_cache_key(
         captured.update(kwargs)
         return _ok_response()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
         model="openrouter/openai/gpt-4o",
@@ -173,7 +174,7 @@ async def test_call_litellm_azure_path_sends_prompt_cache_key(
         captured.update(kwargs)
         return _ok_response()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
         model="azure/gpt-4o",
@@ -204,7 +205,7 @@ async def test_call_litellm_openrouter_non_openai_route_omits_prompt_cache_key(
         captured.update(kwargs)
         return _ok_response()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
         model="openrouter/anthropic/claude-3-5-sonnet",
@@ -236,7 +237,7 @@ async def test_call_litellm_anthropic_path_omits_prompt_cache_key(
         captured.update(kwargs)
         return _ok_response()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
         model="anthropic/claude-opus-4-6",
@@ -264,7 +265,7 @@ async def test_call_litellm_openai_path_session_id_optional(
         captured.update(kwargs)
         return _ok_response()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
         model="openai/gpt-5.5",
@@ -294,7 +295,7 @@ async def test_call_litellm_extra_overrides_prompt_cache_key(
         captured.update(kwargs)
         return _ok_response()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
         model="openai/gpt-5.5",
@@ -327,7 +328,7 @@ async def test_call_litellm_openai_preserves_agent_extra_body_siblings(
         captured.update(kwargs)
         return _ok_response()
 
-    monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
         model="openai/gpt-5.5",

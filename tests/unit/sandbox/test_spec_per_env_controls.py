@@ -19,12 +19,14 @@ lives in ``resolve_bash_timeout_ceiling``. These tests pin each.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from aios.models.environments import EnvironmentConfig
 from aios.sandbox.spec import (
+    ProvisioningPlan,
     _assemble_plan,
     resolve_bash_timeout_ceiling,
 )
@@ -35,7 +37,7 @@ def _call_assemble(
     image: str = "aios-sandbox:test",
     disk_bytes: int | None = None,
     env_config: EnvironmentConfig | None = None,
-) -> object:
+) -> ProvisioningPlan:
     # ``_assemble_plan`` imports its volume helpers function-locally, so
     # patch them at the ``aios.sandbox.volumes`` source module (same shape
     # as ``test_spec_uds_url.py``).
@@ -105,7 +107,7 @@ def _patch_build_spec_deps(
     env_config: EnvironmentConfig | None,
     docker_image: str,
     sandbox_disk_bytes: int | None,
-):
+) -> tuple[Any, ...]:
     """Context manager bundle that stubs every external dependency of
     ``build_spec_from_session`` so it runs to the ``_assemble_plan`` call
     with a synthetic environment config and synthetic settings."""
@@ -176,7 +178,7 @@ async def _build_with(
     env_config: EnvironmentConfig | None,
     docker_image: str = "ghcr.io/eumemic/aios-sandbox:latest",
     sandbox_disk_bytes: int | None = None,
-):
+) -> ProvisioningPlan:
     from contextlib import ExitStack
 
     from aios.sandbox.spec import build_spec_from_session
@@ -257,7 +259,7 @@ def _patch_ceiling_deps(
     env_config: EnvironmentConfig | None,
     default: int,
     load_raises: bool = False,
-):
+) -> tuple[Any, ...]:
     settings = MagicMock()
     settings.bash_default_timeout_seconds = default
     load_env = AsyncMock(return_value=env_config)

@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import json as _json
 import os
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
@@ -61,7 +62,7 @@ def _make_handler(
     token_calls: list[dict[str, Any]] | None = None,
     token_expires_in: int | None = 3600,
     token_status: int = 200,
-):
+) -> Callable[[httpx.Request], httpx.Response]:
     """A MockTransport handler emulating a spec-compliant MCP OAuth provider."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -125,7 +126,7 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
 @contextmanager
-def _patched_provider(**kwargs: Any):
+def _patched_provider(**kwargs: Any) -> Generator[None]:
     handler = _make_handler(**kwargs)
 
     def factory(*_a: Any, **_k: Any) -> httpx.AsyncClient:
@@ -155,7 +156,7 @@ async def _vault(pool: Any, name: str) -> str:
 
 
 def _decrypt_flow(crypto_box: Any, blob: EncryptedBlob) -> dict[str, Any]:
-    return crypto_box.derive_account_subkey(ACCOUNT_ID).decrypt_dict(blob)
+    return cast(dict[str, Any], crypto_box.derive_account_subkey(ACCOUNT_ID).decrypt_dict(blob))
 
 
 async def _cred_payload(pool: Any, crypto_box: Any, cred_id: str) -> dict[str, Any]:
@@ -164,10 +165,13 @@ async def _cred_payload(pool: Any, crypto_box: Any, cred_id: str) -> dict[str, A
         row = await conn.fetchrow(
             "SELECT ciphertext, nonce FROM vault_credentials WHERE id = $1", cred_id
         )
-    return _json.loads(
-        crypto_box.derive_account_subkey(ACCOUNT_ID).decrypt(
-            EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
-        )
+    return cast(
+        dict[str, Any],
+        _json.loads(
+            crypto_box.derive_account_subkey(ACCOUNT_ID).decrypt(
+                EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"]))
+            )
+        ),
     )
 
 

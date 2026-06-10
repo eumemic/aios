@@ -352,7 +352,7 @@ The API process talks to connector subprocesses (which live on the worker) via p
 
 ```bash
 uv sync --dev
-uv run mypy src
+uv run mypy src tests
 uv run ruff check src tests && uv run ruff format --check src tests
 uv run pytest tests/unit -q                   # ~1s, no Docker needed
 

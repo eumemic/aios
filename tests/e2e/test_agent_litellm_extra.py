@@ -64,7 +64,8 @@ async def _create(
         body["litellm_extra"] = litellm_extra
     r = await client.post("/v1/agents", json=body)
     assert r.status_code == 201, r.text
-    return r.json()
+    result: dict[str, Any] = r.json()
+    return result
 
 
 class TestLitellmExtraRoundTrip:

@@ -325,6 +325,8 @@ async def test_wf_run_event_stream_backfills_tails_and_terminates(
 
         async def _consume() -> None:
             async for msg in wf_run_event_stream(subscription, pool, run_id):
+                assert msg.event is not None
+                assert isinstance(msg.data, str)
                 kind = json.loads(msg.data).get("type") if msg.event == "event" else None
                 collected.append((msg.event, kind))
                 if msg.event == "done":

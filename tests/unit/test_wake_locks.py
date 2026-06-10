@@ -11,13 +11,14 @@ real ``session_id`` per call to ``configure_task``.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from procrastinate import App
 from procrastinate.testing import InMemoryConnector
 
 
-def _job_rows(app: App) -> list[dict]:
+def _job_rows(app: App) -> list[dict[str, Any]]:
     connector = app.connector
     assert isinstance(connector, InMemoryConnector)
     return list(connector.jobs.values())

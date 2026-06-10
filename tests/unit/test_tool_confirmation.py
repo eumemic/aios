@@ -15,7 +15,7 @@ def _event(seq: int, data: dict[str, Any], kind: str = "message") -> Event:
         id=f"evt_{seq}",
         session_id="sess_test",
         seq=seq,
-        kind=kind,  # type: ignore[arg-type]
+        kind=kind,
         data=data,
         created_at=datetime.now(UTC),
     )

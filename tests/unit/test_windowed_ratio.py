@@ -65,7 +65,7 @@ def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) ->
 async def test_no_cumulative_falls_back_to_full_read() -> None:
     account_id = "acc_test_stub"  # PR 3 scaffolding
     conn = _FakeConn(total_local=None, ratio_n=0, ratio_mean=0.0)
-    result = await queries.read_windowed_events(
+    result: list[Any] = await queries.read_windowed_events(
         conn,
         "sess_x",
         window_min=1_000,
@@ -139,7 +139,7 @@ async def test_ratio_below_1_drops_fewer() -> None:
     """ratio=0.5 deflates total_effective below window_max → no drop."""
     account_id = "acc_test_stub"  # PR 3 scaffolding
     conn = _FakeConn(total_local=3_000, ratio_n=5, ratio_mean=0.5)
-    result = await queries.read_windowed_events(
+    result: list[Any] = await queries.read_windowed_events(
         conn,
         "sess_x",
         window_min=1_000,

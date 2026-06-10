@@ -9,10 +9,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
 from aios.crypto.vault import KEY_BYTES, NONCE_BYTES, CryptoBox, EncryptedBlob
+from aios.db import queries
 from aios.errors import CryptoDecryptError, OAuthRefreshError, ValidationError
 from aios.models.vaults import (
     TokenEndpointAuthBasic,
@@ -362,12 +364,12 @@ class TestUpdateVaultCredentialCallSite:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "get_vault_credential_with_blob",
                 AsyncMock(return_value=(existing, existing_blob)),
             ),
             patch.object(
-                vaults_service.queries,
+                queries,
                 "update_vault_credential",
                 AsyncMock(return_value=existing),
             ) as upd,
@@ -383,6 +385,7 @@ class TestUpdateVaultCredentialCallSite:
             )
 
         upd.assert_awaited_once()
+        assert upd.await_args is not None
         kwargs = upd.await_args.kwargs
         assert kwargs["display_name"] is ...
         assert kwargs["metadata"] is ...
@@ -400,12 +403,12 @@ class TestUpdateVaultCredentialCallSite:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "get_vault_credential_with_blob",
                 AsyncMock(return_value=(existing, existing_blob)),
             ),
             patch.object(
-                vaults_service.queries,
+                queries,
                 "update_vault_credential",
                 AsyncMock(return_value=existing),
             ) as upd,
@@ -420,6 +423,7 @@ class TestUpdateVaultCredentialCallSite:
                 account_id=account_id,
             )
 
+        assert upd.await_args is not None
         kwargs = upd.await_args.kwargs
         assert kwargs["display_name"] is None  # not Ellipsis — explicitly passed
 
@@ -530,11 +534,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
         ):
             await refresh_credential(
                 crypto_box,
@@ -561,11 +565,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
         ):
             await refresh_credential(
                 crypto_box,
@@ -594,11 +598,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
         ):
             await refresh_credential(
                 crypto_box,
@@ -625,11 +629,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
         ):
             await refresh_credential(
                 crypto_box,
@@ -662,11 +666,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
         ):
             await refresh_credential(
                 crypto_box,
@@ -695,11 +699,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
         ):
             await refresh_credential(
                 crypto_box,
@@ -731,11 +735,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
         ):
             await refresh_credential(
                 crypto_box,
@@ -765,11 +769,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
         ):
             await refresh_credential(
                 crypto_box,
@@ -798,11 +802,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
             pytest.raises(OAuthRefreshError),
         ):
             await refresh_credential(
@@ -827,11 +831,11 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
-            patch.object(vaults_service.httpx, "AsyncClient", MagicMock(return_value=client)),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
             pytest.raises(OAuthRefreshError, match="access_token"),
         ):
             await refresh_credential(
@@ -848,7 +852,7 @@ class TestRefreshCredential:
         conn = _conn_with_transaction()
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=None),
             ),
@@ -876,7 +880,7 @@ class TestRefreshCredential:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "lock_oauth_credential_for_refresh",
                 AsyncMock(return_value=("vc_1", blob)),
             ),
@@ -972,12 +976,12 @@ class TestServiceWiringIsAccountScoped:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "get_vault_credential_with_blob",
                 AsyncMock(return_value=(_existing_credential(), blob_for_a)),
             ),
             patch.object(
-                vaults_service.queries,
+                queries,
                 "update_vault_credential",
                 AsyncMock(return_value=_existing_credential()),
             ),
@@ -1016,12 +1020,12 @@ class TestServiceWiringIsAccountScoped:
 
         with (
             patch.object(
-                vaults_service.queries,
+                queries,
                 "get_vault_credential_with_blob",
                 AsyncMock(return_value=(_existing_credential(), blob_for_a)),
             ),
             patch.object(
-                vaults_service.queries,
+                queries,
                 "update_vault_credential",
                 AsyncMock(return_value=_existing_credential()),
             ),

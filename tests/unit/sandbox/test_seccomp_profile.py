@@ -53,7 +53,8 @@ DENY_NAMES = {
 
 @pytest.fixture(scope="module")
 def profile() -> dict[str, object]:
-    return json.loads(PROFILE_PATH.read_text())
+    data: dict[str, object] = json.loads(PROFILE_PATH.read_text())
+    return data
 
 
 def test_profile_parses(profile: dict[str, object]) -> None:
@@ -175,6 +176,6 @@ def test_settings_default_path_points_at_repo_profile(
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_SANDBOX_SECCOMP_PROFILE", raising=False)
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.sandbox_seccomp_profile.endswith("docker/seccomp-sandbox.json")
     assert Path(s.sandbox_seccomp_profile).exists()

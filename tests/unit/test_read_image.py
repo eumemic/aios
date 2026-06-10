@@ -272,7 +272,7 @@ class TestImageBranch:
         with one combined stat+base64 invocation."""
         stub_get_session_model.value = "model/vision"
         b64_payload = base64.b64encode(b"otherbytes").decode()
-        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=0,
                 stdout=f"10\n{b64_payload}",
@@ -318,7 +318,7 @@ class TestImagePathTraversalAttack:
 
         sandbox_payload = b"sandbox-side-content"
         b64 = base64.b64encode(sandbox_payload).decode()
-        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=0,
                 stdout=f"{len(sandbox_payload)}\n{b64}",
@@ -336,7 +336,7 @@ class TestImagePathTraversalAttack:
             assert b64_secret not in url
         elif isinstance(result, dict):
             assert b64_secret not in str(result)
-        assert stub_runtime.exec.call_count == 1  # type: ignore[attr-defined]
+        assert stub_runtime.exec.call_count == 1
 
     async def test_attachments_traversal_does_not_return_host_bytes(
         self,
@@ -350,7 +350,7 @@ class TestImagePathTraversalAttack:
         (temp_workspace_root / "leak.png").write_bytes(host_secret)
         session_attachments_dir("sess_01TEST").mkdir(parents=True, exist_ok=True)
 
-        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=0,
                 stdout=f"{4}\n{base64.b64encode(b'safe').decode()}",
@@ -388,7 +388,7 @@ class TestImagePathTraversalAttack:
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "sneaky.jpg").symlink_to(outside)
 
-        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=0,
                 stdout=f"{3}\n{base64.b64encode(b'sbx').decode()}",
@@ -406,7 +406,7 @@ class TestImagePathTraversalAttack:
             assert b64_secret not in url
         elif isinstance(result, dict):
             assert b64_secret not in str(result)
-        assert stub_runtime.exec.call_count == 1  # type: ignore[attr-defined]
+        assert stub_runtime.exec.call_count == 1
 
 
 class TestExtensionlessImageDetection:
@@ -489,7 +489,7 @@ class TestExtensionlessImageDetection:
         """A non-image-extension TEXT file reads as text: the local probe sniffs to None and the read falls through to the one-exec text path."""
         stub_get_session_model.value = "model/vision"
         _stage_workspace_image("sess_01TEST", "notes.dat", b"plain text, no magic header")
-        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=0, stdout="     1\thello\n", stderr="", timed_out=False, truncated=False
             )
@@ -509,7 +509,7 @@ class TestExtensionlessImageDetection:
         _stage_workspace_image(
             "sess_01TEST", "random_name", b"just some text, definitely not an image"
         )
-        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=0, stdout="     1\thello\n", stderr="", timed_out=False, truncated=False
             )
@@ -543,7 +543,7 @@ class TestExtensionlessImageDetection:
         stub_get_session_model.value = "model/vision"
         png_head = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
         full = png_head + b"-more-png-bytes"
-        stub_runtime.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_runtime.exec = AsyncMock(
             side_effect=[
                 CommandResult(
                     exit_code=0,

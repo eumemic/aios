@@ -78,9 +78,11 @@ class TestSubmitCall:
         assert (result, is_error) == (expected, False)
         insert.assert_awaited_once()
         notify.assert_awaited_once()
+        assert notify.await_args is not None
         notified_call_id = notify.await_args.kwargs["call_id"]
         assert notified_call_id.startswith("mgmt_")
         assert notify.await_args.kwargs["connector"] == "signal"
+        assert insert.await_args is not None
         assert insert.await_args.kwargs["call_id"] == notified_call_id
 
     @pytest.mark.asyncio

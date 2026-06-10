@@ -93,7 +93,7 @@ class TestIdenticalStrings:
     async def test_identical_old_and_new_returns_error(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = _script_responses()  # type: ignore[method-assign]
+        stub_registry.exec = _script_responses()
         result = await edit_handler(
             "sess_01TEST",
             {"path": "/workspace/a.txt", "old_string": "a", "new_string": "a"},
@@ -101,14 +101,14 @@ class TestIdenticalStrings:
         assert "error" in result
         assert "identical" in result["error"]
         # Container was never touched — guard short-circuits before cat.
-        stub_registry.exec.assert_not_awaited()  # type: ignore[attr-defined]
+        stub_registry.exec.assert_not_awaited()
 
 
 class TestStrictMatching:
     async def test_not_found_returns_error_with_retry_hint(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = _script_responses(_ok("actual file content\n"))  # type: ignore[method-assign]
+        stub_registry.exec = _script_responses(_ok("actual file content\n"))
         result = await edit_handler(
             "sess_01TEST",
             {
@@ -121,12 +121,12 @@ class TestStrictMatching:
         assert "not found" in result["error"]
         assert "read tool" in result["error"]
         # Only the read happened; no write-back because we errored out.
-        assert stub_registry.exec.await_count == 1  # type: ignore[attr-defined]
+        assert stub_registry.exec.await_count == 1
 
     async def test_multiple_matches_requires_replace_all(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = _script_responses(_ok("foo\nbar\nfoo\nfoo\n"))  # type: ignore[method-assign]
+        stub_registry.exec = _script_responses(_ok("foo\nbar\nfoo\nfoo\n"))
         result = await edit_handler(
             "sess_01TEST",
             {
@@ -137,12 +137,12 @@ class TestStrictMatching:
         )
         assert "error" in result
         assert result["matches"] == 3
-        assert stub_registry.exec.await_count == 1  # type: ignore[attr-defined]
+        assert stub_registry.exec.await_count == 1
 
     async def test_unique_match_replaces_and_writes_back(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = _script_responses(  # type: ignore[method-assign]
+        stub_registry.exec = _script_responses(
             _ok("hello world\n"),  # cat response
             _ok(""),  # write-back response
         )
@@ -161,12 +161,12 @@ class TestStrictMatching:
         assert "-hello world" in result["diff"]
         assert "+goodbye world" in result["diff"]
         # Two run_command calls: cat and base64 write-back
-        assert stub_registry.exec.await_count == 2  # type: ignore[attr-defined]
+        assert stub_registry.exec.await_count == 2
 
     async def test_write_back_uses_modified_content(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = _script_responses(  # type: ignore[method-assign]
+        stub_registry.exec = _script_responses(
             _ok("alpha beta gamma\n"),
             _ok(""),
         )
@@ -178,7 +178,7 @@ class TestStrictMatching:
                 "new_string": "BETA",
             },
         )
-        write_cmd: str = stub_registry.exec.await_args_list[1].args[1]  # type: ignore[attr-defined]
+        write_cmd: str = stub_registry.exec.await_args_list[1].args[1]
         expected_b64 = base64.b64encode(b"alpha BETA gamma\n").decode("ascii")
         assert expected_b64 in write_cmd
         # shlex.quote leaves simple paths unquoted.
@@ -187,7 +187,7 @@ class TestStrictMatching:
     async def test_replace_all_replaces_every_occurrence(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = _script_responses(  # type: ignore[method-assign]
+        stub_registry.exec = _script_responses(
             _ok("foo\nbar\nfoo\nfoo\n"),
             _ok(""),
         )
@@ -202,7 +202,7 @@ class TestStrictMatching:
         )
         assert "error" not in result
         assert result["replaced"] == 3
-        write_cmd: str = stub_registry.exec.await_args_list[1].args[1]  # type: ignore[attr-defined]
+        write_cmd: str = stub_registry.exec.await_args_list[1].args[1]
         expected_b64 = base64.b64encode(b"FOO\nbar\nFOO\nFOO\n").decode("ascii")
         assert expected_b64 in write_cmd
 
@@ -215,7 +215,7 @@ class TestPerEnvTimeoutCeiling:
     async def test_both_execs_use_resolved_ceiling(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = _script_responses(  # type: ignore[method-assign]
+        stub_registry.exec = _script_responses(
             _ok("alpha beta gamma\n"),
             _ok(""),
         )
@@ -228,7 +228,7 @@ class TestPerEnvTimeoutCeiling:
                 "sess_01TEST",
                 {"path": "/workspace/a.txt", "old_string": "beta", "new_string": "BETA"},
             )
-        for call in stub_registry.exec.await_args_list:  # type: ignore[attr-defined]
+        for call in stub_registry.exec.await_args_list:
             assert call.kwargs["timeout_seconds"] == 600
 
 
@@ -236,9 +236,7 @@ class TestErrorPaths:
     async def test_cat_failure_returns_error_dict(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = _script_responses(  # type: ignore[method-assign]
-            _err(1, "cat: /nope: No such file or directory\n")
-        )
+        stub_registry.exec = _script_responses(_err(1, "cat: /nope: No such file or directory\n"))
         result = await edit_handler(
             "sess_01TEST",
             {
@@ -253,7 +251,7 @@ class TestErrorPaths:
     async def test_write_back_failure_returns_error_dict(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = _script_responses(  # type: ignore[method-assign]
+        stub_registry.exec = _script_responses(
             _ok("hello\n"),
             _err(1, "bash: /ro/a.txt: Permission denied\n"),
         )
@@ -292,7 +290,7 @@ class TestErrorPaths:
             timed_out=False,
             truncated=True,
         )
-        stub_registry.exec = _script_responses(truncated_result, _ok(""))  # type: ignore[method-assign]
+        stub_registry.exec = _script_responses(truncated_result, _ok(""))
         result = await edit_handler(
             "sess_01TEST",
             {
@@ -312,4 +310,4 @@ class TestErrorPaths:
             f"{result['error']!r}."
         )
         # Critically, no write-back was attempted.
-        assert stub_registry.exec.await_count == 1  # type: ignore[attr-defined]
+        assert stub_registry.exec.await_count == 1

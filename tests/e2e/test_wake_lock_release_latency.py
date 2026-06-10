@@ -90,7 +90,7 @@ class TestWakeLockReleaseLatencyE2E:
                 )
 
                 await defer_wake(pool, session_id, cause="message", account_id=account_id)
-                worker_task = asyncio.create_task(worker.run())
+                worker_task = asyncio.create_task(worker.run())  # type: ignore[no-untyped-call]
 
                 async def _count_wakes(statuses: tuple[str, ...]) -> int:
                     async with pool.acquire() as conn:
@@ -114,7 +114,7 @@ class TestWakeLockReleaseLatencyE2E:
                 await wait_for_predicate(_has_doing, max_wait_s=5.0, interval_s=0.02)
                 await defer_wake(pool, session_id, cause="message", account_id=account_id)
                 await wait_for_predicate(_both_terminal, max_wait_s=15.0, interval_s=0.02)
-                worker.stop()
+                worker.stop()  # type: ignore[no-untyped-call]
                 await asyncio.wait_for(worker_task, timeout=5.0)
         finally:
             await new_connector.close_async()

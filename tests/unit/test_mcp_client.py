@@ -175,6 +175,7 @@ class TestResolveAuthForTargetUrl:
             )
 
         refresh_mock.assert_awaited_once()
+        assert refresh_mock.await_args is not None
         kwargs = refresh_mock.await_args.kwargs
         assert kwargs["vault_id"] == "vlt_s1"
         assert kwargs["target_url"] == "https://mcp.example.com"

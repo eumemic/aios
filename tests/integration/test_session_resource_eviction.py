@@ -232,7 +232,7 @@ async def test_update_session_idempotent_memory_resources_does_not_evict(
     store = await memory_stores_service.create_store(
         pool, account_id=_ACCOUNT_ID, name="idem-notes", description="d", metadata={}
     )
-    resources = [
+    resources: list[MemoryStoreResource | GithubRepositoryResource] = [
         MemoryStoreResource(
             type="memory_store",
             memory_store_id=store.id,

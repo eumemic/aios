@@ -27,7 +27,9 @@ def mock_safe_url() -> Any:
 
 
 class TestWebFetchHandler:
-    async def test_valid_url_returns_content(self, mock_tavily: AsyncMock, mock_safe_url: Any):
+    async def test_valid_url_returns_content(
+        self, mock_tavily: AsyncMock, mock_safe_url: Any
+    ) -> None:
         mock_tavily.return_value = {
             "results": [
                 {
@@ -44,7 +46,9 @@ class TestWebFetchHandler:
         assert result["content"] == "# Hello World\n\nSome content."
         mock_tavily.assert_awaited_once()
 
-    async def test_ssrf_blocked_url_returns_error(self, mock_tavily: AsyncMock, mock_safe_url: Any):
+    async def test_ssrf_blocked_url_returns_error(
+        self, mock_tavily: AsyncMock, mock_safe_url: Any
+    ) -> None:
         mock_safe_url.return_value = False
         result = await web_fetch_handler("sess_01TEST", {"url": "http://169.254.169.254/metadata"})
         assert "error" in result
@@ -61,12 +65,12 @@ class TestWebFetchHandler:
 
     async def test_tavily_error_returns_error_dict(
         self, mock_tavily: AsyncMock, mock_safe_url: Any
-    ):
+    ) -> None:
         mock_tavily.side_effect = WebToolError("TAVILY_API_KEY not set")
         with pytest.raises(WebToolError):
             await web_fetch_handler("sess_01TEST", {"url": "https://example.com"})
 
-    async def test_content_truncation(self, mock_tavily: AsyncMock, mock_safe_url: Any):
+    async def test_content_truncation(self, mock_tavily: AsyncMock, mock_safe_url: Any) -> None:
         long_content = "x" * 200_000
         mock_tavily.return_value = {
             "results": [
@@ -80,7 +84,9 @@ class TestWebFetchHandler:
         result = await web_fetch_handler("sess_01TEST", {"url": "https://example.com"})
         assert len(result["content"]) == 100_000
 
-    async def test_falls_back_to_content_field(self, mock_tavily: AsyncMock, mock_safe_url: Any):
+    async def test_falls_back_to_content_field(
+        self, mock_tavily: AsyncMock, mock_safe_url: Any
+    ) -> None:
         mock_tavily.return_value = {
             "results": [
                 {

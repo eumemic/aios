@@ -68,6 +68,7 @@ class TestPerChatLock:
         assert isinstance(result, ToolResult)
         assert result.is_error is True
         assert "focal channel is locked" in result.content
+        assert result.metadata is not None
         marker = result.metadata[SWITCH_CHANNEL_METADATA_KEY]
         assert marker == {"target": "signal/+1/chat-2", "success": False}
         # Focal-lock short-circuits before any other DB read or write.
@@ -96,6 +97,7 @@ class TestPerChatLock:
             result = await switch_channel_handler("sess_per_chat", {"channel_id": None})
 
         assert result.is_error is True
+        assert result.metadata is not None
         assert result.metadata[SWITCH_CHANNEL_METADATA_KEY] == {
             "target": None,
             "success": False,
@@ -159,6 +161,7 @@ class TestNonPerChatPathStillWorks:
             result = await switch_channel_handler("sess_normal", {"channel_id": None})
 
         assert result.is_error is False
+        assert result.metadata is not None
         assert result.metadata[SWITCH_CHANNEL_METADATA_KEY] == {
             "target": None,
             "success": True,

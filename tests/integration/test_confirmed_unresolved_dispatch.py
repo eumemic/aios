@@ -24,6 +24,7 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.models.agents import ToolSpec
+from aios.models.events import EventKind
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
@@ -75,7 +76,7 @@ async def session_with_mixed_confirmations(
         )
         sid = session.id
 
-        async def append(kind: str, data: dict[str, Any]) -> None:
+        async def append(kind: EventKind, data: dict[str, Any]) -> None:
             async with pool.acquire() as conn:
                 await queries.append_event(
                     conn, account_id=account_id, session_id=sid, kind=kind, data=data

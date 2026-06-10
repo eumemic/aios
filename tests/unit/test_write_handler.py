@@ -104,7 +104,7 @@ class TestHappyPath:
     ) -> None:
         content = "hello world\n"
         await write_handler("sess_01TEST", {"path": "/workspace/a.txt", "content": content})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         expected_b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
         assert f"base64 -d <<< '{expected_b64}'" in cmd
 
@@ -112,7 +112,7 @@ class TestHappyPath:
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await write_handler("sess_01TEST", {"path": "/workspace/a/b/c.txt", "content": "hi"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         # shlex.quote leaves simple paths unquoted; assert mkdir + dirname + path.
         assert "mkdir -p --" in cmd
         assert "dirname --" in cmd
@@ -122,7 +122,7 @@ class TestHappyPath:
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await write_handler("sess_01TEST", {"path": "/workspace/a file.txt", "content": "hi"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "> '/workspace/a file.txt'" in cmd
 
     async def test_handles_special_characters_in_content(
@@ -131,7 +131,7 @@ class TestHappyPath:
         # Content containing quotes, newlines, shell metacharacters.
         tricky = "line with 'quotes' and \"doubles\" and $vars\nand newlines"
         await write_handler("sess_01TEST", {"path": "/workspace/a.txt", "content": tricky})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         # Base64 is quote-safe so no escaping gymnastics.
         expected_b64 = base64.b64encode(tricky.encode("utf-8")).decode("ascii")
         assert expected_b64 in cmd
@@ -153,7 +153,7 @@ class TestPerEnvTimeoutCeiling:
             return_value=600,
         ):
             await write_handler("sess_01TEST", {"path": "/workspace/a.txt", "content": "hello"})
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs
         assert kwargs["timeout_seconds"] == 600
 
 
@@ -161,7 +161,7 @@ class TestErrorPath:
     async def test_nonzero_exit_returns_error_dict(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_registry.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=1,
                 stdout="",

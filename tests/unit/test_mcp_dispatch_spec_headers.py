@@ -59,6 +59,7 @@ class TestMcpDispatchSpecHeaders:
             )
 
         call_mock.assert_awaited_once()
+        assert call_mock.await_args is not None
         assert call_mock.await_args.kwargs.get("spec_headers") == {"X-MCP-Toolsets": "issues"}
         # The resolved URL comes from the spec, not a bare string map value.
         assert call_mock.await_args.args[0] == "https://mcp.github/"

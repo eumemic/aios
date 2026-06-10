@@ -114,6 +114,7 @@ async def test_session_clone_timeout_does_not_abort_sibling_clones() -> None:
     assert returned_proxy is mock_proxy
     append_event_mock.assert_awaited_once()
     call_args = append_event_mock.await_args
+    assert call_args is not None
     payload = call_args.args[3] if len(call_args.args) >= 4 else call_args.kwargs["payload"]
     assert payload["event"] == "github_clone_failed"
     assert payload["resource_id"] == failed_echo.id

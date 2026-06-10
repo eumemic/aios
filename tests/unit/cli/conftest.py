@@ -78,7 +78,7 @@ def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
             return httpx.Response(500, json={"error": "no response queued"})
         return responses.pop(0)
 
-    def _client(self: CliState) -> AiosClient:  # type: ignore[override]
+    def _client(self: CliState) -> AiosClient:
         return AiosClient(
             base_url=self.base_url,
             api_key=self.api_key,

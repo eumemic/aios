@@ -37,7 +37,7 @@ class TestPermissionField:
 
     def test_invalid_policy_rejected(self) -> None:
         with pytest.raises(ValueError):
-            ToolSpec(type="bash", permission="always_deny")  # type: ignore[arg-type]
+            ToolSpec(type="bash", permission="always_deny")
 
 
 class TestEnabledField:

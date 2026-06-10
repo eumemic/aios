@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from aios.harness.channels import (
     FOCAL_CHANNEL_META_KEY,
@@ -22,7 +23,7 @@ def _evt(
     orig: str | None = None,
     focal_at: str | None = None,
     content: str = "hi",
-    data: dict | None = None,
+    data: dict[str, Any] | None = None,
 ) -> Event:
     if data is None:
         data = {}

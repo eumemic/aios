@@ -51,7 +51,8 @@ async def _connections_indexes(db_url: str) -> set[str]:
 async def _version_num(db_url: str) -> str:
     conn = await asyncpg.connect(db_url)
     try:
-        return await conn.fetchval("SELECT version_num FROM alembic_version")
+        result: str = await conn.fetchval("SELECT version_num FROM alembic_version")
+        return result
     finally:
         await conn.close()
 

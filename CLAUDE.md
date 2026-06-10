@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uv sync --dev
 
 # Run checks (do all three before every commit)
-uv run mypy src
+uv run mypy src tests
 uv run ruff check src tests && uv run ruff format --check src tests
 uv run pytest tests/unit -q                    # ~170 tests, <1s, no Docker needed
 
