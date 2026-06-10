@@ -170,9 +170,11 @@ async def test_create_run_cross_tenant_env_404(http_client: httpx.AsyncClient) -
     env_b_id = env_b.json()["id"]
 
     # Tenant A (default bearer) owns the workflow.
-    wf = (
-        await http_client.post("/v1/workflows", json={"name": f"a-{_uniq()}", "script": _SCRIPT})
-    ).json()
+    wf_resp = await http_client.post(
+        "/v1/workflows", json={"name": f"a-{_uniq()}", "script": _SCRIPT}
+    )
+    assert wf_resp.status_code == 201, wf_resp.text
+    wf = wf_resp.json()
 
     # Tenant A targets tenant B's env_id; expected 404, not a bound run.
     cross = await http_client.post(
