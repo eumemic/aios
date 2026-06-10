@@ -242,6 +242,17 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
     return result
 
 
+def transport_defaults() -> dict[str, ToolTransport]:
+    """Each registered built-in's default transport, for the attenuation operator.
+
+    The pure ``attenuate`` operator resolves a builtin ``ToolSpec.transport=None`` to
+    its registry default; it takes this mapping as an argument rather than importing
+    the runtime registry singleton (which would couple the bottom-of-graph operator to
+    worker startup). Read once by the caller and passed in.
+    """
+    return {name: registry.get(name).transport for name in registry.names()}
+
+
 def effective_transport(name: str, agent_tools: list[AgentToolSpec]) -> ToolTransport:
     """Resolve a tool's effective transport given an agent's tool list.
 
