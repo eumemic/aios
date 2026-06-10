@@ -153,7 +153,7 @@ def mock_step_dependencies() -> Any:
             AsyncMock(return_value=session),
         ),
         patch(
-            "aios.harness.loop.agents_service.get_agent",
+            "aios.harness.loop.agents_service.load_for_session",
             AsyncMock(return_value=agent),
         ),
         # Channels helpers are imported lazily inside run_session_step —
