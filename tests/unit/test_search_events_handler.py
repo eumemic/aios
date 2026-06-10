@@ -195,7 +195,7 @@ class TestFormatResults:
 
     def test_single_row(self) -> None:
         rows = [_FakeRecord({"id": "evt_01", "role": "assistant", "content_text": "Hello"})]
-        result = _format_results(rows, False)  # type: ignore[arg-type]
+        result = _format_results(rows, False)
         assert "id" in result
         assert "role" in result
         assert "assistant" in result
@@ -206,29 +206,29 @@ class TestFormatResults:
             _FakeRecord({"seq": 1, "role": "user"}),
             _FakeRecord({"seq": 2, "role": "assistant"}),
         ]
-        result = _format_results(rows, False)  # type: ignore[arg-type]
+        result = _format_results(rows, False)
         lines = result.strip().split("\n")
         assert len(lines) == 4  # header + divider + 2 data rows
 
     def test_truncated_notice(self) -> None:
         rows = [_FakeRecord({"id": "evt_01"})]
-        result = _format_results(rows, truncated=True)  # type: ignore[arg-type]
+        result = _format_results(rows, truncated=True)
         assert "truncat" in result.lower()
         assert str(MAX_ROWS) in result
 
     def test_not_truncated_no_notice(self) -> None:
         rows = [_FakeRecord({"id": "evt_01"})]
-        result = _format_results(rows, truncated=False)  # type: ignore[arg-type]
+        result = _format_results(rows, truncated=False)
         assert "truncat" not in result.lower()
 
     def test_null_values(self) -> None:
         rows = [_FakeRecord({"id": "evt_01", "role": None, "content_text": "text"})]
-        result = _format_results(rows, False)  # type: ignore[arg-type]
+        result = _format_results(rows, False)
         assert "NULL" in result
 
     def test_header_divider_format(self) -> None:
         rows = [_FakeRecord({"a": 1, "b": 2})]
-        result = _format_results(rows, False)  # type: ignore[arg-type]
+        result = _format_results(rows, False)
         lines = result.split("\n")
         assert lines[0] == "a | b"
         assert lines[1] == "-" * len("a | b")

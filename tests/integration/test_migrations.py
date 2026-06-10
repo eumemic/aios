@@ -28,6 +28,9 @@ def postgres() -> Iterator[object]:
 
 def _alembic_url(pg: object) -> str:
     """Return the connection URL alembic env.py expects."""
+    from testcontainers.postgres import PostgresContainer
+
+    assert isinstance(pg, PostgresContainer)
     host = pg.get_container_host_ip()
     port = pg.get_exposed_port(5432)
     user = pg.username

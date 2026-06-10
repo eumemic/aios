@@ -7,6 +7,8 @@ path CRUD is exercised elsewhere.
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 from typer.testing import CliRunner
 
@@ -42,7 +44,7 @@ class TestTriggerSummary:
     def test_cron_row(self) -> None:
         from aios.cli.commands.sessions import _trigger_summary
 
-        row = {
+        row: dict[str, Any] = {
             "schedule": "*/5 * * * *",
             "fire_at": None,
             "metadata": {},
@@ -52,7 +54,7 @@ class TestTriggerSummary:
     def test_raw_one_shot(self) -> None:
         from aios.cli.commands.sessions import _trigger_summary
 
-        row = {
+        row: dict[str, Any] = {
             "schedule": None,
             "fire_at": "2026-05-23T15:00:00Z",
             "metadata": {},
@@ -88,7 +90,7 @@ def test_delete_is_hard_delete_with_yes(mocked_cli):
     assert "sess_1" in result.output
 
 
-def _profile_events_page() -> dict:
+def _profile_events_page() -> dict[str, Any]:
     """Minimal events envelope with a single complete step, enough for the
     profiler to emit every section."""
     return {

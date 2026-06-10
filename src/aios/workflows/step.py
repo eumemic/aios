@@ -33,7 +33,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
 import asyncpg
-import jsonschema  # type: ignore[import-untyped]
+import jsonschema
 from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012

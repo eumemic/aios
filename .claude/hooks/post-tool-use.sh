@@ -35,8 +35,8 @@ if ! uv run ruff check "$FILE_PATH" --output-format concise > "$RUFF_OUTPUT" 2>&
     RUFF_FAILED=1
 fi
 
-# Mypy: check src/ for full type context
-if ! uv run mypy src --no-error-summary > "$MYPY_OUTPUT" 2>&1; then
+# Mypy: check src + tests for full type context (tests are strict-checked too)
+if ! uv run mypy src tests --no-error-summary > "$MYPY_OUTPUT" 2>&1; then
     MYPY_FAILED=1
 fi
 

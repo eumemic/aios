@@ -59,8 +59,8 @@ class _FakeUploadStream:
     def __init__(self, payload: bytes, filename: str, content_type: str) -> None:
         self._payload = payload
         self._pos = 0
-        self.filename = filename
-        self.content_type = content_type
+        self.filename: str | None = filename
+        self.content_type: str | None = content_type
 
     async def read(self, size: int = -1) -> bytes:
         if self._pos >= len(self._payload):
@@ -272,6 +272,9 @@ class TestStaging:
             concurrent ``stage_inbound_attachments`` calls actually
             interleave between ``target.exists()`` and ``os.rename``."""
 
+            filename: str | None = None
+            content_type: str | None = None
+
             def __init__(self, payload: bytes) -> None:
                 self._payload = payload
                 self._pos = 0
@@ -290,10 +293,10 @@ class TestStaging:
 
         a = InboundAttachment(
             stream=_SlowStream(b"A" * 100), filename="img.jpg", content_type="image/jpeg"
-        )  # type: ignore[arg-type]
+        )
         b = InboundAttachment(
             stream=_SlowStream(b"B" * 100), filename="img.jpg", content_type="image/jpeg"
-        )  # type: ignore[arg-type]
+        )
 
         results = await asyncio.gather(
             stage_inbound_attachments(

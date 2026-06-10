@@ -7,6 +7,7 @@ auth header injection, error envelope decoding, and SSE streaming.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -15,7 +16,9 @@ import pytest
 from aios.cli.client import AiosApiError, AiosClient, NonJSONResponseError
 
 
-def _mock_client(handler, *, api_key: str | None = "key-123") -> AiosClient:
+def _mock_client(
+    handler: Callable[[httpx.Request], httpx.Response], *, api_key: str | None = "key-123"
+) -> AiosClient:
     """Build an AiosClient whose underlying httpx.Client uses ``handler``."""
     return AiosClient(
         base_url="http://test.invalid",

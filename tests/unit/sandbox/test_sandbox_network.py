@@ -3,6 +3,7 @@ runner is patched so no real daemon is required."""
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Callable
 
 import pytest
@@ -83,7 +84,7 @@ class TestEnsureNetworkInContainer:
     @pytest.fixture(autouse=True)
     def _in_container(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sandbox_network, "is_running_in_container", lambda: True)
-        monkeypatch.setattr(sandbox_network.socket, "gethostname", lambda: "worker-abc")
+        monkeypatch.setattr(socket, "gethostname", lambda: "worker-abc")
 
     async def test_connects_self_with_alias_when_not_joined(
         self, monkeypatch: pytest.MonkeyPatch
@@ -171,7 +172,7 @@ class TestEnsureConnectFailureInContainer:
     @pytest.fixture(autouse=True)
     def _in_container(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sandbox_network, "is_running_in_container", lambda: True)
-        monkeypatch.setattr(sandbox_network.socket, "gethostname", lambda: "worker-abc")
+        monkeypatch.setattr(socket, "gethostname", lambda: "worker-abc")
 
     async def test_connect_hard_failure_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def responder(argv: list[str]) -> tuple[int, bytes, bytes]:

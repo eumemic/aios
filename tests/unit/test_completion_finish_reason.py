@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import litellm
 import pytest
 
 from aios.harness import completion
@@ -130,13 +131,13 @@ class TestStreamStickyContentFilter:
         async def fake_acompletion(**_kwargs: object) -> _FakeStream:
             return _FakeStream(chunks)
 
-        monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
-        monkeypatch.setattr(completion.litellm, "stream_chunk_builder", _clobbered_builder("stop"))
+        monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+        monkeypatch.setattr(litellm, "stream_chunk_builder", _clobbered_builder("stop"))
 
         _msg, _usage, _cost, finish_reason = await completion.stream_litellm(
             model="anthropic/claude-fable-5",
             messages=[{"role": "user", "content": "hi"}],
-            pool=_StubPool(),  # type: ignore[arg-type]
+            pool=_StubPool(),
             session_id="sess_refusal",
         )
         # Without the sticky-capture this would be "stop" (the clobbered value).
@@ -156,13 +157,13 @@ class TestStreamStickyContentFilter:
         async def fake_acompletion(**_kwargs: object) -> _FakeStream:
             return _FakeStream(chunks)
 
-        monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
-        monkeypatch.setattr(completion.litellm, "stream_chunk_builder", _clobbered_builder("stop"))
+        monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+        monkeypatch.setattr(litellm, "stream_chunk_builder", _clobbered_builder("stop"))
 
         _msg, _usage, _cost, finish_reason = await completion.stream_litellm(
             model="anthropic/claude-fable-5",
             messages=[{"role": "user", "content": "hi"}],
-            pool=_StubPool(),  # type: ignore[arg-type]
+            pool=_StubPool(),
             session_id="sess_ok",
         )
         assert finish_reason == "stop"

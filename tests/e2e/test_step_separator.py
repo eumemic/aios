@@ -11,6 +11,8 @@ adjacency arrives merged.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from tests.conftest import needs_docker
@@ -21,7 +23,7 @@ pytestmark = pytest.mark.docker
 _TAIL_HEADER = "━━━ Channels ━━━"
 
 
-def _is_dot_placeholder(m: dict) -> bool:
+def _is_dot_placeholder(m: dict[str, Any]) -> bool:
     return m.get("role") == "assistant" and m.get("content") == "."
 
 

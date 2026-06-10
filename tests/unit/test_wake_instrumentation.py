@@ -17,6 +17,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from procrastinate import App
+from procrastinate.testing import InMemoryConnector
 
 
 class TestE2EConftestMockSignatures:
@@ -95,6 +96,7 @@ class TestWakeDeferredEvent:
         causes = [call.args[3]["cause"] for call in mock_append.await_args_list]
         assert causes == ["message", "sweep", "tool_confirmation"]
         # Procrastinate coalesced 2/3 but the third cause still wrote its span.
+        assert isinstance(in_memory_app.connector, InMemoryConnector)
         assert len(in_memory_app.connector.jobs) == 1
 
     async def test_defer_wake_with_reschedule_cause_emits_reschedule_span(

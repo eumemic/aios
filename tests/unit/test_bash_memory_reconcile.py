@@ -28,7 +28,7 @@ def _echo(
 ) -> MemoryStoreResourceEcho:
     return MemoryStoreResourceEcho(
         memory_store_id=store_id,
-        access=access,  # type: ignore[arg-type]
+        access=access,
         instructions="",
         name=name,
         description="",
@@ -268,6 +268,7 @@ class TestReconcile:
 
         assert warnings == []
         mock_create.assert_awaited_once()
+        assert mock_create.await_args is not None
         call_kwargs = mock_create.await_args.kwargs
         assert call_kwargs["store_id"] == STORE_A
         assert call_kwargs["path"] == "/new.md"
@@ -316,6 +317,7 @@ class TestReconcile:
 
         assert warnings == []
         mock_update.assert_awaited_once()
+        assert mock_update.await_args is not None
         call_kwargs = mock_update.await_args.kwargs
         assert call_kwargs["precondition_sha256"] == db_sha
         assert call_kwargs["new_content"] == new_content
@@ -356,6 +358,7 @@ class TestReconcile:
 
         assert warnings == []
         mock_delete.assert_awaited_once()
+        assert mock_delete.await_args is not None
         call_kwargs = mock_delete.await_args.kwargs
         assert call_kwargs["store_id"] == STORE_A
         assert call_kwargs["memory_id"] == fake_memory.id

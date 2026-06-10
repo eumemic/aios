@@ -136,7 +136,7 @@ def _mount_mcp(app: FastAPI) -> None:
     """
     # fastapi-mcp doesn't ship a py.typed marker yet, so mypy can't see
     # the package's actual signatures.
-    from fastapi_mcp import AuthConfig, FastApiMCP  # type: ignore[import-untyped]
+    from fastapi_mcp import AuthConfig, FastApiMCP
 
     mcp = FastApiMCP(
         app,

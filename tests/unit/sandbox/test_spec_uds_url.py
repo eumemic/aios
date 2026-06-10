@@ -18,6 +18,7 @@ from unittest.mock import patch
 from aios.sandbox.spec import (
     TOOL_BROKER_SECRET_SANDBOX_PATH,
     TOOL_BROKER_SOCKET_SANDBOX_PATH,
+    ProvisioningPlan,
     _assemble_plan,
 )
 
@@ -28,7 +29,7 @@ def _call_assemble(
     tool_socket_host_path: Path | None,
     tool_broker_secret: str = "secret123",
     session_id: str = "sess_01TEST",
-) -> object:
+) -> ProvisioningPlan:
     # ``_assemble_plan`` imports its volume helpers function-locally, so
     # we patch them at the ``aios.sandbox.volumes`` source module.
     with (

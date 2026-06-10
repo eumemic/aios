@@ -574,7 +574,7 @@ class TestRecordFire:
         prev_pool = runtime.pool
         prev_registry = runtime.sandbox_registry
         runtime.pool = pool
-        runtime.sandbox_registry = registry  # type: ignore[assignment]
+        runtime.sandbox_registry = registry
         with mock.patch(
             "aios.harness.scheduled_task_runner.defer_wake",
             new_callable=mock.AsyncMock,
@@ -593,7 +593,10 @@ class TestRecordFire:
             )
 
         def _data(row: Any) -> dict[str, Any]:
-            return json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+            result: dict[str, Any] = (
+                json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+            )
+            return result
 
         disable_messages = [
             r
@@ -633,7 +636,8 @@ class TestHttp:
             json={"agent_id": agent_id, "environment_id": env_id},
         )
         assert r.status_code == 201, r.text
-        return r.json()["id"]
+        session_id: str = r.json()["id"]
+        return session_id
 
     async def test_round_trip(
         self,
@@ -1056,7 +1060,7 @@ class TestOneShotLifecycle:
         prev_pool = runtime.pool
         prev_registry = runtime.sandbox_registry
         runtime.pool = pool
-        runtime.sandbox_registry = registry  # type: ignore[assignment]
+        runtime.sandbox_registry = registry
         try:
             # Wrap delete_scheduled_task_by_id to confirm order.
             orig_delete = queries.delete_scheduled_task_by_id
@@ -1120,7 +1124,7 @@ class TestOneShotLifecycle:
         prev_pool = runtime.pool
         prev_registry = runtime.sandbox_registry
         runtime.pool = pool
-        runtime.sandbox_registry = registry  # type: ignore[assignment]
+        runtime.sandbox_registry = registry
         # defer_wake reaches into procrastinate which isn't wired here;
         # patch to a no-op so the failure-surface path completes.
         with mock.patch(

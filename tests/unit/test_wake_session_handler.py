@@ -9,7 +9,7 @@ integration tests.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
@@ -63,7 +63,7 @@ def _mock_runtime_pool(monkeypatch: Any) -> None:
     """Most tests construct their own pool — patch the runtime to use it."""
 
     def _fake_require_pool() -> MagicMock:
-        return _DEFAULT_POOL_HOLDER["pool"]
+        return cast(MagicMock, _DEFAULT_POOL_HOLDER["pool"])
 
     monkeypatch.setattr("aios.tools.wake_session.runtime.require_pool", _fake_require_pool)
 

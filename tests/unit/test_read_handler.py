@@ -102,8 +102,8 @@ class TestHappyPath:
             "sess_01TEST",
             {"path": "/workspace/a.txt", "offset": 5, "limit": 10},
         )
-        stub_registry.exec.assert_awaited_once()  # type: ignore[attr-defined]
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        stub_registry.exec.assert_awaited_once()
+        cmd: str = stub_registry.exec.await_args.args[1]
         # shlex.quote leaves simple paths unquoted; just assert substring presence.
         assert "cat -n --" in cmd
         assert "/workspace/a.txt" in cmd
@@ -115,14 +115,14 @@ class TestHappyPath:
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await read_handler("sess_01TEST", {"path": "/workspace/a.txt"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "1,2000p" in cmd
 
     async def test_quotes_paths_with_spaces(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await read_handler("sess_01TEST", {"path": "/workspace/a file.txt"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "'/workspace/a file.txt'" in cmd
 
 
@@ -141,7 +141,7 @@ class TestPerEnvTimeoutCeiling:
             await read_handler("sess_01TEST", {"path": "/workspace/a.txt"})
         # Only the text-read exec fires for a missing local path (the image
         # probe reads the bind-mount host path directly, no exec).
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs
         assert kwargs["timeout_seconds"] == 600
 
 
@@ -149,7 +149,7 @@ class TestErrorPath:
     async def test_cat_failure_returns_error_dict(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_registry.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=1,
                 stdout="",
@@ -159,6 +159,7 @@ class TestErrorPath:
             )
         )
         result = await read_handler("sess_01TEST", {"path": "/nope"})
+        assert isinstance(result, dict)
         assert "error" in result
         assert "No such file" in result["error"]
         assert result["path"] == "/nope"
@@ -182,7 +183,7 @@ class TestErrorPath:
         previous test expects.
         """
         await read_handler("sess_01TEST", {"path": "/workspace/a.txt"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "pipefail" in cmd, (
             f"cmd must enable ``pipefail`` so a failing ``cat`` (e.g., missing "
             f"file) propagates through the ``| sed -n ...`` to the overall "

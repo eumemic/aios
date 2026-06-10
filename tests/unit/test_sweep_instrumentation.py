@@ -29,11 +29,12 @@ def _span_events(append_event: AsyncMock) -> list[dict[str, object]]:
 
 
 def _sweep_events(append_event: AsyncMock) -> list[dict[str, object]]:
-    return [
-        payload
-        for payload in _span_events(append_event)
-        if payload.get("event", "").startswith("sweep_")
-    ]
+    result = []
+    for payload in _span_events(append_event):
+        event = payload.get("event")
+        if isinstance(event, str) and event.startswith("sweep_"):
+            result.append(payload)
+    return result
 
 
 # ─── tail site (tool_dispatch._trigger_sweep) ────────────────────────────────

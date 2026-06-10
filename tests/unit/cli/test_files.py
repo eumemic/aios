@@ -11,49 +11,49 @@ import pytest
 from aios.cli.files import PayloadError, load_payload, walk_skill_dir
 
 
-def test_load_from_file(tmp_path: Path):
+def test_load_from_file(tmp_path: Path) -> None:
     p = tmp_path / "body.json"
     p.write_text('{"name": "X", "n": 1}')
     out = load_payload(p, False, None)
     assert out == {"name": "X", "n": 1}
 
 
-def test_load_from_data_string():
+def test_load_from_data_string() -> None:
     out = load_payload(None, False, '{"k": true}')
     assert out == {"k": True}
 
 
-def test_load_from_stdin(monkeypatch):
+def test_load_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO('{"via": "stdin"}'))
     out = load_payload(None, True, None)
     assert out == {"via": "stdin"}
 
 
-def test_load_no_source_raises():
+def test_load_no_source_raises() -> None:
     with pytest.raises(PayloadError, match="no payload"):
         load_payload(None, False, None)
 
 
-def test_load_multiple_sources_raises(tmp_path: Path):
+def test_load_multiple_sources_raises(tmp_path: Path) -> None:
     p = tmp_path / "x.json"
     p.write_text("{}")
     with pytest.raises(PayloadError, match="only one of"):
         load_payload(p, False, "{}")
 
 
-def test_load_non_object_raises():
+def test_load_non_object_raises() -> None:
     with pytest.raises(PayloadError, match="must be a JSON object"):
         load_payload(None, False, "[1,2,3]")
 
 
-def test_load_invalid_json_raises(tmp_path: Path):
+def test_load_invalid_json_raises(tmp_path: Path) -> None:
     p = tmp_path / "bad.json"
     p.write_text("not json")
     with pytest.raises(PayloadError, match="invalid JSON"):
         load_payload(p, False, None)
 
 
-def test_walk_skill_dir(tmp_path: Path):
+def test_walk_skill_dir(tmp_path: Path) -> None:
     """Keys are prefixed with the root directory's basename.
 
     The server's ``_extract_skill_metadata`` parses the directory name
@@ -75,7 +75,7 @@ def test_walk_skill_dir(tmp_path: Path):
     assert "SKILL.md" not in files
 
 
-def test_walk_skill_dir_matches_server_contract(tmp_path: Path):
+def test_walk_skill_dir_matches_server_contract(tmp_path: Path) -> None:
     """End-to-end shape check: the dict returned by ``walk_skill_dir``
     round-trips through the server's ``_extract_skill_metadata`` without
     the *"SKILL.md must be inside a directory"* failure that motivated
@@ -97,7 +97,7 @@ def test_walk_skill_dir_matches_server_contract(tmp_path: Path):
     assert "helper.py" in normalized
 
 
-def test_walk_skill_dir_missing_skill_md(tmp_path: Path):
+def test_walk_skill_dir_missing_skill_md(tmp_path: Path) -> None:
     d = tmp_path / "empty"
     d.mkdir()
     (d / "other.md").write_text("x")
@@ -105,14 +105,14 @@ def test_walk_skill_dir_missing_skill_md(tmp_path: Path):
         walk_skill_dir(d)
 
 
-def test_walk_skill_dir_not_a_directory(tmp_path: Path):
+def test_walk_skill_dir_not_a_directory(tmp_path: Path) -> None:
     f = tmp_path / "file.txt"
     f.write_text("x")
     with pytest.raises(PayloadError, match="not a directory"):
         walk_skill_dir(f)
 
 
-def test_walk_skill_dir_rejects_symlinked_file(tmp_path: Path):
+def test_walk_skill_dir_rejects_symlinked_file(tmp_path: Path) -> None:
     """A symlink in a skill dir pointing OUTSIDE the dir must be
     rejected. ``Path.is_file()`` and ``Path.read_text()`` both follow
     symlinks by default; without an explicit guard a planted symlink

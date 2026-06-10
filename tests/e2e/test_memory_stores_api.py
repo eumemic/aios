@@ -70,7 +70,8 @@ async def _create_store(http_client: httpx.AsyncClient, **kwargs: Any) -> dict[s
         json={"name": kwargs.get("name", f"store-{_uniq()}"), **kwargs},
     )
     assert r.status_code == 201, r.text
-    return r.json()
+    result: dict[str, Any] = r.json()
+    return result
 
 
 async def _create_memory(
@@ -81,7 +82,8 @@ async def _create_memory(
         json={"path": path, "content": content},
     )
     assert r.status_code == 201, r.text
-    return r.json()
+    result: dict[str, Any] = r.json()
+    return result
 
 
 class TestStoreCrud:
@@ -368,6 +370,7 @@ async def _create_session_for_resources_test(
     without importing the model.
     """
     account_id = "acc_test_stub"  # PR 3 scaffolding
+    from aios.models.github_repositories import GithubRepositoryResource
     from aios.models.memory_stores import MemoryStoreResource
     from aios.services import agents as agents_svc
     from aios.services import environments as env_svc
@@ -388,7 +391,7 @@ async def _create_session_for_resources_test(
         window_max=150_000,
         account_id=account_id,
     )
-    resources = (
+    resources: list[MemoryStoreResource | GithubRepositoryResource] | None = (
         None
         if initial_resources is None
         else [MemoryStoreResource.model_validate(r) for r in initial_resources]

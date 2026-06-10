@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import faulthandler
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, MutableMapping
 from typing import Any
 
 import pytest
@@ -21,7 +21,12 @@ def captured_atexit(monkeypatch: pytest.MonkeyPatch) -> list[Callable[[], None]]
     ``worker.exit`` line into whatever logger config is live then.
     """
     captured: list[Callable[[], None]] = []
-    monkeypatch.setattr(atexit, "register", lambda fn: captured.append(fn) or fn)
+
+    def _fake_register(fn: Callable[[], None]) -> Callable[[], None]:
+        captured.append(fn)
+        return fn
+
+    monkeypatch.setattr(atexit, "register", _fake_register)
     return captured
 
 
@@ -84,7 +89,7 @@ def test_atexit_hook_emits_worker_exit(
     capture_logs.entries.clear()
     captured_atexit[0]()
 
-    matches: list[dict[str, Any]] = [
+    matches: list[MutableMapping[str, Any]] = [
         e for e in capture_logs.entries if e.get("event") == "worker.exit"
     ]
     assert len(matches) == 1

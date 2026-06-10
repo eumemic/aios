@@ -77,23 +77,23 @@ class TestTokenEndpointAuth:
             TokenEndpointAuthPost(method="client_secret_post")  # type: ignore[call-arg]
 
     def test_discriminator_dispatches_none(self) -> None:
-        adapter = TypeAdapter(TokenEndpointAuth)
+        adapter: TypeAdapter[TokenEndpointAuth] = TypeAdapter(TokenEndpointAuth)
         v = adapter.validate_python({"method": "none"})
         assert isinstance(v, TokenEndpointAuthNone)
 
     def test_discriminator_dispatches_basic(self) -> None:
-        adapter = TypeAdapter(TokenEndpointAuth)
+        adapter: TypeAdapter[TokenEndpointAuth] = TypeAdapter(TokenEndpointAuth)
         v = adapter.validate_python({"method": "client_secret_basic", "client_secret": "shh"})
         assert isinstance(v, TokenEndpointAuthBasic)
         assert v.client_secret.get_secret_value() == "shh"
 
     def test_discriminator_dispatches_post(self) -> None:
-        adapter = TypeAdapter(TokenEndpointAuth)
+        adapter: TypeAdapter[TokenEndpointAuth] = TypeAdapter(TokenEndpointAuth)
         v = adapter.validate_python({"method": "client_secret_post", "client_secret": "shh"})
         assert isinstance(v, TokenEndpointAuthPost)
 
     def test_discriminator_rejects_unknown_method(self) -> None:
-        adapter = TypeAdapter(TokenEndpointAuth)
+        adapter: TypeAdapter[TokenEndpointAuth] = TypeAdapter(TokenEndpointAuth)
         with pytest.raises(ValidationError):
             adapter.validate_python({"method": "bogus"})
 
@@ -196,7 +196,7 @@ class TestVaultCredentialCreate:
         with pytest.raises(ValidationError):
             VaultCredentialCreate(
                 target_url="https://x.com",
-                auth_type="unknown",  # type: ignore[arg-type]
+                auth_type="unknown",
                 token=SecretStr("t"),
             )
 

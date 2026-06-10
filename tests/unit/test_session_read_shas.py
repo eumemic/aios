@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import pytest
 
 from aios.harness import runtime
@@ -12,7 +14,7 @@ STORE = "memstore_X"
 
 
 @pytest.fixture(autouse=True)
-def _clear_caches() -> None:
+def _clear_caches() -> Generator[None]:
     runtime.clear_session_read_shas(SESSION_A)
     runtime.clear_session_read_shas(SESSION_B)
     yield

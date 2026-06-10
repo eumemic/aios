@@ -6,6 +6,7 @@ is stubbed so tests don't touch Docker.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -55,7 +56,7 @@ def canned_result() -> CommandResult:
 @pytest.fixture
 def stub_registry(
     stub_handle: SandboxHandle, canned_result: CommandResult, **kwargs: Any
-) -> _StubRegistry:
+) -> Generator[_StubRegistry]:
     """Install a stub sandbox registry on the runtime module, restore after.
 
     Also pins ``resolve_bash_timeout_ceiling`` to the global default so the
@@ -134,9 +135,10 @@ class TestResultShape:
         self, stub_registry: _StubRegistry, stub_handle: SandboxHandle
     ) -> None:
         await bash_handler("sess_01TEST", {"command": "echo hi"})
-        stub_registry.exec.assert_awaited_once()  # type: ignore[attr-defined]
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
-        args: tuple[Any, ...] = stub_registry.exec.await_args.args  # type: ignore[attr-defined]
+        stub_registry.exec.assert_awaited_once()
+        assert stub_registry.exec.await_args is not None
+        kwargs: dict[str, Any] = dict(stub_registry.exec.await_args.kwargs)
+        args: tuple[Any, ...] = stub_registry.exec.await_args.args
         # call signature is (handle, command, kwargs)
         assert args[1] == "echo hi"
         assert kwargs["timeout_seconds"] > 0
@@ -156,7 +158,8 @@ class TestTimeoutCapping:
             "sess_01TEST",
             {"command": "true", "timeout_seconds": max_allowed * 10},
         )
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        assert stub_registry.exec.await_args is not None
+        kwargs: dict[str, Any] = dict(stub_registry.exec.await_args.kwargs)
         assert kwargs["timeout_seconds"] == max_allowed
 
     async def test_respects_smaller_timeout(
@@ -168,7 +171,8 @@ class TestTimeoutCapping:
             "sess_01TEST",
             {"command": "true", "timeout_seconds": 5},
         )
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        assert stub_registry.exec.await_args is not None
+        kwargs: dict[str, Any] = dict(stub_registry.exec.await_args.kwargs)
         assert kwargs["timeout_seconds"] == 5
 
 
@@ -193,7 +197,8 @@ class TestPerEnvTimeoutCeiling:
                 "sess_01TEST",
                 {"command": "true", "timeout_seconds": 300},
             )
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        assert stub_registry.exec.await_args is not None
+        kwargs: dict[str, Any] = dict(stub_registry.exec.await_args.kwargs)
         # 300 < 600 ceiling → request honored verbatim.
         assert kwargs["timeout_seconds"] == 300
 
@@ -208,7 +213,8 @@ class TestPerEnvTimeoutCeiling:
                 "sess_01TEST",
                 {"command": "true", "timeout_seconds": 5000},
             )
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        assert stub_registry.exec.await_args is not None
+        kwargs: dict[str, Any] = dict(stub_registry.exec.await_args.kwargs)
         assert kwargs["timeout_seconds"] == 600
 
     async def test_default_to_per_env_ceiling_when_unspecified(
@@ -222,7 +228,8 @@ class TestPerEnvTimeoutCeiling:
             return_value=600,
         ):
             await bash_handler("sess_01TEST", {"command": "true"})
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        assert stub_registry.exec.await_args is not None
+        kwargs: dict[str, Any] = dict(stub_registry.exec.await_args.kwargs)
         assert kwargs["timeout_seconds"] == 600
 
 
@@ -236,7 +243,7 @@ class TestExecRaisedReconcileSuppression:
         exec_error = RuntimeError("container died")
         reconcile_error = RuntimeError("reconcile failed too")
 
-        stub_registry.exec.side_effect = exec_error  # type: ignore[attr-defined]
+        stub_registry.exec.side_effect = exec_error
 
         with (
             patch(

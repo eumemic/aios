@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import jsonschema  # type: ignore[import-untyped]
+import jsonschema
 
 from aios.db import queries
 from aios.harness import runtime

@@ -153,6 +153,7 @@ class TestWakeSessionIntegration:
 
         # defer_wake was called against the TARGET with the target's account.
         patched_defer_wake.assert_awaited_once()
+        assert patched_defer_wake.await_args is not None
         assert patched_defer_wake.await_args.args[1] == target.id
         assert patched_defer_wake.await_args.kwargs["account_id"] == "acc_wake_a"
         assert patched_defer_wake.await_args.kwargs["cause"] == "agent_wake"

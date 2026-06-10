@@ -286,6 +286,7 @@ class TestReparentConnection:
 
         assert result is updated
         reparent_query.assert_awaited_once()
+        assert reparent_query.await_args is not None
         kwargs = reparent_query.await_args.kwargs
         assert kwargs["destination_account_id"] == "acc_dest"
         assert kwargs["connection_id"] == "conn_x"
@@ -400,6 +401,7 @@ class TestReparentConnection:
             )
 
         reparent_query.assert_awaited_once()
+        assert reparent_query.await_args is not None
         kwargs = reparent_query.await_args.kwargs
         rekeyed = kwargs["secrets_blob"]
         assert rekeyed is not None

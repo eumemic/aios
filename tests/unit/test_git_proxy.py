@@ -72,8 +72,8 @@ async def proxy_with_mock_upstream() -> AsyncIterator[tuple[GitProxy, list[httpx
     # transport. This is private-attr surgery, but we deliberately want
     # to test that the proxy uses its client correctly without requiring
     # network egress.
-    await p._client.aclose()  # type: ignore[has-type]
-    p._client = httpx.AsyncClient(transport=_make_mock_transport(captured))  # type: ignore[has-type]
+    await p._client.aclose()
+    p._client = httpx.AsyncClient(transport=_make_mock_transport(captured))
     await p.start()
     try:
         yield p, captured
@@ -195,8 +195,8 @@ class TestUpstreamFailure:
             raise httpx.ConnectError("simulated network error")
 
         p = GitProxy({"acme/foo": "ghp_TEST"})
-        await p._client.aclose()  # type: ignore[has-type]
-        p._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[has-type]
+        await p._client.aclose()
+        p._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         await p.start()
         try:
             async with httpx.AsyncClient() as client:

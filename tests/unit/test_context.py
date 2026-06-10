@@ -428,7 +428,7 @@ class TestTimezoneRendering:
 # ─── monotonicity ──────────────────────────────────────────────────────────
 
 
-def _assert_prefix(short: list[dict], long: list[dict]) -> None:
+def _assert_prefix(short: list[dict[str, Any]], long: list[dict[str, Any]]) -> None:
     """Assert that *short* is a message-for-message prefix of *long*."""
     assert len(short) <= len(long), (
         f"short ({len(short)} msgs) is longer than long ({len(long)} msgs)"
@@ -445,7 +445,7 @@ class TestMonotonicity:
     cache stable between successive inference calls."""
 
     @staticmethod
-    def _build(events: list[Event]) -> list[dict]:
+    def _build(events: list[Event]) -> list[dict[str, Any]]:
         return build_messages(
             events,
             system_prompt=None,
@@ -635,7 +635,7 @@ class TestMonotonicity:
         # The tail block mutates per step, so compare prefixes only up to
         # (but not including) the trailing user turn that carries it —
         # whether standalone or merged into the preceding inbound.
-        def _strip_tail(msgs: list[dict]) -> list[dict]:
+        def _strip_tail(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for i in range(len(msgs) - 1, -1, -1):
                 m = msgs[i]
                 if m.get("role") == "user" and "━━━ Channels ━━━" in str(m.get("content", "")):
@@ -1616,7 +1616,7 @@ class TestMergeAdjacentUserMessages:
 
     def test_tool_result_between_users_is_not_merged(self) -> None:
         """Adjacent means *consecutive same-role*. Tool results break the run."""
-        msgs = [
+        msgs: list[dict[str, Any]] = [
             {"role": "user", "content": "one"},
             {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
             {"role": "tool", "tool_call_id": "a", "content": "r"},
@@ -1625,7 +1625,7 @@ class TestMergeAdjacentUserMessages:
         assert merge_adjacent_user_messages(msgs) == msgs
 
     def test_three_consecutive_users_merge_to_one(self) -> None:
-        msgs = [
+        msgs: list[dict[str, Any]] = [
             {"role": "user", "content": "a"},
             {"role": "user", "content": "b"},
             {"role": "user", "content": "c"},
@@ -1641,7 +1641,7 @@ class TestMergeAdjacentUserMessages:
             {"type": "text", "text": "second"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
         ]
-        msgs = [
+        msgs: list[dict[str, Any]] = [
             {"role": "user", "content": a_blocks},
             {"role": "user", "content": b_blocks},
         ]
@@ -1656,7 +1656,7 @@ class TestMergeAdjacentUserMessages:
             {"type": "text", "text": "see this"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
         ]
-        msgs = [
+        msgs: list[dict[str, Any]] = [
             {"role": "user", "content": "look:"},
             {"role": "user", "content": list_blocks},
         ]

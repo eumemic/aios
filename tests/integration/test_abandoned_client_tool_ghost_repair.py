@@ -267,9 +267,10 @@ async def session_with_old_unconfirmed_always_ask(
 
 async def _open_tool_call_count(pool: asyncpg.Pool[Any], session_id: str) -> int:
     async with pool.acquire() as conn:
-        return await conn.fetchval(
+        count: int = await conn.fetchval(
             "SELECT open_tool_call_count FROM sessions WHERE id = $1", session_id
         )
+        return count
 
 
 async def _tool_results(

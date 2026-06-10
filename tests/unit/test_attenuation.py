@@ -49,12 +49,12 @@ def canon(s: Surface, *, dmp: PermissionPolicy = DMP) -> Surface:
 
 
 def _toolset(server: str, **kw: object) -> ToolSpec:
-    return ToolSpec(type="mcp_toolset", mcp_server_name=server, **kw)  # type: ignore[arg-type]
+    return ToolSpec(type="mcp_toolset", mcp_server_name=server, **kw)
 
 
 def _mcp_cfg(name: str, *, perm: PermissionPolicy | None = None, **kw: object) -> McpToolConfig:
     pp = McpPermissionPolicy(type=perm) if perm is not None else None
-    return McpToolConfig(name=name, permission_policy=pp, **kw)  # type: ignore[arg-type]
+    return McpToolConfig(name=name, permission_policy=pp, **kw)
 
 
 # ── builtin / custom tools ────────────────────────────────────────────────────
@@ -108,8 +108,8 @@ class TestBuiltinMeet:
 
     def test_custom_tool_keyed_by_name(self) -> None:
         spec = dict(name="foo", description="d", input_schema={"type": "object"})
-        declared = Surface([ToolSpec(type="custom", **spec)], [], [])  # type: ignore[arg-type]
-        launcher = Surface([ToolSpec(type="custom", **spec)], [], [])  # type: ignore[arg-type]
+        declared = Surface([ToolSpec(type="custom", **spec)], [], [])
+        launcher = Surface([ToolSpec(type="custom", **spec)], [], [])
         out = att(declared, launcher)
         assert [t.name for t in out.tools] == ["foo"]
         assert out == canon(declared)

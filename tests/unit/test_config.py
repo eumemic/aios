@@ -29,7 +29,7 @@ def test_workspace_root_must_be_absolute(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "./workspaces")
 
     with pytest.raises(ValidationError, match="must be an absolute path"):
-        Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+        Settings(_env_file=(str(secrets),))
 
 
 def test_workspace_root_error_mentions_tilde(
@@ -51,7 +51,7 @@ def test_workspace_root_error_mentions_tilde(
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "~/aios/workspaces")
 
     with pytest.raises(ValidationError, match=r"does not expand '~'"):
-        Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+        Settings(_env_file=(str(secrets),))
 
 
 def test_workspace_root_accepts_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,7 +62,7 @@ def test_workspace_root_accepts_absolute(tmp_path: Path, monkeypatch: pytest.Mon
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "/var/lib/test")
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.workspace_root == Path("/var/lib/test")
 
 
@@ -76,7 +76,7 @@ def test_workspace_root_default_is_absolute(
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_WORKSPACE_ROOT", raising=False)
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.workspace_root.is_absolute()
 
 
@@ -94,7 +94,7 @@ def test_github_clone_session_timeout_default(
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", raising=False)
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.github_clone_session_timeout_seconds == 30.0
 
 
@@ -110,7 +110,7 @@ def test_github_clone_cache_timeout_default(
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_GITHUB_CLONE_CACHE_TIMEOUT_SECONDS", raising=False)
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.github_clone_cache_timeout_seconds == 300.0
 
 
@@ -128,7 +128,7 @@ def test_github_clone_session_timeout_below_step_budget(
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", raising=False)
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.github_clone_session_timeout_seconds < _JOB_TIMEOUT_S
 
 
@@ -142,7 +142,7 @@ def test_github_clone_session_timeout_env_override(
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", "7")
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.github_clone_session_timeout_seconds == 7.0
 
 
@@ -163,7 +163,7 @@ def test_github_clone_session_timeout_rejects_above_step_budget(
     monkeypatch.setenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", "400")
 
     with pytest.raises(ValidationError, match="must be strictly less than"):
-        Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+        Settings(_env_file=(str(secrets),))
 
 
 def test_github_clone_session_timeout_mirror_matches_harness_constant(
@@ -190,7 +190,7 @@ def test_sandbox_disk_bytes_default_is_none(
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_SANDBOX_DISK_BYTES", raising=False)
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.sandbox_disk_bytes is None
 
 
@@ -202,7 +202,7 @@ def test_sandbox_disk_bytes_env_override(tmp_path: Path, monkeypatch: pytest.Mon
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_SANDBOX_DISK_BYTES", str(4 * 1024 * 1024 * 1024))
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.sandbox_disk_bytes == 4 * 1024 * 1024 * 1024
 
 
@@ -221,4 +221,4 @@ def test_sandbox_disk_bytes_rejects_below_floor(
     monkeypatch.setenv("AIOS_SANDBOX_DISK_BYTES", "1024")
 
     with pytest.raises(ValidationError):
-        Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+        Settings(_env_file=(str(secrets),))

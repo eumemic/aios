@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from typing import cast
 
 import asyncpg
 import pytest
@@ -47,7 +48,7 @@ async def _sessions_columns(db_url: str) -> set[str]:
 async def _version_num(db_url: str) -> str:
     conn = await asyncpg.connect(db_url)
     try:
-        return await conn.fetchval("SELECT version_num FROM alembic_version")
+        return cast(str, await conn.fetchval("SELECT version_num FROM alembic_version"))
     finally:
         await conn.close()
 

@@ -25,6 +25,7 @@ from aios.errors import (
 )
 from aios.harness import tool_dispatch
 from aios.harness.tool_dispatch import _classify_tool_error, _tool_lifecycle
+from aios.services import sessions as sessions_service
 from aios.tools.bash import BashArgumentError
 from aios.tools.invoke import ToolBail, validate_arguments
 
@@ -138,7 +139,7 @@ class TestToolLifecycleEviction:
         """Run a handler that raises ``err`` through the lifecycle; the DB writes are
         stubbed. Returns ``(evict_calls, append_result_mock)``."""
         monkeypatch.setattr(
-            tool_dispatch.sessions_service,
+            sessions_service,
             "append_event",
             AsyncMock(return_value=MagicMock(id="span_1")),
         )
@@ -157,7 +158,7 @@ class TestToolLifecycleEviction:
             on_exception=evicted.append,
         ):
             raise err
-        return evicted, append_result
+        return evicted, append_result  # type: ignore[unreachable]
 
     async def test_client_error_refusal_does_not_evict(self, monkeypatch: Any) -> None:
         evicted, append_result = await self._drive(

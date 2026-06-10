@@ -96,20 +96,20 @@ class TestHappyPath:
 
     async def test_default_path(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "rg " in cmd
         assert "/workspace" in cmd
 
     async def test_include_flag(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "include": "*.py"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "--glob" in cmd
         assert "*.py" in cmd
 
     async def test_no_matches_returns_empty_string(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_registry.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=1,
                 stdout="",
@@ -127,58 +127,58 @@ class TestOutputModes:
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "output_mode": "files_with_matches"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert " -l " in cmd
 
     async def test_count_mode(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "output_mode": "count"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert " -c " in cmd
 
     async def test_content_mode_has_line_numbers(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "output_mode": "content"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert " -n " in cmd
 
 
 class TestAdvancedFlags:
     async def test_context_lines(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "context": 3})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "-C 3" in cmd
 
     async def test_case_insensitive(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "case_insensitive": True})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert " -i " in cmd
 
     async def test_multiline(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "multiline": True})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "-U" in cmd
         assert "--multiline-dotall" in cmd
 
     async def test_file_type_filter(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "file_type": "py"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "--type" in cmd
         assert "py" in cmd
 
     async def test_custom_limit(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello", "limit": 100})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "head -100" in cmd
 
     async def test_default_limit_250(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "head -250" in cmd
 
     async def test_max_columns_flag(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await grep_handler("sess_01TEST", {"pattern": "hello"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "--max-columns=500" in cmd
 
 
@@ -186,7 +186,7 @@ class TestErrorPath:
     async def test_grep_failure_returns_error_dict(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_registry.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=2,
                 stdout="",
@@ -222,7 +222,7 @@ class TestErrorPath:
         error dict the model can act on.
         """
         await grep_handler("sess_01TEST", {"pattern": "hello"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "pipefail" in cmd, (
             f"cmd must enable ``pipefail`` so a failing ``rg`` (e.g., invalid "
             f"regex, missing path) propagates through the ``| head -N`` to "
@@ -245,5 +245,5 @@ class TestPerEnvTimeoutCeiling:
             return_value=600,
         ):
             await grep_handler("sess_01TEST", {"pattern": "hello"})
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs
         assert kwargs["timeout_seconds"] == 600

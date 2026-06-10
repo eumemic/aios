@@ -12,7 +12,7 @@ built-in invoke, MCP invoke, and the v1 gate (transport ∈ {cli, both}
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -54,14 +54,14 @@ def _toolset(
     default_transport: str | None = None,
     configs: list[McpToolConfig] | None = None,
 ) -> ToolSpec:
-    pol = McpPermissionPolicy(type=default_policy) if default_policy else None  # type: ignore[arg-type]
+    pol = McpPermissionPolicy(type=default_policy) if default_policy else None
     return ToolSpec(
         type="mcp_toolset",
         enabled=enabled,
         mcp_server_name=server_name,
         default_config=McpToolsetConfig(
             permission_policy=pol,
-            transport=default_transport,  # type: ignore[arg-type]
+            transport=default_transport,
         ),
         configs=configs,
     )
@@ -78,7 +78,7 @@ async def broker() -> AsyncIterator[ToolBroker]:
 
 
 @pytest.fixture
-def hijack_tool() -> AsyncIterator[
+def hijack_tool() -> Iterator[
     Callable[[str, Callable[[str, dict[str, Any]], Awaitable[Any]]], None]
 ]:
     """Yield a function that overrides a real built-in's handler.

@@ -61,7 +61,7 @@ async def test_terminal_status_drains_catch_up_tail_then_done() -> None:
     subscription = _mk_subscription()
 
     collected = [
-        (msg.event, json.loads(msg.data).get("type") if msg.event == "event" else None)
+        (msg.event, json.loads(str(msg.data)).get("type") if msg.event == "event" else None)
         async for msg in wf_run_event_stream(subscription, pool, "wfr_X", after_seq=0)
     ]
 

@@ -229,14 +229,14 @@ def test_settings_env_file_tuple_layers_and_later_wins(
     ):
         monkeypatch.delenv(k, raising=False)
 
-    s = Settings(_env_file=(str(secrets), str(dotenv)))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets), str(dotenv)))
     assert s.vault_key.get_secret_value() == "vk_secrets"
     # Later file overrides earlier.
     assert s.db_url == "postgresql://dotenv/db"
 
     # Process env beats both files.
     monkeypatch.setenv("AIOS_DB_URL", "postgresql://env/db")
-    s2 = Settings(_env_file=(str(secrets), str(dotenv)))  # type: ignore[call-arg]
+    s2 = Settings(_env_file=(str(secrets), str(dotenv)))
     assert s2.db_url == "postgresql://env/db"
 
 
@@ -250,7 +250,7 @@ def test_settings_instance_id_defaults_to_default(
     secrets.write_text("AIOS_API_KEY=k\nAIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_INSTANCE_ID", raising=False)
 
-    s = Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+    s = Settings(_env_file=(str(secrets),))
     assert s.instance_id == "default"
 
 
@@ -267,4 +267,4 @@ def test_settings_instance_id_rejects_unsafe_value(
     monkeypatch.setenv("AIOS_INSTANCE_ID", "bad-dash")
 
     with pytest.raises(ValidationError):
-        Settings(_env_file=(str(secrets),))  # type: ignore[call-arg]
+        Settings(_env_file=(str(secrets),))

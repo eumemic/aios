@@ -59,7 +59,7 @@ fi
 
 if ! should_skip mypy; then
     echo "── mypy ──"
-    uv run mypy src || fail
+    uv run mypy src tests || fail
 fi
 
 # ── Tests ──────────────────────────────────────────────────────────────────────

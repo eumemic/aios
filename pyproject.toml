@@ -164,6 +164,7 @@ plugins = ["pydantic.mypy"]
 module = [
     "litellm.*",
     "mcp.*",
+    "fastapi_mcp.*",
     "aiodocker.*",
     "procrastinate.*",
     "testcontainers.*",
@@ -173,6 +174,7 @@ module = [
     "croniter.*",
     "dateparser",
     "dateparser.*",
+    "jsonschema",
 ]
 ignore_missing_imports = true
 

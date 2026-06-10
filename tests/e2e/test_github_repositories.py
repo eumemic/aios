@@ -31,7 +31,7 @@ import httpx
 import pytest
 
 from aios.models.agents import ToolSpec
-from aios.models.github_repositories import GithubRepositoryResource
+from aios.models.github_repositories import GithubRepositoryResource, GithubRepositoryResourceEcho
 from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import github_repositories as github_service
@@ -189,6 +189,7 @@ class TestServiceLayer:
             account_id=account_id,
         )
         echo = session.resources[0]
+        assert isinstance(echo, GithubRepositoryResourceEcho)
         async with pool.acquire() as conn:
             recovered = await github_service.get_session_token(
                 conn, crypto_box, session.id, echo.id, account_id=account_id
@@ -221,6 +222,7 @@ class TestServiceLayer:
             account_id=account_id,
         )
         original_echo = session.resources[0]
+        assert isinstance(original_echo, GithubRepositoryResourceEcho)
         new_token = _pat()
         rotated = await github_service.rotate_token(
             pool,
@@ -271,6 +273,7 @@ class TestServiceLayer:
             account_id=account_id,
         )
         echo = session.resources[0]
+        assert isinstance(echo, GithubRepositoryResourceEcho)
         assert echo.git_user_name == "Agent JN"
         assert echo.git_user_email == "agent+jn@example.com"
 
@@ -318,6 +321,7 @@ class TestServiceLayer:
             account_id=account_id,
         )
         echo = session.resources[0]
+        assert isinstance(echo, GithubRepositoryResourceEcho)
 
         rotated = await github_service.rotate_token(
             pool,
@@ -357,6 +361,7 @@ class TestServiceLayer:
             account_id=account_id,
         )
         echo = session.resources[0]
+        assert isinstance(echo, GithubRepositoryResourceEcho)
         assert echo.git_user_name is None
         assert echo.git_user_email is None
 

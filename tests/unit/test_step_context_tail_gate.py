@@ -14,6 +14,8 @@ companion *is* the channels tail listing.
 
 from __future__ import annotations
 
+from typing import Any
+
 from aios.harness.step_context import _agent_owes_response
 
 # Mirrors the shape of context._format_notification_marker output.
@@ -25,7 +27,7 @@ _NOTIFICATION = (
 
 class TestAgentOwesResponse:
     def test_last_message_focal_user_owes_response(self) -> None:
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "[received=...]\nplease respond"},
         ]
@@ -34,7 +36,7 @@ class TestAgentOwesResponse:
     def test_last_message_notification_marker_does_not_owe_response(self) -> None:
         # A non-focal 🔔 marker is a navigation prompt, not a direct stimulus —
         # keep the tail so the agent can see channel state and switch_channel.
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "[received=...]\nhi"},
             {"role": "assistant", "content": "."},
@@ -43,14 +45,14 @@ class TestAgentOwesResponse:
         assert _agent_owes_response(messages) is False
 
     def test_notification_marker_in_list_content_does_not_owe(self) -> None:
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": [{"type": "text", "text": _NOTIFICATION}]},
         ]
         assert _agent_owes_response(messages) is False
 
     def test_last_message_tool_owes_response(self) -> None:
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": "sys"},
             {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]},
             {"role": "tool", "tool_call_id": "t1", "content": "result"},
@@ -58,7 +60,7 @@ class TestAgentOwesResponse:
         assert _agent_owes_response(messages) is True
 
     def test_last_message_assistant_does_not_owe_response(self) -> None:
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hello"},

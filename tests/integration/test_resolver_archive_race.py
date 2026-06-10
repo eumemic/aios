@@ -112,10 +112,11 @@ async def pool_with_per_chat_connection(
 
 async def _count_chat_sessions(pool: asyncpg.Pool[Any], connection_id: str) -> int:
     async with pool.acquire() as conn:
-        return await conn.fetchval(
+        count: int = await conn.fetchval(
             "SELECT COUNT(*) FROM chat_sessions WHERE connection_id = $1",
             connection_id,
         )
+        return count
 
 
 class TestResolverArchiveRace:

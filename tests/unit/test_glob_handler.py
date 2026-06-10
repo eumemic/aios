@@ -90,18 +90,18 @@ class TestHappyPath:
 
     async def test_default_path(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await glob_handler("sess_01TEST", {"pattern": "*.py"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "/workspace" in cmd
         assert "rg --files" in cmd
         assert "*.py" in cmd
 
     async def test_custom_path(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
         await glob_handler("sess_01TEST", {"pattern": "*.txt", "path": "/workspace/docs"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "/workspace/docs" in cmd
 
     async def test_empty_results(self, stub_registry: Any, stub_handle: SandboxHandle) -> None:
-        stub_registry.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_registry.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=0,
                 stdout="",
@@ -118,7 +118,7 @@ class TestErrorPath:
     async def test_find_failure_returns_error_dict(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
-        stub_registry.exec = AsyncMock(  # type: ignore[method-assign]
+        stub_registry.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=2,
                 stdout="",
@@ -149,7 +149,7 @@ class TestErrorPath:
         ("Sibling bug exists in tools/glob.py").
         """
         await glob_handler("sess_01TEST", {"pattern": "*.py"})
-        cmd: str = stub_registry.exec.await_args.args[1]  # type: ignore[attr-defined]
+        cmd: str = stub_registry.exec.await_args.args[1]
         assert "pipefail" in cmd, (
             f"cmd must enable ``pipefail`` so a failing ``rg`` (e.g., "
             f"invalid glob pattern, missing path) propagates through the "
@@ -171,5 +171,5 @@ class TestPerEnvTimeoutCeiling:
             return_value=600,
         ):
             await glob_handler("sess_01TEST", {"pattern": "*.py"})
-        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs  # type: ignore[attr-defined]
+        kwargs: dict[str, Any] = stub_registry.exec.await_args.kwargs
         assert kwargs["timeout_seconds"] == 600

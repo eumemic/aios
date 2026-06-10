@@ -10,8 +10,8 @@ import pytest
 from pydantic import ValidationError
 
 from aios.errors import PayloadTooLargeError
-from aios.models.sessions import SessionCreate
-from aios.services.sessions import MAX_USER_MESSAGE_CHARS, append_user_message
+from aios.models.sessions import MAX_USER_MESSAGE_CHARS, SessionCreate
+from aios.services.sessions import append_user_message
 
 
 class TestAppendUserMessageSizeCap:

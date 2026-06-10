@@ -365,6 +365,7 @@ class TestRecapRendering:
             ],
         )
         out = render_reorient_block([asst], CHAN_A)
+        assert isinstance(out, str)
         # All three calls appear in the recap.
         assert '"text": "first"' in out
         assert '"text": "second"' in out
@@ -377,12 +378,14 @@ class TestRecapRendering:
     def test_fences_top_and_bottom(self) -> None:
         events = [_user(1, channel=CHAN_A, content="msg")]
         out = render_reorient_block(events, CHAN_A)
+        assert isinstance(out, str)
         assert out.startswith(f"━━━ Recap: recent messages on {CHAN_A} ━━━")
         assert out.rstrip().endswith("━━━ End recap ━━━")
 
     def test_body_lines_are_blockquoted(self) -> None:
         events = [_user(1, channel=CHAN_A, content="msg")]
         out = render_reorient_block(events, CHAN_A)
+        assert isinstance(out, str)
         # Body lines within the fences all start with "> " (or are a
         # bare ">" for blank spacing lines between blocks).
         for line in out.split("\n"):

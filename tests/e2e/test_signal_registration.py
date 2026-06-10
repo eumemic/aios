@@ -38,7 +38,7 @@ class _FakeSignalConnector(HttpConnector):
     @management_handler()
     async def register(
         self, *, external_account_id: str, captcha: str | None = None, voice: bool = False
-    ) -> dict:
+    ) -> dict[str, object]:
         self.calls.append(
             (
                 "register",
@@ -63,7 +63,9 @@ class _FakeSignalConnector(HttpConnector):
         }
 
     @management_handler()
-    async def verify(self, *, external_account_id: str, code: str, pin: str | None = None) -> dict:
+    async def verify(
+        self, *, external_account_id: str, code: str, pin: str | None = None
+    ) -> dict[str, object]:
         self.calls.append(
             (
                 "verify",
@@ -80,7 +82,7 @@ class _FakeSignalConnector(HttpConnector):
         given_name: str | None = None,
         family_name: str | None = None,
         about: str | None = None,
-    ) -> dict:
+    ) -> dict[str, object]:
         self.calls.append(
             (
                 "updateProfile",

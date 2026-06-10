@@ -723,7 +723,7 @@ class TestOAuthRefreshE2E:
         )
 
     @staticmethod
-    def _patched_async_client(post_calls: list[Any], body: dict[str, Any]):
+    def _patched_async_client(post_calls: list[Any], body: dict[str, Any]) -> Any:
         """Build a ``patch`` context for ``services.vaults.httpx.AsyncClient``.
 
         Each ``client.post`` invocation is recorded into ``post_calls`` and
