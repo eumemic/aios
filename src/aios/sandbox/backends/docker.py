@@ -45,12 +45,11 @@ log = get_logger("aios.sandbox.backends.docker")
 # in-container process running (moby#9098).
 _CONTAINER_TIMEOUT_KILL_AFTER_S = 5
 _HOST_BACKSTOP_MARGIN_S = 5
-# GNU ``timeout`` exits 124 (TERM path) or 137 (128+9, SIGKILL path) when it
-# force-kills on timeout. Empirically, ``timeout -s KILL`` in the sandbox
-# image (python:3.13-slim-bookworm, GNU coreutils) exits 137 — but map both
-# so a real in-container timeout is reported honestly instead of looking like
-# a normal exit regardless of coreutils internals. See ``timeout --help``.
-_CONTAINER_TIMEOUT_EXIT_CODES = (124, 137)
+# GNU ``timeout -s KILL`` exits 137 (128+9) when it force-kills the workload
+# on timeout — verified in the sandbox image and locally. We map exactly this
+# code to ``timed_out``: our invocation never yields the 124 (TERM-path) code
+# from a timeout, and a command that exits 124 on its own is not a timeout.
+_CONTAINER_TIMEOUT_EXIT_CODE = 137
 
 
 def _decode_and_truncate(raw: bytes, max_bytes: int) -> tuple[str, bool]:
@@ -206,10 +205,12 @@ class DockerBackend:
         cwd: str = "/workspace",
     ) -> CommandResult:
         """Run ``bash -c <command>`` inside the container via ``docker exec``."""
-        # Wrap the agent command in an in-container ``timeout`` so the SIGKILL
-        # on deadline lands on the workload itself, not just the host
-        # ``docker exec`` client (#844 / moby#9098). ``-k 5`` is a kill-after
-        # backstop in case the workload survives the first signal.
+        # Wrap the agent command in an in-container ``timeout`` so the SIGKILL on
+        # deadline lands on the workload itself, not just the host ``docker exec``
+        # client (#844 / moby#9098). The primary signal is already SIGKILL (-s KILL),
+        # which is unblockable; ``-k 5`` is a redundant kill-after backstop kept to
+        # match the agreed invocation and only matters if the primary signal is ever
+        # softened.
         argv = [
             "docker",
             "exec",
@@ -236,11 +237,11 @@ class DockerBackend:
         rc, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
             argv, timeout_s=host_timeout_s
         )
-        # When the in-container ``timeout`` fires it returns 124/137 well before
-        # the host backstop, so the host-derived ``timed_out`` is False on a real
+        # When the in-container ``timeout`` fires it returns 137 well before the
+        # host backstop, so the host-derived ``timed_out`` is False on a real
         # timeout. Map the timeout exit code so we stop telling the model the
         # command finished when it was actually killed (#844).
-        timed_out = timed_out or rc in _CONTAINER_TIMEOUT_EXIT_CODES
+        timed_out = timed_out or rc == _CONTAINER_TIMEOUT_EXIT_CODE
         stdout_str, out_truncated = _decode_and_truncate(stdout_bytes, max_output_bytes)
         stderr_str, err_truncated = _decode_and_truncate(stderr_bytes, max_output_bytes)
         return CommandResult(
