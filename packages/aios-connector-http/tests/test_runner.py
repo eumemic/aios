@@ -763,6 +763,68 @@ class TestWaitReady:
                 await task
 
 
+class TestPostToolResultSerialization:
+    """Regression for #843: a tool returning multimodal ``list[dict]``
+    content must serialize byte-identically on the wire.
+
+    The bug lived at ``RuntimeToolResultRequest.to_dict()`` time — a raw
+    ``list[dict]`` item has no ``.to_dict()``, so the generated model's
+    list branch crashed with ``AttributeError`` and the POST never fired.
+    These tests drive the *real* ``_post_tool_result`` (NOT the
+    ``_ProbeConnector`` override) through the generated runtime op, which
+    serializes ``body.to_dict()`` into the POST ``json`` kwarg — so they
+    genuinely exercise the serialization path the override bypasses.
+    """
+
+    @staticmethod
+    def _client_capturing_body() -> tuple[Any, list[Any]]:
+        """A real ``Client`` backed by an ``httpx.MockTransport`` that
+        captures the JSON the runtime op actually puts on the wire.
+
+        Routing the POST through real httpx serialization means the test
+        sees the bytes the server would — the exact path the #843 bug
+        crashed on before reaching the network."""
+        from aios_sdk import Client
+
+        captured: list[Any] = []
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            captured.append(json.loads(request.content))
+            return httpx.Response(201, json={})
+
+        client = Client(base_url="http://x", token="aios_runtime_x")
+        client.set_async_httpx_client(
+            httpx.AsyncClient(base_url="http://x", transport=httpx.MockTransport(_handler))
+        )
+        return client, captured
+
+    async def test_list_dict_content_serializes_byte_identical(self) -> None:
+        client, captured = self._client_capturing_body()
+        await HttpConnector._post_tool_result(
+            client,
+            connection_id="conn_1",
+            session_id="sess_1",
+            tool_call_id="call_1",
+            content=[{"type": "text", "text": "hello"}],
+        )
+        assert len(captured) == 1
+        # Byte-identical: the list[dict] round-trips unchanged on the wire.
+        assert captured[0]["content"] == [{"type": "text", "text": "hello"}]
+
+    async def test_str_content_serializes_as_string(self) -> None:
+        """Guards against over-wrapping — plain ``str`` stays a ``str``."""
+        client, captured = self._client_capturing_body()
+        await HttpConnector._post_tool_result(
+            client,
+            connection_id="conn_1",
+            session_id="sess_1",
+            tool_call_id="call_1",
+            content="hello",
+        )
+        assert len(captured) == 1
+        assert captured[0]["content"] == "hello"
+
+
 class TestWaitConnectionServed:
     async def test_times_out_if_connection_never_added(self) -> None:
         """wait_connection_served raises TimeoutError when connection never appears."""
