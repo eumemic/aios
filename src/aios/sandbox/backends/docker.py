@@ -145,6 +145,12 @@ class DockerBackend:
             # leaving the cap un-enforced.
             argv.extend(["--storage-opt", f"size={spec.disk_bytes}"])
 
+        # Authored seccomp deny-list (#807). ALWAYS emitted — never conditional —
+        # so a misconfiguration can't silently fall back to Docker's default profile.
+        # The value is a host path the docker CLI reads, or the literal "unconfined"
+        # (emergency rollback via AIOS_SANDBOX_SECCOMP_PROFILE only).
+        argv.extend(["--security-opt", f"seccomp={spec.seccomp_profile}"])
+
         # Keep stdin open so the container doesn't exit on empty stdin.
         argv.append("--interactive")
 

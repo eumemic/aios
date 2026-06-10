@@ -82,6 +82,20 @@ class TestAssemblePlanImageAndDisk:
         plan = _call_assemble()
         assert plan.spec.disk_bytes is None
 
+    def test_seccomp_profile_from_settings_lands_on_spec(self) -> None:
+        """#807: ``_assemble_plan`` copies ``settings.sandbox_seccomp_profile``
+        verbatim onto the spec. It reads ``get_settings()`` internally, so we
+        patch it with a mock carrying the seccomp field plus the existing
+        sandbox-cap attributes the constructor reads."""
+        settings = MagicMock()
+        settings.sandbox_seccomp_profile = "/x/seccomp.json"
+        settings.sandbox_cpu_quota = None
+        settings.sandbox_memory_bytes = None
+        settings.sandbox_pids_limit = None
+        with patch("aios.sandbox.spec.get_settings", return_value=settings):
+            plan = _call_assemble()
+        assert plan.spec.seccomp_profile == "/x/seccomp.json"
+
 
 # ── build_spec_from_session resolution (#724 image, #725 disk) ───────────────
 
@@ -102,6 +116,7 @@ def _patch_build_spec_deps(
     settings.sandbox_cpu_quota = None
     settings.sandbox_memory_bytes = None
     settings.sandbox_pids_limit = None
+    settings.sandbox_seccomp_profile = "/app/docker/seccomp-sandbox.json"
     settings.tool_broker_socket_path = None
 
     tool_broker = MagicMock()

@@ -118,6 +118,13 @@ class SandboxSpec:
     # global ``settings.sandbox_disk_bytes``; the backend injects
     # ``--storage-opt size=`` when set.
     disk_bytes: int | None = None
+    # Authored seccomp profile (#807). Always set by the spec builder to the
+    # configured path (a host filesystem path the docker CLI reads), or the
+    # literal "unconfined" for emergency rollback. The backend ALWAYS emits
+    # --security-opt seccomp=<value>; this field is never None so the default
+    # profile is never silently shipped. The default below is a fallback for
+    # bare test construction only; production always sets it from settings.
+    seccomp_profile: str = "unconfined"
 
 
 @dataclass(frozen=True, slots=True)

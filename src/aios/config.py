@@ -163,6 +163,15 @@ class Settings(BaseSettings):
         "image's own base size. Per-environment overridable via "
         "``EnvironmentConfig.disk_bytes`` (issue #725).",
     )
+    sandbox_seccomp_profile: str = Field(
+        default=str(Path(__file__).resolve().parents[2] / "docker" / "seccomp-sandbox.json"),
+        description="Path to the authored seccomp profile applied to every sandbox "
+        "container via `docker run --security-opt seccomp=<path>`. The docker CLI "
+        "reads this file from the WORKER container's filesystem and ships the JSON "
+        "to the daemon. Defaults to the baked-in profile shipped in the worker image. "
+        "Emergency rollback ONLY: set AIOS_SANDBOX_SECCOMP_PROFILE=unconfined to "
+        "disable seccomp filtering. Never defaults to unconfined; the flag is always emitted.",
+    )
     bash_default_timeout_seconds: int = Field(
         default=120,
         ge=1,

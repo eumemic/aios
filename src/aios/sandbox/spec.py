@@ -599,6 +599,11 @@ def _assemble_plan(
         # (environment override → global default), so pass it straight
         # through rather than re-reading settings here.
         disk_bytes=disk_bytes,
+        # Authored seccomp deny-list (#807). Always set from settings (never
+        # left at the dataclass "unconfined" fallback) so the backend ships
+        # the deny-list profile by default; the literal "unconfined" only
+        # appears via the AIOS_SANDBOX_SECCOMP_PROFILE emergency override.
+        seccomp_profile=settings.sandbox_seccomp_profile,
     )
 
     return ProvisioningPlan(
