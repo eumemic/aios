@@ -270,6 +270,60 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
             rows,
         )
 
+        # One small session with a GENUINELY UNRESOLVED tool call (#840): a user
+        # message, then an assistant message carrying exactly one tool_call
+        # (``tc_open_0``) with NO matching tool-role result. This is NOT built
+        # from ``_tc_session_rows`` (which produces fully-RESOLVED sessions);
+        # the rows are written inline so the open call stays open. The
+        # all-sessions backfill UPDATE below (no id filter) derives its
+        # ``open_tool_call_count = 1``, so the bounded ``GHOST_ASST_SQL`` MUST
+        # return this session — the pass-through half of the bidirectional fence.
+        # Same FK pattern (agt_perf/env_perf, acc_test_stub) as the sess_tc_*.
+        open_sid = "sess_tc_open"
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, workspace_volume_path, account_id) "
+            "VALUES ($1, 'agt_perf', 'env_perf', '/tmp/ws_' || $1, 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING",
+            open_sid,
+        )
+        open_rows: list[tuple[Any, ...]] = [
+            (
+                f"ev_u_{open_sid}_0",
+                open_sid,
+                1,
+                "message",
+                json.dumps({"role": "user", "content": "do a thing"}),
+                "user",
+            ),
+            (
+                f"ev_a_{open_sid}_0",
+                open_sid,
+                2,
+                "message",
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "tc_open_0",
+                                "type": "function",
+                                "function": {"name": "bash", "arguments": "{}"},
+                            }
+                        ],
+                        "reacting_to": 1,
+                    }
+                ),
+                "assistant",
+            ),
+        ]
+        await conn.executemany(
+            "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING",
+            open_rows,
+        )
+
         # Backfill the scalar columns on sessions to match the seeded events.
         # The production path maintains these in append_event; this test inserts
         # events directly, so it must reconcile the sessions rows manually.
@@ -489,19 +543,54 @@ class TestSweepQueryBudget:
 class TestGhostAsstSweepBounded:
     """#840: GHOST_ASST_SQL is bounded by sessions.open_tool_call_count > 0.
 
-    On a fixture where every session is fully resolved (count = 0), including
-    a DEEP fully-resolved tool-call history, the cross-session ghost scan
-    returns zero rows and never touches the event log. Removing the bound makes
-    it scan the entire resolved history → this row budget fails (mutation lock)."""
+    This locks the bound in BOTH directions on a single fixture that mixes a
+    genuinely-open session with deep/fully-resolved ones:
 
-    async def test_ghost_asst_returns_no_rows_when_all_resolved(
+    - **Pass-through (positive)** — ``sess_tc_open`` has one unresolved tool_call
+      (``open_tool_call_count = 1``), so the cross-session scan MUST return it.
+      Catches an OVER-restrictive bound (e.g. ``AND 1=0`` or ``> 99999``) that
+      would silently disable ghost detection while still passing a zero-row test.
+    - **Flatness (negative/suppression)** — every other session is fully
+      resolved (count = 0), including the DEEP 500-turn ``sess_tc_deep`` history.
+      They contribute zero rows no matter how deep the resolved log grows.
+      Catches an UNDER-restrictive bound (the line removed) that leaks resolved
+      sessions and reintroduces the N+1 scan over ``events``.
+
+    The exact-set assertion ``returned == {"sess_tc_open"}`` is the core fence;
+    the two directional assertions above it document intent. The all-resolved
+    zero-row test this replaced was vacuous: an over-restrictive mutation passed
+    it AND the structural N+1 test, silently disabling ghost detection (#840)."""
+
+    async def test_ghost_asst_scoped_to_open_call_sessions(
         self, seeded_pool: asyncpg.Pool[Any]
     ) -> None:
         async with seeded_pool.acquire() as conn:
             rows = await conn.fetch(GHOST_ASST_SQL.format(scope_clause=""))
-        assert len(rows) == 0, (
-            f"GHOST_ASST_SQL returned {len(rows)} rows on a fully-resolved "
-            f"fixture — must be bounded by sessions.open_tool_call_count > 0 (#840)."
+        returned = {r["session_id"] for r in rows}
+
+        # Pass-through: the one session with an unresolved call IS detected.
+        # An over-restrictive bound (AND 1=0, > 99999) empties this and fails.
+        assert "sess_tc_open" in returned, (
+            f"GHOST_ASST_SQL dropped sess_tc_open (open_tool_call_count = 1) — "
+            f"an over-restrictive bound disables ghost detection (#840). Got {returned}."
+        )
+        # Flatness: deep + resolved sessions never leak in, regardless of depth.
+        assert "sess_tc_deep" not in returned, (
+            f"GHOST_ASST_SQL leaked the DEEP fully-resolved sess_tc_deep — bound "
+            f"is under-restrictive and rescans resolved history (#840). Got {returned}."
+        )
+        leaked_resolved = {
+            sid for sid in returned if sid.startswith(("sess_tc_", "sess_perf_"))
+        } - {"sess_tc_open"}
+        assert not leaked_resolved, (
+            f"GHOST_ASST_SQL leaked fully-resolved sessions {leaked_resolved} — "
+            f"bound must suppress open_tool_call_count = 0 sessions (#840)."
+        )
+        # Exact scope: rows ONLY for open-call sessions, regardless of how deep
+        # the resolved history grows. This single assertion is the core fence.
+        assert returned == {"sess_tc_open"}, (
+            f"GHOST_ASST_SQL must return rows ONLY for sessions with "
+            f"open_tool_call_count > 0; expected {{'sess_tc_open'}}, got {returned} (#840)."
         )
 
 
