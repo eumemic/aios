@@ -28,12 +28,15 @@ class CancelArgumentError(AiosError):
 
 
 CANCEL_DESCRIPTION = (
-    "Cancel in-flight tool executions for this session. If "
-    "`tool_call_id` is provided, cancels that specific tool call. "
-    "If omitted, cancels all currently running tool calls. "
-    "Cancelled tools will report an error result. Use this when "
-    "you want to stop a long-running operation (e.g. a slow bash "
-    "command) and try a different approach."
+    "Stop waiting on in-flight tool executions for this session. If "
+    "`tool_call_id` is provided, detaches from that specific tool call; "
+    "if omitted, detaches from all currently running tool calls. The "
+    "tool call reports a cancelled error result so you can move on. "
+    "Note: this stops you waiting on the call, but an already-running "
+    "bash command keeps executing inside the sandbox until it finishes "
+    "or hits its own timeout — it is not killed. Avoid re-running a "
+    "non-idempotent command (build, migration, network write) on the "
+    "assumption that cancel stopped it."
 )
 
 CANCEL_PARAMETERS_SCHEMA: dict[str, Any] = {

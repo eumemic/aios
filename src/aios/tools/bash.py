@@ -91,8 +91,10 @@ BASH_PARAMETERS_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional maximum runtime in seconds. Defaults to the "
                 "server's configured default. Capped at the server's "
-                "maximum. The command is killed (SIGKILL) if it exceeds "
-                "this duration."
+                "maximum. If the command exceeds this duration it is "
+                "terminated (SIGKILL) inside the sandbox; any output "
+                "produced up to that point is returned and `timed_out` "
+                "is set true in the result."
             ),
             "minimum": 1,
         },
