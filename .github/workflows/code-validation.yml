@@ -5,6 +5,16 @@ on:
     branches: [master]
   pull_request:
 
+# Supersede stale runs.  A re-push to a PR cancels that PR's in-flight
+# run; on master the running run keeps its verdict (cancel-in-progress
+# is false for pushes) and a burst of stacked merges collapses pending
+# intermediates to the tip, whose verdict is what "is master green"
+# gates on.  Defends the account-wide runner pool against the observed
+# contention mode where overlapping runs queued an e2e shard for ~7 min.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Mirrors the pre-commit hook's short-circuit: docs-only changes skip
   # the heavy validation pipeline.  Widened beyond the hook's `.py$`
@@ -90,9 +100,9 @@ jobs:
   # The four check jobs below run in parallel.  Splitting them off the
   # previous monolithic ``validate`` job collapses the critical path from
   # ``sum(lint, mypy, unit, integration, sandbox build, e2e)`` to
-  # ``max(...)`` — in practice ~max(e2e) ≈ 7 min instead of ~9.5 min.  Each
-  # job pays its own checkout + uv-setup overhead (~10-15 s), but they pay
-  # in parallel.  The setup-uv cache is shared across jobs by the action.
+  # ``max(...)``.  Each job pays its own checkout + uv-setup overhead
+  # (~10-15 s), but they pay in parallel.  The setup-uv cache is shared
+  # across jobs by the action.
   lint:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'
@@ -159,29 +169,23 @@ jobs:
         run: uv sync --dev
 
       - name: Unit tests
-        run: uv run pytest tests/unit -q
+        # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
+        # runners.  The suite is xdist-safe by construction: no DB, no
+        # fixed ports (broker tests bind port 0 / mkdtemp UDS paths),
+        # per-worker ``AIOS_INSTANCE_ID`` via tests/conftest.py.
+        # Measured locally: 45 s serial → 17 s at ``-n 4``.
+        run: uv run pytest tests/unit -q -n 4
 
   integration:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: aios
-          POSTGRES_PASSWORD: aios
-          POSTGRES_DB: aios_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-
     env:
+      # Parse-only: ``get_settings()`` must see a valid Postgres DSN at
+      # import time.  Nothing dials this URL — the tests run against a
+      # per-worker testcontainer Postgres (tests/conftest.py), which is
+      # why this job declares no ``services:`` block.
       AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
       AIOS_API_KEY: test-key-for-ci
       AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
@@ -200,7 +204,10 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        run: uv run pytest tests/integration -q
+        # Default ``load`` dist: the suite has no shared module-scoped
+        # fixtures (the migration tests boot their own per-test
+        # containers).  Measured locally: 87 s serial → 43 s at ``-n 4``.
+        run: uv run pytest tests/integration -q -n 4
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)
@@ -224,22 +231,11 @@ jobs:
       contents: read
       packages: read
 
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: aios
-          POSTGRES_PASSWORD: aios
-          POSTGRES_DB: aios_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-
     env:
+      # Parse-only: ``get_settings()`` must see a valid Postgres DSN at
+      # import time.  Nothing dials this URL — the tests run against a
+      # per-worker testcontainer Postgres (tests/conftest.py), which is
+      # why this job declares no ``services:`` block.
       AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
       AIOS_API_KEY: test-key-for-ci
       AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
@@ -349,26 +345,33 @@ jobs:
         # here naturally — the explicit ``--ignore`` list on the docker
         # shard below remains the source of truth for "needs daemon
         # infrastructure, skip in CI."
+        #
+        # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
+        # runners.  Default ``load`` dist (not ``loadfile``): the
+        # non-docker set has no module-scoped fixtures — the only one in
+        # tests/e2e lives in docker-marked test_memory_cross_session_sync.
+        # Each worker spins its own session-scoped testcontainer Postgres,
+        # so there is no cross-worker DB state at all.  Measured locally:
+        # 141 s serial → 44 s at ``-n 4``.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
         run: |
-          uv run pytest tests/e2e -q -m "not docker"
+          uv run pytest tests/e2e -q -m "not docker" -n 4
 
       - name: E2E tests (docker shard)
-        # ``-n 2 --dist=loadfile`` runs the docker shard in two parallel
+        # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
         # xdist workers, one whole-file at a time.  ``loadfile`` is load-
         # bearing: ``test_memory_cross_session_sync.py`` uses a module-
         # scoped ``shared_docker_harness`` fixture which would be torn
-        # down + rebuilt per test under the default ``load`` dist.  Two
-        # workers matches the GHA standard runner's 2 cores; ``auto``
-        # over-subscribes on this hardware.  Local measurement: 84 s with
-        # ``-n 2`` vs. ~280 s serial — 3.3× speedup on the docker shard,
-        # amortizing the per-worker testcontainer-Postgres + Docker setup
-        # over ~100 tests each.
+        # down + rebuilt per test under the default ``load`` dist.  Four
+        # workers matches public-repo ubuntu-latest runners (4 vCPU /
+        # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
+        # Each worker amortizes its own testcontainer-Postgres + Docker
+        # setup over ~55 tests.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
         run: |
-          uv run pytest tests/e2e -q -m docker -n 2 --dist=loadfile \
+          uv run pytest tests/e2e -q -m docker -n 4 --dist=loadfile \
             --ignore=tests/e2e/test_signal_connector.py \
             --ignore=tests/e2e/test_signal_registration.py \
             --ignore=tests/e2e/test_telegram_connector.py

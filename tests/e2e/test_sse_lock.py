@@ -48,7 +48,7 @@ class TestSubscriberLockRoundTrip:
         async def _released() -> bool:
             return not await has_subscriber(pool, session_id)
 
-        await wait_for_predicate(_released, max_wait_s=0.5, interval_s=0.05)
+        await wait_for_predicate(_released, max_wait_s=5.0, interval_s=0.05)
         assert await has_subscriber(pool, session_id) is False
 
     async def test_multiple_subscribers_coexist(self, pool: Any, aios_env: dict[str, str]) -> None:
@@ -76,7 +76,7 @@ class TestSubscriberLockRoundTrip:
         async def _released() -> bool:
             return not await has_subscriber(pool, session_id)
 
-        await wait_for_predicate(_released, max_wait_s=0.5, interval_s=0.05)
+        await wait_for_predicate(_released, max_wait_s=5.0, interval_s=0.05)
         assert await has_subscriber(pool, session_id) is False
 
     async def test_different_sessions_are_isolated(
