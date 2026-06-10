@@ -245,6 +245,141 @@ class TestVaultCredentialCRUD:
         )
         assert cred2.id != cred1.id
 
+    async def test_create_environment_variable(self, pool: Any, crypto_box: Any) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        from aios.db import queries
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(
+            pool, display_name="env-var-test", metadata={}, account_id=account_id
+        )
+        body = VaultCredentialCreate(
+            auth_type="environment_variable",
+            secret_name="GITHUB_TOKEN",
+            allowed_hosts=["api.github.com/repos/eumemic", "api.tavily.com"],
+            secret_value=SecretStr("ghp_supersecret"),
+            display_name="gh",
+        )
+        cred = await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=body, account_id=account_id
+        )
+        assert cred.id.startswith("vcr_")
+        assert cred.auth_type == "environment_variable"
+        assert cred.target_url is None
+        assert cred.secret_name == "GITHUB_TOKEN"
+        assert cred.allowed_hosts == ["api.github.com/repos/eumemic", "api.tavily.com"]
+
+        # Secrets are write-only; the secret value only survives in the
+        # encrypted blob, recoverable solely with the account subkey.
+        fetched = await svc.get_vault_credential(pool, vault.id, cred.id, account_id=account_id)
+        dumped = fetched.model_dump()
+        assert "secret_value" not in dumped
+        assert "ciphertext" not in dumped
+        async with pool.acquire() as conn:
+            _, blob = await queries.get_vault_credential_with_blob(
+                conn, vault.id, cred.id, account_id=account_id
+            )
+        payload = crypto_box.derive_account_subkey(account_id).decrypt_dict(blob)
+        assert payload == {"secret_value": "ghp_supersecret"}
+
+    async def test_environment_variable_requires_secret_value(
+        self, pool: Any, crypto_box: Any
+    ) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        from aios.errors import ValidationError
+        from aios.services import vaults as svc
+
+        # secret_value is required at the service layer (like bearer's token),
+        # not at model construction — the structural shape validator only
+        # governs secret_name / allowed_hosts / target_url.
+        vault = await svc.create_vault(
+            pool, display_name="env-req", metadata={}, account_id=account_id
+        )
+        body = VaultCredentialCreate(
+            auth_type="environment_variable",
+            secret_name="GITHUB_TOKEN",
+            allowed_hosts=["api.github.com"],
+        )
+        with pytest.raises(ValidationError):
+            await svc.create_vault_credential(
+                pool, crypto_box, vault_id=vault.id, body=body, account_id=account_id
+            )
+
+    async def test_secret_name_unique_per_vault(self, pool: Any, crypto_box: Any) -> None:
+        """Two active env-var creds with the same secret_name in one vault conflict;
+        archiving the first frees the name; the same name in another vault is fine."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        from aios.errors import ConflictError
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(
+            pool, display_name="env-uniq", metadata={}, account_id=account_id
+        )
+        other = await svc.create_vault(
+            pool, display_name="env-uniq-other", metadata={}, account_id=account_id
+        )
+
+        def _body() -> VaultCredentialCreate:
+            return VaultCredentialCreate(
+                auth_type="environment_variable",
+                secret_name="API_KEY",
+                allowed_hosts=["api.example.com"],
+                secret_value=SecretStr("k1"),
+            )
+
+        cred1 = await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=_body(), account_id=account_id
+        )
+        with pytest.raises(ConflictError):
+            await svc.create_vault_credential(
+                pool, crypto_box, vault_id=vault.id, body=_body(), account_id=account_id
+            )
+        # Same secret_name in a different vault is allowed.
+        await svc.create_vault_credential(
+            pool, crypto_box, vault_id=other.id, body=_body(), account_id=account_id
+        )
+        # Archiving frees the name for reuse in the original vault.
+        await svc.archive_vault_credential(pool, vault.id, cred1.id, account_id=account_id)
+        cred2 = await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=_body(), account_id=account_id
+        )
+        assert cred2.id != cred1.id
+
+    async def test_environment_variable_rotates_secret(self, pool: Any, crypto_box: Any) -> None:
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        from aios.db import queries
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(
+            pool, display_name="env-rotate", metadata={}, account_id=account_id
+        )
+        cred = await svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault.id,
+            body=VaultCredentialCreate(
+                auth_type="environment_variable",
+                secret_name="ROTATING",
+                allowed_hosts=["api.example.com"],
+                secret_value=SecretStr("old"),
+            ),
+            account_id=account_id,
+        )
+        await svc.update_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault.id,
+            credential_id=cred.id,
+            body=VaultCredentialUpdate(secret_value=SecretStr("new")),
+            account_id=account_id,
+        )
+        async with pool.acquire() as conn:
+            _, blob = await queries.get_vault_credential_with_blob(
+                conn, vault.id, cred.id, account_id=account_id
+            )
+        payload = crypto_box.derive_account_subkey(account_id).decrypt_dict(blob)
+        assert payload == {"secret_value": "new"}
+
     async def test_update_credential(self, pool: Any, crypto_box: Any) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.services import vaults as svc

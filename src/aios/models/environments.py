@@ -25,7 +25,9 @@ from pydantic import (
 
 # Hostname: RFC 952 / RFC 1123 labels joined by dots.  Only characters that
 # are safe to embed in a shell script (no metacharacters, no slashes).
-_HOSTNAME_RE = re.compile(
+# Public so vault env-var credentials (``models/vaults.py``) validate their
+# host allowlists against the same grammar the sandbox networking layer uses.
+HOSTNAME_RE = re.compile(
     r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"
 )
 
@@ -62,7 +64,7 @@ class LimitedNetworking(BaseModel):
                 raise ValueError("allowed_hosts entries must not be empty")
             if len(host) > 253:
                 raise ValueError(f"hostname too long ({len(host)} > 253): {host!r}")
-            if not _HOSTNAME_RE.match(host):
+            if not HOSTNAME_RE.match(host):
                 raise ValueError(
                     f"invalid hostname {host!r}: only alphanumerics, hyphens, and dots allowed"
                 )

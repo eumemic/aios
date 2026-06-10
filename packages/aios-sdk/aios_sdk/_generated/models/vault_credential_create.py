@@ -24,12 +24,13 @@ T = TypeVar("T", bound="VaultCredentialCreate")
 class VaultCredentialCreate:
     """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-    All secret fields are write-only. The ``target_url`` is immutable
-    after creation. The service layer validates required fields per
-    ``auth_type``.
+    All secret fields are write-only. ``target_url``, ``secret_name``, and
+    ``auth_type`` are immutable after creation. The service layer validates
+    required secret fields per ``auth_type``; this model validates the
+    structural shape (which kind carries ``target_url`` vs
+    ``secret_name``/``allowed_hosts``).
 
         Attributes:
-            target_url (str):
             auth_type (VaultCredentialCreateAuthType):
             access_token (None | str | Unset):
             expires_at (datetime.datetime | None | Unset):
@@ -44,11 +45,14 @@ class VaultCredentialCreate:
             password (None | str | Unset):
             header_name (None | str | Unset):
             header_value (None | str | Unset):
+            secret_value (None | str | Unset):
             display_name (None | str | Unset):
             metadata (VaultCredentialCreateMetadata | Unset):
+            target_url (None | str | Unset):
+            secret_name (None | str | Unset):
+            allowed_hosts (list[str] | None | Unset):
     """
 
-    target_url: str
     auth_type: VaultCredentialCreateAuthType
     access_token: None | str | Unset = UNSET
     expires_at: datetime.datetime | None | Unset = UNSET
@@ -69,15 +73,17 @@ class VaultCredentialCreate:
     password: None | str | Unset = UNSET
     header_name: None | str | Unset = UNSET
     header_value: None | str | Unset = UNSET
+    secret_value: None | str | Unset = UNSET
     display_name: None | str | Unset = UNSET
     metadata: VaultCredentialCreateMetadata | Unset = UNSET
+    target_url: None | str | Unset = UNSET
+    secret_name: None | str | Unset = UNSET
+    allowed_hosts: list[str] | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.token_endpoint_auth_basic import TokenEndpointAuthBasic
         from ..models.token_endpoint_auth_none import TokenEndpointAuthNone
         from ..models.token_endpoint_auth_post import TokenEndpointAuthPost
-
-        target_url = self.target_url
 
         auth_type = self.auth_type.value
 
@@ -167,6 +173,12 @@ class VaultCredentialCreate:
         else:
             header_value = self.header_value
 
+        secret_value: None | str | Unset
+        if isinstance(self.secret_value, Unset):
+            secret_value = UNSET
+        else:
+            secret_value = self.secret_value
+
         display_name: None | str | Unset
         if isinstance(self.display_name, Unset):
             display_name = UNSET
@@ -177,11 +189,31 @@ class VaultCredentialCreate:
         if not isinstance(self.metadata, Unset):
             metadata = self.metadata.to_dict()
 
+        target_url: None | str | Unset
+        if isinstance(self.target_url, Unset):
+            target_url = UNSET
+        else:
+            target_url = self.target_url
+
+        secret_name: None | str | Unset
+        if isinstance(self.secret_name, Unset):
+            secret_name = UNSET
+        else:
+            secret_name = self.secret_name
+
+        allowed_hosts: list[str] | None | Unset
+        if isinstance(self.allowed_hosts, Unset):
+            allowed_hosts = UNSET
+        elif isinstance(self.allowed_hosts, list):
+            allowed_hosts = self.allowed_hosts
+
+        else:
+            allowed_hosts = self.allowed_hosts
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
             {
-                "target_url": target_url,
                 "auth_type": auth_type,
             }
         )
@@ -211,10 +243,18 @@ class VaultCredentialCreate:
             field_dict["header_name"] = header_name
         if header_value is not UNSET:
             field_dict["header_value"] = header_value
+        if secret_value is not UNSET:
+            field_dict["secret_value"] = secret_value
         if display_name is not UNSET:
             field_dict["display_name"] = display_name
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
+        if target_url is not UNSET:
+            field_dict["target_url"] = target_url
+        if secret_name is not UNSET:
+            field_dict["secret_name"] = secret_name
+        if allowed_hosts is not UNSET:
+            field_dict["allowed_hosts"] = allowed_hosts
 
         return field_dict
 
@@ -228,8 +268,6 @@ class VaultCredentialCreate:
         )
 
         d = dict(src_dict)
-        target_url = d.pop("target_url")
-
         auth_type = VaultCredentialCreateAuthType(d.pop("auth_type"))
 
         def _parse_access_token(data: object) -> None | str | Unset:
@@ -404,6 +442,15 @@ class VaultCredentialCreate:
 
         header_value = _parse_header_value(d.pop("header_value", UNSET))
 
+        def _parse_secret_value(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        secret_value = _parse_secret_value(d.pop("secret_value", UNSET))
+
         def _parse_display_name(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -420,8 +467,42 @@ class VaultCredentialCreate:
         else:
             metadata = VaultCredentialCreateMetadata.from_dict(_metadata)
 
+        def _parse_target_url(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        target_url = _parse_target_url(d.pop("target_url", UNSET))
+
+        def _parse_secret_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        secret_name = _parse_secret_name(d.pop("secret_name", UNSET))
+
+        def _parse_allowed_hosts(data: object) -> list[str] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                allowed_hosts_type_0 = cast(list[str], data)
+
+                return allowed_hosts_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[str] | None | Unset, data)
+
+        allowed_hosts = _parse_allowed_hosts(d.pop("allowed_hosts", UNSET))
+
         vault_credential_create = cls(
-            target_url=target_url,
             auth_type=auth_type,
             access_token=access_token,
             expires_at=expires_at,
@@ -436,8 +517,12 @@ class VaultCredentialCreate:
             password=password,
             header_name=header_name,
             header_value=header_value,
+            secret_value=secret_value,
             display_name=display_name,
             metadata=metadata,
+            target_url=target_url,
+            secret_name=secret_name,
+            allowed_hosts=allowed_hosts,
         )
 
         return vault_credential_create

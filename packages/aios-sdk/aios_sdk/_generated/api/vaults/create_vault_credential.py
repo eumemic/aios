@@ -81,18 +81,24 @@ def sync_detailed(
     Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
     ``bearer_header`` requires ``token``; ``basic`` requires ``username``
-    and ``password``. Caps at 20 active credentials per vault. The
-    ``target_url`` is immutable after creation — to retarget a credential,
-    archive the existing one and create a new credential at the new URL.
+    and ``password``; ``custom_header`` requires ``header_name`` and
+    ``header_value``. ``environment_variable`` is the sandbox-materialized
+    kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
+    ``allowed_hosts`` egress scope and ``secret_value``, and carries no
+    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
+    ``secret_name``, and ``auth_type`` are immutable after creation — archive
+    and recreate to change them.
 
     Args:
         vault_id (str):
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. The ``target_url`` is immutable
-            after creation. The service layer validates required fields per
-            ``auth_type``.
+            All secret fields are write-only. ``target_url``, ``secret_name``, and
+            ``auth_type`` are immutable after creation. The service layer validates
+            required secret fields per ``auth_type``; this model validates the
+            structural shape (which kind carries ``target_url`` vs
+            ``secret_name``/``allowed_hosts``).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -129,18 +135,24 @@ def sync(
     Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
     ``bearer_header`` requires ``token``; ``basic`` requires ``username``
-    and ``password``. Caps at 20 active credentials per vault. The
-    ``target_url`` is immutable after creation — to retarget a credential,
-    archive the existing one and create a new credential at the new URL.
+    and ``password``; ``custom_header`` requires ``header_name`` and
+    ``header_value``. ``environment_variable`` is the sandbox-materialized
+    kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
+    ``allowed_hosts`` egress scope and ``secret_value``, and carries no
+    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
+    ``secret_name``, and ``auth_type`` are immutable after creation — archive
+    and recreate to change them.
 
     Args:
         vault_id (str):
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. The ``target_url`` is immutable
-            after creation. The service layer validates required fields per
-            ``auth_type``.
+            All secret fields are write-only. ``target_url``, ``secret_name``, and
+            ``auth_type`` are immutable after creation. The service layer validates
+            required secret fields per ``auth_type``; this model validates the
+            structural shape (which kind carries ``target_url`` vs
+            ``secret_name``/``allowed_hosts``).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -172,18 +184,24 @@ async def asyncio_detailed(
     Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
     ``bearer_header`` requires ``token``; ``basic`` requires ``username``
-    and ``password``. Caps at 20 active credentials per vault. The
-    ``target_url`` is immutable after creation — to retarget a credential,
-    archive the existing one and create a new credential at the new URL.
+    and ``password``; ``custom_header`` requires ``header_name`` and
+    ``header_value``. ``environment_variable`` is the sandbox-materialized
+    kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
+    ``allowed_hosts`` egress scope and ``secret_value``, and carries no
+    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
+    ``secret_name``, and ``auth_type`` are immutable after creation — archive
+    and recreate to change them.
 
     Args:
         vault_id (str):
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. The ``target_url`` is immutable
-            after creation. The service layer validates required fields per
-            ``auth_type``.
+            All secret fields are write-only. ``target_url``, ``secret_name``, and
+            ``auth_type`` are immutable after creation. The service layer validates
+            required secret fields per ``auth_type``; this model validates the
+            structural shape (which kind carries ``target_url`` vs
+            ``secret_name``/``allowed_hosts``).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -218,18 +236,24 @@ async def asyncio(
     Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
     ``bearer_header`` requires ``token``; ``basic`` requires ``username``
-    and ``password``. Caps at 20 active credentials per vault. The
-    ``target_url`` is immutable after creation — to retarget a credential,
-    archive the existing one and create a new credential at the new URL.
+    and ``password``; ``custom_header`` requires ``header_name`` and
+    ``header_value``. ``environment_variable`` is the sandbox-materialized
+    kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
+    ``allowed_hosts`` egress scope and ``secret_value``, and carries no
+    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
+    ``secret_name``, and ``auth_type`` are immutable after creation — archive
+    and recreate to change them.
 
     Args:
         vault_id (str):
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. The ``target_url`` is immutable
-            after creation. The service layer validates required fields per
-            ``auth_type``.
+            All secret fields are write-only. ``target_url``, ``secret_name``, and
+            ``auth_type`` are immutable after creation. The service layer validates
+            required secret fields per ``auth_type``; this model validates the
+            structural shape (which kind carries ``target_url`` vs
+            ``secret_name``/``allowed_hosts``).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

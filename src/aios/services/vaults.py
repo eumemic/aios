@@ -69,6 +69,7 @@ _OAUTH_FIELDS = (
 _BEARER_FIELDS = ("token",)
 _BASIC_FIELDS = ("username", "password")
 _CUSTOM_HEADER_FIELDS = ("header_name", "header_value")
+_ENV_VAR_FIELDS = ("secret_value",)
 
 # Fields required by each auth_type. Used by both create-time validation
 # (against the request body) and post-merge validation (against the merged
@@ -78,6 +79,7 @@ _AUTH_REQUIRED: dict[AuthType, tuple[str, ...]] = {
     "basic": _BASIC_FIELDS,
     "custom_header": _CUSTOM_HEADER_FIELDS,
     "oauth2_refresh": ("access_token",),
+    "environment_variable": _ENV_VAR_FIELDS,
 }
 
 
@@ -90,6 +92,8 @@ def _fields_for(auth_type: AuthType) -> tuple[str, ...]:
         return _BASIC_FIELDS
     if auth_type == "custom_header":
         return _CUSTOM_HEADER_FIELDS
+    if auth_type == "environment_variable":
+        return _ENV_VAR_FIELDS
     assert_never(auth_type)
 
 
@@ -465,6 +469,8 @@ async def create_vault_credential(
             vault_id=vault_id,
             display_name=body.display_name,
             target_url=body.target_url,
+            secret_name=body.secret_name,
+            allowed_hosts=body.allowed_hosts,
             auth_type=body.auth_type,
             blob=blob,
             metadata=body.metadata,

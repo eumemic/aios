@@ -181,6 +181,27 @@ class TestExtractAuthPayload:
         payload = _extract_auth_payload(body)
         assert payload == {"header_name": "X-Api-Key", "header_value": "bu_secret"}
 
+    def test_environment_variable_only_secret_value(self) -> None:
+        body = VaultCredentialCreate(
+            auth_type="environment_variable",
+            secret_name="GITHUB_TOKEN",
+            allowed_hosts=["api.github.com"],
+            secret_value=SecretStr("ghp_xxx"),
+        )
+        payload = _extract_auth_payload(body)
+        # Only the secret value lands in the encrypted blob; secret_name /
+        # allowed_hosts are plaintext columns, not part of the payload.
+        assert payload == {"secret_value": "ghp_xxx"}
+
+    def test_environment_variable_requires_secret_value(self) -> None:
+        body = VaultCredentialCreate(
+            auth_type="environment_variable",
+            secret_name="GITHUB_TOKEN",
+            allowed_hosts=["api.github.com"],
+        )
+        with pytest.raises(ValidationError):
+            _extract_auth_payload(body)
+
     def test_custom_header_requires_header_name(self) -> None:
         body = VaultCredentialCreate(
             target_url="https://api.example.com",
@@ -328,6 +349,23 @@ class TestMergeAuthPayload:
         update = VaultCredentialUpdate(access_token=None)
         with pytest.raises(ValidationError, match="oauth2_refresh"):
             _merge_auth_payload(existing, update, "oauth2_refresh")
+
+    def test_environment_variable_rotates_secret_value(self) -> None:
+        existing = {"secret_value": "old"}
+        update = VaultCredentialUpdate(secret_value=SecretStr("new"))
+        merged = _merge_auth_payload(existing, update, "environment_variable")
+        assert merged == {"secret_value": "new"}
+
+    def test_environment_variable_preserves_secret_on_omit(self) -> None:
+        existing = {"secret_value": "keep"}
+        merged = _merge_auth_payload(existing, VaultCredentialUpdate(), "environment_variable")
+        assert merged == {"secret_value": "keep"}
+
+    def test_unsetting_required_secret_value_is_rejected(self) -> None:
+        existing = {"secret_value": "secret"}
+        update = VaultCredentialUpdate(secret_value=None)
+        with pytest.raises(ValidationError, match="environment_variable"):
+            _merge_auth_payload(existing, update, "environment_variable")
 
 
 # ── update_vault_credential: no private sentinel leaks into queries ──────────
