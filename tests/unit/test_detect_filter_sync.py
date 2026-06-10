@@ -1,25 +1,23 @@
 """Drift checks for the CI detect-filter and sandbox build trigger.
 
-Three invariants are asserted:
+The ``run_checks`` filter in ``code-validation.yml`` gates the heavy
+validation pipeline; this module asserts that it stays in sync with the
+generated surface so a regen-only PR can never take the docs-only skip path:
 
-1. The ``code-validation.yml`` detect-step regex matches root generated and
-   config artifacts (``Dockerfile``, ``compose.yml``, ``openapi.json``) so
-   PRs that touch only those files still run CI.
-
-2. Every committed file that is a generated artifact (``openapi.json`` plus
-   the entire ``packages/aios-sdk/aios_sdk/_generated/`` tree) is matched by
-   that same regex — so future additions to the generated surface don't silently
-   gain a docs-only skip path.  Run ``scripts/regen-client.sh`` and add the new
-   prefix to the detect-filter regex if this test fails.
-
-3. ``.github/workflows/build-sandbox.yml`` triggers on ``bin/tool`` changes,
-   because ``docker/Dockerfile.sandbox`` COPYs that binary into the image — a
-   tool-only master push must rebuild the image, not silently skip it.
+- The detect regex matches ``openapi.json`` and every committed file under
+  ``packages/aios-sdk/aios_sdk/_generated/``.  Run ``scripts/regen-client.sh``
+  and add the new prefix to the regex if this test fails.
+- The detect regex matches the root config/generated artifacts ``Dockerfile``,
+  ``compose.yml``, and ``openapi.json``.
+- ``.github/workflows/build-sandbox.yml`` triggers on ``bin/tool`` changes,
+  because ``docker/Dockerfile.sandbox`` COPYs that binary into the image — a
+  tool-only master push must rebuild the image, not silently skip it.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,10 +26,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _detect_regex() -> str:
-    """Extract the ERE pattern from the grep -qE line in code-validation.yml."""
+    """Extract the ERE pattern from the ``run_checks`` grep -qE in code-validation.yml.
+
+    The workflow has two ``grep -qE`` lines — the ``run_checks`` filter and a
+    later ``sandbox_changed`` filter.  Key on the ``run_checks=true`` that
+    follows the pattern (with no intervening ``grep -qE``) so a reordered or
+    inserted grep can't silently make this test guard the wrong filter.
+    """
     workflow = (_REPO_ROOT / ".github" / "workflows" / "code-validation.yml").read_text()
-    m = re.search(r"grep -qE '([^']*)'", workflow)
-    assert m is not None, "Could not find 'grep -qE ...' line in code-validation.yml"
+    m = re.search(r"grep -qE '([^']*)'(?:(?!grep -qE).)*?run_checks=true", workflow, re.DOTALL)
+    assert m is not None, "Could not find the run_checks 'grep -qE ...' in code-validation.yml"
     return m.group(1)
 
 
@@ -56,14 +60,19 @@ def test_detect_filter_matches_all_generated_artifacts() -> None:
     """
     pattern = _detect_regex()
 
-    generated_dir = _REPO_ROOT / "packages" / "aios-sdk" / "aios_sdk" / "_generated"
-    # Only committed files — exclude __pycache__/*.pyc and other untracked artefacts.
-    artifact_paths = ["openapi.json"] + [
-        p.relative_to(_REPO_ROOT).as_posix()
-        for p in generated_dir.rglob("*")
-        if p.is_file() and "__pycache__" not in p.parts
-    ]
+    # ``git ls-files`` gives exactly the committed files (repo-relative POSIX
+    # paths) — no __pycache__, no untracked/gitignored artefacts.
+    out = subprocess.run(
+        ["git", "ls-files", "packages/aios-sdk/aios_sdk/_generated/"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    sdk_files = out.stdout.split()
+    assert sdk_files, "git ls-files found no committed files under aios_sdk/_generated/"
 
+    artifact_paths = ["openapi.json", *sdk_files]
     unmatched = [p for p in artifact_paths if not re.search(pattern, p)]
 
     assert not unmatched, (
