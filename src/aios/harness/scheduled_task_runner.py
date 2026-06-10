@@ -210,6 +210,34 @@ async def run_scheduled_task_step(task_id: str) -> None:
                     name=task.name,
                     consecutive_failures=new_failures,
                 )
+        # Surface the auto-disable AFTER the transaction commits — _surface_failure
+        # re-acquires the pool, so nesting it inside the open transaction connection
+        # risks deadlock on the small pool. Mirrors the one-shot path, which also
+        # holds no transaction while surfacing.
+        if new_failures >= MAX_CONSECUTIVE_FAILURES:
+            content = (
+                f"[Scheduled task '{task.name}' auto-disabled after "
+                f"{MAX_CONSECUTIVE_FAILURES} consecutive failures: "
+                f"{error_summary or status}]"
+            )
+            await _surface_failure(task.session_id, task.account_id, content)
+
+
+async def _surface_failure(session_id: str, account_id: str, content: str) -> None:
+    """Append a synthetic user message + defer a wake (best-effort).
+
+    Shared by the one-shot failure path and the cron auto-disable path so
+    both surface a user-visible event instead of failing silently.
+    """
+    pool = runtime.require_pool()
+    try:
+        await sessions_service.append_user_message(pool, session_id, content, account_id=account_id)
+        await defer_wake(pool, session_id, cause="message", account_id=account_id)
+    except Exception:
+        log.exception(
+            "scheduled_task.surface_failure_failed",
+            session_id=session_id,
+        )
 
 
 async def _surface_one_shot_failure(
@@ -230,19 +258,6 @@ async def _surface_one_shot_failure(
     the model sees a deterministic failure event and can decide what to
     do next.
     """
-    pool = runtime.require_pool()
     detail = error_summary or status
     content = f"[Scheduled wake '{name}' failed to deliver: {detail}]"
-    try:
-        await sessions_service.append_user_message(pool, session_id, content, account_id=account_id)
-        await defer_wake(pool, session_id, cause="message", account_id=account_id)
-    except Exception:
-        # Best-effort: if we can't even append the failure event, log
-        # loudly so the operator notices. The agent will not see this
-        # particular wake's outcome.
-        log.exception(
-            "scheduled_task.surface_failure_failed",
-            session_id=session_id,
-            name=name,
-            status=status,
-        )
+    await _surface_failure(session_id, account_id, content)
