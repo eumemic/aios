@@ -22,12 +22,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest import mock
 
 import httpx
 import pytest
 
-from tests.helpers.connections import authed_client
+from tests.helpers.connections import authed_client, wired_app
 
 
 @pytest.fixture
@@ -43,18 +42,7 @@ async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
 
 @pytest.fixture
 async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[httpx.AsyncClient]:
-    from aios.api.app import create_app
-    from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
-
-    settings = get_settings()
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
-
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx.ASGITransport(app=wired_app(pool))
     async with authed_client(
         "http://testserver",
         aios_env["AIOS_API_KEY"],

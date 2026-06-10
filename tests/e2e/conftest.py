@@ -26,7 +26,7 @@ import pytest
 import uvicorn
 
 from tests.e2e.harness import Harness
-from tests.helpers.connections import authed_client, wait_for_health
+from tests.helpers.connections import authed_client, wait_for_health, wired_app
 
 _DEFAULT_DEFER_WAKE_PATCHES: tuple[str, ...] = (
     "aios.api.routers.sessions.defer_wake",
@@ -50,18 +50,12 @@ async def _live_aios_server_impl(
     graceful shutdown) is identical, so factoring it out keeps the two
     public entry points to a thin wrapper each.
     """
-    from aios.api.app import create_app
     from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
     from aios.db.pool import create_pool
 
     settings = get_settings()
     pool = await create_pool(settings.db_url, min_size=1, max_size=pool_max_size)
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
+    app = wired_app(pool)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
@@ -414,20 +408,14 @@ async def http_client(aios_env: dict[str, str]) -> AsyncIterator[Any]:
     """
     import httpx
 
-    from aios.api.app import create_app
     from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
     from aios.db.pool import create_pool
     from aios.harness import runtime
     from aios_connectors.providers import SubsystemToolProvider
 
     settings = get_settings()
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
+    app = wired_app(pool)
     # The fixture skips the API lifespan (httpx ASGITransport doesn't
     # fire startup/shutdown), so mirror the lifespan's runtime
     # registrations explicitly — the ``/context`` endpoint reaches

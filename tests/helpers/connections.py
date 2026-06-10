@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 from unittest import mock
@@ -27,6 +28,51 @@ import httpx
 
 if TYPE_CHECKING:
     import asyncpg
+    from fastapi import FastAPI
+
+
+@functools.cache
+def _shared_app() -> FastAPI:
+    """The one FastAPI app this test process serves — built on first use.
+
+    ``create_app()`` costs ~0.3 s (router registration plus fastapi-mcp's
+    OpenAPI build for the ``/mcp`` mount).  Paying that per test made app
+    construction the dominant cost of the e2e suite, so every app-wiring
+    fixture shares this instance via :func:`wired_app`.  Sharing is sound
+    because tests touch nothing on the app beyond ``app.state``, and
+    request handlers read settings per request (``get_settings`` is
+    cache-cleared per test by ``aios_env_minimal``).  Under pytest-xdist
+    each worker process gets its own instance.
+
+    The load-bearing invariant: tests must NEVER mutate this app beyond
+    ``app.state`` — no ``dependency_overrides``, no route/middleware
+    registration.  Any of those would leak into every later test in the
+    process.  A test that genuinely needs them should build its own
+    ``FastAPI()`` (see ``tests/unit/test_sse_preflight.py``).
+    """
+    from aios.api.app import create_app
+
+    return create_app()
+
+
+def wired_app(pool: Any) -> FastAPI:
+    """The shared app with this test's state bound.
+
+    ``crypto_box`` / ``db_url`` come from settings (already mocked by the
+    caller's ``aios_env*`` fixture); ``procrastinate`` is a fresh
+    ``MagicMock`` per call so mock assertions never see another test's
+    wake deferrals.
+    """
+    from aios.config import get_settings
+    from aios.crypto.vault import CryptoBox
+
+    settings = get_settings()
+    app = _shared_app()
+    app.state.pool = pool
+    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+    app.state.db_url = settings.db_url
+    app.state.procrastinate = mock.MagicMock()
+    return app
 
 
 def authed_client(base_url: str, token: str, **kwargs: Any) -> httpx.AsyncClient:
@@ -102,27 +148,15 @@ async def create_connection(api_key: str, base_url: str, account: str) -> str:
 
 @contextlib.asynccontextmanager
 async def asgi_client(pool: Any) -> AsyncIterator[httpx.AsyncClient]:
-    """In-process ``httpx.AsyncClient`` wired to a fresh FastAPI app.
+    """In-process ``httpx.AsyncClient`` wired to the shared FastAPI app.
 
-    The app's pool / crypto_box / db_url are populated from settings
-    (which the caller's ``aios_env*`` fixture has already mocked); the
-    procrastinate handle is a mock since e2e auth tests don't run jobs.
-    Shared by tests that build the app themselves rather than going
-    through a running uvicorn — see ``tests/e2e/test_account_auth.py``
-    and ``tests/e2e/test_accounts_bootstrap.py``.
+    State binding is :func:`wired_app`'s; the procrastinate handle is a
+    mock since e2e auth tests don't run jobs.  Shared by tests that build
+    the app themselves rather than going through a running uvicorn — see
+    ``tests/e2e/test_account_auth.py`` and
+    ``tests/e2e/test_accounts_bootstrap.py``.
     """
-    from aios.api.app import create_app
-    from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
-
-    settings = get_settings()
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
-
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx.ASGITransport(app=wired_app(pool))
     async with httpx.AsyncClient(base_url="http://testserver", transport=transport) as client:
         yield client
 
