@@ -454,20 +454,30 @@ def _build_litellm_kwargs(
 
 def _unpack_litellm_response(
     obj: Any, *, source: str
-) -> tuple[dict[str, Any], dict[str, int], float | None]:
-    """Extract ``(message, usage, cost)``; ``source`` labels the TypeError on bad message shape."""
+) -> tuple[dict[str, Any], dict[str, int], float | None, str | None]:
+    """Extract ``(message, usage, cost, finish_reason)``.
+
+    ``finish_reason`` is litellm's standardized stop reason for the choice
+    (``"stop"``, ``"tool_calls"``, ``"length"``, ``"content_filter"`` for a
+    safety refusal, …). The harness branches on ``"content_filter"`` to treat
+    a refusal as a bricked turn rather than a normal completion (see
+    ``loop.REFUSAL_FINISH_REASON``). ``source`` labels the TypeError on bad
+    message shape.
+    """
     usage_obj = obj.get("usage")
     usage = _normalize_usage(
         usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj or {}
     )
     cost = _extract_cost(obj)
-    message = obj["choices"][0]["message"]
+    choice = obj["choices"][0]
+    finish_reason: str | None = choice.get("finish_reason")
+    message = choice["message"]
     # litellm returns a Message object that supports model_dump()
     if hasattr(message, "model_dump"):
         result: dict[str, Any] = message.model_dump()
-        return _normalize_message(result), usage, cost
+        return _normalize_message(result), usage, cost, finish_reason
     if isinstance(message, dict):
-        return _normalize_message(message), usage, cost
+        return _normalize_message(message), usage, cost, finish_reason
     raise TypeError(f"unexpected message type from {source}: {type(message).__name__}")
 
 
@@ -479,14 +489,17 @@ async def call_litellm(
     api_base: str | None = None,
     extra: dict[str, Any] | None = None,
     session_id: str | None = None,
-) -> tuple[dict[str, Any], dict[str, int], float | None]:
-    """Call ``litellm.acompletion`` and return ``(message, usage, cost)``.
+) -> tuple[dict[str, Any], dict[str, int], float | None, str | None]:
+    """Call ``litellm.acompletion`` and return ``(message, usage, cost, finish_reason)``.
 
     Returns the message exactly as litellm produced it, including any
     provider-specific extensions like ``reasoning_content`` or
     ``thinking_blocks``. The harness stores the message dict opaquely.
     Usage is normalized to our canonical field names. Cost is LiteLLM's
     per-request USD figure, or ``None`` when the provider doesn't report it.
+    ``finish_reason`` is litellm's standardized stop reason for the choice
+    (notably ``"content_filter"`` for a safety refusal — see
+    ``_unpack_litellm_response``).
 
     ``session_id`` (when provided on the openai provider path) is forwarded
     as OpenAI's ``prompt_cache_key`` so successive turns of the same
@@ -515,14 +528,18 @@ async def stream_litellm(
     extra: dict[str, Any] | None = None,
     pool: asyncpg.Pool[Any],
     session_id: str,
-) -> tuple[dict[str, Any], dict[str, int], float | None]:
-    """Call ``litellm.acompletion`` with streaming, returning ``(message, usage, cost)``.
+) -> tuple[dict[str, Any], dict[str, int], float | None, str | None]:
+    """Call ``litellm.acompletion`` with streaming, returning ``(message, usage, cost, finish_reason)``.
 
     Each content delta fires a transient ``pg_notify`` on the session's
     event channel. SSE clients receive these as ``event: delta`` — no DB
     row is created. After the stream exhausts, the complete message is
     assembled via ``litellm.stream_chunk_builder`` and returned for
-    storage as a normal event.
+    storage as a normal event. ``stream_chunk_builder`` reassembles the
+    ``finish_reason`` with an unconditional last-wins loop, so a trailing
+    chunk can clobber a ``content_filter`` refusal; the loop below captures
+    the refusal off the wire and re-asserts it so the signal survives the
+    streaming path too.
     """
     inject_cache_breakpoints(messages, tools, model)
     kwargs = _build_litellm_kwargs(
@@ -549,6 +566,17 @@ async def stream_litellm(
     chunks: list[Any] = []
     aiter = response.__aiter__()
     first = True
+    # Capture a ``content_filter`` refusal directly off the wire. litellm
+    # 1.83.4's ``stream_chunk_builder`` derives the assembled ``finish_reason``
+    # via an UNCONDITIONAL last-wins loop over chunks, and its Anthropic
+    # streaming adapter defaults ``finish_reason=""`` on every chunk (setting
+    # the mapped value only on the ``message_delta`` event). So any
+    # choice-bearing chunk arriving AFTER the refusal (e.g. an auto
+    # ``include_usage`` trailer carrying ``finish_reason`` in {"", None,
+    # "stop"}) silently clobbers ``content_filter`` back to ``"stop"`` —
+    # defeating ``loop.REFUSAL_FINISH_REASON`` gating on the streaming path.
+    # Make it sticky: once seen on the wire, override the assembled value.
+    saw_content_filter = False
     while True:
         timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S
         try:
@@ -561,6 +589,12 @@ async def stream_litellm(
         # include_usage) emit a terminal usage-summary chunk with empty choices.
         if not chunk.choices:
             continue
+        # ``"content_filter"`` == ``loop.REFUSAL_FINISH_REASON`` (literal here
+        # to avoid a loop<->completion import cycle). ``getattr`` guard: real
+        # litellm chunks always carry ``finish_reason`` (defaults None/""), but
+        # a partial/edge chunk that omits it must not crash the stream loop.
+        if getattr(chunk.choices[0], "finish_reason", None) == "content_filter":
+            saw_content_filter = True
         content = chunk.choices[0].delta.content
         if content:
             await _notify_delta(pool, session_id, content)
@@ -581,7 +615,15 @@ async def stream_litellm(
             f"{model!r}; the provider closed the connection without emitting "
             f"any data"
         )
-    return _unpack_litellm_response(assembled, source="stream_chunk_builder")
+    message, usage, cost, finish_reason = _unpack_litellm_response(
+        assembled, source="stream_chunk_builder"
+    )
+    # Restore a refusal that stream_chunk_builder's last-wins loop clobbered
+    # (see ``saw_content_filter`` above). Zero behavior change on the happy
+    # path: only fires when the wire actually carried a ``content_filter``.
+    if saw_content_filter and finish_reason != "content_filter":
+        finish_reason = "content_filter"
+    return message, usage, cost, finish_reason
 
 
 async def _notify_delta(

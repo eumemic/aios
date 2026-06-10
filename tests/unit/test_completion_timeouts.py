@@ -128,7 +128,7 @@ async def test_stream_litellm_long_ttft_succeeds_when_inter_chunk_is_fast(
         },
     )
 
-    message, _, _ = await completion.stream_litellm(
+    message, _, _, _ = await completion.stream_litellm(
         model="anthropic/claude-sonnet-4-6",
         messages=[{"role": "user", "content": "ping"}],
         pool=_StubPool(),  # type: ignore[arg-type]
@@ -259,7 +259,7 @@ async def test_stream_litellm_tolerates_empty_choices_chunk(
     monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
     monkeypatch.setattr(completion.litellm, "stream_chunk_builder", fake_builder)
 
-    message, _, _ = await completion.stream_litellm(
+    message, _, _, _ = await completion.stream_litellm(
         model="openrouter/anthropic/claude-sonnet-4-6",
         messages=[{"role": "user", "content": "ping"}],
         pool=_StubPool(),  # type: ignore[arg-type]

@@ -64,6 +64,26 @@ _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
 # budget).
 _JOB_TIMEOUT_S = 300.0
 
+# litellm's standardized ``finish_reason`` for a safety refusal. Anthropic's
+# ``stop_reason: "refusal"`` maps here; OpenAI/Azure ``content_filter`` lands
+# here too. A refusal is a *bricked* turn: the response is often truncated
+# mid-generation (a tool call with a half-written argument the API closes into
+# valid-but-wrong JSON) or empty (refused at token 1). Persisting it poisons
+# subsequent turns and dispatching its tool calls is dangerous, so the step
+# surfaces it as an errored turn instead of treating it as a normal completion.
+# Keyed on the standardized value — NOT on any provider/model name — so it
+# stays provider-agnostic.
+REFUSAL_FINISH_REASON = "content_filter"
+
+# Operator-facing message on the errored stop_reason. Renders behind the
+# console's "Errored" pill (status idle + stop_reason.type == "error").
+_REFUSAL_STOP_REASON_MESSAGE = (
+    "Model returned a content_filter refusal; the turn was not dispatched. "
+    "The model likely refused due to conversation content. To recover, post a "
+    "message to the session (optionally after switching the agent's model or "
+    "trimming the conversation that triggered the refusal)."
+)
+
 
 def _retry_delay_for_attempt(attempt: int) -> float | None:
     """Return the backoff delay for ``attempt``, or ``None`` if the budget is spent."""
@@ -443,7 +463,7 @@ async def _run_session_step_body(
     subscribed = await has_subscriber(pool, session_id)
     try:
         if subscribed:
-            assistant_msg, usage, cost_usd = await stream_litellm(
+            assistant_msg, usage, cost_usd, finish_reason = await stream_litellm(
                 model=agent.model,
                 messages=messages,
                 tools=tools if tools else None,
@@ -452,7 +472,7 @@ async def _run_session_step_body(
                 session_id=session_id,
             )
         else:
-            assistant_msg, usage, cost_usd = await call_litellm(
+            assistant_msg, usage, cost_usd, finish_reason = await call_litellm(
                 model=agent.model,
                 messages=messages,
                 tools=tools if tools else None,
@@ -500,7 +520,9 @@ async def _run_session_step_body(
         account_id=account_id,
     )
 
-    # Increment cumulative session-level token counters.
+    # Increment cumulative session-level token counters. A refusal still
+    # consumed tokens upstream, so this (and the model_request_end span above)
+    # runs unconditionally — only the *persist + dispatch* below is suppressed.
     await sessions_service.increment_usage(
         pool,
         session_id,
@@ -510,6 +532,32 @@ async def _run_session_step_body(
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
         account_id=account_id,
     )
+
+    # A refusal bricks the turn: the assistant message is partial/empty and its
+    # tool calls may be truncated. Do NOT persist it as a normal assistant turn
+    # (it would poison subsequent context) and do NOT dispatch its tool calls
+    # (a cut argument can hit a wrong-but-valid target). Record the refusal as a
+    # span (excluded from build_messages replay) and latch the session into the
+    # errored state, where it parks until a user message recovers it. End the
+    # step cleanly — no tool dispatch, normal step_end/turn_ended bracketing.
+    if finish_reason == REFUSAL_FINISH_REASON:
+        await _handle_refusal(
+            pool,
+            session_id,
+            assistant_msg,
+            finish_reason=finish_reason,
+            account_id=account_id,
+        )
+        log.warning(
+            "step.model_refusal",
+            session_id=session_id,
+            finish_reason=finish_reason,
+            had_tool_calls=bool(assistant_msg.get("tool_calls")),
+        )
+        # No ``archive_when_idle``: an errored session parks for recovery, exactly
+        # like the litellm-error / retry-budget-exhausted paths, which never
+        # self-archive. A user message lifts it back to pending.
+        return _StepResult()
 
     if channels:
         from aios.harness.channels import apply_monologue_prefix
@@ -930,6 +978,63 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
         pool, session_id, "turn_ended", "errored", "error", account_id=account_id
     )
     return None
+
+
+async def _handle_refusal(
+    pool: Any,
+    session_id: str,
+    assistant_msg: dict[str, Any],
+    *,
+    finish_reason: str,
+    account_id: str,
+) -> None:
+    """Latch a model refusal (``finish_reason == content_filter``) as an errored turn.
+
+    The refused assistant message is NOT persisted as a normal turn (it would
+    replay as poison) and its tool calls are NOT dispatched (they may be
+    truncated). The partial content/tool_calls are stashed on a ``span`` event
+    for debugging — ``build_messages`` only replays ``kind == "message"`` events,
+    so the span never re-enters context. The session then lands in the terminal
+    ``errored`` state via the same surface as the retry-budget-exhausted path
+    (see ``_apply_retry_or_failure``): a workflow child's open requests are
+    failed so its callers resolve, the stop_reason latches to ``error`` (drives
+    the console "Errored" pill), and the error lifecycle event bumps
+    ``last_error_seq`` so the sweep parks the session until a user message
+    recovers it.
+    """
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "model_refusal",
+            "is_error": True,
+            "finish_reason": finish_reason,
+            # Kept for debugging only — a span is never replayed by build_messages.
+            "partial_content": assistant_msg.get("content") or "",
+            "partial_tool_calls": assistant_msg.get("tool_calls") or [],
+        },
+        account_id=account_id,
+    )
+    # Mirror the terminal branch of ``_apply_retry_or_failure``: resolve a
+    # workflow child's open requests BEFORE latching the error (the latch makes
+    # the sweep skip the session — see the ordering note there).
+    await fail_all_open_requests(
+        pool, session_id, account_id=account_id, error={"kind": "model_refusal"}
+    )
+    await sessions_service.set_session_stop_reason(
+        pool,
+        session_id,
+        {
+            "type": "error",
+            "message": _REFUSAL_STOP_REASON_MESSAGE,
+            "finish_reason": finish_reason,
+        },
+        account_id=account_id,
+    )
+    await _append_lifecycle(
+        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
+    )
 
 
 async def _handle_step_timeout(pool: Any, session_id: str, *, account_id: str) -> float | None:
