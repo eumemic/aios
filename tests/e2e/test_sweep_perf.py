@@ -73,6 +73,71 @@ _N_TC_PER_ASST = 4  # tool_calls per assistant message
 _N_TC_DEEP_ASST = 500
 
 
+def _tc_session_rows(session_id: str, n_asst: int) -> list[tuple[Any, ...]]:
+    """Build the event rows for one fully-resolved, fully-reacted tool-call
+    session: ``n_asst`` assistant messages each carrying ``_N_TC_PER_ASST``
+    tool_calls, every call paired with a tool result, plus a final assistant
+    message reacting to the tail (so there is no unreacted stimulus). The
+    ``sess_tc_*`` and ``sess_tc_deep`` fixtures differ ONLY in id and depth;
+    everything else about the row shape is shared here.
+    """
+    rows: list[tuple[Any, ...]] = []
+    seq = 1
+    for i in range(n_asst):
+        tcids = [f"tc_{session_id}_{i}_{k}" for k in range(_N_TC_PER_ASST)]
+        rows.append(
+            (
+                f"ev_a_{session_id}_{i}",
+                session_id,
+                seq,
+                "message",
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tc,
+                                "type": "function",
+                                "function": {"name": "bash", "arguments": "{}"},
+                            }
+                            for tc in tcids
+                        ],
+                        "reacting_to": seq - 1,
+                    }
+                ),
+                "assistant",
+            )
+        )
+        seq += 1
+        for tc in tcids:
+            rows.append(
+                (
+                    f"ev_t_{session_id}_{i}_{tc}",
+                    session_id,
+                    seq,
+                    "message",
+                    json.dumps({"role": "tool", "tool_call_id": tc, "content": "ok"}),
+                    "tool",
+                )
+            )
+            seq += 1
+    # Final assistant message reacts to every tool result, so there is no
+    # unreacted stimulus — the active OR can't short-circuit and must evaluate
+    # the (fully-resolved) tool_call branch.
+    rows.append(
+        (
+            f"ev_a_{session_id}_final",
+            session_id,
+            seq,
+            "message",
+            json.dumps({"role": "assistant", "content": "done", "reacting_to": seq - 1}),
+            "assistant",
+        )
+    )
+    return rows
+
+
 async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
     """Seed the shape that triggers the pre-#140 correlated-subquery
     pathology: multiple sessions, each with many assistant messages
@@ -174,60 +239,7 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
                 "ON CONFLICT (id) DO NOTHING",
                 tsid,
             )
-            rows = []
-            seq = 1
-            for i in range(_N_TC_ASST_PER):
-                tcids = [f"tc_{tsid}_{i}_{k}" for k in range(_N_TC_PER_ASST)]
-                rows.append(
-                    (
-                        f"ev_a_{tsid}_{i}",
-                        tsid,
-                        seq,
-                        "message",
-                        json.dumps(
-                            {
-                                "role": "assistant",
-                                "content": None,
-                                "tool_calls": [
-                                    {
-                                        "id": tc,
-                                        "type": "function",
-                                        "function": {"name": "bash", "arguments": "{}"},
-                                    }
-                                    for tc in tcids
-                                ],
-                                "reacting_to": seq - 1,
-                            }
-                        ),
-                        "assistant",
-                    )
-                )
-                seq += 1
-                for tc in tcids:
-                    rows.append(
-                        (
-                            f"ev_t_{tsid}_{i}_{tc}",
-                            tsid,
-                            seq,
-                            "message",
-                            json.dumps({"role": "tool", "tool_call_id": tc, "content": "ok"}),
-                            "tool",
-                        )
-                    )
-                    seq += 1
-            # Final assistant message reacts to every tool result, so there is no
-            # unreacted stimulus — the active OR can't short-circuit and must
-            # evaluate the (fully-resolved) tool_call branch.
-            rows.append(
-                (
-                    f"ev_a_{tsid}_final",
-                    tsid,
-                    seq,
-                    "message",
-                    json.dumps({"role": "assistant", "content": "done", "reacting_to": seq - 1}),
-                    "assistant",
-                )
-            )
+            rows = _tc_session_rows(tsid, _N_TC_ASST_PER)
             await conn.executemany(
                 "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
                 "VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'acc_test_stub') "
@@ -250,58 +262,7 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
             "ON CONFLICT (id) DO NOTHING",
             deep_sid,
         )
-        rows = []
-        seq = 1
-        for i in range(_N_TC_DEEP_ASST):
-            tcids = [f"tc_{deep_sid}_{i}_{k}" for k in range(_N_TC_PER_ASST)]
-            rows.append(
-                (
-                    f"ev_a_{deep_sid}_{i}",
-                    deep_sid,
-                    seq,
-                    "message",
-                    json.dumps(
-                        {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": tc,
-                                    "type": "function",
-                                    "function": {"name": "bash", "arguments": "{}"},
-                                }
-                                for tc in tcids
-                            ],
-                            "reacting_to": seq - 1,
-                        }
-                    ),
-                    "assistant",
-                )
-            )
-            seq += 1
-            for tc in tcids:
-                rows.append(
-                    (
-                        f"ev_t_{deep_sid}_{i}_{tc}",
-                        deep_sid,
-                        seq,
-                        "message",
-                        json.dumps({"role": "tool", "tool_call_id": tc, "content": "ok"}),
-                        "tool",
-                    )
-                )
-                seq += 1
-        # Final assistant message reacts to the tail — no unreacted stimulus.
-        rows.append(
-            (
-                f"ev_a_{deep_sid}_final",
-                deep_sid,
-                seq,
-                "message",
-                json.dumps({"role": "assistant", "content": "done", "reacting_to": seq - 1}),
-                "assistant",
-            )
-        )
+        rows = _tc_session_rows(deep_sid, _N_TC_DEEP_ASST)
         await conn.executemany(
             "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
             "VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'acc_test_stub') "
@@ -463,8 +424,10 @@ class TestSweepQueryBudget:
             result = json.loads(result)
         root = result[0]["Plan"]
         hits = _total_buffer_hits(root)
-        # Fixture seeds ~2600 events; linear-scan cost is ~2.6k hits. We
-        # allow generous headroom; the pre-fix path burnt ~1.8M here.
+        # The fixture seeds a few thousand events, so a healthy linear-scan plan
+        # costs a few thousand buffer hits. We allow generous headroom (the
+        # budget is sized to the plan *shape*, not the exact event count, so it
+        # won't go stale as the fixture grows); the pre-fix N+1 path burnt ~1.8M.
         assert hits < 50_000, f"candidate_rows uses {hits} buffer hits — N+1 regression?"
 
     async def test_list_sessions_status_derivation_budget(
