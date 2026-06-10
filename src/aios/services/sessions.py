@@ -503,12 +503,15 @@ async def await_session(
         raise ValidationError("provide request_id or watermark, not both")
 
     # Scope-check FIRST (404s cross-tenant before any LISTEN opens) and capture the
-    # default watermark's ``last_stimulus_seq`` in the same acquire.
+    # default watermark's ``last_stimulus_seq`` in the same read. ``read_session_watermarks``
+    # already enforces ``WHERE id = $1 AND account_id = $2`` and returns None when the row is
+    # missing OR cross-tenant — the same scope guarantee as ``get_session`` — so one call both
+    # 404s and yields the watermark scalars.
     async with pool.acquire() as conn:
-        await queries.get_session(conn, session_id, account_id=account_id)  # 404s cross-tenant
         captured = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
-    captured_last_stimulus_seq = captured[1] if captured is not None else 0
-    effective_watermark = watermark if watermark is not None else captured_last_stimulus_seq
+    if captured is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    effective_watermark = watermark if watermark is not None else captured[1]  # last_stimulus_seq
 
     if request_id is not None:
 
