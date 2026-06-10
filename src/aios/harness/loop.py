@@ -168,32 +168,35 @@ async def run_session_step(
     # see that block). Bound AFTER the gone-session guard — that path is an
     # idempotent no-op with no account to attribute.
     bind_contextvars(session_id=session_id, account_id=account_id, cause=cause)
-    task_registry = runtime.require_task_registry()
-
-    # Outermost span pair: brackets the entire step (issue #131).  Emitted
-    # before the sweep guard so early-outs are also measured — a "wasted
-    # wake" cost shows up as a ``step_start``/``step_end`` pair with no
-    # ``context_build_*`` inside.  ``step_start_id`` backpointer on the
-    # end event matches the ``context_build_start_id`` convention.
-    step_start = await sessions_service.append_event(
-        pool,
-        session_id,
-        "span",
-        {"event": "step_start", "cause": cause},
-        account_id=account_id,
-    )
-    current_task = asyncio.current_task()
-    assert current_task is not None
-    task_registry.register_step(session_id, current_task)
-    result = _StepResult()
     # Outer try/finally guarantees ``clear_contextvars`` is the VERY LAST thing the
     # step does: the post-step wakes and archive-reclaim below (and their nested
     # ``defer_wake`` logging) must still carry account_id/session_id/cause, so the
     # clear can only run once every per-step log line has been emitted. Clearing is
     # defensive hygiene — contextvars are task-scoped and procrastinate runs each job
     # in a fresh asyncio task, but dropping the bindings here keeps them from
-    # outliving the step regardless of how the worker schedules tasks.
+    # outliving the step regardless of how the worker schedules tasks. The try opens
+    # IMMEDIATELY after the bind so the still-fallible setup below (``step_start``
+    # append, ``register_step``) can't escape with the contextvars still bound — e.g.
+    # a DB drop or a session archived in the race window past the account_id guard.
     try:
+        task_registry = runtime.require_task_registry()
+
+        # Outermost span pair: brackets the entire step (issue #131).  Emitted
+        # before the sweep guard so early-outs are also measured — a "wasted
+        # wake" cost shows up as a ``step_start``/``step_end`` pair with no
+        # ``context_build_*`` inside.  ``step_start_id`` backpointer on the
+        # end event matches the ``context_build_start_id`` convention.
+        step_start = await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {"event": "step_start", "cause": cause},
+            account_id=account_id,
+        )
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        task_registry.register_step(session_id, current_task)
+        result = _StepResult()
         try:
             try:
                 result = await asyncio.wait_for(
