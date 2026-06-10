@@ -73,7 +73,6 @@ _CHILD_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "TZ",
         "PYTHONPATH",
         "PYTHONHOME",
-        "PYTHONHASHSEED",
         "VIRTUAL_ENV",
         "__PYVENV_LAUNCHER__",  # macOS venv re-exec
         "SYSTEMROOT",  # Windows interpreter launch
@@ -171,6 +170,13 @@ async def run_script_host(
     # spawn (see ``_CHILD_ENV_ALLOWLIST``), plus the two rlimit knobs the child
     # self-applies. The child must stay credential-free.
     env = {k: os.environ[k] for k in _CHILD_ENV_ALLOWLIST if k in os.environ}
+    # DETERMINISM (load-bearing): pin the hash seed so str-hash-dependent orderings
+    # are identical across wakes. Every wake is a fresh interpreter; under an
+    # inherited/random seed, ``list({"a", "b"})`` reorders per wake, and if such an
+    # ordering feeds a capability spec the call_key desyncs and replay-with-memo
+    # breaks. (``canonical_json`` rejects sets directly, but a list *built from* a
+    # set is indistinguishable from any other list.)
+    env["PYTHONHASHSEED"] = "0"
     env["AIOS_WF_RLIMIT_CPU_S"] = str(cpu_seconds)
     env["AIOS_WF_RLIMIT_AS_BYTES"] = str(address_space_bytes or 0)
     try:

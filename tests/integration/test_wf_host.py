@@ -8,6 +8,9 @@ deadline and the parent stays healthy).
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -15,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from aios.workflows.determinism import content_hash
 from aios.workflows.host_launcher import HostOutcome, run_script_host
 from aios.workflows.wf_script_host import MAX_PARALLEL_FANOUT
 
@@ -149,16 +153,192 @@ async def test_agent_requires_non_none_input() -> None:
 
 async def test_bad_capability_input_is_raised() -> None:
     out = await _run(
-        "async def main(input):\n    return await gate({'t': (1, 2)})"
-    )  # tuple spec rejected
+        "async def main(input):\n    return await gate({'t': {1, 2}})"
+    )  # set spec rejected (hash-ordering hazard)
     assert out.kind == "raised"
     assert "WorkflowInputTypeError" in (out.error_repr or "")
+
+
+async def test_tuple_spec_is_coerced_not_rejected() -> None:
+    # Tuples canonicalize as lists: a tuple-spec gate suspends, keyed exactly as
+    # its list twin (the author and an upstream JSON round-trip agree).
+    out = await _run("async def main(input):\n    return await gate({'t': (1, 2)})")
+    assert out.kind == "suspended"
+    assert out.emitted[0].call_key == f"sha:{content_hash('gate', {'t': [1, 2]})}#0"
 
 
 async def test_missing_main_is_raised() -> None:
     out = await _run("x = 1")
     assert out.kind == "raised"
     assert "main(input)" in (out.error_repr or "")
+
+
+# ─── curated stdlib + classes (T5) ───────────────────────────────────────────
+
+
+async def test_script_can_import_curated_stdlib() -> None:
+    out = await _run(
+        r"""
+        import collections.abc  # an entry admits its submodules
+        import json
+        import math
+        import re
+        from urllib.parse import quote
+
+        async def main(input):
+            data = json.loads('{"items": ["a 12", "b 7"]}')
+            nums = [int(re.search(r"\d+", s).group()) for s in data["items"]]
+            return {
+                "total": sum(nums),
+                "hypot": math.hypot(3, 4),
+                "quoted": quote("a b"),
+                "encoded": json.dumps(sorted(nums)),
+                "is_seq": isinstance(nums, collections.abc.Sequence),
+            }
+        """
+    )
+    assert out.kind == "returned"
+    assert out.value == {
+        "total": 19,
+        "hypot": 5.0,
+        "quoted": "a%20b",
+        "encoded": "[7, 12]",
+        "is_seq": True,
+    }
+
+
+async def test_script_parses_json_tool_body_with_regex() -> None:
+    """The acceptance workload: parse a JSON HTTP body and regex it — the glue
+    every non-trivial coordination script needs (previously unwritable: scripts
+    hand-rolled JSON escaping and delegated parsing to agent() children)."""
+    source = r"""
+    import json
+    import re
+
+    async def main(input):
+        resp = await tool("http_request", {"method": "GET", "url": "https://api.test/x"})
+        body = json.loads(resp["body"])
+        return re.findall(r"#(\d+)", body["title"])
+    """
+    first = await _run(source)
+    assert first.kind == "suspended"  # the tool call is the frontier
+    (cap,) = first.emitted
+    memo = {cap.call_key: {"ok": {"status": 200, "body": '{"title": "fixes #12 and #7"}'}}}
+    out = await _run(source, memo=memo)
+    assert out.kind == "returned"
+    assert out.value == ["12", "7"]
+
+
+async def test_script_can_define_classes() -> None:
+    out = await _run(
+        """
+        class Node:
+            def __init__(self, name):
+                self.name = name
+
+            @property
+            def label(self):
+                return self.name.upper()
+
+        class Leaf(Node):
+            def __init__(self, name):
+                super().__init__(name)
+
+        async def main(input):
+            return Leaf("tip").label
+        """
+    )
+    assert out.kind == "returned"
+    assert out.value == "TIP"
+
+
+async def test_script_dataclasses_have_live_annotations() -> None:
+    """Annotations are LIVE objects (``dont_inherit`` pins this: without it the
+    script inherits the host's PEP 563 future and every annotation stringifies).
+    The ``live`` probe is the actual pin — InitVar correctness alone would pass
+    either way, because the registered script module lets dataclasses resolve
+    even *string* annotations correctly."""
+    out = await _run(
+        """
+        from dataclasses import InitVar, asdict, dataclass, field
+
+        @dataclass
+        class Row:
+            x: int
+            tags: list = field(default_factory=list)
+            scale: InitVar[int] = 1
+
+            def __post_init__(self, scale):
+                self.x *= scale
+
+        async def main(input):
+            return {"row": asdict(Row(5, scale=3)), "live": Row.__annotations__["x"] is int}
+        """
+    )
+    assert out.kind == "returned"
+    assert out.value == {"row": {"x": 15, "tags": []}, "live": True}
+
+
+async def test_annotations_evaluate_eagerly_against_script_namespace() -> None:
+    # The flip side of live annotations: an out-of-scope name is a loud NameError
+    # at def time, not a silently-stored string. (CPython 3.13 semantics — under
+    # PEP 649 (3.14+) annotations evaluate lazily and this assertion will need
+    # revisiting at the version bump; the `live` probe above is the durable pin.)
+    out = await _run("async def main(input: Any):\n    return 1")
+    assert out.kind == "raised"
+    assert "NameError" in (out.error_repr or "")
+
+
+async def test_disallowed_import_is_a_loud_import_error() -> None:
+    stmts = (
+        "import os",
+        "import importlib",
+        "import urllib.request",  # allowlisting urllib.parse does not open the package
+        "from urllib import parse",  # the name imported is `urllib`: rejected; use `import urllib.parse`
+        "from __future__ import annotations",  # would stringify annotations (PEP 563)
+    )
+    outs = await asyncio.gather(
+        *(_run(f"{stmt}\n\nasync def main(input):\n    return 1") for stmt in stmts)
+    )
+    for stmt, out in zip(stmts, outs, strict=True):
+        assert out.kind == "raised", stmt
+        assert "ImportError" in (out.error_repr or ""), stmt
+        assert "may only import" in (out.error_repr or ""), stmt  # the error IS the docs
+
+
+async def test_non_json_return_is_an_author_error_not_a_host_crash() -> None:
+    out = await _run(
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class Point:
+            x: int
+
+        async def main(input):
+            return Point(1)  # forgot asdict()
+        """
+    )
+    assert out.kind == "raised"
+    assert out.error_kind == "author_exception"
+    assert "WorkflowInputTypeError" in (out.error_repr or "")
+    assert "return: unsupported workflow input type Point" in (out.error_repr or "")
+    # NaN would survive json.dumps (allow_nan) only to detonate at the parent's
+    # jsonb cast — the domain validator rejects it at the source instead.
+    nan = await _run("async def main(input):\n    return float('nan')")
+    assert nan.kind == "raised"
+    assert "return: non-finite float" in (nan.error_repr or "")
+    # Same class: Postgres jsonb cannot store NUL — caught here, not as a parent
+    # crashloop after a "successful" host run.
+    nul = await _run("async def main(input):\n    return chr(0)")
+    assert nul.kind == "raised"
+    assert "return: NUL" in (nul.error_repr or "")
+    # A cyclic return RecursionErrors inside the validator — still an author
+    # error, never an rc=1 host crash with the cause lost to stderr.
+    cyc = await _run("async def main(input):\n    x = []\n    x.append(x)\n    return x")
+    assert cyc.kind == "raised"
+    assert cyc.error_kind == "author_exception"
+    assert "RecursionError" in (cyc.error_repr or "")
 
 
 # ─── parallel / pipeline (B2.G — the concurrent scheduler) ───────────────────
@@ -377,7 +557,8 @@ def test_host_transitive_imports_are_credential_free() -> None:
 
 async def test_script_cannot_import_aios() -> None:
     out = await _run("async def main(input):\n    import aios.harness.runtime\n    return 1")
-    assert out.kind == "raised"  # __import__ is not in SAFE_BUILTINS
+    assert out.kind == "raised"  # rejected by the curated-import shim (still ImportError)
+    assert "ImportError" in (out.error_repr or "")
 
 
 async def test_injected_globals_cannot_reach_runtime() -> None:
@@ -408,6 +589,29 @@ async def test_child_env_is_scrubbed_of_secrets(monkeypatch: pytest.MonkeyPatch)
     assert out.kind == "returned"
     assert out.value["leaked"] == []  # no secret crossed the spawn
     assert out.value["has_path"] is True  # but non-secret launch essentials still do
+
+
+async def test_hash_ordering_is_pinned_across_wakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launcher pins PYTHONHASHSEED=0 in the child: str-hash-dependent orderings
+    (``list({...})``) must be identical on every wake, whatever seed the worker
+    itself runs under — an inherited/random seed would desync any call_key built
+    from such an ordering."""
+    strings = '{"alpha", "bravo", "charlie", "delta", "echo"}'  # 0/1/2 orderings all differ
+    outs = []
+    for worker_seed in ("1", "2"):
+        monkeypatch.setenv("PYTHONHASHSEED", worker_seed)
+        outs.append(await _run(f"async def main(input):\n    return list({strings})"))
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        f"import json; print(json.dumps(list({strings})))",
+        stdout=asyncio.subprocess.PIPE,
+        env={**os.environ, "PYTHONHASHSEED": "0"},  # inherit env, pin only the seed
+    )
+    stdout, _ = await proc.communicate()
+    assert proc.returncode == 0
+    assert [o.kind for o in outs] == ["returned", "returned"]
+    assert outs[0].value == outs[1].value == json.loads(stdout)
 
 
 # ─── runaway containment (B1.1) ──────────────────────────────────────────────
