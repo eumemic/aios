@@ -25,8 +25,9 @@ T = TypeVar("T", bound="VaultCredentialUpdate")
 class VaultCredentialUpdate:
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
 
-    ``target_url`` and ``auth_type`` are immutable — not accepted here.
-    Omitted secret fields are preserved (decrypt-merge-encrypt).
+    ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
+    immutable — not accepted here. Omitted secret fields are preserved
+    (decrypt-merge-encrypt).
 
         Attributes:
             access_token (None | str | Unset):

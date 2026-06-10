@@ -85,7 +85,9 @@ def _validate_credential_host(host: str) -> str:
     """
     # HOSTNAME_RE rejects the empty string and anything with a port/slash/
     # wildcard; the explicit length bound is the only thing the regex lacks.
-    if len(host) > 253 or not HOSTNAME_RE.match(host):
+    # fullmatch, not match: the trailing ``$`` would otherwise admit a single
+    # trailing newline ("host\n") and store an unmatchable control char.
+    if len(host) > 253 or not HOSTNAME_RE.fullmatch(host):
         raise ValueError(
             f"invalid host {host!r}: a bare hostname is required "
             "(no scheme, port, path, wildcard, or IPv6)"
@@ -129,7 +131,8 @@ def parse_allowed_host_entry(entry: str) -> tuple[str, str | None]:
             raise ValueError(f"invalid allowed_hosts entry {entry!r}: '.'/'..' path segment")
         # The pchar charset excludes ``%`` (and every shell/URL metachar), so
         # percent-encoding and illegal characters are both rejected here.
-        if not _PATH_SEGMENT_RE.match(seg):
+        # fullmatch, not match: ``$`` would otherwise admit a trailing newline.
+        if not _PATH_SEGMENT_RE.fullmatch(seg):
             raise ValueError(f"invalid allowed_hosts entry {entry!r}: illegal path character")
     return host, "/" + "/".join(segments)
 
@@ -244,11 +247,13 @@ class _VaultCredentialSecrets(BaseModel):
 class VaultCredentialCreate(_VaultCredentialSecrets):
     """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-    All secret fields are write-only. ``target_url``, ``secret_name``, and
-    ``auth_type`` are immutable after creation. The service layer validates
-    required secret fields per ``auth_type``; this model validates the
-    structural shape (which kind carries ``target_url`` vs
-    ``secret_name``/``allowed_hosts``).
+    All secret fields are write-only. The structural fields — ``target_url``,
+    ``secret_name``, ``allowed_hosts``, and ``auth_type`` — are immutable after
+    creation; only the secret (and ``display_name``/``metadata``) can be
+    rotated via PUT, so changing a credential's egress scope means archiving
+    and recreating it. The service layer validates required secret fields per
+    ``auth_type``; this model validates the structural shape (which kind
+    carries ``target_url`` vs ``secret_name``/``allowed_hosts``).
     """
 
     display_name: str | None = Field(default=None, max_length=128)
@@ -284,12 +289,14 @@ class VaultCredentialCreate(_VaultCredentialSecrets):
                     "environment_variable credentials require a non-empty allowed_hosts"
                 )
             # Canonicalize every entry so there is one stored spelling per
-            # semantics (``host/`` → ``host``, ``host/foo/`` → ``host/foo``).
+            # semantics (``host/`` → ``host``, ``host/foo/`` → ``host/foo``),
+            # then drop cross-entry duplicates (the list is a set of egress
+            # scopes; ``dict.fromkeys`` preserves first-seen order).
             canonical: list[str] = []
             for entry in self.allowed_hosts:
                 host, prefix = parse_allowed_host_entry(entry)
                 canonical.append(host if prefix is None else host + prefix)
-            self.allowed_hosts = canonical
+            self.allowed_hosts = list(dict.fromkeys(canonical))
         else:
             if not self.target_url:
                 raise ValueError(f"{self.auth_type} credentials require target_url")
@@ -303,8 +310,9 @@ class VaultCredentialCreate(_VaultCredentialSecrets):
 class VaultCredentialUpdate(_VaultCredentialSecrets):
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
 
-    ``target_url`` and ``auth_type`` are immutable — not accepted here.
-    Omitted secret fields are preserved (decrypt-merge-encrypt).
+    ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
+    immutable — not accepted here. Omitted secret fields are preserved
+    (decrypt-merge-encrypt).
     """
 
     display_name: str | None = Field(default=None, max_length=128)

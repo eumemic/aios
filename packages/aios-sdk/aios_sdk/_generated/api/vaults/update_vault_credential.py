@@ -94,8 +94,9 @@ def sync_detailed(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``target_url`` and ``auth_type`` are immutable — not accepted here.
-            Omitted secret fields are preserved (decrypt-merge-encrypt).
+            ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
+            immutable — not accepted here. Omitted secret fields are preserved
+            (decrypt-merge-encrypt).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -144,8 +145,9 @@ def sync(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``target_url`` and ``auth_type`` are immutable — not accepted here.
-            Omitted secret fields are preserved (decrypt-merge-encrypt).
+            ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
+            immutable — not accepted here. Omitted secret fields are preserved
+            (decrypt-merge-encrypt).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -189,8 +191,9 @@ async def asyncio_detailed(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``target_url`` and ``auth_type`` are immutable — not accepted here.
-            Omitted secret fields are preserved (decrypt-merge-encrypt).
+            ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
+            immutable — not accepted here. Omitted secret fields are preserved
+            (decrypt-merge-encrypt).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -237,8 +240,9 @@ async def asyncio(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``target_url`` and ``auth_type`` are immutable — not accepted here.
-            Omitted secret fields are preserved (decrypt-merge-encrypt).
+            ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
+            immutable — not accepted here. Omitted secret fields are preserved
+            (decrypt-merge-encrypt).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

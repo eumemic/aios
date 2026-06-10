@@ -64,7 +64,10 @@ class LimitedNetworking(BaseModel):
                 raise ValueError("allowed_hosts entries must not be empty")
             if len(host) > 253:
                 raise ValueError(f"hostname too long ({len(host)} > 253): {host!r}")
-            if not HOSTNAME_RE.match(host):
+            # fullmatch, not match: a trailing ``$`` lets ``re.match`` accept a
+            # single trailing newline ("host\n"), which would then be embedded
+            # verbatim into the iptables lockdown script (sandbox/setup.py).
+            if not HOSTNAME_RE.fullmatch(host):
                 raise ValueError(
                     f"invalid hostname {host!r}: only alphanumerics, hyphens, and dots allowed"
                 )

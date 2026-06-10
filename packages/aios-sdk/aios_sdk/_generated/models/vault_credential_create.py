@@ -24,11 +24,13 @@ T = TypeVar("T", bound="VaultCredentialCreate")
 class VaultCredentialCreate:
     """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-    All secret fields are write-only. ``target_url``, ``secret_name``, and
-    ``auth_type`` are immutable after creation. The service layer validates
-    required secret fields per ``auth_type``; this model validates the
-    structural shape (which kind carries ``target_url`` vs
-    ``secret_name``/``allowed_hosts``).
+    All secret fields are write-only. The structural fields — ``target_url``,
+    ``secret_name``, ``allowed_hosts``, and ``auth_type`` — are immutable after
+    creation; only the secret (and ``display_name``/``metadata``) can be
+    rotated via PUT, so changing a credential's egress scope means archiving
+    and recreating it. The service layer validates required secret fields per
+    ``auth_type``; this model validates the structural shape (which kind
+    carries ``target_url`` vs ``secret_name``/``allowed_hosts``).
 
         Attributes:
             auth_type (VaultCredentialCreateAuthType):

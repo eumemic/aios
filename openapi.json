@@ -15004,7 +15004,7 @@
           "auth_type"
         ],
         "title": "VaultCredentialCreate",
-        "description": "Request body for ``POST /v1/vaults/{vault_id}/credentials``.\n\nAll secret fields are write-only. ``target_url``, ``secret_name``, and\n``auth_type`` are immutable after creation. The service layer validates\nrequired secret fields per ``auth_type``; this model validates the\nstructural shape (which kind carries ``target_url`` vs\n``secret_name``/``allowed_hosts``)."
+        "description": "Request body for ``POST /v1/vaults/{vault_id}/credentials``.\n\nAll secret fields are write-only. The structural fields \u2014 ``target_url``,\n``secret_name``, ``allowed_hosts``, and ``auth_type`` \u2014 are immutable after\ncreation; only the secret (and ``display_name``/``metadata``) can be\nrotated via PUT, so changing a credential's egress scope means archiving\nand recreating it. The service layer validates required secret fields per\n``auth_type``; this model validates the structural shape (which kind\ncarries ``target_url`` vs ``secret_name``/``allowed_hosts``)."
       },
       "VaultCredentialUpdate": {
         "properties": {
@@ -15223,7 +15223,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "VaultCredentialUpdate",
-        "description": "Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.\n\n``target_url`` and ``auth_type`` are immutable \u2014 not accepted here.\nOmitted secret fields are preserved (decrypt-merge-encrypt)."
+        "description": "Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.\n\n``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are\nimmutable \u2014 not accepted here. Omitted secret fields are preserved\n(decrypt-merge-encrypt)."
       },
       "VaultUpdate": {
         "properties": {

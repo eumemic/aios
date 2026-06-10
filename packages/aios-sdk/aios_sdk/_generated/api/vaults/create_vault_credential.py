@@ -94,11 +94,13 @@ def sync_detailed(
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. ``target_url``, ``secret_name``, and
-            ``auth_type`` are immutable after creation. The service layer validates
-            required secret fields per ``auth_type``; this model validates the
-            structural shape (which kind carries ``target_url`` vs
-            ``secret_name``/``allowed_hosts``).
+            All secret fields are write-only. The structural fields — ``target_url``,
+            ``secret_name``, ``allowed_hosts``, and ``auth_type`` — are immutable after
+            creation; only the secret (and ``display_name``/``metadata``) can be
+            rotated via PUT, so changing a credential's egress scope means archiving
+            and recreating it. The service layer validates required secret fields per
+            ``auth_type``; this model validates the structural shape (which kind
+            carries ``target_url`` vs ``secret_name``/``allowed_hosts``).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -148,11 +150,13 @@ def sync(
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. ``target_url``, ``secret_name``, and
-            ``auth_type`` are immutable after creation. The service layer validates
-            required secret fields per ``auth_type``; this model validates the
-            structural shape (which kind carries ``target_url`` vs
-            ``secret_name``/``allowed_hosts``).
+            All secret fields are write-only. The structural fields — ``target_url``,
+            ``secret_name``, ``allowed_hosts``, and ``auth_type`` — are immutable after
+            creation; only the secret (and ``display_name``/``metadata``) can be
+            rotated via PUT, so changing a credential's egress scope means archiving
+            and recreating it. The service layer validates required secret fields per
+            ``auth_type``; this model validates the structural shape (which kind
+            carries ``target_url`` vs ``secret_name``/``allowed_hosts``).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -197,11 +201,13 @@ async def asyncio_detailed(
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. ``target_url``, ``secret_name``, and
-            ``auth_type`` are immutable after creation. The service layer validates
-            required secret fields per ``auth_type``; this model validates the
-            structural shape (which kind carries ``target_url`` vs
-            ``secret_name``/``allowed_hosts``).
+            All secret fields are write-only. The structural fields — ``target_url``,
+            ``secret_name``, ``allowed_hosts``, and ``auth_type`` — are immutable after
+            creation; only the secret (and ``display_name``/``metadata``) can be
+            rotated via PUT, so changing a credential's egress scope means archiving
+            and recreating it. The service layer validates required secret fields per
+            ``auth_type``; this model validates the structural shape (which kind
+            carries ``target_url`` vs ``secret_name``/``allowed_hosts``).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -249,11 +255,13 @@ async def asyncio(
         authorization (None | str | Unset):
         body (VaultCredentialCreate): Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-            All secret fields are write-only. ``target_url``, ``secret_name``, and
-            ``auth_type`` are immutable after creation. The service layer validates
-            required secret fields per ``auth_type``; this model validates the
-            structural shape (which kind carries ``target_url`` vs
-            ``secret_name``/``allowed_hosts``).
+            All secret fields are write-only. The structural fields — ``target_url``,
+            ``secret_name``, ``allowed_hosts``, and ``auth_type`` — are immutable after
+            creation; only the secret (and ``display_name``/``metadata``) can be
+            rotated via PUT, so changing a credential's egress scope means archiving
+            and recreating it. The service layer validates required secret fields per
+            ``auth_type``; this model validates the structural shape (which kind
+            carries ``target_url`` vs ``secret_name``/``allowed_hosts``).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

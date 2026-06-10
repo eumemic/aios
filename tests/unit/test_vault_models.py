@@ -297,11 +297,20 @@ class TestEnvironmentVariableCredential:
             "0xA.0xB.0xC.0xD",  # dotted hex IPv4 literal
             "0Xa",  # short hex IPv4 literal, uppercase prefix
             "0177.0.0.1",  # octal-leading IPv4 literal
+            "api.github.com\n",  # trailing newline — the regex `$` anchor must not admit it
+            "api.github.com\nevil.com",  # embedded newline
         ],
     )
     def test_rejects_bad_host(self, host: str) -> None:
         with pytest.raises(ValidationError):
             self._create(allowed_hosts=[host])
+
+    def test_dedups_canonical_allowed_hosts(self) -> None:
+        c = self._create(
+            allowed_hosts=["api.github.com", "api.github.com/", "api.github.com", "api.tavily.com"]
+        )
+        # All three github spellings canonicalize to one entry; order preserved.
+        assert c.allowed_hosts == ["api.github.com", "api.tavily.com"]
 
     @pytest.mark.parametrize(
         "host",
@@ -367,7 +376,17 @@ class TestParseAllowedHostEntry:
         assert parse_allowed_host_entry(entry) == expected
 
     @pytest.mark.parametrize(
-        "entry", ["", "127.0.0.1", "0x7f000001", "host//x", "host/../x", "host/%2e"]
+        "entry",
+        [
+            "",
+            "127.0.0.1",
+            "0x7f000001",
+            "host//x",
+            "host/../x",
+            "host/%2e",
+            "host\n",  # trailing newline in the host part
+            "host/repos\n",  # trailing newline in a path segment
+        ],
     )
     def test_rejects(self, entry: str) -> None:
         with pytest.raises(ValueError):
