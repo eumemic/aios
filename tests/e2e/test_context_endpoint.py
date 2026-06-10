@@ -10,7 +10,7 @@ from unittest import mock
 import httpx
 import pytest
 
-from tests.helpers.connections import authed_client
+from tests.helpers.connections import authed_client, wired_app
 
 
 def _uniq() -> str:
@@ -30,19 +30,13 @@ async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
 
 @pytest.fixture
 async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[httpx.AsyncClient]:
-    from aios.api.app import create_app
     from aios.config import get_settings
     from aios.crypto.vault import CryptoBox
     from aios.harness import runtime
     from aios_connectors.providers import SubsystemToolProvider
 
-    settings = get_settings()
-    crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    app = create_app()
-    app.state.pool = pool
-    app.state.crypto_box = crypto_box
-    app.state.db_url = settings.db_url
-    app.state.procrastinate = mock.MagicMock()
+    crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+    app = wired_app(pool)
 
     # The fixture skips the API lifespan (httpx ASGITransport doesn't
     # fire startup/shutdown), so mirror the lifespan's runtime

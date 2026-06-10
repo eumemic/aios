@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI
+from fastapi.routing import APIRoute
 
 from aios.api.deps import require_bearer_auth
 from aios.api.routers import (
@@ -155,19 +156,27 @@ def _mount_mcp(app: FastAPI) -> None:
 def _iter_operations(app: FastAPI) -> Iterator[tuple[str, str, dict[str, Any]]]:
     """Yield ``(operation_id, http_verb, x_codegen_dict)`` for every operation.
 
-    Skips path-level keys that aren't HTTP methods (parameters, summary,
-    description, ...) and operations without an ``operationId``. The
-    ``x_codegen_dict`` is the raw ``x-codegen`` extension content (or
-    ``{}`` if absent); each caller projects out the sub-key it needs.
+    Walks ``app.routes`` directly instead of the OpenAPI document: building
+    the document costs a full Pydantic schema generation pass (~200 ms),
+    and fastapi-mcp builds its own copy anyway, so going through
+    ``app.openapi()`` here made every ``create_app()`` pay for the schema
+    twice.  The operationId is derived exactly as FastAPI's
+    ``get_openapi_operation_metadata`` does — ``route.operation_id or
+    route.unique_id`` — so the ids match the document (and fastapi-mcp's
+    tool names) verbatim.  The ``x_codegen_dict`` is the raw ``x-codegen``
+    extension content (or ``{}`` if absent); each caller projects out the
+    sub-key it needs.
     """
-    for path_obj in app.openapi()["paths"].values():
-        for verb, method_obj in path_obj.items():
-            if not isinstance(method_obj, dict):
-                continue
-            op_id = method_obj.get("operationId")
-            if not isinstance(op_id, str):
-                continue
-            yield op_id, verb.lower(), method_obj.get("x-codegen", {})
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or not route.include_in_schema:
+            continue
+        op_id = route.operation_id or route.unique_id
+        x_codegen = (route.openapi_extra or {}).get("x-codegen", {})
+        # sorted() so multi-method routes yield in a deterministic order
+        # (route.methods is a set; every aios route is single-method, but
+        # fastapi-mcp's own /mcp transport route is GET+POST+DELETE).
+        for method in sorted(route.methods):
+            yield op_id, method.lower(), x_codegen
 
 
 def _verb_default_annotations(verb: str) -> dict[str, bool]:
@@ -294,10 +303,12 @@ def _apply_mcp_polish(app: FastAPI, mcp: Any, *, instructions: str) -> None:
     }
 
     for tool in mcp.tools:
-        # Direct lookup, not .get + None-skip: mcp.tools is built from the
-        # same app.openapi() that op_meta walks, so every tool.name must be
-        # an operationId we've seen. A KeyError here is a real invariant
-        # break worth surfacing, not a silent annotation dropout.
+        # Direct lookup, not .get + None-skip: fastapi-mcp names tools by
+        # the operationId of the same routes op_meta walks (both derive it
+        # via ``route.operation_id or route.unique_id``), so every
+        # tool.name must be an operationId we've seen. A KeyError here is
+        # a real invariant break worth surfacing, not a silent annotation
+        # dropout.
         verb, overrides = op_meta[tool.name]
         annotations = _verb_default_annotations(verb) | overrides
         if annotations:
