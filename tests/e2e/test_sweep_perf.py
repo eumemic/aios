@@ -32,6 +32,7 @@ from aios.db.queries import _SESSION_STATUS_EXPR
 from aios.harness.sweep import (
     CANDIDATE_ROWS_SQL,
     ERRORED_SESSIONS_SQL,
+    GHOST_ASST_SQL,
     GHOST_SPAN_START_SQL,
     UNREACTED_ROWS_SQL,
 )
@@ -61,6 +62,15 @@ _N_UNREACTED_PER = 30
 _N_TC_SESSIONS = 3
 _N_TC_ASST_PER = 30  # assistant messages carrying tool_calls
 _N_TC_PER_ASST = 4  # tool_calls per assistant message
+
+# One DEEP, fully-resolved tool-call session (#840). Its 500 assistant turns x
+# 4 tool_calls = 2000 fully-paired tool calls give the cross-session ghost scan
+# a large resolved history to walk if it were *not* bounded by
+# ``sessions.open_tool_call_count > 0``. Because every call has a matching tool
+# result, the all-sessions backfill UPDATE below sets its
+# ``open_tool_call_count = 0``, so the bounded ``GHOST_ASST_SQL`` must skip it
+# entirely and return zero rows.
+_N_TC_DEEP_ASST = 500
 
 
 async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
@@ -224,6 +234,80 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
                 "ON CONFLICT (id) DO NOTHING",
                 rows,
             )
+
+        # One DEEP, fully-resolved tool-call session (#840): same shape as the
+        # ``sess_tc_*`` loop above but ``_N_TC_DEEP_ASST`` assistant turns deep.
+        # Every tool_call is paired with a tool result, so the all-sessions
+        # backfill UPDATE below derives its ``open_tool_call_count = 0`` — making
+        # it the bait for the bounded ghost scan: an unbounded GHOST_ASST_SQL
+        # would walk all 500 assistant-with-tool_calls rows; the bounded one must
+        # skip it. Inserted with the SAME FK pattern (agt_perf/env_perf,
+        # acc_test_stub) as the ``sess_tc_*`` sessions.
+        deep_sid = "sess_tc_deep"
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, workspace_volume_path, account_id) "
+            "VALUES ($1, 'agt_perf', 'env_perf', '/tmp/ws_' || $1, 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING",
+            deep_sid,
+        )
+        rows = []
+        seq = 1
+        for i in range(_N_TC_DEEP_ASST):
+            tcids = [f"tc_{deep_sid}_{i}_{k}" for k in range(_N_TC_PER_ASST)]
+            rows.append(
+                (
+                    f"ev_a_{deep_sid}_{i}",
+                    deep_sid,
+                    seq,
+                    "message",
+                    json.dumps(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": tc,
+                                    "type": "function",
+                                    "function": {"name": "bash", "arguments": "{}"},
+                                }
+                                for tc in tcids
+                            ],
+                            "reacting_to": seq - 1,
+                        }
+                    ),
+                    "assistant",
+                )
+            )
+            seq += 1
+            for tc in tcids:
+                rows.append(
+                    (
+                        f"ev_t_{deep_sid}_{i}_{tc}",
+                        deep_sid,
+                        seq,
+                        "message",
+                        json.dumps({"role": "tool", "tool_call_id": tc, "content": "ok"}),
+                        "tool",
+                    )
+                )
+                seq += 1
+        # Final assistant message reacts to the tail — no unreacted stimulus.
+        rows.append(
+            (
+                f"ev_a_{deep_sid}_final",
+                deep_sid,
+                seq,
+                "message",
+                json.dumps({"role": "assistant", "content": "done", "reacting_to": seq - 1}),
+                "assistant",
+            )
+        )
+        await conn.executemany(
+            "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING",
+            rows,
+        )
 
         # Backfill the scalar columns on sessions to match the seeded events.
         # The production path maintains these in append_event; this test inserts
@@ -413,6 +497,29 @@ class TestSweepQueryBudget:
         hits = _total_buffer_hits(result[0]["Plan"])
         assert hits < 50_000, (
             f"list_sessions status derivation uses {hits} buffer hits — correlated-subquery blowup?"
+        )
+
+
+# ─── ghost-scan bound (#840) ─────────────────────────────────────────────────
+
+
+@needs_docker
+class TestGhostAsstSweepBounded:
+    """#840: GHOST_ASST_SQL is bounded by sessions.open_tool_call_count > 0.
+
+    On a fixture where every session is fully resolved (count = 0), including
+    a DEEP fully-resolved tool-call history, the cross-session ghost scan
+    returns zero rows and never touches the event log. Removing the bound makes
+    it scan the entire resolved history → this row budget fails (mutation lock)."""
+
+    async def test_ghost_asst_returns_no_rows_when_all_resolved(
+        self, seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        async with seeded_pool.acquire() as conn:
+            rows = await conn.fetch(GHOST_ASST_SQL.format(scope_clause=""))
+        assert len(rows) == 0, (
+            f"GHOST_ASST_SQL returned {len(rows)} rows on a fully-resolved "
+            f"fixture — must be bounded by sessions.open_tool_call_count > 0 (#840)."
         )
 
 

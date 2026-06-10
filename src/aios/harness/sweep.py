@@ -78,11 +78,22 @@ class _Candidate:
 # per-tool_call_id resolution the scalars don't carry.
 
 
+# ``GHOST_ASST_SQL`` is the cross-session entry point of ghost repair: it
+# returns every assistant-with-tool_calls event whose session might contain a
+# ghost.  Bounded by ``s.open_tool_call_count > 0`` (the same maintained scalar
+# ``CANDIDATE_ROWS_SQL`` uses, migration 0066): that count is ``> 0`` exactly
+# iff the session has an assistant tool_call with no paired tool-result — i.e.
+# exactly the sessions that can hold a ghost.  Without the bound, a fully
+# resolved session's entire tool-call history is rescanned on every sweep pass
+# (#840).  Sessions with open calls still return ALL their
+# assistant-with-tool_calls events, so the per-tcid candidate loop downstream is
+# behaviorally unchanged.
 GHOST_ASST_SQL = """
     SELECT e.session_id, e.data, e.created_at
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE s.archived_at IS NULL
+       AND s.open_tool_call_count > 0
        AND e.kind = 'message'
        AND e.role = 'assistant'
        AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
