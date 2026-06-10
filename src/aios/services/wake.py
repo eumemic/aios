@@ -45,8 +45,10 @@ async def defer_wake(
     it runs — no need for a second job.
 
     ``delay_seconds`` schedules the job that many seconds in the future
-    (procrastinate's ``schedule_in``). Used for the harness retry-backoff
-    path; the user-visible scheduled-wake feature now goes through
+    (procrastinate's ``schedule_in``). Used by the harness retry-backoff
+    path (``cause="reschedule"``) and the connector-inbound debounce path
+    (``cause="inbound"``, gated by the ``inbound_debounce_seconds`` setting);
+    the user-visible scheduled-wake feature now goes through
     :mod:`aios.tools.schedule_wake` and creates one-shot scheduled_tasks
     rows instead.
 
