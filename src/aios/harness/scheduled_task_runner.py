@@ -237,6 +237,7 @@ async def _surface_failure(session_id: str, account_id: str, content: str) -> No
         log.exception(
             "scheduled_task.surface_failure_failed",
             session_id=session_id,
+            content=content,
         )
 
 
