@@ -94,7 +94,7 @@ from typing import TYPE_CHECKING
 
 import asyncpg
 
-from aios.db.pool import normalize_dsn
+from aios.db.pool import listener_application_name, normalize_dsn
 from aios.db.sse_lock import acquire_subscriber_lock
 from aios.logging import get_logger
 
@@ -102,6 +102,22 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 log = get_logger("aios.db.listen")
+
+
+async def _connect_listener(db_url: str) -> asyncpg.Connection[object]:
+    """Open a dedicated (non-pooled) asyncpg connection tagged with this
+    instance's listener ``application_name``.
+
+    Single injection point for every LISTEN connection in this module.
+    The tag (a) gives production observability — all SSE/notify listener
+    backends show up under ``aios-listener:<instance_id>`` in
+    ``pg_stat_activity`` — and (b) lets the e2e leak test count ONLY this
+    instance's listener backends, immune to other workers' / the pool's churn.
+    """
+    return await asyncpg.connect(
+        normalize_dsn(db_url),
+        server_settings={"application_name": listener_application_name()},
+    )
 
 
 @dataclass(slots=True)
@@ -139,7 +155,7 @@ async def open_listen_for_events(
     Any failure after the initial ``asyncpg.connect`` succeeds will
     ``conn.terminate()`` and re-raise.
     """
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    conn = await _connect_listener(db_url)
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
         channel = f"events_{session_id}"
@@ -192,7 +208,7 @@ async def open_listen_for_run_events(
     generator. No subscriber advisory lock: that is a session-worker coordination
     signal (issue #81) with no workflow equivalent (the run sweep is unconditional).
     """
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    conn = await _connect_listener(db_url)
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
         channel = f"wf_run_events_{run_id}"
@@ -234,7 +250,7 @@ async def open_listen_for_connector_calls_by_type(
 
     Two-phase counterpart to :func:`listen_for_connector_calls_by_type`.
     """
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    conn = await _connect_listener(db_url)
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
         channel = f"connector_calls_{connector}"
@@ -273,7 +289,7 @@ async def open_listen_for_management_calls(
     queue_max: int = 1000,
 ) -> ListenSubscription:
     """Open a dedicated asyncpg conn LISTENing ``connector_management_calls_<connector>``."""
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    conn = await _connect_listener(db_url)
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
         channel = f"connector_management_calls_{connector}"
@@ -312,7 +328,7 @@ async def open_listen_for_connection_discovery(
     queue_max: int = 1000,
 ) -> ListenSubscription:
     """Open a dedicated asyncpg conn LISTENing ``connections_<connector>``."""
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    conn = await _connect_listener(db_url)
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
         channel = f"connections_{connector}"
@@ -362,7 +378,7 @@ async def listen_for_connector_result(
     Mirrors :func:`listen_for_events` but with a per-call (not
     per-session) channel and a tighter queue bound.
     """
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    conn = await _connect_listener(db_url)
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
         channel = f"connector_result_{call_id}"
@@ -496,7 +512,7 @@ async def listen_for_session_interrupts(
     db_url: str,
 ) -> AsyncIterator[asyncio.Queue[str]]:
     """Yield a queue of session_id payloads from the interrupt channel."""
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    conn = await _connect_listener(db_url)
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1024)
 
@@ -536,7 +552,7 @@ async def listen_for_scheduled_tasks_due(
     The event is cleared inside this context manager before yielding, so
     callers see a clean edge for each wake.
     """
-    conn = await asyncpg.connect(normalize_dsn(db_url))
+    conn = await _connect_listener(db_url)
     try:
         event = asyncio.Event()
 
