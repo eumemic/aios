@@ -1,19 +1,23 @@
 """Agent-acting workflow builtins — the strange loop.
 
-Four model-callable tools that let an agent author, edit, launch, and await
+Model-callable tools that let an agent author, edit, launch, await, and cancel
 workflows the way a human operator (or the ``aios`` CLI) does. Each is a thin
 wrapper over the existing workflow services; the agent's authority is bounded by
-the same three attenuations those services already enforce, keyed on the
-**executing session id** the harness supplies (``invoke_builtin(session_id, …)``,
+the attenuations those services already enforce, keyed on the **executing
+session id** the harness supplies (``invoke_builtin(session_id, …)``,
 ``tools/invoke.py``) — never model input:
 
 * ``create_workflow`` — surface attenuation: the declared tool/server surface must
   be a subset of the *creating agent's* own.
 * ``update_workflow`` — merged-surface attenuation + an optimistic ``version`` pin.
 * ``create_run`` — vault attenuation (bound vaults ⊆ the *launching session's*) plus
-  the vertical run-depth cap; the run inherits the caller's environment.
+  the vertical run-depth cap and the horizontal fan-out caps (outstanding runs per
+  launcher and per account); the run inherits the caller's environment.
 * ``await_run`` — a bounded long-poll that blocks (as a fire-and-forget tool task,
   so the session stays responsive) until the run is terminal or the timeout lapses.
+* ``cancel_run`` — cancel-time attenuation: a session may cancel only runs *it
+  launched* (the self-service escape for the fan-out cap; operator-launched runs
+  need the operator).
 
 **Identity is load-bearing, so two invariants hold (see F1 in the review):**
 1. The trusted ids (``creator_session_id``/``actor_session_id``/``launcher_session_id``,
@@ -22,7 +26,7 @@ the same three attenuations those services already enforce, keyed on the
    with ``extra="forbid"``), so an injected key is rejected before the handler runs.
 2. Handlers map service kwargs explicitly from the validated model — never ``**arguments``.
 
-All four register ``transport="agent_tool"`` (model-only; the CLI broker refuses them).
+All register ``transport="agent_tool"`` (model-only; the CLI broker refuses them).
 
 **Security boundary (A2):** these builtins attenuate, but a grant of the operator-level
 management API (HTTP / a future management MCP) does not — that path is unattenuated by
@@ -83,6 +87,15 @@ class _AwaitRunArgs(BaseModel):
 
     run_id: str
     timeout_seconds: int = Field(default=300, ge=1, le=1800)
+
+
+class _CancelRunArgs(BaseModel):
+    """``cancel_run`` arguments — just the run id; the canceller is the trusted
+    executing session (you may cancel only runs you launched)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
 
 
 # ─── handler plumbing ────────────────────────────────────────────────────────
@@ -177,6 +190,19 @@ async def await_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[
     return resp.model_dump(mode="json")
 
 
+async def cancel_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = _parse(_CancelRunArgs, arguments)
+    run = await wf_service.cancel_run(
+        pool,
+        run_id=args.run_id,
+        account_id=account_id,
+        canceller_session_id=session_id,  # cancel only what this session launched
+    )
+    return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
+
+
 # ─── descriptions + registration ─────────────────────────────────────────────
 
 CREATE_WORKFLOW_DESCRIPTION = (
@@ -196,12 +222,20 @@ CREATE_RUN_DESCRIPTION = (
     "Launch a run of a workflow you can access. The run executes with the workflow's "
     "declared surface but only the vaults you attach via 'vault_ids' — which must be a "
     "subset of the vaults bound to you. It runs in your own environment. Returns the run "
-    "id and status; use await_run to block for its result."
+    "id and status; use await_run to block for its result. The number of runs you may "
+    "have outstanding at once is capped — finish (await_run) or cancel (cancel_run) "
+    "runs to free slots."
 )
 AWAIT_RUN_DESCRIPTION = (
     "Block until a run reaches a terminal state (completed/errored/cancelled), or until "
     "'timeout_seconds' elapses. Returns {done, run_status, output, is_error, error}; if "
     "not yet done, call again to keep waiting. The session stays responsive while you wait."
+)
+CANCEL_RUN_DESCRIPTION = (
+    "Cancel a run YOU launched (you cannot cancel runs launched by others or by the "
+    "operator). The run finalizes 'cancelled' on its next wake — usually within moments "
+    "— freeing one of your outstanding-run slots once it does. Idempotent: an "
+    "already-finished run is returned unchanged."
 )
 
 
@@ -232,6 +266,13 @@ def _register() -> None:
         description=AWAIT_RUN_DESCRIPTION,
         parameters_schema=_AwaitRunArgs.model_json_schema(),
         handler=await_run_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="cancel_run",
+        description=CANCEL_RUN_DESCRIPTION,
+        parameters_schema=_CancelRunArgs.model_json_schema(),
+        handler=cancel_run_handler,
         transport="agent_tool",
     )
 

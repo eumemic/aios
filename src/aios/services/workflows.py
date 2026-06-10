@@ -290,7 +290,7 @@ async def await_run(
     account_id: str,
     timeout_seconds: float,
 ) -> WfRunWaitResponse:
-    """Block until the run reaches a terminal status (``completed``/``errored``), or ``timeout``.
+    """Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
 
     The run backing of the ``await``-a-completion primitive. Account-scopes the run FIRST (so a
     cross-tenant/missing ``run_id`` 404s before we open any connection — mirroring ``/stream``,
@@ -365,7 +365,12 @@ async def resume_gate_by_nonce(
 
 
 async def cancel_run(
-    pool: asyncpg.Pool[Any], *, run_id: str, account_id: str, reason: Any = None
+    pool: asyncpg.Pool[Any],
+    *,
+    run_id: str,
+    account_id: str,
+    reason: Any = None,
+    canceller_session_id: str | None = None,
 ) -> WfRun:
     """Request cancellation of a run, returning it (still in its pre-cancel status).
 
@@ -376,12 +381,23 @@ async def cancel_run(
     on the wake, so the returned run still shows its current status — as gate-resume
     returns a still-``suspended`` run.
 
+    **Cancel-time attenuation:** when ``canceller_session_id`` is set (an agent
+    cancelling via the builtin), the run must have been launched by that very session
+    — you may cancel what you launched, nothing else; a breach raises
+    :class:`ForbiddenError`. With no canceller (the HTTP/operator path) any
+    account-scoped run may be cancelled.
+
     Idempotent: an already-terminal run is returned unchanged, with no signal or
     wake. A cross-tenant / missing run 404s (via :func:`get_wf_run`).
     """
     async with pool.acquire() as conn:
         run = await wf_queries.get_wf_run(conn, run_id, account_id=account_id)  # 404s cross-tenant
-        if run.status in ("completed", "errored", "cancelled"):
+        if canceller_session_id is not None and run.launcher_session_id != canceller_session_id:
+            raise ForbiddenError(
+                "run was not launched by this session; only the operator can cancel it",
+                detail={"run_id": run_id},
+            )
+        if run.status in TERMINAL_RUN_STATUSES:
             return run  # already terminal — nothing to cancel
         await wf_queries.insert_run_signal(
             conn,

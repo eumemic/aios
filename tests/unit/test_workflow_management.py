@@ -88,6 +88,12 @@ class TestSchemaRejectsInjectedTrustedIds:
                 "ses_1", "create_run", {"workflow_id": "wf_1", "parent_run_id": "wfr_x"}
             )
 
+    async def test_cancel_run_canceller_session_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin(
+                "ses_1", "cancel_run", {"run_id": "wfr_1", "canceller_session_id": "ses_victim"}
+            )
+
 
 class TestErrorPropagation:
     async def test_pydantic_semantic_error_becomes_toolbail(self) -> None:

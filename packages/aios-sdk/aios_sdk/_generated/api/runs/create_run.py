@@ -83,7 +83,8 @@ def sync_detailed(
 
             ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
             binds to ``environment_id`` (like a session), into which its ``agent()`` children
-            spawn.
+            spawn. (``launcher_session_id`` is deliberately NOT a field — trusted ids never
+            ride in request bodies; the HTTP path is always an operator launch.)
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -125,7 +126,8 @@ def sync(
 
             ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
             binds to ``environment_id`` (like a session), into which its ``agent()`` children
-            spawn.
+            spawn. (``launcher_session_id`` is deliberately NOT a field — trusted ids never
+            ride in request bodies; the HTTP path is always an operator launch.)
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -162,7 +164,8 @@ async def asyncio_detailed(
 
             ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
             binds to ``environment_id`` (like a session), into which its ``agent()`` children
-            spawn.
+            spawn. (``launcher_session_id`` is deliberately NOT a field — trusted ids never
+            ride in request bodies; the HTTP path is always an operator launch.)
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -202,7 +205,8 @@ async def asyncio(
 
             ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
             binds to ``environment_id`` (like a session), into which its ``agent()`` children
-            spawn.
+            spawn. (``launcher_session_id`` is deliberately NOT a field — trusted ids never
+            ride in request bodies; the HTTP path is always an operator launch.)
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

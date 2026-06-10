@@ -69,6 +69,9 @@ class WfRun(BaseModel):
     account_id: str
     environment_id: str  # the run binds to an environment; agent() children inherit it
     parent_run_id: str | None = None
+    # The agent session that launched this run (None = operator/HTTP). Lineage, plus
+    # the per-launcher fan-out cap's count key.
+    launcher_session_id: str | None = None
     script: str
     script_sha: str
     tools: list[ToolSpec] = Field(default_factory=list)
@@ -125,8 +128,8 @@ class WfRunWaitResponse(BaseModel):
     """
 
     run_status: WfRunStatus
-    done: bool  # run_status in {completed, errored} — terminal, never reverts
-    output: Any = None  # the run's return value (on completed; None on error)
+    done: bool  # run_status in TERMINAL_RUN_STATUSES (completed/errored/cancelled)
+    output: Any = None  # the run's return value (on completed; None otherwise)
     is_error: bool = False  # run_status == errored
     error: dict[str, Any] | None = None  # the run_completed event's {kind} (on errored)
 
@@ -182,8 +185,11 @@ class WfRunCreate(BaseModel):
 
     ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
     binds to ``environment_id`` (like a session), into which its ``agent()`` children
-    spawn.
+    spawn. (``launcher_session_id`` is deliberately NOT a field — trusted ids never
+    ride in request bodies; the HTTP path is always an operator launch.)
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     workflow_id: str
     environment_id: str
@@ -205,6 +211,8 @@ class GateResume(BaseModel):
     ``call_started`` event), not the internal ``call_key``. ``result`` is the
     externally-delivered resume value (arbitrary JSON).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     gate_nonce: str
     result: Any = None

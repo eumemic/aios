@@ -66,6 +66,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         account_id=row["account_id"],
         environment_id=row["environment_id"],
         parent_run_id=row["parent_run_id"],
+        launcher_session_id=row["launcher_session_id"],
         script=row["script"],
         script_sha=row["script_sha"],
         tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
@@ -356,21 +357,24 @@ async def insert_wf_run(
     script_sha: str,
     input: Any = None,
     parent_run_id: str | None = None,
+    launcher_session_id: str | None = None,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
-    declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch."""
+    declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
+    ``launcher_session_id`` records the agent session that launched it (NULL = operator)."""
     new_id = make_id(WORKFLOW_RUN)
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
-                 script, script_sha, status, input, tools, mcp_servers, http_servers)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb,
-                    $9::jsonb, $10::jsonb, $11::jsonb)
+                 launcher_session_id, script, script_sha, status, input,
+                 tools, mcp_servers, http_servers)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9::jsonb,
+                    $10::jsonb, $11::jsonb, $12::jsonb)
             RETURNING *
             """,
             new_id,
@@ -378,6 +382,7 @@ async def insert_wf_run(
             account_id,
             environment_id,
             parent_run_id,
+            launcher_session_id,
             script,
             script_sha,
             json.dumps(input) if input is not None else None,
@@ -387,8 +392,13 @@ async def insert_wf_run(
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
-            f"workflow {workflow_id} or environment {environment_id} not found",
-            detail={"workflow_id": workflow_id, "environment_id": environment_id},
+            "a referenced resource is gone: workflow, environment, parent run, or launcher session",
+            detail={
+                "workflow_id": workflow_id,
+                "environment_id": environment_id,
+                "parent_run_id": parent_run_id,
+                "launcher_session_id": launcher_session_id,
+            },
         ) from exc
     assert row is not None
     return _row_to_wf_run(row)
@@ -419,6 +429,59 @@ async def run_ancestor_depth(conn: asyncpg.Connection[Any], run_id: str, *, acco
         account_id,
     )
     return depth or 0
+
+
+async def count_active_runs(
+    conn: asyncpg.Connection[Any], *, account_id: str, launcher_session_id: str | None = None
+) -> int:
+    """Count the account's OUTSTANDING (non-terminal, non-archived) runs — optionally
+    only those launched by one session. The two fan-out cap reads.
+
+    The status list is verbatim-identical to the ``wf_runs_launcher_active_idx``
+    predicate (migration 0078) — keep them in sync so the planner uses the partial
+    index — and is the exact complement of ``TERMINAL_RUN_STATUSES``.
+
+    Cap invariant: ``archived_at IS NULL`` assumes archival is terminal-only. No run
+    archival exists today; if one lands, it must refuse non-terminal runs (or take
+    ``acquire_account_wf_runs_lock``), else an archived-but-running run would escape
+    the count while still consuming real capacity.
+    """
+    if launcher_session_id is None:
+        count: int = await conn.fetchval(
+            """
+            SELECT count(*) FROM wf_runs
+             WHERE account_id = $1 AND archived_at IS NULL
+               AND status IN ('pending','running','suspended')
+            """,
+            account_id,
+        )
+        return count
+    count = await conn.fetchval(
+        """
+        SELECT count(*) FROM wf_runs
+         WHERE account_id = $1 AND launcher_session_id = $2 AND archived_at IS NULL
+           AND status IN ('pending','running','suspended')
+        """,
+        account_id,
+        launcher_session_id,
+    )
+    return count
+
+
+async def acquire_account_wf_runs_lock(conn: asyncpg.Connection[Any], account_id: str) -> None:
+    """Take the per-account, transaction-scoped advisory lock serializing the fan-out
+    cap's COUNT+INSERT (released automatically at commit/rollback).
+
+    One account-level lock guards BOTH caps (a launcher's runs are a subset of its
+    account's), making them contractual against concurrent launches rather than
+    best-effort. The key is ``hashtextextended('aios_wf_runs_cap:' || account_id, 0)``
+    — a distinct namespace from the scheduled-tasks and worker-singleton locks, and
+    the two cap locks are never co-held in one transaction (no deadlock cycle).
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"aios_wf_runs_cap:{account_id}",
+    )
 
 
 async def set_run_vaults(

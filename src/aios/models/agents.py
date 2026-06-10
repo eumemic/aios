@@ -39,6 +39,7 @@ BuiltinToolType = Literal[
     "update_workflow",
     "create_run",
     "await_run",
+    "cancel_run",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled
