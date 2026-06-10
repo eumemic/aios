@@ -185,6 +185,36 @@ class TestDockerBackendArgs:
         argv = await _capture_docker_argv(_make_spec(Unrestricted()))
         assert "--cap-add" not in argv
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            Limited(allowed_hosts=frozenset({"example.com"})),
+            Unrestricted(),
+        ],
+        ids=["limited", "unrestricted"],
+    )
+    async def test_security_opt_no_new_privileges(self, policy: Limited | Unrestricted) -> None:
+        argv = await _capture_docker_argv(_make_spec(policy))
+        assert "--security-opt" in argv
+        i = argv.index("--security-opt")
+        assert argv[i + 1] == "no-new-privileges"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            Limited(allowed_hosts=frozenset({"example.com"})),
+            Unrestricted(),
+        ],
+        ids=["limited", "unrestricted"],
+    )
+    async def test_ipc_private(self, policy: Limited | Unrestricted) -> None:
+        argv = await _capture_docker_argv(_make_spec(policy))
+        assert "--ipc" in argv
+        i = argv.index("--ipc")
+        assert argv[i + 1] == "private"
+
 
 class TestDockerBackendIsAlive:
     """DockerBackend.is_alive maps ``docker inspect`` outcomes to a bool (#691).
