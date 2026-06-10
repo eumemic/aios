@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+from structlog.contextvars import bind_contextvars, clear_contextvars
+
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
 from aios.harness.completion import call_litellm, stream_litellm
@@ -161,102 +163,120 @@ async def run_session_step(
     account_id = await sessions_service.load_live_session_account_id(pool, session_id)
     if account_id is None:
         return
-    task_registry = runtime.require_task_registry()
-
-    # Outermost span pair: brackets the entire step (issue #131).  Emitted
-    # before the sweep guard so early-outs are also measured — a "wasted
-    # wake" cost shows up as a ``step_start``/``step_end`` pair with no
-    # ``context_build_*`` inside.  ``step_start_id`` backpointer on the
-    # end event matches the ``context_build_start_id`` convention.
-    step_start = await sessions_service.append_event(
-        pool,
-        session_id,
-        "span",
-        {"event": "step_start", "cause": cause},
-        account_id=account_id,
-    )
-    current_task = asyncio.current_task()
-    assert current_task is not None
-    task_registry.register_step(session_id, current_task)
-    result = _StepResult()
+    # Bind tenant/session/cause onto structlog contextvars so every line this step
+    # emits is attributable; cleared in the outer finally below (defensive hygiene —
+    # see that block). Bound AFTER the gone-session guard — that path is an
+    # idempotent no-op with no account to attribute.
+    bind_contextvars(session_id=session_id, account_id=account_id, cause=cause)
+    # Outer try/finally guarantees ``clear_contextvars`` is the VERY LAST thing the
+    # step does: the post-step wakes and archive-reclaim below (and their nested
+    # ``defer_wake`` logging) must still carry account_id/session_id/cause, so the
+    # clear can only run once every per-step log line has been emitted. Clearing is
+    # defensive hygiene — contextvars are task-scoped and procrastinate runs each job
+    # in a fresh asyncio task, but dropping the bindings here keeps them from
+    # outliving the step regardless of how the worker schedules tasks. The try opens
+    # IMMEDIATELY after the bind so the still-fallible setup below (``step_start``
+    # append, ``register_step``) can't escape with the contextvars still bound — e.g.
+    # a DB drop or a session archived in the race window past the account_id guard.
     try:
+        task_registry = runtime.require_task_registry()
+
+        # Outermost span pair: brackets the entire step (issue #131).  Emitted
+        # before the sweep guard so early-outs are also measured — a "wasted
+        # wake" cost shows up as a ``step_start``/``step_end`` pair with no
+        # ``context_build_*`` inside.  ``step_start_id`` backpointer on the
+        # end event matches the ``context_build_start_id`` convention.
+        step_start = await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {"event": "step_start", "cause": cause},
+            account_id=account_id,
+        )
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        task_registry.register_step(session_id, current_task)
+        result = _StepResult()
         try:
-            result = await asyncio.wait_for(
-                _run_session_step_body(
+            try:
+                result = await asyncio.wait_for(
+                    _run_session_step_body(
+                        pool,
+                        task_registry,
+                        session_id,
+                        cause=cause,
+                        account_id=account_id,
+                    ),
+                    timeout=_JOB_TIMEOUT_S,
+                )
+            except TimeoutError:
+                # Job-level safety net: a per-call timeout was missing or didn't
+                # fire. Force a reschedulable error state so the next wake can
+                # proceed (matches what the body's litellm-error handler does).
+                log.exception("step.job_timeout", session_id=session_id, timeout=_JOB_TIMEOUT_S)
+                result = _StepResult(
+                    retry_delay=await _handle_step_timeout(pool, session_id, account_id=account_id)
+                )
+            except Exception:
+                # Unexpected harness error (not a model/tool error — those are caught
+                # inside _run_session_step_body). Emit a span so the event log has a
+                # record, then apply the retry-or-failure state machine identically to
+                # the timeout path. Re-raise when the budget is exhausted.
+                log.exception("step.harness_error", session_id=session_id)
+                await sessions_service.append_event(
                     pool,
-                    task_registry,
                     session_id,
-                    cause=cause,
+                    "span",
+                    {"event": "harness_error", "is_error": True},
                     account_id=account_id,
-                ),
-                timeout=_JOB_TIMEOUT_S,
-            )
-        except TimeoutError:
-            # Job-level safety net: a per-call timeout was missing or didn't
-            # fire. Force a reschedulable error state so the next wake can
-            # proceed (matches what the body's litellm-error handler does).
-            log.exception("step.job_timeout", session_id=session_id, timeout=_JOB_TIMEOUT_S)
-            result = _StepResult(
-                retry_delay=await _handle_step_timeout(pool, session_id, account_id=account_id)
-            )
-        except Exception:
-            # Unexpected harness error (not a model/tool error — those are caught
-            # inside _run_session_step_body). Emit a span so the event log has a
-            # record, then apply the retry-or-failure state machine identically to
-            # the timeout path. Re-raise when the budget is exhausted.
-            log.exception("step.harness_error", session_id=session_id)
+                )
+                delay = await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+                result = _StepResult(retry_delay=delay)
+                if delay is None:
+                    raise
+        finally:
+            task_registry.unregister_step(session_id)
             await sessions_service.append_event(
                 pool,
                 session_id,
                 "span",
-                {"event": "harness_error", "is_error": True},
+                {"event": "step_end", "step_start_id": step_start.id},
                 account_id=account_id,
             )
-            delay = await _apply_retry_or_failure(pool, session_id, account_id=account_id)
-            result = _StepResult(retry_delay=delay)
-            if delay is None:
-                raise
+
+        # Every wake fires AFTER ``step_end`` so its ``wake_deferred`` span lands in
+        # step N+1's temporal window, not step N's — the "all wake_deferred since the
+        # previous step_end" pairing rule the profiler keys off (#132). Emitting inside
+        # the body would mis-attribute the gap. ``reschedule`` carries a known backoff
+        # delay; the ``request_nudge`` re-wakes the session for another answer turn; the
+        # auto-error wakes the caller run to harvest the ``no_return``.
+        if result.retry_delay is not None:
+            await defer_wake(
+                pool,
+                session_id,
+                cause="reschedule",
+                delay_seconds=result.retry_delay,
+                account_id=account_id,
+            )
+        if result.nudge_session:
+            await defer_wake(pool, session_id, cause="request_nudge", account_id=account_id)
+        if result.autoerror_caller_run_id is not None:
+            await defer_run_wake(result.autoerror_caller_run_id)
+
+        # Archive-on-quiescence, performed LAST: a session launched ``archive_when_idle``
+        # self-archives the first time it goes idle. It runs after ``step_end`` and every
+        # wake span so it is the step's final session write — once archived, ``append_event``
+        # rejects writes (``archived_at IS NULL`` fence). ``reclaim_session_if_idle`` is
+        # conditional on still-idle, so a nudge or a user message that re-activated the
+        # session (its ``defer_wake`` span already appended just above) wins and the archive
+        # no-ops. Only the clean end-of-turn return sets the flag (error/reschedule paths
+        # leave it False), so a rescheduling session is never reclaimed out from under a retry.
+        if result.archive_when_idle and await sessions_service.reclaim_session_if_idle(
+            pool, session_id, account_id=account_id
+        ):
+            log.info("step.session_reclaimed", session_id=session_id, cause=cause)
     finally:
-        task_registry.unregister_step(session_id)
-        await sessions_service.append_event(
-            pool,
-            session_id,
-            "span",
-            {"event": "step_end", "step_start_id": step_start.id},
-            account_id=account_id,
-        )
-
-    # Every wake fires AFTER ``step_end`` so its ``wake_deferred`` span lands in
-    # step N+1's temporal window, not step N's — the "all wake_deferred since the
-    # previous step_end" pairing rule the profiler keys off (#132). Emitting inside
-    # the body would mis-attribute the gap. ``reschedule`` carries a known backoff
-    # delay; the ``request_nudge`` re-wakes the session for another answer turn; the
-    # auto-error wakes the caller run to harvest the ``no_return``.
-    if result.retry_delay is not None:
-        await defer_wake(
-            pool,
-            session_id,
-            cause="reschedule",
-            delay_seconds=result.retry_delay,
-            account_id=account_id,
-        )
-    if result.nudge_session:
-        await defer_wake(pool, session_id, cause="request_nudge", account_id=account_id)
-    if result.autoerror_caller_run_id is not None:
-        await defer_run_wake(result.autoerror_caller_run_id)
-
-    # Archive-on-quiescence, performed LAST: a session launched ``archive_when_idle``
-    # self-archives the first time it goes idle. It runs after ``step_end`` and every
-    # wake span so it is the step's final session write — once archived, ``append_event``
-    # rejects writes (``archived_at IS NULL`` fence). ``reclaim_session_if_idle`` is
-    # conditional on still-idle, so a nudge or a user message that re-activated the
-    # session (its ``defer_wake`` span already appended just above) wins and the archive
-    # no-ops. Only the clean end-of-turn return sets the flag (error/reschedule paths
-    # leave it False), so a rescheduling session is never reclaimed out from under a retry.
-    if result.archive_when_idle and await sessions_service.reclaim_session_if_idle(
-        pool, session_id, account_id=account_id
-    ):
-        log.info("step.session_reclaimed", session_id=session_id, cause=cause)
+        clear_contextvars()
 
 
 async def _run_session_step_body(

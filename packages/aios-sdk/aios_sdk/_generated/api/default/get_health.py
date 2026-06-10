@@ -54,7 +54,9 @@ def sync_detailed(
 
     Suitable for load balancer health checks and monitoring probes. Always
     returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up.
+    process is up. Deliberately does NOT touch the DB pool — a post-startup
+    Postgres outage must not flip liveness (that's ``/ready``'s job), or an
+    orchestrator would kill an otherwise-healthy process during a DB blip.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -83,7 +85,9 @@ def sync(
 
     Suitable for load balancer health checks and monitoring probes. Always
     returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up.
+    process is up. Deliberately does NOT touch the DB pool — a post-startup
+    Postgres outage must not flip liveness (that's ``/ready``'s job), or an
+    orchestrator would kill an otherwise-healthy process during a DB blip.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -108,7 +112,9 @@ async def asyncio_detailed(
 
     Suitable for load balancer health checks and monitoring probes. Always
     returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up.
+    process is up. Deliberately does NOT touch the DB pool — a post-startup
+    Postgres outage must not flip liveness (that's ``/ready``'s job), or an
+    orchestrator would kill an otherwise-healthy process during a DB blip.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -135,7 +141,9 @@ async def asyncio(
 
     Suitable for load balancer health checks and monitoring probes. Always
     returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up.
+    process is up. Deliberately does NOT touch the DB pool — a post-startup
+    Postgres outage must not flip liveness (that's ``/ready``'s job), or an
+    orchestrator would kill an otherwise-healthy process during a DB blip.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

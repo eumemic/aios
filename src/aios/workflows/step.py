@@ -37,6 +37,7 @@ import jsonschema
 from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
+from structlog.contextvars import bind_contextvars, clear_contextvars
 
 from aios.config import get_settings
 from aios.db import queries as db_queries
@@ -160,7 +161,24 @@ async def run_workflow_step(run_id: str) -> None:
         if run is None or run.status in TERMINAL_RUN_STATUSES:
             return  # vanished or already terminal — a stray/duplicate wake is a no-op
         account_id = run.account_id
+    # Bind run/tenant onto structlog contextvars so every line this step emits is
+    # attributable; cleared in the finally as defensive hygiene (contextvars are
+    # task-scoped and procrastinate runs each job in a fresh asyncio task, but the
+    # clear keeps the bindings from outliving the step regardless). Bound AFTER the
+    # gone/terminal guard above — that path is an idempotent no-op with no account to
+    # attribute. ``cause`` is omitted: workflows have no per-wake cause concept
+    # (unlike a session step's message/reschedule/etc).
+    bind_contextvars(run_id=run_id, account_id=account_id)
+    try:
+        await _run_workflow_step_body(pool, run_id, run, account_id)
+    finally:
+        clear_contextvars()
 
+
+async def _run_workflow_step_body(
+    pool: asyncpg.Pool[Any], run_id: str, run: WfRun, account_id: str
+) -> None:
+    async with pool.acquire() as conn:
         events = await wf_queries.list_run_events(conn, run_id)
         signals = {s.call_key: s for s in await wf_queries.list_run_signals(conn, run_id)}
 

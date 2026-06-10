@@ -91,7 +91,7 @@ services:
       - signal_state:/var/lib/aios/signal-data
     ports:
       - "${AIOS_API_PORT:-8080}:8080"
-    # Healthcheck inherited from Dockerfile (curl http://127.0.0.1:8080/health).
+    # Healthcheck inherited from Dockerfile (curl http://127.0.0.1:8080/ready).
 
   worker:
     build:
