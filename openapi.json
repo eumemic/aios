@@ -3363,6 +3363,109 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/await": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Await Session",
+        "description": "Block until a correlated response lands (``request_id``) or the session has fully\nreacted to a stimulus (``watermark``; defaults to the session's ``last_stimulus_seq`` at\ncall time), or ``timeout`` seconds elapse \u2014 then ``done=false`` so the caller re-polls.\n\nThe ``await`` primitive's session backing: one JSON round-trip, MCP-usable so an agent can\nawait a session it drove and join. Provide ``request_id`` XOR ``watermark`` (both \u2192 422).\nA cross-tenant session 404s before any subscription opens.",
+        "operationId": "await_session",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "watermark",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Watermark"
+            }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 60,
+              "minimum": 0,
+              "default": 30,
+              "title": "Timeout"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionAwaitResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/skills": {
       "post": {
         "tags": [
@@ -13299,6 +13402,45 @@
         ],
         "title": "Session",
         "description": "Read view of a session. Internal-only columns are not exposed.\n\n``status`` ({active, idle}) is derived per read from the event log; see\n:data:`SessionStatus`. ``stop_reason`` records why the most recent step\nended. Possible ``type`` values: ``\"end_turn\"``, ``\"interrupt\"``,\n``\"rescheduling\"``, ``\"error\"`` (``idle`` + ``error`` = the errored\nlanding pad). ``awaiting`` lists tool calls the session is blocked on\n(derived per read from the event log + agent tool specs)."
+      },
+      "SessionAwaitResponse": {
+        "properties": {
+          "done": {
+            "type": "boolean",
+            "title": "Done"
+          },
+          "last_reacted_seq": {
+            "type": "integer",
+            "title": "Last Reacted Seq"
+          },
+          "result": {
+            "title": "Result"
+          },
+          "is_error": {
+            "type": "boolean",
+            "title": "Is Error",
+            "default": false
+          },
+          "error": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "done",
+          "last_reacted_seq"
+        ],
+        "title": "SessionAwaitResponse",
+        "description": "Response for GET /v1/sessions/{id}/await \u2014 the await-a-completion primitive,\nsession backing. One envelope over two monotonic predicates (request_id\ncorrelation, or reacted>=watermark). Poll until `done`."
       },
       "SessionCloneRequest": {
         "properties": {

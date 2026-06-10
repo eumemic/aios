@@ -144,6 +144,7 @@ async def open_listen_for_events(
     session_id: str,
     *,
     queue_max: int = 1000,
+    acquire_lock: bool = True,
 ) -> ListenSubscription:
     """Open a dedicated asyncpg connection, LISTEN events_<session_id>,
     acquire the SSE subscriber lock, and return a :class:`ListenSubscription`.
@@ -151,6 +152,16 @@ async def open_listen_for_events(
     Two-phase counterpart to :func:`listen_for_events` for callers (SSE
     route handlers) that need to preflight setup BEFORE constructing the
     streaming response.
+
+    ``acquire_lock`` (default ``True``) controls whether the subscriber
+    advisory lock is taken (issue #81): with it held, the worker's
+    :func:`aios.db.sse_lock.has_subscriber` check returns True and the model
+    call takes the streaming path (deltas → ``pg_notify`` → SSE clients).
+    A caller that consumes ONLY the terminal completion state — never the
+    deltas — should pass ``acquire_lock=False`` so it doesn't force the
+    awaited session's worker into the slower streaming path for a consumer
+    that ignores deltas. The ``await``-primitive poller does exactly this,
+    mirroring how :func:`open_listen_for_run_events` omits the lock entirely.
 
     Any failure after the initial ``asyncpg.connect`` succeeds will
     ``conn.terminate()`` and re-raise.
@@ -185,10 +196,11 @@ async def open_listen_for_events(
                     pass
 
         await conn.add_listener(channel, _callback)
-        # Hold a shared advisory lock on this dedicated connection so the
-        # worker can detect that an SSE subscriber exists (issue #81).
-        # pg_locks releases automatically on connection close — no cleanup.
-        await acquire_subscriber_lock(conn, session_id)
+        if acquire_lock:
+            # Hold a shared advisory lock on this dedicated connection so the
+            # worker can detect that an SSE subscriber exists (issue #81).
+            # pg_locks releases automatically on connection close — no cleanup.
+            await acquire_subscriber_lock(conn, session_id)
     except BaseException:
         conn.terminate()
         raise

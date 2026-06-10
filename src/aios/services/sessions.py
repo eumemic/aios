@@ -19,7 +19,14 @@ import asyncpg
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import ConflictError, NotFoundError, PayloadTooLargeError, RateLimitedError
+from aios.db.listen import open_listen_for_events
+from aios.errors import (
+    ConflictError,
+    NotFoundError,
+    PayloadTooLargeError,
+    RateLimitedError,
+    ValidationError,
+)
 from aios.models.agents import (
     Agent,
     AgentVersion,
@@ -36,6 +43,7 @@ from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
     AwaitingToolCall,
     Session,
+    SessionAwaitResponse,
     SessionResource,
     SessionResourceEcho,
     SessionStatus,
@@ -45,6 +53,7 @@ from aios.sandbox.volumes import validate_workspace_path
 from aios.services import agents as agents_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
+from aios.services.await_completion import await_completion
 
 
 async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
@@ -467,6 +476,97 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: s
             "scheduled_tasks": task_echoes,
             "awaiting": awaiting_by_sid.get(session_id, []),
         }
+    )
+
+
+async def await_session(
+    pool: asyncpg.Pool[Any],
+    db_url: str,
+    session_id: str,
+    *,
+    account_id: str,
+    request_id: str | None,
+    watermark: int | None,
+    timeout_seconds: float,
+) -> SessionAwaitResponse:
+    """Block until a correlated response lands (request_id mode) or the session has fully
+    reacted to a fixed stimulus (watermark mode; watermark defaults to last_stimulus_seq
+    captured at call time), or timeout. The session backing of the await primitive.
+
+    Account-scopes the session FIRST (cross-tenant/missing 404s before any LISTEN opens),
+    then subscribes to events_<session_id> BEFORE the first predicate read (LISTEN-before-read),
+    drives await_completion with the monotonic done-predicate, and returns the completion
+    envelope — or, on timeout, done=False so the caller re-polls. Never waits on bare idle:
+    both modes are monotonic w.r.t. a fixed stimulus (request_id, or reacted>=watermark).
+    """
+    if request_id is not None and watermark is not None:
+        raise ValidationError("provide request_id or watermark, not both")
+
+    # Scope-check FIRST (404s cross-tenant before any LISTEN opens) and capture the
+    # default watermark's ``last_stimulus_seq`` in the same read. ``read_session_watermarks``
+    # already enforces ``WHERE id = $1 AND account_id = $2`` and returns None when the row is
+    # missing OR cross-tenant — the same scope guarantee as ``get_session`` — so one call both
+    # 404s and yields the watermark scalars.
+    async with pool.acquire() as conn:
+        captured = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
+    if captured is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    effective_watermark = watermark if watermark is not None else captured[1]  # last_stimulus_seq
+
+    if request_id is not None:
+
+        async def _read() -> Any:
+            async with pool.acquire() as conn:
+                return await queries.derive_response(
+                    conn, session_id, account_id=account_id, request_id=request_id
+                )
+
+        def _is_done(state: Any) -> bool:
+            return state is not None  # a response (or child_gone) has landed
+    else:
+
+        async def _read() -> Any:
+            async with pool.acquire() as conn:
+                wm = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
+                return wm[0] if wm is not None else 0  # last_reacted_seq
+
+        def _is_done(state: Any) -> bool:
+            return bool(state >= effective_watermark)
+
+    # An await poller consumes only the terminal completion state, never the
+    # token-by-token deltas, so it must NOT acquire the subscriber lock: doing
+    # so would make has_subscriber() return True and force the awaited
+    # session's worker into the streaming model path for the entire await
+    # window — wasted work for a consumer that ignores deltas. Mirrors how
+    # open_listen_for_run_events omits the lock (issue #81).
+    subscription = await open_listen_for_events(db_url, session_id, acquire_lock=False)
+    try:
+        state = await await_completion(
+            subscription.queue,
+            read_state=_read,
+            is_done=_is_done,
+            timeout_seconds=timeout_seconds,
+        )
+    finally:
+        subscription.terminate()
+
+    async with pool.acquire() as conn:
+        wm = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
+    last_reacted_seq = wm[0] if wm is not None else 0
+
+    if request_id is not None:
+        if state is not None:
+            return SessionAwaitResponse(
+                done=True,
+                last_reacted_seq=last_reacted_seq,
+                result=state["result"],
+                is_error=state["is_error"],
+                error=state["error"],
+            )
+        return SessionAwaitResponse(done=False, last_reacted_seq=last_reacted_seq)
+
+    return SessionAwaitResponse(
+        done=last_reacted_seq >= effective_watermark, last_reacted_seq=last_reacted_seq
     )
 
 

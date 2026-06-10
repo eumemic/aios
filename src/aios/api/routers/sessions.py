@@ -50,6 +50,7 @@ from aios.models.scheduled_tasks import (
 from aios.models.sessions import (
     ContextResponse,
     Session,
+    SessionAwaitResponse,
     SessionCloneRequest,
     SessionCreate,
     SessionInterruptRequest,
@@ -796,4 +797,33 @@ async def wait_for_events(
         session_stop_reason=session.stop_reason,
         session_awaiting=session.awaiting,
         next_after=events[-1].seq if events else after,
+    )
+
+
+@router.get("/{session_id}/await", operation_id="await_session")
+async def await_session(
+    session_id: str,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    request_id: str | None = None,
+    watermark: int | None = None,
+    timeout_seconds: Annotated[int, Query(alias="timeout", ge=0, le=60)] = 30,
+) -> SessionAwaitResponse:
+    """Block until a correlated response lands (``request_id``) or the session has fully
+    reacted to a stimulus (``watermark``; defaults to the session's ``last_stimulus_seq`` at
+    call time), or ``timeout`` seconds elapse — then ``done=false`` so the caller re-polls.
+
+    The ``await`` primitive's session backing: one JSON round-trip, MCP-usable so an agent can
+    await a session it drove and join. Provide ``request_id`` XOR ``watermark`` (both → 422).
+    A cross-tenant session 404s before any subscription opens.
+    """
+    return await service.await_session(
+        pool,
+        db_url,
+        session_id,
+        account_id=account_id,
+        request_id=request_id,
+        watermark=watermark,
+        timeout_seconds=timeout_seconds,
     )

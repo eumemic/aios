@@ -68,6 +68,11 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
     "wait_for_events_v1_sessions__session_id__wait_get": (
         "Long-poll endpoint; use `aios sessions stream` / `aios tail` instead."
     ),
+    "await_session": (
+        "Await-a-completion long-poll (the await primitive's session backing); "
+        "MCP-surfaced for agents, but operators watch a session via "
+        "`aios sessions stream` / `aios tail` rather than a blocking poll."
+    ),
     # ── Interactive (browser-redirect) OAuth ─────────────────────────
     # The vault-credential "Connect" flow returns an authorization URL for the
     # user to sign in at the provider, then exchanges the returned code. It is
