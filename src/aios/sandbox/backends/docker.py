@@ -89,6 +89,29 @@ class DockerBackend:
         if isinstance(spec.network_policy, Limited):
             argv.extend(["--cap-add", "NET_ADMIN"])
 
+        # WS0 phase-1 hardening: two flags safe to land before the exec-user
+        # seam is in place.
+        #
+        # --security-opt no-new-privileges: blocks privilege *gain* across
+        # execve (setuid bits, file capabilities).  Root setup execs don't
+        # escalate — apt's _apt drop uses seteuid downward via CAP_SETUID;
+        # the Limited iptables lockdown already runs as root holding NET_ADMIN.
+        # No setuid binaries ship in the sandbox image today.  Any future
+        # setuid binary added to the image will silently not escalate under
+        # NNP — acceptable and intended.
+        #
+        # --ipc private: drops SysV-shm / POSIX-mq sharing with the host and
+        # sibling containers.  Nothing uses cross-container IPC; this is the
+        # modern Docker default — an explicit assertion rather than a behaviour
+        # change.
+        #
+        # --cap-drop=ALL, --read-only, and a seccomp profile are deferred:
+        # cap-drop interacts with apt/dpkg; --read-only conflicts with
+        # root-agent workspace writes.  Track those in separate follow-up
+        # issues.
+        argv.extend(["--security-opt", "no-new-privileges"])
+        argv.extend(["--ipc", "private"])
+
         if spec.host_gateway_alias is not None:
             argv.extend(["--add-host", f"{spec.host_gateway_alias}:host-gateway"])
 
