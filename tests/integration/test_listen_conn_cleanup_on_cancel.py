@@ -24,6 +24,7 @@ from aios.db.listen import (
     listen_for_management_calls,
     listen_for_session_interrupts,
 )
+from aios.db.pool import listener_application_name
 from tests.conftest import needs_docker
 from tests.helpers.db import count_active_backends
 
@@ -51,13 +52,14 @@ async def test_listener_cancellation_does_not_leak_pg_conn(
     listener_name: str,
 ) -> None:
     factory = LISTENERS[listener_name]
+    app_name = listener_application_name()
 
     async def _hold(ready: asyncio.Event) -> None:
         async with factory(migrated_db_url) as queue:
             ready.set()
             await queue.get()
 
-    baseline = await count_active_backends(migrated_db_url)
+    baseline = await count_active_backends(migrated_db_url, application_name=app_name)
 
     n_streams = 5
     readies = [asyncio.Event() for _ in range(n_streams)]
@@ -65,7 +67,7 @@ async def test_listener_cancellation_does_not_leak_pg_conn(
 
     await asyncio.wait_for(asyncio.gather(*(r.wait() for r in readies)), timeout=5.0)
 
-    peak = await count_active_backends(migrated_db_url)
+    peak = await count_active_backends(migrated_db_url, application_name=app_name)
     assert peak >= baseline + n_streams, (
         f"only {peak - baseline}/{n_streams} backends observed during peak; "
         f"the LISTENs may not be using dedicated conns"
@@ -79,7 +81,7 @@ async def test_listener_cancellation_does_not_leak_pg_conn(
 
     deadline = asyncio.get_running_loop().time() + 5.0
     while True:
-        cur = await count_active_backends(migrated_db_url)
+        cur = await count_active_backends(migrated_db_url, application_name=app_name)
         if cur <= baseline:
             return
         if asyncio.get_running_loop().time() > deadline:

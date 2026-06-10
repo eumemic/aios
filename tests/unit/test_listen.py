@@ -19,6 +19,23 @@ import pytest
 from aios.db import listen
 
 
+def test_listener_application_name_uses_settings_instance_id() -> None:
+    from aios.config import get_settings
+    from aios.db.pool import listener_application_name
+
+    expected = f"aios-listener:{get_settings().instance_id}"[:63]
+    assert listener_application_name() == expected
+
+
+def test_listener_application_name_explicit_and_truncates() -> None:
+    from aios.db.pool import listener_application_name
+
+    assert listener_application_name("abc") == "aios-listener:abc"
+    long = listener_application_name("x" * 100)
+    assert long.startswith("aios-listener:")
+    assert len(long.encode()) <= 63
+
+
 def _mk_listener(name: str) -> AbstractAsyncContextManager[Any]:
     """Build the listener context manager keyed by function name.
 

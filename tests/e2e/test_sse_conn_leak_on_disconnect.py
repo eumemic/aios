@@ -18,6 +18,24 @@ Cleanup via synchronous ``conn.terminate()`` (``transport.abort()``
 directly, no await) closes the socket regardless of cancellation state.
 This test guards against any future regression that re-introduces an
 async cleanup step in the listener helpers' finally blocks.
+
+## Why the backend count is filtered by ``application_name`` (issue #894)
+
+Counting *all* of the database's client backends made this test racy under
+``pytest -n`` (xdist): other workers' app pools and listener connections,
+plus this server's own pool churning on backfill, moved the global count
+non-deterministically. The fix tags every dedicated listener connection
+with a per-instance Postgres ``application_name`` —
+``aios-listener:<instance_id>``, set in
+:func:`aios.db.listen._connect_listener` — and counts ONLY backends
+carrying that exact label. The in-process ``live_aios_server`` shares
+``get_settings()`` with this test, so both observe the same ``instance_id``
+and therefore the same label. Filtering makes the count immune to other
+xdist workers and to this server's own app pool. With a clean,
+instance-scoped count we can assert FULL reap back to ``baseline`` (every
+opened stream's listener backend is gone) rather than the old
+``peak - n_streams`` heuristic, which tolerated pool noise and so detected
+leaks more weakly.
 """
 
 from __future__ import annotations
@@ -31,6 +49,7 @@ import asyncpg
 import httpx
 import pytest
 
+from aios.db.pool import listener_application_name
 from tests.conftest import needs_docker
 from tests.e2e.conftest import live_aios_server, wait_for_predicate
 from tests.helpers.db import count_active_backends
@@ -94,11 +113,14 @@ class TestSseDisconnectLeak:
         """Open N SSE streams, drop TCP abruptly, assert conns return to baseline."""
         api_key = aios_env["AIOS_API_KEY"]
         session_id = await _seed_session(migrated_db_url)
+        app_name = listener_application_name()
 
         # Baseline AFTER session is seeded so the seed-helper pool's
-        # lifecycle is out of the way.
+        # lifecycle is out of the way.  Filtered by this instance's listener
+        # application_name so the count is immune to other xdist workers and
+        # the app pool (issue #894).
         await asyncio.sleep(0.2)
-        baseline = await count_active_backends(migrated_db_url)
+        baseline = await count_active_backends(migrated_db_url, application_name=app_name)
 
         n_streams = 5
         clients: list[httpx.AsyncClient] = []
@@ -121,14 +143,14 @@ class TestSseDisconnectLeak:
                 clients.append(c)
                 consumer_tasks.append(asyncio.create_task(_consume_one(c)))
 
-            # Wait for the SSE backends to attach.  Each open stream
-            # adds one ``listen_for_events`` backend; the pool may add
-            # more on backfill ``pool.acquire()`` calls if it grew
-            # lazily.  Poll until we see at least n_streams new client
-            # backends.
+            # Wait for the SSE backends to attach.  Each open stream adds
+            # exactly one tagged ``listen_for_events`` backend; pool /
+            # backfill connections carry a different application_name and are
+            # excluded from this filtered count.  Poll until we see at least
+            # n_streams new tagged listener backends.
             deadline = asyncio.get_running_loop().time() + 5.0
             while True:
-                peak = await count_active_backends(migrated_db_url)
+                peak = await count_active_backends(migrated_db_url, application_name=app_name)
                 if peak >= baseline + n_streams:
                     break
                 if asyncio.get_running_loop().time() > deadline:
@@ -165,22 +187,26 @@ class TestSseDisconnectLeak:
                 with contextlib.suppress(BaseException):
                     await t
 
-        # After cleanup, the N dedicated listener backends must be reaped.
-        # The api process's pool may keep up to pool_max_size pool conns
-        # idle for reuse — those aren't leaks, just capacity.  Assert on
-        # the LISTENER reduction (peak - n_streams) rather than absolute
-        # baseline so the test is robust to pool growth during peak.
-        target = peak - n_streams
-
-        async def _reaped_to_target() -> bool:
-            return await count_active_backends(migrated_db_url) <= target
+        # After cleanup, every dedicated listener backend opened by the N
+        # streams must be reaped.  Because the count is filtered to this
+        # instance's listener application_name, the app pool's idle conns
+        # don't show up — so we can assert FULL reap back to ``baseline``
+        # (the measured floor) rather than the old ``peak - n_streams``
+        # heuristic.
+        async def _reaped_to_baseline() -> bool:
+            return (
+                await count_active_backends(migrated_db_url, application_name=app_name) <= baseline
+            )
 
         with contextlib.suppress(AssertionError):
-            await wait_for_predicate(_reaped_to_target, max_wait_s=8.0, interval_s=0.1)
-        cur = await count_active_backends(migrated_db_url)
-        if cur > target:
+            await wait_for_predicate(_reaped_to_baseline, max_wait_s=8.0, interval_s=0.1)
+        cur = await count_active_backends(migrated_db_url, application_name=app_name)
+        if cur > baseline:
+            # Unfiltered diagnostic: ALL client backends, not just tagged
+            # listeners — so this snapshot won't match the filtered counts
+            # above.  Printed only on failure to aid debugging.
             states = await _backend_states(migrated_db_url)
-            print("\n=== LEAKED BACKENDS ===")
+            print("\n=== ALL BACKENDS (unfiltered diagnostic) ===")
             for s in states:
                 age = s["age_s"]
                 state_age = s["state_age_s"]
@@ -190,8 +216,9 @@ class TestSseDisconnectLeak:
                     f"wait={s['wait_event_type']}/{s['wait_event']} "
                     f"query={(s['query'] or '')[:120]!r}"
                 )
-            print(f"=== baseline={baseline} peak={peak} current={cur} target={target} ===\n")
-        assert cur <= target, (
-            f"listener backends did not reap within 8s: peak={peak} "
-            f"current={cur} target={target} (expected drop of {n_streams})"
+            print(f"=== app_name={app_name} baseline={baseline} peak={peak} current={cur} ===\n")
+        assert cur <= baseline, (
+            f"listener backends did not reap to baseline within 8s: "
+            f"app_name={app_name} baseline={baseline} peak={peak} "
+            f"current={cur} (expected drop of {n_streams})"
         )
