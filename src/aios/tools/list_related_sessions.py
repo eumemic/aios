@@ -59,8 +59,20 @@ async def list_related_sessions_handler(
             await queries.get_connection(conn, connection_id, account_id=account_id)
             conns = [connection_id]
         else:
-            connections = await queries.list_connections(conn, account_id=account_id)
-            conns = [c.id for c in connections]
+            # Page through every active connection on the account. The default
+            # ``list_connections`` limit (50) would silently truncate accounts
+            # with more than 50 connections, contradicting this tool's "every
+            # chat-session binding on your account" contract.
+            conns = []
+            cursor: str | None = None
+            while True:
+                page = await queries.list_connections(
+                    conn, account_id=account_id, limit=200, after=cursor
+                )
+                conns.extend(c.id for c in page)
+                if len(page) < 200:
+                    break
+                cursor = page[-1].id
         for cid in conns:
             rows = await queries.list_chat_sessions_for_connection(conn, cid, account_id=account_id)
             for chat_id, sess_id, created_at in rows:
