@@ -356,6 +356,26 @@ class Settings(BaseSettings):
     )
 
     # ── connectors ─────────────────────────────────────────────────────────
+    inbound_debounce_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Debounce window (seconds) before the FIRST wake of an "
+        "idle session on a connector inbound. aios already coalesces "
+        "mid-turn arrivals, but the very first wake of an idle session "
+        "fires immediately, so a bursty sender that jitters several "
+        "messages a few seconds apart (e.g. Jarvis, 2-5s between sends) "
+        "spawns one turn per message instead of one turn for the burst. "
+        "When > 0, the inbound path schedules the wake this many seconds "
+        "out via ``defer_wake``'s ``delay_seconds``; the existing "
+        "``queueing_lock=session_id`` dedup then collapses any follow-on "
+        "inbounds that land inside the window into the same single wake. "
+        "0.0 (the default) disables debounce — the wake fires immediately, "
+        "preserving pre-feature behavior. Fixed delay, not random jitter "
+        "(v1). Only the connector-inbound first wake is affected; the "
+        "harness retry-backoff path (cause='reschedule') and the async "
+        "tool-completion path (cause='connector_tool_result') are "
+        "untouched.",
+    )
     connector_backfill_max_age_seconds: int = Field(
         default=60 * 60,  # 1 hour
         ge=60,

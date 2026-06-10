@@ -19,6 +19,7 @@ from typing import Any, NamedTuple
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
@@ -186,7 +187,23 @@ async def handle_inbound(
 
     # Defer wake unconditionally — both first-append and dedup paths
     # heal the case where a prior attempt committed but failed to wake.
-    await defer_wake(pool, target_session_id, cause="inbound", account_id=account_id)
+    #
+    # Inbound debounce (#799): when configured (> 0), schedule the first
+    # wake of an idle session ``inbound_debounce_seconds`` out instead of
+    # immediately. ``defer_wake``'s ``queueing_lock=session_id`` then
+    # collapses any follow-on inbounds that arrive inside the window into
+    # this same single wake — one turn for a bursty sender's whole burst.
+    # Only the inbound path is debounced; the harness retry (cause=
+    # 'reschedule') and tool-completion (cause='connector_tool_result')
+    # paths pass their own delay semantics and are untouched. When the
+    # knob is 0.0 (off), omit ``delay_seconds`` entirely so the call is
+    # byte-identical to pre-feature behavior (and so the test assertion
+    # for the off case can require its absence).
+    debounce_seconds = get_settings().inbound_debounce_seconds
+    wake_kwargs: dict[str, Any] = {"cause": "inbound", "account_id": account_id}
+    if debounce_seconds > 0:
+        wake_kwargs["delay_seconds"] = debounce_seconds
+    await defer_wake(pool, target_session_id, **wake_kwargs)
 
     return InboundResult(
         appended_event_id=event_id,
