@@ -73,9 +73,10 @@ async def test_security_opt_always_emitted(monkeypatch: pytest.MonkeyPatch) -> N
     spec = _make_spec(seccomp_profile="/app/docker/seccomp-sandbox.json")
     await DockerBackend().create(spec)
 
-    argv = calls[0]
-    idx = argv.index("--security-opt")
-    assert argv[idx + 1] == "seccomp=/app/docker/seccomp-sandbox.json"
+    # Order-independent: the backend emits multiple --security-opt flags
+    # (no-new-privileges from #812 precedes seccomp), so scan all of them
+    # rather than assuming seccomp is first — matching the sibling tests below.
+    assert "seccomp=/app/docker/seccomp-sandbox.json" in _security_opt_values(calls[0])
 
 
 async def test_unconfined_override_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
