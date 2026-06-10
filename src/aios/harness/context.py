@@ -19,6 +19,16 @@ own seq. This correctly handles the race where a tool result arrives
 during inference — the model's response has a ``reacting_to`` that
 predates the tool result, so the result is "new" and triggers a
 follow-up step.
+
+Because this replay runs on EVERY wake over the immutable log, a per-event
+render failure is a structural brick risk: the model is never called, so
+the "model sees the error and retries" recovery cannot engage. A quarantine
+backstop guards against it — any per-event render that raises is caught and
+replaced by a deterministic placeholder that is a function of ``e.seq`` ONLY
+(see :func:`_quarantine_placeholder`), preserving the monotonicity invariant,
+and the failure is signalled via the ``context.poison_event_quarantined``
+structlog event. One poison event degrades exactly one position; every other
+event in the window still renders.
 """
 
 from __future__ import annotations
@@ -695,6 +705,17 @@ class ContextResult:
     reacting_to: int  # max seq of user/tool events included in context
 
 
+def _quarantine_placeholder(seq: int) -> dict[str, Any]:
+    """Deterministic stand-in for an event whose render raised.
+
+    A function of ``seq`` ONLY — no timestamps, no counters — so the
+    context stays a monotonic function of the log (see module docstring):
+    re-rendering the same window always produces byte-identical output at
+    this position, and appending later events never rewrites it.
+    """
+    return {"role": "user", "content": f"[unrenderable event seq={seq} — quarantined]"}
+
+
 def build_messages(
     events: list[Event],
     *,
@@ -760,101 +781,139 @@ def build_messages(
     for e in events:
         if e.kind != "message":
             continue
-        role = e.data.get("role")
+        # Quarantine backstop (#686): build_messages is a pure replay over
+        # the immutable log, run on EVERY wake. A single event that makes the
+        # render dispatch raise would brick the session permanently — the
+        # model is never called, so the "model sees the error and retries"
+        # recovery never engages. Degrade THAT ONE event to a deterministic
+        # placeholder (a function of e.seq only, preserving monotonicity)
+        # rather than failing the whole build. The inner isinstance/OSError
+        # guards still pre-empt this for the shapes they cover; this catches
+        # novel raisers they don't.
+        mark = len(messages)
+        try:
+            role = e.data.get("role")
 
-        if role == "user":
-            msg = render_user_event(
-                e.data,
-                e.orig_channel,
-                e.focal_channel_at_arrival,
-                e.created_at,
-                tz_name=tz_name,
-                model=model,
-                session_id=session_id,
-                workspace_path=workspace_path,
-            )
-            messages.append(msg)
-            max_stimulus_seq = max(max_stimulus_seq, e.seq)
+            if role == "user":
+                msg = render_user_event(
+                    e.data,
+                    e.orig_channel,
+                    e.focal_channel_at_arrival,
+                    e.created_at,
+                    tz_name=tz_name,
+                    model=model,
+                    session_id=session_id,
+                    workspace_path=workspace_path,
+                )
+                messages.append(msg)
+                max_stimulus_seq = max(max_stimulus_seq, e.seq)
 
-        elif role == "assistant":
-            messages.append(e.data)
-            horizon = horizon_for.get(e.seq, _INF)
-            for tc in e.data.get("tool_calls") or []:
-                tcid = tc.get("id")
-                if not tcid or tcid in emitted_tcids:
-                    continue
-                rseq = real_result_seqs.get(tcid)
-                if rseq is not None and rseq <= horizon:
-                    messages.append(real_results[tcid])
-                    max_stimulus_seq = max(max_stimulus_seq, rseq)
-                else:
-                    placeholder = (
-                        _PENDING_BACKGROUND
-                        if tcid in in_flight_tool_call_ids
-                        else _PENDING_EXTERNAL
-                    )
-                    messages.append({"role": "tool", "tool_call_id": tcid, "content": placeholder})
-                    if tcid in real_results:
-                        # Safe: last assistant has horizon=INF so rseq<=INF
-                        # always takes the REAL branch above; only non-last
-                        # assistants reach here, and they all have entries.
-                        setter_seq = horizon_setter_for[e.seq]
-                        inject_after.setdefault(setter_seq, []).append((tcid, real_results[tcid]))
-                emitted_tcids.add(tcid)
+            elif role == "assistant":
+                messages.append(e.data)
+                horizon = horizon_for.get(e.seq, _INF)
+                for tc in e.data.get("tool_calls") or []:
+                    tcid = tc.get("id")
+                    if not tcid or tcid in emitted_tcids:
+                        continue
+                    rseq = real_result_seqs.get(tcid)
+                    if rseq is not None and rseq <= horizon:
+                        messages.append(real_results[tcid])
+                        max_stimulus_seq = max(max_stimulus_seq, rseq)
+                    else:
+                        placeholder = (
+                            _PENDING_BACKGROUND
+                            if tcid in in_flight_tool_call_ids
+                            else _PENDING_EXTERNAL
+                        )
+                        messages.append(
+                            {"role": "tool", "tool_call_id": tcid, "content": placeholder}
+                        )
+                        if tcid in real_results:
+                            # Safe: last assistant has horizon=INF so rseq<=INF
+                            # always takes the REAL branch above; only non-last
+                            # assistants reach here, and they all have entries.
+                            setter_seq = horizon_setter_for[e.seq]
+                            inject_after.setdefault(setter_seq, []).append(
+                                (tcid, real_results[tcid])
+                            )
+                    emitted_tcids.add(tcid)
 
-            # Inline blind-spot injections anchored to this assistant
-            # (preserves prefix monotonicity — see docstring).
-            for inj_tcid, inj_data in inject_after.pop(e.seq, []):
-                name = inj_data.get("name", "tool")
-                header = f"[Tool result: {name} (call {inj_tcid}) completed]"
-                inj_content = inj_data.get("content", "")
-                if isinstance(inj_content, list):
-                    # Multimodal tool result (e.g. image-aware read returning a
-                    # text + image_url part list).  F-stringing would emit the
-                    # Python repr of the list, losing the pixels — splice the
-                    # parts into the synthetic user message instead so the model
-                    # sees the image in the blind-spot signal too.  Spec'd text
-                    # parts are concatenated under the header; non-text parts
-                    # (image_url, etc.) follow as siblings.
-                    text_chunks: list[str] = [header]
-                    other_parts: list[dict[str, Any]] = []
-                    for part in inj_content:
-                        if not isinstance(part, dict):
-                            continue
-                        if part.get("type") == "text":
-                            txt = part.get("text")
-                            if isinstance(txt, str) and txt:
-                                text_chunks.append(txt)
+                # Inline blind-spot injections anchored to this assistant
+                # (preserves prefix monotonicity — see docstring).
+                for inj_tcid, inj_data in inject_after.pop(e.seq, []):
+                    name = inj_data.get("name", "tool")
+                    header = f"[Tool result: {name} (call {inj_tcid}) completed]"
+                    inj_content = inj_data.get("content", "")
+                    if isinstance(inj_content, list):
+                        # Multimodal tool result (e.g. image-aware read returning a
+                        # text + image_url part list).  F-stringing would emit the
+                        # Python repr of the list, losing the pixels — splice the
+                        # parts into the synthetic user message instead so the model
+                        # sees the image in the blind-spot signal too.  Spec'd text
+                        # parts are concatenated under the header; non-text parts
+                        # (image_url, etc.) follow as siblings.
+                        text_chunks: list[str] = [header]
+                        other_parts: list[dict[str, Any]] = []
+                        for part in inj_content:
+                            if not isinstance(part, dict):
+                                continue
+                            if part.get("type") == "text":
+                                txt = part.get("text")
+                                if isinstance(txt, str) and txt:
+                                    text_chunks.append(txt)
+                            else:
+                                other_parts.append(part)
+                        combined_text = "\n".join(text_chunks)
+                        if other_parts:
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": combined_text},
+                                        *other_parts,
+                                    ],
+                                }
+                            )
                         else:
-                            other_parts.append(part)
-                    combined_text = "\n".join(text_chunks)
-                    if other_parts:
+                            messages.append({"role": "user", "content": combined_text})
+                    else:
                         messages.append(
                             {
                                 "role": "user",
-                                "content": [
-                                    {"type": "text", "text": combined_text},
-                                    *other_parts,
-                                ],
+                                "content": f"{header}\n{inj_content}",
                             }
                         )
-                    else:
-                        messages.append({"role": "user", "content": combined_text})
-                else:
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": f"{header}\n{inj_content}",
-                        }
-                    )
-                max_stimulus_seq = max(max_stimulus_seq, real_result_seqs[inj_tcid])
+                    max_stimulus_seq = max(max_stimulus_seq, real_result_seqs[inj_tcid])
 
-        elif role == "tool":
-            tcid = e.data.get("tool_call_id")
-            if tcid and tcid not in emitted_tcids:
-                messages.append(e.data)
-                emitted_tcids.add(tcid)
-                max_stimulus_seq = max(max_stimulus_seq, e.seq)
+            elif role == "tool":
+                tcid = e.data.get("tool_call_id")
+                if tcid and tcid not in emitted_tcids:
+                    messages.append(e.data)
+                    emitted_tcids.add(tcid)
+                    max_stimulus_seq = max(max_stimulus_seq, e.seq)
+
+        except Exception as exc:
+            # Roll back any partial appends from THIS event so the quarantine
+            # is atomic w.r.t. ``messages``: exactly one placeholder per
+            # quarantined position, never a half-rendered assistant turn
+            # (e.g. the assistant message appended before a corrupt
+            # ``tool_calls`` raised, which would leave an orphan tool_calls
+            # turn — an invalid chat-completions sequence that re-bricks).
+            # Residual limitation: a quarantined ASSISTANT event's downstream
+            # tool-result events (later in the window) may still render as
+            # orphan ``tool`` messages — accepted, because assistant events are
+            # harness-produced, not external connector poison (the realistic
+            # source), and the alternative is the permanent brick this guard exists
+            # to prevent.
+            del messages[mark:]
+            log.warning(
+                "context.poison_event_quarantined",
+                session_id=session_id,
+                seq=e.seq,
+                error_type=type(exc).__name__,
+            )
+            messages.append(_quarantine_placeholder(e.seq))
+            max_stimulus_seq = max(max_stimulus_seq, e.seq)
 
     # Prune dangling messages at the start of the window.  DB-level
     # windowing can cut in the middle of an assistant+tool_result group,

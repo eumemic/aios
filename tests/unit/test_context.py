@@ -6,7 +6,8 @@ Uses lightweight FakeEvent objects to avoid touching the DB.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import logging
+from datetime import MINYEAR, UTC, datetime
 from typing import Any
 
 import pytest
@@ -15,8 +16,10 @@ from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
     _concat_user_messages,
     _is_degenerate_empty_assistant,
+    _quarantine_placeholder,
     build_messages,
     merge_adjacent_user_messages,
+    render_user_event,
     stub_missing_reasoning_content,
 )
 from aios.models.events import Event
@@ -1943,3 +1946,206 @@ class TestEventDataImmutability:
         assert out_url.startswith("data:image/jpeg;base64,"), (
             f"renderer should have corrected png → jpeg in the output, got {out_url[:50]}"
         )
+
+
+class TestPoisonEventQuarantine:
+    """``build_messages`` is a pure replay over the immutable event log,
+    run on EVERY wake. A single event that makes the renderer raise would
+    permanently brick the session — the model is never called, so the
+    "model sees the error and retries" recovery never engages (#686).
+
+    The quarantine backstop catches any per-event render failure and
+    degrades THAT ONE event to a deterministic placeholder (a function of
+    ``e.seq`` only, preserving the monotonicity invariant) while every
+    other event in the window still renders. The failure is signalled via
+    the ``context.poison_event_quarantined`` structlog event.
+
+    The pre-existing inner ``isinstance`` / ``OSError`` guards take
+    precedence — those shapes render normally, NOT via quarantine. The
+    outer quarantine is the last-resort backstop for novel raisers the
+    inner guards don't cover.
+    """
+
+    def test_out_of_range_created_at_is_quarantined(self) -> None:
+        """The GENUINE current brick: a ``created_at`` so small that
+        ``_format_received``'s ``astimezone`` raises ``OverflowError``
+        (``date value out of range``). No inner guard covers it, so it
+        must degrade to the deterministic placeholder rather than propagate.
+        """
+        e = _evt(7, "user", content="hi", created_at=datetime(MINYEAR, 1, 1, tzinfo=UTC))
+        ctx = build_messages([e], system_prompt=None, tz_name="America/Los_Angeles")
+        assert ctx.messages == [_quarantine_placeholder(7)]
+        assert ctx.messages[0]["role"] == "user"
+        assert ctx.messages[0]["content"] == "[unrenderable event seq=7 — quarantined]"
+        # The placeholder occupies seq 7's position; reacting_to must move
+        # past it so find_sessions_needing_inference doesn't treat the
+        # poison event as perpetually-new.
+        assert ctx.reacting_to == 7
+
+    def test_non_dict_attachment_renders_normally_not_quarantined(self) -> None:
+        """The inner ``context.attachment_record_not_dict`` guard pre-empts
+        the outer quarantine: non-dict attachment records are skipped
+        in-place, so the event renders as a plain string with no
+        ``[unrenderable`` marker."""
+        md = {"channel": "echo/a/c", "attachments": ["oops", None, 42]}
+        e = _evt(1, "user", content="hi", metadata=md, focal_channel_at_arrival="echo/a/c")
+        ctx = build_messages([e], system_prompt=None, model="gpt-4o", session_id="s")
+        content = ctx.messages[0]["content"]
+        assert isinstance(content, str)
+        assert "[unrenderable" not in content
+        assert "hi" in content
+
+    def test_render_user_event_raise_is_quarantined(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A synthetic novel raiser inside ``render_user_event`` — the kind
+        of new event shape that today would brick the session — degrades to
+        the placeholder."""
+
+        def _boom(*a: Any, **k: Any) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("aios.harness.context.render_user_event", _boom)
+        ctx = build_messages([_evt(3, "user", content="x")], system_prompt=None)
+        assert ctx.messages == [_quarantine_placeholder(3)]
+        assert ctx.reacting_to == 3
+
+    def test_quarantine_emits_structlog_signal(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Quarantines are observable: a ``context.poison_event_quarantined``
+        warning carrying ``session_id``, ``seq``, and ``error_type``.
+
+        The conftest routes structlog through stdlib's ConsoleRenderer, which
+        flattens the event + bound fields into ``record.getMessage()`` rather
+        than preserving them as record attributes — so we substring-match the
+        rendered line (same convention as test_attachment_staging.py)."""
+
+        def _boom(*a: Any, **k: Any) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("aios.harness.context.render_user_event", _boom)
+        with caplog.at_level(logging.WARNING):
+            build_messages(
+                [_evt(3, "user", content="x")], system_prompt=None, session_id="sess_01TEST"
+            )
+        rec = next(
+            r for r in caplog.records if "context.poison_event_quarantined" in r.getMessage()
+        )
+        rendered = rec.getMessage()
+        assert "seq=3" in rendered
+        assert "session_id=sess_01TEST" in rendered
+        assert "error_type=RuntimeError" in rendered
+
+    def test_only_poison_event_quarantined_others_render(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One poison event among good events: exactly its position is
+        quarantined; the others (including assistant turns) render normally."""
+        original = render_user_event
+
+        def _selective(event_data: dict[str, Any], *a: Any, **k: Any) -> dict[str, Any]:
+            if event_data.get("content") == "gamma":
+                raise RuntimeError("gamma is poison")
+            return original(event_data, *a, **k)
+
+        monkeypatch.setattr("aios.harness.context.render_user_event", _selective)
+        events = [
+            _evt(1, "user", content="alpha"),
+            _evt(2, "assistant", content="beta"),
+            _evt(3, "user", content="gamma"),
+            _evt(4, "assistant", content="delta"),
+        ]
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.messages[0]["content"] == f"[received={RECEIVED}]\nalpha"
+        assert ctx.messages[1]["role"] == "assistant"
+        assert ctx.messages[1]["content"] == "beta"
+        assert ctx.messages[2] == _quarantine_placeholder(3)
+        assert ctx.messages[3]["role"] == "assistant"
+        assert ctx.messages[3]["content"] == "delta"
+        assert ctx.reacting_to == 3
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"channel": "c", "timestamp_ms": "not-an-int"},
+            {"channel": "c", "timestamp_ms": 10**30},
+            {"channel": "c", "mentions": "not-a-list"},
+            {"channel": "c", "mentions": [None, 42, {"uuid": 5}, {"name": []}]},
+            {"channel": "c", "reaction": "not-a-dict"},
+            {"channel": "c", "reaction": {"emoji": {"nested": "obj"}}},
+            {"channel": "c", "reaction": {"new_emojis": "not-a-list"}},
+            {"channel": "c", "reply_to": {"text": {"blocks": [1, 2]}}},
+            {"channel": "c", "reply_to": "not-a-dict"},
+            {"channel": "c", "request": {"output_schema": {1: object()}}},
+            {"channel": "c", "attachments": "not-a-list"},
+            {"channel": "c", "attachments": [{"in_sandbox_path": 123}]},
+            {"channel": 12345},
+            {},
+        ],
+    )
+    def test_build_messages_never_raises_on_adversarial_metadata(
+        self, metadata: dict[str, Any]
+    ) -> None:
+        """Hand-rolled fuzz over adversarial metadata shapes. For each,
+        ``build_messages`` must NOT raise, and the single resulting message
+        is EITHER a normally-rendered user message OR the quarantine
+        placeholder (union invariant — passes regardless of which path each
+        shape takes). Most shapes are absorbed by inner ``isinstance``
+        guards and render normally."""
+        focal = metadata.get("channel") if isinstance(metadata, dict) else None
+        focal = focal if isinstance(focal, str) else None
+        e = _evt(
+            1,
+            "user",
+            content="x",
+            metadata=metadata,
+            focal_channel_at_arrival=focal,
+        )
+        ctx = build_messages([e], system_prompt=None, model="gpt-4o", session_id="s")
+        assert len(ctx.messages) == 1
+        msg = ctx.messages[0]
+        assert msg["role"] == "user"
+        content = msg["content"]
+        assert isinstance(content, (str, list))
+        # A normal render must never accidentally produce a quarantine-shaped
+        # message; the marker string appears iff this is the exact placeholder.
+        if isinstance(content, str) and "unrenderable event seq=" in content:
+            assert msg == _quarantine_placeholder(1)
+
+    def test_unserializable_output_schema_reaches_outer_quarantine(self) -> None:
+        """The one shape that genuinely reaches the OUTER quarantine: a
+        request whose ``output_schema`` is un-JSON-serializable. The
+        ``json.dumps(output_schema)`` line only executes when a string
+        ``request_id`` is also present (the surrounding guard), so the
+        adversarial fuzz shape #10 — which omits ``request_id`` — renders
+        normally; this companion case includes it to exercise the outer
+        backstop."""
+        md = {
+            "channel": "c",
+            "request": {"request_id": "req_1", "output_schema": {1: object()}},
+        }
+        e = _evt(1, "user", content="x", metadata=md, focal_channel_at_arrival="c")
+        ctx = build_messages([e], system_prompt=None, model="gpt-4o", session_id="s")
+        assert ctx.messages == [_quarantine_placeholder(1)]
+        assert ctx.reacting_to == 1
+
+    def test_quarantined_assistant_event_is_atomic_single_message(self) -> None:
+        """The assistant branch appends ``e.data`` BEFORE iterating
+        ``tool_calls``; a raise mid-branch (here a truthy non-iterable
+        ``tool_calls`` so ``for tc in 42`` raises ``TypeError`` after the
+        append) must NOT leave both the orphan assistant turn AND the
+        placeholder — that invalid chat-completions sequence (tool_calls not
+        followed by results) re-bricks the session. The rollback makes the
+        quarantine atomic: exactly the placeholder remains."""
+        e = Event(
+            id="evt_5",
+            session_id="sess_01TEST",
+            seq=5,
+            kind="message",
+            data={"role": "assistant", "content": "x", "tool_calls": 42},
+            created_at=_FIXED_CREATED_AT,
+            orig_channel=None,
+            focal_channel_at_arrival=None,
+        )
+        ctx = build_messages([e], system_prompt=None)
+        assert len(ctx.messages) == 1
+        assert ctx.messages[0] == _quarantine_placeholder(5)
