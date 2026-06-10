@@ -100,13 +100,15 @@ def test_migration_creates_all_tables(postgres: object) -> None:
             for required in (
                 "credentials_name_uniq",
                 "agents_name_uniq",
-                "events_session_seq_idx",
                 "events_session_message_seq_idx",
                 "events_model_request_end_calibration_idx",
                 "bindings_connection_active_uniq",
                 "runtime_tokens_connector_idx",
             ):
                 assert required in index_names, f"missing index {required}"
+            assert "events_session_seq_idx" not in index_names, (
+                "events_session_seq_idx should be dropped by migration 0080"
+            )
         finally:
             await conn.close()
 
