@@ -1199,6 +1199,24 @@ async def derive_response(
     return None
 
 
+async def read_session_watermarks(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> tuple[int, int] | None:
+    """(last_reacted_seq, last_stimulus_seq) for a scoped session, or None if absent.
+
+    The Mode-2 scalar read for await_session: the monotonic quiescence columns, read
+    directly with no event-log status derivation."""
+    row = await conn.fetchrow(
+        "SELECT last_reacted_seq, last_stimulus_seq FROM sessions "
+        "WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        return None
+    return (row["last_reacted_seq"], row["last_stimulus_seq"])
+
+
 async def derive_session_status(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> str:

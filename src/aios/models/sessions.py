@@ -362,6 +362,18 @@ class WaitResponse(BaseModel):
     next_after: int
 
 
+class SessionAwaitResponse(BaseModel):
+    """Response for GET /v1/sessions/{id}/await — the await-a-completion primitive,
+    session backing. One envelope over two monotonic predicates (request_id
+    correlation, or reacted>=watermark). Poll until `done`."""
+
+    done: bool
+    last_reacted_seq: int
+    result: Any = None
+    is_error: bool = False
+    error: dict[str, Any] | None = None
+
+
 class ContextResponse(BaseModel):
     """Response for ``GET /v1/sessions/{id}/context``.
 

@@ -259,3 +259,73 @@ class TestRunWaitEndpoint:
         any LISTEN is opened, so an unauthorized caller never opens a connection on the channel."""
         r = await http_client.get("/v1/runs/wf_run_nope/wait", params={"timeout": 0})
         assert r.status_code == 404, r.text
+
+
+class TestSessionAwaitEndpoint:
+    """``GET /v1/sessions/{id}/await`` — the await-a-completion endpoint (session backing).
+
+    Exercises the HTTP wiring (route registration, the ``timeout`` query alias, the either/or
+    ``request_id``/``watermark`` params, the ``SessionAwaitResponse`` serialization, account
+    scoping) over a real ASGI client. The blocking/completion behavior of the service is covered
+    in ``tests/integration/test_await_session.py``; here ``timeout=0`` keeps each case
+    non-blocking."""
+
+    async def test_mode1_timeout_zero_pending_done_false(
+        self, http_client: httpx.AsyncClient, session_id: str
+    ) -> None:
+        """An unanswered request_id is non-terminal; ``timeout=0`` returns at once with
+        ``done=false`` — the re-poll contract."""
+        r = await http_client.get(
+            f"/v1/sessions/{session_id}/await", params={"request_id": "nope", "timeout": 0}
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["done"] is False
+        assert body["is_error"] is False
+        assert body["result"] is None
+
+    async def test_mode2_default_watermark_unmet_done_false(
+        self, http_client: httpx.AsyncClient, pool: Any, session_id: str
+    ) -> None:
+        """A pending user stimulus (last_stimulus_seq > last_reacted_seq) with the default
+        watermark is unmet at ``timeout=0`` → ``done=false`` with ``last_reacted_seq == 0``."""
+        from aios.services import sessions as sessions_svc
+
+        await sessions_svc.append_user_message(pool, session_id, "hi", account_id="acc_test_stub")
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/await", params={"timeout": 0})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["done"] is False
+        assert body["last_reacted_seq"] == 0
+
+    async def test_mode2_met_watermark_done_true(
+        self, http_client: httpx.AsyncClient, session_id: str
+    ) -> None:
+        """A fresh session has ``last_reacted_seq == 0``; ``watermark=0`` is met → ``done``."""
+        r = await http_client.get(
+            f"/v1/sessions/{session_id}/await", params={"watermark": 0, "timeout": 0}
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["done"] is True
+
+    async def test_both_params_422(self, http_client: httpx.AsyncClient, session_id: str) -> None:
+        """``request_id`` and ``watermark`` are mutually exclusive (422)."""
+        r = await http_client.get(
+            f"/v1/sessions/{session_id}/await",
+            params={"request_id": "r", "watermark": 1, "timeout": 0},
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_rejects_timeout_above_cap(
+        self, http_client: httpx.AsyncClient, session_id: str
+    ) -> None:
+        """The ``le=60`` bound on the ``timeout`` query param is enforced (422)."""
+        r = await http_client.get(f"/v1/sessions/{session_id}/await", params={"timeout": 3600})
+        assert r.status_code == 422, r.text
+
+    async def test_unknown_session_404(self, http_client: httpx.AsyncClient) -> None:
+        """A session id the caller can't see 404s before any LISTEN opens."""
+        r = await http_client.get("/v1/sessions/sess_nope/await", params={"timeout": 0})
+        assert r.status_code == 404, r.text

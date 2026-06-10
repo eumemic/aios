@@ -153,6 +153,8 @@ from .scheduled_task_echo_metadata import ScheduledTaskEchoMetadata
 from .scheduled_task_update import ScheduledTaskUpdate
 from .scheduled_task_update_metadata_type_0 import ScheduledTaskUpdateMetadataType0
 from .session import Session
+from .session_await_response import SessionAwaitResponse
+from .session_await_response_error_type_0 import SessionAwaitResponseErrorType0
 from .session_clone_request import SessionCloneRequest
 from .session_create import SessionCreate
 from .session_create_env import SessionCreateEnv
@@ -391,6 +393,8 @@ __all__ = (
     "ScheduledTaskUpdate",
     "ScheduledTaskUpdateMetadataType0",
     "Session",
+    "SessionAwaitResponse",
+    "SessionAwaitResponseErrorType0",
     "SessionCloneRequest",
     "SessionCreate",
     "SessionCreateEnv",
