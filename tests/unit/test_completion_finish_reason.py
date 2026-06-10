@@ -16,6 +16,7 @@ import pytest
 
 from aios.harness import completion
 from aios.harness.completion import _unpack_litellm_response
+from tests.unit.test_completion_timeouts import _StubPool
 
 
 def _envelope(message: dict[str, Any], finish_reason: str | None) -> dict[str, Any]:
@@ -119,8 +120,6 @@ class TestStreamStickyContentFilter:
 
     @pytest.mark.asyncio
     async def test_refusal_survives_trailing_clobber(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from tests.unit.test_completion_timeouts import _StubPool
-
         # content_filter rides a non-final chunk; a trailing "stop" chunk is
         # what litellm's assembler would last-wins onto the result.
         chunks = [
@@ -149,8 +148,6 @@ class TestStreamStickyContentFilter:
     ) -> None:
         """The capture must not fabricate a refusal: a stream whose wire never
         carried ``content_filter`` returns the assembled value unchanged."""
-        from tests.unit.test_completion_timeouts import _StubPool
-
         chunks = [
             _FakeChunk(finish_reason=None, content="hi"),
             _FakeChunk(finish_reason="stop"),
