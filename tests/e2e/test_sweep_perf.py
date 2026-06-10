@@ -404,6 +404,25 @@ class TestNoCorrelatedSubplanOverEvents:
             f"{len(found)} correlated subplan(s) over events. See #685."
         )
 
+    async def test_ghost_asst_is_not_n_plus_1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
+        """``GHOST_ASST_SQL`` is the cross-session entry point of ghost
+        repair, run unscoped (``scope_clause=""``) on every periodic sweep
+        pass via ``find_and_repair_ghosts``.  Its bound — ``s.open_tool_call_count
+        > 0``, a maintained scalar on ``sessions`` (migration 0066) — must stay
+        a plain seq-scan + hash-join over that column, never regress into a
+        correlated subquery over ``events`` (e.g. an ``EXISTS`` re-deriving the
+        open-call set per row).  Such a rewrite would still return 0 rows on a
+        fully-resolved fixture — passing the row-budget test — while silently
+        reintroducing the N+1 scan over ``events`` on every sweep (#840)."""
+        plan = await _explain(seeded_pool, GHOST_ASST_SQL.format(scope_clause=""))
+        found = find_subplans_over_events(plan)
+        assert not found, (
+            f"N+1 regression in find_and_repair_ghosts cross-session ghost scan: "
+            f"{len(found)} correlated subplan(s) over events. GHOST_ASST_SQL must "
+            f"stay bounded by the maintained sessions.open_tool_call_count scalar "
+            f"(migration 0066), not an event-log subquery. See #840."
+        )
+
 
 # ─── budget smoke (secondary, slow-marker) ───────────────────────────────────
 
