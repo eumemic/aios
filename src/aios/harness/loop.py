@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+from structlog.contextvars import bind_contextvars, clear_contextvars
+
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
 from aios.harness.completion import call_litellm, stream_litellm
@@ -161,6 +163,11 @@ async def run_session_step(
     account_id = await sessions_service.load_live_session_account_id(pool, session_id)
     if account_id is None:
         return
+    # Bind tenant/session/cause onto structlog contextvars so every line this step
+    # emits is attributable; cleared in the finally below so it never leaks to the
+    # next job on this worker task. Bound AFTER the gone-session guard — that path
+    # is an idempotent no-op with no account to attribute.
+    bind_contextvars(session_id=session_id, account_id=account_id, cause=cause)
     task_registry = runtime.require_task_registry()
 
     # Outermost span pair: brackets the entire step (issue #131).  Emitted
@@ -225,6 +232,10 @@ async def run_session_step(
             {"event": "step_end", "step_start_id": step_start.id},
             account_id=account_id,
         )
+        # Clear last: the step's logging is done, so drop the bindings before the
+        # worker task picks up the next job (contextvars are task-scoped, and the
+        # worker reuses tasks across jobs).
+        clear_contextvars()
 
     # Every wake fires AFTER ``step_end`` so its ``wake_deferred`` span lands in
     # step N+1's temporal window, not step N's — the "all wake_deferred since the

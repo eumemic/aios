@@ -12,6 +12,7 @@ from typing import Annotated, cast
 import asyncpg
 from fastapi import Depends, Header, Request
 from procrastinate import App as ProcrastinateApp
+from structlog.contextvars import bind_contextvars
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
@@ -74,6 +75,11 @@ async def require_bearer_auth(
     if result is None:
         raise UnauthorizedError("invalid api key")
     account, key_id = result
+    # Bind account_id onto the request's contextvars so every downstream log line
+    # — the request-logging middleware, the exception handlers — can attribute the
+    # request to its tenant. No clear here: Starlette runs each request in its own
+    # task context, so the binding is scoped to this request and doesn't leak.
+    bind_contextvars(account_id=account.id)
     return (account.id, key_id, account.can_mint_children)
 
 

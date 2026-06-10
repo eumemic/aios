@@ -57,6 +57,12 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
     "put_connector_tools_schema": (
         "Called by connector containers via runtime token; not for operators."
     ),
+    # ── Infra/orchestrator probe ─────────────────────────────────────
+    "get_ready": (
+        "Readiness probe (SELECT 1 under a short timeout) consumed by the "
+        "Docker/compose healthcheck and load balancers, not operators. "
+        "Operators check reachability + auth via `aios status` (get_health)."
+    ),
     # ── Multipart / long-poll ────────────────────────────────────────
     "upload_session_file": ("Multipart upload; file as a dedicated CLI issue if/when needed."),
     "wait_for_events_v1_sessions__session_id__wait_get": (

@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
 from aios.api.deps import require_bearer_auth
+from aios.api.middleware import RequestLoggingMiddleware
 from aios.api.routers import (
     accounts,
     agents,
@@ -90,6 +91,11 @@ def create_app() -> FastAPI:
         separate_input_output_schemas=False,
     )
     install_exception_handlers(app)
+    # Outermost middleware: a pure-ASGI request logger that runs in the same
+    # task context as the route (so an ``account_id`` bound by the auth dep is
+    # visible on its line) and brackets the whole stack, including the exception
+    # handlers, in its duration measurement.
+    app.add_middleware(RequestLoggingMiddleware)
     app.include_router(health.router)
     app.include_router(accounts.router)
     app.include_router(environments.router)

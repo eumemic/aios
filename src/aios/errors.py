@@ -13,10 +13,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from aios.logging import get_logger
+
+log = get_logger(__name__)
 
 
 class AiosError(Exception):
@@ -224,15 +229,46 @@ class SSEPreflightFailedError(AiosError):
 # ─── FastAPI integration ─────────────────────────────────────────────────────
 
 
-async def aios_error_handler(_request: Request, exc: Exception) -> JSONResponse:
-    """Render an :class:`AiosError` as a JSON response."""
+async def aios_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Render an :class:`AiosError` as a JSON response (and log it).
+
+    4xx is operator/client noise (``warning``); 5xx is a real fault
+    (``log.exception`` — valid here because the handler runs inside the live
+    exception context, so it attaches the traceback). ``account_id`` is read
+    from the contextvar the auth dep bound, so a 5xx can be attributed to a
+    tenant even though the handler has no dep-injected account.
+    """
     assert isinstance(exc, AiosError)
+    path = request.url.path
+    account_id = structlog.contextvars.get_contextvars().get("account_id")
+    if exc.status_code >= 500:
+        log.exception(
+            "api.error",
+            path=path,
+            status=exc.status_code,
+            error_type=exc.error_type,
+            account_id=account_id,
+        )
+    else:
+        log.warning(
+            "api.error",
+            path=path,
+            status=exc.status_code,
+            error_type=exc.error_type,
+            account_id=account_id,
+        )
     return JSONResponse(status_code=exc.status_code, content=exc.to_body())
 
 
-async def http_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
-    """Render Starlette/FastAPI HTTPExceptions in our error envelope."""
+async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Render Starlette/FastAPI HTTPExceptions in our error envelope (and log it)."""
     assert isinstance(exc, StarletteHTTPException)
+    path = request.url.path
+    account_id = structlog.contextvars.get_contextvars().get("account_id")
+    if exc.status_code >= 500:
+        log.exception("api.http_error", path=path, status=exc.status_code, account_id=account_id)
+    else:
+        log.warning("api.http_error", path=path, status=exc.status_code, account_id=account_id)
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -244,7 +280,7 @@ async def http_exception_handler(_request: Request, exc: Exception) -> JSONRespo
     )
 
 
-async def validation_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+async def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Render pydantic/FastAPI request validation errors.
 
     Pydantic's ``value_error`` entries include a ``ctx`` field that
@@ -255,6 +291,12 @@ async def validation_error_handler(_request: Request, exc: Exception) -> JSONRes
     clients.
     """
     assert isinstance(exc, RequestValidationError)
+    log.warning(
+        "api.validation_error",
+        path=request.url.path,
+        status=422,
+        account_id=structlog.contextvars.get_contextvars().get("account_id"),
+    )
     errors = [{k: v for k, v in err.items() if k != "ctx"} for err in exc.errors()]
     return JSONResponse(
         status_code=422,
