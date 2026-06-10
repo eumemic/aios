@@ -327,3 +327,152 @@ async def test_archived_connection_drops_inbound_without_routing(
         f"connection is decommissioned but messages keep flowing."
     )
     assert not resolver_called, "resolver must be skipped entirely for archived connections"
+
+
+# ── inbound debounce (#799) ─────────────────────────────────────────────────
+
+
+async def _drive_inbound_to_wake(
+    pool: MagicMock,
+    *,
+    debounce_seconds: float,
+    defer_wake_mock: AsyncMock,
+    event_id: str = "evt_1",
+) -> Any:
+    """Drive one ``handle_inbound`` through to its ``defer_wake`` call.
+
+    Patches everything between the connection fetch and the wake so the
+    happy path resolves to ``sess_X`` and reaches ``defer_wake`` (the
+    assertion target supplied by the caller). ``get_settings`` is stubbed
+    with the given ``inbound_debounce_seconds`` so the inbound-layer
+    debounce branch is exercised without a real ``Settings`` instance.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from aios.models.connections import Connection
+    from aios.services.inbound import handle_inbound
+    from aios_connectors.resolver import ResolveResult
+
+    live = Connection(
+        id="conn_01LIVE000000000000000000001",
+        connector="telegram",
+        external_account_id="bot1",
+        session_id=None,
+        session_template_id=None,
+        metadata={},
+        secrets_set=False,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        attached_at=None,
+        updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        archived_at=None,  # ← live
+    )
+
+    async def fake_get_connection(*_args: Any, **_kwargs: Any) -> Connection:
+        return live
+
+    async def fake_resolver(*_args: Any, **_kwargs: Any) -> ResolveResult:
+        return ResolveResult(session_id="sess_X", drop=None)
+
+    async def fake_stage(*_args: Any, **_kwargs: Any) -> tuple[list[Any], list[Any]]:
+        return [], []
+
+    async def fake_append_event(*_args: Any, **_kwargs: Any) -> Any:
+        ev = MagicMock()
+        ev.seq = 7
+        return ev
+
+    with (
+        patch(
+            "aios.services.inbound.queries.get_connection",
+            AsyncMock(side_effect=fake_get_connection),
+        ),
+        patch("aios_connectors.resolver.resolve_target_session", fake_resolver),
+        patch(
+            "aios.services.inbound.stage_inbound_attachments",
+            AsyncMock(side_effect=fake_stage),
+        ),
+        patch(
+            "aios.services.inbound.queries.append_event",
+            AsyncMock(side_effect=fake_append_event),
+        ),
+        patch(
+            "aios.services.inbound.queries.try_record_inbound_ack",
+            AsyncMock(return_value=True),
+        ),
+        patch("aios.services.inbound.defer_wake", defer_wake_mock),
+        patch(
+            "aios.services.inbound.get_settings",
+            lambda: SimpleNamespace(inbound_debounce_seconds=debounce_seconds),
+        ),
+    ):
+        return await handle_inbound(
+            pool,
+            account_id="acc_test_stub",
+            connection_id=live.id,
+            event_id=event_id,
+            chat_id="chat_1",
+            sender={"display_name": "Alice"},
+            content="hello",
+        )
+
+
+async def test_inbound_debounce_applies_delay_when_configured(
+    fake_pool: MagicMock,
+) -> None:
+    """When ``inbound_debounce_seconds`` > 0, the inbound path schedules
+    the first wake that many seconds out via ``defer_wake``'s
+    ``delay_seconds`` so a bursty sender collapses into one turn."""
+    from unittest.mock import ANY
+
+    defer_wake_mock = AsyncMock()
+    result = await _drive_inbound_to_wake(
+        fake_pool, debounce_seconds=2.0, defer_wake_mock=defer_wake_mock
+    )
+
+    assert result.drop_reason is None
+    defer_wake_mock.assert_awaited_once_with(
+        ANY, "sess_X", cause="inbound", account_id=ANY, delay_seconds=2.0
+    )
+
+
+async def test_inbound_no_delay_when_debounce_off(
+    fake_pool: MagicMock,
+) -> None:
+    """When ``inbound_debounce_seconds`` == 0.0 (the default, off), the
+    inbound path omits ``delay_seconds`` entirely so the call is
+    byte-identical to pre-feature behavior — the wake fires immediately."""
+    from unittest.mock import ANY
+
+    defer_wake_mock = AsyncMock()
+    await _drive_inbound_to_wake(fake_pool, debounce_seconds=0.0, defer_wake_mock=defer_wake_mock)
+
+    # No ``delay_seconds`` kwarg: this assertion fails if delay_seconds was passed.
+    defer_wake_mock.assert_awaited_once_with(ANY, "sess_X", cause="inbound", account_id=ANY)
+
+
+async def test_inbound_burst_within_window_shares_session_and_delay(
+    fake_pool: MagicMock,
+) -> None:
+    """Two inbounds on the same chat within the debounce window both carry
+    the same target session id and the same ``delay_seconds``.
+
+    This verifies only the inbound-LAYER precondition: each call hands
+    ``defer_wake`` the same ``(session_id, delay_seconds)`` so the burst
+    is eligible to collapse. The actual single-job collapse is enforced by
+    ``queueing_lock=session_id`` inside ``defer_wake`` (already-tested
+    wake.py behavior), not exercised here.
+    """
+    defer_wake_mock = AsyncMock()
+    await _drive_inbound_to_wake(
+        fake_pool, debounce_seconds=2.0, defer_wake_mock=defer_wake_mock, event_id="evt_1"
+    )
+    await _drive_inbound_to_wake(
+        fake_pool, debounce_seconds=2.0, defer_wake_mock=defer_wake_mock, event_id="evt_2"
+    )
+
+    assert defer_wake_mock.await_count == 2
+    for call in defer_wake_mock.await_args_list:
+        assert call.args[1] == "sess_X"  # positional session_id
+        assert call.kwargs["delay_seconds"] == 2.0
+        assert call.kwargs["cause"] == "inbound"
