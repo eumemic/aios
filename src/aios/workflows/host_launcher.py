@@ -35,6 +35,25 @@ from aios.workflows._protocol import (
 
 DEFAULT_CPU_SECONDS = 30
 DEFAULT_DEADLINE_SECONDS = 30.0
+# Per-wake budgets SCALE with the INIT frame (#780): a wake that replays a bigger
+# memo is entitled to proportionally more wall/CPU time, so a run can never time
+# out merely because it has accumulated results. 30s/MiB is ~3 orders of magnitude
+# above measured parse+replay cost — the headroom is for the author's own glue
+# (sorting/joining N results), which is what actually grows with the memo. The cap
+# bounds how long one wake can hold a worker (a run cancel is only consumed at the
+# next step, and a deploy drains in-flight steps): a capped budget is still
+# ~15,000x the measured replay cost of a frame-cap-sized INIT.
+DEADLINE_SECONDS_PER_INIT_MIB = 30.0
+MAX_SCALED_SECONDS = 600.0
+
+
+def _scaled_seconds(base: float, init_len: int) -> float:
+    """The effective per-wake budget: ``base`` plus the INIT-size allowance, capped."""
+    return min(
+        base + (init_len / (1024 * 1024)) * DEADLINE_SECONDS_PER_INIT_MIB, MAX_SCALED_SECONDS
+    )
+
+
 # 4 GiB virtual-address ceiling: bounds a runaway allocation (e.g. ``[0]*10**10``
 # ≈ 80 GB) that the wall-clock deadline does NOT bound — the deadline caps
 # duration, not peak memory — while leaving ample headroom for a coordination
@@ -164,8 +183,17 @@ async def run_script_host(
     address_space_bytes: int | None = DEFAULT_ADDRESS_SPACE_BYTES,
     deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
 ) -> HostOutcome:
-    """Drive one wake of ``source`` in a fresh, credential-free subprocess."""
+    """Drive one wake of ``source`` in a fresh, credential-free subprocess.
+
+    ``deadline_seconds``/``cpu_seconds`` are the BASE budgets; the effective
+    budgets scale with the INIT frame size (see :func:`_scaled_seconds`). CPU is
+    pinned one second above the wall deadline so a CPU-bound child is killed by
+    the parent's deadline (a clean ``script_host_timeout``), never by the rlimit
+    SIGKILL (an opaque host crash).
+    """
     init_bytes = encode_frame({"type": INIT, "source": source, "input": input, "memo": memo})
+    deadline = _scaled_seconds(deadline_seconds, len(init_bytes))
+    cpu = int(_scaled_seconds(cpu_seconds, len(init_bytes))) + 1
     # Deny-by-default env: only non-secret launch/locale essentials cross the
     # spawn (see ``_CHILD_ENV_ALLOWLIST``), plus the two rlimit knobs the child
     # self-applies. The child must stay credential-free.
@@ -177,7 +205,7 @@ async def run_script_host(
     # breaks. (``canonical_json`` rejects sets directly, but a list *built from* a
     # set is indistinguishable from any other list.)
     env["PYTHONHASHSEED"] = "0"
-    env["AIOS_WF_RLIMIT_CPU_S"] = str(cpu_seconds)
+    env["AIOS_WF_RLIMIT_CPU_S"] = str(cpu)
     env["AIOS_WF_RLIMIT_AS_BYTES"] = str(address_space_bytes or 0)
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -196,7 +224,7 @@ async def run_script_host(
 
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=init_bytes), timeout=deadline_seconds
+            proc.communicate(input=init_bytes), timeout=deadline
         )
     except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
@@ -208,7 +236,9 @@ async def run_script_host(
         return HostOutcome(
             kind="raised",
             error_kind="script_host_timeout",
-            error_repr=f"script host exceeded the {deadline_seconds}s wall-clock deadline",
+            # The EFFECTIVE (scaled) deadline — this string becomes the run's
+            # terminal output, so it must state the number actually enforced.
+            error_repr=f"script host exceeded the {deadline:.1f}s wall-clock deadline",
         )
     except BaseException:
         with contextlib.suppress(ProcessLookupError):

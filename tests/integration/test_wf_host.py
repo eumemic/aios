@@ -646,6 +646,26 @@ async def test_address_space_bomb_is_contained_and_parent_survives() -> None:
     assert ok.kind == "returned" and ok.value == "alive"
 
 
+async def test_big_memo_replay_outlives_a_tiny_base_deadline() -> None:
+    """The wall budget scales with INIT bytes (#780). The base here (0.01s) is
+    deliberately below interpreter spawn time (~20-50ms), so an UNSCALED host
+    deterministically times out — what passes is the multi-MiB memo's scale
+    allowance. This pins that ``_scaled_seconds`` is actually wired into
+    ``run_script_host``, not merely unit-green."""
+    source = "async def main(input):\n    g = await gate('x')\n    return len(g)"
+    first = await _run(source)
+    (cap,) = first.emitted  # learn the gate's call_key
+    memo = {
+        cap.call_key: {"ok": "v"},
+        # An unmatched memo key is never consulted by the driver — it exists only
+        # to inflate the INIT frame past 2MiB.
+        "pad": {"ok": "x" * (2 * 1024 * 1024)},
+    }
+    out = await _run(source, memo=memo, deadline_seconds=0.01)
+    assert out.kind == "returned"
+    assert out.value == 1
+
+
 async def test_log_goes_to_stderr_not_the_frame_stream() -> None:
     out = await _run("async def main(input):\n    log('diagnostic')\n    return 7")
     assert out.kind == "returned"
