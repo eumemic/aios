@@ -310,6 +310,7 @@ async def _append_tool_result_event(
                 existing_is_error=existing_is_error,
                 attempted_is_error=bool(event_data.get("is_error", False)),
             )
+            await queries.decrement_open_tool_call_count(conn, session_id, account_id=account_id)
             return
         await queries.append_event(
             conn,

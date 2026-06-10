@@ -744,6 +744,9 @@ async def append_tool_result(
             # operator learns the deny is too late.
             existing_is_error = bool(existing.data.get("is_error", False))
             if existing_is_error == is_error:
+                await queries.decrement_open_tool_call_count(
+                    conn, session_id, account_id=account_id
+                )
                 return existing
             raise ConflictError(
                 f"tool_call_id {tool_call_id!r} already has a "

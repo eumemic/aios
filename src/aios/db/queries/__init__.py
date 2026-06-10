@@ -1491,6 +1491,33 @@ async def lock_active_session_for_update(
         )
 
 
+async def decrement_open_tool_call_count(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
+    """Compensate the id-blind +1 that ``append_event`` applied for a
+    tool_call when its result append later dedup-skips (issue #841).
+
+    ``append_event`` increments ``open_tool_call_count`` by ``len(tool_calls)``
+    when the assistant turn lands — id-blind. Every decrement path (the
+    ``role:"tool"`` append) is short-circuited when a ``tool_call_id`` already
+    has a result, so a reused/duplicate id leaks a permanent +1: the session
+    stays a wake candidate (``_SESSION_ACTIVE_EXPR`` / ``CANDIDATE_ROWS_SQL``)
+    forever. Both dedup-skip sites call this to apply the matching -1 in the
+    SAME session-row-lock transaction. ``GREATEST(..., 0)`` clamps the floor.
+
+    Must be called inside the caller's transaction, while it holds the
+    session row lock (``SELECT ... FOR UPDATE`` /
+    ``lock_active_session_for_update``).
+    """
+    await conn.execute(
+        "UPDATE sessions "
+        "SET open_tool_call_count = GREATEST(open_tool_call_count - 1, 0) "
+        "WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+
+
 async def set_session_stop_reason(
     conn: asyncpg.Connection[Any],
     session_id: str,
