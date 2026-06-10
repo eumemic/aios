@@ -5,15 +5,18 @@ Replay-with-memo only works if re-running a deterministic script produces the
 that:
 
 - :func:`canonical_json` — a total, order-independent serialization over a
-  **restricted** input domain. Non-finite floats (NaN/Inf), sets, tuples, bytes,
+  **restricted** input domain. Non-finite floats (NaN/Inf), sets, bytes,
   datetimes, and arbitrary objects are **rejected** at the call site (raising
   :class:`WorkflowInputTypeError`). Finite floats are accepted; integer-valued
   floats (``1.0``, ``2.0``) are normalized to their ``int`` form so ``1`` and
   ``1.0`` produce the same JSON token — the call key is stable even when an
   upstream agent returns ``{"count": 1.0}`` and the script author wrote
-  ``{"count": 1}``. Sets and dicts with non-str keys are rejected because their
-  iteration order is ``PYTHONHASHSEED``-sensitive, which would desync the key
-  across a worker restart. ``sort_keys`` makes dict key order irrelevant.
+  ``{"count": 1}``. Tuples are coerced to lists the same way (JSON has no
+  tuple; list is the canonical form). Sets and dicts with non-str keys are
+  rejected because an unordered collection has no canonical JSON form (the
+  script host pins ``PYTHONHASHSEED=0``, so iteration order is at least stable —
+  but stable-arbitrary is not canonical, and the order would still shift across
+  interpreter versions). ``sort_keys`` makes dict key order irrelevant.
 
 - :class:`CallKeyer` — turns ``(capability_id, input)`` into
   ``"sha:<hex>#<n>"`` where ``n`` is the count of *prior* emissions in this run
@@ -40,13 +43,34 @@ class WorkflowInputTypeError(TypeError):
     Raised deterministically at the call site (same input → same rejection on
     every replay), so a bad input is a loud author error, never a silent hash
     desync. Allowed: ``None``, ``bool``, ``int``, ``float`` (finite only),
-    ``str``, and ``list``/``dict`` of those. NaN/Inf floats, sets, tuples,
-    bytes, datetimes, and arbitrary objects are rejected.
+    ``str``, and ``list``/``tuple``/``dict`` of those (tuples canonicalize as
+    lists). NaN/Inf floats, sets, bytes, datetimes, and arbitrary objects are
+    rejected, as are strings Postgres jsonb cannot store (NUL, unpaired
+    surrogates).
     """
 
 
-def _validate(x: Any, *, path: str = "input") -> None:
-    if x is None or isinstance(x, (bool, int, str)):
+def validate_value(x: Any, *, path: str = "input") -> None:
+    """Check ``x`` against the workflow value domain (see
+    :class:`WorkflowInputTypeError`), raising with a path-precise message on the
+    first violation. Capability inputs are validated via :func:`canonical_json`;
+    the script host also validates return values directly (same domain, same
+    error vocabulary, no canonicalization needed)."""
+    if isinstance(x, str):
+        # The domain must be storable: Postgres jsonb rejects NUL and lone
+        # surrogates, so accepting one here would let the value sail through the
+        # host only to detonate at the parent's ::jsonb cast — wedging the run in
+        # a deterministic re-wake crashloop instead of a loud author error.
+        if "\x00" in x:
+            raise WorkflowInputTypeError(f"{path}: NUL (U+0000) is not storable in a workflow")
+        try:
+            x.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise WorkflowInputTypeError(
+                f"{path}: unpaired surrogate is not storable in a workflow"
+            ) from exc
+        return
+    if x is None or isinstance(x, (bool, int)):
         return
     if isinstance(x, float):
         if not math.isfinite(x):
@@ -54,9 +78,9 @@ def _validate(x: Any, *, path: str = "input") -> None:
                 f"{path}: non-finite float {x!r} (NaN/Inf have no canonical form)"
             )
         return
-    if isinstance(x, list):
+    if isinstance(x, (list, tuple)):
         for i, item in enumerate(x):
-            _validate(item, path=f"{path}[{i}]")
+            validate_value(item, path=f"{path}[{i}]")
         return
     if isinstance(x, dict):
         for key, value in x.items():
@@ -64,22 +88,23 @@ def _validate(x: Any, *, path: str = "input") -> None:
                 raise WorkflowInputTypeError(
                     f"{path}: dict keys must be str, got {type(key).__name__}"
                 )
-            _validate(value, path=f"{path}.{key}")
+            validate_value(value, path=f"{path}.{key}")
         return
     raise WorkflowInputTypeError(
         f"{path}: unsupported workflow input type {type(x).__name__} "
-        f"(allowed: None, bool, int, float, str, list, dict)"
+        f"(allowed: None, bool, int, float, str, list, tuple, dict)"
     )
 
 
-def _canon_numbers(x: Any) -> Any:
-    """Collapse integer-valued floats so ``1.0`` and ``1`` produce the same JSON token."""
+def _canon(x: Any) -> Any:
+    """Collapse integer-valued floats (``1.0`` → ``1``) and tuples (→ lists) so
+    equal content produces the same JSON token whichever form the author built."""
     if isinstance(x, float):
         return int(x) if x.is_integer() else x
-    if isinstance(x, list):
-        return [_canon_numbers(i) for i in x]
+    if isinstance(x, (list, tuple)):
+        return [_canon(i) for i in x]
     if isinstance(x, dict):
-        return {k: _canon_numbers(v) for k, v in x.items()}
+        return {k: _canon(v) for k, v in x.items()}
     return x
 
 
@@ -90,11 +115,12 @@ def canonical_json(x: Any) -> str:
     serializing. Integer-valued floats (``1.0``, ``2.0``) are collapsed to their
     ``int`` form so ``1`` and ``1.0`` produce the same JSON token — the call key is
     content-hash-stable even when an upstream agent returns ``{"count": 1.0}`` and
-    the script author wrote ``{"count": 1}``.
+    the script author wrote ``{"count": 1}``. Tuples are coerced to lists for the
+    same reason: ``(1, 2)`` and ``[1, 2]`` key identically.
     """
-    _validate(x)
+    validate_value(x)
     return json.dumps(
-        _canon_numbers(x), separators=(",", ":"), sort_keys=True, ensure_ascii=True, allow_nan=False
+        _canon(x), separators=(",", ":"), sort_keys=True, ensure_ascii=True, allow_nan=False
     )
 
 

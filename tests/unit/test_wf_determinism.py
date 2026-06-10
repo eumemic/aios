@@ -36,7 +36,6 @@ def test_canonical_json_accepts_allowed_types() -> None:
     "bad",
     [
         {1, 2},
-        (1, 2),
         b"bytes",
         datetime(2026, 1, 1),
         {"when": datetime(2026, 1, 1)},
@@ -46,6 +45,21 @@ def test_canonical_json_accepts_allowed_types() -> None:
 def test_canonical_json_rejects_disallowed_types(bad: object) -> None:
     with pytest.raises(WorkflowInputTypeError):
         canonical_json(bad)
+
+
+def test_canonical_json_coerces_tuples_to_lists() -> None:
+    # JSON has no tuple; list is the canonical form (mirrors the 1.0/1 collapse).
+    assert canonical_json((1, 2)) == canonical_json([1, 2]) == "[1,2]"
+    assert canonical_json({"pairs": [(1, "a"), (2, "b")]}) == canonical_json(
+        {"pairs": [[1, "a"], [2, "b"]]}
+    )
+    assert content_hash("agent", {"x": (1, 2)}) == content_hash("agent", {"x": [1, 2]})
+    # Tuple *elements* are still validated...
+    with pytest.raises(WorkflowInputTypeError):
+        canonical_json(({1, 2},))
+    # ...and dict KEYS stay str-only — a tuple key is still rejected.
+    with pytest.raises(WorkflowInputTypeError):
+        canonical_json({(1, 2): "x"})
 
 
 def test_canonical_json_accepts_finite_floats() -> None:
@@ -82,6 +96,17 @@ def test_canonical_json_float_repr_stability() -> None:
 def test_canonical_json_rejects_non_str_dict_keys() -> None:
     with pytest.raises(WorkflowInputTypeError):
         canonical_json({1: "x"})
+
+
+def test_canonical_json_rejects_unstorable_strings() -> None:
+    # Postgres jsonb rejects NUL and lone surrogates; accepting either here would
+    # defer the failure to the parent's ::jsonb cast (a re-wake crashloop).
+    with pytest.raises(WorkflowInputTypeError, match="NUL"):
+        canonical_json("a\x00b")
+    with pytest.raises(WorkflowInputTypeError, match="surrogate"):
+        canonical_json({"s": "\ud800"})
+    # Paired-surrogate-free astral text is fine.
+    assert canonical_json("éπ💡") == '"\\u00e9\\u03c0\\ud83d\\udca1"'
 
 
 def test_content_hash_is_sensitive_to_capability_and_spec() -> None:

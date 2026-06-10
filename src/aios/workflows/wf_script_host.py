@@ -14,8 +14,8 @@ never import ``aios.harness.*`` / ``aios.crypto*`` / ``aios.db*`` / ``aios.servi
 / ``aios.tools.*`` / ``aios.sandbox.spec`` — those hold the worker's master
 ``CryptoBox`` and all-accounts pool. Because the child is a fresh ``spawn``ed
 interpreter that never imports them, even a full sandbox escape in author code
-reaches only this credential-free process. ``SAFE_BUILTINS`` and the absence of
-``__import__`` are determinism/footgun aids, **not** the security boundary.
+reaches only this credential-free process. ``SAFE_BUILTINS`` and the curated
+``__import__`` allowlist are determinism/footgun aids, **not** the security boundary.
 
 ``gate()`` and ``agent()`` are real capabilities (for ``agent()`` the parent spawns
 a child session and harvests its completion marker). ``parallel()``/``pipeline()``
@@ -31,6 +31,7 @@ import contextlib
 import os
 import sys
 import traceback
+import types
 from typing import Any
 
 from aios.workflows._protocol import (
@@ -42,7 +43,7 @@ from aios.workflows._protocol import (
     read_frame_sync,
     write_frame_sync,
 )
-from aios.workflows.determinism import CallKeyer, canonical_schema_json
+from aios.workflows.determinism import CallKeyer, canonical_schema_json, validate_value
 
 
 class WorkflowScriptError(Exception):
@@ -218,7 +219,7 @@ def log(*args: Any) -> None:
     sys.stderr.write(" ".join(str(a) for a in args) + "\n")
 
 
-# ─── restricted builtins (a footgun aid, NOT the security boundary) ──────────
+# ─── restricted builtins + curated imports (footgun aids, NOT the boundary) ──
 
 _SAFE_BUILTIN_NAMES = frozenset(
     {
@@ -231,6 +232,7 @@ _SAFE_BUILTIN_NAMES = frozenset(
         "bytes",
         "callable",
         "chr",
+        "classmethod",
         "dict",
         "divmod",
         "enumerate",
@@ -238,6 +240,8 @@ _SAFE_BUILTIN_NAMES = frozenset(
         "float",
         "format",
         "frozenset",
+        "getattr",
+        "hasattr",
         "hash",
         "hex",
         "int",
@@ -250,19 +254,25 @@ _SAFE_BUILTIN_NAMES = frozenset(
         "max",
         "min",
         "next",
+        "object",
         "oct",
         "ord",
         "pow",
+        "property",
         "range",
         "repr",
         "reversed",
         "round",
         "set",
+        "setattr",
         "slice",
         "sorted",
+        "staticmethod",
         "str",
         "sum",
+        "super",
         "tuple",
+        "type",
         "zip",
         # constants + exceptions (so authors can raise / except)
         "NotImplemented",
@@ -272,6 +282,7 @@ _SAFE_BUILTIN_NAMES = frozenset(
         "AttributeError",
         "BaseException",
         "Exception",
+        "ImportError",
         "IndexError",
         "KeyError",
         "LookupError",
@@ -287,22 +298,93 @@ SAFE_BUILTINS: dict[str, Any] = {
     name: getattr(builtins, name) for name in _SAFE_BUILTIN_NAMES if hasattr(builtins, name)
 }
 
+# The curated import surface: modules whose direct API is deterministic, I/O-free
+# parse/transform glue. An entry admits itself and its submodules
+# (``collections.abc``). First-order claim only — module *attributes* stay
+# reachable regardless (``statistics.random`` is one hop away), and the
+# fail-closed replay check, not this list, is the determinism enforcement layer.
+# Like SAFE_BUILTINS, a footgun aid, NOT the security boundary. ``__future__`` is
+# deliberately rejected: under PEP 563 every annotation becomes a string and
+# dataclasses' ClassVar/InitVar detection silently misclassifies fields (see
+# ``dont_inherit`` in ``_build_coroutine``).
+_IMPORTABLE_MODULES = frozenset(
+    {
+        "base64",
+        "collections",
+        "dataclasses",
+        "functools",
+        "hashlib",
+        "itertools",
+        "json",
+        "math",
+        "re",
+        "statistics",
+        "string",
+        "textwrap",
+        "urllib.parse",
+    }
+)
+
+
+def _safe_import(
+    name: str,
+    globals: Any = None,
+    locals: Any = None,
+    fromlist: Any = (),
+    level: int = 0,
+) -> Any:
+    """The ``__import__`` behind a script's ``import`` statements: allowlist the
+    dotted name (an entry or a submodule of one), then the real import machinery.
+    The error message carries the full allowlist — it IS the author-facing
+    documentation. ``from urllib import parse`` is rejected (the name ``__import__``
+    receives is ``urllib``, which is not listed); the author retries as
+    ``import urllib.parse`` / ``from urllib.parse import …``."""
+    allowed = level == 0 and any(name == m or name.startswith(m + ".") for m in _IMPORTABLE_MODULES)
+    if not allowed:
+        raise ImportError(
+            f"cannot import {name!r}: workflow scripts may only import "
+            f"{', '.join(sorted(_IMPORTABLE_MODULES))}"
+        )
+    return builtins.__import__(name, globals, locals, fromlist, level)
+
+
+# The two dunders an author never calls by name: ``import x`` desugars to
+# ``__import__`` (the curated shim) and ``class X:`` to ``__build_class__`` (the
+# real one — classes are fully enabled; the allowlist includes ``dataclasses``).
+SAFE_BUILTINS["__import__"] = _safe_import
+SAFE_BUILTINS["__build_class__"] = builtins.__build_class__
+
 
 def _build_coroutine(source: str, input_value: Any) -> Any:
-    namespace: dict[str, Any] = {
-        "__builtins__": SAFE_BUILTINS,
-        "gate": gate,
-        "agent": agent,
-        "tool": tool,
-        "parallel": parallel,
-        "pipeline": pipeline,
-        "log": log,
-        # The agent() failure type lives with its capability in the author API
-        # (not SAFE_BUILTINS), so `try/except AgentError` resolves it as a global.
-        "AgentError": AgentError,
-        "AgentNoReturnError": AgentNoReturnError,
-    }
-    code = compile(source, "<workflow>", "exec")
+    # The script runs as a REAL module registered in sys.modules: a class body's
+    # first op is ``__module__ = __name__`` (so the name must resolve), and
+    # consumers like dataclasses resolve string annotations against
+    # ``sys.modules[cls.__module__].__dict__`` — pointing that at the script's own
+    # namespace keeps such lookups truthful (an explicit ``"InitVar[int]"``
+    # annotation finds the *script's* import, not a bystander module's globals).
+    module = types.ModuleType("<workflow>")
+    sys.modules[module.__name__] = module
+    namespace: dict[str, Any] = module.__dict__
+    namespace.update(
+        {
+            "__builtins__": SAFE_BUILTINS,
+            "gate": gate,
+            "agent": agent,
+            "tool": tool,
+            "parallel": parallel,
+            "pipeline": pipeline,
+            "log": log,
+            # The agent() failure type lives with its capability in the author API
+            # (not SAFE_BUILTINS), so `try/except AgentError` resolves it as a global.
+            "AgentError": AgentError,
+            "AgentNoReturnError": AgentNoReturnError,
+        }
+    )
+    # dont_inherit: without it the script inherits THIS module's ``from __future__
+    # import annotations`` (PEP 563), stringifying every annotation — which silently
+    # breaks dataclasses' ClassVar/InitVar detection. Compiled clean, annotations
+    # are live objects, evaluated eagerly against the script's own namespace.
+    code = compile(source, "<workflow>", "exec", dont_inherit=True)
     exec(code, namespace)
     entry = namespace.get("main")
     if entry is None or not callable(entry):
@@ -461,6 +543,19 @@ def _drive(root_coro: Any, memo: dict[str, Any], emit: Any) -> None:
             except StopIteration as stop:
                 progressed = True
                 if branch is root:
+                    # The return value must live in the same JSON value domain as
+                    # capability inputs — validate it at the source (path-precise
+                    # author error) rather than letting ``json.dumps`` decide: a
+                    # dataclass instance would die as an opaque host crash, and a
+                    # NaN would sail through ``allow_nan`` only to detonate at the
+                    # parent's jsonb cast. ANY exception out of the walk is
+                    # author-caused (RecursionError on a cyclic value, a raising
+                    # ``.items()`` on a dict subclass), so all are author errors.
+                    try:
+                        validate_value(stop.value, path="return")
+                    except Exception as exc:
+                        _emit_raised(emit, exc)
+                        return
                     emit({"type": RETURNED, "value": stop.value})
                     return
                 _finish(branch, stop.value)
