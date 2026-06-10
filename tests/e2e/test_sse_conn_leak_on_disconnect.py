@@ -49,7 +49,6 @@ import asyncpg
 import httpx
 import pytest
 
-from aios.config import get_settings
 from aios.db.pool import listener_application_name
 from tests.conftest import needs_docker
 from tests.e2e.conftest import live_aios_server, wait_for_predicate
@@ -114,7 +113,7 @@ class TestSseDisconnectLeak:
         """Open N SSE streams, drop TCP abruptly, assert conns return to baseline."""
         api_key = aios_env["AIOS_API_KEY"]
         session_id = await _seed_session(migrated_db_url)
-        app_name = listener_application_name(get_settings().instance_id)
+        app_name = listener_application_name()
 
         # Baseline AFTER session is seeded so the seed-helper pool's
         # lifecycle is out of the way.  Filtered by this instance's listener

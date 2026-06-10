@@ -23,7 +23,7 @@ def test_listener_application_name_uses_settings_instance_id() -> None:
     from aios.config import get_settings
     from aios.db.pool import listener_application_name
 
-    expected = f"aios-listener:{get_settings().instance_id}"
+    expected = f"aios-listener:{get_settings().instance_id}"[:63]
     assert listener_application_name() == expected
 
 
