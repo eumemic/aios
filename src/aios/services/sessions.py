@@ -26,6 +26,7 @@ from aios.models.agents import (
     is_mcp_tool_name,
     resolve_permission,
 )
+from aios.models.attenuation import Surface
 from aios.models.events import Event, EventKind
 from aios.models.scheduled_tasks import (
     ScheduledTaskCreate,
@@ -278,6 +279,8 @@ async def create_child_session(
     environment_id: str,
     agent_version: int,
     parent_run_id: str,
+    surface: Surface,
+    vault_ids: list[str],
     request_id: str,
     input: Any,
     output_schema: dict[str, Any] | None = None,
@@ -297,11 +300,18 @@ async def create_child_session(
     a child owing several requests can carry a distinct schema for each — surfaced to
     the model alongside the request and enforced when it calls ``return``.
 
+    ``surface`` is the child's **frozen, run-attenuated** capability surface
+    (``attenuate(agent, run)`` — #794); ``vault_ids`` is the run's vault bindings,
+    copied into the child's ``session_vaults`` so it resolves credentials off its own
+    (subset) table. Both are written **only on a real insert**, inside the one
+    transaction, so a replay never re-freezes a shifted surface or re-binds vaults.
+
     One transaction: insert the child row (``ON CONFLICT (id) DO NOTHING``) and,
-    **only on a real insert**, deliver the request — without a stimulus the child
-    would be born-idle. Atomic, so a crash can never leave a child row without its
-    request. Returns ``True`` on first spawn, ``False`` on conflict (replay → the
-    caller harvests the response instead of re-spawning).
+    **only on a real insert**, freeze the surface, bind the vaults, and deliver the
+    request — without a stimulus the child would be born-idle. Atomic, so a crash can
+    never leave a child row without its request. Returns ``True`` on first spawn,
+    ``False`` on conflict (replay → the caller harvests the response instead of
+    re-spawning).
     """
     content = input if isinstance(input, str) else json.dumps(input)
     async with pool.acquire() as conn, conn.transaction():
@@ -313,9 +323,14 @@ async def create_child_session(
             environment_id=environment_id,
             agent_version=agent_version,
             parent_run_id=parent_run_id,
+            tools=surface.tools,
+            mcp_servers=surface.mcp_servers,
+            http_servers=surface.http_servers,
         )
         if child is None:
             return False  # replay: row exists — do NOT re-deliver the request
+        if vault_ids:
+            await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
         request_meta: dict[str, Any] = {
             "request_id": request_id,
             "caller": {"kind": "run", "id": parent_run_id},
@@ -397,13 +412,22 @@ async def compute_awaiting(
         )
     if not unresolved_by_sid:
         return {}
-    agent_cache: dict[tuple[str, int | None], Agent | AgentVersion] = {}
+    # Foreground sessions sharing an (agent_id, agent_version) share a surface, so they
+    # dedupe the agent load. Workflow children do NOT: each carries its own frozen,
+    # run-attenuated surface (#794), so two children of the same agent/version under
+    # different runs would collide on the old key and misclassify authority — they key
+    # per-session instead.
+    agent_cache: dict[str | tuple[str, int | None], Agent | AgentVersion] = {}
     out: dict[str, list[AwaitingToolCall]] = {}
     for session in sessions:
         unresolved = unresolved_by_sid.get(session.id)
         if not unresolved:
             continue
-        key = (session.agent_id, session.agent_version)
+        key: str | tuple[str, int | None] = (
+            session.id
+            if session.parent_run_id is not None
+            else (session.agent_id, session.agent_version)
+        )
         if key not in agent_cache:
             agent_cache[key] = await agents_service.load_for_session(
                 pool, session, account_id=account_id

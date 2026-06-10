@@ -44,7 +44,9 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
+from aios.models.attenuation import surface_of
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
+from aios.services import attenuation as attenuation_service
 from aios.services.sessions import create_child_session
 from aios.services.wake import defer_run_wake, defer_wake
 from aios.workflows import run_tools
@@ -496,7 +498,9 @@ async def _open_agent_capability(
 
     child_id = child_session_id(run.id, cap.call_key)
     try:
-        pinned = await db_queries.get_agent_head_version(conn, agent_id, account_id=account_id)
+        # The full agent (head row) — both the pinned version AND its declared surface,
+        # which the run clamps. One query, same NotFoundError contract as before.
+        agent = await db_queries.get_agent(conn, agent_id, account_id=account_id)
     except NotFoundError:
         await _complete_run(
             conn,
@@ -506,6 +510,10 @@ async def _open_agent_capability(
             error_kind="agent_not_found",
         )
         return _SpawnResult(rejected=True, needs_rewake=False)
+    pinned = agent.version
+    # #794: the child wields agent ∩ run, frozen at spawn; its vaults are the run's.
+    child_surface = attenuation_service.clamp(surface_of(agent), surface_of(run))
+    run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=account_id)
 
     created = await create_child_session(
         pool,
@@ -515,6 +523,8 @@ async def _open_agent_capability(
         environment_id=run.environment_id,
         agent_version=pinned,
         parent_run_id=run.id,
+        surface=child_surface,
+        vault_ids=run_vaults,
         request_id=cap.call_key,  # the agent() call IS the request the child must answer
         input=spec.get("input"),
         output_schema=output_schema,

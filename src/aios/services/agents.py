@@ -144,9 +144,41 @@ async def load_for_session(
 ) -> Agent | AgentVersion:
     """Load the Agent / AgentVersion the harness sees for ``session`` at step time.
 
-    ``session.agent_version is None`` means "latest" — fetches the
-    current ``Agent``; an integer pins to a specific ``AgentVersion``.
+    A **workflow child** (``parent_run_id`` set) reads the surface **frozen at spawn**
+    (#794: the ``attenuate(agent, run)`` clamp) over its pinned ``AgentVersion`` —
+    model/system/skills/litellm_extra preserved, only tools/mcp/http overridden. This is
+    the single chokepoint every reader (loop, broker, http_request, prelude,
+    compute_awaiting, the context preview) inherits the clamp through, with no per-site
+    edit. The meet is **never recomputed** here — the frozen result is read verbatim, so
+    replay is stable against later agent-version or operator-default changes. A
+    ``parent_run_id`` child whose row is somehow not ``surface_frozen`` **fails closed**
+    (never silently falls back to the full agent surface).
+
+    Otherwise: ``session.agent_version is None`` means "latest" — fetches the current
+    ``Agent``; an integer pins to a specific ``AgentVersion``.
     """
+    if session.parent_run_id is not None:
+        async with pool.acquire() as conn:
+            frozen = await queries.get_session_frozen_surface(
+                conn, session.id, account_id=account_id
+            )
+            if frozen is None:
+                raise RuntimeError(
+                    f"workflow child {session.id} has no frozen surface snapshot "
+                    "(parent_run_id set but surface_frozen is false)"
+                )
+            # A workflow child always pins a concrete agent_version at spawn
+            # (insert_child_session requires the int), so this is never a "latest" read.
+            version = await queries.get_agent_version(
+                conn, session.agent_id, session.agent_version, account_id=account_id
+            )
+        return version.model_copy(
+            update={
+                "tools": frozen.tools,
+                "mcp_servers": frozen.mcp_servers,
+                "http_servers": frozen.http_servers,
+            }
+        )
     if session.agent_version is not None:
         return await get_agent_version(
             pool, session.agent_id, session.agent_version, account_id=account_id

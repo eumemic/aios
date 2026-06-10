@@ -33,11 +33,16 @@ from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimite
 from aios.harness import runtime
 from aios.mcp.client import resolve_auth_for_target_url_run
 from aios.models.agents import Agent, HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.attenuation import surface_of
 from aios.models.vaults import VaultCredentialCreate
 from aios.services import agents as agents_service
+from aios.services import attenuation as attenuation_service
+from aios.services import sessions as sessions_service
 from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
+from aios.services.sessions import create_child_session
 from aios.tools import workflow_management as wm
+from aios.workflows.child_id import child_session_id
 from aios.workflows.service import WORKFLOW_RUN_MAX_DEPTH, WorkflowRunDepthExceededError
 
 pytestmark = pytest.mark.integration
@@ -525,10 +530,17 @@ async def test_create_run_builtin_threads_parent_run_id(vault_pool: asyncpg.Pool
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-bi-nest", script=_SCRIPT)
     root = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
 
-    # Set the parent_run_id column directly (the run-spawn machinery is what populates
-    # it on a real child session); this asserts the handler READS it and threads it.
+    # Make the session a real child: parent_run_id + a frozen surface (the run-spawn
+    # machinery populates both; load_for_session fails closed on a parent_run_id session
+    # that is not surface_frozen). This asserts the handler READS the lineage and threads it.
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE sessions SET parent_run_id = $1 WHERE id = $2", root.id, sess)
+        await conn.execute(
+            "UPDATE sessions SET parent_run_id = $1, surface_frozen = TRUE, "
+            "tools = '[]'::jsonb, mcp_servers = '[]'::jsonb, http_servers = '[]'::jsonb "
+            "WHERE id = $2",
+            root.id,
+            sess,
+        )
 
     out = await wm.create_run_handler(sess, {"workflow_id": wf.id})
     assert out["parent_run_id"] == root.id
@@ -670,3 +682,185 @@ async def test_cancel_run_builtin_only_own_runs(vault_pool: asyncpg.Pool[Any]) -
         await wm.cancel_run_handler(other, {"run_id": own["id"]})
     with pytest.raises(ForbiddenError):
         await wm.cancel_run_handler(sess, {"run_id": op.id})
+
+
+# ─── #794: the run→child materialize edge (frozen, run-attenuated surface) ────
+#
+# A run's agent() child must wield agent ∩ run, frozen at spawn, with the run's vaults —
+# closing the "agent-shaped side door". These spawn children the way step.py does
+# (clamp(agent, run) then create_child_session) and read the frozen surface back through
+# load_for_session, the one chokepoint every reader inherits.
+
+
+async def _spawn_child(
+    pool: asyncpg.Pool[Any],
+    run_id: str,
+    agent: Agent,
+    *,
+    surface: Any,
+    vault_ids: list[str] | None = None,
+) -> Any:
+    """Spawn one child for ``run_id`` (as step.py does) and return its Session."""
+    cid = child_session_id(run_id, "0")
+    await create_child_session(
+        pool,
+        session_id=cid,
+        account_id=ACC,
+        agent_id=agent.id,
+        environment_id=ENV,
+        agent_version=agent.version,
+        parent_run_id=run_id,
+        surface=surface,
+        vault_ids=vault_ids or [],
+        request_id="0",
+        input="hi",
+    )
+    return await sessions_service.get_session_basic(pool, cid, account_id=ACC)
+
+
+async def test_child_surface_is_the_frozen_clamp_not_the_live_agent(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """The setuid regression: a child wields agent ∩ run, NOT the agent's full surface.
+
+    The agent has bash + read; the run only bash. The child — read back through
+    load_for_session, the chokepoint every reader uses — has bash but NOT read, even
+    though its agent does. Anything the run can't do, its child can't do either.
+    """
+    pool = vault_pool
+    agent = await _make_agent(
+        pool, "db-admin", tools=[ToolSpec(type="bash"), ToolSpec(type="read")]
+    )
+    # Operator-authored workflow with the run's (narrower) surface; launched operator-side.
+    wf = await wf_service.create_workflow(
+        pool, account_id=ACC, name="wf-run-bash", script=_SCRIPT, tools=[ToolSpec(type="bash")]
+    )
+    run = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    child_surface = attenuation_service.clamp(surface_of(agent), surface_of(run))
+
+    child = await _spawn_child(pool, run.id, agent, surface=child_surface)
+    loaded = await agents_service.load_for_session(pool, child, account_id=ACC)
+    assert {t.type for t in loaded.tools} == {"bash"}  # read dropped — the side door closed
+
+
+async def test_child_vaults_copied_from_run(vault_pool: asyncpg.Pool[Any]) -> None:
+    """The credential half (#794 P1=A): a child's session_vaults are the run's, frozen."""
+    pool = vault_pool
+    vx = await _make_vault(pool, "v-x")
+    agent = await _make_agent(pool, "vault-child-agent")
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-vc", script=_SCRIPT)
+    run = await wf_service.create_run(
+        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, vault_ids=[vx]
+    )
+    async with pool.acquire() as conn:
+        run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=ACC)
+
+    child = await _spawn_child(pool, run.id, agent, surface=surface_of(agent), vault_ids=run_vaults)
+    async with pool.acquire() as conn:
+        child_vaults = await db_queries.get_session_vault_ids(conn, child.id, account_id=ACC)
+    assert child_vaults == [vx]
+
+
+async def test_frozen_surface_wins_over_a_later_agent_edit(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """Replay-soundness: the child reads its spawn-time frozen surface, not the live
+    agent, even after the agent's surface is rewritten (a new version)."""
+    pool = vault_pool
+    agent = await _make_agent(pool, "evolving-agent", tools=[ToolSpec(type="bash")])
+    wf = await wf_service.create_workflow(
+        pool, account_id=ACC, name="wf-frozen", script=_SCRIPT, tools=[ToolSpec(type="bash")]
+    )
+    run = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    child = await _spawn_child(
+        pool, run.id, agent, surface=attenuation_service.clamp(surface_of(agent), surface_of(run))
+    )
+
+    # Rewrite the agent's surface (a new version) AFTER the child froze.
+    await agents_service.update_agent(
+        pool,
+        agent.id,
+        account_id=ACC,
+        expected_version=agent.version,
+        tools=[ToolSpec(type="read")],
+    )
+
+    loaded = await agents_service.load_for_session(pool, child, account_id=ACC)
+    assert {t.type for t in loaded.tools} == {"bash"}  # the frozen surface, not the new [read]
+
+
+async def test_load_for_session_fails_closed_on_unfrozen_child(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """A parent_run_id session with no frozen snapshot fails closed — never the full agent."""
+    pool = vault_pool
+    agent = await _make_agent(pool, "ghost-child-agent", tools=[ToolSpec(type="bash")])
+    sess_id = await _make_session(pool, agent)
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-ghost", script=_SCRIPT)
+    run = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    # Make it look like a child (parent_run_id) WITHOUT a frozen surface — the corrupt state.
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE sessions SET parent_run_id = $1 WHERE id = $2", run.id, sess_id)
+    sess = await sessions_service.get_session_basic(pool, sess_id, account_id=ACC)
+    with pytest.raises(RuntimeError, match="no frozen surface"):
+        await agents_service.load_for_session(pool, sess, account_id=ACC)
+
+
+async def test_create_run_clamps_top_edge_to_launcher(vault_pool: asyncpg.Pool[Any]) -> None:
+    """The top edge: an agent-launched run is clamped to the launcher's surface; the
+    operator path snapshots the workflow verbatim."""
+    pool = vault_pool
+    agent = await _make_agent(pool, "narrow-launcher", tools=[ToolSpec(type="bash")])
+    launcher = await _make_session(pool, agent)
+    # Operator authors a BROADER workflow (the agent couldn't, but the operator can).
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id=ACC,
+        name="wf-broad-run",
+        script=_SCRIPT,
+        tools=[ToolSpec(type="bash"), ToolSpec(type="read")],
+    )
+    launched = await wf_service.create_run(
+        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, launcher_session_id=launcher
+    )
+    assert {t.type for t in launched.tools} == {"bash"}  # read clamped away
+
+    operator = await wf_service.create_run(
+        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV
+    )
+    assert {t.type for t in operator.tools} == {"bash", "read"}  # operator = top — verbatim
+
+
+async def test_subrun_composes_against_child_frozen_clamp(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """A sub-run launched by a child cannot exceed the child's frozen surface —
+    composition with no ancestor walk: the child's load_for_session returns its clamp,
+    and create_run meets the sub-workflow against it."""
+    pool = vault_pool
+    agent = await _make_agent(pool, "nesting-agent", tools=[ToolSpec(type="bash")])
+    wf = await wf_service.create_workflow(
+        pool, account_id=ACC, name="wf-parent", script=_SCRIPT, tools=[ToolSpec(type="bash")]
+    )
+    run = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    child = await _spawn_child(
+        pool, run.id, agent, surface=attenuation_service.clamp(surface_of(agent), surface_of(run))
+    )
+
+    # The child launches a sub-run of a broader operator workflow; it clamps to [bash].
+    sub_wf = await wf_service.create_workflow(
+        pool,
+        account_id=ACC,
+        name="wf-sub-broad",
+        script=_SCRIPT,
+        tools=[ToolSpec(type="bash"), ToolSpec(type="read")],
+    )
+    subrun = await wf_service.create_run(
+        pool,
+        account_id=ACC,
+        workflow_id=sub_wf.id,
+        environment_id=ENV,
+        launcher_session_id=child.id,
+        parent_run_id=run.id,
+    )
+    assert {t.type for t in subrun.tools} == {"bash"}  # composed clamp: read dropped

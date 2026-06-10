@@ -17,12 +17,11 @@ from typing import Any
 
 import asyncpg
 
-from aios.config import get_settings
 from aios.db.listen import open_listen_for_run_events
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
-from aios.models.attenuation import Surface, attenuate, canonicalize, surface_diff
+from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     WfRun,
@@ -31,10 +30,10 @@ from aios.models.workflows import (
     Workflow,
 )
 from aios.services import agents as agents_service
+from aios.services import attenuation as attenuation_service
 from aios.services import sessions as sessions_service
 from aios.services.await_completion import await_completion
 from aios.services.wake import defer_run_wake
-from aios.tools.registry import transport_defaults
 from aios.workflows.service import create_run, resume_gate
 
 __all__ = [
@@ -80,16 +79,9 @@ async def _enforce_surface_attenuation(
         pool, actor_session_id, account_id=account_id
     )
     agent = await agents_service.load_for_session(pool, session, account_id=account_id)
-    default_mcp = get_settings().default_mcp_permission_policy or "always_ask"
-    builtin_transports = transport_defaults()
     declared = Surface(tools, mcp_servers, http_servers)
-    actor = Surface(agent.tools, agent.mcp_servers, agent.http_servers)
-    expected = canonicalize(
-        declared, default_mcp_permission=default_mcp, builtin_transports=builtin_transports
-    )
-    effective = attenuate(
-        declared, actor, default_mcp_permission=default_mcp, builtin_transports=builtin_transports
-    )
+    expected = attenuation_service.normalize(declared)
+    effective = attenuation_service.clamp(declared, surface_of(agent))
     if effective != expected:
         raise ForbiddenError(
             "workflow surface exceeds the acting agent's",

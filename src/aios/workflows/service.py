@@ -15,7 +15,11 @@ from aios.config import get_settings
 from aios.db.queries import get_environment, get_session_vault_ids
 from aios.db.queries import workflows as wf_queries
 from aios.errors import AiosError, ForbiddenError, NotFoundError, RateLimitedError
+from aios.models.attenuation import Surface, surface_of
 from aios.models.workflows import WfRun
+from aios.services import agents as agents_service
+from aios.services import attenuation as attenuation_service
+from aios.services import sessions as sessions_service
 from aios.services.wake import defer_run_wake
 
 # Vertical recursion bound: how deep a chain of runs (a run whose agent() child
@@ -74,10 +78,35 @@ async def create_run(
     stale-high — a conservative early refusal, never a cap breach.)
     """
     requested = list(vault_ids or [])
+    # #794 top edge: an agent-launched run cannot exceed the launcher's own surface.
+    # Load the launcher's effective surface BEFORE acquiring the run's connection (a
+    # second pool.acquire() while holding `conn` would deadlock a small pool); the meet
+    # itself runs inside the transaction once the workflow is fetched. The operator/HTTP
+    # path (no launcher) is the lattice top — the run snapshots the workflow verbatim.
+    # (Consistency note: this read is outside the run txn, so a concurrent agent edit
+    # between it and the snapshot clamps against a slightly-stale launcher surface — a
+    # same-account, bounded-to-recent-state lag, the same read-then-act window as the
+    # author edge, never a cross-tenant breach. A conn-threaded load would close it.)
+    launcher_surface: Surface | None = None
+    if launcher_session_id is not None:
+        launcher_session = await sessions_service.get_session_basic(
+            pool, launcher_session_id, account_id=account_id
+        )
+        launcher_agent = await agents_service.load_for_session(
+            pool, launcher_session, account_id=account_id
+        )
+        launcher_surface = surface_of(launcher_agent)
     async with pool.acquire() as conn, conn.transaction():
         await get_environment(conn, environment_id, account_id=account_id)  # 404s foreign/absent
         workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
         script_sha = hashlib.sha256(workflow.script.encode("utf-8")).hexdigest()
+        # Clamp the snapshot to the launcher's surface (sub-runs compose for free: a
+        # child launcher's load_for_session already returns its frozen clamp).
+        effective = (
+            attenuation_service.clamp(surface_of(workflow), launcher_surface)
+            if launcher_surface is not None
+            else surface_of(workflow)
+        )
         if parent_run_id is not None:
             # ``parent_run_id`` is trusted same-account: the only caller that sets it is
             # the builtin, threading the launcher session's own ``parent_run_id`` (set by
@@ -138,11 +167,11 @@ async def create_run(
             script=workflow.script,
             script_sha=script_sha,
             input=input,
-            # Snapshot the declared surface at launch (like script), so a later
+            # Snapshot the launch-clamped surface (like script), so a later
             # update_workflow never shifts this run's tool-authority.
-            tools=workflow.tools,
-            mcp_servers=workflow.mcp_servers,
-            http_servers=workflow.http_servers,
+            tools=effective.tools,
+            mcp_servers=effective.mcp_servers,
+            http_servers=effective.http_servers,
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)

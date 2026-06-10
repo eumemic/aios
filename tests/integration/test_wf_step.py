@@ -30,6 +30,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
+from aios.models.attenuation import Surface
 from aios.models.vaults import VaultCredentialCreate
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
@@ -135,6 +136,8 @@ async def _spawn_child(
         environment_id="env_wf",
         agent_version=1,
         parent_run_id=run_id,
+        surface=Surface([], [], []),
+        vault_ids=[],
         request_id=ordinal,
         input="hi",
         output_schema=output_schema,
@@ -160,6 +163,8 @@ async def test_create_child_session_idempotent(
         environment_id="env_wf",
         agent_version=1,
         parent_run_id=run_id,
+        surface=Surface([], [], []),
+        vault_ids=[],
         request_id="sha:x#0",
         input={"q": "hi"},
     )
@@ -173,6 +178,8 @@ async def test_create_child_session_idempotent(
         environment_id="env_wf",
         agent_version=1,
         parent_run_id=run_id,
+        surface=Surface([], [], []),
+        vault_ids=[],
         request_id="sha:x#0",
         input={"q": "hi"},
     )

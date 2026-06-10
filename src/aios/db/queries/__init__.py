@@ -56,6 +56,7 @@ from aios.ids import (
 )
 from aios.models.accounts import Account, AccountConfig
 from aios.models.agents import Agent, AgentVersion, HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.attenuation import Surface
 from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.environments import Environment, EnvironmentConfig
 from aios.models.events import Event, EventKind
@@ -527,24 +528,6 @@ async def get_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id:
     )
 
 
-async def get_agent_head_version(
-    conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str
-) -> int:
-    """The agent's current head ``version`` as a scalar — no full-row hydration.
-
-    Used to pin a workflow child's ``agent_version`` at spawn (the spawn path
-    needs only the int, not the parsed Agent). Raises ``NotFoundError`` if the
-    agent is absent, mirroring :func:`get_agent`. (Distinct from
-    :func:`get_agent_version`, which fetches one historical ``AgentVersion`` row.)
-    """
-    version = await conn.fetchval(
-        "SELECT version FROM agents WHERE id = $1 AND account_id = $2", agent_id, account_id
-    )
-    if version is None:
-        raise NotFoundError(f"agent {agent_id} not found", detail={"id": agent_id})
-    return int(version)
-
-
 async def list_agents(
     conn: asyncpg.Connection[Any],
     *,
@@ -968,6 +951,9 @@ async def insert_child_session(
     environment_id: str,
     agent_version: int,
     parent_run_id: str,
+    tools: list[ToolSpec],
+    mcp_servers: list[McpServerSpec],
+    http_servers: list[HttpServerSpec],
 ) -> Session | None:
     """Insert a workflow ``agent()`` child under a deterministic ``session_id``.
 
@@ -975,9 +961,14 @@ async def insert_child_session(
     :class:`Session` on first spawn, or ``None`` on conflict (a replay found the
     existing row, so the caller harvests instead of re-spawning). ``origin`` is
     ``'background'`` and ``agent_version`` is the **pinned** int resolved at
-    spawn (never ``None`` — a child must not track "latest"). v1 children carry
-    no vaults/resources/scheduled-tasks; the caller delivers the agent input in
-    the same transaction.
+    spawn (never ``None`` — a child must not track "latest").
+
+    ``tools``/``mcp_servers``/``http_servers`` are the child's **frozen, run-attenuated
+    surface** (the ``attenuate(agent, run)`` meet result) and ``surface_frozen`` is set
+    ``TRUE`` — read back by ``load_for_session`` instead of the live agent, and pinned
+    under ``ON CONFLICT DO NOTHING`` so a replay can never re-freeze a shifted surface.
+    The caller delivers the agent input and copies the run's vaults in the same
+    transaction.
     """
     workspace_path = _default_workspace_path(account_id, session_id)
     try:
@@ -986,10 +977,12 @@ async def insert_child_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 workspace_volume_path, env, focal_channel, focal_locked,
-                account_id, parent_run_id, origin, archive_when_idle
+                account_id, parent_run_id, origin, archive_when_idle,
+                tools, mcp_servers, http_servers, surface_frozen
             )
             VALUES ($1, $2, $3, $4, NULL, '{}'::jsonb, $5, '{}'::jsonb,
-                    NULL, FALSE, $6, $7, 'background', TRUE)
+                    NULL, FALSE, $6, $7, 'background', TRUE,
+                    $8::jsonb, $9::jsonb, $10::jsonb, TRUE)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -1000,6 +993,9 @@ async def insert_child_session(
             workspace_path,
             account_id,
             parent_run_id,
+            json.dumps([t.model_dump() for t in tools]),
+            json.dumps([s.model_dump() for s in mcp_servers]),
+            json.dumps([s.model_dump() for s in http_servers]),
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -1007,6 +1003,32 @@ async def insert_child_session(
             detail={"agent_id": agent_id, "environment_id": environment_id},
         ) from exc
     return _row_to_session(row) if row is not None else None
+
+
+async def get_session_frozen_surface(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> Surface | None:
+    """A workflow child's frozen surface, or ``None`` if the row is not ``surface_frozen``.
+
+    ``None`` is the load-bearing signal that this is *not* a frozen child (a foreground
+    session, or — for a ``parent_run_id`` child — a corrupt/unmigrated row the caller
+    must fail closed on). Raises ``NotFoundError`` if the session is absent.
+    """
+    row = await conn.fetchrow(
+        "SELECT tools, mcp_servers, http_servers, surface_frozen "
+        "FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError("session not found", detail={"session_id": session_id})
+    if not row["surface_frozen"]:
+        return None
+    return Surface(
+        tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
+        mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
+        http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
+    )
 
 
 async def get_session_workflow_context(
