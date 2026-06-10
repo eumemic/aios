@@ -2590,17 +2590,13 @@ async def append_event(
                 # impossible anyway, since a later tz config change re-renders
                 # history regardless of what was counted here.
                 #
-                # The count also pre-pays the separator assistant message that
-                # ``separate_adjacent_user_messages`` inserts when this user
-                # message follows another user message at compose time.
-                # Separators exist only because of user messages, so charging
-                # each user event its potential separator keeps the windowing
-                # budget an upper bound — without it, the post-window payload
-                # can exceed ``window_max`` by ~5 local tokens per kept
-                # adjacent-user pair (unbudgeted, since separators are not
-                # events). Non-adjacent user messages overcount by the same
-                # ~5 — the same keep-fewer-never-overshoot asymmetry as the
-                # ceil in ``read_windowed_events``.
+                # The count also pre-pays for adjacent-user handling: at
+                # compose time ``merge_adjacent_user_messages`` concatenates
+                # consecutive user inbounds (the old code inserted a ``.``
+                # separator instead). Reserving an assistant-separator's worth
+                # of tokens per user event keeps the windowing budget a
+                # conservative upper bound — the merge delimiter is smaller, so
+                # the post-window payload never exceeds ``window_max``.
                 rendered = render_user_event(
                     data, orig_channel, focal_at_arrival, datetime.now(UTC)
                 )

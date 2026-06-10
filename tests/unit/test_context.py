@@ -13,8 +13,10 @@ import pytest
 
 from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
+    _concat_user_messages,
+    _is_degenerate_empty_assistant,
     build_messages,
-    separate_adjacent_user_messages,
+    merge_adjacent_user_messages,
     stub_missing_reasoning_content,
 )
 from aios.models.events import Event
@@ -25,14 +27,14 @@ def _full_pipeline(
     channels: list[str],
     focal_channel: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Compose ``build_messages`` → tail-block append → separator — the
-    same sequence ``loop.py:run_session_step`` runs before handing the
-    message list to LiteLLM."""
+    """Compose ``build_messages`` → tail-block append → adjacent-user
+    merge — the same sequence ``compose_step_context`` runs before
+    handing the message list to LiteLLM."""
     ctx = build_messages(events, system_prompt=None)
     tail = build_channels_tail_block(channels, events, focal_channel)
     if tail is not None:
         ctx.messages.append(tail)
-    return separate_adjacent_user_messages(ctx.messages)
+    return merge_adjacent_user_messages(ctx.messages)
 
 
 # Fixed receipt time so the per-message ``received=`` envelope field
@@ -372,6 +374,38 @@ class TestBuildMessages:
         assert [m["role"] for m in msgs] == ["user"]
         assert msgs[0]["content"] == f"[received={RECEIVED}]\nnext"
 
+    def test_degenerate_empty_assistant_dropped_load_bearing_turns_kept(self) -> None:
+        """A degenerate empty assistant turn (no content, no tool_calls, no
+        thinking) is excluded from the composed messages — replaying it
+        teaches literal-minded models to imitate silence. A tool-call turn
+        and a real text turn are load-bearing and survive."""
+        events = [
+            _evt(1, "user", content="do it"),
+            # A genuine empty turn the model emitted at some prior step.
+            _evt(2, "assistant", content=""),
+            _evt(3, "user", content="still there?"),
+            _evt(4, "assistant", tool_calls=[_tc("a")]),
+            _evt(5, "tool", tool_call_id="a", content="result a"),
+            _evt(6, "assistant", content="here is the answer"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 3
+        events[5].data["reacting_to"] = 5
+
+        msgs = build_messages(events, system_prompt=None).messages
+
+        # The degenerate empty assistant at seq=2 is gone.
+        assert not any(
+            m["role"] == "assistant" and m.get("content") == "" and "tool_calls" not in m
+            for m in msgs
+        )
+        # The tool-call turn + its result and the text turn are kept.
+        assert any(m["role"] == "assistant" and m.get("tool_calls") for m in msgs)
+        assert any(m["role"] == "tool" and "result a" in m.get("content", "") for m in msgs)
+        assert any(
+            m["role"] == "assistant" and m.get("content") == "here is the answer" for m in msgs
+        )
+
 
 class TestTimezoneRendering:
     """The ``received=`` envelope renders in the account's effective timezone
@@ -565,12 +599,19 @@ class TestMonotonicity:
         _assert_prefix(ctx1, ctx2)
         _assert_prefix(ctx2, ctx3)
 
-    def test_separator_insertion_preserves_monotonicity(self) -> None:
-        """Full pipeline (build_messages → tail-block → separator) must
-        keep the prefix-stability invariant: output(L1) is a prefix of
-        output(L2) when L1 ⊂ L2.  Pins the "insertions only at the
-        volatile suffix" claim — a refactor that inserted separators
-        into the cache-stable prefix would fail this."""
+    def test_merge_insertion_preserves_monotonicity(self) -> None:
+        """Full pipeline (build_messages → tail-block → adjacent-user
+        merge) must keep the prefix-stability invariant: output(L1) is a
+        prefix of output(L2) when L1 ⊂ L2.  Pins the "mutations only at
+        the volatile suffix" claim — a refactor that merged messages into
+        the cache-stable prefix would fail this.
+
+        The tail block lands as the trailing user-role message. When the
+        preceding message is also user-role (L2: ``…, user "do B"``), the
+        merge folds the tail *into* that user turn, so the tail header is
+        no longer a standalone message — it's a substring of the final
+        user content. ``_strip_tail`` drops any trailing user message
+        carrying the header either way."""
         bindings = ["signal/test/1"]
 
         l1 = [
@@ -584,18 +625,18 @@ class TestMonotonicity:
         out2 = _full_pipeline(l2, bindings)
         out3 = _full_pipeline(l3, bindings)
 
-        # The tail block mutates per step, so compare prefixes only up
-        # to (but not including) the tail and any separator before it.
+        # No degenerate "." separator is ever produced now.
+        for out in (out1, out2, out3):
+            assert not any(m == {"role": "assistant", "content": "."} for m in out)
+
+        # The tail block mutates per step, so compare prefixes only up to
+        # (but not including) the trailing user turn that carries it —
+        # whether standalone or merged into the preceding inbound.
         def _strip_tail(msgs: list[dict]) -> list[dict]:
             for i in range(len(msgs) - 1, -1, -1):
                 m = msgs[i]
-                if m.get("role") == "user" and str(m.get("content", "")).startswith(
-                    "━━━ Channels ━━━"
-                ):
-                    stop = i
-                    if i > 0 and msgs[i - 1] == {"role": "assistant", "content": "."}:
-                        stop = i - 1
-                    return msgs[:stop]
+                if m.get("role") == "user" and "━━━ Channels ━━━" in str(m.get("content", "")):
+                    return msgs[:i]
             return msgs
 
         _assert_prefix(_strip_tail(out1), _strip_tail(out2))
@@ -948,24 +989,31 @@ class TestToolCallSanitization:
         assert msgs[1]["tool_calls"][0]["function"]["name"] == ""
 
     def test_missing_id_filtered_out(self) -> None:
-        """A tool_call entry without an ``id`` is unjoinable — dropped, not preserved with id=''."""
+        """A tool_call entry without an ``id`` is unjoinable — dropped, not
+        preserved with id=''. Once its sole tool_call is stripped the
+        assistant turn has no content and no tool_calls, so the
+        degenerate-empty-assistant drop removes the turn entirely; only
+        the user message survives."""
         bad_tc = {"type": "function", "function": {"name": "bash", "arguments": "{}"}}
         events = [
             _evt(1, "user", content="go"),
             _evt(2, "assistant", tool_calls=[bad_tc]),
         ]
         msgs = build_messages(events, system_prompt=None).messages
-        assert "tool_calls" not in msgs[1]
+        assert [m["role"] for m in msgs] == ["user"]
+        assert not any(m.get("tool_calls") for m in msgs)
 
     def test_empty_id_string_filtered(self) -> None:
-        """An explicit empty-string id is also unjoinable and filtered."""
+        """An explicit empty-string id is also unjoinable and filtered;
+        the resulting degenerate empty assistant turn is then dropped."""
         bad_tc = {"id": "", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
         events = [
             _evt(1, "user", content="go"),
             _evt(2, "assistant", tool_calls=[bad_tc]),
         ]
         msgs = build_messages(events, system_prompt=None).messages
-        assert "tool_calls" not in msgs[1]
+        assert [m["role"] for m in msgs] == ["user"]
+        assert not any(m.get("tool_calls") for m in msgs)
 
     def test_mid_window_malformed_filtered_among_valid(self) -> None:
         """Mid-window assistant with mixed valid + malformed tool_calls keeps only the valid entry."""
@@ -1533,65 +1581,189 @@ class TestFocalRendering:
         assert msgs[1]["content"].startswith(f"[channel={self._CHAN_A}")
 
 
-class TestSeparateAdjacentUserMessages:
-    def test_inserts_empty_assistant_between_two_users(self) -> None:
+def _has_dot_placeholder(msgs: list[dict[str, Any]]) -> bool:
+    """True if any message is the old degenerate ``"."`` assistant separator."""
+    return any(m == {"role": "assistant", "content": "."} for m in msgs)
+
+
+class TestMergeAdjacentUserMessages:
+    """``merge_adjacent_user_messages`` folds consecutive user-role turns
+    into one, replacing the old ``"."`` placeholder-assistant separator
+    (which literal-minded models imitated into silence)."""
+
+    def test_merges_two_users_into_one(self) -> None:
         msgs = [
             {"role": "user", "content": "one"},
             {"role": "user", "content": "two"},
         ]
-        assert separate_adjacent_user_messages(msgs) == [
-            {"role": "user", "content": "one"},
-            {"role": "assistant", "content": "."},
-            {"role": "user", "content": "two"},
-        ]
+        result = merge_adjacent_user_messages(msgs)
+        assert result == [{"role": "user", "content": "one\n\ntwo"}]
+        assert not _has_dot_placeholder(result)
 
     def test_preserves_existing_alternation(self) -> None:
+        """A user/assistant/user sequence has no adjacency — no merge
+        across the assistant turn."""
         msgs = [
             {"role": "user", "content": "one"},
             {"role": "assistant", "content": "hi"},
             {"role": "user", "content": "two"},
         ]
-        assert separate_adjacent_user_messages(msgs) == msgs
+        assert merge_adjacent_user_messages(msgs) == msgs
+        assert not _has_dot_placeholder(merge_adjacent_user_messages(msgs))
 
-    def test_tool_result_between_users_is_not_separated(self) -> None:
-        """Adjacent means *consecutive same-role*. Tool results don't trigger."""
+    def test_tool_result_between_users_is_not_merged(self) -> None:
+        """Adjacent means *consecutive same-role*. Tool results break the run."""
         msgs = [
             {"role": "user", "content": "one"},
             {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
             {"role": "tool", "tool_call_id": "a", "content": "r"},
             {"role": "user", "content": "two"},
         ]
-        assert separate_adjacent_user_messages(msgs) == msgs
+        assert merge_adjacent_user_messages(msgs) == msgs
 
-    def test_three_consecutive_users_get_two_separators(self) -> None:
+    def test_three_consecutive_users_merge_to_one(self) -> None:
         msgs = [
             {"role": "user", "content": "a"},
             {"role": "user", "content": "b"},
             {"role": "user", "content": "c"},
         ]
-        assert separate_adjacent_user_messages(msgs) == [
-            {"role": "user", "content": "a"},
-            {"role": "assistant", "content": "."},
-            {"role": "user", "content": "b"},
-            {"role": "assistant", "content": "."},
-            {"role": "user", "content": "c"},
+        result = merge_adjacent_user_messages(msgs)
+        assert result == [{"role": "user", "content": "a\n\nb\n\nc"}]
+        assert not _has_dot_placeholder(result)
+
+    def test_list_content_users_concatenate_blocks(self) -> None:
+        """Vision/multi-part list contents concatenate block-wise."""
+        a_blocks = [{"type": "text", "text": "first"}]
+        b_blocks = [
+            {"type": "text", "text": "second"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
         ]
+        msgs = [
+            {"role": "user", "content": a_blocks},
+            {"role": "user", "content": b_blocks},
+        ]
+        result = merge_adjacent_user_messages(msgs)
+        assert result == [{"role": "user", "content": [*a_blocks, *b_blocks]}]
+        assert not _has_dot_placeholder(result)
+
+    def test_string_plus_list_normalizes_to_block_list(self) -> None:
+        """A string user followed by a list user normalises the string to
+        a text block and concatenates."""
+        list_blocks = [
+            {"type": "text", "text": "see this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]
+        msgs = [
+            {"role": "user", "content": "look:"},
+            {"role": "user", "content": list_blocks},
+        ]
+        result = merge_adjacent_user_messages(msgs)
+        assert result == [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "look:"}, *list_blocks],
+            }
+        ]
+        assert not _has_dot_placeholder(result)
 
     def test_empty_input_returns_empty(self) -> None:
-        assert separate_adjacent_user_messages([]) == []
+        assert merge_adjacent_user_messages([]) == []
 
-    def test_system_then_user_then_user_separates_only_users(self) -> None:
+    def test_system_then_user_then_user_merges_only_users(self) -> None:
         msgs = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "one"},
             {"role": "user", "content": "two"},
         ]
-        assert separate_adjacent_user_messages(msgs) == [
+        result = merge_adjacent_user_messages(msgs)
+        assert result == [
             {"role": "system", "content": "sys"},
+            {"role": "user", "content": "one\n\ntwo"},
+        ]
+        assert not _has_dot_placeholder(result)
+
+    def test_does_not_mutate_input_messages(self) -> None:
+        """Merge produces new dicts; the caller's input list is untouched."""
+        original = [
             {"role": "user", "content": "one"},
-            {"role": "assistant", "content": "."},
             {"role": "user", "content": "two"},
         ]
+        snapshot = [dict(m) for m in original]
+        merge_adjacent_user_messages(original)
+        assert original == snapshot
+
+
+class TestConcatUserMessages:
+    """``_concat_user_messages`` is the block-aware joiner behind the merge."""
+
+    def test_two_strings_join_with_blank_line(self) -> None:
+        a = {"role": "user", "content": "alpha"}
+        b = {"role": "user", "content": "beta"}
+        assert _concat_user_messages(a, b) == {"role": "user", "content": "alpha\n\nbeta"}
+
+    def test_two_lists_concatenate(self) -> None:
+        a = {"role": "user", "content": [{"type": "text", "text": "x"}]}
+        b = {"role": "user", "content": [{"type": "text", "text": "y"}]}
+        assert _concat_user_messages(a, b) == {
+            "role": "user",
+            "content": [{"type": "text", "text": "x"}, {"type": "text", "text": "y"}],
+        }
+
+    def test_string_then_list_normalizes_string(self) -> None:
+        a = {"role": "user", "content": "hi"}
+        b = {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u"}}]}
+        assert _concat_user_messages(a, b) == {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "image_url", "image_url": {"url": "u"}},
+            ],
+        }
+
+
+class TestIsDegenerateEmptyAssistant:
+    """``_is_degenerate_empty_assistant`` flags assistant turns carrying no
+    content, no tool_calls, and no thinking — the non-events that
+    ``build_messages`` drops to break the empty-turn imitation loop."""
+
+    def test_empty_string_no_tools_no_thinking_is_degenerate(self) -> None:
+        assert _is_degenerate_empty_assistant({"role": "assistant", "content": ""}) is True
+
+    def test_whitespace_only_content_is_degenerate(self) -> None:
+        assert _is_degenerate_empty_assistant({"role": "assistant", "content": "  \n\t"}) is True
+
+    def test_content_none_is_degenerate(self) -> None:
+        assert _is_degenerate_empty_assistant({"role": "assistant", "content": None}) is True
+
+    def test_missing_content_is_degenerate(self) -> None:
+        assert _is_degenerate_empty_assistant({"role": "assistant"}) is True
+
+    def test_text_content_is_not_degenerate(self) -> None:
+        assert _is_degenerate_empty_assistant({"role": "assistant", "content": "hi"}) is False
+
+    def test_tool_calls_present_is_not_degenerate(self) -> None:
+        msg = {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]}
+        assert _is_degenerate_empty_assistant(msg) is False
+
+    def test_thinking_blocks_present_is_not_degenerate(self) -> None:
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "thinking_blocks": [{"type": "thinking", "thinking": "hmm"}],
+        }
+        assert _is_degenerate_empty_assistant(msg) is False
+
+    def test_list_content_with_nonempty_text_block_is_not_degenerate(self) -> None:
+        msg = {"role": "assistant", "content": [{"type": "text", "text": "real"}]}
+        assert _is_degenerate_empty_assistant(msg) is False
+
+    def test_list_content_with_only_empty_text_blocks_is_degenerate(self) -> None:
+        msg = {"role": "assistant", "content": [{"type": "text", "text": "  "}]}
+        assert _is_degenerate_empty_assistant(msg) is True
+
+    def test_non_assistant_role_is_never_degenerate(self) -> None:
+        assert _is_degenerate_empty_assistant({"role": "user", "content": ""}) is False
+        assert _is_degenerate_empty_assistant({"role": "tool", "content": ""}) is False
 
 
 class TestStubMissingReasoningContent:
@@ -1620,10 +1792,12 @@ class TestStubMissingReasoningContent:
         stub_missing_reasoning_content(msgs)
         assert msgs[0] == {"role": "tool", "tool_call_id": "x", "content": "result"}
 
-    def test_stubs_separator_placeholder(self) -> None:
-        """The placeholder assistant inserted by
-        :func:`separate_adjacent_user_messages` is still an assistant
-        message and must also carry the stub."""
+    def test_stubs_bare_dot_assistant(self) -> None:
+        """Any assistant turn — including a stray single-byte one — must
+        carry the empty reasoning stub so thinking-mode providers don't
+        reject the transcript. (``merge_adjacent_user_messages`` no longer
+        produces such a turn, but the stub must still cover one if present
+        from any other source.)"""
         msgs = [
             {"role": "user", "content": "a"},
             {"role": "assistant", "content": "."},
@@ -1646,24 +1820,29 @@ class TestStubMissingReasoningContent:
         assert msgs[0]["tool_calls"] == [{"id": "a"}]
 
 
-class TestSeparateAdjacentUserMessagesPipeline:
-    """Exercise the separator against realistic ``build_messages`` output
+class TestMergeAdjacentUserMessagesPipeline:
+    """Exercise the merge against realistic ``build_messages`` output
     (rather than synthetic dicts) so a refactor that changes the output's
     role sequence can't silently break the fix."""
 
-    def test_inbound_then_tail_block_gets_separator(self) -> None:
+    def test_inbound_then_tail_block_merge_into_one_user(self) -> None:
+        """An inbound followed by the user-role channels tail block is the
+        canonical adjacency: the two fold into a single user turn, and no
+        degenerate ``"."`` assistant placeholder is produced."""
         events = [_evt(1, "user", content="hello")]
         msgs = _full_pipeline(events, ["signal/test/1"])
 
-        assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
-        assert msgs[1] == {"role": "assistant", "content": "."}
-        assert msgs[2]["content"].startswith("━━━ Channels ━━━")
+        assert [m["role"] for m in msgs] == ["user"]
+        assert not any(m == {"role": "assistant", "content": "."} for m in msgs)
+        merged = msgs[0]["content"]
+        assert merged.startswith(f"[received={RECEIVED}]\nhello")
+        assert "\n\n━━━ Channels ━━━" in merged
 
-    def test_blind_spot_injection_adjacent_user_gets_separator(self) -> None:
+    def test_blind_spot_injection_adjacent_user_merges(self) -> None:
         """``build_messages`` inlines a blind-spot tool result as a
-        synthetic user message right after the horizon-setter.  When
-        a real user event follows, the two land back-to-back and need
-        separating."""
+        synthetic user message right after the horizon-setter.  When a
+        real user event follows, the two land back-to-back and merge into
+        one user turn (was: separated by a ``"."`` placeholder)."""
         events = [
             _evt(1, "user", content="run it"),
             _evt(2, "assistant", tool_calls=[_tc("t1")]),
@@ -1678,18 +1857,19 @@ class TestSeparateAdjacentUserMessagesPipeline:
 
         msgs = _full_pipeline(events, channels=[])
 
-        injection_idx = next(
-            i
-            for i, m in enumerate(msgs)
-            if m["role"] == "user" and "RESULT" in str(m.get("content", ""))
+        assert not any(m == {"role": "assistant", "content": "."} for m in msgs)
+        merged = next(
+            m for m in msgs if m["role"] == "user" and "RESULT" in str(m.get("content", ""))
         )
-        assert msgs[injection_idx + 1] == {"role": "assistant", "content": "."}
-        assert msgs[injection_idx + 2]["role"] == "user"
-        assert msgs[injection_idx + 2]["content"] == f"[received={RECEIVED}]\nanything else?"
+        # The injected blind-spot result and the following real inbound are
+        # one user turn now.
+        assert "anything else?" in merged["content"]
+        # The original inbound stays its own (earlier) user turn.
+        assert merged["content"].count("RESULT") == 1
 
-    def test_alternating_events_no_tail_block_no_separator(self) -> None:
-        """Guards against a future change that inserts a separator when
-        no adjacency exists (empty bindings → tail block is ``None``)."""
+    def test_alternating_events_no_tail_block_no_merge(self) -> None:
+        """No adjacency (empty bindings → tail block is ``None``) → the
+        role sequence is untouched and no placeholder is produced."""
         events = [
             _evt(1, "user", content="hi"),
             _evt(2, "assistant", content="hello"),

@@ -31,8 +31,8 @@ from typing import TYPE_CHECKING, Any
 from aios.harness._text import join_blocks
 from aios.harness.context import (
     build_messages,
+    merge_adjacent_user_messages,
     message_is_notification_marker,
-    separate_adjacent_user_messages,
     stub_missing_reasoning_content,
 )
 from aios.tools.registry import to_openai_tools
@@ -370,9 +370,10 @@ async def compose_step_context(
     if tail is not None and not _agent_owes_response(ctx.messages):
         ctx.messages.append(tail)
 
-    # Block LiteLLM's adjacent-same-role merge on Anthropic so the tail
-    # isn't concatenated into the preceding user inbound.
-    messages = separate_adjacent_user_messages(ctx.messages)
+    # Merge consecutive user inbounds into one turn (Anthropic requires
+    # alternating roles). This replaces the old "." placeholder separator,
+    # which degenerate-poisoned literal models like claude-fable-5.
+    messages = merge_adjacent_user_messages(ctx.messages)
 
     # Unblock thinking-mode models: DeepSeek V4 Flash rejects assistant
     # turns without reasoning_content.  Empty stub is ignored by all
