@@ -8,6 +8,9 @@ deadline and the parent stays healthy).
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -408,6 +411,29 @@ async def test_child_env_is_scrubbed_of_secrets(monkeypatch: pytest.MonkeyPatch)
     assert out.kind == "returned"
     assert out.value["leaked"] == []  # no secret crossed the spawn
     assert out.value["has_path"] is True  # but non-secret launch essentials still do
+
+
+async def test_hash_ordering_is_pinned_across_wakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launcher pins PYTHONHASHSEED=0 in the child: str-hash-dependent orderings
+    (``list({...})``) must be identical on every wake, whatever seed the worker
+    itself runs under — an inherited/random seed would desync any call_key built
+    from such an ordering."""
+    strings = '{"alpha", "bravo", "charlie", "delta", "echo"}'  # 0/1/2 orderings all differ
+    outs = []
+    for worker_seed in ("1", "2"):
+        monkeypatch.setenv("PYTHONHASHSEED", worker_seed)
+        outs.append(await _run(f"async def main(input):\n    return list({strings})"))
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        f"import json; print(json.dumps(list({strings})))",
+        stdout=asyncio.subprocess.PIPE,
+        env={**os.environ, "PYTHONHASHSEED": "0"},  # inherit env, pin only the seed
+    )
+    stdout, _ = await proc.communicate()
+    assert proc.returncode == 0
+    assert [o.kind for o in outs] == ["returned", "returned"]
+    assert outs[0].value == outs[1].value == json.loads(stdout)
 
 
 # ─── runaway containment (B1.1) ──────────────────────────────────────────────
