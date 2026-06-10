@@ -1,0 +1,15 @@
+diff --git a/lib/src/main/java/org/asamk/signal/manager/helper/IncomingMessageHandler.java b/lib/src/main/java/org/asamk/signal/manager/helper/IncomingMessageHandler.java
+--- a/lib/src/main/java/org/asamk/signal/manager/helper/IncomingMessageHandler.java
++++ b/lib/src/main/java/org/asamk/signal/manager/helper/IncomingMessageHandler.java
+@@ -276,6 +276,11 @@ public final class IncomingMessageHandler {
+             }
+         }
+         if (envelope.isReceipt()) {
++            if (envelope.getSourceServiceId() == null && content == null) {
++                logger.debug("Ignoring sealed-sender receipt envelope without a resolvable sender: {}",
++                        envelope.getTimestamp());
++                return List.of();
++            }
+             final var senderDeviceAddress = getSender(envelope, content);
+             final var sender = senderDeviceAddress.serviceId();
+             final var senderDeviceId = senderDeviceAddress.deviceId();

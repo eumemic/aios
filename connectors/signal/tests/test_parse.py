@@ -126,6 +126,22 @@ def test_missing_source_uuid_returns_none(bot_uuid: str) -> None:
     assert parse_envelope(envelope, bot_account_uuid=bot_uuid) is None
 
 
+def test_source_less_receipt_returns_none(bot_uuid: str) -> None:
+    """SPQR sealed-sender receipts (#907) can arrive with no resolvable
+    sender — no ``sourceUuid``/``source``.  signal-cli's IncomingMessageHandler
+    NPEs on these; the connector must drop them, not raise."""
+    envelope: dict[str, Any] = {
+        "timestamp": 1700000005000,
+        "receiptMessage": {
+            "when": 1700000005000,
+            "isDelivery": False,
+            "isRead": True,
+            "timestamps": [1700000004999],
+        },
+    }
+    assert parse_envelope(envelope, bot_account_uuid=bot_uuid) is None
+
+
 def test_build_content_text_attachment_only_is_empty(
     envelope_attachment_only: dict[str, Any], bot_uuid: str
 ) -> None:
