@@ -7,7 +7,8 @@ Two readers resolve the same "confirmed ``allow`` whose ``tool_call`` has no
 * ``sweep.CONFIRMED_ROWS_SQL`` (``find_sessions_needing_inference`` case (c))
   scans confirmed-allow lifecycle rows **cross-session** every sweep pass to
   decide which sessions need a dispatch step — previously unindexed for this
-  predicate (only the wide ``events_session_seq_idx`` applied).
+  predicate (only the wide btree backing the ``events``
+  ``UNIQUE (session_id, seq)`` constraint applied).
 * ``queries.list_confirmed_unresolved_tool_calls`` resolves the dispatchable
   ``tool_call`` dicts for one session on **every** inference step; without this
   index it would scan all of a long session's lifecycle rows per step.

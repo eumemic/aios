@@ -117,7 +117,7 @@ Built-in and externally-executed tools can be called in the same response. The i
 ### Two pools in one process
 
 The worker runs **two** Postgres connection pools:
-- **asyncpg** (ours): event log, session state, all application queries
+- **asyncpg** (ours): event log, session state, all application queries. The pool sets `statement_timeout`/`idle_in_transaction_session_timeout` and TCP keepalive GUCs via `server_settings` (see `db/pool.py`); the psycopg3/migrate path deliberately does not.
 - **psycopg3** (procrastinate's): job queue. Separate connector, separate connections.
 
 They don't share connections; they share Postgres state.

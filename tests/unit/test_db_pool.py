@@ -51,6 +51,22 @@ async def test_default_max_size_is_8() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pool_sets_timeouts_and_keepalive() -> None:
+    fake_pool = _make_fake_pool("200")
+    with patch(
+        "aios.db.pool.asyncpg.create_pool", new=AsyncMock(return_value=fake_pool)
+    ) as mock_create:
+        await create_pool("postgresql://stub/db")
+        _, kwargs = mock_create.call_args
+        ss = kwargs["server_settings"]
+        assert ss["statement_timeout"] == "30000"
+        assert ss["idle_in_transaction_session_timeout"] == "60000"
+        assert ss["tcp_keepalives_idle"] == "60"
+        assert ss["tcp_keepalives_interval"] == "10"
+        assert ss["tcp_keepalives_count"] == "5"
+
+
+@pytest.mark.asyncio
 async def test_warning_emitted_when_capacity_reaches_pg_max(
     capture_logs: structlog.testing.LogCapture,
 ) -> None:

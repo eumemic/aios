@@ -27,8 +27,21 @@ def normalize_dsn(db_url: str) -> str:
 
 async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> asyncpg.Pool[Any]:
     """Create a new asyncpg pool against ``db_url``."""
+    # asyncpg exposes no client-side keepalive kwarg, so the statement/idle
+    # timeouts and TCP keepalive are applied as Postgres USERSET GUCs on every
+    # pooled connection — bounding runaway scans, idle-in-txn leaks, and dead
+    # connections behind a silently-dropped TCP link.
     pool = await asyncpg.create_pool(
-        dsn=normalize_dsn(db_url), min_size=min_size, max_size=max_size
+        dsn=normalize_dsn(db_url),
+        min_size=min_size,
+        max_size=max_size,
+        server_settings={
+            "statement_timeout": "30000",
+            "idle_in_transaction_session_timeout": "60000",
+            "tcp_keepalives_idle": "60",
+            "tcp_keepalives_interval": "10",
+            "tcp_keepalives_count": "5",
+        },
     )
     if pool is None:
         raise RuntimeError(f"asyncpg.create_pool returned None for {db_url}")

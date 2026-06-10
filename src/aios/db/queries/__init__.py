@@ -2934,7 +2934,8 @@ async def _unresolved_tool_calls(
     # ``events_assistant_tool_calls_idx``; the ``jsonb_array_length > 0``
     # post-filter narrows to non-empty arrays (the index admits
     # ``null`` / ``[]`` too).  Without the ``?`` conjunct the planner
-    # falls back to the wider ``events_session_seq_idx``.
+    # falls back to the wider btree backing the ``events``
+    # ``UNIQUE (session_id, seq)`` constraint.
     #
     # ``$3`` carries the optional age bound (seconds); NULL disables it so
     # the awaiting read-model path is byte-for-byte unchanged (#741), while

@@ -218,6 +218,10 @@ async def worker_main() -> None:
             concurrency=settings.worker_concurrency,
             wait=True,
             install_signal_handlers=True,
+            # procrastinate defaults to NEVER deleting finished jobs, so
+            # ``procrastinate_jobs`` would grow one row per wake forever.
+            # Reap successful jobs; keep failures around for triage.
+            delete_jobs="successful",
         )
     finally:
         log.info("worker.shutdown")
