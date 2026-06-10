@@ -11,9 +11,10 @@ from typing import Any
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.db.queries import get_environment, get_session_vault_ids
 from aios.db.queries import workflows as wf_queries
-from aios.errors import AiosError, ForbiddenError, NotFoundError
+from aios.errors import AiosError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.models.workflows import WfRun
 from aios.services.wake import defer_run_wake
 
@@ -63,6 +64,14 @@ async def create_run(
     and feeds the **vertical depth cap**: nesting past ``WORKFLOW_RUN_MAX_DEPTH`` raises
     :class:`WorkflowRunDepthExceededError`. The operator/HTTP path passes none, so it is
     a root run (never capped).
+
+    **Horizontal fan-out caps:** outstanding (non-terminal) runs are bounded per
+    launcher session (``workflow_runs_per_launcher_max``, agent path only) and per
+    account (``workflow_runs_per_account_max``, every launch) — a breach raises
+    :class:`RateLimitedError`. COUNT+INSERT are serialized by a per-account advisory
+    lock, so the caps are contractual against concurrent launches. (A concurrently
+    *completing* run flips terminal without the lock, so a count can only be
+    stale-high — a conservative early refusal, never a cap breach.)
     """
     requested = list(vault_ids or [])
     async with pool.acquire() as conn, conn.transaction():
@@ -94,12 +103,38 @@ async def create_run(
                     "run requested vaults the launching agent does not hold",
                     detail={"ungranted_vault_ids": ungranted},
                 )
+        # Fan-out caps, last (after all other validation, so a doomed launch never
+        # takes the lock). The advisory lock serializes COUNT+INSERT account-wide.
+        settings = get_settings()
+        await wf_queries.acquire_account_wf_runs_lock(conn, account_id)
+        if launcher_session_id is not None:
+            launcher_cap = settings.workflow_runs_per_launcher_max
+            outstanding = await wf_queries.count_active_runs(
+                conn, account_id=account_id, launcher_session_id=launcher_session_id
+            )
+            if outstanding >= launcher_cap:
+                raise RateLimitedError(
+                    f"launcher at outstanding-run cap ({outstanding}/{launcher_cap}); "
+                    "wait for runs you launched to finish (await_run) or cancel one "
+                    "you no longer need (cancel_run) to free a slot",
+                    detail={"outstanding": outstanding, "max": launcher_cap},
+                )
+        account_cap = settings.workflow_runs_per_account_max
+        outstanding = await wf_queries.count_active_runs(conn, account_id=account_id)
+        if outstanding >= account_cap:
+            raise RateLimitedError(
+                f"account at outstanding-run cap ({outstanding}/{account_cap}); "
+                "wait for outstanding runs to complete, or have stuck runs cancelled, "
+                "to free a slot",
+                detail={"outstanding": outstanding, "max": account_cap},
+            )
         run = await wf_queries.insert_wf_run(
             conn,
             account_id=account_id,
             workflow_id=workflow_id,
             environment_id=environment_id,
             parent_run_id=parent_run_id,
+            launcher_session_id=launcher_session_id,
             script=workflow.script,
             script_sha=script_sha,
             input=input,

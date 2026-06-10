@@ -5,6 +5,7 @@ class ToolSpecTypeType0(str, Enum):
     AWAIT_RUN = "await_run"
     BASH = "bash"
     CANCEL = "cancel"
+    CANCEL_RUN = "cancel_run"
     CREATE_RUN = "create_run"
     CREATE_WORKFLOW = "create_workflow"
     EDIT = "edit"

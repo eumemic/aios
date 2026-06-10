@@ -8655,7 +8655,7 @@
           "runs"
         ],
         "summary": "Await Run",
-        "description": "Block until the run reaches a terminal status (``completed``/``errored``), or ``timeout``.\n\nThe ``await``-a-completion primitive (runs backing): one JSON round-trip returning the\ncompletion record \u2014 ``done`` + ``output``, or ``is_error`` + ``error``. A run still running\nafter ``timeout`` seconds returns ``done=false`` with its current status; call again to keep\nblocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP\ntool \u2014 an agent can await a sub-run and join. A cross-tenant run 404s.",
+        "description": "Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.\n\nThe ``await``-a-completion primitive (runs backing): one JSON round-trip returning the\ncompletion record \u2014 ``done`` + ``output``, or ``is_error`` + ``error``. A run still running\nafter ``timeout`` seconds returns ``done=false`` with its current status; call again to keep\nblocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP\ntool \u2014 an agent can await a sub-run and join. A cross-tenant run 404s.",
         "operationId": "await_run",
         "parameters": [
           {
@@ -10541,6 +10541,7 @@
             "title": "Result"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "gate_nonce"
@@ -14317,7 +14318,8 @@
                   "create_workflow",
                   "update_workflow",
                   "create_run",
-                  "await_run"
+                  "await_run",
+                  "cancel_run"
                 ]
               },
               {
@@ -15244,6 +15246,17 @@
             ],
             "title": "Parent Run Id"
           },
+          "launcher_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Launcher Session Id"
+          },
           "script": {
             "type": "string",
             "title": "Script"
@@ -15356,13 +15369,14 @@
             "description": "Vault ids to bind to the run for credential resolution. When an agent launches the run, these must be a subset of the launcher's own vaults; the HTTP path is unattenuated operator authority."
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "workflow_id",
           "environment_id"
         ],
         "title": "WfRunCreate",
-        "description": "Request body for ``POST /v1/runs`` \u2014 launch a run of a workflow.\n\n``input`` is arbitrary JSON (a workflow's input need not be an object). The run\nbinds to ``environment_id`` (like a session), into which its ``agent()`` children\nspawn."
+        "description": "Request body for ``POST /v1/runs`` \u2014 launch a run of a workflow.\n\n``input`` is arbitrary JSON (a workflow's input need not be an object). The run\nbinds to ``environment_id`` (like a session), into which its ``agent()`` children\nspawn. (``launcher_session_id`` is deliberately NOT a field \u2014 trusted ids never\nride in request bodies; the HTTP path is always an operator launch.)"
       },
       "WfRunEvent": {
         "properties": {

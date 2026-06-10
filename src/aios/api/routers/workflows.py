@@ -199,7 +199,7 @@ async def await_run(
     account_id: AccountIdDep,
     timeout_seconds: Annotated[int, Query(alias="timeout", ge=0, le=60)] = 30,
 ) -> WfRunWaitResponse:
-    """Block until the run reaches a terminal status (``completed``/``errored``), or ``timeout``.
+    """Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
 
     The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
     completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running

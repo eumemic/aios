@@ -333,6 +333,27 @@ class Settings(BaseSettings):
         "— a child doing real model+tool work can legitimately run for minutes; "
         "this is the never-resolves backstop, not a tight SLA.",
     )
+    workflow_runs_per_launcher_max: int = Field(
+        default=20,
+        ge=1,
+        description="Per-launcher-session ceiling on OUTSTANDING (non-terminal) "
+        "runs — the horizontal fan-out bound on the agent's ``create_run`` "
+        "builtin (the operator/HTTP path has no launcher and is exempt). A "
+        "concurrency cap, not a rate or lifetime budget: slots free as runs "
+        "reach a terminal status, so a sequential launch loop is unbounded by "
+        "design. Enforced with the per-account cap under one advisory lock; "
+        "on exceed, ``create_run`` raises ``RateLimitedError``.",
+    )
+    workflow_runs_per_account_max: int = Field(
+        default=100,
+        ge=1,
+        description="Per-account ceiling on OUTSTANDING (non-terminal) runs "
+        "across all launchers, operator launches included — the backstop the "
+        "per-launcher cap can't provide (many sessions, or a run's agent() "
+        "children, are each fresh launchers). Same concurrency-not-budget "
+        "semantics; worst-case standing exposure is this many runs each "
+        "entitled to ``workflow_max_agent_calls`` children.",
+    )
 
     # ── connectors ─────────────────────────────────────────────────────────
     connector_backfill_max_age_seconds: int = Field(

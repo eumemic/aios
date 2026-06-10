@@ -78,7 +78,7 @@ def sync_detailed(
 ) -> Response[HTTPValidationError | WfRunWaitResponse]:
     """Await Run
 
-     Block until the run reaches a terminal status (``completed``/``errored``), or ``timeout``.
+     Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
 
     The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
     completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running
@@ -121,7 +121,7 @@ def sync(
 ) -> HTTPValidationError | WfRunWaitResponse | None:
     """Await Run
 
-     Block until the run reaches a terminal status (``completed``/``errored``), or ``timeout``.
+     Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
 
     The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
     completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running
@@ -159,7 +159,7 @@ async def asyncio_detailed(
 ) -> Response[HTTPValidationError | WfRunWaitResponse]:
     """Await Run
 
-     Block until the run reaches a terminal status (``completed``/``errored``), or ``timeout``.
+     Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
 
     The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
     completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running
@@ -200,7 +200,7 @@ async def asyncio(
 ) -> HTTPValidationError | WfRunWaitResponse | None:
     """Await Run
 
-     Block until the run reaches a terminal status (``completed``/``errored``), or ``timeout``.
+     Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
 
     The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
     completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running

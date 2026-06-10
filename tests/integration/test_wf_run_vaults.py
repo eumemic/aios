@@ -29,7 +29,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
-from aios.errors import ConflictError, ForbiddenError, NotFoundError
+from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.harness import runtime
 from aios.mcp.client import resolve_auth_for_target_url_run
 from aios.models.agents import Agent, HttpServerSpec, McpServerSpec
@@ -73,7 +73,13 @@ async def vault_pool(
                 ENV,
                 ACC,
             )
-        with mock.patch("aios.workflows.service.defer_run_wake", new=AsyncMock()):
+        # Both defer_run_wake bindings: create_run uses aios.workflows.service's,
+        # cancel_run uses aios.services.workflows' own import (same split the e2e
+        # conftest patches).
+        with (
+            mock.patch("aios.workflows.service.defer_run_wake", new=AsyncMock()),
+            mock.patch("aios.services.workflows.defer_run_wake", new=AsyncMock()),
+        ):
             yield pool
     finally:
         runtime.pool = prev
@@ -526,3 +532,94 @@ async def test_create_run_rejects_foreign_environment(vault_pool: asyncpg.Pool[A
             pool, account_id=ACC, workflow_id=wf.id, environment_id="env_foreign"
         )
     assert await _run_count(pool) == before
+
+
+# ─── horizontal fan-out caps + launcher-attenuated cancel ────────────────────
+
+
+def _cap_settings(monkeypatch: pytest.MonkeyPatch, **caps: int) -> None:
+    """Patch ``aios.workflows.service.get_settings`` with lowered fan-out caps."""
+    from aios.config import get_settings
+
+    capped = get_settings().model_copy(update=caps)
+    monkeypatch.setattr("aios.workflows.service.get_settings", lambda: capped)
+
+
+async def _force_terminal(pool: asyncpg.Pool[Any], run_id: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE wf_runs SET status = 'completed' WHERE id = $1", run_id)
+
+
+async def test_launcher_fanout_cap(
+    vault_pool: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launcher session may hold at most N outstanding runs; slots free as runs
+    reach a terminal status. The operator path is exempt from the launcher cap."""
+    pool = vault_pool
+    _cap_settings(monkeypatch, workflow_runs_per_launcher_max=2)
+    agent = await _make_agent(pool, "fanout-agent")
+    sess = await _make_session(pool, agent)
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-cap", script=_SCRIPT)
+
+    first = await wm.create_run_handler(sess, {"workflow_id": wf.id})
+    assert first["launcher_session_id"] == sess  # persisted lineage (the cap's count key)
+    await wm.create_run_handler(sess, {"workflow_id": wf.id})
+
+    before = await _run_count(pool)
+    with pytest.raises(RateLimitedError, match="outstanding-run cap"):
+        await wm.create_run_handler(sess, {"workflow_id": wf.id})
+    assert await _run_count(pool) == before  # refusal leaves no row
+
+    # Self-healing: a run reaching terminal frees the slot.
+    await _force_terminal(pool, first["id"])
+    await wm.create_run_handler(sess, {"workflow_id": wf.id})
+
+    # Operator launches carry no launcher (and are exempt from the launcher cap).
+    op = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    assert op.launcher_session_id is None
+
+
+async def test_account_fanout_cap_binds_every_launch(
+    vault_pool: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The account cap is the backstop: it counts agent AND operator launches."""
+    pool = vault_pool
+    _cap_settings(monkeypatch, workflow_runs_per_account_max=2)
+    agent = await _make_agent(pool, "fanout-acct-agent")
+    sess = await _make_session(pool, agent)
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-acap", script=_SCRIPT)
+
+    await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    await wm.create_run_handler(sess, {"workflow_id": wf.id})  # agent launch counts too
+
+    # Third launch refused on BOTH paths.
+    with pytest.raises(RateLimitedError, match="account at outstanding-run cap"):
+        await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    with pytest.raises(RateLimitedError, match="account at outstanding-run cap"):
+        await wm.create_run_handler(sess, {"workflow_id": wf.id})
+
+
+async def test_cancel_run_builtin_only_own_runs(vault_pool: asyncpg.Pool[Any]) -> None:
+    """cancel_run cancels only runs the executing session launched — the self-service
+    escape for the launcher cap; operator-launched runs are out of its reach."""
+    pool = vault_pool
+    agent = await _make_agent(pool, "canceller-agent")
+    sess = await _make_session(pool, agent)
+    other = await _make_session(pool, agent)
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-cxl", script=_SCRIPT)
+
+    own = await wm.create_run_handler(sess, {"workflow_id": wf.id})
+    out = await wm.cancel_run_handler(sess, {"run_id": own["id"]})
+    assert out["id"] == own["id"]  # accepted; the run finalizes on its next wake
+    async with pool.acquire() as conn:
+        signal = await conn.fetchrow(
+            "SELECT 1 FROM wf_run_signals WHERE run_id = $1 AND kind = 'cancel'", own["id"]
+        )
+    assert signal is not None
+
+    # Another session's run and an operator run are both forbidden.
+    op = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    with pytest.raises(ForbiddenError):
+        await wm.cancel_run_handler(other, {"run_id": own["id"]})
+    with pytest.raises(ForbiddenError):
+        await wm.cancel_run_handler(sess, {"run_id": op.id})
