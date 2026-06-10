@@ -590,12 +590,63 @@ async def set_run_terminal(
     )
 
 
-async def list_active_run_ids(conn: asyncpg.Connection[Any]) -> list[str]:
-    """``id`` for every non-terminal, live run — the sweep predicate. (No
-    ``account_id``: ``defer_run_wake`` needs none and appends no journal span.)"""
+async def list_run_ids_needing_step(
+    conn: asyncpg.Connection[Any],
+    *,
+    agent_deadline_seconds: float,
+    tool_stale_seconds: float,
+) -> list[str]:
+    """``id`` for every live run with something for a step to DO — the sweep
+    predicate (#780). A parked run with nothing new is deliberately NOT matched
+    (waking it costs a full memo reship + script replay), so each clause carries a
+    recall obligation; the fail direction must always be "wake too much":
+
+    - ``pending``/``running`` — seeded-but-never-stepped, and the step lease
+      (every step flips ``running`` before its first journal write, so ANY
+      mid-step crash — including the deliberate spawn-failed re-raise — lands
+      here until the step's closing park/terminal write).
+    - an unharvested signal (``gate_resume``/``tool_result``/``child_done``/
+      ``cancel`` row with no matching ``call_result``) — every external resume
+      and child completion commits one atomically with its payload, so a lost
+      ``defer_run_wake`` is always visible here.
+    - a stale inflight call: an ``agent`` past the wall-clock deadline (the step
+      must force-resolve its timeout — this clause DRIVES that backstop) or a
+      ``tool`` past the re-dispatch horizon (its task crashed without a signal;
+      re-dispatch is idempotent). A ``gate`` maps to NULL — resume-driven only,
+      never stale.
+
+    (No ``account_id``: ``defer_run_wake`` needs none and appends no journal span.)
+    """
     rows = await conn.fetch(
-        "SELECT id FROM wf_runs "
-        "WHERE archived_at IS NULL AND status IN ('pending','running','suspended')"
+        """
+        SELECT r.id FROM wf_runs r
+        WHERE r.archived_at IS NULL
+          AND r.status IN ('pending','running','suspended')
+          AND (
+            r.status IN ('pending','running')
+            OR EXISTS (
+              SELECT 1 FROM wf_run_signals s
+              WHERE s.run_id = r.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events e
+                  WHERE e.run_id = r.id AND e.call_key = s.call_key
+                    AND e.type = 'call_result'))
+            OR EXISTS (
+              SELECT 1 FROM wf_run_events cs
+              WHERE cs.run_id = r.id AND cs.type = 'call_started'
+                AND cs.created_at < now() - make_interval(secs =>
+                      CASE cs.payload->>'capability'
+                        WHEN 'agent' THEN $1::float8
+                        WHEN 'tool' THEN $2::float8
+                      END)
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events e
+                  WHERE e.run_id = r.id AND e.call_key = cs.call_key
+                    AND e.type = 'call_result'))
+          )
+        """,
+        agent_deadline_seconds,
+        tool_stale_seconds,
     )
     return [r["id"] for r in rows]
 

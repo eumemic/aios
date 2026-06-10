@@ -20,6 +20,7 @@ from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import open_listen_for_events
+from aios.db.queries import workflows as wf_queries
 from aios.errors import (
     ConflictError,
     NotFoundError,
@@ -778,6 +779,13 @@ async def append_assistant_and_guard_quiescence(
                     result=None,
                     error={"kind": "no_return"},
                 ):
+                    # The second of the two response-write sites (the first is
+                    # respond_to_request): the ``child_done`` side-marker commits
+                    # in the guard's own transaction, so a lost post-commit caller
+                    # wake is SQL-visible to the needs-step sweep (#780).
+                    await wf_queries.insert_run_signal(
+                        conn, run_id=parent_run_id, call_key=request_id, kind="child_done"
+                    )
                     autoerror_caller_run_id = parent_run_id
             else:
                 to_nudge.append(request_id)

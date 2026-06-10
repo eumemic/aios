@@ -564,8 +564,12 @@ async def test_return_writes_response_and_wakes_caller_without_archiving(
         response = await db_queries.read_request_response(
             conn, cid, account_id="acc_wf", request_id="sha:d2#0"
         )
+        signals = await wf_queries.list_run_signals(conn, run_id)
     assert response is not None
     assert response["is_error"] is False and response["result"] == {"answer": 42}
+    # The child_done side-marker committed with the response (#780): a lost caller
+    # wake stays SQL-visible to the needs-step sweep.
+    assert [(s.call_key, s.kind) for s in signals] == [("sha:d2#0", "child_done")]
     child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
     # NOT archived by the handler — archive-on-quiescence reclaims at the next idle step.
     assert child.archived_at is None
@@ -1067,9 +1071,13 @@ async def test_open_request_is_auto_errored_after_nudge_budget(
         )
         open_ids = await db_queries.get_open_request_ids(conn, cid, account_id="acc_wf")
         status = await db_queries.derive_session_status(conn, cid, account_id="acc_wf")
+        signals = await wf_queries.list_run_signals(conn, run_id)
     assert resp is not None and resp["is_error"] is True and resp["error"] == {"kind": "no_return"}
     assert open_ids == []  # answered (by the backstop) → no longer open
     assert status == "idle"  # nothing owed → free to rest
+    # The backstop is the SECOND response writer — it too leaves the child_done
+    # marker, so a lost post-commit caller wake stays sweep-visible (#780).
+    assert [(s.call_key, s.kind) for s in signals] == [("sha:nr#0", "child_done")]
 
 
 async def test_non_answering_child_resolves_run_via_agent_no_return_error(
@@ -1806,8 +1814,130 @@ async def test_spawn_failure_is_transient_not_terminal(wf_runtime: asyncpg.Pool[
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
+        needing = await wf_queries.list_run_ids_needing_step(
+            conn, agent_deadline_seconds=3600, tool_stale_seconds=60
+        )
     assert run is not None and run.status != "errored"  # retriable, not terminal
     assert not any(e.type == "run_completed" for e in events)
+    # The step LEASE (#780): the crashed step left 'running', which the needs-step
+    # sweep matches unconditionally — what makes the re-raise actually retriable.
+    assert run.status == "running"
+    assert run_id in needing
+
+
+async def test_post_harvest_crash_leaves_lease_for_the_sweep(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The filter's hardest loss mode (#780 red-team, critical): a step harvests
+    its last pending signal into a call_result, then dies before the re-drive
+    parks the run. With the harvest committed, no signal is unharvested and no
+    call is inflight — only the per-step 'running' lease keeps the run
+    sweep-visible. Without the lease this state was a permanent zombie."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    await run_workflow_step(run_id)  # suspends on the gate
+    gate_key = (await _events(pool, run_id))[1][2]
+    assert gate_key is not None
+    await service.resume_gate(pool, run_id=run_id, call_key=gate_key, result="yes")
+
+    with (
+        mock.patch(
+            "aios.workflows.step.run_script_host",
+            new=AsyncMock(side_effect=RuntimeError("worker died mid-step")),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        needing = await wf_queries.list_run_ids_needing_step(
+            conn, agent_deadline_seconds=3600, tool_stale_seconds=60
+        )
+    assert run is not None and run.status == "running"  # the lease, not 'suspended'
+    assert any(e.type == "call_result" for e in events)  # the harvest DID commit
+    assert run_id in needing  # ...and the sweep still sees the run
+
+    # The next (healthy) step replays with the journaled memo and completes.
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+
+
+async def test_child_done_signal_is_atomic_with_the_response(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """Fault injection: if the child_done insert fails, the response write must
+    roll back with it — two separate autocommits would re-open the exact lost-wake
+    hole the marker exists to close (a committed response with no marker)."""
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:at#0")
+    with (
+        mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()),
+        mock.patch(
+            "aios.db.queries.workflows.insert_run_signal",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await workflow_completion.return_handler(cid, {"request_id": "sha:at#0", "value": 1})
+
+    async with pool.acquire() as conn:
+        response = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="sha:at#0"
+        )
+    assert response is None  # rolled back WITH the failed signal — still unanswered
+
+    # A retry (signal write healthy again) responds normally, not 'duplicate'.
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        res = await workflow_completion.return_handler(cid, {"request_id": "sha:at#0", "value": 1})
+    assert res == {"status": "returned"}
+    async with pool.acquire() as conn:
+        signals = await wf_queries.list_run_signals(conn, run_id)
+    assert [(s.call_key, s.kind) for s in signals] == [("sha:at#0", "child_done")]
+
+
+async def test_large_fanout_completes_and_parks_quiet(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """#780 acceptance proxy: 200 resolved calls through the REAL step path. The
+    discriminating assertions are the needs-step ones — a parked 200-wide fan-out
+    is QUIET (the old blanket sweep re-drove it, full memo reship, every tick) and
+    flips hot exactly while resumes sit unharvested."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    results = await parallel([(lambda i=i: gate({'i': i})) for i in range(200)])\n"
+        "    return sum(r['v'] for r in results)\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # parks on a 200-wide frontier
+
+    async def needing() -> set[str]:
+        async with pool.acquire() as conn:
+            return set(
+                await wf_queries.list_run_ids_needing_step(
+                    conn, agent_deadline_seconds=3600, tool_stale_seconds=60
+                )
+            )
+
+    gate_keys = [k for _s, t, k in await _events(pool, run_id) if t == "call_started"]
+    assert len(gate_keys) == 200
+    assert run_id not in await needing()  # parked on gates: quiet
+
+    for i, key in enumerate(gate_keys):
+        assert key is not None
+        await service.resume_gate(pool, run_id=run_id, call_key=key, result={"v": i})
+    assert run_id in await needing()  # unharvested resumes: hot
+
+    await run_workflow_step(run_id)  # harvests all 200, replays past them, completes
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == sum(range(200))
+    assert run_id not in await needing()  # terminal: out of the sweep for good
 
 
 async def test_early_gate_signal_triggers_self_rewake(wf_runtime: asyncpg.Pool[Any]) -> None:

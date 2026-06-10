@@ -179,6 +179,17 @@ async def _run_workflow_step_body(
     pool: asyncpg.Pool[Any], run_id: str, run: WfRun, account_id: str
 ) -> None:
     async with pool.acquire() as conn:
+        # ``running`` is the step's LEASE (#780): flipped on EVERY wake before any
+        # journal write — not just the first — so a crash anywhere mid-step
+        # (including the deliberate spawn-failed re-raise below) leaves a state the
+        # needs-step sweep matches unconditionally. Without this, a crash after the
+        # harvest journals its last call_result but before the re-drive parks/ends
+        # the run would leave a 'suspended' row no filter clause ever wakes again.
+        # The step's closing write — park to 'suspended' or a terminal — hands the
+        # lease back. (``run.status`` is the entry snapshot, read just above.)
+        if run.status != "running":
+            await wf_queries.set_run_status(conn, run_id, "running", account_id=account_id)
+
         events = await wf_queries.list_run_events(conn, run_id)
         signals = {s.call_key: s for s in await wf_queries.list_run_signals(conn, run_id)}
 
@@ -215,7 +226,6 @@ async def _run_workflow_step_body(
                 type="run_started",
                 payload={"input": run.input},
             )
-            await wf_queries.set_run_status(conn, run_id, "running", account_id=account_id)
 
         # Pre-replay harvest: resolve any inflight capability that is now done — a
         # gate with a delivered resume signal, or an agent child with a response (or a

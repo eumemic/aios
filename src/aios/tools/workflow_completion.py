@@ -35,6 +35,7 @@ from typing import Any
 import jsonschema
 
 from aios.db import queries
+from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.services.wake import defer_run_wake
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
@@ -117,15 +118,24 @@ async def respond_to_request(
             conn, session_id, account_id=account_id
         ):
             return "unknown_request"  # already answered, never asked, or a typo from the model
-        wrote = await queries.write_response_if_absent(
-            conn,
-            session_id,
-            account_id=account_id,
-            request_id=request_id,
-            is_error=is_error,
-            result=result,
-            error=error,
-        )
+        # The response and its ``child_done`` side-marker commit ATOMICALLY: the
+        # marker is what makes a lost caller wake SQL-visible to the needs-step
+        # sweep (#780), so a crash between the two writes must not be possible.
+        # ``request_id`` IS the agent call's ``call_key`` (the call is the request).
+        async with conn.transaction():
+            wrote = await queries.write_response_if_absent(
+                conn,
+                session_id,
+                account_id=account_id,
+                request_id=request_id,
+                is_error=is_error,
+                result=result,
+                error=error,
+            )
+            if wrote:
+                await wf_queries.insert_run_signal(
+                    conn, run_id=parent_run_id, call_key=request_id, kind="child_done"
+                )
     if wrote:
         await defer_run_wake(parent_run_id)
     return "responded" if wrote else "duplicate"
