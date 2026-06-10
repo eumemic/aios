@@ -79,6 +79,105 @@ class TestNormalizeMessage:
         assert "tool_calls" not in result
 
 
+class TestNormalizeMessageThinkingLift:
+    """``_normalize_message`` lifts Anthropic thinking blocks from
+    ``provider_specific_fields.thinking_blocks`` to the top-level
+    ``thinking_blocks`` key (only ``_strip_to_spec``'s whitelisted
+    top-level key survives replay). Blocks with empty ``thinking`` text are
+    NOT lifted: a signature without its content fails Anthropic-side
+    validation on replay."""
+
+    def test_lifts_nonempty_thinking_block_to_top_level(self) -> None:
+        block = {"type": "thinking", "thinking": "real reasoning", "signature": "sig"}
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "provider_specific_fields": {"thinking_blocks": [block]},
+        }
+        result = _normalize_message(msg)
+        assert result["thinking_blocks"] == [block]
+
+    def test_empty_thinking_block_lifted_then_dropped(self) -> None:
+        """A block whose only payload is a signature (empty ``thinking``
+        text, the ``display: "omitted"`` default) is dropped, not lifted —
+        no top-level ``thinking_blocks`` results."""
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "provider_specific_fields": {
+                "thinking_blocks": [{"type": "thinking", "thinking": "", "signature": "sig"}]
+            },
+        }
+        result = _normalize_message(msg)
+        assert "thinking_blocks" not in result
+
+    def test_whitespace_only_thinking_block_dropped(self) -> None:
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "provider_specific_fields": {
+                "thinking_blocks": [{"type": "thinking", "thinking": "   ", "signature": "sig"}]
+            },
+        }
+        result = _normalize_message(msg)
+        assert "thinking_blocks" not in result
+
+    def test_mixed_blocks_keeps_only_nonempty(self) -> None:
+        good = {"type": "thinking", "thinking": "kept", "signature": "s1"}
+        empty = {"type": "thinking", "thinking": "", "signature": "s2"}
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "provider_specific_fields": {"thinking_blocks": [good, empty]},
+        }
+        result = _normalize_message(msg)
+        assert result["thinking_blocks"] == [good]
+
+    def test_non_dict_provider_specific_fields_unchanged(self) -> None:
+        """A non-dict ``provider_specific_fields`` must not crash, and no
+        top-level ``thinking_blocks`` is synthesised."""
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "provider_specific_fields": "not-a-dict",
+        }
+        result = _normalize_message(msg)
+        assert "thinking_blocks" not in result
+        assert result["content"] == "answer"
+
+    def test_absent_provider_specific_fields_unchanged(self) -> None:
+        msg: dict[str, object] = {"role": "assistant", "content": "answer"}
+        result = _normalize_message(msg)
+        assert "thinking_blocks" not in result
+
+    def test_existing_top_level_thinking_blocks_preserved(self) -> None:
+        """A truthy top-level ``thinking_blocks`` is left untouched — the
+        lift only fills it when absent/empty, and does not clobber a value
+        already present (e.g. blocks already lifted on a prior pass)."""
+        existing = [{"type": "thinking", "thinking": "already here", "signature": "sig"}]
+        psf_block = {"type": "thinking", "thinking": "should be ignored", "signature": "other"}
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "thinking_blocks": existing,
+            "provider_specific_fields": {"thinking_blocks": [psf_block]},
+        }
+        result = _normalize_message(msg)
+        assert result["thinking_blocks"] == existing
+
+    def test_falsy_top_level_thinking_blocks_removed_when_no_psf(self) -> None:
+        """An empty/falsy top-level ``thinking_blocks`` with no liftable
+        provider blocks is removed (a falsy value would otherwise confuse
+        downstream replay)."""
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "thinking_blocks": [],
+        }
+        result = _normalize_message(msg)
+        assert "thinking_blocks" not in result
+
+
 def test_modify_params_enabled_on_import() -> None:
     """Importing aios.harness.completion sets litellm.modify_params = True.
 
