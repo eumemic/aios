@@ -25,12 +25,14 @@ class Captured:
     path: str = ""
     query: dict[str, list[str]] = None  # type: ignore[assignment]
     body: Any = None
+    headers: dict[str, str] = None  # type: ignore[assignment]
 
     def reset(self) -> None:
         self.method = ""
         self.path = ""
         self.query = {}
         self.body = None
+        self.headers = {}
 
 
 @dataclass
@@ -65,6 +67,7 @@ def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
         captured.method = request.method
         captured.path = request.url.path
         captured.query = {k: request.url.params.get_list(k) for k in request.url.params}
+        captured.headers = dict(request.headers)
         if request.content:
             import json
 

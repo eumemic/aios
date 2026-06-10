@@ -406,11 +406,11 @@ def bootstrap() -> None:
 
     secrets_path = Path.home() / ".aios" / "secrets.env"
     secrets = parse_env_file(secrets_path)
-    missing = [k for k in ("AIOS_API_KEY", "AIOS_VAULT_KEY") if k not in secrets]
+    missing = [k for k in ("AIOS_BOOTSTRAP_TOKEN", "AIOS_VAULT_KEY") if k not in secrets]
     if missing:
         print_error(f"{secrets_path} is missing required keys: {', '.join(missing)}")
         print_note("Required contents (generate values yourself):")
-        print_note("  AIOS_API_KEY=<openssl rand -hex 32>")
+        print_note("  AIOS_BOOTSTRAP_TOKEN=<openssl rand -hex 32>")
         print_note("  AIOS_VAULT_KEY=<openssl rand -base64 32>")
         print_note("Plus any provider keys (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, ...).")
         raise typer.Exit(1)
@@ -465,7 +465,7 @@ def bootstrap() -> None:
         "AIOS_DB_URL": runtime_db_url,
         "AIOS_API_PORT": str(port),
         "AIOS_WORKSPACE_ROOT": str(workspace_root),
-        "AIOS_API_KEY": secrets["AIOS_API_KEY"],
+        "AIOS_BOOTSTRAP_TOKEN": secrets["AIOS_BOOTSTRAP_TOKEN"],
         "AIOS_VAULT_KEY": secrets["AIOS_VAULT_KEY"],
     }
     rc = subprocess.call(
@@ -489,6 +489,12 @@ def bootstrap() -> None:
     print_note("Run:")
     print_note("  uv run aios api       # terminal 1")
     print_note("  uv run aios worker    # terminal 2")
+    print_note("")
+    print_note("Mint the root account's first API key (one-shot per DB), then use it:")
+    print_note("  export AIOS_API_KEY=$(uv run aios -f json accounts bootstrap \\")
+    print_note(
+        "    | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"plaintext_key\"])')"
+    )
     print_note("  uv run aios agents list")
 
 

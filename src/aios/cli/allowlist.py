@@ -62,12 +62,6 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
     "wait_for_events_v1_sessions__session_id__wait_get": (
         "Long-poll endpoint; use `aios sessions stream` / `aios tail` instead."
     ),
-    # ── One-shot deployment bootstrap ────────────────────────────────
-    "bootstrap_root_account": (
-        "One-time-per-deployment seeding; gated by AIOS_ENABLE_ROOT_BOOTSTRAP "
-        "and only callable while the accounts table is empty. Operator runs "
-        "this via curl during initial install, not via day-to-day CLI."
-    ),
     # ── Interactive (browser-redirect) OAuth ─────────────────────────
     # The vault-credential "Connect" flow returns an authorization URL for the
     # user to sign in at the provider, then exchanges the returned code. It is
