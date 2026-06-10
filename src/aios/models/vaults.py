@@ -57,11 +57,12 @@ _PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~!$&'()*+,;=:@-]+$")
 _SECRET_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # A final hostname label that is a pure numeric token in any base — decimal
-# ("10", "2130706433"), hex ("0x7f000001", "0xA"), or octal ("0177"). The
-# last octet of every IPv4-literal spelling is such a token, and no real DNS
-# top label is, so rejecting these labels rejects IP literals without a libc
-# parse. (The bare alpha check alone misses hex, whose letters look "alpha".)
-_NUMERIC_LABEL_RE = re.compile(r"0[xX][0-9A-Fa-f]+|[0-9]+", re.ASCII)
+# ("10", "2130706433"), hex ("0x7f000001", "0xA"), or octal ("0177"). The last
+# octet of every IPv4-literal spelling is such a token, so rejecting these
+# labels rejects IP literals without a libc parse. A must-contain-a-letter
+# test would be both too weak (hex octets contain letters) and too strict
+# (rejects legitimate digit-hyphen labels), which is why this is a token match.
+_NUMERIC_LABEL_RE = re.compile(r"0[xX][0-9A-Fa-f]+|[0-9]+")
 
 # Upper bound on one ``allowed_hosts`` entry (host[/path]). The host part is
 # already capped at 253; this bounds the optional path prefix.
@@ -89,8 +90,7 @@ def _validate_credential_host(host: str) -> str:
             f"invalid host {host!r}: a bare hostname is required "
             "(no scheme, port, path, wildcard, or IPv6)"
         )
-    final_label = host.rsplit(".", 1)[-1]
-    if _NUMERIC_LABEL_RE.fullmatch(final_label) or not any(c.isalpha() for c in final_label):
+    if _NUMERIC_LABEL_RE.fullmatch(host.rsplit(".", 1)[-1]):
         raise ValueError(f"invalid host {host!r}: a DNS hostname is required, not an IP literal")
     return host
 

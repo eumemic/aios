@@ -310,9 +310,11 @@ class TestEnvironmentVariableCredential:
             "c0ffee.io",  # alphanumeric label with digits
             "3m.com",  # leading-digit label
             "xn--p1ai",  # punycode
+            "example.9-9",  # letterless final label that is NOT an IP literal — only IP
+            "foo.1-2",  # literals are rejected, not every digits-only-looking label
         ],
     )
-    def test_accepts_hostname_with_hexish_labels(self, host: str) -> None:
+    def test_accepts_non_ip_numeric_looking_labels(self, host: str) -> None:
         c = self._create(allowed_hosts=[host])
         assert c.allowed_hosts == [host]
 
