@@ -120,6 +120,22 @@ def _prepend_header(msg: dict[str, Any], header: str) -> None:
     msg["content"] = f"{header}\n{existing}" if existing else header
 
 
+def _wake_header(metadata: dict[str, Any] | None) -> str | None:
+    """System-derived wake-provenance header, or None when not a wake.
+
+    Reads only the keys wake_session stamps (wake_source_session_id,
+    wake_depth) — never caller-suppliable free text.
+    """
+    if not metadata:
+        return None
+    src = metadata.get("wake_source_session_id")
+    if not isinstance(src, str) or not src:
+        return None
+    depth = metadata.get("wake_depth")
+    depth_str = str(depth) if isinstance(depth, int) else "?"
+    return f"[wake from session={src} · depth={depth_str}]"
+
+
 def _format_channel_header(metadata: dict[str, Any], received: str) -> str:
     """Render a one-line header describing the origin of an inbound message.
 
@@ -420,6 +436,9 @@ def render_user_event(
 
     if orig_channel is None:
         _prepend_header(msg, f"[received={received}]")
+        wake = _wake_header(metadata)
+        if wake is not None:
+            _prepend_header(msg, wake)
         return msg
 
     if orig_channel == focal_channel_at_arrival:
@@ -427,6 +446,9 @@ def render_user_event(
             _format_channel_header(metadata, received) if metadata else f"[received={received}]"
         )
         _prepend_header(msg, header)
+        wake = _wake_header(metadata)
+        if wake is not None:
+            _prepend_header(msg, wake)
         if metadata:
             attachments = metadata.get("attachments")
             if isinstance(attachments, list) and attachments:
