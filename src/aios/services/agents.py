@@ -139,8 +139,48 @@ async def get_agent_version(
         return await queries.get_agent_version(conn, agent_id, version, account_id=account_id)
 
 
+async def _load_for_session_conn(
+    conn: asyncpg.Connection[Any], session: Any, *, account_id: str
+) -> Agent | AgentVersion:
+    """Resolve a session's effective surface on a caller-supplied ``conn``.
+
+    The body of :func:`load_for_session` — see that function's docstring for the
+    branch semantics (frozen-child overlay / pinned version / latest). Kept on a
+    supplied ``conn`` so a caller already inside a transaction (``create_run``'s
+    launcher read) resolves at the same consistency point without a second acquire.
+    """
+    if session.parent_run_id is not None:
+        frozen = await queries.get_session_frozen_surface(conn, session.id, account_id=account_id)
+        if frozen is None:
+            raise RuntimeError(
+                f"workflow child {session.id} has no frozen surface snapshot "
+                "(parent_run_id set but surface_frozen is false)"
+            )
+        # A workflow child always pins a concrete agent_version at spawn
+        # (insert_child_session requires the int), so this is never a "latest" read.
+        version = await queries.get_agent_version(
+            conn, session.agent_id, session.agent_version, account_id=account_id
+        )
+        return version.model_copy(
+            update={
+                "tools": frozen.tools,
+                "mcp_servers": frozen.mcp_servers,
+                "http_servers": frozen.http_servers,
+            }
+        )
+    if session.agent_version is not None:
+        return await queries.get_agent_version(
+            conn, session.agent_id, session.agent_version, account_id=account_id
+        )
+    return await queries.get_agent(conn, session.agent_id, account_id=account_id)
+
+
 async def load_for_session(
-    pool: asyncpg.Pool[Any], session: Any, *, account_id: str
+    pool: asyncpg.Pool[Any],
+    session: Any,
+    *,
+    account_id: str,
+    conn: asyncpg.Connection[Any] | None = None,
 ) -> Agent | AgentVersion:
     """Load the Agent / AgentVersion the harness sees for ``session`` at step time.
 
@@ -156,34 +196,14 @@ async def load_for_session(
 
     Otherwise: ``session.agent_version is None`` means "latest" — fetches the current
     ``Agent``; an integer pins to a specific ``AgentVersion``.
+
+    Pass ``conn`` to resolve on a caller-supplied connection (e.g. inside an open
+    transaction); with no ``conn`` the read self-acquires from ``pool`` as before.
     """
-    if session.parent_run_id is not None:
-        async with pool.acquire() as conn:
-            frozen = await queries.get_session_frozen_surface(
-                conn, session.id, account_id=account_id
-            )
-            if frozen is None:
-                raise RuntimeError(
-                    f"workflow child {session.id} has no frozen surface snapshot "
-                    "(parent_run_id set but surface_frozen is false)"
-                )
-            # A workflow child always pins a concrete agent_version at spawn
-            # (insert_child_session requires the int), so this is never a "latest" read.
-            version = await queries.get_agent_version(
-                conn, session.agent_id, session.agent_version, account_id=account_id
-            )
-        return version.model_copy(
-            update={
-                "tools": frozen.tools,
-                "mcp_servers": frozen.mcp_servers,
-                "http_servers": frozen.http_servers,
-            }
-        )
-    if session.agent_version is not None:
-        return await get_agent_version(
-            pool, session.agent_id, session.agent_version, account_id=account_id
-        )
-    return await get_agent(pool, session.agent_id, account_id=account_id)
+    if conn is not None:
+        return await _load_for_session_conn(conn, session, account_id=account_id)
+    async with pool.acquire() as acquired:
+        return await _load_for_session_conn(acquired, session, account_id=account_id)
 
 
 def effective_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPolicy:

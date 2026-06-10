@@ -42,6 +42,7 @@ from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
 from aios.services.sessions import create_child_session
 from aios.tools import workflow_management as wm
+from aios.workflows import service as wf_service_module
 from aios.workflows.child_id import child_session_id
 from aios.workflows.service import WORKFLOW_RUN_MAX_DEPTH, WorkflowRunDepthExceededError
 
@@ -829,6 +830,75 @@ async def test_create_run_clamps_top_edge_to_launcher(vault_pool: asyncpg.Pool[A
         pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV
     )
     assert {t.type for t in operator.tools} == {"bash", "read"}  # operator = top — verbatim
+
+
+async def test_create_run_clamps_to_launcher_revoked_mid_launch(
+    vault_pool: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#835: the launcher surface is read INSIDE the run txn, not before it.
+
+    A live-read launcher (``agent_version=None``) holds ``[bash, read]``. The operator
+    authors a broad ``[bash, read]`` workflow. We inject an ``update_agent`` that revokes
+    ``read`` at the txn boundary — patching ``get_environment`` (the first in-txn query)
+    to commit the revoke before calling through. The snapshot must clamp to the
+    post-revoke surface ``{bash}``.
+
+    Discriminates the bug: pre-fix, ``load_for_session`` runs BEFORE the txn and reads the
+    stale-broad ``[bash, read]`` (the revoke commits too late) → snapshot ``{bash, read}``.
+    Post-fix, the in-txn read happens AFTER the revoke barrier → snapshot ``{bash}``.
+    """
+    pool = vault_pool
+    agent = await _make_agent(
+        pool, "revoked-launcher", tools=[ToolSpec(type="bash"), ToolSpec(type="read")]
+    )
+    # Live/latest-read launcher session (agent_version=None) — the only kind with a live
+    # surface read to race; a pinned/frozen session would read an immutable version.
+    async with pool.acquire() as conn:
+        launcher_session = await db_queries.insert_session(
+            conn,
+            account_id=ACC,
+            agent_id=agent.id,
+            environment_id=ENV,
+            agent_version=None,
+            title=None,
+            metadata={},
+        )
+    launcher = launcher_session.id
+    # Operator authors a BROAD workflow (the run will clamp against the launcher).
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id=ACC,
+        name="wf-revoke-mid",
+        script=_SCRIPT,
+        tools=[ToolSpec(type="bash"), ToolSpec(type="read")],
+    )
+
+    # The real in-txn env read (imported from aios.db.queries; we patch the name bound
+    # in the service module, so capture the original from its source here).
+    real_get_environment = db_queries.get_environment
+    revoked = False
+
+    async def revoking_get_environment(conn: Any, environment_id: str, *, account_id: str) -> Any:
+        nonlocal revoked
+        if not revoked:
+            revoked = True
+            # Commit the revoke on a fresh pool connection (its own txn), simulating a
+            # concurrent operator edit landing at the txn boundary.
+            await agents_service.update_agent(
+                pool, agent.id, account_id=ACC, expected_version=1, tools=[ToolSpec(type="bash")]
+            )
+        return await real_get_environment(conn, environment_id, account_id=account_id)
+
+    monkeypatch.setattr(wf_service_module, "get_environment", revoking_get_environment)
+
+    run = await wf_service.create_run(
+        pool,
+        account_id=ACC,
+        workflow_id=wf.id,
+        environment_id=ENV,
+        launcher_session_id=launcher,
+    )
+    assert {t.type for t in run.tools} == {"bash"}  # clamped to the post-revoke surface
 
 
 async def test_subrun_composes_against_child_frozen_clamp(

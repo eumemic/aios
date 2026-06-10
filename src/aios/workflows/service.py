@@ -12,14 +12,13 @@ from typing import Any
 import asyncpg
 
 from aios.config import get_settings
-from aios.db.queries import get_environment, get_session_vault_ids
+from aios.db.queries import get_environment, get_session_bare, get_session_vault_ids
 from aios.db.queries import workflows as wf_queries
 from aios.errors import AiosError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.models.attenuation import Surface, surface_of
 from aios.models.workflows import WfRun
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
-from aios.services import sessions as sessions_service
 from aios.services.wake import defer_run_wake
 
 # Vertical recursion bound: how deep a chain of runs (a run whose agent() child
@@ -79,27 +78,25 @@ async def create_run(
     """
     requested = list(vault_ids or [])
     # #794 top edge: an agent-launched run cannot exceed the launcher's own surface.
-    # Load the launcher's effective surface BEFORE acquiring the run's connection (a
-    # second pool.acquire() while holding `conn` would deadlock a small pool); the meet
-    # itself runs inside the transaction once the workflow is fetched. The operator/HTTP
-    # path (no launcher) is the lattice top — the run snapshots the workflow verbatim.
-    # (Consistency note: this read is outside the run txn, so a concurrent agent edit
-    # between it and the snapshot clamps against a slightly-stale launcher surface — a
-    # same-account, bounded-to-recent-state lag, the same read-then-act window as the
-    # author edge, never a cross-tenant breach. A conn-threaded load would close it.)
+    # #835: the launcher's effective surface is read INSIDE the run transaction (below),
+    # threading `conn` into load_for_session — the same consistency point as the vault
+    # check and the snapshot write, so a concurrent agent edit can't land a stale-broad
+    # snapshot. The operator/HTTP path (no launcher) is the lattice top — the run
+    # snapshots the workflow verbatim. Threading `conn` (vs a second pool.acquire())
+    # keeps the whole path single-connection, so it is safe on a size-1 pool.
     launcher_surface: Surface | None = None
-    if launcher_session_id is not None:
-        launcher_session = await sessions_service.get_session_basic(
-            pool, launcher_session_id, account_id=account_id
-        )
-        launcher_agent = await agents_service.load_for_session(
-            pool, launcher_session, account_id=account_id
-        )
-        launcher_surface = surface_of(launcher_agent)
     async with pool.acquire() as conn, conn.transaction():
         await get_environment(conn, environment_id, account_id=account_id)  # 404s foreign/absent
         workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
         script_sha = hashlib.sha256(workflow.script.encode("utf-8")).hexdigest()
+        if launcher_session_id is not None:
+            launcher_session = await get_session_bare(
+                conn, launcher_session_id, account_id=account_id
+            )
+            launcher_agent = await agents_service.load_for_session(
+                pool, launcher_session, account_id=account_id, conn=conn
+            )
+            launcher_surface = surface_of(launcher_agent)
         # Clamp the snapshot to the launcher's surface (sub-runs compose for free: a
         # child launcher's load_for_session already returns its frozen clamp).
         effective = (

@@ -178,7 +178,7 @@ class TestEntrySweepSpan:
                 AsyncMock(return_value=session),
             ),
             patch(
-                "aios.harness.loop.agents_service.get_agent",
+                "aios.harness.loop.agents_service.load_for_session",
                 AsyncMock(return_value=agent),
             ),
             patch(
