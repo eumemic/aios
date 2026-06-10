@@ -52,9 +52,12 @@ if ! should_skip ruff; then
     echo "── ruff ──"
 
     if [[ $FAIL_ON_AUTOFIX -eq 1 ]]; then
-        # Check + format, then detect if anything changed
-        uv run ruff check --fix "${LINT_TARGETS[@]}" 2>&1
-        uv run ruff format "${LINT_TARGETS[@]}" 2>&1
+        # Check + format, then detect if anything changed.  A non-zero ruff
+        # exit means it reported lint errors it could NOT auto-fix; those
+        # leave no diff, so we must surface the exit status explicitly or the
+        # pre-commit gate would pass an unfixable error.
+        uv run ruff check --fix "${LINT_TARGETS[@]}" 2>&1 || fail
+        uv run ruff format "${LINT_TARGETS[@]}" 2>&1 || fail
         if [[ -n "$(git diff --name-only)" ]]; then
             echo "ruff auto-fixed files — please re-stage:" >&2
             git diff --name-only >&2

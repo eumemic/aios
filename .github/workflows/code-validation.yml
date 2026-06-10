@@ -192,11 +192,6 @@ jobs:
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
 
-    env:
-      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
-      AIOS_API_KEY: test-key-for-ci
-      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
-
     steps:
       - uses: actions/checkout@v4
 
