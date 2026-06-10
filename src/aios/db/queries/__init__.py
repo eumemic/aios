@@ -344,9 +344,13 @@ async def get_environment_config_for_session(
     Filters both ``s.account_id`` AND ``e.account_id`` against the same
     caller account: ``insert_session`` only relies on the
     ``environment_id REFERENCES environments(id)`` FK and does not
-    validate cross-account ownership, so a session row can carry an
-    ``environment_id`` from a different tenant. Without the
-    ``e.account_id`` predicate this read would surface the foreign
+    validate cross-account ownership. As of issue #755 the service-layer
+    create paths (``create_session`` and ``create_run``) verify
+    environment ownership before insert, so the normal path no longer
+    binds a session to a foreign-tenant environment. The ``e.account_id``
+    predicate remains as defense-in-depth for rows created via paths that
+    bypass the service layer (direct ``insert_session`` in tests,
+    pre-existing rows): without it this read would surface the foreign
     tenant's ``EnvironmentConfig`` — env vars, networking, packages —
     inside the worker's step context [security].
     """
