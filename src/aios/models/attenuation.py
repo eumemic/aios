@@ -32,7 +32,7 @@ tried to widen.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 
 from aios.models.agents import (
     HttpServerSpec,
@@ -49,15 +49,28 @@ from aios.models.agents import (
 class Surface(NamedTuple):
     """A principal's capability surface — the meet operates on this triple.
 
-    Constructed inline at the four call sites (the author edge, ``create_run``,
-    ``create_child_session``, the frozen-overlay read) from whatever carries the
-    three lists; not a persisted type. The lists are treated as immutable by the
-    operator — it never mutates an input, always builds fresh output.
+    Constructed via :func:`surface_of` at the materialize edges (the author edge,
+    ``create_run``, ``create_child_session``, the frozen-overlay read) from whatever
+    carries the three lists; not a persisted type. The lists are treated as immutable
+    by the operator — it never mutates an input, always builds fresh output.
     """
 
     tools: list[ToolSpec]
     mcp_servers: list[McpServerSpec]
     http_servers: list[HttpServerSpec]
+
+
+class HasSurface(Protocol):
+    """Anything carrying the surface triple — ``Agent``/``AgentVersion``/``Workflow``/``WfRun``."""
+
+    tools: list[ToolSpec]
+    mcp_servers: list[McpServerSpec]
+    http_servers: list[HttpServerSpec]
+
+
+def surface_of(principal: HasSurface) -> Surface:
+    """Project a principal's ``(tools, mcp_servers, http_servers)`` into a ``Surface``."""
+    return Surface(principal.tools, principal.mcp_servers, principal.http_servers)
 
 
 def _tool_key(t: ToolSpec) -> tuple[str, str | None]:

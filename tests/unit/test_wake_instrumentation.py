@@ -228,7 +228,7 @@ class TestStepStartEndSpans:
                 AsyncMock(return_value=session),
             ),
             patch(
-                "aios.harness.loop.agents_service.get_agent",
+                "aios.harness.loop.agents_service.load_for_session",
                 AsyncMock(return_value=agent),
             ),
             patch(
@@ -331,7 +331,7 @@ class TestStepStartEndSpans:
                 AsyncMock(return_value=session),
             ),
             patch(
-                "aios.harness.loop.agents_service.get_agent",
+                "aios.harness.loop.agents_service.load_for_session",
                 AsyncMock(return_value=agent),
             ),
             patch(
@@ -443,7 +443,9 @@ class TestStepStartEndSpans:
                 "aios.harness.loop.sessions_service.get_session_basic",
                 AsyncMock(return_value=session),
             ),
-            patch("aios.harness.loop.agents_service.get_agent", AsyncMock(return_value=agent)),
+            patch(
+                "aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)
+            ),
             patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
             patch(
                 "aios.harness.loop.sessions_service.read_windowed_events",
@@ -539,7 +541,9 @@ class TestStepStartEndSpans:
                 "aios.harness.loop.sessions_service.get_session_basic",
                 AsyncMock(return_value=session),
             ),
-            patch("aios.harness.loop.agents_service.get_agent", AsyncMock(return_value=agent)),
+            patch(
+                "aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)
+            ),
             patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
             patch(
                 "aios.harness.loop.sessions_service.read_windowed_events",
@@ -633,7 +637,7 @@ class TestStepStartEndSpans:
                 AsyncMock(return_value=session),
             ),
             patch(
-                "aios.harness.loop.agents_service.get_agent",
+                "aios.harness.loop.agents_service.load_for_session",
                 AsyncMock(return_value=agent),
             ),
             patch(
@@ -728,7 +732,7 @@ async def _harness_with_guard(
         patch(
             "aios.harness.loop.sessions_service.get_session_basic", AsyncMock(return_value=session)
         ),
-        patch("aios.harness.loop.agents_service.get_agent", AsyncMock(return_value=agent)),
+        patch("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)),
         patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         patch(
             "aios.harness.loop.sessions_service.read_windowed_events", AsyncMock(return_value=[])
