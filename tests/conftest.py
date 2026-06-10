@@ -241,6 +241,14 @@ def aios_env_minimal(
         "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
         "AIOS_DB_URL": migrated_db_url,
         "AIOS_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
+        # Issue #807: point the docker_harness-driven e2e provisions at the
+        # repo's authored seccomp profile. The config default resolves to the
+        # baked /app/docker path, which doesn't exist on the host running the
+        # tests; this overrides it to the in-tree file so seccomp is actually
+        # enforced on e2e sandboxes (e.g. the Limited-provision regression).
+        "AIOS_SANDBOX_SECCOMP_PROFILE": str(
+            Path(__file__).parents[1] / "docker" / "seccomp-sandbox.json"
+        ),
     }
     with mock.patch.dict(os.environ, env_vars):
         from aios.config import get_settings
