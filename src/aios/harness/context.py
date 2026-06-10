@@ -790,6 +790,7 @@ def build_messages(
         # rather than failing the whole build. The inner isinstance/OSError
         # guards still pre-empt this for the shapes they cover; this catches
         # novel raisers they don't.
+        mark = len(messages)
         try:
             role = e.data.get("role")
 
@@ -892,6 +893,19 @@ def build_messages(
                     max_stimulus_seq = max(max_stimulus_seq, e.seq)
 
         except Exception as exc:
+            # Roll back any partial appends from THIS event so the quarantine
+            # is atomic w.r.t. ``messages``: exactly one placeholder per
+            # quarantined position, never a half-rendered assistant turn
+            # (e.g. the assistant message appended before a corrupt
+            # ``tool_calls`` raised, which would leave an orphan tool_calls
+            # turn — an invalid chat-completions sequence that re-bricks).
+            # Residual limitation: a quarantined ASSISTANT event's downstream
+            # tool-result events (later in the window) may still render as
+            # orphan ``tool`` messages — accepted, because assistant events are
+            # harness-produced, not external connector poison (the realistic
+            # source), and the alternative is the permanent brick this guard exists
+            # to prevent.
+            del messages[mark:]
             log.warning(
                 "context.poison_event_quarantined",
                 session_id=session_id,

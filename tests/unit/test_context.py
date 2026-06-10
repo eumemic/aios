@@ -2104,8 +2104,12 @@ class TestPoisonEventQuarantine:
         assert len(ctx.messages) == 1
         msg = ctx.messages[0]
         assert msg["role"] == "user"
-        # Union invariant: normally-rendered text OR the quarantine placeholder.
-        assert msg == _quarantine_placeholder(1) or isinstance(msg["content"], (str, list))
+        content = msg["content"]
+        assert isinstance(content, (str, list))
+        # A normal render must never accidentally produce a quarantine-shaped
+        # message; the marker string appears iff this is the exact placeholder.
+        if isinstance(content, str) and "unrenderable event seq=" in content:
+            assert msg == _quarantine_placeholder(1)
 
     def test_unserializable_output_schema_reaches_outer_quarantine(self) -> None:
         """The one shape that genuinely reaches the OUTER quarantine: a
@@ -2123,3 +2127,25 @@ class TestPoisonEventQuarantine:
         ctx = build_messages([e], system_prompt=None, model="gpt-4o", session_id="s")
         assert ctx.messages == [_quarantine_placeholder(1)]
         assert ctx.reacting_to == 1
+
+    def test_quarantined_assistant_event_is_atomic_single_message(self) -> None:
+        """The assistant branch appends ``e.data`` BEFORE iterating
+        ``tool_calls``; a raise mid-branch (here a truthy non-iterable
+        ``tool_calls`` so ``for tc in 42`` raises ``TypeError`` after the
+        append) must NOT leave both the orphan assistant turn AND the
+        placeholder — that invalid chat-completions sequence (tool_calls not
+        followed by results) re-bricks the session. The rollback makes the
+        quarantine atomic: exactly the placeholder remains."""
+        e = Event(
+            id="evt_5",
+            session_id="sess_01TEST",
+            seq=5,
+            kind="message",
+            data={"role": "assistant", "content": "x", "tool_calls": 42},
+            created_at=_FIXED_CREATED_AT,
+            orig_channel=None,
+            focal_channel_at_arrival=None,
+        )
+        ctx = build_messages([e], system_prompt=None)
+        assert len(ctx.messages) == 1
+        assert ctx.messages[0] == _quarantine_placeholder(5)
