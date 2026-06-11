@@ -1,0 +1,1447 @@
+"""Event-log queries.
+
+A subsystem module of the ``aios.db.queries`` package — see ``__init__`` for the
+shared scoping helpers and the package-level re-export contract. Raw SQL against
+asyncpg, same conventions as the rest of the package.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import time
+from datetime import UTC, datetime
+from typing import Any
+
+import asyncpg
+
+from aios.db import queries
+from aios.db.queries import (
+    parse_jsonb,
+)
+from aios.db.queries.connections import _session_bound_to_connection_predicate
+from aios.errors import (
+    NotFoundError,
+)
+from aios.harness.window import WindowedEvents, WindowOmission
+from aios.ids import (
+    EVENT,
+    make_id,
+)
+from aios.models.events import Event, EventKind
+
+# ─── events ───────────────────────────────────────────────────────────────────
+
+
+def _row_to_event(row: asyncpg.Record) -> Event:
+    raw_data = row["data"]
+    data = parse_jsonb(raw_data)
+    return Event(
+        id=row["id"],
+        session_id=row["session_id"],
+        seq=row["seq"],
+        kind=row["kind"],
+        data=data,
+        cumulative_tokens=row["cumulative_tokens"],
+        created_at=row["created_at"],
+        orig_channel=row["orig_channel"],
+        focal_channel_at_arrival=row["focal_channel_at_arrival"],
+        channel=row["channel"],
+    )
+
+
+async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: str) -> int | None:
+    """Fetch the cumulative_tokens value of the most recent message event."""
+    val: int | None = await conn.fetchval(
+        "SELECT cumulative_tokens FROM events "
+        "WHERE session_id = $1 AND kind = 'message' "
+        "AND cumulative_tokens IS NOT NULL "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+    )
+    return val
+
+
+_MODEL_TOKEN_RATIO_MIN_SAMPLES = 5
+_MODEL_TOKEN_RATIO_MIN = 0.5
+_MODEL_TOKEN_RATIO_BUCKET_FLOOR = 0.001
+_MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS = 60.0
+# Shorter TTL for the "not enough samples yet" path: every step on a freshly
+# deployed model fired this aggregate JSONB scan otherwise, because the
+# below-threshold branch used to skip the cache write entirely.  10 s bounds
+# the activation lag once the model crosses the sample threshold.
+_MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS = 10.0
+# Fixed per-sample stddev prior for the tokenizer ratio.  Empirically,
+# observed per-span CV is ~0.5-1.5 % across the models we've measured
+# (Opus 4.7: 0.75 %; Haiku 4.5: ~1 %), so 0.02 is a conservative upper
+# bound.  Keeping this fixed (rather than using the observed sample
+# stddev) makes the bucket width a deterministic function of ``n`` alone
+# — the core property #170 / #171 require: quantization stability is a
+# function of ``(n, mean)`` only, independent of the noisy observed-
+# stddev estimate that wobbles at small n.
+_MODEL_TOKEN_RATIO_SIGMA_PRIOR = 0.02
+_model_token_ratio_cache: dict[tuple[str, float], tuple[float, float]] = {}
+
+
+def _clear_model_token_ratio_cache() -> None:
+    """Clear the process-local token-ratio cache for tests."""
+    _model_token_ratio_cache.clear()
+
+
+async def model_token_ratio(
+    conn: asyncpg.Connection[Any],
+    model: str,
+    *,
+    account_id: str,
+    k_bucket: float = 2.0,
+) -> float:
+    """Per-model actual/local token correction.
+
+    Treats R as a fixed tokenizer parameter estimated from noisy
+    observed spans.  Returns the lifetime unweighted mean of per-span
+    ``actual/local`` ratios, quantized to a prior-shaped bucket
+    ``max(k_bucket * sigma_prior / sqrt(n), 0.001)``.  With very little
+    data, returns ``1.0`` so newly seen models preserve the old
+    model-agnostic windowing behavior until calibration is meaningful.
+
+    ``sigma_prior`` is a fixed per-sample spread prior (see
+    :data:`_MODEL_TOKEN_RATIO_SIGMA_PRIOR`).  Using the prior instead of
+    the observed sample stddev is what makes the bucket width a
+    deterministic function of ``n`` alone — the quantized R depends on
+    ``(n, mean)`` only.
+
+    The bucket floor (``0.001``) guards against float rounding nudging
+    the drop boundary across an event at very large ``n``.  The returned
+    ratio is clamped to ``0.5`` as a physical lower bound: when
+    calibration data is pathological, prefer near-neutral windowing over
+    dividing by a near-zero R.
+
+    Mature calibrated ratios are cached in-process for 60 seconds.  The
+    lifetime aggregate is intentionally slow-moving, and caching prevents
+    every windowing call from rescanning all historical calibration spans.
+    Below-threshold results (returning the neutral ``1.0``) are cached for
+    a shorter 10-second TTL so a freshly deployed model doesn't pay the
+    aggregate scan on every step before calibration kicks in; activation
+    once samples accumulate is therefore delayed by at most one TTL.
+
+    ``model`` is the raw model string (``agent.model``) — NO NORMALIZATION.
+    Different LiteLLM routes (``anthropic/...`` vs
+    ``openrouter/anthropic/...``) hit different provider tokenizers and
+    must partition separately.  The same string must appear at stamp time
+    and at query time for the same step — always plumb ``agent.model`` on
+    both sides.  aios sessions do not carry a model override; the session's
+    active model is always its agent's configured model.
+
+    Scope: the aggregate pools samples across every session in this
+    database.  Token counts are scalar only — no content crosses between
+    sessions — but the ratio reflects the mixed workload of whatever
+    traffic has accumulated.
+
+    "actual" is the provider's ``input_tokens`` usage value, which
+    LiteLLM normalizes to the OpenAI convention: ``input_tokens`` is
+    **the full prompt count**, including any cached-read or
+    cache-creation portion.  Do NOT sum ``cache_read_input_tokens`` or
+    ``cache_creation_input_tokens`` on top — they are breakdown metrics
+    within the same total, not disjoint extensions.  Output tokens are
+    excluded: we're correcting the size of the context we sent, not
+    what the model returned.  Uses the
+    ``events_model_request_end_calibration_idx`` partial index
+    (migration 0024).
+    """
+    if k_bucket <= 0:
+        raise ValueError("k_bucket must be positive")
+
+    cache_key = (model, k_bucket)
+    now = time.monotonic()
+    cached = _model_token_ratio_cache.get(cache_key)
+    if cached is not None:
+        expires_at, ratio = cached
+        if expires_at > now:
+            return ratio
+        del _model_token_ratio_cache[cache_key]
+
+    row = await conn.fetchrow(
+        """
+        WITH calibration AS (
+            SELECT
+                (data->'model_usage'->>'input_tokens')::float AS it,
+                (data->>'local_tokens')::bigint                AS lt
+            FROM events
+            WHERE kind = 'span'
+              AND data->>'event' = 'model_request_end'
+              AND (data->>'is_error')::boolean = false
+              AND data->>'model' = $1
+              AND data ? 'local_tokens'
+              AND data ? 'model'
+              -- Exclude old/malformed success spans before casting.
+              AND (data->'model_usage') ? 'input_tokens'
+              AND (data->'model_usage'->>'input_tokens') IS NOT NULL
+              AND (data->>'local_tokens')::bigint > 0
+        )
+        SELECT
+            COUNT(*)::bigint                            AS n,
+            COALESCE(AVG(it / NULLIF(lt, 0)), 0)::float AS mean_ratio
+        FROM calibration
+        """,
+        model,
+    )
+    assert row is not None
+    if row["n"] < _MODEL_TOKEN_RATIO_MIN_SAMPLES:
+        _model_token_ratio_cache[cache_key] = (
+            now + _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS,
+            1.0,
+        )
+        return 1.0
+
+    raw = float(row["mean_ratio"])
+    bucket = max(
+        k_bucket * _MODEL_TOKEN_RATIO_SIGMA_PRIOR / math.sqrt(float(row["n"])),
+        _MODEL_TOKEN_RATIO_BUCKET_FLOOR,
+    )
+    quantized = round(raw / bucket) * bucket
+    ratio = max(quantized, _MODEL_TOKEN_RATIO_MIN)
+    _model_token_ratio_cache[cache_key] = (
+        now + _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS,
+        ratio,
+    )
+    return ratio
+
+
+def _derive_tool_name(kind: str, data: dict[str, Any]) -> str | None:
+    """Compute the stamped ``tool_name`` column for a new event.
+
+    For tool-result events the name lives at ``data->>'name'``.  For
+    assistant events that requested tools, the first tool_call's function
+    name is promoted — multi-tool turns remain discoverable by that first
+    name; the full list still lives in ``data->'tool_calls'``.  Pure
+    function; paths mirror the backfill in migration 0022 so old and new
+    rows stay byte-equivalent in this column.
+    """
+    if kind != "message":
+        return None
+    role = data.get("role")
+    if role == "tool":
+        name = data.get("name")
+        return name if isinstance(name, str) else None
+    if role == "assistant":
+        tool_calls = data.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return None
+        first = tool_calls[0]
+        if not isinstance(first, dict):
+            return None
+        function = first.get("function")
+        if not isinstance(function, dict):
+            return None
+        name = function.get("name")
+        return name if isinstance(name, str) else None
+    return None
+
+
+def _derive_sender_name(kind: str, data: dict[str, Any]) -> str | None:
+    """Sender name for user events carrying connector metadata; else NULL."""
+    if kind != "message" or data.get("role") != "user":
+        return None
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    name = metadata.get("sender_name")
+    return name if isinstance(name, str) else None
+
+
+def _derive_is_error(kind: str, data: dict[str, Any]) -> bool | None:
+    """Error flag on events that carry ``is_error``; NULL when absent.
+
+    Originally restricted to message-kind events (tool-result rows), but
+    span events also carry ``is_error`` (e.g. ``model_request_end``,
+    ``step_timeout``, ``harness_error``).  We now write the physical column
+    for any kind that includes the field so that ``?error_only=true``
+    filtering works across all event kinds.
+    """
+    flag = data.get("is_error")
+    if flag is None:
+        return None
+    return bool(flag)
+
+
+async def _derive_event_channel(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    kind: str,
+    data: dict[str, Any],
+    orig_channel: str | None,
+    focal_at_arrival: str | None,
+) -> str | None:
+    """Compute the derived ``channel`` for a new event, pre-insert.
+
+    User events → ``orig_channel``.
+    Assistant events → ``focal_at_arrival`` (the live focal at stamp time).
+    Tool events → the parent assistant's ``focal_channel_at_arrival``,
+    looked up by matching ``tool_call_id`` against prior assistant rows'
+    ``data->'tool_calls'``. Returns NULL if no parent is found (shouldn't
+    happen in practice — tool results only arrive for assistant-requested
+    tool calls — but the recap filter tolerates NULL).
+
+    Non-message events and message events with no identifiable role
+    return NULL.
+    """
+    if kind != "message":
+        return None
+    role = data.get("role")
+    if role == "user":
+        return orig_channel
+    if role == "assistant":
+        return focal_at_arrival
+    if role == "tool":
+        tool_call_id = data.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return None
+        # Predicates match ``events_assistant_tool_calls_idx`` (partial
+        # index on (session_id, seq) for role=assistant rows that have
+        # tool_calls — migration 0011) so the planner can walk it in
+        # reverse-seq order and stop at the first matching parent.
+        parent_focal: str | None = await conn.fetchval(
+            "SELECT focal_channel_at_arrival FROM events "
+            "WHERE session_id = $1 "
+            "  AND kind = 'message' "
+            "  AND data->>'role' = 'assistant' "
+            "  AND data ? 'tool_calls' "
+            "  AND data->'tool_calls' @> jsonb_build_array("
+            "    jsonb_build_object('id', $2::text)) "
+            "ORDER BY seq DESC LIMIT 1",
+            session_id,
+            tool_call_id,
+        )
+        return parent_focal
+    return None
+
+
+async def find_tool_result_event(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+) -> Event | None:
+    """Return the existing tool-role event for ``tool_call_id``, or ``None``.
+
+    Used by ``services.append_tool_result`` to make the intake idempotent
+    on ``(session_id, tool_call_id)``: a retried POST returns the original
+    event instead of appending a duplicate that would later violate the
+    monotonic-context invariant (``harness/context.py:499-506`` keeps the
+    latest tool_result per id by dict-overwrite — duplicates silently
+    rewrite history).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT * FROM events
+         WHERE session_id = $1
+           AND account_id = $2
+           AND kind = 'message'
+           AND data->>'role' = 'tool'
+           AND data->>'tool_call_id' = $3
+         LIMIT 1
+        """,
+        session_id,
+        account_id,
+        tool_call_id,
+    )
+    return _row_to_event(row) if row is not None else None
+
+
+async def find_tool_confirmed_event(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+) -> Event | None:
+    """Return the existing ``lifecycle/tool_confirmed`` event for
+    ``tool_call_id``, or ``None``.
+
+    Used by ``services.confirm_tool_allow`` to make the intake
+    idempotent on ``(session_id, tool_call_id)``: a retried POST returns
+    the original event instead of appending a duplicate. Mirrors the
+    same-shape sibling :func:`find_tool_result_event` (used by the deny
+    twin's idempotency).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT * FROM events
+         WHERE session_id = $1
+           AND account_id = $2
+           AND kind = 'lifecycle'
+           AND data->>'event' = 'tool_confirmed'
+           AND data->>'tool_call_id' = $3
+         LIMIT 1
+        """,
+        session_id,
+        account_id,
+        tool_call_id,
+    )
+    return _row_to_event(row) if row is not None else None
+
+
+async def lookup_tool_name_by_call_id(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+) -> str | None:
+    """Return the function name of the matching ``tool_call`` on the parent
+    assistant event, or None if no parent is found.
+
+    Used by the custom tool-result handler to stamp a ``name`` field on
+    the tool-role event it appends, so ``_derive_tool_name`` populates
+    the ``tool_name`` column (issue #133, migration 0022).  Mirrors the
+    parent-assistant lookup in ``_derive_event_channel`` — same ``@>``
+    predicate, same partial index (``events_assistant_tool_calls_idx``).
+    """
+    raw = await conn.fetchval(
+        "SELECT data->'tool_calls' FROM events "
+        "WHERE session_id = $1 "
+        "  AND account_id = $3 "
+        "  AND kind = 'message' "
+        "  AND data->>'role' = 'assistant' "
+        "  AND data ? 'tool_calls' "
+        "  AND data->'tool_calls' @> jsonb_build_array("
+        "    jsonb_build_object('id', $2::text)) "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+        tool_call_id,
+        account_id,
+    )
+    if raw is None:
+        return None
+    tool_calls = parse_jsonb(raw)
+    if not isinstance(tool_calls, list):
+        return None
+    for tc in tool_calls:
+        if not isinstance(tc, dict) or tc.get("id") != tool_call_id:
+            continue
+        function = tc.get("function")
+        if not isinstance(function, dict):
+            return None
+        name = function.get("name")
+        return name if isinstance(name, str) else None
+    return None
+
+
+async def list_confirmed_unresolved_tool_calls(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    max_age_seconds: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return the dispatchable ``tool_call`` dicts for a session: those
+    operator-confirmed (``tool_confirmed``/``allow``) whose ``tool_call_id``
+    has no paired ``tool_result`` yet, in chronological (parent-assistant
+    ``seq``) order.
+
+    This is the dispatch-side resolver of the SAME predicate the sweep uses to
+    wake the session for case (c) — ``sweep.CONFIRMED_ROWS_SQL``: a
+    ``tool_confirmed``/``allow`` lifecycle event whose ``tool_call_id`` has no
+    ``role='tool'`` result, AND (when bounded) whose confirmation is within
+    ``max_age_seconds``.  Detection (the sweep, cross-session, projecting
+    only ``session_id``) and dispatch (here, per-session, projecting the
+    ``tool_call`` dicts) therefore agree by construction; re-resolving per step
+    is load-bearing against the wake→step TOCTOU window.  CRITICAL: the age
+    clause here MUST stay byte-for-byte identical to ``CONFIRMED_ROWS_SQL`` —
+    a mismatch surfaces a session for wake that then yields no dispatchable
+    call, the wake-with-no-progress loop (#155 symptom).
+
+    ``max_age_seconds`` is an OPTIONAL age bound on the ``tool_confirmed``
+    lifecycle event's (``lc``) ``created_at`` — when set, calls whose
+    CONFIRMATION is older than that many seconds are SKIPPED (excluded from
+    dispatch, not expired; no synthetic result).  It is keyed on the CONFIRM
+    event, NOT the assistant turn: an operator can confirm an OLD proposal,
+    which is a FRESH intent to dispatch (#746).  It defaults to ``None`` (no
+    bound) for safety/testability; this path is dispatch-only (the sole caller
+    is ``_dispatch_confirmed_tools`` via ``sessions.py``, no read-model
+    caller), so the dispatch caller always passes
+    ``settings.confirmed_dispatch_max_age_seconds``.  Parallel to the connector
+    backfill bound in :func:`_unresolved_tool_calls` (#744).
+
+    Unwindowed otherwise — keyed on ``tool_call_id`` via the
+    ``events_tool_confirmed_allow_idx`` partial index (migration 0065), so a
+    confirmed tool whose parent assistant has scrolled out of the token window,
+    or simply isn't the latest assistant, is still recovered (#737).  The
+    ``NOT EXISTS`` result guard means one whose result has itself scrolled out
+    is not re-dispatched (no duplicate ``tool_result``; CLAUDE.md invariant
+    #4).  The parent-assistant join reuses ``events_assistant_tool_calls_idx``;
+    the result check reuses ``events_tool_result_idx``.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT a.seq AS asst_seq,
+               lc.data->>'tool_call_id' AS tool_call_id,
+               a.data->'tool_calls' AS tool_calls
+          FROM events lc
+          JOIN events a
+            ON a.session_id = lc.session_id
+           AND a.account_id = lc.account_id
+           AND a.kind = 'message'
+           AND a.role = 'assistant'
+           AND a.data ? 'tool_calls'
+           AND a.data->'tool_calls' @> jsonb_build_array(
+                 jsonb_build_object('id', lc.data->>'tool_call_id'))
+         WHERE lc.session_id = $1
+           AND lc.account_id = $2
+           AND lc.kind = 'lifecycle'
+           AND lc.data->>'event' = 'tool_confirmed'
+           AND lc.data->>'result' = 'allow'
+           AND (
+                 $3::bigint IS NULL
+                 OR lc.created_at >= now() - make_interval(secs => $3::bigint)
+               )
+           AND NOT EXISTS (
+               SELECT 1 FROM events tr
+                WHERE tr.session_id = lc.session_id
+                  AND tr.account_id = lc.account_id
+                  AND tr.kind = 'message'
+                  AND tr.role = 'tool'
+                  AND tr.data->>'tool_call_id' = lc.data->>'tool_call_id'
+           )
+         ORDER BY a.seq ASC
+        """,
+        session_id,
+        account_id,
+        max_age_seconds,
+    )
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        tool_call_id: str = row["tool_call_id"]
+        if tool_call_id in seen:
+            continue
+        tool_calls = parse_jsonb(row["tool_calls"])
+        if not isinstance(tool_calls, list):
+            continue
+        for tc in tool_calls:
+            if isinstance(tc, dict) and tc.get("id") == tool_call_id:
+                seen.add(tool_call_id)
+                out.append(tc)
+                break
+    return out
+
+
+async def append_event(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    session_id: str,
+    kind: EventKind,
+    data: dict[str, Any],
+    orig_channel: str | None = None,
+) -> Event:
+    """Append an event to ``session_id`` with gapless seq allocation.
+
+    Wraps the increment + insert in a single transaction with a row lock on
+    the parent session, so concurrent appenders (the API server adding a
+    user message while the harness is mid-turn) serialize correctly. Issues
+    ``pg_notify`` after the insert so SSE subscribers receive the new event.
+
+    For message events, computes and stores ``cumulative_tokens`` — the
+    running total of approximate token counts through this event.  The
+    previous cumulative value is fetched inside the same transaction (under
+    the session row lock), so there is no race with concurrent appenders.
+
+    Focal-channel stamping (issue #29 redesign): the session's current
+    ``focal_channel`` is read from the same UPDATE that allocates the seq
+    (via its RETURNING clause) and written to ``focal_channel_at_arrival``
+    on the new event row.  Pairing it with the caller-supplied
+    ``orig_channel`` (stamped for user events via ``append_user_message``)
+    lets the context builder render each event deterministically at arrival
+    time without ever needing to re-project past events.
+
+    Derived-channel stamping (issue #52): in the same transaction, the
+    new event's ``channel`` column is computed as — for user events,
+    ``orig_channel``; for assistant events, ``focal_at_arrival``; for
+    tool events, the parent assistant's ``focal_channel_at_arrival``
+    (looked up by matching the tool_call_id against prior assistant
+    rows' ``data->'tool_calls'``).  This answers "which channel does
+    this event belong to?" once and for all; downstream filters become
+    a single column read.
+    """
+    from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, render_user_event
+    from aios.harness.tokens import approx_tokens
+
+    new_id = make_id(EVENT)
+    data_json = json.dumps(data)
+
+    # role/tool_name/is_error/sender_name: indexed-column promotions for
+    # events_search (migration 0022); not on the Event model.
+    role: str | None = None
+    if kind == "message":
+        raw_role = data.get("role")
+        if isinstance(raw_role, str):
+            role = raw_role
+    # A user message bumps ``updated_at`` (last-interaction time). It no longer
+    # needs to flip a status column: ``status`` is derived from the event log,
+    # so an errored session recovers automatically once a user message lands
+    # (its seq exceeds the latest error lifecycle event — see
+    # ``_SESSION_ERRORED_EXPR``), and the sweep stops skipping it (#39, #353).
+    is_user_message = kind == "message" and role == "user"
+    # A *stimulus* is any message the assistant must react to: user OR tool
+    # (role <> 'assistant'). ``last_stimulus_seq`` tracks its max seq and drives
+    # the active predicate. This is deliberately broader than ``is_user_message``
+    # (the error latch) — an unreacted tool result keeps the session active, but
+    # must NOT clear an error. See ``_SESSION_ACTIVE_EXPR``.
+    is_stimulus = kind == "message" and role != "assistant"
+    is_error_lifecycle = kind == "lifecycle" and data.get("stop_reason") == "error"
+    is_assistant_message = kind == "message" and role == "assistant"
+    tool_call_count_delta = (
+        len(data.get("tool_calls") or [])
+        if is_assistant_message
+        else (-1 if kind == "message" and role == "tool" else 0)
+    )
+    # The reaction watermark advances to MAX(COALESCE(reacting_to, seq)) over
+    # assistant messages — exactly the pre-#732 ``session_max_reacting`` CTE. An
+    # assistant message with an explicit ``reacting_to`` uses it; one without
+    # (seeded data, or an unprompted assistant turn) falls back to the
+    # assistant's OWN new seq (``last_event_seq + 1``). ``turn_ended`` lifecycle
+    # events do NOT bump it: a rescheduling ``turn_ended`` appends with no
+    # assistant reaction, and bumping the watermark there would falsely mark the
+    # still-unreacted user message as reacted-to, flipping a retry-pending
+    # session to idle (breaks the litellm/harness-error retry loop — the
+    # session must stay active so the sweep re-picks it). Reaction is tracked by
+    # assistant ``reacting_to``, never by turn boundaries.
+    reacting_to_seq = int(data.get("reacting_to") or 0) if is_assistant_message else 0
+
+    async with conn.transaction():
+        seq_row = await conn.fetchrow(
+            "UPDATE sessions "
+            "SET last_event_seq = last_event_seq + 1, "
+            "    updated_at = CASE WHEN $3 THEN now() ELSE updated_at END, "
+            "    last_user_seq = CASE WHEN $3 THEN last_event_seq + 1 ELSE last_user_seq END, "
+            "    last_stimulus_seq = CASE WHEN $8 THEN last_event_seq + 1 "
+            "        ELSE last_stimulus_seq END, "
+            "    last_error_seq = CASE WHEN $4 THEN last_event_seq + 1 ELSE last_error_seq END, "
+            "    open_tool_call_count = GREATEST(open_tool_call_count + $5, 0), "
+            "    last_reacted_seq = CASE "
+            "        WHEN $7 THEN GREATEST(last_reacted_seq, "
+            "            CASE WHEN $6 > 0 THEN $6 ELSE last_event_seq + 1 END) "
+            "        ELSE last_reacted_seq END "
+            "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL "
+            "RETURNING last_event_seq, focal_channel",
+            session_id,
+            account_id,
+            is_user_message,
+            is_error_lifecycle,
+            tool_call_count_delta,
+            reacting_to_seq,
+            is_assistant_message,
+            is_stimulus,
+        )
+        if seq_row is None:
+            # Treat archived as "session no longer exists for write purposes."
+            # ``find_sessions_needing_inference`` (harness/sweep.py) already
+            # filters ``archived_at IS NULL``, so without this guard a
+            # POST to an archived session would return 201 + silently
+            # vanish: the row's ``last_event_seq`` increments, the event
+            # INSERTs, but the wake-sweep never picks it up. Surfacing as
+            # ``NotFoundError`` (→ 404 at the router) gives the caller an
+            # honest signal that the post is dropped. Same defect class
+            # as PR #521 (archived-connection inbound), one layer deeper.
+            raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+        seq = seq_row["last_event_seq"]
+        focal_at_arrival: str | None = seq_row["focal_channel"]
+
+        # Compute cumulative_tokens for message events against the
+        # as-rendered form so the column stays honest for non-focal
+        # notification markers (which occupy far fewer tokens than their
+        # full-content counterparts).
+        cum_tokens: int | None = None
+        if kind == "message":
+            prev = await _latest_cumulative_tokens(conn, session_id)
+            if is_user_message:
+                # TODO(vision): plumb ``agent.model`` through here so
+                # :func:`render_user_event` matches build-time output for
+                # image-bearing events.  Today this call site renders without
+                # ``model``/``session_id``, so attachments degrade to text
+                # markers and the per-event ``cumulative_tokens`` undercounts
+                # inlined images by ~55 LiteLLM tokens each (text marker ~30
+                # vs. ``image_url`` part ~85).  The undercount is bounded by
+                # ``model_token_ratio`` calibration in
+                # :func:`read_windowed_events`; see PR #218 for the
+                # follow-up plan to make append-time vision-aware.
+                #
+                # ``created_at`` isn't assigned until the INSERT below (DB
+                # DEFAULT now()), so pass a now() stand-in and render in the
+                # default UTC zone. For a non-UTC account the build-time
+                # envelope is a few tokens wider (variable-length IANA name);
+                # like the vision undercount above, the drift is absorbed by
+                # ``model_token_ratio`` calibration — and exact matching is
+                # impossible anyway, since a later tz config change re-renders
+                # history regardless of what was counted here.
+                #
+                # The count also pre-pays for adjacent-user handling: at
+                # compose time ``merge_adjacent_user_messages`` concatenates
+                # consecutive user inbounds (the old code inserted a ``.``
+                # separator instead). Reserving an assistant-separator's worth
+                # of tokens per user event keeps the windowing budget a
+                # conservative upper bound — the merge delimiter is smaller, so
+                # the post-window payload never exceeds ``window_max``.
+                rendered = render_user_event(
+                    data, orig_channel, focal_at_arrival, datetime.now(UTC)
+                )
+                separator = {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}
+                cum_tokens = (prev or 0) + approx_tokens([rendered, separator])
+            else:
+                cum_tokens = (prev or 0) + approx_tokens([data])
+
+        channel = await _derive_event_channel(
+            conn, session_id, kind, data, orig_channel, focal_at_arrival
+        )
+        tool_name = _derive_tool_name(kind, data)
+        is_error = _derive_is_error(kind, data)
+        sender_name = _derive_sender_name(kind, data)
+
+        row = await conn.fetchrow(
+            "INSERT INTO events "
+            "(id, session_id, seq, kind, data, cumulative_tokens, "
+            " orig_channel, focal_channel_at_arrival, channel, "
+            " role, tool_name, is_error, sender_name, account_id) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, "
+            " $10, $11, $12, $13, $14) RETURNING *",
+            new_id,
+            session_id,
+            seq,
+            kind,
+            data_json,
+            cum_tokens,
+            orig_channel,
+            focal_at_arrival,
+            channel,
+            role,
+            tool_name,
+            is_error,
+            sender_name,
+            account_id,
+        )
+        assert row is not None
+
+    # NOTIFY happens outside the transaction so subscribers don't see it
+    # before the row is committed. Use pg_notify (the function form) rather
+    # than the literal NOTIFY statement, because Postgres case-folds unquoted
+    # identifiers in NOTIFY <chan> — and our prefixed-ULID session ids
+    # contain uppercase letters. asyncpg's add_listener quotes the channel,
+    # preserving case, so the two would never match. pg_notify(text, text)
+    # treats the channel as a string literal and preserves it byte-for-byte.
+    await conn.execute("SELECT pg_notify($1, $2)", f"events_{session_id}", new_id)
+
+    # Connector fan-out: every assistant-with-tool_calls fires
+    # ``connector_calls_<type>`` per bound connection. The consumer's
+    # backfill filters by ``connector.tools_schema``, so over-fanout
+    # (when none of the tool_calls are custom) is harmless and avoids
+    # loading agent.tools on the append hot path.
+    if (
+        kind == "message"
+        and role == "assistant"
+        and isinstance(data, dict)
+        and data.get("tool_calls")
+    ):
+        for cid, connector in await _list_bound_connection_ids(
+            conn, session_id, account_id=account_id
+        ):
+            await conn.execute(
+                "SELECT pg_notify($1, $2)",
+                f"connector_calls_{connector}",
+                f"{session_id}|{cid}",
+            )
+    return _row_to_event(row)
+
+
+async def list_pending_calls_for_connector(
+    conn: asyncpg.Connection[Any],
+    connector: str,
+    *,
+    account_id: str,
+) -> list[dict[str, Any]]:
+    """Pending custom tool calls across every active connection of ``connector`` type.
+
+    Used by the runtime SSE at subscribe-time backfill.  A "pending"
+    call is a tool_call on ANY assistant message of a bound session
+    whose ``function.name`` is in ``connector.tools_schema`` and has no
+    paired tool_result event yet — not just the latest assistant turn, so
+    a custom call left pending while the model emitted a later turn is
+    still surfaced for execution (the connector-side facet of #741).  No
+    dependency on ``stop_reason`` — the source of truth is the event log.
+
+    Each emitted record carries ``connection_id`` so the runtime can
+    fan out to the right per-connection worker.
+
+    ``workspace_path`` is the session's host-side bind-mount source for
+    ``/workspace`` (the ``workspace_volume_path`` column); the connector
+    SDK uses it to resolve ``SandboxPath`` arguments to host paths.
+
+    Output dict shape::
+
+        {
+            "session_id": "sess_xxx",
+            "tool_call_id": "call_yyy",
+            "name": "telegram_send",
+            "arguments": "{...}",       # JSON string from the model
+            "focal_channel": "telegram/bot1/chat123" | None,
+            "connection_id": "conn_zzz",
+            "workspace_path": "/var/lib/aios/workspaces/acc_xxx/sess_xxx",
+        }
+    """
+    # The connector type's tool schema gates which tool_calls we surface.
+    # ``connectors`` is global per-type; no account scoping on its row.
+    cat_row = await conn.fetchrow(
+        "SELECT tools_schema AS tools FROM connectors WHERE connector = $1",
+        connector,
+    )
+    if cat_row is None:
+        return []
+    tools_data = parse_jsonb(cat_row["tools"])
+    name_set = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
+    if not name_set:
+        return []
+
+    # Find bound sessions of this connector type. Tenant isolation: both
+    # ``connections.account_id`` and ``sessions.account_id`` must match the
+    # bearer's account, otherwise a runtime token for tenant A could see
+    # tool-call arguments from tenants B, C, D under the same connector type.
+    bound_rows = await conn.fetch(
+        """
+        SELECT DISTINCT c.id AS connection_id,
+               s.id AS session_id, s.focal_channel,
+               s.workspace_volume_path AS workspace_path
+          FROM connections c
+          JOIN sessions s
+            ON s.archived_at IS NULL
+           AND s.account_id = $2
+           AND (EXISTS (SELECT 1 FROM bindings b
+                         WHERE b.connection_id = c.id
+                           AND b.archived_at IS NULL
+                           AND b.session_id = s.id)
+                OR EXISTS (SELECT 1 FROM chat_sessions cs
+                            WHERE cs.connection_id = c.id
+                              AND cs.session_id = s.id))
+         WHERE c.connector = $1
+           AND c.archived_at IS NULL
+           AND c.account_id = $2
+        """,
+        connector,
+        account_id,
+    )
+    if not bound_rows:
+        return []
+
+    by_session: dict[str, list[tuple[str, str | None]]] = {}
+    workspace_path_by_session: dict[str, str] = {}
+    for row in bound_rows:
+        by_session.setdefault(row["session_id"], []).append(
+            (row["connection_id"], row["focal_channel"])
+        )
+        workspace_path_by_session[row["session_id"]] = row["workspace_path"]
+
+    # Age guard scoped to the transmit/backfill path ONLY (#744): a pending
+    # send whose parent assistant turn is older than the threshold is skipped
+    # — excluded here, not expired (the event log is left untouched). The
+    # sibling read-model (Session.awaiting via _unresolved_tool_calls with no
+    # bound) still surfaces stale calls; this only stops the connector from
+    # re-transmitting weeks-dormant sends on a reconnect after a worker restart.
+    from aios.config import get_settings
+
+    max_age_seconds = get_settings().connector_backfill_max_age_seconds
+    raw_by_sid = await _unresolved_tool_calls(
+        conn, list(by_session.keys()), account_id=account_id, max_age_seconds=max_age_seconds
+    )
+    out: list[dict[str, Any]] = []
+    for sid, calls in raw_by_sid.items():
+        workspace_path = workspace_path_by_session[sid]
+        for conn_id, focal in by_session[sid]:
+            for tc in calls:
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                if name not in name_set:
+                    continue
+                out.append(
+                    {
+                        "session_id": sid,
+                        "tool_call_id": tc["id"],
+                        "name": name,
+                        "arguments": fn.get("arguments", "{}"),
+                        "connection_id": conn_id,
+                        "focal_channel": focal,
+                        "workspace_path": workspace_path,
+                    }
+                )
+    return out
+
+
+async def list_pending_calls_for_session_and_connection(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    session_id: str,
+    connection_id: str,
+) -> list[dict[str, Any]]:
+    """Same shape as :func:`list_pending_calls_for_connector` but scoped
+    to one session.  Used by the SSE NOTIFY tail to fetch calls only for
+    the session that just emitted, instead of re-scanning all bound
+    sessions.
+
+    Age-bounded identically to the subscribe-time backfill (#744): the
+    NOTIFY tail is a second transmit path into ``runtime_connector_calls_stream``,
+    so it passes the same ``settings.connector_backfill_max_age_seconds``
+    ceiling to ``_unresolved_tool_calls``.  Without it the tail would
+    re-transmit a weeks-stale dormant connector send the instant its
+    session emits any new event (firing the per-session NOTIFY) — the
+    ``emitted`` dedup in the stream only suppresses calls the backfill
+    already yielded, and the backfill now SKIPS stale calls, so they are
+    absent from ``emitted`` and would slip through here unbounded.  Both
+    emit paths must be bounded by the same setting; neither transmits a
+    connector send older than the threshold.  Like the backfill this is
+    skip-not-expire (the event log is untouched) and does NOT touch
+    ``Session.awaiting`` (the read-model sibling surfaces all unresolved
+    calls regardless of age, #741).
+    """
+    conn_row = await conn.fetchrow(
+        f"""
+        SELECT cat.tools_schema AS tools, s.focal_channel,
+               s.workspace_volume_path AS workspace_path
+          FROM connections c
+          JOIN connectors cat ON cat.connector = c.connector
+          JOIN sessions s
+            ON s.id = $3 AND s.archived_at IS NULL AND s.account_id = $2
+         WHERE c.id = $1 AND c.archived_at IS NULL AND c.account_id = $2
+           AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=3, account_id_param_index=2
+            )
+        }
+        """,
+        connection_id,
+        account_id,
+        session_id,
+    )
+    if conn_row is None:
+        return []
+    tools_data = parse_jsonb(conn_row["tools"])
+    name_set = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
+    if not name_set:
+        return []
+
+    # Same age guard as the subscribe-time backfill (#744): the NOTIFY tail
+    # is the second transmit path, so it must bound by the same setting or a
+    # stale send re-transmits the moment its session emits a new event.
+    from aios.config import get_settings
+
+    max_age_seconds = get_settings().connector_backfill_max_age_seconds
+    raw_by_sid = await _unresolved_tool_calls(
+        conn, [session_id], account_id=account_id, max_age_seconds=max_age_seconds
+    )
+    focal = conn_row["focal_channel"]
+    workspace_path = conn_row["workspace_path"]
+    out: list[dict[str, Any]] = []
+    for tc in raw_by_sid.get(session_id, []):
+        fn = tc.get("function") or {}
+        name = fn.get("name")
+        if name not in name_set:
+            continue
+        out.append(
+            {
+                "session_id": session_id,
+                "tool_call_id": tc["id"],
+                "name": name,
+                "arguments": fn.get("arguments", "{}"),
+                "connection_id": connection_id,
+                "focal_channel": focal,
+                "workspace_path": workspace_path,
+            }
+        )
+    return out
+
+
+async def _unresolved_tool_calls(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+    max_age_seconds: int | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return ``{session_id: [tool_call_dict]}`` for EVERY assistant's
+    tool_calls (per session) that have no paired tool_result event, in
+    chronological (seq-ascending) order.
+
+    Spans all assistant turns, not just the latest: an ``always_ask``
+    tool_call on an earlier assistant can stay unresolved while a later
+    assistant emits other tool_calls (e.g. the model reacts to an impatient
+    user message before the operator confirms).  Restricting to the latest
+    assistant (a ``DISTINCT ON (session_id) ... ORDER BY seq DESC``) hid such
+    still-pending calls from ``Session.awaiting`` — the read-model sibling of
+    the dispatch-side window-edge bug #737 (#741).
+
+    Pending-ness is purely an event-log property — the session row's
+    ``status`` and ``stop_reason`` are irrelevant. Tool_call dicts are
+    returned as-is from the assistant's ``data->'tool_calls'`` array.
+
+    ``max_age_seconds`` is an OPTIONAL age bound on the parent assistant
+    turn's ``created_at`` — when set, tool_calls whose assistant event is
+    older than that many seconds are excluded.  It defaults to ``None``
+    (no age filter) so the ``Session.awaiting`` / unresolved-read-model
+    callers keep surfacing ALL unresolved calls regardless of age (#741).
+    BOTH connector-SSE transmit paths pass a bound (#744): the
+    subscribe-time backfill (:func:`list_pending_calls_for_connector`)
+    AND the NOTIFY tail (:func:`list_pending_calls_for_session_and_connection`),
+    so neither re-transmits a weeks-dormant connector send — on reconnect
+    (backfill) or on session re-activation (tail).
+    """
+    if not session_ids:
+        return {}
+    # ``data ? 'tool_calls'`` is the partial-index predicate on
+    # ``events_assistant_tool_calls_idx``; the ``jsonb_array_length > 0``
+    # post-filter narrows to non-empty arrays (the index admits
+    # ``null`` / ``[]`` too).  Without the ``?`` conjunct the planner
+    # falls back to the wider btree backing the ``events``
+    # ``UNIQUE (session_id, seq)`` constraint.
+    #
+    # ``$3`` carries the optional age bound (seconds); NULL disables it so
+    # the awaiting read-model path is byte-for-byte unchanged (#741), while
+    # the connector backfill (#744) passes a positive value to drop stale
+    # sends.  ``make_interval`` keeps the bound parameterized rather than
+    # string-interpolated into the SQL.
+    asst_rows = await conn.fetch(
+        """
+        SELECT session_id, data
+          FROM events
+         WHERE session_id = ANY($1::text[])
+           AND account_id = $2
+           AND kind = 'message'
+           AND role = 'assistant'
+           AND data ? 'tool_calls'
+           AND jsonb_array_length(
+                 COALESCE(NULLIF(data->'tool_calls','null'::jsonb), '[]'::jsonb)
+               ) > 0
+           AND (
+                 $3::bigint IS NULL
+                 OR created_at >= now() - make_interval(secs => $3::bigint)
+               )
+         ORDER BY session_id, seq ASC
+        """,
+        session_ids,
+        account_id,
+        max_age_seconds,
+    )
+    if not asst_rows:
+        return {}
+    results_by_sid = await _tool_result_ids_by_session(conn, session_ids, account_id=account_id)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in asst_rows:
+        sid: str = row["session_id"]
+        data = parse_jsonb(row["data"])
+        completed: set[str] = results_by_sid.get(sid, set())
+        for tc in data.get("tool_calls") or []:
+            if tc.get("id") and tc["id"] not in completed:
+                out.setdefault(sid, []).append(tc)
+    return out
+
+
+async def _tool_result_ids_by_session(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, set[str]]:
+    """Map ``session_id → {tool_call_id}`` for every tool-role event."""
+    rows = await conn.fetch(
+        """
+        SELECT session_id, data->>'tool_call_id' AS tool_call_id
+          FROM events
+         WHERE session_id = ANY($1::text[])
+           AND account_id = $2
+           AND kind = 'message'
+           AND role = 'tool'
+        """,
+        session_ids,
+        account_id,
+    )
+    out: dict[str, set[str]] = {}
+    for r in rows:
+        tcid = r["tool_call_id"]
+        if tcid:
+            out.setdefault(r["session_id"], set()).add(tcid)
+    return out
+
+
+async def list_unresolved_tool_calls_batch(
+    conn: asyncpg.Connection[Any],
+    session_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """For each session, return every assistant's tool_calls that have no
+    paired tool_result, annotated with allow-lifecycle presence.
+
+    Spans all assistant turns, not just the latest, so a tool_call left
+    unresolved on an earlier turn still appears in ``Session.awaiting``
+    (#741).  Used by :func:`services.sessions.compute_awaiting` to build the
+    ``Session.awaiting`` derived view. Returned dicts have keys
+    ``tool_call_id``, ``name``, ``arguments``, ``has_allow_lifecycle``
+    — the caller classifies kind / needs_confirm using ``agent`` (and
+    the tool's ``classify_permission`` for arg-aware routes like
+    ``http_request``).
+    """
+    raw = await _unresolved_tool_calls(conn, session_ids, account_id=account_id)
+    if not raw:
+        return {}
+    allow_rows = await conn.fetch(
+        """
+        SELECT session_id, data->>'tool_call_id' AS tool_call_id
+          FROM events
+         WHERE session_id = ANY($1::text[])
+           AND account_id = $2
+           AND kind = 'lifecycle'
+           AND data->>'event' = 'tool_confirmed'
+           AND data->>'result' = 'allow'
+        """,
+        session_ids,
+        account_id,
+    )
+    allows_by_sid: dict[str, set[str]] = {}
+    for r in allow_rows:
+        tcid = r["tool_call_id"]
+        if tcid:
+            allows_by_sid.setdefault(r["session_id"], set()).add(tcid)
+
+    out: dict[str, list[dict[str, Any]]] = {}
+    for sid, calls in raw.items():
+        allows = allows_by_sid.get(sid, set())
+        entries: list[dict[str, Any]] = []
+        for tc in calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if not name:
+                continue
+            entries.append(
+                {
+                    "tool_call_id": tc["id"],
+                    "name": name,
+                    "arguments": fn.get("arguments", "{}"),
+                    "has_allow_lifecycle": tc["id"] in allows,
+                }
+            )
+        if entries:
+            out[sid] = entries
+    return out
+
+
+async def _list_bound_connection_ids(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[tuple[str, str]]:
+    """``(connection_id, connector)`` pairs for active connections bound to ``session_id``.
+
+    Called from :func:`append_event` when an assistant message with
+    tool_calls lands, to fan a per-connection notification on the
+    ``connector_calls_<connector>`` channel.  Tools-less connections
+    receive notifications and harmlessly no-op them on the consumer side.
+    """
+    rows = await conn.fetch(
+        f"""
+        SELECT c.id, c.connector
+          FROM connections c
+         WHERE c.archived_at IS NULL
+           AND c.account_id = $2
+           AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=1, account_id_param_index=2
+            )
+        }
+        """,
+        session_id,
+        account_id,
+    )
+    return [(row["id"], row["connector"]) for row in rows]
+
+
+async def is_session_bound_to_connection(
+    conn: asyncpg.Connection[Any], *, account_id: str, connection_id: str, session_id: str
+) -> bool:
+    """True iff ``connection_id`` is bound to ``session_id`` via either
+    of the two lineage paths:
+
+    * Active single_session binding on this connection whose
+      ``bindings.session_id`` matches.
+    * Row in ``chat_sessions`` for this ``(connection_id, session_id)``.
+
+    Centralised so route handlers don't inline the union of branches
+    every time they need to authorise a connector-driven write.
+    """
+    row = await conn.fetchval(
+        f"""
+        SELECT 1
+          FROM connections c
+         WHERE c.id = $1
+           AND c.archived_at IS NULL
+           AND c.account_id = $3
+           AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=2, account_id_param_index=3
+            )
+        }
+         LIMIT 1
+        """,
+        connection_id,
+        session_id,
+        account_id,
+    )
+    return row is not None
+
+
+async def read_events(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    after_seq: int = 0,
+    before: int | None = None,
+    kind: EventKind | None = None,
+    limit: int = 200,
+    newest_first: bool = False,
+    error_only: bool = False,
+) -> list[Event]:
+    # ``after_seq`` is a lower bound (forward, ASC by default); ``before`` is an
+    # upper bound for tail-anchored backward paging (chat-style reverse scroll),
+    # which is always newest-first. Both compose with ``kind``/``error_only``.
+    order = "DESC" if newest_first or before is not None else "ASC"
+    params: list[Any] = [session_id, account_id]
+    where = "session_id = $1 AND account_id = $2"
+    if after_seq:
+        params.append(after_seq)
+        where += f" AND seq > ${len(params)}"
+    if before is not None:
+        params.append(before)
+        where += f" AND seq < ${len(params)}"
+    if kind is not None:
+        params.append(kind)
+        where += f" AND kind = ${len(params)}"
+    if error_only:
+        where += " AND is_error IS TRUE"
+    params.append(limit)
+    rows = await conn.fetch(
+        f"SELECT * FROM events WHERE {where} ORDER BY seq {order} LIMIT ${len(params)}",
+        *params,
+    )
+    return [_row_to_event(r) for r in rows]
+
+
+async def get_event(
+    conn: asyncpg.Connection[Any], session_id: str, event_id: str, *, account_id: str
+) -> Event:
+    row = await conn.fetchrow(
+        "SELECT * FROM events WHERE id = $1 AND session_id = $2 AND account_id = $3",
+        event_id,
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(f"event {event_id} not found", detail={"id": event_id})
+    return _row_to_event(row)
+
+
+async def get_session_event_stats(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> tuple[int, datetime | None]:
+    row = await conn.fetchrow(
+        "SELECT COUNT(*) AS total, MAX(created_at) AS last_at FROM events "
+        "WHERE session_id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    assert row is not None  # COUNT(*) always returns a row
+    return int(row["total"]), row["last_at"]
+
+
+async def read_message_events(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[Event]:
+    """Read every message-kind event for a session in chronological order.
+
+    Used by callers that need the full unwindowed log (e.g.
+    ``confirm_tool_deny`` searching for a tool_call_id).
+    """
+    rows = await conn.fetch(
+        "SELECT * FROM events WHERE session_id = $1 AND account_id = $2 "
+        "AND kind = 'message' ORDER BY seq ASC",
+        session_id,
+        account_id,
+    )
+    return [_row_to_event(r) for r in rows]
+
+
+async def list_session_channels(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[str]:
+    """Distinct channel addresses the session has interacted with, sorted.
+
+    Derived from the event log's ``channel`` column (stamped at append
+    time per :func:`_derive_event_channel`).
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT channel
+          FROM events
+         WHERE session_id = $1
+           AND account_id = $2
+           AND kind = 'message'
+           AND channel IS NOT NULL
+         ORDER BY channel
+        """,
+        session_id,
+        account_id,
+    )
+    return [str(r["channel"]) for r in rows]
+
+
+async def read_windowed_events(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    window_min: int,
+    window_max: int,
+    model: str,
+    overhead_local: int,
+) -> WindowedEvents:
+    """Read message events for the session's trailing context window.
+
+    Uses the ``cumulative_tokens`` column to compute the chunked-window
+    snap boundary (same math as :func:`~aios.harness.window.select_window`)
+    and loads only the events past that boundary.
+
+    ``cumulative_tokens`` is stored in model-agnostic units (see
+    :func:`aios.harness.tokens.approx_tokens`), so the raw value
+    systematically diverges from what the provider actually counts —
+    ~18 % low on Sonnet 4.6, ~34 % low on Opus 4.7.  This function
+    corrects for that at read time: ``window_min`` / ``window_max`` are
+    interpreted as provider tokens, ``total_effective = total_local * R``
+    where ``R = model_token_ratio(model)``, and the drop boundary is
+    translated back to local units for the ``cumulative_tokens`` index
+    scan.  When the model has fewer than ``model_token_ratio``'s sample
+    threshold, ``R`` is ``1.0`` and the math reduces to the plain
+    chunked-snap algorithm.
+
+    ``overhead_local`` is the token cost the caller will add on top of
+    the returned events — system prompt plus tool schemas — in local
+    (``approx_tokens``) units.  It is NOT included in
+    ``cumulative_tokens``, so the windower has to subtract it from the
+    effective budget up-front or the sent prompt will exceed
+    ``window_max`` by the overhead amount.  Callers that don't have any
+    such overhead (preview tooling, test scaffolds) pass ``0``.
+
+    ``model`` must be the session's currently-active model string —
+    ``agent.model`` on the session's pinned agent/version.  The same
+    string is what :func:`~aios.harness.loop.run_session_step` stamps on
+    ``model_request_end`` spans, so stamp-side and query-side stay
+    partitioned on identical keys.
+
+    Prefix-cache invariant: the plain chunked-snap algorithm gave a
+    *strict* guarantee of byte-identical prompt prefix within a snap
+    chunk.  With the ratio correction this remains stable in practice
+    because :func:`model_token_ratio` uses a lifetime aggregate and
+    standard-error bucketing, so mature calibrations do not drift on every
+    new sample.  Early calibrations are coarse by design and converge as
+    the sample count grows.
+
+    Falls back to :func:`read_message_events` (loading all events) when
+    cumulative data is not available (pre-backfill sessions or rolling
+    deploys) or when the entire session fits within ``window_max``.
+
+    When the boundary excludes message events, the result carries a
+    :class:`~aios.harness.window.WindowOmission` (issue #738), computed
+    against the same ``cumulative_tokens`` boundary as the retained scan
+    — exact complements.  Cache-stability rationale lives on the class.
+    """
+    # Index seek: total cumulative tokens from the latest message event.
+    total = await _latest_cumulative_tokens(conn, session_id)
+
+    # Fallback: no cumulative data yet — load everything.
+    if total is None:
+        return WindowedEvents(
+            events=await queries.read_message_events(conn, session_id, account_id=account_id),
+            omission=None,
+        )
+
+    ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
+
+    # Shrink the effective window by the caller's overhead contribution.
+    # Apply R to overhead_local up-front so the subtraction happens in the
+    # same effective (provider-token) space tokens_to_drop operates in.
+    overhead_effective = round(overhead_local * ratio)
+    events_window_max = window_max - overhead_effective
+    events_window_min = max(0, window_min - overhead_effective)
+    if events_window_max <= 0:
+        raise ValueError(
+            f"system+tools overhead ({overhead_effective} provider tokens) "
+            f"exceeds window_max ({window_max}); no budget remains for events"
+        )
+
+    total_effective = round(total * ratio)
+    if total_effective <= events_window_max:
+        return WindowedEvents(
+            events=await queries.read_message_events(conn, session_id, account_id=account_id),
+            omission=None,
+        )
+
+    from aios.harness.tokens import tokens_to_drop
+
+    # Forward-convert local → effective with plain rounding: best-estimate
+    # of the provider-token total.  Back-convert effective → local with
+    # ceil: deliberately asymmetric so the post-drop remaining fits under
+    # ``window_max`` even when ratio error would otherwise leave one
+    # message straddling the boundary.
+    drop_effective = tokens_to_drop(
+        total_effective, window_min=events_window_min, window_max=events_window_max
+    )
+    if drop_effective == 0:
+        return WindowedEvents(
+            events=await queries.read_message_events(conn, session_id, account_id=account_id),
+            omission=None,
+        )
+
+    drop = math.ceil(drop_effective / ratio)
+
+    # Bounded range scan: only events past the boundary.
+    rows = await conn.fetch(
+        "SELECT * FROM events "
+        "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
+        "AND cumulative_tokens > $2 "
+        "ORDER BY seq ASC",
+        session_id,
+        drop,
+        account_id,
+    )
+
+    # The omitted complement: same boundary expression as the retained
+    # scan (``<=`` vs ``>``), and a seq-prefix of the log — so its
+    # ``min(created_at)`` IS the conversation start, and NULL means the
+    # boundary excludes nothing (oversized first event straddling it).
+    # The aggregate re-scans the omitted span each windowed step; if it
+    # ever profiles hot, the escape hatch is a ``cumulative_messages``
+    # counter column (the ``cumulative_tokens`` mechanism).
+    omission_row = await conn.fetchrow(
+        "SELECT min(created_at) AS began_at, "
+        "count(*) FILTER (WHERE role IN ('user', 'assistant')) AS omitted_messages "
+        "FROM events "
+        "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
+        "AND cumulative_tokens <= $2",
+        session_id,
+        drop,
+        account_id,
+    )
+    assert omission_row is not None  # aggregate query always returns one row
+    omission = (
+        WindowOmission(
+            began_at=omission_row["began_at"],
+            omitted_messages=omission_row["omitted_messages"],
+        )
+        if omission_row["began_at"] is not None
+        else None
+    )
+    return WindowedEvents(events=[_row_to_event(r) for r in rows], omission=omission)
