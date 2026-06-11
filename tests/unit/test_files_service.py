@@ -7,6 +7,7 @@ Filename sanitisation lives in ``volumes.safe_filename`` and is covered by
 from __future__ import annotations
 
 import hashlib
+import os
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
@@ -209,3 +210,65 @@ class TestStageUploadSessionNotFound:
         # Short-circuited before any disk activity.
         uploads_dir = _workspace / "_uploads" / "sess_x"
         assert not uploads_dir.exists()
+
+
+class TestStageUploadOwnership:
+    """#959: under root the worker chowns newly-created _uploads tree
+    components to the configured owner so the api (uid 1000) can write."""
+
+    async def test_upload_chowns_uploads_root_and_session_dir_as_root(
+        self, _workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspaces_owner_uid", 1000)
+        monkeypatch.setattr(settings, "workspaces_owner_gid", 1000)
+        chowns: list[tuple[str, int, int]] = []
+        # ensure_owned_dir uses os.lchown (symlink-swap-race-safe; #959 FIX C).
+        monkeypatch.setattr(os, "lchown", lambda p, u, g: chowns.append((str(p), u, g)))
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+        account_id = "acc_test_stub"
+        upload = _FakeUpload(b"data", filename="a.bin")
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
+        with _patch_session_get(), _patch_insert_file({}):
+            await stage_upload(pool, session_id="sess_x", upload=upload, account_id=account_id)
+
+        chowned = {p for p, _u, _g in chowns}
+        assert str(_workspace / "_uploads") in chowned
+        assert str(_workspace / "_uploads" / "sess_x") in chowned
+        assert all((u, g) == (1000, 1000) for _p, u, g in chowns)
+
+    async def test_upload_second_call_no_op_chown(
+        self, _workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = get_settings()
+        monkeypatch.setattr(settings, "workspaces_owner_uid", 1000)
+        monkeypatch.setattr(settings, "workspaces_owner_gid", 1000)
+        chowns: list[tuple[str, int, int]] = []
+        # ensure_owned_dir uses os.lchown (symlink-swap-race-safe; #959 FIX C).
+        monkeypatch.setattr(os, "lchown", lambda p, u, g: chowns.append((str(p), u, g)))
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+        account_id = "acc_test_stub"
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
+        with _patch_session_get(), _patch_insert_file({}):
+            await stage_upload(
+                pool,
+                session_id="sess_x",
+                upload=_FakeUpload(b"one", filename="one.bin"),
+                account_id=account_id,
+            )
+            chowns.clear()
+            # Second file, same session: _uploads and _uploads/sess_x already
+            # exist, so neither gets re-chowned. (The per-file_id leaf is an
+            # api-side bare mkdir that does not chown.)
+            await stage_upload(
+                pool,
+                session_id="sess_x",
+                upload=_FakeUpload(b"two", filename="two.bin"),
+                account_id=account_id,
+            )
+
+        chowned = {p for p, _u, _g in chowns}
+        assert str(_workspace / "_uploads") not in chowned
+        assert str(_workspace / "_uploads" / "sess_x") not in chowned

@@ -5,8 +5,10 @@
 # utilities, curl for HTTP fetches, git, ripgrep for the grep/glob tools,
 # jq for JSON-from-bash composition (notably ``tool <name> '{...}' | jq
 # ...`` flows), and Node + npm so agents can ``npm install -g`` into the
-# persistent workspace npm prefix without first apt-installing the
-# runtime themselves. No other languages; no package manager state at
+# image's default (system) npm prefix without first apt-installing the
+# runtime themselves. Such globals persist across calls/idle because #916
+# durable sandboxes snapshot the whole container rootfs — not via any
+# /workspace redirect. No other languages; no package manager state at
 # runtime (apt lists are cleaned).
 #
 # Published as ``ghcr.io/eumemic/aios-sandbox`` by

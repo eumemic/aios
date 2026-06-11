@@ -38,6 +38,7 @@ from aios.config import get_settings
 from aios.logging import get_logger
 from aios.sandbox._subprocess import run_subprocess_with_timeout
 from aios.sandbox.volumes import (
+    ensure_owned_dir,
     github_repo_cache_dir,
     github_repo_cache_lock_path,
     github_repos_cache_root,
@@ -134,7 +135,7 @@ async def ensure_cache_clone(repo_url: str, token: str) -> Path:
     and continues.
     """
     settings = get_settings()
-    github_repos_cache_root().mkdir(parents=True, exist_ok=True)
+    ensure_owned_dir(github_repos_cache_root())
     url_key = url_hash(repo_url)
     cache_dir = github_repo_cache_dir(url_key)
     lock_path = github_repo_cache_lock_path(url_key)
@@ -162,7 +163,7 @@ async def ensure_cache_clone(repo_url: str, token: str) -> Path:
             # Clean any partial dir left by a crashed prior attempt.
             if cache_dir.exists():
                 shutil.rmtree(cache_dir)
-            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            ensure_owned_dir(cache_dir.parent)
             rc, _stdout, stderr = await _run_git(
                 ["clone", "--bare", auth_url, str(cache_dir)],
                 op="clone --bare",
@@ -263,7 +264,7 @@ async def ensure_session_working_tree(
     session_timeout_s = settings.github_clone_session_timeout_seconds
 
     work_dir = session_repo_working_tree_dir(session_id, resource_id)
-    session_repos_root(session_id).mkdir(parents=True, exist_ok=True)
+    ensure_owned_dir(session_repos_root(session_id))
 
     if work_dir.exists():
         shutil.rmtree(work_dir)

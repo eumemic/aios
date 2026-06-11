@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import builtins
 import contextlib
+import inspect
 import os
 import sys
 import traceback
@@ -65,9 +66,11 @@ class AgentError(Exception):
     (the bubble). ``kind`` distinguishes the failure mode: ``None`` for an explicit
     ``error()`` from the child, ``"child_errored"`` for a model failure,
     ``"child_gone"`` if the child was archived/deleted before answering,
-    ``"timeout"`` if the call outran its wall-clock budget without responding, and
+    ``"timeout"`` if the call outran its wall-clock budget without responding,
     ``"no_return"`` for an idle-without-responding child (see
-    :class:`AgentNoReturnError`).
+    :class:`AgentNoReturnError`), ``"agent_not_found"`` if the named agent does not
+    exist, and ``"bad_agent_call"`` for a malformed call (a non-string ``agent_id``
+    or an invalid ``output_schema``).
     """
 
     def __init__(self, message: str, *, kind: str | None = None) -> None:
@@ -140,8 +143,10 @@ def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
     ``input`` is **required and must not be None** — the child needs a real first
     message to act on (a child born with no user message would sit idle forever and
     poison the totality backstop). Pass a ``str`` (delivered verbatim) or any
-    JSON-serialisable value (delivered as canonical JSON). The error surfaces as a
-    normal exception in the author's script, so a bad call fails the run loudly.
+    JSON-serialisable value (delivered as canonical JSON). A missing agent or a
+    malformed call (non-string ``agent_id`` / invalid ``output_schema``) surfaces as
+    a catchable :class:`AgentError` at the ``await`` — ``try/except`` it like any
+    other agent failure, or let it propagate to fail the run / ``None`` the branch.
     """
     if input is None:
         raise ValueError("agent() requires a non-None input (the child's first message)")
@@ -194,11 +199,34 @@ def parallel(thunks: Any) -> _ParallelAwait:
     return _ParallelAwait([_branch(t) for t in thunks])
 
 
-def _pipeline_thunk(item: Any, stages: tuple[Any, ...]) -> Any:
+def _stage_arity(stage: Any) -> int:
+    """How many of ``(prev, item, index)`` to hand ``stage`` — inspected once at
+    construction. A ``*args`` stage opts into all three; a plain stage gets its count
+    of positional parameters, clamped to ``[1, 3]`` (so a 0-param stage still receives
+    ``prev``, a >3 stage gets the three available). A callable whose signature can't be
+    inspected (e.g. a C builtin) falls back to the legacy 1-arg (prev-only) call."""
+    try:
+        params = inspect.signature(stage).parameters.values()
+    except (ValueError, TypeError):
+        return 1  # non-inspectable callable (e.g. C builtin) → legacy 1-arg (prev only)
+    if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params):
+        return 3  # *args → all three (prev, item, index)
+    n = sum(
+        1
+        for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    return min(max(n, 1), 3)  # clamp: 0-param → 1, >3 → 3
+
+
+def _pipeline_thunk(
+    item: Any, index: int, stages: tuple[Any, ...], arities: tuple[int, ...]
+) -> Any:
     async def run() -> Any:
         value = item
-        for stage in stages:
-            produced = stage(value)
+        for stage, arity in zip(stages, arities, strict=True):
+            args = (value, item, index)[:arity]
+            produced = stage(*args)
             value = await produced if hasattr(produced, "__await__") else produced
         return value
 
@@ -210,10 +238,20 @@ def pipeline(items: Any, *stages: Any) -> _ParallelAwait:
     chain advances on its own, with no barrier between stages. Returns a list of
     final values, one per item in order (``None`` for an item whose chain failed with
     an :class:`AgentError`; any other exception fails the whole run, per
-    :func:`parallel`). Each stage is ``stage(value) -> awaitable | value``; a
-    non-awaitable return is used as-is (a sync transform). Composition over
-    :func:`parallel`."""
-    return parallel([_pipeline_thunk(item, stages) for item in items])
+    :func:`parallel`).
+
+    Each stage may declare 1, 2, or 3 of ``(prev, item, index)``: ``prev`` is the
+    previous stage's output (the item itself for the first stage), ``item`` is the
+    original element, and ``index`` is its position in ``items``. A stage's arity is
+    inspected once at construction. A ``*args`` stage receives all three; a callable
+    whose signature can't be inspected receives only ``prev`` (the legacy 1-arg
+    shape); every stage must accept at least ``prev``. A stage returns
+    ``awaitable | value`` — a non-awaitable return is used as-is (a sync transform).
+    Composition over :func:`parallel`."""
+    arities = tuple(_stage_arity(s) for s in stages)
+    return parallel(
+        [_pipeline_thunk(item, index, stages, arities) for index, item in enumerate(items)]
+    )
 
 
 # Annotations (log/phase) produced during the branch step currently being driven.
