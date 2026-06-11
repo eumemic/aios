@@ -18,8 +18,8 @@ from typing import Any
 
 import pytest
 
-from aios.workflows.determinism import content_hash
-from aios.workflows.host_launcher import HostOutcome, run_script_host
+from aios.workflows.determinism import content_hash, storable_text
+from aios.workflows.host_launcher import EmittedAnnotation, HostOutcome, run_script_host
 from aios.workflows.wf_script_host import MAX_PARALLEL_FANOUT
 
 
@@ -686,13 +686,118 @@ async def test_cpu_rlimit_derives_from_the_scaled_deadline() -> None:
     assert 61 <= int(big.value) <= 62  # int(0.01 + ~2*30) + 1
 
 
-async def test_log_goes_to_stderr_not_the_frame_stream() -> None:
-    out = await _run("async def main(input):\n    log('diagnostic')\n    return 7")
-    assert out.kind == "returned"
-    assert out.value == 7  # stdout frame stream parsed cleanly despite the log()
-    assert "diagnostic" in out.stderr
-
-
 async def test_print_is_unavailable_so_author_cannot_corrupt_stdout() -> None:
     out = await _run("async def main(input):\n    print('x')\n    return 1")
     assert out.kind == "raised"  # print is not in SAFE_BUILTINS
+
+
+# ─── log() / phase() as journaled annotations (B-783) ────────────────────────
+
+
+def _ann_key(kind: str, text: str, *, path: str = "") -> str:
+    """The branch-local annotation call_key the host derives — ``path`` is the
+    parallel branch prefix ("" for root, "0.0/" for the first child)."""
+    return f"{path}sha:{content_hash('annotation', {'kind': kind, 'text': text})}#0"
+
+
+async def test_log_is_a_journaled_annotation_not_stderr() -> None:
+    # The stderr reversion: log() no longer writes stderr — it emits a journaled
+    # annotation frame, keyed branch-locally so the journal can dedup it across replays.
+    out = await _run("async def main(input):\n    log('diagnostic')\n    return 7")
+    assert out.kind == "returned"
+    assert out.value == 7
+    assert "diagnostic" not in out.stderr  # stderr is crash-diagnostics-only now
+    assert out.annotations == [
+        EmittedAnnotation(
+            call_key=_ann_key("log", "diagnostic"),
+            payload={"kind": "log", "text": "diagnostic"},
+        )
+    ]
+
+
+async def test_phase_is_a_journaled_annotation() -> None:
+    out = await _run("async def main(input):\n    phase('build')\n    return 1")
+    assert out.kind == "returned"
+    assert out.annotations == [
+        EmittedAnnotation(
+            call_key=_ann_key("phase", "build"), payload={"kind": "phase", "text": "build"}
+        )
+    ]
+
+
+async def test_log_space_joins_args_like_print() -> None:
+    out = await _run("async def main(input):\n    log('a', 1, True)\n    return 1")
+    assert out.annotations[0].payload == {"kind": "log", "text": "a 1 True"}
+
+
+async def test_annotations_emit_in_order_before_the_frontier() -> None:
+    # phase() then log() then a suspending gate: both annotations are emitted (in
+    # execution order) alongside the one frontier capability.
+    out = await _run(
+        "async def main(input):\n    phase('p')\n    log('l')\n    return await gate(1)"
+    )
+    assert out.kind == "suspended"
+    assert [(a.payload["kind"], a.payload["text"]) for a in out.annotations] == [
+        ("phase", "p"),
+        ("log", "l"),
+    ]
+    assert len(out.emitted) == 1  # the gate frontier
+
+
+async def test_annotation_call_key_is_stable_across_replays() -> None:
+    # The host re-emits annotations on EVERY wake with the IDENTICAL call_key; emit-once
+    # is the journal's job (ON CONFLICT), so stability of the key across wakes is what
+    # the host must guarantee.
+    src = "async def main(input):\n    log('once')\n    r = await gate(1)\n    return r"
+    first = await _run(src)
+    assert [a.payload["text"] for a in first.annotations] == ["once"]
+    gate_key = first.emitted[0].call_key
+    second = await _run(src, memo={gate_key: {"ok": "v"}})
+    assert second.kind == "returned"
+    assert second.value == "v"
+    assert second.annotations[0].call_key == first.annotations[0].call_key
+
+
+_PARALLEL_LOG_SRC = """
+    async def main(input):
+        def mk(n):
+            async def run():
+                log('hi')
+                return await gate(n)
+            return run
+        return await parallel([mk(1), mk(2)])
+"""
+
+
+async def test_parallel_branches_key_annotations_locally() -> None:
+    # Both branches log the identical text 'hi'. Branch-local keying (path prefix)
+    # makes the two annotations DISTINCT call_keys — they neither collide nor dedupe
+    # each other — which is exactly why annotations route through the branch keyer.
+    out = await _run(_PARALLEL_LOG_SRC)
+    assert out.kind == "suspended"
+    assert len(out.annotations) == 2
+    assert all(a.payload == {"kind": "log", "text": "hi"} for a in out.annotations)
+    assert {a.call_key for a in out.annotations} == {
+        _ann_key("log", "hi", path="0.0/"),
+        _ann_key("log", "hi", path="0.1/"),
+    }
+
+
+async def test_log_with_unstorable_text_does_not_kill_the_run() -> None:
+    # NUL / unpaired surrogate is common in logged tool output (decoded bytes, JSON with
+    # control chars). A diagnostic must never fail the run, so the host sanitizes the
+    # text rather than letting the call_key validator raise (which would error the run).
+    out = await _run(
+        "async def main(input):\n    log('a' + chr(0) + chr(0xD800) + 'b')\n    return 9"
+    )
+    assert out.kind == "returned"
+    assert out.value == 9
+    text = out.annotations[0].payload["text"]
+    assert "\x00" not in text
+    text.encode("utf-8")  # storable: raises if a lone surrogate survived
+
+
+def test_storable_neutralizes_nul_and_surrogates_losslessly() -> None:
+    assert storable_text("ordinary text — é 🎉") == "ordinary text — é 🎉"
+    assert "\x00" not in storable_text("a\x00b")
+    storable_text("x" + chr(0xD800)).encode("utf-8")  # no raise → storable

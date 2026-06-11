@@ -96,6 +96,19 @@ def validate_value(x: Any, *, path: str = "input") -> None:
     )
 
 
+def storable_text(text: str) -> str:
+    """Neutralize the two byte classes :func:`validate_value` rejects — NUL and unpaired
+    surrogates (Postgres jsonb cannot store either) — so the result is always storable.
+
+    The sanitize-sibling of :func:`validate_value`'s reject, over the same domain: a
+    capability input fails loudly on an unstorable byte (it is the author's data), but a
+    *diagnostic* string (``log()``/``phase()`` text) must be total — a progress line can
+    never fail the run — so it is neutralized instead. Lossless for ordinary text: only
+    the rejected bytes are replaced (NUL survives the UTF-8 round-trip, so it needs its
+    own pass)."""
+    return text.encode("utf-8", "replace").decode("utf-8").replace("\x00", "�")
+
+
 def _canon(x: Any) -> Any:
     """Collapse integer-valued floats (``1.0`` → ``1``) and tuples (→ lists) so
     equal content produces the same JSON token whichever form the author built."""

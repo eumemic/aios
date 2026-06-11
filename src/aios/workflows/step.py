@@ -313,6 +313,23 @@ async def _run_workflow_step_body(
     # the txn commits (below), so call_started is visible before a task can signal+wake.
     tools_to_launch: list[tuple[str, str, Any]] = []
     async with pool.acquire() as conn:
+        # Journal this wake's progress annotations (log()/phase()) FIRST — before the
+        # raised/returned/suspended dispatch — so a line emitted just before a crash or
+        # a return is durably captured, ordered ahead of this wake's call_started /
+        # run_completed. The run is still 'running' here (the lease flip above), so the
+        # append's status guard admits them. Emit-once across replays is the memo's job:
+        # a re-emitted annotation hits ON CONFLICT (run_id, call_key, type) — type
+        # 'annotation' — and no-ops, preserving the original seq.
+        for ann in outcome.annotations:
+            await wf_queries.append_run_event(
+                conn,
+                account_id=account_id,
+                run_id=run_id,
+                type="annotation",
+                call_key=ann.call_key,
+                payload=ann.payload,
+            )
+
         if outcome.kind == "raised":
             if outcome.error_kind == "script_host_spawn_failed":
                 # Failure to *spawn* the host (EAGAIN/ENOMEM at fork) is a transient

@@ -2,6 +2,7 @@ from enum import Enum
 
 
 class WfRunEventType(str, Enum):
+    ANNOTATION = "annotation"
     CALL_RESULT = "call_result"
     CALL_STARTED = "call_started"
     RUN_COMPLETED = "run_completed"

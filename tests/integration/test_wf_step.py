@@ -293,6 +293,131 @@ async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool
     assert await _events(pool, run_id) == before  # journal unchanged
 
 
+# ─── annotations — log()/phase() journaling (B-783) ──────────────────────────
+
+
+async def _typed(pool: asyncpg.Pool[Any], run_id: str) -> list[tuple[str, str | None, str | None]]:
+    """The journal as ``(type, kind, text)`` — ``kind``/``text`` are an annotation's
+    payload, ``None`` for every other event type."""
+    async with pool.acquire() as conn:
+        rows = await wf_queries.list_run_events(conn, run_id)
+    return [
+        (e.type, e.payload.get("kind"), e.payload.get("text"))
+        if e.type == "annotation"
+        else (e.type, None, None)
+        for e in rows
+    ]
+
+
+_ANN_SCRIPT = (
+    "async def main(input):\n"
+    "    phase('start')\n"
+    "    log('before', 'gate')\n"
+    "    r = await gate({'q': 'ok?'})\n"
+    "    log('after gate')\n"
+    "    return r\n"
+)
+
+
+async def test_annotations_journaled_in_execution_order(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    run_id = await _make_run(pool, _ANN_SCRIPT)
+
+    # Wake 1: phase() + log() emit before the gate frontier.
+    await run_workflow_step(run_id)
+    assert [(t, k is not None) for _s, t, k in await _events(pool, run_id)] == [
+        ("run_started", False),
+        ("annotation", True),
+        ("annotation", True),
+        ("call_started", True),
+    ]
+    gate_key = next(k for _s, t, k in await _events(pool, run_id) if t == "call_started")
+    assert gate_key is not None
+    await service.resume_gate(pool, run_id=run_id, call_key=gate_key, result="yes")
+
+    # Wake 2: replay re-emits the first two annotations (deduped by the memo), harvests
+    # the gate, then emits the post-gate log (new) — so the journal stays in execution
+    # order with NO duplicate annotation rows.
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert await _typed(pool, run_id) == [
+        ("run_started", None, None),
+        ("annotation", "phase", "start"),
+        ("annotation", "log", "before gate"),  # log(*args) space-joined
+        ("call_started", None, None),
+        ("call_result", None, None),
+        ("annotation", "log", "after gate"),
+        ("run_completed", None, None),
+    ]
+
+
+async def test_replay_does_not_duplicate_annotations(wf_runtime: asyncpg.Pool[Any]) -> None:
+    # Re-driving the suspended run WITHOUT resolving the gate would quiet-wake (no
+    # re-emit); instead force a real replay by resolving the gate, and assert the two
+    # pre-gate annotations each appear exactly once though wake 2 re-emitted them.
+    pool = wf_runtime
+    run_id = await _make_run(pool, _ANN_SCRIPT)
+    await run_workflow_step(run_id)
+    gate_key = next(k for _s, t, k in await _events(pool, run_id) if t == "call_started")
+    assert gate_key is not None
+    await service.resume_gate(pool, run_id=run_id, call_key=gate_key, result="yes")
+    await run_workflow_step(run_id)
+    annotations = [(k, txt) for typ, k, txt in await _typed(pool, run_id) if typ == "annotation"]
+    assert annotations == [("phase", "start"), ("log", "before gate"), ("log", "after gate")]
+
+
+async def test_annotation_write_once_first_text_wins(wf_runtime: asyncpg.Pool[Any]) -> None:
+    # The memo UNIQUE (run_id, call_key, type) makes annotation text write-once per
+    # call_key: a replay that re-emits the SAME key with edited text is a no-op, and the
+    # original row stands (correct under replay — a deterministic script can't change a
+    # position's text, but a hand-edited script source must never rewrite history).
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    async with pool.acquire() as conn:
+        first = await wf_queries.append_run_event(
+            conn,
+            account_id="acc_wf",
+            run_id=run_id,
+            type="annotation",
+            call_key="sha:ann#0",
+            payload={"kind": "log", "text": "first"},
+        )
+        second = await wf_queries.append_run_event(
+            conn,
+            account_id="acc_wf",
+            run_id=run_id,
+            type="annotation",
+            call_key="sha:ann#0",
+            payload={"kind": "log", "text": "EDITED"},
+        )
+    assert first is not None
+    assert second is None  # ON CONFLICT (run_id, call_key, type) → no-op, no seq consumed
+    annotations = [(k, txt) for typ, k, txt in await _typed(pool, run_id) if typ == "annotation"]
+    assert annotations == [("log", "first")]
+
+
+async def test_annotation_before_crash_is_captured(wf_runtime: asyncpg.Pool[Any]) -> None:
+    # The debuggability payoff: a log() just before an author exception is journaled
+    # AHEAD of the run_completed(errored) bookend, so an operator can see how far a
+    # crashing run got.
+    pool = wf_runtime
+    run_id = await _make_run(
+        pool,
+        "async def main(input):\n    log('about to fail')\n    raise ValueError('boom')\n",
+    )
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "errored"
+    assert await _typed(pool, run_id) == [
+        ("run_started", None, None),
+        ("annotation", "log", "about to fail"),
+        ("run_completed", None, None),
+    ]
+
+
 # ─── cancel — user-requested termination via the cancel signal ───────────────
 
 

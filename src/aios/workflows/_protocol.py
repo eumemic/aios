@@ -5,12 +5,15 @@ Wire format: a 4-byte big-endian length prefix followed by that many bytes of
 UTF-8 JSON. Stdlib-only — imported by the credential-free child, so it must never
 pull in anything from ``aios.harness``/``aios.db``/``aios.crypto``.
 
-Message flow (the child emits zero or more frontier capabilities, then a terminal;
-a single-coroutine run emits at most one, a ``parallel``/``pipeline`` fan-out emits
-one EMIT per open branch capability before the terminal):
+Message flow (the child emits zero or more ANNOTATION + frontier-capability frames,
+then a terminal; a single-coroutine run emits at most one EMIT, a
+``parallel``/``pipeline`` fan-out emits one EMIT per open branch capability before
+the terminal; ANNOTATION frames — ``log()``/``phase()`` progress — interleave freely,
+fire-and-forget, in execution order):
 
     parent → child:  INIT {source, input, memo}
-    child  → parent: EMIT {capability_id, call_key, spec} *  (zero or more)
+    child  → parent: ANNOTATION {call_key, payload} *  (zero or more, interleaved)
+                     EMIT {capability_id, call_key, spec} *  (zero or more)
                      then exactly one of SUSPENDED | RETURNED {value} | RAISED {repr, traceback}
 """
 
@@ -26,6 +29,7 @@ MAX_FRAME_BYTES = 64 * 1024 * 1024  # guard against a corrupt/oversized length p
 # message "type" tags
 INIT = "init"
 EMIT = "emit"
+ANNOTATION = "annotation"
 SUSPENDED = "suspended"
 RETURNED = "returned"
 RAISED = "raised"
