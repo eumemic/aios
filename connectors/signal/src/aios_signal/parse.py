@@ -13,7 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from .addressing import ChatType
+
+log = structlog.get_logger(__name__)
 
 # Unicode Object Replacement Character used by Signal for @-mentions.
 MENTION_PLACEHOLDER = "\ufffc"
@@ -113,11 +117,19 @@ def parse_envelope(
 ) -> InboundMessage | None:
     source_uuid = envelope.get("sourceUuid")
     if not isinstance(source_uuid, str) or not source_uuid:
+        log.warning(
+            "signal.inbound.skipped", reason="source_less", timestamp=envelope.get("timestamp")
+        )
         return None
     if source_uuid == bot_account_uuid:
+        log.debug("signal.inbound.skipped", reason="self_message", source_uuid=source_uuid)
         return None
 
-    if envelope.get("receiptMessage") or envelope.get("typingMessage"):
+    if envelope.get("receiptMessage"):
+        log.debug("signal.inbound.skipped", reason="receipt", source_uuid=source_uuid)
+        return None
+    if envelope.get("typingMessage"):
+        log.debug("signal.inbound.skipped", reason="typing", source_uuid=source_uuid)
         return None
 
     # signal-cli emits two top-level shapes for inbound payloads:
@@ -141,8 +153,12 @@ def parse_envelope(
                 if isinstance(target_raw, int):
                     edit_target_ts = target_raw
             else:
+                log.warning(
+                    "signal.inbound.skipped", reason="edit_no_data", source_uuid=source_uuid
+                )
                 return None
         else:
+            log.warning("signal.inbound.skipped", reason="no_content", source_uuid=source_uuid)
             return None
 
     timestamp_ms = int(envelope.get("timestamp", 0))
@@ -166,6 +182,7 @@ def parse_envelope(
         and not data_message.get("reaction")
         and not data_message.get("attachments")
     ):
+        log.warning("signal.inbound.skipped", reason="group_update", source_uuid=source_uuid)
         return None
 
     reaction_raw = data_message.get("reaction")
@@ -234,6 +251,7 @@ def parse_envelope(
         )
 
     if not text and not attachments and reaction is None:
+        log.warning("signal.inbound.skipped", reason="no_content", source_uuid=source_uuid)
         return None
 
     return InboundMessage(

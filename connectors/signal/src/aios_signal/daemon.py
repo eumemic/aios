@@ -7,10 +7,14 @@ connection's phone against ``accounts.json``.
 
 Crash-is-fatal: an unexpected subprocess exit sets
 :class:`DaemonCrashError` on :meth:`crashed`.  The connector's inbound
-dispatcher (spawned under the runner's TaskGroup) observes this
-indirectly via ``RpcListener.messages()`` failing once the subprocess
-dies, and the resulting exception propagates through the TaskGroup —
-tearing the container down so the operator restarts.
+dispatcher (spawned under the runner's TaskGroup) distinguishes two
+listener-drop cases via :meth:`subprocess_alive`:
+
+* subprocess dead → fatal.  The drop's :class:`ListenerClosedError`
+  propagates through the TaskGroup, tearing the container down so the
+  operator restarts.
+* subprocess alive (transient TCP blip) → the dispatcher reconnects the
+  listener with bounded backoff instead of crashing.
 """
 
 from __future__ import annotations
@@ -169,6 +173,23 @@ class SignalDaemon:
     def crashed(self) -> asyncio.Future[None]:
         assert self._crash_future is not None, "daemon not started"
         return self._crash_future
+
+    def subprocess_alive(self) -> bool:
+        """True iff the signal-cli subprocess is still running.
+
+        The inbound dispatcher consults this on a listener drop: alive
+        means the TCP stream blipped while signal-cli kept running, so a
+        reconnect is worth attempting; not-alive means the subprocess
+        exited (its ``_watch_exit`` set :class:`DaemonCrashError` on the
+        crash future) and the drop is fatal — let it propagate so the
+        container restarts.
+        """
+        return (
+            self._proc is not None
+            and self._proc.returncode is None
+            and self._crash_future is not None
+            and not self._crash_future.done()
+        )
 
     async def _wait_for_tcp(self) -> None:
         # ``version`` is the universal readiness probe — works in

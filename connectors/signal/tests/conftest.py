@@ -71,6 +71,13 @@ def connector(tmp_path: Path) -> SignalConnector:
             "rpc": type("Rpc", (), {"call": AsyncMock(return_value=None)})(),
             "list_groups": AsyncMock(return_value=[]),
             "verify_phone": AsyncMock(return_value="bot-uuid"),
+            # ``subprocess_alive`` / ``listener`` are consulted by the
+            # inbound dispatcher's reconnect path; tests that exercise it
+            # override these (the listener stub + alive flag), but the
+            # attributes must exist so ``monkeypatch.setattr`` can patch
+            # them and so a stray dispatcher read doesn't AttributeError.
+            "subprocess_alive": lambda self: True,
+            "listener": None,
         },
     )()
     c.state[CONNECTION_ID] = _SignalConnectionState(
@@ -130,3 +137,13 @@ def envelope_typing() -> dict[str, Any]:
 @pytest.fixture
 def envelope_self() -> dict[str, Any]:
     return _load("self_message.json")
+
+
+@pytest.fixture
+def envelope_source_less_receipt() -> dict[str, Any]:
+    return _load("source_less_receipt.json")
+
+
+@pytest.fixture
+def envelope_missing_server_guid() -> dict[str, Any]:
+    return _load("missing_server_guid.json")
