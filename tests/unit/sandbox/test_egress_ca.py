@@ -16,6 +16,7 @@ What matters here, in order of load-bearingness:
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,9 +30,11 @@ from aios.models.environments import EnvironmentConfig
 from aios.sandbox.backends.base import CommandResult
 from aios.sandbox.egress_ca import (
     CA_CERT_SANDBOX_PATH,
+    LEAF_VALIDITY_DAYS,
     SYSTEM_CA_BUNDLE_PATH,
     EgressCA,
     get_egress_ca,
+    mint_server_leaf,
 )
 from aios.sandbox.setup import install_egress_ca
 from aios.sandbox.spec import ProvisioningPlan, _assemble_plan
@@ -98,6 +101,44 @@ class TestCertificate:
         )
         with pytest.raises(x509.verification.VerificationError):
             verifier.verify(leaf, [])
+
+
+class TestMintServerLeaf:
+    """The production leaf contract (the single authoritative mint the egress
+    proxy and the tls test helper both call)."""
+
+    def test_leaf_contract(self) -> None:
+        cert, key = mint_server_leaf(EgressCA(SEED_A), "api.example.com")
+
+        # keyid-only AKID: the SKI matches across worker processes; an
+        # issuer+serial reference would break chains (the CA serial varies).
+        akid = cert.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier).value
+        assert akid.key_identifier is not None
+        assert akid.authority_cert_serial_number is None
+        assert akid.authority_cert_issuer is None
+
+        # Not a CA; DNS SAN present; explicit CN subject (empty subject would
+        # force a critical SAN to verify).
+        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+        assert bc.ca is False
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        assert san.get_values_for_type(x509.DNSName) == ["api.example.com"]
+        cn = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
+        assert cn == "api.example.com"
+
+        eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        assert x509.oid.ExtendedKeyUsageOID.SERVER_AUTH in eku
+        # The leaf key signs the handshake — it is a fresh per-leaf key, not
+        # the CA's.
+        assert key.public_key().public_numbers() == (
+            cert.public_key().public_numbers()  # type: ignore[union-attr]
+        )
+
+    def test_short_validity(self) -> None:
+        cert, _ = mint_server_leaf(EgressCA(SEED_A), "api.example.com")
+        span = cert.not_valid_after_utc - cert.not_valid_before_utc
+        # LEAF_VALIDITY_DAYS plus the one-hour backdate.
+        assert span == timedelta(days=LEAF_VALIDITY_DAYS, hours=1)
 
 
 @pytest.fixture
