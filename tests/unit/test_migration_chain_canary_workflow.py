@@ -112,22 +112,18 @@ def test_runs_only_the_chain_test_not_the_suite() -> None:
 
     Mutation-resistant core: broadening the run to ``pytest tests/unit`` would
     couple the canary's verdict to unrelated test flakes and slow it down. We
-    assert (a) some step runs the specific chain-test file, and (b) NO run step
-    invokes the suite broadly (``pytest tests/unit`` followed by whitespace).
+    assert there is exactly one pytest step and the set of test paths it names
+    is precisely ``{tests/unit/test_migration_chain.py}`` — nothing more.
 
-    The suite-level regex ``pytest\\s+tests/unit\\s`` requires whitespace
-    immediately after ``unit``; the chain-test path has ``/`` there, so it does
-    not match ``pytest tests/unit/test_migration_chain.py``.
+    This exact-token-set check fails for end-of-line ``tests/unit`` (no trailing
+    whitespace), for the whole suite, and for any extra test file added to the
+    invocation.
     """
-    run_steps = _run_steps(_doc())
-    assert any(f"pytest {_CHAIN_TEST_PATH}" in run for run in run_steps), (
-        f"{_WF} must have a step running 'pytest {_CHAIN_TEST_PATH}'; run steps were {run_steps!r}."
-    )
-    suite_re = re.compile(r"pytest\s+tests/unit\s")
-    offenders = [run for run in run_steps if suite_re.search(run)]
-    assert not offenders, (
-        f"{_WF} must NOT run the whole tests/unit suite (couples the canary to unrelated "
-        f"flakes); offending run step(s): {offenders!r}."
+    pytest_steps = [r for r in _run_steps(_doc()) if "pytest" in r]
+    assert len(pytest_steps) == 1, f"expected exactly one pytest step, found {len(pytest_steps)}"
+    test_paths = set(re.findall(r"tests/\S+", pytest_steps[0]))
+    assert test_paths == {_CHAIN_TEST_PATH}, (
+        f"canary must run ONLY the chain test; found test paths {test_paths}"
     )
 
 
@@ -166,11 +162,32 @@ def test_issue_step_runs_only_on_failure() -> None:
 
 
 def test_incident_body_is_actionable() -> None:
-    """The workflow references the run id and commit sha for an actionable issue."""
-    text = _WF.read_text()
-    assert "github.run_id" in text, (
-        f"{_WF} must reference github.run_id so the incident issue links the failing run."
+    """The failure step wires run id and commit sha into its ``env:`` mapping.
+
+    Structural (not text-substring): the failure step is the step whose ``run``
+    contains the issue title. Asserting against its ``env:`` mapping can't be
+    satisfied by the top-of-file security comment that merely mentions these
+    contexts — the env wiring must actually be present.
+    """
+    doc = _doc()
+    steps = doc["jobs"]["canary"]["steps"]
+    fail_step = next(s for s in steps if "run" in s and _ISSUE_TITLE in s["run"])
+    env = fail_step.get("env", {})
+    assert "github.run_id" in env.get("RUN_URL", ""), (
+        "failure step must wire RUN_URL to github.run_id"
     )
-    assert "github.sha" in text, (
-        f"{_WF} must reference github.sha so the incident issue names the offending commit."
+    assert "github.sha" in env.get("COMMIT_SHA", ""), (
+        "failure step must wire COMMIT_SHA to github.sha"
+    )
+
+
+def test_concurrency_does_not_cancel_in_progress() -> None:
+    """``cancel-in-progress`` must stay false (load-bearing per the workflow).
+
+    PyYAML parses the unquoted ``false`` as Python ``False``.
+    """
+    doc = _doc()
+    assert doc["concurrency"]["cancel-in-progress"] is False, (
+        "cancel-in-progress must stay false so a later push can't cancel an "
+        "in-flight canary mid-issue-creation"
     )

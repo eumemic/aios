@@ -44,15 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # Parse-only defaults: get_settings() runs at import for some unit modules.
-    # tests/conftest.py already os.environ.setdefault()s these, so the chain
-    # test passes without them; set them explicitly anyway so the canary never
-    # depends on conftest's default values staying in place.
-    env:
-      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
-      AIOS_API_KEY: test-key-for-ci
-      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
-
+    # The chain test is pure-Python and needs no env (tests/conftest.py
+    # os.environ.setdefault()s the parse-only settings it imports).
     steps:
       - uses: actions/checkout@v4
 
@@ -102,9 +95,14 @@ jobs:
             "Fix forward by renumbering the duplicate/forked revision so the ladder is a single linear chain, then re-run this workflow.")
 
           # Create-or-update via gh (no github-script, matching repo idiom).
+          # List by label (REST list is immediately consistent, unlike the
+          # eventually-consistent search index) and exact-match the title in jq,
+          # so rapid consecutive failures update the one issue instead of
+          # spawning duplicates.
           EXISTING=$(gh issue list \
-            --search "\"${TITLE}\" in:title" \
+            --label incident \
             --state open \
+            --limit 100 \
             --json number,title \
             --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty")
 
