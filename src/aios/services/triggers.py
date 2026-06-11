@@ -7,11 +7,20 @@ defense-in-depth heal whenever an already-enabled row is found with
 ``next_fire`` NULL — and exposes granular add/remove/update/list operations
 to the API + tool layers.
 
-Healing invariant (#957): an enabled schedulable trigger always has a
+Healing invariant (#957): an enabled schedulable (cron) trigger always has a
 non-NULL ``next_fire``. ``update_trigger`` re-arms a NULL on ANY update whose
 final state is enabled — closing the gap the #925 incident's manual
-``UPDATE … SET enabled=true`` opened, and complementing the startup-reconcile
-(#940 / PR #950). run_completion rows stay NULL by design.
+``UPDATE … SET enabled=true`` opened. This heal is the SOLE recovery path for
+an incident-state row (``enabled=true, next_fire=NULL``): nothing re-arms such
+a row on its own. The scheduler's claim/MIN queries both filter
+``next_fire IS NOT NULL`` (see ``fetch_and_claim_due_triggers`` /
+``fetch_next_trigger_event`` in :mod:`aios.db.queries`), so a NULL row is
+invisible to the scheduler and never fires. #940 / PR #950 is NOT a reconcile:
+it only broadened ``notify_scheduled_tasks_due()`` to NOTIFY on any
+``next_fire`` change and lowered the scheduler heartbeat, which is what makes
+the scheduler REACT promptly to the re-armed schedule this heal produces.
+Removing this heal would therefore leave incident-state rows with no recovery
+at all. run_completion rows stay NULL by design.
 
 Deliberately no whole-list-replace primitive; per #270, the only mutation
 surface is granular ops.
@@ -218,8 +227,10 @@ async def update_trigger(
     - Healing (#957): an already-enabled row found with ``next_fire`` NULL has
       ``next_fire`` recomputed from the merged source on ANY update whose final
       state is enabled — no cap re-check, no failure-counter reset;
-      run_completion rows stay NULL by design; defense-in-depth with the
-      startup-reconcile (#940 / PR #950). Invariant: an enabled schedulable
+      run_completion rows stay NULL by design. This recompute is the SOLE
+      producer of a non-NULL ``next_fire`` for such a row; #940 / PR #950 only
+      broadened the NOTIFY gate and lowered the heartbeat so the scheduler
+      REACTS to the re-armed schedule. Invariant: an enabled schedulable
       trigger always has non-NULL ``next_fire``.
     - action / metadata / no-op: ``next_fire`` untouched.
 
@@ -276,7 +287,12 @@ async def update_trigger(
         # requires an explicit source. This keeps a metadata-only or enabled=true
         # PATCH on a stale one-shot from raising a spurious 422. (When a source IS
         # provided, the source_provided branch below handles every source type
-        # unchanged.) Defense-in-depth with the startup-reconcile (#940 / PR #950).
+        # unchanged.) This recompute is the SOLE producer of a non-NULL next_fire
+        # for an incident-state row (enabled=true, next_fire=NULL): the scheduler's
+        # claim/MIN queries both filter `next_fire IS NOT NULL`, so such a row never
+        # fires and nothing else re-arms it. #940 / PR #950 is not a reconcile — it
+        # only broadened the NOTIFY gate and lowered the heartbeat so the scheduler
+        # REACTS to the re-armed next_fire this heal writes.
         heal_next_fire = current.next_fire is None and isinstance(current.source, CronSource)
         if not new_enabled and current.enabled:
             # Disabling: clear next_fire.
