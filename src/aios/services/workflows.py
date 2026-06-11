@@ -274,6 +274,7 @@ async def list_runs(
     workflow_id: str | None = None,
     status: str | None = None,
     parent_run_id: str | None = None,
+    launcher_session_id: str | None = None,
 ) -> list[WfRun]:
     async with pool.acquire() as conn:
         return await wf_queries.list_wf_runs(
@@ -284,6 +285,7 @@ async def list_runs(
             workflow_id=workflow_id,
             status=status,
             parent_run_id=parent_run_id,
+            launcher_session_id=launcher_session_id,
         )
 
 

@@ -417,3 +417,68 @@ async def test_update_workflow_rename_collision_conflicts(
         await wf_queries.update_workflow(
             wf_conn, other.id, account_id="acc_root", expected_version=1, name="taken"
         )
+
+
+# ─── list_wf_runs — launcher filter (the agent list_runs default scoping) ─────
+
+
+async def test_list_wf_runs_filters_by_launcher_session(wf_conn: asyncpg.Connection[Any]) -> None:
+    """``launcher_session_id`` scopes the list to one session's own runs (including
+    terminal ones), and composes with the other equality filters; omitting it lists the
+    whole account. Backs the agent ``list_runs`` builtin's default (self) vs ``account_wide``."""
+    # wf_runs.launcher_session_id REFERENCES sessions(id), so seed real sessions first:
+    # the FK chain is accounts → environments → agents → sessions (acc_root/env_root
+    # already seeded by the fixture). Minimal raw inserts — no sandbox/crypto path.
+    await wf_conn.execute(
+        "INSERT INTO agents (id, name, model, account_id) "
+        "VALUES ('agn_wf', 'wf-agent', 'fake/test', 'acc_root')"
+    )
+    for ses in ("ses_a", "ses_b"):
+        await wf_conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, workspace_volume_path, account_id) "
+            "VALUES ($1, 'agn_wf', 'env_root', $2, 'acc_root')",
+            ses,
+            f"/tmp/ws-{ses}",
+        )
+
+    wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="demo", script="S")
+
+    async def _mk_run(launcher: str | None) -> str:
+        run = await wf_queries.insert_wf_run(
+            wf_conn,
+            account_id="acc_root",
+            workflow_id=wf.id,
+            environment_id="env_root",
+            script=wf.script,
+            script_sha="sha",
+            launcher_session_id=launcher,
+        )
+        return run.id
+
+    run_a = await _mk_run("ses_a")
+    run_b = await _mk_run("ses_b")
+    run_c = await _mk_run(None)
+
+    # The launcher filter lists only that session's runs.
+    by_a = await wf_queries.list_wf_runs(
+        wf_conn, account_id="acc_root", launcher_session_id="ses_a"
+    )
+    assert [r.id for r in by_a] == [run_a]
+
+    # No launcher → the whole account (all three).
+    everything = await wf_queries.list_wf_runs(wf_conn, account_id="acc_root")
+    assert {r.id for r in everything} == {run_a, run_b, run_c}
+
+    # The launcher composes with another equality filter (workflow_id).
+    by_b = await wf_queries.list_wf_runs(
+        wf_conn, account_id="acc_root", launcher_session_id="ses_b", workflow_id=wf.id
+    )
+    assert [r.id for r in by_b] == [run_b]
+
+    # A launcher with no runs → empty.
+    assert (
+        await wf_queries.list_wf_runs(
+            wf_conn, account_id="acc_root", launcher_session_id="ses_a", workflow_id="wf_nope"
+        )
+        == []
+    )

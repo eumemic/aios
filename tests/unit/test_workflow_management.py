@@ -26,7 +26,7 @@ import pytest
 
 import aios.tools  # noqa: F401 — registers the builtins
 from aios.errors import CryptoDecryptError, ForbiddenError
-from aios.models.workflows import WfRunWaitResponse, Workflow
+from aios.models.workflows import WfRun, WfRunEvent, WfRunWaitResponse, Workflow
 from aios.tools import workflow_management as wm
 from aios.tools.invoke import ToolBail, invoke_builtin
 
@@ -54,6 +54,37 @@ def _workflow(**over: Any) -> Workflow:
     )
     base.update(over)
     return Workflow(**base)
+
+
+def _run(**over: Any) -> WfRun:
+    base: dict[str, Any] = dict(
+        id="wfr_1",
+        workflow_id="wf_1",
+        account_id="acc_x",
+        environment_id="env_x",
+        script="SECRET",
+        script_sha="sha",
+        status="running",
+        last_event_seq=0,
+        created_at=_DT,
+        updated_at=_DT,
+    )
+    base.update(over)
+    return WfRun(**base)
+
+
+def _event(**over: Any) -> WfRunEvent:
+    base: dict[str, Any] = dict(
+        id="wfe_1",
+        run_id="wfr_1",
+        seq=1,
+        type="annotation",
+        call_key="k0",
+        payload={"kind": "log", "text": "hello"},
+        created_at=_DT,
+    )
+    base.update(over)
+    return WfRunEvent(**base)
 
 
 class TestSchemaRejectsInjectedTrustedIds:
@@ -92,6 +123,42 @@ class TestSchemaRejectsInjectedTrustedIds:
         with pytest.raises(ToolBail):
             await invoke_builtin(
                 "ses_1", "cancel_run", {"run_id": "wfr_1", "canceller_session_id": "ses_victim"}
+            )
+
+    async def test_get_run_account_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin(
+                "ses_1", "get_run", {"run_id": "wfr_1", "account_id": "acc_victim"}
+            )
+
+    async def test_list_runs_launcher_session_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin("ses_1", "list_runs", {"launcher_session_id": "ses_victim"})
+
+    async def test_list_runs_account_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin("ses_1", "list_runs", {"account_id": "acc_victim"})
+
+    async def test_list_run_events_account_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin(
+                "ses_1", "list_run_events", {"run_id": "wfr_1", "account_id": "acc_victim"}
+            )
+
+    async def test_get_workflow_account_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin(
+                "ses_1", "get_workflow", {"workflow_id": "wf_1", "account_id": "acc_victim"}
+            )
+
+    async def test_list_runs_account_wide_as_id_rejected(self) -> None:
+        # The widen control is a bool; smuggling the sibling launcher_session_id key
+        # alongside account_wide=True trips extra="forbid" before the handler runs.
+        with pytest.raises(ToolBail):
+            await invoke_builtin(
+                "ses_1",
+                "list_runs",
+                {"account_wide": True, "launcher_session_id": "ses_victim"},
             )
 
 
@@ -154,3 +221,96 @@ class TestReturnShape:
         pos = mock_await.call_args.args
         assert pos[1] == "postgres://test-db"
         assert mock_await.call_args.kwargs["timeout_seconds"] == 7
+
+
+class TestReadHandlers:
+    """The five read-only builtins: full vs. lean return shapes + launcher scoping."""
+
+    async def test_get_workflow_returns_full_script_and_version(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(
+            "aios.services.workflows.get_workflow",
+            AsyncMock(return_value=_workflow(version=3, script="SECRET")),
+        )
+        out = await wm.get_workflow_handler("ses_1", {"workflow_id": "wf_1"})
+        assert out["script"] == "SECRET"
+        assert out["version"] == 3
+        assert out["id"] == "wf_1"
+
+    async def test_list_workflows_excludes_script_and_heavy_fields(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(
+            "aios.services.workflows.list_workflows",
+            AsyncMock(return_value=[_workflow(name="w", version=2, script="SECRET")]),
+        )
+        out = await wm.list_workflows_handler("ses_1", {})
+        row = out["workflows"][0]
+        assert row["name"] == "w"
+        assert row["version"] == 2
+        for heavy in (
+            "script",
+            "input_schema",
+            "output_schema",
+            "tools",
+            "mcp_servers",
+            "http_servers",
+        ):
+            assert heavy not in row
+        assert "description" in row
+        assert "created_at" in row
+
+    async def test_list_runs_default_filters_by_launcher(self, monkeypatch: Any) -> None:
+        mock_list = AsyncMock(return_value=[_run()])
+        monkeypatch.setattr("aios.services.workflows.list_runs", mock_list)
+        await wm.list_runs_handler("ses_1", {})
+        assert mock_list.call_args.kwargs["launcher_session_id"] == "ses_1"
+
+    async def test_list_runs_account_wide_drops_launcher_filter(self, monkeypatch: Any) -> None:
+        mock_list = AsyncMock(return_value=[_run()])
+        monkeypatch.setattr("aios.services.workflows.list_runs", mock_list)
+        await wm.list_runs_handler("ses_1", {"account_wide": True})
+        assert mock_list.call_args.kwargs["launcher_session_id"] is None
+
+    async def test_list_runs_strips_heavy_run_fields(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(
+            "aios.services.workflows.list_runs",
+            AsyncMock(return_value=[_run(script="SECRET")]),
+        )
+        out = await wm.list_runs_handler("ses_1", {})
+        row = out["runs"][0]
+        for heavy in ("script", "script_sha", "tools", "mcp_servers", "http_servers"):
+            assert heavy not in row
+        assert row["status"] == "running"
+
+    async def test_list_runs_passes_through_workflow_id_and_status(self, monkeypatch: Any) -> None:
+        mock_list = AsyncMock(return_value=[_run()])
+        monkeypatch.setattr("aios.services.workflows.list_runs", mock_list)
+        await wm.list_runs_handler("ses_1", {"workflow_id": "wf_9", "status": "completed"})
+        assert mock_list.call_args.kwargs["workflow_id"] == "wf_9"
+        assert mock_list.call_args.kwargs["status"] == "completed"
+
+    async def test_get_run_returns_full_including_script(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(
+            "aios.services.workflows.get_run",
+            AsyncMock(return_value=_run(script="SECRET")),
+        )
+        out = await wm.get_run_handler("ses_1", {"run_id": "wfr_1"})
+        assert out["script"] == "SECRET"
+        assert out["script_sha"] == "sha"
+        assert out["status"] == "running"
+
+    async def test_list_run_events_pages_and_preserves_annotation_order(
+        self, monkeypatch: Any
+    ) -> None:
+        mock_ev = AsyncMock(
+            return_value=[
+                _event(seq=2, payload={"kind": "phase", "text": "a"}),
+                _event(seq=3, payload={"kind": "log", "text": "b"}),
+            ]
+        )
+        monkeypatch.setattr("aios.services.workflows.list_run_events", mock_ev)
+        out = await wm.list_run_events_handler(
+            "ses_1", {"run_id": "wfr_1", "after_seq": 1, "limit": 50}
+        )
+        assert [e["seq"] for e in out["events"]] == [2, 3]
+        assert out["events"][0]["payload"]["kind"] == "phase"
+        assert mock_ev.call_args.kwargs["after_seq"] == 1
+        assert mock_ev.call_args.kwargs["limit"] == 50

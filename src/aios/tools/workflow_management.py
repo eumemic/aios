@@ -54,6 +54,18 @@ from aios.tools.registry import registry
 _WORKFLOW_ECHO_EXCLUDE = {"script"}
 _RUN_ECHO_EXCLUDE = {"script", "script_sha", "tools", "mcp_servers", "http_servers"}
 
+# list_workflows summaries: strip script + heavy schema/surface blobs, leaving
+# id, account_id, name, version, description, timestamps (the locked summary set;
+# account_id is harmless metadata, kept like the analogous run exclude set keeps it).
+_WORKFLOW_LIST_EXCLUDE = {
+    "script",
+    "input_schema",
+    "output_schema",
+    "tools",
+    "mcp_servers",
+    "http_servers",
+}
+
 
 # ─── argument models (parameters_schema + parse, in one place) ───────────────
 
@@ -96,6 +108,49 @@ class _CancelRunArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str
+
+
+class _GetWorkflowArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+
+
+class _ListWorkflowsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=50, ge=1, le=200)
+    after: str | None = None
+    name: str | None = None
+
+
+class _GetRunArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+
+
+class _ListRunsArgs(BaseModel):
+    """Defaults to THIS session's own runs (launcher-filtered). Set account_wide=True
+    to widen to all of the account's runs. There is deliberately no launcher_session_id
+    or account_id field — the launcher is the trusted executing session, and the
+    account derives from it; the widen control is a bool, never an id."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_wide: bool = False
+    workflow_id: str | None = None
+    status: str | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+    after: str | None = None
+
+
+class _ListRunEventsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    after_seq: int = Field(default=0, ge=0)
+    limit: int = Field(default=200, ge=1, le=500)
 
 
 # ─── handler plumbing ────────────────────────────────────────────────────────
@@ -203,6 +258,61 @@ async def cancel_run_handler(session_id: str, arguments: dict[str, Any]) -> dict
     return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
 
 
+async def get_workflow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = _parse(_GetWorkflowArgs, arguments)
+    wf = await wf_service.get_workflow(pool, args.workflow_id, account_id=account_id)
+    return wf.model_dump(mode="json")  # FULL — includes script + version (the re-read loop)
+
+
+async def list_workflows_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = _parse(_ListWorkflowsArgs, arguments)
+    workflows = await wf_service.list_workflows(
+        pool, account_id=account_id, limit=args.limit, after=args.after, name=args.name
+    )
+    return {
+        "workflows": [w.model_dump(mode="json", exclude=_WORKFLOW_LIST_EXCLUDE) for w in workflows]
+    }
+
+
+async def get_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = _parse(_GetRunArgs, arguments)
+    run = await wf_service.get_run(pool, args.run_id, account_id=account_id)
+    return run.model_dump(mode="json")  # FULL WfRun incl. pinned script
+
+
+async def list_runs_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = _parse(_ListRunsArgs, arguments)
+    runs = await wf_service.list_runs(
+        pool,
+        account_id=account_id,
+        limit=args.limit,
+        after=args.after,
+        workflow_id=args.workflow_id,
+        status=args.status,
+        # Default: only this session's own runs. account_wide widens to the whole account.
+        launcher_session_id=None if args.account_wide else session_id,
+    )
+    return {"runs": [r.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE) for r in runs]}
+
+
+async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = _parse(_ListRunEventsArgs, arguments)
+    events = await wf_service.list_run_events(
+        pool, args.run_id, account_id=account_id, after_seq=args.after_seq, limit=args.limit
+    )
+    return {"events": [e.model_dump(mode="json") for e in events]}  # no truncation
+
+
 # ─── descriptions + registration ─────────────────────────────────────────────
 
 CREATE_WORKFLOW_DESCRIPTION = (
@@ -214,17 +324,17 @@ CREATE_WORKFLOW_DESCRIPTION = (
 UPDATE_WORKFLOW_DESCRIPTION = (
     "Update one of your workflows in place, bumping its version. Pass the current "
     "'version' as an optimistic-concurrency token (a stale token is rejected — re-read "
-    "and retry). Omitted fields are preserved. The resulting tool/server surface must "
-    "still be a subset of your own. In-flight runs are unaffected (a run pins its "
-    "workflow's script + surface at launch)."
+    "with get_workflow and retry). Omitted fields are preserved. The resulting tool/server "
+    "surface must still be a subset of your own. In-flight runs are unaffected (a run pins "
+    "its workflow's script + surface at launch)."
 )
 CREATE_RUN_DESCRIPTION = (
     "Launch a run of a workflow you can access. The run executes with the workflow's "
     "declared surface but only the vaults you attach via 'vault_ids' — which must be a "
     "subset of the vaults bound to you. It runs in your own environment. Returns the run "
     "id and status; use await_run to block for its result. The number of runs you may "
-    "have outstanding at once is capped — finish (await_run) or cancel (cancel_run) "
-    "runs to free slots."
+    "have outstanding at once is capped — check your outstanding runs with list_runs, and "
+    "finish (await_run) or cancel (cancel_run) them to free slots."
 )
 AWAIT_RUN_DESCRIPTION = (
     "Block until a run reaches a terminal state (completed/errored/cancelled), or until "
@@ -236,6 +346,35 @@ CANCEL_RUN_DESCRIPTION = (
     "operator). The run finalizes 'cancelled' on its next wake — usually within moments "
     "— freeing one of your outstanding-run slots once it does. Idempotent: an "
     "already-finished run is returned unchanged."
+)
+GET_WORKFLOW_DESCRIPTION = (
+    "Fetch one of your workflows in full by id — including its 'script' and current "
+    "'version'. Use this to re-read a workflow before retrying an update_workflow whose "
+    "optimistic-concurrency token was rejected: read the fresh version, reconcile your "
+    "edit, and retry with that version."
+)
+LIST_WORKFLOWS_DESCRIPTION = (
+    "List your account's workflows, newest first, as lean summaries (id, name, "
+    "description, version, timestamps) — no script bodies. Optional 'name' filter; "
+    "page with 'limit' and 'after' (the last id seen). To read a workflow's script, "
+    "fetch it with get_workflow."
+)
+GET_RUN_DESCRIPTION = (
+    "Fetch one workflow run in full by id — including the immutable 'script' the run "
+    "pinned at launch, its status, input, and output. Inspect what a specific run "
+    "actually executed."
+)
+LIST_RUNS_DESCRIPTION = (
+    "List workflow runs, newest first. By default returns only the runs YOU launched; "
+    "set 'account_wide' true to list every run in the account. Optional 'workflow_id' / "
+    "'status' filters; page with 'limit' and 'after'. Rows are lean (no script or tool "
+    "surface) — fetch a single run with get_run for its full body."
+)
+LIST_RUN_EVENTS_DESCRIPTION = (
+    "Page a run's journal in sequence order (oldest first), surfacing a mid-flight run's "
+    "annotation events (the log/phase progress markers a workflow emits) as they land. "
+    "Page forward with 'after_seq' (the last seq seen) and 'limit'; events are returned "
+    "untruncated."
 )
 
 
@@ -273,6 +412,41 @@ def _register() -> None:
         description=CANCEL_RUN_DESCRIPTION,
         parameters_schema=_CancelRunArgs.model_json_schema(),
         handler=cancel_run_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="get_workflow",
+        description=GET_WORKFLOW_DESCRIPTION,
+        parameters_schema=_GetWorkflowArgs.model_json_schema(),
+        handler=get_workflow_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="list_workflows",
+        description=LIST_WORKFLOWS_DESCRIPTION,
+        parameters_schema=_ListWorkflowsArgs.model_json_schema(),
+        handler=list_workflows_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="get_run",
+        description=GET_RUN_DESCRIPTION,
+        parameters_schema=_GetRunArgs.model_json_schema(),
+        handler=get_run_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="list_runs",
+        description=LIST_RUNS_DESCRIPTION,
+        parameters_schema=_ListRunsArgs.model_json_schema(),
+        handler=list_runs_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="list_run_events",
+        description=LIST_RUN_EVENTS_DESCRIPTION,
+        parameters_schema=_ListRunEventsArgs.model_json_schema(),
+        handler=list_run_events_handler,
         transport="agent_tool",
     )
 

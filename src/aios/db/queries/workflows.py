@@ -325,6 +325,7 @@ async def list_wf_runs(
     workflow_id: str | None = None,
     status: str | None = None,
     parent_run_id: str | None = None,
+    launcher_session_id: str | None = None,
 ) -> list[WfRun]:
     """Keyset-paginated list of an account's runs (non-archived), newest first.
 
@@ -334,6 +335,12 @@ async def list_wf_runs(
     id; a timer fire on a workflow-child session threads that session's own
     parent run). The run-side analog of filtering sessions by
     ``parent_run_id`` for a run's ``agent()`` children.
+
+    When ``launcher_session_id`` is set, the launcher filter lists ALL of a
+    session's runs including terminal ones, so it is NOT fully served by the
+    ``wf_runs_launcher_active_idx`` partial index (which covers only ``status IN
+    ('pending','running','suspended')``); the account-scoped ``ORDER BY id DESC``
+    keyset still applies.
     """
     return await _list_scoped(
         conn,
@@ -346,6 +353,7 @@ async def list_wf_runs(
             ("workflow_id", workflow_id),
             ("status", status),
             ("parent_run_id", parent_run_id),
+            ("launcher_session_id", launcher_session_id),
         ],
     )
 
