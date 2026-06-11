@@ -142,6 +142,71 @@ class TestBuildIptablesScript:
         assert "aios-worker:8765" in script
         assert "--dport 8765 -j ACCEPT" in script
 
+    # ── nat-table DNAT to the secret-egress proxy (#878) ──────────────────────
+
+    def test_dnat_rule_emitted_per_credential_host_on_443(self) -> None:
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=["api.secret.com", "data.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        assert "iptables -t nat -A OUTPUT" in script
+        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
+        assert "getent ahosts api.secret.com" in script
+        assert "getent ahosts data.secret.com" in script
+        assert "PROXY_IP=$(getent ahosts aios-worker" in script
+
+    def test_dnat_not_redirect(self) -> None:
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=["api.secret.com", "data.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        assert "DNAT" in script
+        assert "--to-port" not in script
+        assert "REDIRECT" not in script
+
+    def test_no_nat_rules_without_dnat_target(self) -> None:
+        script = build_iptables_script(
+            allowed_hosts={"api.example.com"},
+            dnat_hosts=["api.secret.com"],
+        )
+        assert "-t nat" not in script
+        assert "DNAT" not in script
+
+    def test_no_nat_rules_without_dnat_hosts(self) -> None:
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=[],
+            dnat_target=("aios-worker", 49152),
+        )
+        assert "-t nat" not in script
+        assert "DNAT" not in script
+
+    def test_existing_callers_unchanged(self) -> None:
+        script = build_iptables_script(allowed_hosts={"api.example.com"})
+        assert "-t nat" not in script
+        assert "iptables -P OUTPUT DROP" in script
+
+    def test_allowed_host_gets_accept_not_dnat(self) -> None:
+        script = build_iptables_script(
+            allowed_hosts={"plain.example.com"},
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        assert 'iptables -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT' in script
+        assert "getent ahosts plain.example.com" in script
+        # Only the credential host is DNAT'd; the plain allowed host is not.
+        assert script.count("-j DNAT --to-destination") == 1
+
+    def test_dnat_only_on_443_not_80(self) -> None:
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=["api.secret.com", "data.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        assert "--dport 80 -j DNAT" not in script
+
 
 # ── docker backend translates network policy to docker run argv ────────────────
 
@@ -380,6 +445,26 @@ class TestApplyNetworkLockdown:
 
         script = self._sidecar_scripts(backend)[0]
         assert "aios-worker:8765" in script
+
+    @pytest.mark.asyncio
+    async def test_dnat_params_threaded_through(self) -> None:
+        backend = FakeBackend()
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=[])
+
+        await apply_network_lockdown(
+            backend,
+            handle,
+            networking,
+            extra_host_ports=[("aios-worker", 49152)],
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+
+        script = self._sidecar_scripts(backend)[0]
+        assert "iptables -t nat -A OUTPUT" in script
+        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
+        assert "getent ahosts api.secret.com" in script
 
 
 # ── lockdown fails closed (security gate, not best-effort) ─────────────────────

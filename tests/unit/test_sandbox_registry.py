@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import gc
 from collections.abc import Iterator
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -36,6 +37,7 @@ from aios.sandbox.backends.base import (
 )
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.spec import ProvisioningPlan
+from aios.services.vaults import ResolvedEnvVarCredential
 from tests.helpers.sandbox import FakeBackend, FakePool, make_handle
 
 
@@ -476,6 +478,83 @@ class TestLockdownFailsClosed:
         assert registry.peek("sess_X") is None, (
             "a Limited sandbox whose lockdown failed must not remain cached"
         )
+
+
+class TestSecretProxyDnatThreading:
+    """The registry threads the secret-egress-proxy endpoint + the credential
+    hosts into ``apply_network_lockdown`` so the lockdown can DNAT credential
+    :443 egress through the proxy (#878).
+
+    ``apply_network_lockdown`` is patched with an ``AsyncMock`` spy:
+    ``_maybe_apply_lockdown``'s extraction logic still runs in full, so the
+    captured kwargs reflect the real wiring without booting a sidecar.
+    """
+
+    @staticmethod
+    def _provision_patches(plan: ProvisioningPlan, lockdown: AsyncMock) -> ExitStack:
+        """Enter the cold-provision dep patches + a spy ``apply_network_lockdown``."""
+        broker = MagicMock()
+        broker.port = 8765
+        stack = ExitStack()
+        for cm in (
+            patch("aios.harness.runtime.require_tool_broker", lambda: broker),
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=plan),
+            ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", lockdown),
+        ):
+            stack.enter_context(cm)
+        return stack
+
+    async def test_secret_proxy_dnat_threaded_when_creds_present(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        cred = ResolvedEnvVarCredential(
+            credential_id="cred_1",
+            secret_name="API_TOKEN",
+            secret_value="real-secret",
+            allowed_hosts=("api.secret.com", "data.secret.com/v1"),
+            updated_at=datetime(2025, 1, 1, tzinfo=UTC),
+            placeholder="AIOS_SECRET_PLACEHOLDER_deadbeef",
+        )
+        base = _provisioning_plan_limited("sess_X")
+        plan = ProvisioningPlan(
+            spec=base.spec,
+            env_config=base.env_config,
+            memory_echoes=base.memory_echoes,
+            github_echoes=base.github_echoes,
+            git_proxy=base.git_proxy,
+            env_var_credentials=(cred,),
+            secret_proxy=cast(Any, FakeSecretProxy(port=49152)),
+        )
+        lockdown = AsyncMock()
+
+        with self._provision_patches(plan, lockdown):
+            await registry.get_or_provision("sess_X")
+
+        kwargs = lockdown.call_args.kwargs
+        assert ("aios-worker", 49152) in kwargs["extra_host_ports"]
+        assert kwargs["dnat_target"] == ("aios-worker", 49152)
+        # The ``/v1`` path prefix is stripped and the bare hosts de-dup'd.
+        assert set(kwargs["dnat_hosts"]) == {"api.secret.com", "data.secret.com"}
+
+    async def test_no_dnat_when_no_secret_proxy(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        plan = _provisioning_plan_limited("sess_X")  # secret_proxy None, no creds
+        lockdown = AsyncMock()
+
+        with self._provision_patches(plan, lockdown):
+            await registry.get_or_provision("sess_X")
+
+        kwargs = lockdown.call_args.kwargs
+        assert kwargs["dnat_target"] is None
+        assert not kwargs["dnat_hosts"]
+        assert ("aios-worker", 49152) not in kwargs["extra_host_ports"]
 
 
 class TestStaleHandleDetection:

@@ -488,6 +488,7 @@ class SandboxRegistry:
         """Apply network lockdown if the plan calls for it."""
         from aios.harness import runtime
         from aios.models.environments import LimitedNetworking
+        from aios.models.vaults import parse_allowed_host_entry
 
         networking = plan.env_config.networking if plan.env_config else None
         if not isinstance(networking, LimitedNetworking):
@@ -497,14 +498,29 @@ class SandboxRegistry:
         ]
         if plan.git_proxy is not None:
             extra_host_ports.append((WORKER_NETWORK_ALIAS, plan.git_proxy.port))
-        # The secret-egress proxy port is intentionally NOT opened here: it is
-        # inert until #878 wires nat DNAT egress routing through it. Opening a
-        # host port with no consumer would be wrong; #878 adds it.
+        dnat_hosts: list[str] = []
+        dnat_target: tuple[str, int] | None = None
+        if plan.secret_proxy is not None:
+            # Open the filter OUTPUT for the rewritten (post-DNAT) flow to the
+            # proxy endpoint — mirrors the git_proxy precedent above. (#878)
+            extra_host_ports.append((WORKER_NETWORK_ALIAS, plan.secret_proxy.port))
+            dnat_target = (WORKER_NETWORK_ALIAS, plan.secret_proxy.port)
+            # Each credential's allowed_hosts holds canonical entries (host or
+            # host/path-prefix); DNAT keys on the bare host only.
+            seen: set[str] = set()
+            for cred in plan.env_var_credentials:
+                for entry in cred.allowed_hosts:
+                    host, _prefix = parse_allowed_host_entry(entry)
+                    if host not in seen:
+                        seen.add(host)
+                        dnat_hosts.append(host)
         await apply_network_lockdown(
             self._backend,
             handle,
             networking,
             extra_host_ports=extra_host_ports,
+            dnat_hosts=dnat_hosts,
+            dnat_target=dnat_target,
         )
 
     async def _stop_proxy_silently(
