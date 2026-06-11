@@ -48,6 +48,31 @@ def _run_steps(doc: dict[Any, Any]) -> list[str]:
     return [s["run"] for s in doc["jobs"]["canary"]["steps"] if "run" in s]
 
 
+def _failure_step(doc: dict[Any, Any]) -> dict[str, Any]:
+    """The step whose ``run`` body contains the incident title — i.e. the
+    failure-path step that opens/updates the incident issue."""
+    steps = doc["jobs"]["canary"]["steps"]
+    return next(s for s in steps if "run" in s and _ISSUE_TITLE in s["run"])
+
+
+def _failure_step_run(doc: dict[Any, Any]) -> str:
+    """The ``run`` string of the failure-path step."""
+    run = _failure_step(doc)["run"]
+    assert isinstance(run, str)
+    return run
+
+
+def _logical_commands(run: str) -> list[str]:
+    """Join shell line-continuations and drop comment lines, yielding one
+    string per logical command."""
+    joined = run.replace("\\\n", " ")
+    return [
+        line.strip()
+        for line in joined.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
 def test_workflow_parses_to_nonempty_dict() -> None:
     """The canary workflow exists and parses to a non-empty mapping."""
     assert _WF.exists(), (
@@ -136,16 +161,30 @@ def test_issue_title_constant_present() -> None:
     )
 
 
-def test_incident_label_used_and_created() -> None:
-    """The incident is labeled, and the label is created idempotently first."""
-    run_steps = _run_steps(_doc())
-    assert any("--label incident" in run for run in run_steps), (
-        f"{_WF} must pass '--label incident' when creating the issue; run steps were {run_steps!r}."
+def test_incident_issue_is_created_with_the_incident_label() -> None:
+    """The incident is labeled, and the label is created idempotently first.
+
+    Pinning ``--label incident`` on the ``gh issue create`` command specifically
+    (not merely somewhere in the run) is load-bearing: ``--label incident`` also
+    appears in a comment and in the ``gh issue list --label incident`` lookup, so
+    a future edit that drops it from ``gh issue create`` alone would leave new
+    issues unlabeled — and the label-based lookup would then never find them,
+    spawning a fresh duplicate on every failure.
+    """
+    doc = _doc()
+    fail_run = _failure_step_run(doc)  # the run of the step whose body contains TITLE
+    commands = _logical_commands(fail_run)
+
+    # The label must be created idempotently before use.
+    assert any(c.startswith("gh label create incident") for c in commands), (
+        "failure step must idempotently create the incident label"
     )
-    assert any("gh label create incident" in run for run in run_steps), (
-        f"{_WF} must 'gh label create incident' (idempotent guard) so issue creation "
-        f"can't fail on a missing label; run steps were {run_steps!r}."
-    )
+
+    # The CREATE command specifically must carry --label incident, else new
+    # issues are unlabeled and the label-based lookup spawns duplicates.
+    create_cmds = [c for c in commands if c.startswith("gh issue create")]
+    assert len(create_cmds) == 1, f"expected one `gh issue create`, found {len(create_cmds)}"
+    assert "--label incident" in create_cmds[0], "gh issue create must apply the incident label"
 
 
 def test_issue_step_runs_only_on_failure() -> None:
@@ -170,8 +209,7 @@ def test_incident_body_is_actionable() -> None:
     contexts — the env wiring must actually be present.
     """
     doc = _doc()
-    steps = doc["jobs"]["canary"]["steps"]
-    fail_step = next(s for s in steps if "run" in s and _ISSUE_TITLE in s["run"])
+    fail_step = _failure_step(doc)
     env = fail_step.get("env", {})
     assert "github.run_id" in env.get("RUN_URL", ""), (
         "failure step must wire RUN_URL to github.run_id"
@@ -190,4 +228,8 @@ def test_concurrency_does_not_cancel_in_progress() -> None:
     assert doc["concurrency"]["cancel-in-progress"] is False, (
         "cancel-in-progress must stay false so a later push can't cancel an "
         "in-flight canary mid-issue-creation"
+    )
+    assert doc["concurrency"]["group"] == "${{ github.workflow }}-${{ github.ref }}", (
+        "concurrency group must serialize per-ref (workflow + ref), else "
+        "cancel-in-progress:false no longer guarantees one canary per ref"
     )
