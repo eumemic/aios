@@ -77,10 +77,11 @@ def test_full_sequence_worker_create_repair_then_api_write(
     assert all((u, g) == (1000, 1000) for _p, u, g in phase1_chowns)
 
     # ── Phase 2: repair pass over a tree whose on-disk owner mismatches.
+    # The repair pass uses ``os.lchown`` (symlink-aware), so record that.
     monkeypatch.setattr(settings, "workspaces_owner_uid", os.getuid() + 1)
     monkeypatch.setattr(settings, "workspaces_owner_gid", os.getgid() + 1)
     phase2_chowns: list[tuple[str, int, int]] = []
-    monkeypatch.setattr(os, "chown", lambda p, u, g: phase2_chowns.append((str(p), u, g)))
+    monkeypatch.setattr(os, "lchown", lambda p, u, g: phase2_chowns.append((str(p), u, g)))
 
     repaired = repair_workspace_ownership()
     assert repaired > 0

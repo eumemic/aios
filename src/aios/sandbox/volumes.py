@@ -14,13 +14,15 @@ dirs is a Phase 6 polish item.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import re
 from pathlib import Path
 
 from aios.config import get_settings
 from aios.errors import ForbiddenError
+from aios.logging import get_logger
+
+log = get_logger("aios.sandbox.volumes")
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^\w.\-]")
 _MAX_FILENAME_LEN = 200
@@ -77,9 +79,13 @@ def ensure_owned_dir(path: Path) -> Path:
     if os.geteuid() == 0:
         uid, gid = settings.workspaces_owner_uid, settings.workspaces_owner_gid
         for component in newly:
-            # A racing provision may have created+chowned this already.
-            with contextlib.suppress(OSError):
+            # A racing provision may have created+chowned this component first
+            # (benign), but the failure must stay observable per CLAUDE.md's
+            # no-silent-error stance — log and continue rather than crash.
+            try:
                 os.chown(component, uid, gid)
+            except OSError as e:
+                log.warning("workspace.chown_failed", path=str(component), error=str(e))
     return path
 
 

@@ -43,6 +43,15 @@ def _record_chowns(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int, int]
     return chowns
 
 
+def _record_lchowns(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int, int]]:
+    """Recorder for the REPAIR pass, which uses ``os.lchown`` (symlink-aware)
+    so a root-owned symlink is chowned in place rather than following it to
+    chown the target (see #959 hardening)."""
+    lchowns: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(os, "lchown", lambda p, u, g: lchowns.append((str(p), u, g)))
+    return lchowns
+
+
 class TestEnsureOwnedDir:
     def test_ensure_owned_dir_root_chowns_only_new_components(
         self, _owner: Path, monkeypatch: pytest.MonkeyPatch
@@ -122,13 +131,13 @@ class TestRepairWorkspaceOwnership:
     def test_repair_skips_when_not_root(
         self, _owner: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        chowns = _record_chowns(monkeypatch)
+        lchowns = _record_lchowns(monkeypatch)
         monkeypatch.setattr(os, "geteuid", lambda: 1000)
         # Build something repairable to prove it's the guard, not an empty tree.
         (_owner / "_uploads" / "sess_A").mkdir(parents=True)
 
         assert repair_workspace_ownership() == 0
-        assert chowns == []
+        assert lchowns == []
 
     def test_repair_depth_bound_and_one_log_per_fix(
         self, _owner: Path, monkeypatch: pytest.MonkeyPatch
@@ -138,7 +147,7 @@ class TestRepairWorkspaceOwnership:
         # the only variable.
         monkeypatch.setattr(settings, "workspaces_owner_uid", os.getuid() + 1)
         monkeypatch.setattr(settings, "workspaces_owner_gid", os.getgid() + 1)
-        chowns = _record_chowns(monkeypatch)
+        lchowns = _record_lchowns(monkeypatch)
         monkeypatch.setattr(os, "geteuid", lambda: 0)
 
         (_owner / "_uploads" / "sess_A" / "file_deep").mkdir(parents=True)
@@ -147,7 +156,7 @@ class TestRepairWorkspaceOwnership:
 
         count = repair_workspace_ownership()
 
-        chowned = {p for p, _u, _g in chowns}
+        chowned = {p for p, _u, _g in lchowns}
         expected = {
             str(_owner),
             str(_owner / "_uploads"),
@@ -171,14 +180,14 @@ class TestRepairWorkspaceOwnership:
         # Every dir on disk already matches the configured owner.
         monkeypatch.setattr(settings, "workspaces_owner_uid", os.getuid())
         monkeypatch.setattr(settings, "workspaces_owner_gid", os.getgid())
-        chowns = _record_chowns(monkeypatch)
+        lchowns = _record_lchowns(monkeypatch)
         monkeypatch.setattr(os, "geteuid", lambda: 0)
 
         (_owner / "_uploads" / "sess_A").mkdir(parents=True)
         (_owner / "acc_x" / "sess_b").mkdir(parents=True)
 
         assert repair_workspace_ownership() == 0
-        assert chowns == []
+        assert lchowns == []
 
     def test_repair_continues_past_one_oserror(
         self, _owner: Path, monkeypatch: pytest.MonkeyPatch
@@ -191,21 +200,65 @@ class TestRepairWorkspaceOwnership:
         (_owner / "_uploads" / "sess_A").mkdir(parents=True)
 
         bad = str(_owner / "_uploads")
-        chowns: list[tuple[str, int, int]] = []
+        lchowns: list[tuple[str, int, int]] = []
 
-        def _chown(p: object, u: int, g: int) -> None:
+        def _lchown(p: object, u: int, g: int) -> None:
             if str(p) == bad:
                 raise OSError("boom")
-            chowns.append((str(p), u, g))
+            lchowns.append((str(p), u, g))
 
-        monkeypatch.setattr(os, "chown", _chown)
+        monkeypatch.setattr(os, "lchown", _lchown)
 
         # Must not raise; the bad entry is skipped but the rest process.
         count = repair_workspace_ownership()
 
-        chowned = {p for p, _u, _g in chowns}
+        chowned = {p for p, _u, _g in lchowns}
         assert bad not in chowned
         assert str(_owner) in chowned
         assert str(_owner / "_uploads" / "sess_A") in chowned
         # The failed entry is not counted.
         assert count == len(chowned)
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="under real root lstat/chown semantics differ; this exercises the "
+        "non-root recorder path with geteuid mocked to 0",
+    )
+    def test_repair_lchowns_symlink_and_skips_descent_into_target(
+        self, _owner: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hardening (#959, FIX #1 + #2): a symlink under a shared root is
+        chowned in place via ``os.lchown`` (NOT ``os.chown``, which would
+        follow it and chown the target), and the symlink's target directory's
+        children are NOT enumerated/chowned (no descent into a symlinked dir).
+        """
+        settings = get_settings()
+        # Mismatch every on-disk entry so the only variable is symlink handling.
+        monkeypatch.setattr(settings, "workspaces_owner_uid", os.getuid() + 1)
+        monkeypatch.setattr(settings, "workspaces_owner_gid", os.getgid() + 1)
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+        # An external directory OUTSIDE workspace_root with a child that must
+        # never be touched by the repair walk.
+        external = _owner.parent / "external_target"
+        (external / "secret_child").mkdir(parents=True)
+
+        # A shared root containing a symlink that points at the external dir.
+        uploads = _owner / "_uploads"
+        uploads.mkdir(parents=True)
+        link = uploads / "link"
+        link.symlink_to(external, target_is_directory=True)
+
+        lchowns: list[str] = []
+        chowns: list[str] = []
+        monkeypatch.setattr(os, "lchown", lambda p, u, g: lchowns.append(str(p)))
+        monkeypatch.setattr(os, "chown", lambda p, u, g: chowns.append(str(p)))
+
+        repair_workspace_ownership()
+
+        # (a) The symlink itself was lchowned (in place), never chowned.
+        assert str(link) in lchowns
+        assert chowns == [], "os.chown must never be called — repair uses lchown"
+        # (b) No descent into the symlink target: its external child is untouched.
+        assert str(external / "secret_child") not in lchowns
+        assert str(external) not in lchowns

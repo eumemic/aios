@@ -169,7 +169,8 @@ async def worker_main() -> None:
 
         # Repair pre-existing root-owned shared-workspace dirs (#959) before
         # any provisioning job can run. No-op unless the worker is root.
-        repaired = repair_workspace_ownership()
+        # to_thread: synchronous lstat/chown walk must not block the event loop.
+        repaired = await asyncio.to_thread(repair_workspace_ownership)
         if repaired:
             log.info("worker.workspace_ownership_repaired", count=repaired)
 

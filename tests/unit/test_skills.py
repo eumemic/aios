@@ -393,5 +393,66 @@ class TestProvisionSkillFiles:
             assert skill_md.read_text() == sv.files["SKILL.md"]
 
     @pytest.mark.asyncio
+    async def test_root_provisioning_chowns_created_skill_subdirs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Worker-side (#959, FIX #3): ``provision_skill_files`` runs in the
+        worker process (root) via ``run_session_step``. The nested skill
+        subdirs it creates (``skills/``, ``skills/<dir>/``,
+        ``skills/<dir>/scripts/``) must be chowned to the workspaces owner —
+        otherwise the api (uid 1000, no CAP_CHOWN) can't write into them,
+        reintroducing the bug. ``provision_skill_files`` routes
+        ``file_path.parent`` through ``ensure_owned_dir``, which chowns the
+        components it creates when running as root.
+        """
+        import os
+
+        from aios.config import get_settings
+
+        sv = SkillVersion(
+            skill_id="skl_01TEST",
+            version=1,
+            directory="my-skill",
+            name="my-skill",
+            description="Test skill",
+            files={
+                "SKILL.md": "# Instructions",
+                "scripts/run.py": "print('hello')",
+            },
+            created_at=_NOW,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "sess_01TEST"
+            settings = get_settings()
+            monkeypatch.setattr(settings, "workspace_root", root)
+            monkeypatch.setattr(settings, "workspaces_owner_uid", 1000)
+            monkeypatch.setattr(settings, "workspaces_owner_gid", 1000)
+            monkeypatch.setattr(os, "geteuid", lambda: 0)
+            chowns: list[tuple[str, int, int]] = []
+            monkeypatch.setattr(os, "chown", lambda p, u, g: chowns.append((str(p), u, g)))
+
+            # NOTE: do NOT patch ensure_workspace_path/ensure_owned_dir here —
+            # the chown behaviour under test lives inside them.
+            with patch(
+                "aios.harness.skills._load_workspace_path",
+                AsyncMock(return_value=str(workspace)),
+            ):
+                await provision_skill_files("sess_01TEST", [sv])
+
+            chowned = {p for p, _u, _g in chowns}
+            # ``ensure_owned_dir`` resolves paths, so compare against the
+            # canonical form (macOS maps ``/var`` → ``/private/var``).
+            skills = (workspace / "skills").resolve()
+            # Every created skill subdir was chowned to the owner uid:gid.
+            assert str(skills) in chowned
+            assert str(skills / "my-skill") in chowned
+            assert str(skills / "my-skill" / "scripts") in chowned
+            assert all((u, g) == (1000, 1000) for _p, u, g in chowns)
+            # Files were still written.
+            assert (workspace / "skills" / "my-skill" / "SKILL.md").exists()
+            assert (workspace / "skills" / "my-skill" / "scripts" / "run.py").exists()
+
+    @pytest.mark.asyncio
     async def test_empty_list_noop(self) -> None:
         await provision_skill_files("sess_01TEST", [])

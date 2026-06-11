@@ -70,7 +70,11 @@ def repair_workspace_ownership() -> int:
         try:
             st = path.lstat()  # lstat: chown the symlink itself, not its target
             if st.st_uid != uid or st.st_gid != gid:
-                os.chown(path, uid, gid)
+                # lchown (not chown): a root-owned symlink passes the lstat uid
+                # check above, but os.chown FOLLOWS the symlink and would chown
+                # its target (possibly outside the tree) while leaving the link
+                # itself root-owned — re-triggering repair every restart.
+                os.lchown(path, uid, gid)
                 log.info(
                     "workspace.ownership_repaired",
                     path=str(path),
@@ -91,7 +95,11 @@ def repair_workspace_ownership() -> int:
         if _repair_one(entry):
             count += 1
         # Descend exactly one level into shared roots and account/legacy dirs.
-        if not entry.is_dir():
+        # follow_symlinks=False: a symlinked-to-directory (e.g.
+        # ``_uploads/link -> /external/dir``) must NOT be descended into, or we
+        # would enumerate and chown its target's external children. The symlink
+        # entry itself is still repaired by ``_repair_one`` (via lchown) above.
+        if not entry.is_dir(follow_symlinks=False):
             continue
         if entry.name in _SHARED_ROOTS or entry.name.startswith(_DESCEND_PREFIXES):
             for child in entry.iterdir():
