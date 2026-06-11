@@ -54,6 +54,7 @@ from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.tool_broker import ToolBroker
+from aios.sandbox.workspace_ownership import repair_workspace_ownership
 
 # Hashed (via Postgres ``hashtextextended($1, 0)``) into the 64-bit
 # advisory-lock key enforcing the worker-process singleton. The string
@@ -165,6 +166,12 @@ async def worker_main() -> None:
         runtime.mcp_session_pool = mcp_session_pool
         runtime.tool_broker = tool_broker
         runtime.tool_provider = SubsystemToolProvider()
+
+        # Repair pre-existing root-owned shared-workspace dirs (#959) before
+        # any provisioning job can run. No-op unless the worker is root.
+        repaired = repair_workspace_ownership()
+        if repaired:
+            log.info("worker.workspace_ownership_repaired", count=repaired)
 
         await procrastinate_app.open_async()
         procrastinate_opened = True
