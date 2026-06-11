@@ -97,7 +97,12 @@ class WhatsappManagementMixin:
         jid = outcome.get("jid")
         if response["status"] == "success" and jid:
             scanned = jid.split("@")[0].split(":")[0]
-            expected = normalize_phone(external_account_id)[1:]
+            # Compare digits-only (mirrors connector._phone_to_jid):
+            # normalize_phone strips only spaces/dashes, so a phone
+            # stored as "+1 (555) 111-2222" would otherwise never equal
+            # the scanned JID's pure-digit user part and a correctly
+            # paired device would be falsely auto-unpaired.
+            expected = "".join(c for c in external_account_id if c.isdigit())
             if scanned != expected:
                 # Wrong account scanned onto this connection.  Unpair
                 # the foreign device before returning so we never leave

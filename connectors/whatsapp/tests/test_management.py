@@ -186,6 +186,42 @@ async def test_confirm_pairing_jid_format_match_with_device_suffix(
     connector.state[CONNECTION_ID].daemon.unpair.assert_not_awaited()  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    "formatted_phone",
+    [
+        "+1 (555) 111-2222",
+        "+1.555.111.2222",
+    ],
+)
+async def test_confirm_pairing_formatted_phone_digits_match_succeeds(
+    connector: WhatsappConnector, formatted_phone: str
+) -> None:
+    """A connection phone stored with separators normalize_phone doesn't
+    strip (parens, dots) must still compare digits-only against the scanned
+    JID — a correctly paired device must NOT be falsely auto-unpaired."""
+    # Mirror serve_connection's store-side normalization: state.phone is
+    # normalize_phone(secrets["phone"]), which keeps parens/dots.
+    connector.state[CONNECTION_ID].phone = normalize_phone(formatted_phone)
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return(
+            {
+                "status": "success",
+                "jid": "15551112222@s.whatsapp.net",
+                "push_name": "Bot",
+            }
+        )
+    )
+    connector.state[CONNECTION_ID].daemon.unpair = _async_return(None)  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=formatted_phone)
+    assert result == {
+        "external_account_id": formatted_phone,
+        "status": "success",
+        "jid": "15551112222@s.whatsapp.net",
+        "push_name": "Bot",
+    }
+    connector.state[CONNECTION_ID].daemon.unpair.assert_not_awaited()  # type: ignore[attr-defined]
+
+
 async def test_unpair_invokes_daemon(connector: WhatsappConnector) -> None:
     connector.state[CONNECTION_ID].daemon.unpair = _async_return(None)  # type: ignore[attr-defined]
     result = await connector.unpair(external_account_id=PHONE)
