@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from procrastinate import exceptions as procrastinate_exceptions
 from procrastinate.types import JSONValue
 
+from aios.config import get_settings
 from aios.db import queries
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
@@ -78,21 +79,14 @@ async def defer_wake(
 
     task_kwargs: dict[str, JSONValue] = {"session_id": session_id, "cause": cause}
 
-    if delay_seconds is not None:
-        deferrer = app.configure_task(
-            "harness.wake_session",
-            lock=session_id,
-            queueing_lock=session_id,
-            priority=priority,
-            schedule_in={"seconds": delay_seconds},
-        )
-    else:
-        deferrer = app.configure_task(
-            "harness.wake_session",
-            lock=session_id,
-            queueing_lock=session_id,
-            priority=priority,
-        )
+    # configure_task accepts schedule_in=None (treated as "no schedule").
+    deferrer = app.configure_task(
+        "harness.wake_session",
+        lock=session_id,
+        queueing_lock=session_id,
+        priority=priority,
+        schedule_in={"seconds": delay_seconds} if delay_seconds is not None else None,
+    )
 
     try:
         await deferrer.defer_async(**task_kwargs)
@@ -105,20 +99,33 @@ async def defer_wake(
         )
 
 
-async def defer_run_wake(run_id: str) -> None:
+async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:
     """Enqueue a ``wake_workflow`` job for a run, swallowing ``AlreadyEnqueued``.
 
     Unlike :func:`defer_wake`, this appends **no** journal span: ``wf_run_events``
     is single-writer — only ``run_workflow_step`` (under ``lock=run_id``) writes
     it. ``queueing_lock`` dedups concurrent wakes for the same run.
+
+    ``batch`` (#780) schedules the wake ``workflow_wake_batch_seconds`` out
+    instead of immediately, so a burst of completions collapses into one
+    re-drive: the scheduled job sits in ``todo`` holding the ``queueing_lock``,
+    absorbing every further defer until it runs — including otherwise-immediate
+    wakes (a gate resume, the step's self-wake) arriving inside the window.
+    That absorption is sound because every wake source commits its signal/
+    response BEFORE deferring, so the delayed step harvests it; the cost is
+    latency bounded by the window. The high-frequency sources (child
+    completions, tool results) pass ``batch=True``; with the setting at 0
+    (the default) batching is off and every wake is immediate.
     """
     from aios.harness.procrastinate_app import app
 
+    window = get_settings().workflow_wake_batch_seconds if batch else 0.0
     deferrer = app.configure_task(
         "harness.wake_workflow",
         lock=run_id,
         queueing_lock=run_id,
         priority=_BACKGROUND_PRIORITY,  # workflow run steps yield to foreground too
+        schedule_in={"seconds": window} if window > 0 else None,
     )
     try:
         await deferrer.defer_async(run_id=run_id)

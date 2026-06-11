@@ -620,8 +620,7 @@ async def test_hash_ordering_is_pinned_across_wakes(monkeypatch: pytest.MonkeyPa
 async def test_cpu_bomb_is_killed_and_parent_survives() -> None:
     out = await _run(
         "async def main(input):\n    while True:\n        pass",
-        cpu_seconds=2,
-        deadline_seconds=2.0,
+        deadline_seconds=2.0,  # the CPU rlimit derives from this (deadline + 1s)
     )
     assert out.kind == "raised"
     assert out.error_kind in ("script_host_timeout", "script_host_crash")
@@ -644,6 +643,47 @@ async def test_address_space_bomb_is_contained_and_parent_survives() -> None:
     assert out.kind == "raised"
     ok = await _run("async def main(input):\n    return 'alive'")
     assert ok.kind == "returned" and ok.value == "alive"
+
+
+async def test_big_memo_replay_outlives_a_tiny_base_deadline() -> None:
+    """The wall budget scales with INIT bytes (#780). The base here (0.01s) is
+    deliberately below interpreter spawn time (~20-50ms), so an UNSCALED host
+    deterministically times out — what passes is the multi-MiB memo's scale
+    allowance. This pins that ``_scaled_seconds`` is actually wired into
+    ``run_script_host``, not merely unit-green."""
+    source = "async def main(input):\n    g = await gate('x')\n    return len(g)"
+    first = await _run(source)
+    (cap,) = first.emitted  # learn the gate's call_key
+    memo = {
+        cap.call_key: {"ok": "v"},
+        # An unmatched memo key is never consulted by the driver — it exists only
+        # to inflate the INIT frame past 2MiB.
+        "pad": {"ok": "x" * (2 * 1024 * 1024)},
+    }
+    out = await _run(source, memo=memo, deadline_seconds=0.01)
+    assert out.kind == "returned"
+    assert out.value == 1
+
+
+async def test_cpu_rlimit_derives_from_the_scaled_deadline() -> None:
+    """The child's CPU budget must track the SCALED wall deadline (int(deadline)+1),
+    not the base — pinned end-to-end by reading the env the child was handed (via
+    the documented builtins-escape, like the env-scrub test). A base-derived
+    mutation would hand a multi-MiB replay a 1s CPU budget."""
+    source = (
+        "async def main(input):\n"
+        "    return gate.__globals__['os'].environ['AIOS_WF_RLIMIT_CPU_S']\n"
+    )
+    tiny = await _run(source, deadline_seconds=2.0)
+    assert tiny.kind == "returned"
+    assert tiny.value == "3"  # tiny INIT: int(~2.0) + 1
+    big = await _run(
+        source,
+        memo={"pad": {"ok": "x" * (2 * 1024 * 1024)}},  # ~2MiB INIT → ~60s wall
+        deadline_seconds=0.01,
+    )
+    assert big.kind == "returned"
+    assert 61 <= int(big.value) <= 62  # int(0.01 + ~2*30) + 1
 
 
 async def test_log_goes_to_stderr_not_the_frame_stream() -> None:

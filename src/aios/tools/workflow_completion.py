@@ -11,13 +11,15 @@ captured for it, by whichever of these writes first:
   (``fail_all_open_requests``, when the model fails past its retry budget) both go
   through :func:`respond_to_request`,
 * the run's totality backstop (``services.sessions`` quiescence guard) writes
-  ``write_response_if_absent`` directly — it runs inside the guard's open
-  transaction, so it can't acquire its own connection.
+  inside its own open transaction — it can't acquire its own connection.
 
-The common, load-bearing seam is therefore ``write_response_if_absent`` (the
-exactly-once, first-writer-wins guard), not :func:`respond_to_request`: a
-``return``+``error`` batch, a model double-call, a model-failure racing a late
-``return``, or the backstop racing any of them all collapse to one response there.
+The common, load-bearing seam for an external writer is
+``sessions_service.write_child_response`` — exactly-once first-writer-wins (via
+``write_response_if_absent``) PLUS the atomic ``child_done`` marker the
+needs-step sweep's recall depends on (a writer that bypassed it would silently
+re-open the lost-wake stall the marker closes). A ``return``+``error`` batch, a
+model double-call, a model-failure racing a late ``return``, or the backstop
+racing any of them all collapse to one response there.
 :func:`respond_to_request` adds the caller-wake on top for the pool-level callers.
 
 It does **not** archive or terminate the child. Responding resumes the caller
@@ -36,6 +38,7 @@ import jsonschema
 
 from aios.db import queries
 from aios.harness import runtime
+from aios.services import sessions as sessions_service
 from aios.services.wake import defer_run_wake
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
 
@@ -117,17 +120,21 @@ async def respond_to_request(
             conn, session_id, account_id=account_id
         ):
             return "unknown_request"  # already answered, never asked, or a typo from the model
-        wrote = await queries.write_response_if_absent(
-            conn,
-            session_id,
-            account_id=account_id,
-            request_id=request_id,
-            is_error=is_error,
-            result=result,
-            error=error,
-        )
+        async with conn.transaction():
+            wrote = await sessions_service.write_child_response(
+                conn,
+                session_id,
+                account_id=account_id,
+                parent_run_id=parent_run_id,
+                request_id=request_id,
+                is_error=is_error,
+                result=result,
+                error=error,
+            )
     if wrote:
-        await defer_run_wake(parent_run_id)
+        # batch: child completions are the high-frequency wake source — a fan-out's
+        # burst coalesces into one re-drive when the window setting is on.
+        await defer_run_wake(parent_run_id, batch=True)
     return "responded" if wrote else "duplicate"
 
 

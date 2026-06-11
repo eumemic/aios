@@ -218,7 +218,8 @@ async def open_listen_for_run_events(
     The workflow-run analog of :func:`open_listen_for_events` — same dedicated
     connection + bounded-queue-with-drop shape, feeding the ``/v1/runs/{id}/stream``
     generator. No subscriber advisory lock: that is a session-worker coordination
-    signal (issue #81) with no workflow equivalent (the run sweep is unconditional).
+    signal (issue #81) with no workflow equivalent (a lost run wake self-heals via
+    the needs-step sweep clauses, not via subscriber gating).
     """
     conn = await _connect_listener(db_url)
     try:

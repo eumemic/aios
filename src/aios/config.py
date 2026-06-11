@@ -363,6 +363,19 @@ class Settings(BaseSettings):
         "semantics; worst-case standing exposure is this many runs each "
         "entitled to ``workflow_max_agent_calls`` children.",
     )
+    workflow_wake_batch_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Coalescing window for run wakes from child completions and "
+        "tool results: completions landing within the window collapse into one "
+        "re-drive (the scheduled wake occupies the dedup lock, so further defers "
+        "are absorbed — including, for the window's duration, otherwise-immediate "
+        "wakes like a gate resume; their signals are still harvested by the "
+        "delayed step). 0 disables (every completion wakes immediately — today's "
+        "behavior). Note the effective floor: a not-yet-due scheduled job is "
+        "picked up by worker polling (~5s on an otherwise-idle worker), so "
+        "sub-second windows buy nothing.",
+    )
 
     # ── connectors ─────────────────────────────────────────────────────────
     inbound_debounce_seconds: float = Field(

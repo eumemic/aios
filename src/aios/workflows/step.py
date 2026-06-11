@@ -179,6 +179,17 @@ async def _run_workflow_step_body(
     pool: asyncpg.Pool[Any], run_id: str, run: WfRun, account_id: str
 ) -> None:
     async with pool.acquire() as conn:
+        # ``running`` is the step's LEASE (#780): flipped on EVERY wake before any
+        # journal write — not just the first — so a crash anywhere mid-step
+        # (including the deliberate spawn-failed re-raise below) leaves a state the
+        # needs-step sweep matches unconditionally. Without this, a crash after the
+        # harvest journals its last call_result but before the re-drive parks/ends
+        # the run would leave a 'suspended' row no filter clause ever wakes again.
+        # The step's closing write — park to 'suspended' or a terminal — hands the
+        # lease back. (``run.status`` is the entry snapshot, read just above.)
+        if run.status != "running":
+            await wf_queries.set_run_status(conn, run_id, "running", account_id=account_id)
+
         events = await wf_queries.list_run_events(conn, run_id)
         signals = {s.call_key: s for s in await wf_queries.list_run_signals(conn, run_id)}
 
@@ -215,12 +226,12 @@ async def _run_workflow_step_body(
                 type="run_started",
                 payload={"input": run.input},
             )
-            await wf_queries.set_run_status(conn, run_id, "running", account_id=account_id)
 
         # Pre-replay harvest: resolve any inflight capability that is now done — a
         # gate with a delivered resume signal, or an agent child with a response (or a
         # past-deadline timeout) — and fold its result into memo so replay
         # fast-forwards past it.
+        harvested = False  # any call_result journaled this step
         now = datetime.now(UTC)
         agent_deadline = timedelta(seconds=get_settings().workflow_agent_deadline_seconds)
         for call_key, cap_event in list(inflight.items()):
@@ -278,6 +289,21 @@ async def _run_workflow_step_body(
             # fast-forward into the await, or an `{error}` to throw as AgentError.
             memo[call_key] = _memo_outcome(result_payload)
             del inflight[call_key]
+            harvested = True
+
+        # QUIET WAKE early-exit (#780): the run entered parked ('suspended' means
+        # the previous step's closing park committed, so the journal is a complete
+        # suspension) and the harvest resolved nothing — by determinism the replay
+        # would re-emit the same frontier and re-park, so the O(memo) reship +
+        # replay is a provable no-op. Park back and return. This is what keeps a
+        # sweep wake of a heavy parked run O(1): without it, a replay that outlives
+        # the sweep interval re-arms the next tick's wake forever (lease/sweep
+        # resonance), and a slow tool's run pays a full replay per tick. A
+        # 'pending' or 'running' entry MUST drive: first wake, or a crashed step
+        # whose frontier may be only part-journaled.
+        if run.status == "suspended" and not harvested:
+            await wf_queries.set_run_status(conn, run_id, "suspended", account_id=account_id)
+            return
 
     # Drive one wake in the credential-free subprocess (no DB conn held).
     outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
