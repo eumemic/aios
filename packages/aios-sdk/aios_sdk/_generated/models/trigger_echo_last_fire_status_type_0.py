@@ -1,7 +1,7 @@
 from enum import Enum
 
 
-class ScheduledTaskEchoLastFireStatusType0(str, Enum):
+class TriggerEchoLastFireStatusType0(str, Enum):
     ERROR = "error"
     OK = "ok"
     SKIPPED = "skipped"

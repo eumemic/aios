@@ -291,15 +291,15 @@ class Settings(BaseSettings):
         "for unmounted servers.",
     )
 
-    # ── scheduled tasks ────────────────────────────────────────────────────
-    scheduled_tasks_per_account_max: int = Field(
+    # ── triggers ───────────────────────────────────────────────────────────
+    triggers_per_account_max: int = Field(
         default=100,
         ge=1,
-        description="Per-account ceiling on enabled scheduled_tasks rows "
-        "across all sessions. Enforced at ``add_task`` time; on exceed, "
+        description="Per-account ceiling on enabled trigger rows "
+        "across all sessions. Enforced at ``add_trigger`` time; on exceed, "
         "the call raises ``RateLimitedError``. Bounds the worst-case work "
         "the event-driven scheduler has to enumerate on each tick, and "
-        "the curl-storm a misbehaving agent could deflect at the broker. "
+        "the fire-storm a misbehaving agent could deflect at the broker. "
         "Includes one-shot ``schedule_wake`` rows; bump if your workload "
         "legitimately needs more standing timers per tenant.",
     )

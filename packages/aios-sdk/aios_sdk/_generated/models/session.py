@@ -16,10 +16,10 @@ if TYPE_CHECKING:
     from ..models.awaiting_tool_call import AwaitingToolCall
     from ..models.github_repository_resource_echo import GithubRepositoryResourceEcho
     from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
-    from ..models.scheduled_task_echo import ScheduledTaskEcho
     from ..models.session_metadata import SessionMetadata
     from ..models.session_stop_reason_type_0 import SessionStopReasonType0
     from ..models.session_usage import SessionUsage
+    from ..models.trigger_echo import TriggerEcho
 
 
 T = TypeVar("T", bound="Session")
@@ -52,7 +52,7 @@ class Session:
             vault_ids (list[str] | Unset):
             usage (SessionUsage | Unset): Cumulative token usage across all model calls in a session.
             resources (list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset):
-            scheduled_tasks (list[ScheduledTaskEcho] | Unset):
+            triggers (list[TriggerEcho] | Unset):
             archived_at (datetime.datetime | None | Unset):
             focal_channel (None | str | Unset):
             focal_locked (bool | Unset):  Default: False.
@@ -80,7 +80,7 @@ class Session:
     resources: list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset = (
         UNSET
     )
-    scheduled_tasks: list[ScheduledTaskEcho] | Unset = UNSET
+    triggers: list[TriggerEcho] | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     focal_channel: None | str | Unset = UNSET
     focal_locked: bool | Unset = False
@@ -150,12 +150,12 @@ class Session:
 
                 resources.append(resources_item)
 
-        scheduled_tasks: list[dict[str, Any]] | Unset = UNSET
-        if not isinstance(self.scheduled_tasks, Unset):
-            scheduled_tasks = []
-            for scheduled_tasks_item_data in self.scheduled_tasks:
-                scheduled_tasks_item = scheduled_tasks_item_data.to_dict()
-                scheduled_tasks.append(scheduled_tasks_item)
+        triggers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.triggers, Unset):
+            triggers = []
+            for triggers_item_data in self.triggers:
+                triggers_item = triggers_item_data.to_dict()
+                triggers.append(triggers_item)
 
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
@@ -220,8 +220,8 @@ class Session:
             field_dict["usage"] = usage
         if resources is not UNSET:
             field_dict["resources"] = resources
-        if scheduled_tasks is not UNSET:
-            field_dict["scheduled_tasks"] = scheduled_tasks
+        if triggers is not UNSET:
+            field_dict["triggers"] = triggers
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
         if focal_channel is not UNSET:
@@ -248,10 +248,10 @@ class Session:
             GithubRepositoryResourceEcho,
         )
         from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
-        from ..models.scheduled_task_echo import ScheduledTaskEcho
         from ..models.session_metadata import SessionMetadata
         from ..models.session_stop_reason_type_0 import SessionStopReasonType0
         from ..models.session_usage import SessionUsage
+        from ..models.trigger_echo import TriggerEcho
 
         d = dict(src_dict)
         id = d.pop("id")
@@ -346,16 +346,14 @@ class Session:
 
                 resources.append(resources_item)
 
-        _scheduled_tasks = d.pop("scheduled_tasks", UNSET)
-        scheduled_tasks: list[ScheduledTaskEcho] | Unset = UNSET
-        if _scheduled_tasks is not UNSET:
-            scheduled_tasks = []
-            for scheduled_tasks_item_data in _scheduled_tasks:
-                scheduled_tasks_item = ScheduledTaskEcho.from_dict(
-                    scheduled_tasks_item_data
-                )
+        _triggers = d.pop("triggers", UNSET)
+        triggers: list[TriggerEcho] | Unset = UNSET
+        if _triggers is not UNSET:
+            triggers = []
+            for triggers_item_data in _triggers:
+                triggers_item = TriggerEcho.from_dict(triggers_item_data)
 
-                scheduled_tasks.append(scheduled_tasks_item)
+                triggers.append(triggers_item)
 
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -438,7 +436,7 @@ class Session:
             vault_ids=vault_ids,
             usage=usage,
             resources=resources,
-            scheduled_tasks=scheduled_tasks,
+            triggers=triggers,
             archived_at=archived_at,
             focal_channel=focal_channel,
             focal_locked=focal_locked,

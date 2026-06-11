@@ -2198,14 +2198,14 @@
         }
       }
     },
-    "/v1/sessions/{session_id}/scheduled-tasks": {
+    "/v1/sessions/{session_id}/triggers": {
       "get": {
         "tags": [
           "sessions"
         ],
-        "summary": "List Scheduled Tasks",
-        "description": "List scheduled tasks attached to ``session_id``.",
-        "operationId": "list_scheduled_tasks",
+        "summary": "List Triggers",
+        "description": "List triggers attached to ``session_id``.",
+        "operationId": "list_triggers",
         "parameters": [
           {
             "name": "session_id",
@@ -2239,7 +2239,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListResponse_ScheduledTaskEcho_"
+                  "$ref": "#/components/schemas/ListResponse_TriggerEcho_"
                 }
               }
             }
@@ -2260,9 +2260,9 @@
         "tags": [
           "sessions"
         ],
-        "summary": "Create Scheduled Task",
-        "description": "Add a scheduled task. Granular operation per #270 \u2014 there is no\nwhole-list ``set`` surface on ``SessionUpdate``.",
-        "operationId": "create_scheduled_task",
+        "summary": "Create Trigger",
+        "description": "Add a trigger. Granular operation per #270 \u2014 there is no whole-list\n``set`` surface on ``SessionUpdate``.",
+        "operationId": "create_trigger",
         "parameters": [
           {
             "name": "session_id",
@@ -2295,7 +2295,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ScheduledTaskCreate"
+                "$ref": "#/components/schemas/TriggerCreate"
               }
             }
           }
@@ -2306,7 +2306,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ScheduledTaskEcho"
+                  "$ref": "#/components/schemas/TriggerEcho"
                 }
               }
             }
@@ -2324,14 +2324,14 @@
         }
       }
     },
-    "/v1/sessions/{session_id}/scheduled-tasks/{name}": {
+    "/v1/sessions/{session_id}/triggers/{name}": {
       "delete": {
         "tags": [
           "sessions"
         ],
-        "summary": "Delete Scheduled Task",
-        "description": "Remove a scheduled task by name.",
-        "operationId": "delete_scheduled_task",
+        "summary": "Delete Trigger",
+        "description": "Remove a trigger by name.",
+        "operationId": "delete_trigger",
         "parameters": [
           {
             "name": "session_id",
@@ -2388,9 +2388,9 @@
         "tags": [
           "sessions"
         ],
-        "summary": "Update Scheduled Task",
-        "description": "Patch fields of a scheduled task by name. Omitted fields unchanged.",
-        "operationId": "update_scheduled_task",
+        "summary": "Update Trigger",
+        "description": "Replace a trigger's source/action/enabled/metadata by name. Omitted\nfields unchanged; ``source`` / ``action`` replace wholesale.",
+        "operationId": "update_trigger",
         "parameters": [
           {
             "name": "session_id",
@@ -2432,7 +2432,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ScheduledTaskUpdate"
+                "$ref": "#/components/schemas/TriggerUpdate"
               }
             }
           }
@@ -2443,7 +2443,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ScheduledTaskEcho"
+                  "$ref": "#/components/schemas/TriggerEcho"
                 }
               }
             }
@@ -10329,6 +10329,29 @@
         "title": "ContextResponse",
         "description": "Response for ``GET /v1/sessions/{id}/context``.\n\nThe exact chat-completions payload the worker would send to LiteLLM\nif a step ran right now.  Dry-run: no side effects \u2014 no events\nappended, no status bump, no skill files provisioned."
       },
+      "CronSource": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "cron",
+            "title": "Kind",
+            "default": "cron"
+          },
+          "schedule": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Schedule"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "schedule"
+        ],
+        "title": "CronSource",
+        "description": "Recurring source: a standard 5-field cron expression in UTC.\n\nStructure-only here \u2014 grammar/occurrence checks live on the write\nmodels (``TriggerCreate`` / ``TriggerUpdate``) so the read path accepts\nevery row the write path ever accepted (see module docstring + \u00a72.2 of\nthe design contract). A future additive ``timezone`` field (IANA name;\nabsent = UTC) lands without touching this model or the DB CHECK."
+      },
       "Environment": {
         "properties": {
           "id": {
@@ -11351,38 +11374,6 @@
         ],
         "title": "ListResponse[RuntimeToken]"
       },
-      "ListResponse_ScheduledTaskEcho_": {
-        "properties": {
-          "data": {
-            "items": {
-              "$ref": "#/components/schemas/ScheduledTaskEcho"
-            },
-            "type": "array",
-            "title": "Data"
-          },
-          "has_more": {
-            "type": "boolean",
-            "title": "Has More",
-            "default": false
-          },
-          "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Cursor"
-          }
-        },
-        "type": "object",
-        "required": [
-          "data"
-        ],
-        "title": "ListResponse[ScheduledTaskEcho]"
-      },
       "ListResponse_SessionTemplate_": {
         "properties": {
           "data": {
@@ -11510,6 +11501,38 @@
           "data"
         ],
         "title": "ListResponse[Skill]"
+      },
+      "ListResponse_TriggerEcho_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/TriggerEcho"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[TriggerEcho]"
       },
       "ListResponse_Union_Memory__MemoryPrefix__": {
         "properties": {
@@ -12585,6 +12608,28 @@
         "title": "OAuthStartResponse",
         "description": "The authorization URL to redirect the user to, plus the flow's CSRF state."
       },
+      "OneShotSource": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "one_shot",
+            "title": "Kind",
+            "default": "one_shot"
+          },
+          "fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Fire At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "fire_at"
+        ],
+        "title": "OneShotSource",
+        "description": "One-shot source: fires once at an absolute UTC time, then self-deletes."
+      },
       "RecentChat": {
         "properties": {
           "chat_id": {
@@ -12890,54 +12935,19 @@
         "title": "RuntimeToolResultRequest",
         "description": "Body for ``POST /v1/connectors/runtime/tool-results``.\n\nCarries ``connection_id`` explicitly \u2014 the bearer scopes the\ncaller to a connector *type*, not to one connection, so the body\nhas to name the target connection."
       },
-      "ScheduledTaskCreate": {
+      "SandboxCommandAction": {
         "properties": {
-          "name": {
+          "kind": {
             "type": "string",
-            "maxLength": 64,
-            "minLength": 1,
-            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
-            "title": "Name",
-            "description": "Stable user-chosen identifier; unique per session."
-          },
-          "schedule": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 128,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Schedule",
-            "description": "Standard 5-field cron expression in UTC for recurring rows. Mutually exclusive with ``fire_at``."
-          },
-          "fire_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Fire At",
-            "description": "Absolute UTC time for one-shot rows; the row self-deletes after firing. Mutually exclusive with ``schedule``."
+            "const": "sandbox_command",
+            "title": "Kind",
+            "default": "sandbox_command"
           },
           "command": {
             "type": "string",
             "maxLength": 16384,
             "minLength": 1,
-            "title": "Command",
-            "description": "Bash command run in the session's sandbox at each fire."
-          },
-          "enabled": {
-            "type": "boolean",
-            "title": "Enabled",
-            "default": true
+            "title": "Command"
           },
           "timeout_seconds": {
             "type": "integer",
@@ -12952,248 +12962,52 @@
             "minimum": 1024.0,
             "title": "Max Output Bytes",
             "default": 65536
-          },
-          "metadata": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Metadata"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "name",
           "command"
         ],
-        "title": "ScheduledTaskCreate",
-        "description": "Request body for adding a scheduled task to a session.\n\nEach row carries either a cron ``schedule`` (recurring) or a\n``fire_at`` absolute time (one-shot \u2014 self-deletes after firing).\nExactly one must be set; enforced by both a Pydantic ``model_validator``\nhere and a DB CHECK constraint.\n\nAlso accepted in :class:`SessionCreate.scheduled_tasks` for initial\nattachment at session creation."
+        "title": "SandboxCommandAction",
+        "description": "Run a bash command in the session's sandbox WITHOUT waking the model.\n\nVerbatim today's scheduled-task behavior. Defaults for\n``timeout_seconds`` / ``max_output_bytes`` are materialized at write\ntime so the stored row is self-describing (the runner carries no\ndefaults knowledge)."
       },
-      "ScheduledTaskEcho": {
+      "SandboxCommandActionReplace": {
         "properties": {
-          "id": {
+          "kind": {
             "type": "string",
-            "title": "Id"
-          },
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "schedule": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Schedule"
-          },
-          "fire_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Fire At"
+            "const": "sandbox_command",
+            "title": "Kind",
+            "default": "sandbox_command"
           },
           "command": {
             "type": "string",
+            "maxLength": 16384,
+            "minLength": 1,
             "title": "Command"
-          },
-          "enabled": {
-            "type": "boolean",
-            "title": "Enabled"
           },
           "timeout_seconds": {
             "type": "integer",
+            "maximum": 3600.0,
+            "minimum": 1.0,
             "title": "Timeout Seconds"
           },
           "max_output_bytes": {
             "type": "integer",
+            "maximum": 1048576.0,
+            "minimum": 1024.0,
             "title": "Max Output Bytes"
-          },
-          "next_fire": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Fire"
-          },
-          "last_fire_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Last Fire At"
-          },
-          "last_fire_status": {
-            "anyOf": [
-              {
-                "type": "string",
-                "enum": [
-                  "ok",
-                  "error",
-                  "timeout",
-                  "skipped"
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Last Fire Status"
-          },
-          "consecutive_failures": {
-            "type": "integer",
-            "title": "Consecutive Failures"
-          },
-          "metadata": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Metadata"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Updated At"
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "schedule",
-          "fire_at",
-          "command",
-          "enabled",
-          "timeout_seconds",
-          "max_output_bytes",
-          "next_fire",
-          "last_fire_at",
-          "last_fire_status",
-          "consecutive_failures",
-          "metadata",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "ScheduledTaskEcho",
-        "description": "Read view of a scheduled task as echoed on ``Session.scheduled_tasks``.\n\nExactly one of ``schedule`` (cron) or ``fire_at`` (one-shot) is set.\nRuntime fields (``last_fire_at`` / ``last_fire_status`` /\n``consecutive_failures``) reflect the most recent fire outcome.\n``running_since`` is internal scheduler bookkeeping and is not\nexposed here."
-      },
-      "ScheduledTaskUpdate": {
-        "properties": {
-          "schedule": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 128,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Schedule"
-          },
-          "fire_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Fire At",
-            "description": "Update the one-shot fire time. Mutually exclusive with `schedule`."
-          },
-          "command": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 16384,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Command"
-          },
-          "enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enabled"
-          },
-          "timeout_seconds": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "maximum": 3600.0,
-                "minimum": 1.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Timeout Seconds"
-          },
-          "max_output_bytes": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "maximum": 1048576.0,
-                "minimum": 1024.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Output Bytes"
-          },
-          "metadata": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Metadata"
           }
         },
         "additionalProperties": false,
         "type": "object",
-        "title": "ScheduledTaskUpdate",
-        "description": "PATCH body for updating a scheduled task.\n\n``name`` cannot be changed \u2014 it is the addressable identifier within\na session. All other fields are optional; omitted fields are left\nunchanged. Toggling ``enabled`` true\u2192false clears ``next_fire``;\nfalse\u2192true recomputes it from now.\n\nUpdates can adjust the trigger by setting ``schedule`` (cron) or\n``fire_at`` (one-shot) \u2014 but not both in the same PATCH; the DB\nCHECK constraint enforces the XOR invariant after the merged write."
+        "required": [
+          "command",
+          "timeout_seconds",
+          "max_output_bytes"
+        ],
+        "title": "SandboxCommandActionReplace",
+        "description": "Update-side variant: optional-at-create fields are REQUIRED, so a\npartial action 422s instead of silently resetting stored values to\ndefaults. (Create keeps the defaults for tool ergonomics.)"
       },
       "Session": {
         "properties": {
@@ -13298,12 +13112,12 @@
             "type": "array",
             "title": "Resources"
           },
-          "scheduled_tasks": {
+          "triggers": {
             "items": {
-              "$ref": "#/components/schemas/ScheduledTaskEcho"
+              "$ref": "#/components/schemas/TriggerEcho"
             },
             "type": "array",
-            "title": "Scheduled Tasks"
+            "title": "Triggers"
           },
           "created_at": {
             "type": "string",
@@ -13570,14 +13384,14 @@
             "title": "Resources",
             "description": "Resources to attach. Mix of memory stores (mounted under /mnt/memory/<name>/) and github repositories (cloned to a user-specified mount_path). Each type has its own per-session cap; duplicates within a type are rejected. Use ``PUT /v1/sessions/{id}`` with ``resources`` to detach or replace the set after creation."
           },
-          "scheduled_tasks": {
+          "triggers": {
             "items": {
-              "$ref": "#/components/schemas/ScheduledTaskCreate"
+              "$ref": "#/components/schemas/TriggerCreate"
             },
             "type": "array",
             "maxItems": 32,
-            "title": "Scheduled Tasks",
-            "description": "Cron-fired bash tasks attached at session creation. Each task fires its command in the session's sandbox at its schedule without waking the model \u2014 bash must explicitly POST a user-role event back to escalate. Manage after creation via ``POST/DELETE/PUT /v1/sessions/{id}/scheduled-tasks``; ``SessionUpdate`` deliberately does not accept this field (granular ops only)."
+            "title": "Triggers",
+            "description": "Triggers attached at session creation. Each pairs a ``source`` (cron / one_shot) with an ``action`` (a ``sandbox_command`` bash task that fires without waking the model, or a ``wake_owner`` message that wakes it). Manage after creation via ``POST/DELETE/PUT /v1/sessions/{id}/triggers``; ``SessionUpdate`` deliberately does not accept this field (granular ops only)."
           }
         },
         "additionalProperties": false,
@@ -14471,9 +14285,10 @@
                   "wake_session",
                   "wake_self",
                   "http_request",
-                  "schedule_task_add",
-                  "schedule_task_remove",
-                  "schedule_task_update",
+                  "trigger_create",
+                  "trigger_remove",
+                  "trigger_update",
+                  "trigger_list",
                   "create_workflow",
                   "update_workflow",
                   "create_run",
@@ -14623,6 +14438,283 @@
         ],
         "title": "ToolsSchemaUpdate",
         "description": "Body for ``PUT /v1/connectors/{connector}/tools_schema``."
+      },
+      "TriggerCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+            "title": "Name",
+            "description": "Stable user-chosen identifier; unique per session."
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CronSource"
+              },
+              {
+                "$ref": "#/components/schemas/OneShotSource"
+              }
+            ],
+            "title": "Source",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "cron": "#/components/schemas/CronSource",
+                "one_shot": "#/components/schemas/OneShotSource"
+              }
+            }
+          },
+          "action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SandboxCommandAction"
+              },
+              {
+                "$ref": "#/components/schemas/WakeOwnerAction"
+              }
+            ],
+            "title": "Action",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "sandbox_command": "#/components/schemas/SandboxCommandAction",
+                "wake_owner": "#/components/schemas/WakeOwnerAction"
+              }
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "source",
+          "action"
+        ],
+        "title": "TriggerCreate",
+        "description": "Request body for adding a trigger to a session.\n\nCarries a ``source`` (cron / one_shot) and an ``action``\n(sandbox_command / wake_owner). Also accepted in\n:class:`SessionCreate.triggers` for initial attachment at session\ncreation."
+      },
+      "TriggerEcho": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CronSource"
+              },
+              {
+                "$ref": "#/components/schemas/OneShotSource"
+              }
+            ],
+            "title": "Source",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "cron": "#/components/schemas/CronSource",
+                "one_shot": "#/components/schemas/OneShotSource"
+              }
+            }
+          },
+          "action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SandboxCommandAction"
+              },
+              {
+                "$ref": "#/components/schemas/WakeOwnerAction"
+              }
+            ],
+            "title": "Action",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "sandbox_command": "#/components/schemas/SandboxCommandAction",
+                "wake_owner": "#/components/schemas/WakeOwnerAction"
+              }
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "next_fire": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire"
+          },
+          "last_fire_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire At"
+          },
+          "last_fire_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "error",
+                  "timeout",
+                  "skipped"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire Status"
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "title": "Consecutive Failures"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "source",
+          "action",
+          "enabled",
+          "next_fire",
+          "last_fire_at",
+          "last_fire_status",
+          "consecutive_failures",
+          "metadata",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TriggerEcho",
+        "description": "Read view of a trigger as echoed on ``Session.triggers``.\n\nRuntime fields (``last_fire_at`` / ``last_fire_status`` /\n``consecutive_failures``) reflect the most recent fire outcome.\n``running_since`` is internal scheduler bookkeeping and is not exposed\nhere."
+      },
+      "TriggerUpdate": {
+        "properties": {
+          "source": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CronSource"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OneShotSource"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "kind",
+                  "mapping": {
+                    "cron": "#/components/schemas/CronSource",
+                    "one_shot": "#/components/schemas/OneShotSource"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SandboxCommandActionReplace"
+                  },
+                  {
+                    "$ref": "#/components/schemas/WakeOwnerAction"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "kind",
+                  "mapping": {
+                    "sandbox_command": "#/components/schemas/SandboxCommandActionReplace",
+                    "wake_owner": "#/components/schemas/WakeOwnerAction"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TriggerUpdate",
+        "description": "Update body. ``source`` / ``action`` are replaced WHOLESALE when\nprovided (a cron\u2194one-shot or sandbox\u2194wake conversion is just a\ndifferent object). ``None`` = leave alone; there is no clear-to-null\n(both columns are NOT NULL). The next_fire / cap / past-fire_at\nbusiness rules are enforced in the service layer (\u00a72.4)."
       },
       "UnrestrictedNetworking": {
         "properties": {
@@ -15467,6 +15559,29 @@
         ],
         "title": "WaitResponse",
         "description": "Response for ``GET /v1/sessions/{id}/wait``."
+      },
+      "WakeOwnerAction": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "wake_owner",
+            "title": "Kind",
+            "default": "wake_owner"
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 16384,
+            "minLength": 1,
+            "title": "Content"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "WakeOwnerAction",
+        "description": "Deliver ``content`` as a user-role message to the trigger's OWNING\nsession, waking the model \u2014 the self-wake primitive on a timer.\n\nNo ``session_id``: the target is implicitly ``owner_session_id`` (NOT\nNULL this slice). An explicit-target wake is a separate future kind,\nnot a field on this one (avoids the uncapped cross-session wake that an\nunconstrained ``session_id`` would be \u2014 see the ``wake_session`` tool's\ndepth/rate caps)."
       },
       "WfRun": {
         "properties": {

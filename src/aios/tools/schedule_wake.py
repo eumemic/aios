@@ -1,29 +1,26 @@
 """The schedule_wake tool — ask the harness to wake this session at a future time.
 
-Thin wrapper over :mod:`aios.services.scheduled_tasks`: creates a one-shot
-``scheduled_tasks`` row whose bash command invokes the ``tool wake_self``
-CLI, which delivers a user-role message to the session via the broker
-(authenticating through the sandbox's ``TOOL_BROKER_URL`` /
-``TOOL_BROKER_SECRET`` env vars, so no secret lands in the command string).
-At the configured time, the scheduler claims the row, the runner fires the
-bash, the broker appends the marker, and the model wakes naturally.
+Thin sugar over :mod:`aios.services.triggers`: creates a one-shot trigger
+whose ``source`` is ``{kind: one_shot, fire_at}`` and whose ``action`` is
+``{kind: wake_owner, content}``. At the configured time the scheduler claims
+the row and the runner delivers ``content`` as a user-role message to this
+session IN-WORKER (append + ``defer_wake``) — no sandbox, no broker secret,
+and no fire-time 404 if ``wake_self`` isn't declared on the agent (the old
+``sandbox_command`` + ``tool wake_self`` path's failure mode).
 
-Accepts either ``delay_seconds`` (relative) or ``at`` (absolute, ISO 8601
-or natural language via ``dateparser``). Hard-fails unparseable strings —
-the agent retries through the session log, which is the design (see
+Accepts either ``delay_seconds`` (relative) or ``at`` (absolute, ISO 8601 or
+natural language via ``dateparser``). Hard-fails unparseable strings — the
+agent retries through the session log, which is the design (see
 :doc:`CLAUDE.md`).
 
-Replaces the prior ``defer_wake(delay_seconds=…)``-based implementation;
-the harness retry-backoff path keeps using ``defer_wake`` directly
-because that's a job-execution concern, not a user-visible scheduled
-task (no row in ``session_scheduled_tasks``, no per-account cap, no
-visibility in ``aios scheduled-tasks list``).
+The harness retry-backoff path keeps using ``defer_wake`` directly because
+that's a job-execution concern, not a user-visible trigger (no row in
+``triggers``, no per-account cap, no visibility in ``aios sessions triggers
+list``).
 """
 
 from __future__ import annotations
 
-import json
-import shlex
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -33,9 +30,9 @@ import dateparser
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
-from aios.models.scheduled_tasks import ScheduledTaskCreate
-from aios.services import scheduled_tasks as scheduled_tasks_service
+from aios.models.triggers import OneShotSource, TriggerCreate, WakeOwnerAction
 from aios.services import sessions as sessions_service
+from aios.services import triggers as triggers_service
 from aios.tools.registry import registry
 
 
@@ -51,8 +48,8 @@ SCHEDULE_WAKE_DESCRIPTION = (
     "ISO 8601 (e.g. `2026-05-23T15:00:00Z`) or natural language (e.g. "
     "`tomorrow at 9am`, `in 30 minutes`). For natural language, pass `tz` "
     "(IANA name, e.g. `America/Los_Angeles`) for interpretation context — "
-    "defaults to UTC. The wake is implemented as a one-shot scheduled task; "
-    "you can list / cancel it via the `schedule_task_*` tools by name."
+    "defaults to UTC. The wake is implemented as a one-shot trigger; you can "
+    "list / cancel it via the `trigger_*` tools by name."
 )
 
 SCHEDULE_WAKE_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -121,7 +118,7 @@ def _resolve_fire_at(arguments: dict[str, Any]) -> datetime:
             raise ScheduleWakeArgumentError(
                 f"delay_seconds={delay_seconds} exceeds the max allowed ({max_delay}s "
                 f"≈ {max_delay // 86400} days). Use a shorter delay or split the "
-                "schedule into a recurring cron task if you need a long horizon."
+                "schedule into a recurring cron trigger if you need a long horizon."
             )
         if tz is not None:
             raise ScheduleWakeArgumentError("`tz` is not valid with `delay_seconds`")
@@ -164,34 +161,26 @@ def _resolve_fire_at(arguments: dict[str, Any]) -> datetime:
             f"resolved fire time {parsed_utc.isoformat()} is more than "
             f"{max_delay}s ({max_delay // 86400} days) in the future, which "
             "exceeds the max allowed. Use a shorter offset or split into a "
-            "recurring cron task if you need a long horizon."
+            "recurring cron trigger if you need a long horizon."
         )
     return parsed_utc
 
 
-def _build_wake_bash(reason: str) -> str:
-    """Generate the bash one-liner the scheduled fire will execute.
+def _wake_content(reason: str) -> str:
+    """The user-role marker delivered at fire time.
 
-    Invokes the in-sandbox ``tool wake_self`` CLI with a JSON-encoded
-    ``content`` argument. This keeps the broker secret out of the
-    command string and uses the canonical self-wake primitive (#703).
-    The JSON payload is shell-escaped so arbitrary characters in the
-    reason can't break out of the argument.
+    Byte-identical to the string the prior ``sandbox_command`` path passed
+    to ``tool wake_self`` — the new ``wake_owner`` action delivers it
+    directly via the in-worker self-delivery path (#818).
     """
-    payload = json.dumps(
-        {"content": f"[Your scheduled wake fired. Reason: {reason}]"},
-        ensure_ascii=False,
-    )
-    # Requires `wake_self` to be declared on the agent; an undeclared tool
-    # yields a fire-time 404 surfaced through the scheduled-task runner.
-    return f"tool wake_self {shlex.quote(payload)}"
+    return f"[Your scheduled wake fired. Reason: {reason}]"
 
 
-def _make_task_name() -> str:
-    """Generate a unique-per-session name for the auto-created task.
+def _make_trigger_name() -> str:
+    """Generate a unique-per-session name for the auto-created trigger.
 
     Uses a short ULID-ish suffix that fits the ``[A-Za-z0-9_-]*`` name
-    constraint enforced by :class:`ScheduledTaskCreate`.
+    constraint enforced by :class:`TriggerCreate`.
     """
     return f"wake-{uuid.uuid4().hex[:12]}"
 
@@ -206,23 +195,19 @@ async def schedule_wake_handler(session_id: str, arguments: dict[str, Any]) -> d
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
 
-    spec = ScheduledTaskCreate(
-        name=_make_task_name(),
-        fire_at=fire_at,
-        command=_build_wake_bash(reason),
-        # `tool wake_self` finishes in seconds; tight bound keeps stuck fires from
-        # tying up worker slots.
-        timeout_seconds=30,
-        # Tag for human-friendly rendering in the CLI's
-        # scheduled-tasks listing (`wake: <reason>` instead of the
-        # full bash command).
+    spec = TriggerCreate(
+        name=_make_trigger_name(),
+        source=OneShotSource(fire_at=fire_at),
+        action=WakeOwnerAction(content=_wake_content(reason)),
+        # Tag for human-friendly rendering in the CLI's triggers listing
+        # (`wake: <reason>` instead of the underlying action).
         metadata={"kind": "wake", "reason": reason},
     )
 
-    echo = await scheduled_tasks_service.add_task(pool, session_id, spec, account_id=account_id)
+    echo = await triggers_service.add_trigger(pool, session_id, spec, account_id=account_id)
     return {
         "scheduled": True,
-        "task_id": echo.id,
+        "trigger_id": echo.id,
         "name": echo.name,
         "fire_at": fire_at.isoformat(),
         "reason": reason,

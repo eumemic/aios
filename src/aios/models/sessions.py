@@ -28,11 +28,11 @@ from aios.models.memory_stores import (
     MemoryStoreResourceEcho,
 )
 from aios.models.memory_stores import validate_resources as _validate_memory_resources
-from aios.models.scheduled_tasks import (
-    MAX_SCHEDULED_TASKS_PER_SESSION,
-    ScheduledTaskCreate,
-    ScheduledTaskEcho,
-    validate_scheduled_tasks,
+from aios.models.triggers import (
+    MAX_TRIGGERS_PER_SESSION,
+    TriggerCreate,
+    TriggerEcho,
+    validate_triggers,
 )
 
 # Discriminated union over resource types. New types extend this union.
@@ -191,17 +191,16 @@ class SessionCreate(BaseModel):
             "replace the set after creation."
         ),
     )
-    scheduled_tasks: list[ScheduledTaskCreate] = Field(
+    triggers: list[TriggerCreate] = Field(
         default_factory=list,
-        max_length=MAX_SCHEDULED_TASKS_PER_SESSION,
+        max_length=MAX_TRIGGERS_PER_SESSION,
         description=(
-            "Cron-fired bash tasks attached at session creation. Each task "
-            "fires its command in the session's sandbox at its schedule "
-            "without waking the model — bash must explicitly POST a "
-            "user-role event back to escalate. Manage after creation via "
-            "``POST/DELETE/PUT /v1/sessions/{id}/scheduled-tasks``; "
-            "``SessionUpdate`` deliberately does not accept this field "
-            "(granular ops only)."
+            "Triggers attached at session creation. Each pairs a ``source`` "
+            "(cron / one_shot) with an ``action`` (a ``sandbox_command`` bash "
+            "task that fires without waking the model, or a ``wake_owner`` "
+            "message that wakes it). Manage after creation via "
+            "``POST/DELETE/PUT /v1/sessions/{id}/triggers``; ``SessionUpdate`` "
+            "deliberately does not accept this field (granular ops only)."
         ),
     )
 
@@ -218,8 +217,8 @@ class SessionCreate(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _validate_scheduled_tasks_list(self) -> SessionCreate:
-        validate_scheduled_tasks(self.scheduled_tasks)
+    def _validate_triggers_list(self) -> SessionCreate:
+        validate_triggers(self.triggers)
         return self
 
 
@@ -274,7 +273,7 @@ class Session(BaseModel):
     last_event_seq: int
     usage: SessionUsage = Field(default_factory=SessionUsage)
     resources: list[SessionResourceEcho] = Field(default_factory=list)
-    scheduled_tasks: list[ScheduledTaskEcho] = Field(default_factory=list)
+    triggers: list[TriggerEcho] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

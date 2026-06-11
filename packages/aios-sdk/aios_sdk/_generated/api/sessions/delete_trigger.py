@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -7,15 +7,13 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
-from ...models.scheduled_task_create import ScheduledTaskCreate
-from ...models.scheduled_task_echo import ScheduledTaskEcho
 from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     session_id: str,
+    name: str,
     *,
-    body: ScheduledTaskCreate,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -23,15 +21,12 @@ def _get_kwargs(
         headers["Authorization"] = authorization
 
     _kwargs: dict[str, Any] = {
-        "method": "post",
-        "url": "/v1/sessions/{session_id}/scheduled-tasks".format(
+        "method": "delete",
+        "url": "/v1/sessions/{session_id}/triggers/{name}".format(
             session_id=quote(str(session_id), safe=""),
+            name=quote(str(name), safe=""),
         ),
     }
-
-    _kwargs["json"] = body.to_dict()
-
-    headers["Content-Type"] = "application/json"
 
     _kwargs["headers"] = headers
     return _kwargs
@@ -39,11 +34,10 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> HTTPValidationError | ScheduledTaskEcho | None:
-    if response.status_code == 201:
-        response_201 = ScheduledTaskEcho.from_dict(response.json())
-
-        return response_201
+) -> Any | HTTPValidationError | None:
+    if response.status_code == 204:
+        response_204 = cast(Any, None)
+        return response_204
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -58,7 +52,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[HTTPValidationError | ScheduledTaskEcho]:
+) -> Response[Any | HTTPValidationError]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -69,40 +63,31 @@ def _build_response(
 
 def sync_detailed(
     session_id: str,
+    name: str,
     *,
     client: AuthenticatedClient | Client,
-    body: ScheduledTaskCreate,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | ScheduledTaskEcho]:
-    """Create Scheduled Task
+) -> Response[Any | HTTPValidationError]:
+    """Delete Trigger
 
-     Add a scheduled task. Granular operation per #270 — there is no
-    whole-list ``set`` surface on ``SessionUpdate``.
+     Remove a trigger by name.
 
     Args:
         session_id (str):
+        name (str):
         authorization (None | str | Unset):
-        body (ScheduledTaskCreate): Request body for adding a scheduled task to a session.
-
-            Each row carries either a cron ``schedule`` (recurring) or a
-            ``fire_at`` absolute time (one-shot — self-deletes after firing).
-            Exactly one must be set; enforced by both a Pydantic ``model_validator``
-            here and a DB CHECK constraint.
-
-            Also accepted in :class:`SessionCreate.scheduled_tasks` for initial
-            attachment at session creation.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | ScheduledTaskEcho]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        body=body,
+        name=name,
         authorization=authorization,
     )
 
@@ -115,81 +100,63 @@ def sync_detailed(
 
 def sync(
     session_id: str,
+    name: str,
     *,
     client: AuthenticatedClient | Client,
-    body: ScheduledTaskCreate,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | ScheduledTaskEcho | None:
-    """Create Scheduled Task
+) -> Any | HTTPValidationError | None:
+    """Delete Trigger
 
-     Add a scheduled task. Granular operation per #270 — there is no
-    whole-list ``set`` surface on ``SessionUpdate``.
+     Remove a trigger by name.
 
     Args:
         session_id (str):
+        name (str):
         authorization (None | str | Unset):
-        body (ScheduledTaskCreate): Request body for adding a scheduled task to a session.
-
-            Each row carries either a cron ``schedule`` (recurring) or a
-            ``fire_at`` absolute time (one-shot — self-deletes after firing).
-            Exactly one must be set; enforced by both a Pydantic ``model_validator``
-            here and a DB CHECK constraint.
-
-            Also accepted in :class:`SessionCreate.scheduled_tasks` for initial
-            attachment at session creation.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | ScheduledTaskEcho
+        Any | HTTPValidationError
     """
 
     return sync_detailed(
         session_id=session_id,
+        name=name,
         client=client,
-        body=body,
         authorization=authorization,
     ).parsed
 
 
 async def asyncio_detailed(
     session_id: str,
+    name: str,
     *,
     client: AuthenticatedClient | Client,
-    body: ScheduledTaskCreate,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | ScheduledTaskEcho]:
-    """Create Scheduled Task
+) -> Response[Any | HTTPValidationError]:
+    """Delete Trigger
 
-     Add a scheduled task. Granular operation per #270 — there is no
-    whole-list ``set`` surface on ``SessionUpdate``.
+     Remove a trigger by name.
 
     Args:
         session_id (str):
+        name (str):
         authorization (None | str | Unset):
-        body (ScheduledTaskCreate): Request body for adding a scheduled task to a session.
-
-            Each row carries either a cron ``schedule`` (recurring) or a
-            ``fire_at`` absolute time (one-shot — self-deletes after firing).
-            Exactly one must be set; enforced by both a Pydantic ``model_validator``
-            here and a DB CHECK constraint.
-
-            Also accepted in :class:`SessionCreate.scheduled_tasks` for initial
-            attachment at session creation.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | ScheduledTaskEcho]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        body=body,
+        name=name,
         authorization=authorization,
     )
 
@@ -200,42 +167,33 @@ async def asyncio_detailed(
 
 async def asyncio(
     session_id: str,
+    name: str,
     *,
     client: AuthenticatedClient | Client,
-    body: ScheduledTaskCreate,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | ScheduledTaskEcho | None:
-    """Create Scheduled Task
+) -> Any | HTTPValidationError | None:
+    """Delete Trigger
 
-     Add a scheduled task. Granular operation per #270 — there is no
-    whole-list ``set`` surface on ``SessionUpdate``.
+     Remove a trigger by name.
 
     Args:
         session_id (str):
+        name (str):
         authorization (None | str | Unset):
-        body (ScheduledTaskCreate): Request body for adding a scheduled task to a session.
-
-            Each row carries either a cron ``schedule`` (recurring) or a
-            ``fire_at`` absolute time (one-shot — self-deletes after firing).
-            Exactly one must be set; enforced by both a Pydantic ``model_validator``
-            here and a DB CHECK constraint.
-
-            Also accepted in :class:`SessionCreate.scheduled_tasks` for initial
-            attachment at session creation.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | ScheduledTaskEcho
+        Any | HTTPValidationError
     """
 
     return (
         await asyncio_detailed(
             session_id=session_id,
+            name=name,
             client=client,
-            body=body,
             authorization=authorization,
         )
     ).parsed

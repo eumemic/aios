@@ -36,10 +36,6 @@ from aios.models.agents import (
 )
 from aios.models.attenuation import Surface
 from aios.models.events import Event, EventKind
-from aios.models.scheduled_tasks import (
-    ScheduledTaskCreate,
-    compute_initial_next_fire,
-)
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
     AwaitingToolCall,
@@ -49,6 +45,10 @@ from aios.models.sessions import (
     SessionResourceEcho,
     SessionStatus,
     split_resources_by_type,
+)
+from aios.models.triggers import (
+    TriggerCreate,
+    compute_initial_next_fire,
 )
 from aios.sandbox.volumes import validate_workspace_path
 from aios.services import agents as agents_service
@@ -171,7 +171,7 @@ async def create_session(
     metadata: dict[str, Any],
     vault_ids: list[str] | None = None,
     resources: list[SessionResource] | None = None,
-    scheduled_tasks: list[ScheduledTaskCreate] | None = None,
+    triggers: list[TriggerCreate] | None = None,
     crypto_box: CryptoBox | None = None,
     workspace_path: str | None = None,
     env: dict[str, str] | None = None,
@@ -239,50 +239,42 @@ async def create_session(
                 )
             echoes = await _list_all_echoes(conn, session.id, account_id=account_id)
             session = session.model_copy(update={"resources": echoes})
-        if scheduled_tasks:
+        if triggers:
             now = datetime.now(UTC)
-            enabled_new = sum(1 for spec in scheduled_tasks if spec.enabled)
+            enabled_new = sum(1 for spec in triggers if spec.enabled)
             # Take the per-account advisory lock for the duration of the
             # count + batch INSERT so concurrent session creates against
             # the same account can't race past the cap. The lock is
             # transaction-scoped, released on COMMIT/ROLLBACK.
-            await queries.acquire_account_scheduled_tasks_lock(conn, account_id)
+            await queries.acquire_account_triggers_lock(conn, account_id)
             if enabled_new:
-                cap = get_settings().scheduled_tasks_per_account_max
-                existing = await queries.count_account_scheduled_tasks(
+                cap = get_settings().triggers_per_account_max
+                existing = await queries.count_account_triggers(
                     conn, account_id=account_id, enabled_only=True
                 )
                 if existing + enabled_new > cap:
                     raise RateLimitedError(
                         f"account at active-timer cap ({existing}/{cap}); the "
-                        f"{enabled_new} enabled scheduled task(s) in this session "
-                        "would exceed the cap — disable some entries or remove an "
-                        "older session's tasks first"
+                        f"{enabled_new} enabled trigger(s) in this session would "
+                        "exceed the cap — disable some entries or remove an "
+                        "older session's triggers first"
                     )
-            for spec in scheduled_tasks:
-                next_fire = (
-                    compute_initial_next_fire(spec.schedule, spec.fire_at, now)
-                    if spec.enabled
-                    else None
-                )
-                await queries.add_scheduled_task(
+            for spec in triggers:
+                next_fire = compute_initial_next_fire(spec.source, now) if spec.enabled else None
+                await queries.add_trigger(
                     conn,
                     session.id,
                     name=spec.name,
-                    schedule=spec.schedule,
-                    fire_at=spec.fire_at,
-                    command=spec.command,
+                    source=spec.source.kind,
+                    source_spec=spec.source.model_dump(mode="json", exclude={"kind"}),
+                    action=spec.action.model_dump(mode="json"),
                     enabled=spec.enabled,
-                    timeout_seconds=spec.timeout_seconds,
-                    max_output_bytes=spec.max_output_bytes,
                     metadata=spec.metadata,
                     next_fire=next_fire,
                     account_id=account_id,
                 )
-            task_echoes = await queries.list_scheduled_tasks(
-                conn, session.id, account_id=account_id
-            )
-            session = session.model_copy(update={"scheduled_tasks": task_echoes})
+            trigger_echoes = await queries.list_triggers(conn, session.id, account_id=account_id)
+            session = session.model_copy(update={"triggers": trigger_echoes})
         return session
 
 
@@ -470,13 +462,13 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: s
         session = await queries.get_session(conn, session_id, account_id=account_id)
         vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
-        task_echoes = await queries.list_scheduled_tasks(conn, session_id, account_id=account_id)
+        trigger_echoes = await queries.list_triggers(conn, session_id, account_id=account_id)
     awaiting_by_sid = await compute_awaiting(pool, [session], account_id=account_id)
     return session.model_copy(
         update={
             "vault_ids": vault_ids,
             "resources": echoes,
-            "scheduled_tasks": task_echoes,
+            "triggers": trigger_echoes,
             "awaiting": awaiting_by_sid.get(session_id, []),
         }
     )
@@ -626,7 +618,7 @@ async def list_sessions(
         sid_list = [s.id for s in sessions]
         vault_map = await queries.batch_get_session_vault_ids(conn, sid_list, account_id=account_id)
         echoes_map = await _batch_list_all_echoes(conn, sid_list, account_id=account_id)
-        task_map = await queries.batch_list_session_scheduled_tasks(
+        trigger_map = await queries.batch_list_session_triggers(
             conn, sid_list, account_id=account_id
         )
     awaiting_by_sid = await compute_awaiting(pool, sessions, account_id=account_id)
@@ -635,7 +627,7 @@ async def list_sessions(
             update={
                 "vault_ids": vault_map[s.id],
                 "resources": echoes_map[s.id],
-                "scheduled_tasks": task_map[s.id],
+                "triggers": trigger_map[s.id],
                 "awaiting": awaiting_by_sid.get(s.id, []),
             }
         )
@@ -1069,7 +1061,7 @@ async def increment_usage(
 
 
 async def archive_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:
-    # Enrich vault_ids / resources / scheduled_tasks so the API response
+    # Enrich vault_ids / resources / triggers so the API response
     # shape matches GET /sessions/{id}. Archive itself is a single column
     # flip; the lists are read post-update to surface any concurrent
     # mutation that committed before archive landed.
@@ -1077,12 +1069,12 @@ async def archive_session(pool: asyncpg.Pool[Any], session_id: str, *, account_i
         session = await queries.archive_session(conn, session_id, account_id=account_id)
         vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
-        task_echoes = await queries.list_scheduled_tasks(conn, session_id, account_id=account_id)
+        trigger_echoes = await queries.list_triggers(conn, session_id, account_id=account_id)
     return session.model_copy(
         update={
             "vault_ids": vault_ids,
             "resources": echoes,
-            "scheduled_tasks": task_echoes,
+            "triggers": trigger_echoes,
         }
     )
 
@@ -1103,12 +1095,12 @@ async def clone_session(
         )
         vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session.id, account_id=account_id)
-        task_echoes = await queries.list_scheduled_tasks(conn, session.id, account_id=account_id)
+        trigger_echoes = await queries.list_triggers(conn, session.id, account_id=account_id)
         return session.model_copy(
             update={
                 "vault_ids": vault_ids,
                 "resources": echoes,
-                "scheduled_tasks": task_echoes,
+                "triggers": trigger_echoes,
             }
         )
 
@@ -1172,12 +1164,12 @@ async def update_session(
                 )
         vids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
-        task_echoes = await queries.list_scheduled_tasks(conn, session_id, account_id=account_id)
+        trigger_echoes = await queries.list_triggers(conn, session_id, account_id=account_id)
         result = session.model_copy(
             update={
                 "vault_ids": vids,
                 "resources": echoes,
-                "scheduled_tasks": task_echoes,
+                "triggers": trigger_echoes,
             }
         )
 

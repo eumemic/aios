@@ -25,8 +25,8 @@ class WakeSelfArgumentError(AiosError):
 WAKE_SELF_DESCRIPTION = (
     "Append content as a user-role message to your own session and "
     "schedule the next step. This is the canonical self-wake primitive "
-    "from inside scheduled-task cron commands or any sandbox bash "
-    "command — it replaces the older "
+    "from inside a trigger's sandbox_command (or any sandbox bash "
+    "command) — it replaces the older "
     "``curl $TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages`` "
     "idiom and keeps the broker secret out of the command string. The "
     "appended message is delivered to your next model call as a normal "

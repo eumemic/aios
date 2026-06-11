@@ -97,24 +97,26 @@ class TestActiveStatus:
     async def test_armed_schedule_wake_stays_idle(
         self, http_client: httpx.AsyncClient, pool: Any, idle_session_id: str
     ) -> None:
-        """Quiescent between fires: a session with an armed future wake (a
-        pending scheduled task) but no in-flight or unreacted work derives
-        ``idle``. The scheduled task is a row, not an event, so it adds no
-        unreacted stimulus — the timer only matters when it actually fires."""
+        """Quiescent between fires: a session with an armed future trigger (a
+        pending one-shot) but no in-flight or unreacted work derives
+        ``idle``. The trigger is a row, not an event, so it adds no unreacted
+        stimulus — the timer only matters when it actually fires."""
         from datetime import UTC, datetime, timedelta
 
-        from aios.models.scheduled_tasks import ScheduledTaskCreate
-        from aios.services import scheduled_tasks as scheduled_tasks_svc
+        from aios.models.triggers import TriggerCreate
+        from aios.services import triggers as triggers_svc
 
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        await scheduled_tasks_svc.add_task(
+        fire_at = datetime.now(UTC) + timedelta(hours=1)
+        await triggers_svc.add_trigger(
             pool,
             idle_session_id,
-            ScheduledTaskCreate(
-                name=f"wake-{_uniq()}",
-                fire_at=datetime.now(UTC) + timedelta(hours=1),
-                command="echo hi",
-                timeout_seconds=30,
+            TriggerCreate.model_validate(
+                {
+                    "name": f"wake-{_uniq()}",
+                    "source": {"kind": "one_shot", "fire_at": fire_at.isoformat()},
+                    "action": {"kind": "wake_owner", "content": "wake up"},
+                }
             ),
             account_id=account_id,
         )

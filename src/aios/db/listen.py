@@ -546,15 +546,20 @@ async def listen_for_session_interrupts(
         conn.terminate()
 
 
+# Channel VALUE is byte-identical across the #818 rename (the underlying
+# Postgres NOTIFY trigger function ``notify_scheduled_tasks_due`` and its
+# channel string stay put — renaming buys nothing and opens a deploy window
+# where an old worker listens on a channel nothing notifies). Only the
+# Python helper below is renamed to the new ``triggers`` vocabulary.
 SCHEDULED_TASKS_DUE_CHANNEL = "aios_scheduled_tasks_due"
 
 
 @asynccontextmanager
-async def listen_for_scheduled_tasks_due(
+async def listen_for_triggers_due(
     db_url: str,
 ) -> AsyncIterator[asyncio.Event]:
-    """Yield an :class:`asyncio.Event` that fires whenever the
-    ``session_scheduled_tasks`` NOTIFY trigger emits.
+    """Yield an :class:`asyncio.Event` that fires whenever the ``triggers``
+    NOTIFY trigger emits.
 
     The scheduler doesn't care which row changed — it always recomputes
     ``MIN(next_fire)`` on wake — so this listener collapses all incoming

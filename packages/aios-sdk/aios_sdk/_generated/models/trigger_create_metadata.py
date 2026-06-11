@@ -6,11 +6,11 @@ from typing import Any, TypeVar
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
-T = TypeVar("T", bound="ScheduledTaskCreateMetadata")
+T = TypeVar("T", bound="TriggerCreateMetadata")
 
 
 @_attrs_define
-class ScheduledTaskCreateMetadata:
+class TriggerCreateMetadata:
     """ """
 
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -25,10 +25,10 @@ class ScheduledTaskCreateMetadata:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        scheduled_task_create_metadata = cls()
+        trigger_create_metadata = cls()
 
-        scheduled_task_create_metadata.additional_properties = d
-        return scheduled_task_create_metadata
+        trigger_create_metadata.additional_properties = d
+        return trigger_create_metadata
 
     @property
     def additional_keys(self) -> list[str]:
