@@ -123,11 +123,24 @@ The worker runs **two** Postgres connection pools:
 
 They don't share connections; they share Postgres state.
 
+### Workflows
+
+The durable workflow runtime runs deterministic, replayable scripts as an **append-only journal with replay-from-memo** — a different shape from the session step. A workflow **run** is a row plus its `wf_run_events` journal; `append_run_event` (`db/queries/workflows.py`) is the **single writer** to that journal, allocating a **gapless** seq and idempotent on `(run_id, call_key, type)`. `run_workflow_step` (`workflows/step.py`) rebuilds the **memo** from the `call_result` journal events and hands it to the script host, which fast-forwards already-resolved capabilities by `.send()`-ing results into the script coroutine. No model is called in a step — it is pure deterministic replay.
+
+- **Credential-free out-of-process host**: `run_script_host` (`workflows/host_launcher.py`) spawns `python -m aios.workflows.wf_script_host` as a **separate subprocess** under a deny-by-default env allowlist (`_CHILD_ENV_ALLOWLIST`). The child imports only stdlib + `aios.workflows.determinism`/`._protocol` — never `aios.crypto`/`aios.db`/`aios.harness`/`aios.services` — so the master `CryptoBox` and the all-accounts pool are **never inherited**. The parent enforces a wall-clock `SIGKILL` deadline.
+- **Per-run compute ceiling (#780)**: `_scaled_seconds(base, init_len)` (`host_launcher.py`) scales the subprocess deadline by INIT-frame size (`DEFAULT_DEADLINE_SECONDS=30`, `DEADLINE_SECONDS_PER_INIT_MIB=30`, capped at `MAX_SCALED_SECONDS=600`) — a run replaying a large accumulated memo gets proportionally more time.
+- **Attenuation clamp (#794)**: a step computes `child_surface = attenuation_service.clamp(surface_of(agent), surface_of(run))` (`step.py`); `clamp` (`services/attenuation.py`) is the lattice **meet**, so a child session's authority never exceeds the run's snapshotted surface. The result is written immutably to the child `session.surface`.
+- **Journaled `log()`/`phase()` (#783)**: script `log()`/`phase()` → ANNOTATION frames (`workflows/_protocol.py`) → journaled by `step.py` as `type="annotation"` events (`WfRunEventType` in `models/workflows.py`), keyed by `call_key` so the `(run_id, call_key, type)` unique constraint dedups them to **emit-once across replays**.
+
+**Where it lives**: step = `workflows/step.py` (`run_workflow_step`); sweep = `workflows/sweep.py` (`wake_runs_needing_step` → `list_run_ids_needing_step` in `db/queries/workflows.py`); queries = `db/queries/workflows.py`; job = `wake_workflow` (`harness/tasks.py`).
+
+**Shares vs. diverges from session wake**: it **shares** the procrastinate job queue, `lock=run_id` / `queueing_lock=run_id`, `LISTEN/NOTIFY`, and commit-before-`NOTIFY`. It **diverges**: workflow wake is `defer_run_wake` (`services/wake.py`) which appends **no** journal span (`wf_run_events` is single-writer), supports `batch=True` coalescing (#780, `workflow_wake_batch_seconds`), and runs at `_BACKGROUND_PRIORITY=-10` so it yields to interactive sessions; and the step is deterministic replay with **no model call** plus the attenuation clamp — unlike the session step.
+
 ## Conventions
 
 - **Python 3.13+** with PEP 695 type parameter syntax: `class ListResponse[T](BaseModel)`, `def select_window[T](...)`. Do NOT use `TypeVar` + `Generic[T]`.
 - **`from __future__ import annotations`** at the top of every source file.
-- **Raw SQL + asyncpg**, no ORM. Every query lives in `db/queries.py`.
+- **Raw SQL + asyncpg**, no ORM. Every query lives in the `db/queries` package — **one module per resource** (`db/queries/sessions.py`, `events.py`, `connections.py`, `vaults.py`, `triggers.py`, …). Shared tenant-scoping helpers (`_get_scoped`, `_list_scoped`, `_archive_scoped`, `_build_set_assignments`, `parse_jsonb`, `_escape_like`) live in `db/queries/__init__.py` and are imported by the per-resource modules. Every public query is re-exported from the package root, so `from aios.db import queries; queries.foo()` and `from aios.db.queries import foo` both work and stay patchable (`patch.object(queries, "foo", ...)`).
 - **`pg_notify($1, $2)` function form**, never literal `NOTIFY`. Postgres case-folds unquoted identifiers; our ULIDs have uppercase.
 - **structlog** with `structlog.stdlib.LoggerFactory()`. NOT `PrintLoggerFactory`.
 - **Extreme simplicity.** No defensive guards for model mistakes, no fuzzy matching, no model-specific shims. The model sees raw errors and retries through the session log. Ask: "can the model handle this failure itself?" If yes, don't add complexity.
