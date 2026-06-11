@@ -1047,6 +1047,10 @@ async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
     from aios.workflows.host_launcher import EmittedCapability
     from aios.workflows.step import _open_agent_capability
 
+    # A cap high enough that the lifetime quota never trips — this test exercises the
+    # re-attach / self-wake arm, not H1.
+    _SPAWN_KW = {"agent_spawns": 0, "max_agent_calls": 1000}
+
     pool = wf_runtime
     script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
     run_id = await _make_run(pool, script)
@@ -1060,12 +1064,12 @@ async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
         assert run is not None
         # First spawn: created → defer_wake fires once.
         with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w1:
-            r1 = await _open_agent_capability(conn, pool, run, cap)
+            r1 = await _open_agent_capability(conn, pool, run, cap, **_SPAWN_KW)
         assert not r1.rejected and not r1.needs_rewake
         w1.assert_awaited_once()
         # Re-attach, no marker yet → no defer_wake, no self-wake.
         with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w2:
-            r2 = await _open_agent_capability(conn, pool, run, cap)
+            r2 = await _open_agent_capability(conn, pool, run, cap, **_SPAWN_KW)
         assert not r2.rejected and not r2.needs_rewake
         w2.assert_not_awaited()
 
@@ -1079,7 +1083,7 @@ async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
         run = await wf_queries.get_run_for_step(conn, run_id)
         assert run is not None
         with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w3:
-            r3 = await _open_agent_capability(conn, pool, run, cap)
+            r3 = await _open_agent_capability(conn, pool, run, cap, **_SPAWN_KW)
         assert not r3.rejected and r3.needs_rewake  # marker present → self-wake to harvest
         w3.assert_not_awaited()
 
@@ -1759,11 +1763,16 @@ async def test_parallel_barrier_yields_none_for_an_errored_child(
 # ─── H — runaway caps + the per-call wall-clock deadline ──────────────────────
 
 
-async def test_lifetime_agent_cap_errors_atomically_before_spawning(
+async def test_lifetime_agent_cap_errors_at_the_over_cap_spawn(
     monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
-    """A fan-out that would push the run past its lifetime agent-call cap errors
-    BEFORE spawning any of that step's children — no partial fan-out of orphans."""
+    """A fan-out that would push the run past its lifetime agent-call cap errors with
+    ``too_many_agents`` AT the over-cap child: the cap is enforced per-spawn (so a
+    rejected cap never tips it), checked just before each ``create_child_session``. The
+    children up to the cap are spawned, but the (cap + 1)-th child is NEVER created — the
+    run errors the moment that spawn is attempted. Those at-cap children are orphans the
+    quiescence sweep reclaims (idle, no sandbox until used); the over-cap child does not
+    exist."""
     from aios.config import get_settings
 
     capped = get_settings().model_copy(update={"workflow_max_agent_calls": 2})
@@ -1775,17 +1784,18 @@ async def test_lifetime_agent_cap_errors_atomically_before_spawning(
         f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(3)])\n"
     )
     run_id = await _make_run(pool, script)
-    await run_workflow_step(run_id)  # 3 > cap 2 → error, nothing spawned
+    await run_workflow_step(run_id)  # 3 > cap 2 → error AT the 3rd spawn
 
-    assert await _children_of(pool, run_id) == []  # no call_started journaled
+    # The cap-many children spawned (call_started journaled); the over-cap one did not.
+    assert len(await _children_of(pool, run_id)) == 2  # exactly max_agent_calls, never the 3rd
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
-        # the invariant at its real surface: no child session rows exist for the run
-        orphans = await conn.fetchval(
+        # The over-cap child is never created — at most max_agent_calls session rows exist.
+        spawned = await conn.fetchval(
             "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
         )
-    assert orphans == 0  # atomic: no partial fan-out of orphan children
+    assert spawned == 2  # the (cap + 1)-th child was never created
     assert run is not None and run.status == "errored"
     assert events[-1].type == "run_completed"
     assert events[-1].payload["error"]["kind"] == "too_many_agents"
@@ -1848,6 +1858,106 @@ async def test_lowering_cap_mid_flight_does_not_kill_a_harvest_only_step(
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "suspended"  # NOT errored — no new spawns
+
+
+async def test_rejected_agent_cap_does_not_count_toward_quota(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A cap the spawn gate REJECTS (agent_not_found / bad_agent_call) spawns no child
+    and must NOT count toward ``max_agent_calls``. With cap 2 and one prior real spawn,
+    a ``parallel([agent('nope'), agent(real)])`` frontier has only ONE real spawn left
+    (the good branch) — so the run must NOT trip ``too_many_agents``: the bad branch
+    surfaces a catchable AgentError (→ barrier slot None) and the good branch completes.
+    The buggy pre-count saw 2 new caps (1 prior + 2 > 2) and terminated the run."""
+    from aios.config import get_settings
+    from aios.tools import workflow_completion
+
+    capped = get_settings().model_copy(update={"workflow_max_agent_calls": 2})
+    monkeypatch.setattr("aios.workflows.step.get_settings", lambda: capped)
+
+    pool = wf_runtime
+    # One prior real spawn, THEN the bad+good fan-out: prior=1, one real spawn left.
+    script = (
+        "async def main(input):\n"
+        f"    await agent({wf_agent_id!r}, 'first')\n"
+        "    return await parallel([\n"
+        "        lambda: agent('agent_nope', 'x'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'y'),\n"
+        "    ])\n"
+    )
+    run_id = await _make_run(pool, script)
+
+    # Wake 1: spawn `first`, suspend. Answer it so the next wake replays to the parallel.
+    await run_workflow_step(run_id)
+    first_child = (await _children_of(pool, run_id))[0]
+    rid_first = await _open_request_id(pool, first_child)
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(
+            first_child, {"request_id": rid_first, "value": "r_first"}
+        )
+
+    # Wake 2: harvest `first` → replay to the parallel frontier. prior=1, new caps={nope, y}.
+    # The good 'y' is the only real spawn (count 2 ≤ 2 OK); 'nope' is rejected, NOT counted.
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    # NOT terminated by too_many_agents — the rejected cap did not tip the quota.
+    assert run is not None and run.status == "running"  # owes the catchable-error drive
+    assert not any(
+        e.type == "run_completed" and e.payload.get("error", {}).get("kind") == "too_many_agents"
+        for e in events
+    )
+    errors = [e for e in events if e.type == "call_result" and e.payload.get("is_error")]
+    assert len(errors) == 1 and errors[0].payload["error"]["kind"] == "agent_not_found"
+    # Two real children total: `first` (harvested) + `y` (just spawned).
+    children = await _children_of(pool, run_id)
+    assert len(children) == 2
+
+    # Drive the owed replay (throws the caught AgentError → re-suspend on `y`), then
+    # answer `y` and complete. The bad branch is None; the good branch is `y`'s value.
+    await run_workflow_step(run_id)
+    y_child = children[1]
+    rid_y = await _open_request_id(pool, y_child)
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(y_child, {"request_id": rid_y, "value": "r_y"})
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == [None, "r_y"]  # bad branch → None, good branch → its value
+
+
+async def test_real_overquota_fanout_still_errors_too_many_agents(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The guard still fires for genuine over-quota REAL spawns (it isn't disabled by the
+    per-spawn counting): a fan-out of three real agents with cap 2 terminates the run with
+    ``too_many_agents`` and the over-cap child is never created."""
+    from aios.config import get_settings
+
+    capped = get_settings().model_copy(update={"workflow_max_agent_calls": 2})
+    monkeypatch.setattr("aios.workflows.step.get_settings", lambda: capped)
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    return await parallel([\n"
+        f"        lambda: agent({wf_agent_id!r}, 'a'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'b'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'c'),\n"
+        "    ])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # 3 real > cap 2 → too_many_agents
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "errored"
+    assert events[-1].type == "run_completed"
+    assert events[-1].payload["error"]["kind"] == "too_many_agents"
 
 
 async def test_agent_call_times_out_when_child_never_responds(
