@@ -356,16 +356,18 @@ async def _run_workflow_step_body(
         # inflight call — fail closed rather than strand a frontier that will never
         # be admitted. A key that later gets a `call_started` (admitted) is tracked
         # by `inflight` instead, and one that resolved is in `memo` — both excluded.
-        started_keys = {
-            e.call_key for e in events if e.type == "call_started" and e.call_key is not None
-        }
+        # A "started" key is one that already had a `call_started`: either it's
+        # still open (`inflight`) or it has since resolved (`memo`). Every memo'd
+        # key provably had a prior `call_started` (call_result requires it,
+        # schema-enforced), so this is exactly the set of all `call_started` keys
+        # — no separate scan of `events` needed.
+        started_keys = set(inflight) | set(memo)
         deferred_pending = {
             e.call_key
             for e in events
             if e.type == "frontier_deferred"
             and e.call_key is not None
             and e.call_key not in started_keys
-            and e.call_key not in memo
         }
         diverged = sorted(
             {k for k in inflight if k not in emitted_keys}
