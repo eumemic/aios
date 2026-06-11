@@ -1,14 +1,17 @@
 """Backend-agnostic post-create setup for a sandbox.
 
 After the registry calls ``backend.create(spec)`` and gets a
-:class:`SandboxHandle` back, three setup steps run inside the sandbox to
+:class:`SandboxHandle` back, four setup steps run inside the sandbox to
 bring it to a usable state:
 
-1. :func:`install_egress_ca` — installs the worker's egress-CA cert
+1. :func:`ensure_workspace_runtime_dirs` — creates ``/workspace/.venv``
+   and ``/workspace/.npm`` (the persistent install targets that survive
+   idle release; see issue #227).
+2. :func:`install_egress_ca` — installs the worker's egress-CA cert
    into the sandbox trust store (issue #875).
-2. :func:`install_packages` — runs the apt/pip/npm/cargo/gem/go
+3. :func:`install_packages` — runs the apt/pip/npm/cargo/gem/go
    commands the environment config asked for.
-3. :func:`apply_network_lockdown` — applies (and read-back verifies) the
+4. :func:`apply_network_lockdown` — applies (and read-back verifies) the
    iptables egress rules when the network policy is :class:`Limited`, from
    an ephemeral operator-image sidecar joined to the sandbox's netns (§5.8)
    — NOT from the tenant-writable sandbox filesystem.
@@ -18,7 +21,7 @@ touching Docker directly, so they work uniformly across backends; the
 lockdown goes through :func:`SandboxBackend.run_netns_sidecar` (the sandbox
 holds no ``NET_ADMIN``, so it cannot apply or subvert its own lockdown).
 
-The first two steps are best-effort enrichments — a nonzero exit is
+The first three steps are best-effort enrichments — a nonzero exit is
 logged, never raised; the model can retry or work around missing tooling.
 :func:`apply_network_lockdown` is different: when the policy is
 :class:`Limited` it is a **security gate**, not an enrichment. A
@@ -50,6 +53,29 @@ from aios.sandbox.egress_ca import CA_CERT_SANDBOX_PATH, get_egress_ca
 log = get_logger("aios.sandbox.setup")
 
 
+# Bind-mounted ``/workspace`` is the only path that survives idle release;
+# pinning pip/npm installs into these subdirs lets long-lived sessions
+# stop re-installing pdfminer / jq-cli-wrapper / etc. on every cold
+# sandbox.  See issue #227 for the trade-offs vs PIP_TARGET / project-
+# local node_modules / derived images.
+WORKSPACE_VENV = "/workspace/.venv"
+WORKSPACE_NPM = "/workspace/.npm"
+
+# Environment variables the sandbox image needs to find the persistent
+# venv/npm installs. Spec building merges these into ``SandboxSpec.environment``.
+WORKSPACE_RUNTIME_ENV: dict[str, str] = {
+    "VIRTUAL_ENV": WORKSPACE_VENV,
+    "NPM_CONFIG_PREFIX": WORKSPACE_NPM,
+    "NODE_PATH": f"{WORKSPACE_NPM}/lib/node_modules",
+    # Hardcoded system PATH because docker --env doesn't expand $PATH;
+    # the suffix matches the python:3.13-slim-bookworm image's default.
+    "PATH": (
+        f"{WORKSPACE_VENV}/bin:{WORKSPACE_NPM}/bin:"
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ),
+}
+
+
 # Well-known hosts for public package registries.  Added to the iptables
 # allowlist when ``allow_package_managers`` is True in limited networking.
 PACKAGE_REGISTRY_HOSTS: frozenset[str] = frozenset(
@@ -75,6 +101,36 @@ PACKAGE_REGISTRY_HOSTS: frozenset[str] = frozenset(
         "objects.githubusercontent.com",
     }
 )
+
+
+async def ensure_workspace_runtime_dirs(backend: SandboxBackend, handle: SandboxHandle) -> None:
+    """Idempotently create ``/workspace/.venv`` and ``/workspace/.npm``.
+
+    Both live under the workspace bind mount so they survive idle
+    release; the venv pins ``pip install`` into a persistent
+    ``site-packages``, and the npm prefix pins ``npm install -g``.  The
+    ``[ -e .venv/bin/python ]`` guard makes venv creation a no-op on
+    every cold provision after the first.
+
+    Failures are logged but don't fail the provision — the model can
+    still operate without the persistence layer (it just falls back to
+    re-installing tools after every cold release).
+    """
+    settings = get_settings()
+    cmd = (
+        f"mkdir -p {WORKSPACE_NPM}/lib {WORKSPACE_NPM}/bin && "
+        f"([ -e {WORKSPACE_VENV}/bin/python ] || python3 -m venv {WORKSPACE_VENV})"
+    )
+    result = await backend.exec(
+        handle, cmd, timeout_seconds=60, max_output_bytes=settings.bash_max_output_bytes
+    )
+    if result.exit_code != 0:
+        log.warning(
+            "sandbox.workspace_runtime_dirs_setup_failed",
+            session_id=handle.session_id,
+            exit_code=result.exit_code,
+            stderr=result.stderr[:500],
+        )
 
 
 async def install_egress_ca(backend: SandboxBackend, handle: SandboxHandle) -> None:

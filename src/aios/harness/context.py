@@ -109,8 +109,7 @@ def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
         )
         return (
             f"[The persisted sandbox filesystem for this session was discarded {cause}. "
-            f"The next command runs on a fresh base filesystem; previously installed "
-            f"packages and tools are gone, reinstall as needed.{_FS_UNAFFECTED}]"
+            f"The next command runs on a fresh base filesystem;{_FS_UNAFFECTED}]"
         )
     # sandbox_fs_reset (or any other allowlisted reset-shaped event).
     if reason == "environment_image_changed":
@@ -121,8 +120,7 @@ def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
         detail = "the persisted filesystem was reset"
     return (
         f"[The sandbox filesystem for this session was reset because {detail}. "
-        f"The next command runs on a fresh base filesystem; previously installed "
-        f"packages and tools are gone, reinstall as needed.{_FS_UNAFFECTED}]"
+        f"The next command runs on a fresh base filesystem;{_FS_UNAFFECTED}]"
     )
 
 
