@@ -74,13 +74,44 @@ class WhatsappManagementMixin:
         """
         state = self._state_for_phone(external_account_id)
         outcome = await state.daemon.confirm_pairing()
+        # `or "error"` covers both missing key and the empty-string the
+        # daemon could emit if outcome was wiped mid-race; the route then
+        # maps an unrecognized status to an "error" response with the raw
+        # value in reason.
+        status = outcome.get("status") or "error"
+        # Security gate: a device linked to the wrong WhatsApp account is
+        # live exposure — the operator would be sending/receiving as an
+        # account they don't control.  Whatsmeow reports the scanned
+        # device's jid; if its phone part doesn't match the connection's
+        # external_account_id we must NEVER persist the pairing.  Hard-fail
+        # and auto-unpair the device so it can't linger live.
+        if status == "success" and outcome.get("jid"):
+            jid = outcome["jid"]
+            # jid is `NNN@s.whatsapp.net` or `NNN:D@s.whatsapp.net` (the
+            # `:D` is whatsmeow's device suffix) — strip both to the phone.
+            scanned = jid.split("@")[0].split(":")[0]
+            expected = normalize_phone(external_account_id).removeprefix("+")
+            if scanned != expected:
+                status = "error"
+                try:
+                    await state.daemon.unpair()
+                    reason = (
+                        f"paired_jid_mismatch: scanned account +{scanned} does not "
+                        f"match connection +{expected}; device has been unpaired"
+                    )
+                except Exception as exc:
+                    reason = (
+                        f"paired_jid_mismatch: scanned account +{scanned} does not "
+                        f"match connection +{expected}; auto-unpair ALSO failed "
+                        f"({exc!r}) — device may still be paired"
+                    )
+                # Surface the offending jid + mismatch reason; drop
+                # push_name so a failed pairing can't masquerade as a
+                # successful one via a display name.
+                outcome = {"jid": jid, "reason": reason}
         response: dict[str, Any] = {
             "external_account_id": external_account_id,
-            # `or "error"` covers both missing key and the empty-string
-            # the daemon could emit if outcome was wiped mid-race; the
-            # route then maps an unrecognized status to an "error"
-            # response with the raw value in reason.
-            "status": outcome.get("status") or "error",
+            "status": status,
         }
         for key in ("jid", "push_name", "reason"):
             # Use `is not None` so future fields with a falsy-but-
