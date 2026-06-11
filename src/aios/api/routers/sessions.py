@@ -60,6 +60,7 @@ from aios.models.sessions import (
 from aios.models.triggers import (
     TriggerCreate,
     TriggerEcho,
+    TriggerRunEcho,
     TriggerUpdate,
 )
 from aios.services import files as files_service
@@ -339,6 +340,30 @@ async def update_trigger(
     return await triggers_service.update_trigger(
         pool, session_id, name, body, account_id=account_id
     )
+
+
+@router.get(
+    "/{session_id}/triggers/{name}/runs",
+    operation_id="list_trigger_runs",
+)
+async def list_trigger_runs(
+    session_id: str,
+    name: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> ListResponse[TriggerRunEcho]:
+    """List a trigger's fires (the per-fire audit), newest first.
+
+    Keyed by name against the audit table's denormalized columns — NOT the
+    live trigger row — so one-shot tombstones and a deleted trigger's history
+    stay reachable (the audit outlives its trigger by design). Rows older
+    than the retention window are pruned.
+    """
+    runs = await triggers_service.list_trigger_runs(
+        pool, session_id, name, account_id=account_id, limit=limit
+    )
+    return ListResponse[TriggerRunEcho](data=runs)
 
 
 @router.post(

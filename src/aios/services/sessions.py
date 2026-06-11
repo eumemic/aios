@@ -55,7 +55,22 @@ from aios.sandbox.volumes import validate_workspace_path
 from aios.services import agents as agents_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
+from aios.services import triggers as triggers_service
 from aios.services.await_completion import await_completion
+
+
+async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:
+    """Module-level wrapper over :func:`aios.services.wake.defer_run_wake`.
+
+    ``wake`` imports this module at top level, so a top-level
+    ``from aios.services.wake import defer_run_wake`` here would be a circular
+    import. This thin wrapper imports it lazily at call time, and — being a real
+    attribute of this module — stays the single patch point for tests that stub the
+    archive/delete run-wake (``aios.services.sessions.defer_run_wake``).
+    """
+    from aios.services.wake import defer_run_wake as _defer_run_wake
+
+    await _defer_run_wake(run_id, batch=batch)
 
 
 async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
@@ -255,12 +270,26 @@ async def create_session(
                 )
                 if existing + enabled_new > cap:
                     raise RateLimitedError(
-                        f"account at active-timer cap ({existing}/{cap}); the "
+                        f"account at active-trigger cap ({existing}/{cap}); the "
                         f"{enabled_new} enabled trigger(s) in this session would "
                         "exceed the cap — disable some entries or remove an "
                         "older session's triggers first"
                     )
             for spec in triggers:
+                # Same shared validation as POST /triggers (watched-workflow
+                # existence, pin == current, env resolution) — this loop calls
+                # queries.add_trigger directly, so without it a session-create
+                # body would be an unvalidated write path into triggers. The
+                # just-inserted session is passed through so N specs don't
+                # re-read the row N times.
+                trigger_env = await triggers_service.validate_trigger_spec(
+                    conn,
+                    spec.source,
+                    spec.action,
+                    session_id=session.id,
+                    account_id=account_id,
+                    session=session,
+                )
                 next_fire = compute_initial_next_fire(spec.source, now) if spec.enabled else None
                 await queries.add_trigger(
                     conn,
@@ -272,6 +301,7 @@ async def create_session(
                     enabled=spec.enabled,
                     metadata=spec.metadata,
                     next_fire=next_fire,
+                    environment_id=trigger_env,
                     account_id=account_id,
                 )
             trigger_echoes = await queries.list_triggers(conn, session.id, account_id=account_id)
@@ -744,6 +774,60 @@ async def write_child_response(
     return wrote
 
 
+async def fail_open_child_requests_conn(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    error: dict[str, Any],
+) -> str | None:
+    """Conn-level twin of ``workflow_completion.fail_all_open_requests``: fail every
+    still-open request on a workflow child through the fused :func:`write_child_response`
+    seam, INSIDE the caller's open transaction, so the ``child_gone`` response + its
+    ``child_done`` signal commit atomically with the archive/delete that terminates the
+    child. What actually *survives* differs by caller: archive only flips ``archived_at``,
+    so the ``request_response`` event persists and ``derive_response`` returns the written
+    ``child_gone``; delete's cascade erases that event, leaving the ``child_done`` signal
+    (in ``wf_run_signals``, keyed by ``run_id`` — a separate table) as the sole survivor
+    that keeps the run sweep-visible, while ``derive_response`` resolves ``child_gone`` via
+    its liveness fallback (the session row is gone). Routing both paths through the seam is
+    deliberate: it keeps the single response-writer/signal chokepoint — the erased delete-path
+    event is the harmless cost of one uniform seam, not a bug. Returns the ``parent_run_id``
+    to wake when at least one response was written (so the pool-level caller can
+    ``defer_run_wake`` after commit), else ``None`` — a no-op for non-child sessions
+    (``parent_run_id`` is None) and children that owe nothing.
+
+    The pool-level ``fail_all_open_requests`` is the harness-erroring path (the model
+    failed past its retry budget) and acquires its own connection + wakes itself; this
+    twin instead joins the caller's transaction so the failure is fused with the
+    terminating archive/delete — there is no point at which the child is gone but its
+    callers still hung.
+    """
+    ctx = await queries.get_session_workflow_context(conn, session_id)
+    if ctx is None:
+        return None
+    _account_id, parent_run_id = ctx
+    if parent_run_id is None:
+        return None  # not a workflow child — nothing owes a request
+    open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
+    if not open_ids:
+        return None
+    wrote_any = False
+    for request_id in open_ids:
+        wrote = await write_child_response(
+            conn,
+            session_id,
+            account_id=account_id,
+            parent_run_id=parent_run_id,
+            request_id=request_id,
+            is_error=True,
+            result=None,
+            error=error,
+        )
+        wrote_any |= wrote
+    return parent_run_id if wrote_any else None
+
+
 async def append_assistant_and_guard_quiescence(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -1062,15 +1146,25 @@ async def increment_usage(
 
 
 async def archive_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:
-    # Enrich vault_ids / resources / triggers so the API response
-    # shape matches GET /sessions/{id}. Archive itself is a single column
-    # flip; the lists are read post-update to surface any concurrent
-    # mutation that committed before archive landed.
-    async with pool.acquire() as conn:
+    # Archiving a workflow child that still owes its agent() response is a
+    # COMPLETION: fail its open requests through write_child_response (error
+    # child_gone) FIRST — before the archived_at flip, because append_event is
+    # fenced by ``archived_at IS NULL`` and raises NotFoundError on an archived
+    # row — so the child_gone response + its child_done signal commit atomically
+    # with the archive. The run is then sweep-visible within a tick (#904) instead
+    # of waiting out the 1h agent deadline. Enrich vault_ids / resources / triggers
+    # so the API response shape matches GET /sessions/{id}; the lists are read
+    # post-update to surface any concurrent mutation that committed before archive.
+    async with pool.acquire() as conn, conn.transaction():
+        parent_run_id = await fail_open_child_requests_conn(
+            conn, session_id, account_id=account_id, error={"kind": "child_gone"}
+        )
         session = await queries.archive_session(conn, session_id, account_id=account_id)
         vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
         echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
         trigger_echoes = await queries.list_triggers(conn, session_id, account_id=account_id)
+    if parent_run_id is not None:
+        await defer_run_wake(parent_run_id, batch=True)
     return session.model_copy(
         update={
             "vault_ids": vault_ids,
@@ -1107,8 +1201,23 @@ async def clone_session(
 
 
 async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> None:
-    async with pool.acquire() as conn:
+    # Deleting a workflow child that still owes its agent() response is a
+    # COMPLETION (#904): fail its open requests through write_child_response (error
+    # child_gone) FIRST — same single response-writer/signal seam as archive. The
+    # cascade then wipes the child's events, INCLUDING the child_gone request_response
+    # this just wrote — that erasure is harmless (routing through the one seam is the
+    # point; see fail_open_child_requests_conn). What carries the completion is the
+    # child_done signal, which lives in wf_run_signals (keyed by run_id, NOT the child's
+    # events), so it survives the cascade and makes the run sweep-visible within a tick
+    # rather than waiting out the 1h agent deadline; derive_response resolves child_gone
+    # via its liveness fallback once the session row is gone.
+    async with pool.acquire() as conn, conn.transaction():
+        parent_run_id = await fail_open_child_requests_conn(
+            conn, session_id, account_id=account_id, error={"kind": "child_gone"}
+        )
         await queries.delete_session(conn, session_id, account_id=account_id)
+    if parent_run_id is not None:
+        await defer_run_wake(parent_run_id, batch=True)
 
 
 async def update_session(

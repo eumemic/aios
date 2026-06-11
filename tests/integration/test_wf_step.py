@@ -77,6 +77,9 @@ async def wf_runtime(
             # The fire-and-forget tool task's own wake — patch it too, else it enqueues a
             # real wake_workflow job against the test DB (the harvest is driven manually).
             mock.patch("aios.workflows.run_tools.defer_run_wake", new=AsyncMock()),
+            # The service-level archive/delete now eagerly fail open child requests and
+            # defer a run wake after commit — patch it so they don't enqueue a real job.
+            mock.patch("aios.services.sessions.defer_run_wake", new=AsyncMock()),
         ):
             yield pool
     finally:
@@ -602,18 +605,211 @@ async def test_agent_spawn_idempotent_on_replay(
     assert user_msgs == 1  # input delivered exactly once across replays
 
 
-async def test_agent_not_found_errors_the_run(wf_runtime: asyncpg.Pool[Any]) -> None:
+async def test_agent_not_found_is_catchable(wf_runtime: asyncpg.Pool[Any]) -> None:
+    """A missing agent surfaces as a catchable ``AgentError`` at the ``await``, not an
+    uncatchable terminal run error. Wake 1 journals a ``call_result`` error (and
+    self-wakes); wake 2 replays and throws the AgentError where the script catches it
+    and completes. No child is ever spawned for the bad call."""
     pool = wf_runtime
-    run_id = await _make_run(
-        pool, "async def main(input):\n    return await agent('agent_nope', 'x')\n"
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        "        await agent('agent_nope', 'x')\n"
+        "    except AgentError as e:\n"
+        "        return {'caught': True, 'kind': e.kind, 'msg': str(e)}\n"
+        "    return {'caught': False}\n"
     )
-    await run_workflow_step(run_id)
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # wake 1: journal the catchable error + self-wake
+    await run_workflow_step(run_id)  # wake 2: replay -> throw AgentError -> caught -> return
+
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
-    assert run is not None and run.status == "errored"
-    assert events[-1].type == "run_completed"
-    assert events[-1].payload["error"]["kind"] == "agent_not_found"
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "completed"
+    assert run.output == {
+        "caught": True,
+        "kind": "agent_not_found",
+        "msg": "agent 'agent_nope' not found",
+    }
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["is_error"] is True
+    assert cr.payload["error"] == {
+        "kind": "agent_not_found",
+        "message": "agent 'agent_nope' not found",
+    }
+    assert children == 0  # the rejected call never spawned a child
+
+
+async def test_bad_agent_call_invalid_schema_is_catchable(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A structurally-invalid ``output_schema`` surfaces as a catchable
+    ``AgentError(kind='bad_agent_call')`` at the await, preserving the descriptive
+    schema message. Two wakes; no child is spawned."""
+    pool = wf_runtime
+    bad_schema = {"type": "not-a-real-type"}
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent({wf_agent_id!r}, 'hi', output_schema={bad_schema!r})\n"
+        "    except AgentError as e:\n"
+        "        return {'caught': True, 'kind': e.kind, 'msg': str(e)}\n"
+        "    return {'caught': False}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "completed"
+    assert run.output["caught"] is True
+    assert run.output["kind"] == "bad_agent_call"
+    assert run.output["msg"].startswith("agent() output_schema is not a valid JSON Schema")
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["is_error"] is True
+    assert cr.payload["error"]["kind"] == "bad_agent_call"
+    assert cr.payload["error"]["message"].startswith(
+        "agent() output_schema is not a valid JSON Schema"
+    )
+    assert children == 0
+
+
+async def test_bad_agent_call_non_string_agent_id_is_catchable(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A non-string ``agent_id`` (here an int) reaches the parent's
+    ``not isinstance(agent_id, str)`` branch and surfaces as a catchable
+    ``AgentError(kind='bad_agent_call')`` with the exact descriptive message. No child."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        "        await agent(123, 'hi')\n"
+        "    except AgentError as e:\n"
+        "        return {'caught': True, 'kind': e.kind, 'msg': str(e)}\n"
+        "    return {'caught': False}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "completed"
+    assert run.output == {
+        "caught": True,
+        "kind": "bad_agent_call",
+        "msg": "agent() requires a string agent_id, got 123",
+    }
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["error"] == {
+        "kind": "bad_agent_call",
+        "message": "agent() requires a string agent_id, got 123",
+    }
+    assert children == 0
+
+
+async def test_one_bad_branch_in_fanout_does_not_terminate_the_run(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """HEADLINE: a spawn error on ONE branch of a fan-out journals that branch's
+    catchable error and must NOT abort spawning the others. After wake 1 the run is
+    NOT terminated — the two good children are spawned and exactly one error is
+    journaled; it owes one drive ('running'), and a self-wake re-suspends it on the two
+    good children. After they answer, the barrier returns ``[None, r_a, r_b]``."""
+    from aios.tools import workflow_completion
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    return await parallel([\n"
+        "        lambda: agent('agent_nope', 'x'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'a'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'b'),\n"
+        "    ])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # wake 1: spawn the 2 good children, journal 1 error
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    # NOT terminated by the bad branch — it owes a drive (the catchable error replay).
+    assert run is not None and run.status == "running"
+    started = [e for e in events if e.type == "call_started"]
+    assert len(started) == 2  # exactly the two good children spawned
+    errors = [e for e in events if e.type == "call_result" and e.payload.get("is_error")]
+    assert len(errors) == 1  # exactly one journaled spawn error
+    assert errors[0].payload["error"]["kind"] == "agent_not_found"
+    children = await _children_of(pool, run_id)
+    assert len(children) == 2
+
+    await run_workflow_step(run_id)  # owed drive: replay throws the caught error → re-suspend
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "suspended"  # settled on the two good children
+    assert len([e for e in events if e.type == "call_started"]) == 2  # no new spawns on replay
+    assert len([e for e in events if e.type == "call_result" and e.payload.get("is_error")]) == 1
+
+    # Answer the two good children, then drive again: barrier returns with the bad
+    # branch's None in its (first) slot.
+    for cid, value in zip(children, ["r_a", "r_b"], strict=True):
+        rid = await _open_request_id(pool, cid)
+        with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+            await workflow_completion.return_handler(cid, {"request_id": rid, "value": value})
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == [None, "r_a", "r_b"]
+
+
+async def test_spawn_error_call_result_has_no_paired_call_started(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The journaled spawn error is a bare ``call_result`` for the bad call_key with NO
+    paired ``call_started`` — and the replay-prefix check (which asserts every inflight
+    ``call_started`` is re-emitted) never trips ``nondeterministic_replay``, because the
+    bad call has no open ``call_started`` to orphan."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        "        await agent('agent_nope', 'x')\n"
+        "    except AgentError:\n"
+        "        return 'caught'\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # wake 1: journal the error, self-wake
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    error_keys = {
+        e.call_key for e in events if e.type == "call_result" and e.payload.get("is_error")
+    }
+    started_keys = {e.call_key for e in events if e.type == "call_started"}
+    assert len(error_keys) == 1
+    assert error_keys.isdisjoint(started_keys)  # the bad call_result has no call_started
+    # The run did not error (least of all with nondeterministic_replay).
+    completed = [e for e in events if e.type == "run_completed"]
+    assert all(
+        e.payload.get("error", {}).get("kind") != "nondeterministic_replay" for e in completed
+    )
 
 
 # ─── B2.D — return()/error() completion tools + injection gate ────────────────
@@ -854,6 +1050,10 @@ async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
     from aios.workflows.host_launcher import EmittedCapability
     from aios.workflows.step import _open_agent_capability
 
+    # A cap high enough that the lifetime quota never trips — this test exercises the
+    # re-attach / self-wake arm, not H1.
+    _SPAWN_KW = {"agent_spawns": 0, "max_agent_calls": 1000}
+
     pool = wf_runtime
     script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
     run_id = await _make_run(pool, script)
@@ -867,12 +1067,12 @@ async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
         assert run is not None
         # First spawn: created → defer_wake fires once.
         with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w1:
-            r1 = await _open_agent_capability(conn, pool, run, cap)
+            r1 = await _open_agent_capability(conn, pool, run, cap, **_SPAWN_KW)
         assert not r1.rejected and not r1.needs_rewake
         w1.assert_awaited_once()
         # Re-attach, no marker yet → no defer_wake, no self-wake.
         with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w2:
-            r2 = await _open_agent_capability(conn, pool, run, cap)
+            r2 = await _open_agent_capability(conn, pool, run, cap, **_SPAWN_KW)
         assert not r2.rejected and not r2.needs_rewake
         w2.assert_not_awaited()
 
@@ -886,7 +1086,7 @@ async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
         run = await wf_queries.get_run_for_step(conn, run_id)
         assert run is not None
         with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w3:
-            r3 = await _open_agent_capability(conn, pool, run, cap)
+            r3 = await _open_agent_capability(conn, pool, run, cap, **_SPAWN_KW)
         assert not r3.rejected and r3.needs_rewake  # marker present → self-wake to harvest
         w3.assert_not_awaited()
 
@@ -1443,8 +1643,10 @@ async def test_operator_archived_child_resolves_run_as_child_gone(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
     """An operator archiving a *running* child before it answers must not hang the
-    run: derive_response sees the child is no longer live and resolves the call as a
-    catchable AgentError(child_gone)."""
+    run. The service-level archive EAGERLY fails the child's open request through the
+    write_child_response seam (error child_gone) + writes its child_done signal, so the
+    run is sweep-visible within a tick — no waiting out the 1h agent deadline. The
+    harvest then resolves the call as a catchable AgentError(child_gone)."""
     pool = wf_runtime
     script = (
         "async def main(input):\n"
@@ -1456,8 +1658,24 @@ async def test_operator_archived_child_resolves_run_as_child_gone(
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     child_id = await _child_id_of(pool, run_id)
-    async with pool.acquire() as conn:  # operator archives the child mid-flight
-        await db_queries.archive_session(conn, child_id, account_id="acc_wf")
+    request_id = await _open_request_id(pool, child_id)  # capture BEFORE archiving
+
+    # Suspended, no signal, not past the agent deadline → not yet sweep-visible.
+    assert run_id not in await _needing(pool)
+
+    # Operator archives the child mid-flight, via the SERVICE-level path under test.
+    await sessions_service.archive_session(pool, child_id, account_id="acc_wf")
+
+    # CORE #904 ASSERTION: the eager child_done signal makes the run sweep-visible
+    # WITHOUT aging the wall-clock — it appears in the needs-step set immediately.
+    assert run_id in await _needing(pool)
+
+    # The request was failed immediately, before any further step ran.
+    async with pool.acquire() as conn:
+        resolved = await db_queries.derive_response(
+            conn, child_id, account_id="acc_wf", request_id=request_id
+        )
+    assert resolved == {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
 
     await run_workflow_step(run_id)  # harvest -> child_gone -> AgentError -> caught
     async with pool.acquire() as conn:
@@ -1469,8 +1687,12 @@ async def test_operator_archived_child_resolves_run_as_child_gone(
 async def test_operator_deleted_child_resolves_run_as_child_gone(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
-    """Same totality guarantee when the child is hard-deleted (its events are gone):
-    the run resolves from the child's absence, not a written response."""
+    """Same totality guarantee when the child is hard-deleted. The service-level
+    delete EAGERLY fails the open request through write_child_response FIRST (so its
+    child_gone response + child_done signal commit before the cascade wipes the child's
+    events), making the run sweep-visible within a tick. The signal survives the
+    cascade (it lives in wf_run_signals, not the child's events); the harvest resolves
+    child_gone from the signal, not a re-read of the now-absent child."""
     pool = wf_runtime
     script = (
         "async def main(input):\n"
@@ -1482,13 +1704,60 @@ async def test_operator_deleted_child_resolves_run_as_child_gone(
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     child_id = await _child_id_of(pool, run_id)
+    request_id = await _open_request_id(pool, child_id)  # the agent call_key; capture BEFORE delete
+
+    assert run_id not in await _needing(pool)
+
+    await sessions_service.delete_session(pool, child_id, account_id="acc_wf")
+
+    # Eagerness: the child_done signal makes the run sweep-visible immediately.
+    assert run_id in await _needing(pool)
+
     async with pool.acquire() as conn:
-        await db_queries.delete_session(conn, child_id, account_id="acc_wf")
+        # The child_done signal survived the events cascade (lives in wf_run_signals).
+        signal = await wf_queries.read_run_signal(conn, run_id, request_id)
+        # The child session row is gone.
+        with pytest.raises(NotFoundError):
+            await db_queries.get_session_bare(conn, child_id, account_id="acc_wf")
+    assert signal is not None and signal.kind == "child_done"
 
     await run_workflow_step(run_id)  # harvest -> child_gone -> AgentError -> caught
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "completed" and run.output == "child_gone"
+
+
+async def test_archive_child_commits_response_and_child_done_atomically(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """Acceptance #3: the child_gone response, its child_done signal, and the
+    archived_at flip all commit in ONE transaction — observable together afterward."""
+    pool = wf_runtime
+    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+    request_id = await _open_request_id(pool, child_id)
+
+    await sessions_service.archive_session(pool, child_id, account_id="acc_wf")
+
+    async with pool.acquire() as conn:
+        # (a) the request_response lifecycle event was written with error child_gone.
+        response = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=request_id
+        )
+        # (b) the child_done signal exists for (run_id, request_id).
+        signal = await wf_queries.read_run_signal(conn, run_id, request_id)
+        # (c) the session's archived_at is set.
+        archived_at = await conn.fetchval(
+            "SELECT archived_at FROM sessions WHERE id = $1 AND account_id = $2",
+            child_id,
+            "acc_wf",
+        )
+    assert response is not None and response["is_error"] is True
+    assert response["error"] == {"kind": "child_gone"}
+    assert signal is not None and signal.kind == "child_done"
+    assert archived_at is not None
 
 
 # ─── G — parallel() spawns a child fan-out and collects results ───────────────
@@ -1566,11 +1835,16 @@ async def test_parallel_barrier_yields_none_for_an_errored_child(
 # ─── H — runaway caps + the per-call wall-clock deadline ──────────────────────
 
 
-async def test_lifetime_agent_cap_errors_atomically_before_spawning(
+async def test_lifetime_agent_cap_errors_at_the_over_cap_spawn(
     monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
-    """A fan-out that would push the run past its lifetime agent-call cap errors
-    BEFORE spawning any of that step's children — no partial fan-out of orphans."""
+    """A fan-out that would push the run past its lifetime agent-call cap errors with
+    ``too_many_agents`` AT the over-cap child: the cap is enforced per-spawn (so a
+    rejected cap never tips it), checked just before each ``create_child_session``. The
+    children up to the cap are spawned, but the (cap + 1)-th child is NEVER created — the
+    run errors the moment that spawn is attempted. Those at-cap children are orphans the
+    quiescence sweep reclaims (idle, no sandbox until used); the over-cap child does not
+    exist."""
     from aios.config import get_settings
 
     capped = get_settings().model_copy(update={"workflow_max_agent_calls": 2})
@@ -1582,17 +1856,18 @@ async def test_lifetime_agent_cap_errors_atomically_before_spawning(
         f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(3)])\n"
     )
     run_id = await _make_run(pool, script)
-    await run_workflow_step(run_id)  # 3 > cap 2 → error, nothing spawned
+    await run_workflow_step(run_id)  # 3 > cap 2 → error AT the 3rd spawn
 
-    assert await _children_of(pool, run_id) == []  # no call_started journaled
+    # The cap-many children spawned (call_started journaled); the over-cap one did not.
+    assert len(await _children_of(pool, run_id)) == 2  # exactly max_agent_calls, never the 3rd
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
-        # the invariant at its real surface: no child session rows exist for the run
-        orphans = await conn.fetchval(
+        # The over-cap child is never created — at most max_agent_calls session rows exist.
+        spawned = await conn.fetchval(
             "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
         )
-    assert orphans == 0  # atomic: no partial fan-out of orphan children
+    assert spawned == 2  # the (cap + 1)-th child was never created
     assert run is not None and run.status == "errored"
     assert events[-1].type == "run_completed"
     assert events[-1].payload["error"]["kind"] == "too_many_agents"
@@ -1651,10 +1926,112 @@ async def test_lowering_cap_mid_flight_does_not_kill_a_harvest_only_step(
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
         await workflow_completion.return_handler(children[0], {"request_id": rid0, "value": "r0"})
 
-    await run_workflow_step(run_id)  # harvest child0; child1 inflight; new_agent_caps == []
+    await run_workflow_step(
+        run_id
+    )  # harvest child0; child1 still inflight; no new agent spawns this step
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "suspended"  # NOT errored — no new spawns
+
+
+async def test_rejected_agent_cap_does_not_count_toward_quota(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A cap the spawn gate REJECTS (agent_not_found / bad_agent_call) spawns no child
+    and must NOT count toward ``max_agent_calls``. With cap 2 and one prior real spawn,
+    a ``parallel([agent('nope'), agent(real)])`` frontier has only ONE real spawn left
+    (the good branch) — so the run must NOT trip ``too_many_agents``: the bad branch
+    surfaces a catchable AgentError (→ barrier slot None) and the good branch completes.
+    The buggy pre-count saw 2 new caps (1 prior + 2 > 2) and terminated the run."""
+    from aios.config import get_settings
+    from aios.tools import workflow_completion
+
+    capped = get_settings().model_copy(update={"workflow_max_agent_calls": 2})
+    monkeypatch.setattr("aios.workflows.step.get_settings", lambda: capped)
+
+    pool = wf_runtime
+    # One prior real spawn, THEN the bad+good fan-out: prior=1, one real spawn left.
+    script = (
+        "async def main(input):\n"
+        f"    await agent({wf_agent_id!r}, 'first')\n"
+        "    return await parallel([\n"
+        "        lambda: agent('agent_nope', 'x'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'y'),\n"
+        "    ])\n"
+    )
+    run_id = await _make_run(pool, script)
+
+    # Wake 1: spawn `first`, suspend. Answer it so the next wake replays to the parallel.
+    await run_workflow_step(run_id)
+    first_child = (await _children_of(pool, run_id))[0]
+    rid_first = await _open_request_id(pool, first_child)
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(
+            first_child, {"request_id": rid_first, "value": "r_first"}
+        )
+
+    # Wake 2: harvest `first` → replay to the parallel frontier. prior=1, new caps={nope, y}.
+    # The good 'y' is the only real spawn (count 2 ≤ 2 OK); 'nope' is rejected, NOT counted.
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    # NOT terminated by too_many_agents — the rejected cap did not tip the quota.
+    assert run is not None and run.status == "running"  # owes the catchable-error drive
+    assert not any(
+        e.type == "run_completed" and e.payload.get("error", {}).get("kind") == "too_many_agents"
+        for e in events
+    )
+    errors = [e for e in events if e.type == "call_result" and e.payload.get("is_error")]
+    assert len(errors) == 1 and errors[0].payload["error"]["kind"] == "agent_not_found"
+    # Two real children total: `first` (harvested) + `y` (just spawned).
+    children = await _children_of(pool, run_id)
+    assert len(children) == 2
+
+    # Drive the owed replay (throws the caught AgentError → re-suspend on `y`), then
+    # answer `y` and complete. The bad branch is None; the good branch is `y`'s value.
+    await run_workflow_step(run_id)
+    y_child = children[1]
+    rid_y = await _open_request_id(pool, y_child)
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(y_child, {"request_id": rid_y, "value": "r_y"})
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == [None, "r_y"]  # bad branch → None, good branch → its value
+
+
+async def test_real_overquota_fanout_still_errors_too_many_agents(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The guard still fires for genuine over-quota REAL spawns (it isn't disabled by the
+    per-spawn counting): a fan-out of three real agents with cap 2 terminates the run with
+    ``too_many_agents`` and the over-cap child is never created."""
+    from aios.config import get_settings
+
+    capped = get_settings().model_copy(update={"workflow_max_agent_calls": 2})
+    monkeypatch.setattr("aios.workflows.step.get_settings", lambda: capped)
+
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    return await parallel([\n"
+        f"        lambda: agent({wf_agent_id!r}, 'a'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'b'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'c'),\n"
+        "    ])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # 3 real > cap 2 → too_many_agents
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "errored"
+    assert events[-1].type == "run_completed"
+    assert events[-1].payload["error"]["kind"] == "too_many_agents"
 
 
 async def test_agent_call_times_out_when_child_never_responds(
@@ -2303,15 +2680,20 @@ async def test_return_enforces_output_schema(
 async def test_malformed_output_schema_errors_the_run(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
-    """A malformed output_schema fails the run cleanly (author-facing bad_agent_call)
-    and never spawns a child."""
+    """A malformed output_schema surfaces as a catchable ``AgentError(bad_agent_call)``
+    at the await (preserving the schema message) and never spawns a child."""
     pool = wf_runtime
     bad_schema = {"type": "not-a-real-type"}
     script = (
-        f"async def main(input):\n"
-        f"    return await agent({wf_agent_id!r}, 'hi', output_schema={bad_schema!r})\n"
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent({wf_agent_id!r}, 'hi', output_schema={bad_schema!r})\n"
+        "    except AgentError as e:\n"
+        "        return {'kind': e.kind, 'msg': str(e)}\n"
+        "    return {'caught': False}\n"
     )
     run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
     await run_workflow_step(run_id)
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
@@ -2319,9 +2701,11 @@ async def test_malformed_output_schema_errors_the_run(
         children = await conn.fetchval(
             "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
         )
-    assert run is not None and run.status == "errored"
-    completed = [e for e in events if e.type == "run_completed"]
-    assert completed and completed[0].payload["error"]["kind"] == "bad_agent_call"
+    assert run is not None and run.status == "completed"
+    assert run.output["kind"] == "bad_agent_call"
+    assert run.output["msg"].startswith("agent() output_schema is not a valid JSON Schema")
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["error"]["kind"] == "bad_agent_call"
     assert children == 0  # rejected before any spawn
 
 
@@ -2330,11 +2714,19 @@ async def test_non_object_output_schema_errors_the_run(
 ) -> None:
     """A non-object output_schema (a bare boolean — valid JSON Schema, but ``false``
     rejects every value and ``true`` disables enforcement) is a degenerate author input:
-    fail the run cleanly as bad_agent_call rather than spawn a child that can never
-    return (or one with no enforcement)."""
+    surface a catchable ``AgentError(bad_agent_call)`` rather than spawn a child that can
+    never return (or one with no enforcement)."""
     pool = wf_runtime
-    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'hi', output_schema=False)\n"
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent({wf_agent_id!r}, 'hi', output_schema=False)\n"
+        "    except AgentError as e:\n"
+        "        return {'kind': e.kind, 'msg': str(e)}\n"
+        "    return {'caught': False}\n"
+    )
     run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
     await run_workflow_step(run_id)
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
@@ -2342,10 +2734,11 @@ async def test_non_object_output_schema_errors_the_run(
         children = await conn.fetchval(
             "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
         )
-    assert run is not None and run.status == "errored"
-    completed = [e for e in events if e.type == "run_completed"]
-    assert completed and completed[0].payload["error"]["kind"] == "bad_agent_call"
-    assert "object schema" in completed[0].payload["output"]
+    assert run is not None and run.status == "completed"
+    assert run.output["kind"] == "bad_agent_call"
+    assert "object schema" in run.output["msg"]
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["error"]["kind"] == "bad_agent_call"
     assert children == 0  # rejected before any spawn
 
 
@@ -2471,11 +2864,20 @@ async def test_dangling_ref_output_schema_errors_the_run(
 ) -> None:
     """A schema whose ``$ref`` doesn't resolve passes check_schema but would raise at
     the child's validation time (bricking it until the deadline). Reject it
-    author-facing at the spawn gate, before any child spawns."""
+    author-facing at the spawn gate (a catchable ``AgentError``), before any child
+    spawns."""
     pool = wf_runtime
     schema = {"type": "object", "properties": {"a": {"$ref": "#/$defs/missing"}}, "required": ["a"]}
-    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'x', output_schema={schema!r})\n"
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent({wf_agent_id!r}, 'x', output_schema={schema!r})\n"
+        "    except AgentError as e:\n"
+        "        return {'kind': e.kind, 'msg': str(e)}\n"
+        "    return {'caught': False}\n"
+    )
     run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
     await run_workflow_step(run_id)
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
@@ -2483,10 +2885,11 @@ async def test_dangling_ref_output_schema_errors_the_run(
         children = await conn.fetchval(
             "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
         )
-    assert run is not None and run.status == "errored"
-    completed = [e for e in events if e.type == "run_completed"]
-    assert completed and completed[0].payload["error"]["kind"] == "bad_agent_call"
-    assert "reference" in completed[0].payload["output"].lower()
+    assert run is not None and run.status == "completed"
+    assert run.output["kind"] == "bad_agent_call"
+    assert "reference" in run.output["msg"].lower()
+    cr = next(e for e in events if e.type == "call_result")
+    assert cr.payload["error"]["kind"] == "bad_agent_call"
     assert children == 0  # rejected before any spawn
 
 

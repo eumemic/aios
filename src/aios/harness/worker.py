@@ -47,12 +47,14 @@ from aios.harness.sweep import (
     wake_sessions_needing_inference,
 )
 from aios.harness.task_registry import TaskRegistry
+from aios.harness.trigger_runner import sweep_trigger_fires
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.tool_broker import ToolBroker
+from aios.sandbox.workspace_ownership import repair_workspace_ownership
 
 # Hashed (via Postgres ``hashtextextended($1, 0)``) into the 64-bit
 # advisory-lock key enforcing the worker-process singleton. The string
@@ -164,6 +166,13 @@ async def worker_main() -> None:
         runtime.mcp_session_pool = mcp_session_pool
         runtime.tool_broker = tool_broker
         runtime.tool_provider = SubsystemToolProvider()
+
+        # Repair pre-existing root-owned shared-workspace dirs (#959) before
+        # any provisioning job can run. No-op unless the worker is root.
+        # to_thread: synchronous lstat/chown walk must not block the event loop.
+        repaired = await asyncio.to_thread(repair_workspace_ownership)
+        if repaired:
+            log.info("worker.workspace_ownership_repaired", count=repaired)
 
         await procrastinate_app.open_async()
         procrastinate_opened = True
@@ -419,6 +428,8 @@ async def _periodic_sweep(
             woken_runs = await wake_runs_needing_step(pool)
             if woken_runs:
                 log.info("periodic_sweep.workflows", woken_runs=woken_runs)
+
+            await sweep_trigger_fires(pool)
         except Exception:
             log.exception("periodic_sweep.failed")
 

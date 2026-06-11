@@ -70,6 +70,10 @@ class WfRun(BaseModel):
     workflow_id: str
     account_id: str
     environment_id: str  # the run binds to an environment; agent() children inherit it
+    # Lineage + the vertical depth cap's walk key. Set by nested workflow()
+    # launches AND by trigger fires (#819): a run_completion fire threads the
+    # completing run's id, a timer fire threads the owner session's own parent
+    # run — so reactive cascades and self-fire loops are depth-bounded.
     parent_run_id: str | None = None
     # The agent session that launched this run (None = operator/HTTP). Lineage, plus
     # the per-launcher fan-out cap's count key.

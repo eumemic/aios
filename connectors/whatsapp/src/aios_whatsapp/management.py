@@ -11,10 +11,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import structlog
 from aios_connector_http import ManagementHandlerError, management_handler
+
+from .prompts import _jid_identity_key
 
 if TYPE_CHECKING:
     from .connector import _WhatsappConnectionState
+
+log = structlog.get_logger(__name__)
 
 
 def normalize_phone(phone: str) -> str:
@@ -74,13 +79,85 @@ class WhatsappManagementMixin:
         """
         state = self._state_for_phone(external_account_id)
         outcome = await state.daemon.confirm_pairing()
+        # `or "error"` covers both missing key and the empty-string the
+        # daemon could emit if outcome was wiped mid-race; the route then
+        # maps an unrecognized status to an "error" response with the raw
+        # value in reason.
+        status = outcome.get("status") or "error"
+        # Security gate: a device linked to the wrong WhatsApp account is
+        # live exposure — the operator would be sending/receiving as an
+        # account they don't control.  Whatsmeow reports the scanned
+        # device's jid; if its phone part doesn't match the connection's
+        # external_account_id we must NEVER persist the pairing.  We verify
+        # EVERY success: a success with no jid is unverifiable, which is just
+        # as dangerous as a mismatch, so it takes the same hard-fail +
+        # auto-unpair path.
+        if status == "success":
+            jid = outcome.get("jid") or ""
+            # `_jid_identity_key` strips the `@host` and the `:D` device
+            # suffix to the phone-bearing local part — the single source of
+            # truth for JID parsing in this package.  An empty jid yields "",
+            # which can never equal `expected`, so it fails closed.
+            scanned = _jid_identity_key(jid)
+            # Compare digits-only (mirrors connector._phone_to_jid):
+            # normalize_phone strips only spaces/dashes, so a phone stored
+            # as "+1 (555) 111-2222" or "+1.555.111.2222" would otherwise
+            # never equal the scanned JID's pure-digit user part and a
+            # CORRECTLY paired device would be falsely auto-unpaired.
+            expected = "".join(c for c in external_account_id if c.isdigit())
+            # No special-case for non-phone JID spaces (e.g. WhatsApp LID —
+            # `@lid` identities that live in a separate identifier space and
+            # cannot be mapped to a phone number): `_jid_identity_key` would
+            # produce a value that can never equal a phone-digit `expected`,
+            # so they fall into the fail-closed branch below BY DESIGN.
+            # Treating an unverifiable identity as a failure (unpair) rather
+            # than passing it through is the whole point of this gate — a
+            # fail-open path would reopen the exact wrong-account bypass it
+            # closes.  A LID-aware verification path, should the daemon ever
+            # report a LID self-JID at pairing, is tracked as a followup (#971).
+            if scanned != expected:
+                if scanned:
+                    mismatch = (
+                        f"paired_jid_mismatch: scanned account +{scanned} does not "
+                        f"match connection +{expected}"
+                    )
+                else:
+                    mismatch = (
+                        "paired_jid_mismatch: daemon reported success without a JID, "
+                        f"cannot verify against connection +{expected}"
+                    )
+                status = "error"
+                try:
+                    await state.daemon.unpair()
+                    reason = f"{mismatch}; device has been unpaired"
+                    unpaired = True
+                except Exception as exc:
+                    reason = (
+                        f"{mismatch}; auto-unpair ALSO failed ({exc!r}) "
+                        "— device may still be paired"
+                    )
+                    unpaired = False
+                # A wrong-account linkage (or an unverifiable success) is a
+                # security event — possible hijack attempt or misconfigured
+                # connection.  Surface it server-side; the response only
+                # reaches the operator.
+                log.warning(
+                    "whatsapp_pairing_jid_mismatch",
+                    external_account_id=external_account_id,
+                    jid=outcome.get("jid"),
+                    expected=expected,
+                    unpaired=unpaired,
+                )
+                # Surface the mismatch reason and, when present, the offending
+                # jid; drop push_name so a failed pairing can't masquerade as
+                # a successful one via a display name.  No jid key when the
+                # daemon gave us none — don't fabricate one.
+                outcome = {"reason": reason}
+                if jid:
+                    outcome["jid"] = jid
         response: dict[str, Any] = {
             "external_account_id": external_account_id,
-            # `or "error"` covers both missing key and the empty-string
-            # the daemon could emit if outcome was wiped mid-race; the
-            # route then maps an unrecognized status to an "error"
-            # response with the raw value in reason.
-            "status": outcome.get("status") or "error",
+            "status": status,
         }
         for key in ("jid", "push_name", "reason"):
             # Use `is not None` so future fields with a falsy-but-

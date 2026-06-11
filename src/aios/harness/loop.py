@@ -127,8 +127,10 @@ async def refresh_session_mount_state(
     """Refresh the cached resource echoes and the sandbox drift check.
 
     Returns the memory echoes (used downstream for prompt augmentation).
-    Github echoes are cached and fed into the registry's drift check but
-    not returned — no current caller in the step body needs them.
+    Github echoes and env-var credential echoes are fed into the registry's
+    drift check but not returned — no current caller in the step body needs
+    them. The env-var echoes carry ``updated_at`` so a credential rotation
+    recycles the sandbox (#877), exactly like github token rotation.
     """
     from aios.db import queries
 
@@ -139,10 +141,13 @@ async def refresh_session_mount_state(
         github_echoes = await queries.list_session_github_repo_echoes(
             conn, session_id, account_id=account_id
         )
+        env_var_echoes = await queries.list_session_env_var_credential_echoes(
+            conn, session_id, account_id=account_id
+        )
     runtime.set_session_memory_mounts(session_id, memory_echoes)
     if runtime.sandbox_registry is not None:
         await runtime.sandbox_registry.release_if_mounts_changed(
-            session_id, memory_echoes, github_echoes
+            session_id, memory_echoes, github_echoes, env_var_echoes
         )
     return memory_echoes
 

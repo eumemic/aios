@@ -196,7 +196,11 @@ async def test_signal_send_group_returns_sent_at_ms_from_echo(
         text="hello", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID
     )
 
-    assert result == {"sent_at_ms": sent_ts}
+    assert result == {
+        "sent_at_ms": sent_ts,
+        "channel": f"signal/{BOT_UUID}/{GROUP_CHAT_ID}",
+        "chat_type": "group",
+    }
 
 
 async def test_signal_send_group_falls_back_when_echo_times_out(
@@ -212,7 +216,11 @@ async def test_signal_send_group_falls_back_when_echo_times_out(
         text="silence", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID
     )
 
-    assert result == {"status": "ok"}
+    assert result == {
+        "status": "ok",
+        "channel": f"signal/{BOT_UUID}/{GROUP_CHAT_ID}",
+        "chat_type": "group",
+    }
 
 
 async def test_inbound_dispatcher_resolves_echo_on_peer_account_stream(
@@ -289,5 +297,9 @@ async def test_signal_send_dm_does_not_register_echo_future(
 
     result = await connector.signal_send(text="dm", chat_id=ALICE_UUID, connection_id=CONNECTION_ID)
 
-    assert result == {"sent_at_ms": 999}
+    assert result == {
+        "sent_at_ms": 999,
+        "channel": f"signal/{BOT_UUID}/{ALICE_UUID}",
+        "chat_type": "dm",
+    }
     assert (PHONE, ALICE_UUID) not in connector._pending_echoes

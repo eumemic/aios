@@ -1,9 +1,10 @@
 """The ``trigger_create`` tool — add a trigger to this session.
 
-A trigger pairs a ``source`` (what fires it: a recurring ``cron`` schedule
-or a one-shot ``fire_at``) with an ``action`` (what runs: a
-``sandbox_command`` bash task that does NOT wake the model, or a
-``wake_owner`` message delivered to this session that DOES wake the model).
+A trigger pairs a ``source`` (what fires it: a recurring ``cron`` schedule,
+a one-shot ``fire_at``, or a reactive ``run_completion`` watch) with an
+``action`` (what runs: a ``sandbox_command`` bash task that does NOT wake
+the model, a ``wake_owner`` message delivered to this session that DOES wake
+the model, or a ``workflow`` launch — deterministic, no model wake).
 
 Hand-written precursor to the autogen'd self-state tools. Granular ops only
 — no whole-list ``set``. Each entry is identified by ``name`` (unique per
@@ -19,6 +20,7 @@ from aios.models.triggers import (
     DEFAULT_MAX_OUTPUT_BYTES,
     DEFAULT_TIMEOUT_SECONDS,
     MAX_COMMAND_CHARS,
+    MAX_INPUT_TEMPLATE_BYTES,
     MAX_MAX_OUTPUT_BYTES,
     MAX_NAME_CHARS,
     MAX_SCHEDULE_CHARS,
@@ -26,6 +28,7 @@ from aios.models.triggers import (
     MAX_WAKE_CONTENT_CHARS,
     MIN_MAX_OUTPUT_BYTES,
     MIN_TIMEOUT_SECONDS,
+    RUN_TERMINAL_STATUSES,
     TriggerCreate,
 )
 from aios.services import sessions as sessions_service
@@ -37,22 +40,30 @@ TRIGGER_CREATE_DESCRIPTION = (
     "an `action` (what runs at fire time).\n"
     "\n"
     "Sources: `{kind: 'cron', schedule}` (recurring, standard 5-field cron "
-    "in UTC) or `{kind: 'one_shot', fire_at}` (fires once at an absolute UTC "
-    "time, then self-deletes).\n"
+    "in UTC); `{kind: 'one_shot', fire_at}` (fires once at an absolute UTC "
+    "time, then self-deletes); `{kind: 'run_completion', workflow_id, "
+    "statuses?}` (reactive — fires once per terminal completion of any run "
+    "of that workflow; narrow `statuses` to e.g. ['errored'] for "
+    "failure-only reactions).\n"
     "\n"
     "Actions: `{kind: 'sandbox_command', command}` runs bash in the "
     "session's sandbox WITHOUT waking the model; `{kind: 'wake_owner', "
     "content}` delivers `content` as a user-role message to THIS session, "
-    "waking the model.\n"
+    "waking the model; `{kind: 'workflow', workflow_id, input_template?, "
+    "workflow_version?, vault_ids?}` launches a run of that workflow — "
+    "deterministic, no model wake; the run launches into this session's own "
+    "environment with your authority (its surface and vaults are checked "
+    "against yours at every fire).\n"
     "\n"
     "Use a sandbox_command for deterministic polling (file watchers, API "
     "checks, periodic syncs) without burning model tokens per fire; use "
-    "wake_owner for a recurring or scheduled self-reminder. Names must be "
-    "unique per session."
+    "wake_owner for a recurring or scheduled self-reminder; pair "
+    "run_completion with a workflow action for fully deterministic "
+    "run-to-run pipelines. Names must be unique per session."
 )
 
-# Shared source/action schemas; #819's workflow action is one added oneOf
-# branch.
+# Create-side source/action schemas. trigger_update.py carries deliberately
+# divergent copies (the Replace rule: optional-at-create fields required).
 _SOURCE_SCHEMA: dict[str, Any] = {
     "description": "What fires the trigger.",
     "oneOf": [
@@ -83,6 +94,31 @@ _SOURCE_SCHEMA: dict[str, Any] = {
                 },
             },
             "required": ["kind", "fire_at"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"const": "run_completion"},
+                "workflow_id": {
+                    "type": "string",
+                    "description": (
+                        "Id of a workflow under this account to watch. The trigger "
+                        "fires once per terminal completion of any of its runs."
+                    ),
+                },
+                "statuses": {
+                    "type": "array",
+                    "items": {"enum": list(RUN_TERMINAL_STATUSES)},
+                    "minItems": 1,
+                    "default": list(RUN_TERMINAL_STATUSES),
+                    "description": (
+                        "Which terminal statuses fire the trigger. Defaults to all "
+                        "three; narrow to e.g. ['errored'] for failure-only reactions."
+                    ),
+                },
+            },
+            "required": ["kind", "workflow_id"],
             "additionalProperties": False,
         },
     ],
@@ -141,11 +177,59 @@ _ACTION_SCHEMA: dict[str, Any] = {
                     "maxLength": MAX_WAKE_CONTENT_CHARS,
                     "description": (
                         "Message delivered as a user-role event to THIS session at fire "
-                        "time, waking the model. No sandbox involved."
+                        "time, waking the model. No sandbox involved. Delivered verbatim "
+                        "— a run_completion fire does not interpolate the completing "
+                        "run's identity (use a workflow action to consume the event)."
                     ),
                 },
             },
             "required": ["kind", "content"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"const": "workflow"},
+                "workflow_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of a workflow under this account to launch at each fire.",
+                },
+                "workflow_version": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "default": None,
+                    "description": (
+                        "null (default): each fire runs the workflow's CURRENT version. "
+                        "An integer must equal the workflow's current version when you "
+                        "write the trigger and is re-asserted at each fire — if the "
+                        "workflow has been edited since, the fire records an error "
+                        "instead of running the unreviewed edit (re-pin after review)."
+                    ),
+                },
+                "input_template": {
+                    "default": None,
+                    "description": (
+                        "Arbitrary JSON (any type; null = no payload), at most "
+                        f"{MAX_INPUT_TEMPLATE_BYTES} serialized bytes. The launched run's input is ALWAYS the "
+                        "envelope {'trigger': <firing context>, 'input': <this template "
+                        "verbatim>} — for run_completion fires the context carries the "
+                        "completing run's id, status, output, and error kind under "
+                        "trigger.run. A workflow built to be triggered reads "
+                        "input['trigger'] and input['input']."
+                    ),
+                },
+                "vault_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": (
+                        "Vaults to bind to the launched run — must be a subset of this "
+                        "session's vaults, re-checked at every fire."
+                    ),
+                },
+            },
+            "required": ["kind", "workflow_id"],
             "additionalProperties": False,
         },
     ],

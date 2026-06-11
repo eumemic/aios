@@ -118,6 +118,19 @@ class Settings(BaseSettings):
         "Each session gets <workspace_root>/<session_id> bind-mounted to /workspace "
         "inside its sandbox container.",
     )
+    workspaces_owner_uid: int = Field(
+        default=1000,
+        ge=0,
+        description="uid that should own every directory under workspace_root. The "
+        "worker (root) chowns newly-created shared-tree components to this uid so the "
+        "api container (running as this uid) can write into them. Set via "
+        "AIOS_WORKSPACES_OWNER_UID.",
+    )
+    workspaces_owner_gid: int = Field(
+        default=1000,
+        ge=0,
+        description="gid counterpart to workspaces_owner_uid. Set via AIOS_WORKSPACES_OWNER_GID.",
+    )
     sandbox_cpu_quota: float | None = Field(
         default=None,
         ge=0.01,
@@ -340,6 +353,14 @@ class Settings(BaseSettings):
         "the fire-storm a misbehaving agent could deflect at the broker. "
         "Includes one-shot ``schedule_wake`` rows; bump if your workload "
         "legitimately needs more standing timers per tenant.",
+    )
+    trigger_runs_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="Days of per-fire trigger audit rows (``trigger_runs``) to "
+        "retain; older rows are pruned by the worker's periodic sweep. "
+        "Time-based by design — see ``prune_trigger_runs`` for why a "
+        "count-cap would be unsafe.",
     )
     schedule_wake_max_delay_seconds: int = Field(
         default=60 * 60 * 24 * 30,  # 30 days
