@@ -678,7 +678,7 @@ def env_var_credential_containment_error(
     problem and should surface (at provision it becomes a refusal to
     provision, the safe direction).
     """
-    cred_lists = [tuple(h) for h in credential_allowed_hosts]
+    cred_lists = list(credential_allowed_hosts)
     # Iterate the OUTER list, not flattened hosts: a credential with an
     # EMPTY allowed_hosts tuple still counts as "has a credential". Only a
     # session with zero env-var credentials skips the gate entirely.
@@ -693,11 +693,16 @@ def env_var_credential_containment_error(
             "boundary for the egress swap proxy"
         )
 
-    env_hosts = {parse_allowed_host_entry(entry)[0] for entry in networking.allowed_hosts}
+    # DNS hostnames are case-insensitive but ``HOSTNAME_RE`` (and thus
+    # ``parse_allowed_host_entry``) preserves the stored casing, so case-fold
+    # both sides — mirrors ``_validate_credential_host`` in ``models/vaults.py``,
+    # which documents that downstream comparisons (this is one) case-fold.
+    env_hosts = {parse_allowed_host_entry(entry)[0].lower() for entry in networking.allowed_hosts}
     for cred_hosts in cred_lists:
         for entry in cred_hosts:
+            # Keep the stored spelling for the message; compare case-folded.
             cred_host = parse_allowed_host_entry(entry)[0]
-            if cred_host not in env_hosts:
+            if cred_host.lower() not in env_hosts:
                 return (
                     "environment_variable credential requires a Limited environment whose "
                     f"allowed_hosts cover the credential's hosts (credential host {cred_host!r} "

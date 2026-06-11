@@ -368,7 +368,13 @@ async def create_child_session(
             return False  # replay: row exists — do NOT re-deliver the request
         if vault_ids:
             await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
-            await _assert_env_var_creds_contained(conn, session_id, account_id=account_id)
+            # No advisory containment gate here: ``create_child_session`` is an
+            # internal workflow spawn (no console to surface a fast 422), and its
+            # caller in ``workflows/step.py`` only catches ``NotFoundError`` — a
+            # raised ``ValidationError`` would crash the procrastinate job. The
+            # authoritative gate in ``build_spec_from_session`` catches a
+            # mis-scoped child at provision. The advisory 422 stays on the
+            # operator-facing API attach paths (create_session/update_session).
         request_meta: dict[str, Any] = {
             "request_id": request_id,
             "caller": {"kind": "run", "id": parent_run_id},

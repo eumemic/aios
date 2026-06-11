@@ -17,11 +17,7 @@ from aios.crypto.vault import KEY_BYTES, NONCE_BYTES, CryptoBox, EncryptedBlob
 from aios.db import queries
 from aios.db.queries import EnvVarCredentialRow
 from aios.errors import CryptoDecryptError, OAuthRefreshError, ValidationError
-from aios.models.environments import (
-    EnvironmentConfig,
-    LimitedNetworking,
-    UnrestrictedNetworking,
-)
+from aios.models.environments import EnvironmentConfig, UnrestrictedNetworking
 from aios.models.vaults import (
     TokenEndpointAuthBasic,
     TokenEndpointAuthNone,
@@ -42,6 +38,7 @@ from aios.services.vaults import (
     mint_secret_placeholder,
     refresh_credential,
 )
+from tests.helpers.sandbox import limited_env
 from tests.unit.conftest import fake_pool_yielding_conn
 
 
@@ -1136,13 +1133,6 @@ class TestServiceWiringIsAccountScoped:
 # ── #879 env-var credential containment gate ─────────────────────────────────
 
 
-def _limited(*allowed_hosts: str) -> EnvironmentConfig:
-    """An EnvironmentConfig whose networking is Limited to ``allowed_hosts``."""
-    return EnvironmentConfig(
-        networking=LimitedNetworking(type="limited", allowed_hosts=list(allowed_hosts))
-    )
-
-
 class TestEnvVarCredentialContainment:
     """Pure-function verdict for the two-layer #879 gate
     (:func:`env_var_credential_containment_error`).
@@ -1173,18 +1163,33 @@ class TestEnvVarCredentialContainment:
         assert verdict is not None
 
     def test_covered_host_passes(self) -> None:
-        env = _limited("api.github.com")
+        env = limited_env("api.github.com")
         assert env_var_credential_containment_error(env, [("api.github.com",)]) is None
 
+    def test_host_comparison_is_case_insensitive(self) -> None:
+        # DNS hostnames are case-insensitive and ``HOSTNAME_RE`` permits
+        # uppercase, so containment must case-fold both sides. Either casing on
+        # either side is covered, in either direction.
+        cred_upper_env_lower = limited_env("api.github.com")
+        assert (
+            env_var_credential_containment_error(cred_upper_env_lower, [("API.GitHub.Com",)])
+            is None
+        )
+        cred_lower_env_upper = limited_env("API.GITHUB.COM")
+        assert (
+            env_var_credential_containment_error(cred_lower_env_upper, [("api.github.com",)])
+            is None
+        )
+
     def test_uncovered_host_rejected_names_offending_host(self) -> None:
-        env = _limited("api.github.com")
+        env = limited_env("api.github.com")
         verdict = env_var_credential_containment_error(env, [("evil.example.com",)])
         assert verdict is not None
         assert "'evil.example.com'" in verdict
 
     def test_cred_path_prefix_compared_host_only(self) -> None:
         # A credential with a path prefix only tightens below an allowed host.
-        env = _limited("api.github.com")
+        env = limited_env("api.github.com")
         assert (
             env_var_credential_containment_error(env, [("api.github.com/repos/eumemic",)]) is None
         )
@@ -1196,16 +1201,16 @@ class TestEnvVarCredentialContainment:
         # (bare hostnames only — see HOSTNAME_RE), so an env *path prefix* is
         # unconstructable; the host-only parse is what keeps env↔cred comparison
         # symmetric with the path-prefixed CRED side.
-        env = _limited("api.github.com")
+        env = limited_env("api.github.com")
         assert env_var_credential_containment_error(env, [("api.github.com",)]) is None
 
     def test_multiple_creds_one_uncovered_rejected(self) -> None:
-        env = _limited("api.github.com")
+        env = limited_env("api.github.com")
         verdict = env_var_credential_containment_error(env, [("api.github.com",), ("pypi.org",)])
         assert verdict is not None
         assert "'pypi.org'" in verdict
 
-    def test_cred_with_empty_allowed_hosts_still_requires_limited(self) -> None:
+    def test_cred_with_empty_allowed_hosts_still_requireslimited_env(self) -> None:
         # An empty allowed_hosts tuple still counts as "has a credential":
         # the OUTER list is non-empty, so the Limited check still fires.
         env = EnvironmentConfig(networking=UnrestrictedNetworking())
@@ -1265,7 +1270,7 @@ class TestEnvVarCredentialAttachGate:
             patch.object(
                 queries,
                 "get_environment_config_for_session",
-                AsyncMock(return_value=_limited("api.github.com")),
+                AsyncMock(return_value=limited_env("api.github.com")),
             ),
             pytest.raises(ValidationError, match=r"evil\.example\.com"),
         ):
@@ -1276,7 +1281,7 @@ class TestEnvVarCredentialAttachGate:
     @pytest.mark.asyncio
     async def test_attach_covered_host_no_raise(self) -> None:
         conn = MagicMock()
-        env_getter = AsyncMock(return_value=_limited("api.github.com"))
+        env_getter = AsyncMock(return_value=limited_env("api.github.com"))
         with (
             patch.object(
                 queries,
@@ -1294,7 +1299,7 @@ class TestEnvVarCredentialAttachGate:
     @pytest.mark.asyncio
     async def test_attach_no_env_var_creds_skips_env_query(self) -> None:
         conn = MagicMock()
-        env_getter = AsyncMock(return_value=_limited("api.github.com"))
+        env_getter = AsyncMock(return_value=limited_env("api.github.com"))
         with (
             patch.object(
                 queries,

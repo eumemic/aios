@@ -33,7 +33,7 @@ from aios.models.environments import (
 from aios.models.vaults import RESERVED_SANDBOX_ENV_KEYS
 from aios.sandbox.spec import build_spec_from_session
 from aios.services.vaults import ResolvedEnvVarCredential
-from tests.helpers.sandbox import patch_build_spec_deps
+from tests.helpers.sandbox import limited_env, patch_build_spec_deps
 
 # A distinctive sentinel rather than a real-looking token, so a leak is
 # unambiguous in any diff (and never a plausible credential in CI logs).
@@ -57,15 +57,8 @@ def _cred(allowed_hosts: Iterable[str]) -> ResolvedEnvVarCredential:
 _CRED = _cred(["api.github.com"])
 
 
-def _limited(*allowed_hosts: str) -> EnvironmentConfig:
-    """An EnvironmentConfig whose networking is Limited to ``allowed_hosts``."""
-    return EnvironmentConfig(
-        networking=LimitedNetworking(type="limited", allowed_hosts=list(allowed_hosts))
-    )
-
-
 # The default containing env for the _CRED above.
-_LIMITED_GITHUB = _limited("api.github.com")
+_LIMITED_GITHUB = limited_env("api.github.com")
 
 
 async def test_placeholder_lands_in_env_secret_never_does() -> None:
@@ -204,13 +197,13 @@ async def test_env_var_cred_with_no_env_config_rejected() -> None:
 async def test_env_var_cred_uncovered_host_rejected_names_host() -> None:
     with pytest.raises(ValueError, match=r"evil\.example\.com"):
         await _build_with(
-            env_config=_limited("api.github.com"), creds=(_cred(["evil.example.com"]),)
+            env_config=limited_env("api.github.com"), creds=(_cred(["evil.example.com"]),)
         )
 
 
 async def test_env_var_cred_covered_host_provisions() -> None:
     plan = await _build_with(
-        env_config=_limited("api.github.com"), creds=(_cred(["api.github.com"]),)
+        env_config=limited_env("api.github.com"), creds=(_cred(["api.github.com"]),)
     )
     # A covered cred provisions and its placeholder lands in the env.
     assert plan.spec.environment["GITHUB_TOKEN"] == _CRED.placeholder  # type: ignore[attr-defined]
@@ -219,7 +212,7 @@ async def test_env_var_cred_covered_host_provisions() -> None:
 async def test_env_var_cred_path_prefix_provisions_host_only() -> None:
     # A path-prefixed cred is compared host-only against the env's host set.
     plan = await _build_with(
-        env_config=_limited("api.github.com"),
+        env_config=limited_env("api.github.com"),
         creds=(_cred(["api.github.com/repos/eumemic"]),),
     )
     assert plan.spec.environment["GITHUB_TOKEN"] == _CRED.placeholder  # type: ignore[attr-defined]
@@ -239,7 +232,7 @@ async def test_env_multi_host_covers_each_cred_host_provisions() -> None:
     # The host-only env parse is still exercised: a multi-host Limited env
     # covers a bare cred host that is one of several allowed.
     plan = await _build_with(
-        env_config=_limited("pypi.org", "api.github.com"),
+        env_config=limited_env("pypi.org", "api.github.com"),
         creds=(_cred(["api.github.com"]),),
     )
     assert plan.spec.environment["GITHUB_TOKEN"] == _CRED.placeholder  # type: ignore[attr-defined]
