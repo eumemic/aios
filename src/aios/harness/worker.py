@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -48,7 +50,7 @@ from aios.harness.task_registry import TaskRegistry
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.sandbox.backends.docker import DockerBackend
-from aios.sandbox.network import ensure_sandbox_network
+from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.tool_broker import ToolBroker
 
@@ -61,10 +63,40 @@ _WORKER_SINGLETON_LOCK_KEY_TEXT = "aios_worker_connector_supervisor"
 # Path the worker touches periodically to signal liveness; the Dockerfile
 # HEALTHCHECK reads its mtime. tmpfs in containers, so touch/unlink are
 # sub-microsecond and don't justify ``asyncio.to_thread`` (which would
-# add more latency than it saves) — that's why the call sites suppress
-# the async-blocking-pathlib lint with a per-line ignore.
-_HEARTBEAT_FILE = Path("/var/run/aios-worker-alive")
+# add more latency than it saves).
+#
+# ``/var/run`` is only writable by the container user, so on the host
+# (lean mode, ``uv run aios worker``) touching it raises EACCES. That
+# both spammed the log every 15 s and left the liveness file missing —
+# anything modelling the compose HEALTHCHECK would have seen a dead
+# worker. So pick the path at startup: the container path in a
+# container (the Dockerfile HEALTHCHECK stats it), a user-writable temp
+# path otherwise.
+_HEARTBEAT_FILENAME = "aios-worker-alive"
+_CONTAINER_HEARTBEAT_FILE = Path("/var/run") / _HEARTBEAT_FILENAME
 _HEARTBEAT_INTERVAL_SECONDS = 15
+
+
+def _resolve_heartbeat_path() -> Path:
+    """Return the liveness file path the worker should touch.
+
+    In a container, the Dockerfile HEALTHCHECK stats
+    ``/var/run/aios-worker-alive``, so that exact path is required. On
+    the host, ``/var/run`` is not writable by the running user, so fall
+    back to a user-writable temp directory (honoring ``$TMPDIR``). This
+    keeps the periodic touch from EACCES-spamming the log and ensures
+    the file actually exists for anything consuming it.
+    """
+    if is_running_in_container():
+        return _CONTAINER_HEARTBEAT_FILE
+    # Resolve ``$TMPDIR`` here rather than via ``tempfile.gettempdir()``,
+    # which caches its first result process-wide and so wouldn't reflect
+    # the environment the worker was actually launched with.
+    tmpdir = os.environ.get("TMPDIR") or tempfile.gettempdir()
+    return Path(tmpdir) / _HEARTBEAT_FILENAME
+
+
+_HEARTBEAT_FILE = _resolve_heartbeat_path()
 
 
 def _make_worker_id() -> str:
@@ -207,7 +239,7 @@ async def worker_main() -> None:
         # operational. Touch once now for an immediate green signal,
         # then the task takes over the periodic refresh.
         with contextlib.suppress(OSError):
-            _HEARTBEAT_FILE.touch()  # noqa: ASYNC240
+            _HEARTBEAT_FILE.touch()
         heartbeat_task = asyncio.create_task(
             _periodic_heartbeat(interval=_HEARTBEAT_INTERVAL_SECONDS),
             name="heartbeat",
@@ -230,7 +262,7 @@ async def worker_main() -> None:
         # (Coolify, k8s) get the right liveness signal during the
         # potentially-slow drain that follows.
         with contextlib.suppress(OSError):
-            _HEARTBEAT_FILE.unlink(missing_ok=True)  # noqa: ASYNC240
+            _HEARTBEAT_FILE.unlink(missing_ok=True)
         if heartbeat_task is not None:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -342,7 +374,7 @@ async def _periodic_heartbeat(*, interval: int = _HEARTBEAT_INTERVAL_SECONDS) ->
     log = get_logger("aios.worker.heartbeat")
     while True:
         try:
-            _HEARTBEAT_FILE.touch()  # noqa: ASYNC240
+            _HEARTBEAT_FILE.touch()
         except OSError as e:
             # tmpfs unavailable / permission denied — surface but don't
             # crash the worker; a missing heartbeat file simply means
