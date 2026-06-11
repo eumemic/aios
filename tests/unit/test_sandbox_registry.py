@@ -941,7 +941,6 @@ class TestSecretProxyLifecycle:
                 "aios.sandbox.registry.build_spec_from_session",
                 AsyncMock(return_value=plan),
             ),
-            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
             patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
