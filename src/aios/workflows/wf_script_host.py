@@ -35,6 +35,7 @@ import types
 from typing import Any
 
 from aios.workflows._protocol import (
+    ANNOTATION,
     EMIT,
     INIT,
     RAISED,
@@ -210,13 +211,58 @@ def pipeline(items: Any, *stages: Any) -> _ParallelAwait:
     return parallel([_pipeline_thunk(item, stages) for item in items])
 
 
-def log(*args: Any) -> None:
-    """Emit a diagnostic to stderr (never stdout — that's the frame stream).
+# Annotations (log/phase) produced during the branch step currently being driven.
+# A synchronous log()/phase() cannot reach the driver's per-branch keyer directly,
+# so it buffers here; the driver drains this right after each branch step, keying
+# every entry through THAT branch's keyer+path (see _flush_annotations). The host is
+# single-threaded and drives exactly one branch at a time, so a module list is the
+# whole of the ambient context.
+_pending: list[tuple[str, str]] = []
 
-    Re-fires on every replay; kept to stderr so it can't corrupt the protocol or
-    the journal.
-    """
-    sys.stderr.write(" ".join(str(a) for a in args) + "\n")
+
+def _storable(text: str) -> str:
+    """Neutralize the two byte classes Postgres jsonb (and the call_key validator)
+    reject — NUL and unpaired surrogates — so a progress line can never fail the run.
+    ``log()``/``phase()`` are diagnostics: total by construction, the way their
+    pre-journal stderr form never crashed. Lossless for ordinary text (only the
+    rejected bytes are replaced)."""
+    return text.encode("utf-8", "replace").decode("utf-8").replace("\x00", "�")
+
+
+def log(*args: Any) -> None:
+    """Record a progress line on the run's journal (a durable ``annotation`` event,
+    surfaced in the run stream). Space-joined like ``print``; re-runs on every replay
+    but the journal keeps it emit-once."""
+    _pending.append(("log", _storable(" ".join(str(a) for a in args))))
+
+
+def phase(title: Any) -> None:
+    """Record a phase marker on the run's journal (a durable ``annotation`` event) —
+    a lightweight progress label, not a step boundary. Emit-once across replays."""
+    _pending.append(("phase", _storable(str(title))))
+
+
+def _flush_annotations(branch: _Branch, emit: Any) -> None:
+    """Emit the annotations buffered during ``branch``'s just-finished step, keying
+    each through the BRANCH's own keyer+path — the identical derivation a capability
+    call uses. That makes every annotation's call_key branch-local and replay-stable:
+    ``parallel()`` branches never collide, and a replay re-emits the identical key,
+    which the journal's ``UNIQUE (run_id, call_key, type)`` folds to one row (the
+    ``type`` discriminator keeps an annotation distinct from a same-keyed capability).
+    Drained right after the producing step so attribution to the branch is exact.
+
+    Total by construction: ``_storable`` already made every text jsonb-storable, so
+    ``keyer.next`` (which validates against that same domain) cannot raise here — a
+    raise would propagate out of the driver's inner ``finally`` and wrongly error the
+    run (or mask a clean return)."""
+    if not _pending:
+        return
+    buffered = _pending[:]
+    _pending.clear()
+    for kind, text in buffered:
+        payload = {"kind": kind, "text": text}
+        call_key = branch.path + branch.keyer.next(ANNOTATION, payload)
+        emit({"type": ANNOTATION, "call_key": call_key, "payload": payload})
 
 
 # ─── restricted builtins + curated imports (footgun aids, NOT the boundary) ──
@@ -374,6 +420,7 @@ def _build_coroutine(source: str, input_value: Any) -> Any:
             "parallel": parallel,
             "pipeline": pipeline,
             "log": log,
+            "phase": phase,
             # The agent() failure type lives with its capability in the author API
             # (not SAFE_BUILTINS), so `try/except AgentError` resolves it as a global.
             "AgentError": AgentError,
@@ -534,12 +581,21 @@ def _drive(root_coro: Any, memo: dict[str, Any], emit: Any) -> None:
             if branch.done or branch.blocked:
                 continue
             try:
-                # A journaled error outcome is delivered as a throw AT the await, so
-                # the author's try/except sees it; everything else is a resume value.
-                if branch.throw is not None:
-                    yielded = branch.coro.throw(branch.throw)
-                else:
-                    yielded = branch.coro.send(branch.send)
+                try:
+                    # A journaled error outcome is delivered as a throw AT the await, so
+                    # the author's try/except sees it; everything else is a resume value.
+                    if branch.throw is not None:
+                        yielded = branch.coro.throw(branch.throw)
+                    else:
+                        yielded = branch.coro.send(branch.send)
+                finally:
+                    # Drain log()/phase() buffered during THIS step, keyed by THIS
+                    # branch — before the outcome is handled, so annotation frames
+                    # precede the step's EMIT/terminal in the stream, and the live
+                    # exception (if the send raised) is still bound for the outer
+                    # handlers' traceback capture. _flush_annotations is total, so it
+                    # can never replace that exception.
+                    _flush_annotations(branch, emit)
             except StopIteration as stop:
                 progressed = True
                 if branch is root:

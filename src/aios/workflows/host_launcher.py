@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aios.workflows._protocol import (
+    ANNOTATION,
     EMIT,
     INIT,
     RAISED,
@@ -109,14 +110,30 @@ class EmittedCapability:
 
 
 @dataclass(frozen=True)
+class EmittedAnnotation:
+    """One ``log()``/``phase()`` progress line the child emitted this wake. ``call_key``
+    is the branch-local annotation key; ``payload`` is ``{"kind": "log"|"phase", "text"}``.
+    The step journals these as ``annotation`` events; the memo UNIQUE makes a replay's
+    re-emission a no-op (emit-once)."""
+
+    call_key: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class HostOutcome:
     """The result of driving one wake of the author script in the subprocess."""
 
     kind: HostOutcomeKind
     emitted: list[EmittedCapability] = field(default_factory=list)
+    annotations: list[EmittedAnnotation] = field(default_factory=list)
     value: Any = None
     error_repr: str | None = None
     error_kind: HostErrorKind | None = None
+    # CRASH DIAGNOSTICS ONLY — the child's real stderr (a Python traceback from a host
+    # crash, an rlimit message). log()/phase() no longer route through here (they are
+    # journaled annotation frames on stdout); the step never reads this field. It exists
+    # solely so a host crash/timeout leaves an attributable diagnostic in the worker log.
     stderr: str = ""
 
 
@@ -144,6 +161,15 @@ def _outcome_from_frames(
         for f in frames
         if f.get("type") == EMIT
     ]
+    # Progress annotations (log()/phase()), in stream/execution order. Carried on every
+    # outcome — including a no-terminal crash below — so a script that logged before
+    # dying is still journaled. (A timeout/spawn failure returns earlier with none: its
+    # frames are discarded, which is exactly the zero-growth bound for a runaway loop.)
+    annotations = [
+        EmittedAnnotation(call_key=f["call_key"], payload=f["payload"])
+        for f in frames
+        if f.get("type") == ANNOTATION
+    ]
     terminal = next(
         (f for f in reversed(frames) if f.get("type") in (SUSPENDED, RETURNED, RAISED)), None
     )
@@ -151,20 +177,28 @@ def _outcome_from_frames(
         return HostOutcome(
             kind="raised",
             emitted=emitted,
+            annotations=annotations,
             error_kind="script_host_crash",
             error_repr=f"script host exited (rc={returncode}) without a terminal frame",
             stderr=stderr,
         )
     kind = terminal["type"]
     if kind == SUSPENDED:
-        return HostOutcome(kind="suspended", emitted=emitted, stderr=stderr)
+        return HostOutcome(
+            kind="suspended", emitted=emitted, annotations=annotations, stderr=stderr
+        )
     if kind == RETURNED:
         return HostOutcome(
-            kind="returned", emitted=emitted, value=terminal.get("value"), stderr=stderr
+            kind="returned",
+            emitted=emitted,
+            annotations=annotations,
+            value=terminal.get("value"),
+            stderr=stderr,
         )
     return HostOutcome(
         kind="raised",
         emitted=emitted,
+        annotations=annotations,
         error_repr=terminal.get("repr"),
         # The host stamps a specific kind on structural failures it detects itself
         # (e.g. the fan-out cap); an uncaught author exception carries none → generic.
