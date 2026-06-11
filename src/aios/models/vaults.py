@@ -28,23 +28,18 @@ AuthType = Literal[
 ]
 
 # Env var names the harness injects into every sandbox (see
-# ``sandbox/spec.py`` ``merged_env``, ``sandbox/setup.py``
-# ``WORKSPACE_RUNTIME_ENV``, and ``sandbox/egress_ca.py``
+# ``sandbox/spec.py`` ``merged_env`` and ``sandbox/egress_ca.py``
 # ``TRUST_STORE_ENV``). An ``environment_variable`` credential may not
-# claim one as its ``secret_name``: a collision either hijacks a load-bearing
-# sandbox variable (e.g. ``PATH`` repointed → unqualified-binary takeover) or
+# claim one as its ``secret_name``: a collision either hijacks a
+# load-bearing sandbox variable (e.g. a trust-store var repointed → TLS
+# bypass, or ``TOOL_BROKER_SECRET`` repointed → session-wake escalation) or
 # is silently shadowed by the harness's own merge order — both defects, and
 # ``secret_name`` is immutable post-create. Hardcoded here rather than
-# imported from ``sandbox.setup`` (that would cycle via ``aios.config``) or
-# ``sandbox.egress_ca`` (cycle-free, but would drag cryptography's x509
+# imported from ``sandbox.egress_ca`` (which would drag cryptography's x509
 # machinery into every models import); a unit test pins this set against
 # the live merge order so it can't drift.
 RESERVED_SANDBOX_ENV_KEYS: frozenset[str] = frozenset(
     {
-        "VIRTUAL_ENV",
-        "NPM_CONFIG_PREFIX",
-        "NODE_PATH",
-        "PATH",
         "SSL_CERT_FILE",
         "REQUESTS_CA_BUNDLE",
         "NODE_EXTRA_CA_CERTS",

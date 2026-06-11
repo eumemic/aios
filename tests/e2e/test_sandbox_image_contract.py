@@ -146,7 +146,7 @@ class TestRuntimeBehaviour:
         assert (major, minor) >= (3, 13), f"expected Python >= 3.13, got {version_output.strip()!r}"
 
     def test_python3_venv_creation(self, pulled_image: str) -> None:
-        """setup.py calls ``python3 -m venv /workspace/.venv`` on first provision."""
+        """The image's python3 ships a working venv module (the model may create venvs)."""
         r = _docker_run(
             pulled_image,
             "bash",
