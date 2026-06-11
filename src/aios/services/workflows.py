@@ -310,8 +310,7 @@ async def await_run(
     if is_error:
         # ``error.kind`` lives only in the run_completed payload, not on the run row.
         async with pool.acquire() as conn:
-            completed = await wf_queries.get_run_completed_event(conn, run_id)
-        error = completed.payload.get("error") if completed is not None else None
+            error = await wf_queries.resolve_run_error(conn, run_id)
     return WfRunWaitResponse(
         run_status=run.status, done=done, output=run.output, is_error=is_error, error=error
     )

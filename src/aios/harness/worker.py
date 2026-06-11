@@ -47,6 +47,7 @@ from aios.harness.sweep import (
     wake_sessions_needing_inference,
 )
 from aios.harness.task_registry import TaskRegistry
+from aios.harness.trigger_runner import sweep_trigger_fires
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.sandbox.backends.docker import DockerBackend
@@ -419,8 +420,6 @@ async def _periodic_sweep(
             woken_runs = await wake_runs_needing_step(pool)
             if woken_runs:
                 log.info("periodic_sweep.workflows", woken_runs=woken_runs)
-
-            from aios.harness.trigger_runner import sweep_trigger_fires
 
             await sweep_trigger_fires(pool)
         except Exception:

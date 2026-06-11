@@ -62,8 +62,8 @@ TRIGGER_CREATE_DESCRIPTION = (
     "run-to-run pipelines. Names must be unique per session."
 )
 
-# Shared source/action schemas; #819's workflow action is one added oneOf
-# branch.
+# Create-side source/action schemas. trigger_update.py carries deliberately
+# divergent copies (the Replace rule: optional-at-create fields required).
 _SOURCE_SCHEMA: dict[str, Any] = {
     "description": "What fires the trigger.",
     "oneOf": [

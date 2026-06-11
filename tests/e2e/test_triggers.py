@@ -444,7 +444,7 @@ class TestPerAccountCap:
     async def test_wake_owner_counts_against_cap(
         self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
     ) -> None:
-        """A wake_owner trigger consumes a per-account active-timer slot just
+        """A wake_owner trigger consumes a per-account active-trigger slot just
         like a sandbox_command — a future 'self-delivery is cheap, skip the
         cap' refactor must not silently remove the only standing-row bound."""
         from aios.config import Settings

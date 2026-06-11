@@ -85,6 +85,11 @@ async def validate_trigger_spec(
     """
     if session is None:
         session = await queries.get_session_bare(conn, session_id, account_id=account_id)
+    else:
+        # The bypass exists ONLY for create_session's attach loop (the row it
+        # just inserted under this account); a misaimed session would silently
+        # skip the cross-tenant check this helper was built to enforce.
+        assert session.id == session_id
     if isinstance(source, RunCompletionSource):
         await wf_queries.get_workflow(conn, source.workflow_id, account_id=account_id)
     if not isinstance(action, WorkflowAction):
@@ -196,7 +201,7 @@ async def update_trigger(
 
     - Disabling (true→false): clears ``next_fire``.
     - Re-enabling (false→true): recomputes ``next_fire`` from the merged
-      source, under the per-account active-timer cap (a disabled row didn't
+      source, under the per-account active-trigger cap (a disabled row didn't
       hold a slot), and rejects a one-shot whose merged ``fire_at`` is
       already in the past.
     - Source replaced on a row whose final state is enabled: recomputes
@@ -237,6 +242,7 @@ async def update_trigger(
         merged_source = update.source if update.source is not None else current.source
 
         next_fire: datetime | None | EllipsisType = ...  # ... = leave alone
+        reenabled = new_enabled and not current.enabled
         if not new_enabled and current.enabled:
             # Disabling: clear next_fire.
             next_fire = None
@@ -244,7 +250,7 @@ async def update_trigger(
             # Re-enabling, or replacing the source on a row whose final
             # state is enabled: recompute next_fire from the merged source.
             if not current.enabled:
-                # Re-enable consumes a per-account active-timer slot (a
+                # Re-enable consumes a per-account active-trigger slot (a
                 # disabled row didn't); take the lock + cap check so this
                 # can't race past the cap against concurrent adds.
                 await queries.acquire_account_triggers_lock(conn, account_id)
@@ -280,6 +286,11 @@ async def update_trigger(
             metadata=update.metadata,
             next_fire=next_fire,
             environment_id=environment_id,
+            # A re-enable is a fresh start for the failure counter — without
+            # the reset, a counter parked past MAX_CONSECUTIVE_FAILURES would
+            # never EQUAL it again and the auto-disable breaker would be
+            # permanently disarmed for a still-broken trigger.
+            reset_consecutive_failures=reenabled,
             account_id=account_id,
         )
 

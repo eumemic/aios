@@ -8117,9 +8117,16 @@ async def update_trigger(
     metadata: dict[str, Any] | None = None,
     next_fire: datetime | None | EllipsisType = ...,
     environment_id: str | None | EllipsisType = ...,
+    reset_consecutive_failures: bool = False,
     account_id: str,
 ) -> TriggerEcho:
     """Update fields by name. Raises :class:`NotFoundError` if absent.
+
+    ``reset_consecutive_failures`` is set by the service on the enabled
+    false→true flip: a re-enable is a fresh start for the failure counter, so
+    the ``== MAX`` auto-disable gate can trip again on a still-broken trigger
+    (without the reset, a counter parked past the threshold would never equal
+    it again and the 5-strike breaker would be permanently disarmed).
 
     ``source`` / ``source_spec`` are set together (wholesale replacement of
     the source union) or both left alone (``None``). ``action`` is replaced
@@ -8155,6 +8162,8 @@ async def update_trigger(
         add("next_fire", next_fire)
     if not isinstance(environment_id, EllipsisType):
         add("environment_id", environment_id)
+    if reset_consecutive_failures:
+        set_clauses.append("consecutive_failures = 0")
 
     # Always bump ``updated_at`` so a no-op PATCH still records a write —
     # external pollers using ``updated_at > <since>`` mustn't miss it.
@@ -8346,9 +8355,17 @@ async def record_trigger_fire(
     *,
     status: TriggerFireStatus,
     fired_at: datetime,
+    clear_running_since: bool = True,
 ) -> int | None:
-    """Record the outcome of a fire and clear ``running_since``; return the
-    post-update ``consecutive_failures``.
+    """Record the outcome of a fire (clearing ``running_since`` for TICK
+    fires); return the post-update ``consecutive_failures``.
+
+    ``clear_running_since=False`` is the EVENT-fire form: event fires never
+    held the tick's ``running_since`` claim, and unconditionally clearing it
+    here could release a CONCURRENT tick fire's overlap lease (reachable when
+    a mid-flight source conversion lets a straggler event fire finish while a
+    freshly-converted cron row's tick fire is executing) — re-opening the row
+    for an overlapping fire, the exact invariant ``running_since`` exists for.
 
     The counter is computed SQL-side (ok → 0, skipped → unchanged, else +1):
     run_completion fires are unserialized (no ``running_since`` claim, no
@@ -8366,7 +8383,7 @@ async def record_trigger_fire(
     result: int | None = await conn.fetchval(
         """
         UPDATE triggers
-        SET running_since = NULL,
+        SET running_since = CASE WHEN $4 THEN NULL ELSE running_since END,
             last_fire_at = $1,
             last_fire_status = $2,
             consecutive_failures = CASE
@@ -8381,6 +8398,7 @@ async def record_trigger_fire(
         fired_at,
         status,
         trigger_id,
+        clear_running_since,
     )
     return result
 
@@ -8491,7 +8509,7 @@ async def count_session_triggers(
     Backs the per-session cap (``MAX_TRIGGERS_PER_SESSION``) enforced in
     ``services.triggers.add_trigger``. Counts all rows (enabled or disabled)
     because the per-session cap is about the session's resource footprint,
-    not just its active-timer load.
+    not just its active-trigger load.
     """
     result: int | None = await conn.fetchval(
         """
@@ -8567,6 +8585,10 @@ async def insert_run_completion_fires(
         workflow_id,
         status,
     )
+    if not rows:
+        # The overwhelmingly common case (no watchers) — never pay an
+        # executemany round-trip inside the run-completion terminal txn.
+        return []
     event = json.dumps({"run_id": run_id, "workflow_id": workflow_id, "status": status})
     refs = [TriggerFireRef(make_id(TRIGGER_RUN), r["id"]) for r in rows]
     # One pipelined statement for the whole batch — this runs inside the

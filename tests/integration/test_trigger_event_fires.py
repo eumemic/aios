@@ -196,6 +196,9 @@ async def test_two_completions_two_fires_two_runs(trig_runtime: asyncpg.Pool[Any
     assert [r["parent_run_id"] for r in launched] == [run_a, run_b]
     # The envelope reached the run: output rode by value.
     first_input = queries.parse_jsonb(launched[0]["input"])
+    # The envelope's source derives from the fire's ORIGIN (the carrier), not
+    # the reloaded row — must agree with the audit's trigger_context.
+    assert first_input["trigger"]["source"] == "run_completion"
     assert first_input["trigger"]["run"] == {
         "id": run_a,
         "workflow_id": watched,
@@ -532,6 +535,74 @@ async def test_concurrent_error_fires_counter_atomic(
     rows = await _carrier_rows(pool, tid)
     assert all(r["status"] in ("error", "skipped") for r in rows)
     assert any("NotFoundError" in (r["error_summary"] or "") for r in rows)
+
+
+async def test_reenable_rearms_auto_disable(trig_runtime: asyncpg.Pool[Any]) -> None:
+    """The == MAX disable gate is only sound with the re-enable counter reset:
+    without it, a counter parked past the threshold never EQUALS it again and
+    a re-enabled still-broken trigger would fire-and-fail forever."""
+    from aios.models.triggers import TriggerUpdate
+
+    pool = trig_runtime
+    _, _, session = await seed_agent_env_session(pool, account_id=ACC, prefix="rearm")
+    watched = await _make_workflow(pool)
+    target = await _make_workflow(pool)
+    tid = await _add_trigger(
+        pool,
+        session.id,
+        {
+            "name": "flaky",
+            "source": {"kind": "run_completion", "workflow_id": watched},
+            "action": {"kind": "workflow", "workflow_id": target},
+        },
+    )
+
+    async def _fail_n(n: int, tag: str) -> None:
+        for i in range(n):
+            (ref,) = await _seed_fake_fire(pool, watched, f"wfr_{tag}_{i}")
+            await run_trigger_step(ref.trigger_id, trigger_run_id=ref.trigger_run_id)
+
+    await _fail_n(5, "first")
+    async with pool.acquire() as conn:
+        enabled = await conn.fetchval("SELECT enabled FROM triggers WHERE id = $1", tid)
+    assert enabled is False
+    assert await _consecutive_failures(pool, tid) == 5
+
+    # Re-enable: a fresh start — the counter resets, re-arming the breaker.
+    await trig_service.update_trigger(
+        pool, session.id, "flaky", TriggerUpdate.model_validate({"enabled": True}), account_id=ACC
+    )
+    assert await _consecutive_failures(pool, tid) == 0
+
+    # Still broken: five more failures must auto-disable AGAIN (slice-1's
+    # guarantee), with a second surfaced message.
+    await _fail_n(5, "second")
+    async with pool.acquire() as conn:
+        enabled = await conn.fetchval("SELECT enabled FROM triggers WHERE id = $1", tid)
+        surfaced = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 "
+            "AND data::text LIKE '%auto-disabled%'",
+            session.id,
+        )
+    assert enabled is False
+    assert surfaced == 2
+
+
+async def test_set_run_terminal_first_writer_wins(trig_runtime: asyncpg.Pool[Any]) -> None:
+    """A dual-execution loser's terminal flip must not overwrite the winner's:
+    the run row has to agree with the journal bookend and with any
+    run_completion fires the winner dispatched."""
+    pool = trig_runtime
+    _, env, _ = await seed_agent_env_session(pool, account_id=ACC, prefix="fww")
+    w = await _make_workflow(pool)
+    run_id = await _complete_run_of(pool, w, env.id)  # winner: completed
+
+    async with pool.acquire() as conn:
+        await wf_queries.set_run_terminal(
+            conn, run_id, status="cancelled", output=None, account_id=ACC
+        )
+        status = await conn.fetchval("SELECT status FROM wf_runs WHERE id = $1", run_id)
+    assert status == "completed"  # the loser's flip was a no-op
 
 
 async def test_pin_drift_fire_errors(trig_runtime: asyncpg.Pool[Any]) -> None:
