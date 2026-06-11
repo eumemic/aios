@@ -341,6 +341,14 @@ class Settings(BaseSettings):
         "Includes one-shot ``schedule_wake`` rows; bump if your workload "
         "legitimately needs more standing timers per tenant.",
     )
+    trigger_runs_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="Days of per-fire trigger audit rows (``trigger_runs``) to "
+        "retain; older rows are pruned by the worker's periodic sweep. "
+        "Time-based by design — see ``prune_trigger_runs`` for why a "
+        "count-cap would be unsafe.",
+    )
     schedule_wake_max_delay_seconds: int = Field(
         default=60 * 60 * 24 * 30,  # 30 days
         ge=60,

@@ -25,15 +25,87 @@ import asyncpg
 
 from aios.config import get_settings
 from aios.db import queries
-from aios.errors import RateLimitedError, ValidationError
+from aios.db.queries import workflows as wf_queries
+from aios.errors import ConflictError, RateLimitedError, ValidationError
+from aios.models.sessions import Session
 from aios.models.triggers import (
     MAX_TRIGGERS_PER_SESSION,
+    CronSource,
     OneShotSource,
+    RunCompletionSource,
+    SandboxCommandAction,
     TriggerCreate,
     TriggerEcho,
+    TriggerRunEcho,
     TriggerUpdate,
+    WakeOwnerAction,
+    WorkflowAction,
     compute_initial_next_fire,
 )
+
+
+async def validate_trigger_spec(
+    conn: asyncpg.Connection[Any],
+    source: CronSource | OneShotSource | RunCompletionSource | None,
+    action: SandboxCommandAction | WakeOwnerAction | WorkflowAction | None,
+    *,
+    session_id: str,
+    account_id: str,
+    session: Session | None = None,
+) -> str | None:
+    """Shared write-path validation for a trigger's source/action references;
+    returns the resolved ``environment_id`` (``workflow`` actions) or ``None``.
+
+    Called from EVERY write path into ``triggers`` — ``add_trigger``,
+    ``update_trigger`` (provided pieces only), and ``create_session``'s
+    ``SessionCreate.triggers`` attachment — so the three stay consistent. The
+    typed ``action`` is part of the contract: only PARSED union members reach
+    this chokepoint (the Replace variants are subclasses), so a caller cannot
+    silently skip workflow validation with an unparsed dict.
+
+    The account-scoped session read is FIRST and UNCONDITIONAL: the HTTP path
+    takes ``session_id`` from the URL, and without this check account A could
+    attach a trigger to account B's session (for ``sandbox_command`` that is
+    cross-tenant code execution at fire time). 404s like every other scoped
+    read. ``create_session``'s attach loop passes its just-inserted ``session``
+    instead — same-transaction, same-account by construction — so attaching N
+    specs doesn't re-read the row N times.
+
+    Reference checks are correctness, not authority (authority is enforced at
+    every fire by ``create_run``, where it cannot go stale): the watched
+    workflow must exist account-scoped (a foreign/absent watch never matches,
+    so it would sit silently dead forever — the silent-dead-cron analog of the
+    occurrence-horizon check); the action's workflow must exist account-scoped,
+    and an integer ``workflow_version`` pin must equal its CURRENT version
+    ("resolve-latest-at-write": the write resolves what the pin freezes;
+    mismatch is a stale optimistic token → 409, mirroring ``update_workflow``).
+    Deliberately NO vault checks: ``action.vault_ids`` are re-checked against
+    the owner's live vaults at every fire — a write-time subset check would go
+    stale in both directions.
+    """
+    if session is None:
+        session = await queries.get_session_bare(conn, session_id, account_id=account_id)
+    else:
+        # The bypass exists ONLY for create_session's attach loop (the row it
+        # just inserted under this account); a misaimed session would silently
+        # skip the cross-tenant check this helper was built to enforce.
+        assert session.id == session_id
+    if isinstance(source, RunCompletionSource):
+        await wf_queries.get_workflow(conn, source.workflow_id, account_id=account_id)
+    if not isinstance(action, WorkflowAction):
+        return None
+    workflow = await wf_queries.get_workflow(conn, action.workflow_id, account_id=account_id)
+    if action.workflow_version is not None and action.workflow_version != workflow.version:
+        raise ConflictError(
+            f"workflow_version pin {action.workflow_version} does not match current "
+            f"version {workflow.version}; re-read the workflow and pin the version "
+            "you reviewed",
+            detail={"pinned": action.workflow_version, "current": workflow.version},
+        )
+    # Sessions' environment is immutable, so resolving it at write time equals
+    # fire-time resolution; environment_id is deliberately NOT a wire field (a
+    # caller-chosen env would bypass the create_run builtin's same refusal).
+    return session.environment_id
 
 
 async def add_trigger(
@@ -62,6 +134,11 @@ async def add_trigger(
     cap = get_settings().triggers_per_account_max
     next_fire = compute_initial_next_fire(spec.source, datetime.now(UTC)) if spec.enabled else None
     async with pool.acquire() as conn, conn.transaction():
+        # Validate the spec's references (and account-scope the session) BEFORE
+        # the advisory lock — a doomed spec never serializes other writers.
+        environment_id = await validate_trigger_spec(
+            conn, spec.source, spec.action, session_id=session_id, account_id=account_id
+        )
         await queries.acquire_account_triggers_lock(conn, account_id)
         existing_session = await queries.count_session_triggers(
             conn, session_id=session_id, account_id=account_id
@@ -78,7 +155,7 @@ async def add_trigger(
             )
             if existing_account >= cap:
                 raise RateLimitedError(
-                    f"account at active-timer cap ({existing_account}/{cap}); "
+                    f"account at active-trigger cap ({existing_account}/{cap}); "
                     "remove or disable an existing trigger to free a slot"
                 )
         return await queries.add_trigger(
@@ -91,6 +168,7 @@ async def add_trigger(
             enabled=spec.enabled,
             metadata=spec.metadata,
             next_fire=next_fire,
+            environment_id=environment_id,
             account_id=account_id,
         )
 
@@ -123,7 +201,7 @@ async def update_trigger(
 
     - Disabling (true→false): clears ``next_fire``.
     - Re-enabling (false→true): recomputes ``next_fire`` from the merged
-      source, under the per-account active-timer cap (a disabled row didn't
+      source, under the per-account active-trigger cap (a disabled row didn't
       hold a slot), and rejects a one-shot whose merged ``fire_at`` is
       already in the past.
     - Source replaced on a row whose final state is enabled: recomputes
@@ -145,11 +223,26 @@ async def update_trigger(
 
     async with pool.acquire() as conn, conn.transaction():
         current = await queries.get_trigger_by_name(conn, session_id, name, account_id=account_id)
+        # Validate only the PROVIDED pieces (re-validating an untouched stored
+        # pin must not 409 an unrelated enable-flip). environment_id is
+        # recomputed WHENEVER action is provided — the resolved env for a
+        # workflow action, NULL otherwise — so the jsonb and the column flip in
+        # one UPDATE (the iff CHECK catches forgotten kind conversions; a
+        # same-kind workflow→workflow replacement with a stale column would be
+        # silent without this).
+        environment_id: str | None | EllipsisType = ...
+        if update.source is not None or update.action is not None:
+            resolved = await validate_trigger_spec(
+                conn, update.source, update.action, session_id=session_id, account_id=account_id
+            )
+            if update.action is not None:
+                environment_id = resolved
         now = datetime.now(UTC)
         new_enabled = update.enabled if update.enabled is not None else current.enabled
         merged_source = update.source if update.source is not None else current.source
 
         next_fire: datetime | None | EllipsisType = ...  # ... = leave alone
+        reenabled = new_enabled and not current.enabled
         if not new_enabled and current.enabled:
             # Disabling: clear next_fire.
             next_fire = None
@@ -157,7 +250,7 @@ async def update_trigger(
             # Re-enabling, or replacing the source on a row whose final
             # state is enabled: recompute next_fire from the merged source.
             if not current.enabled:
-                # Re-enable consumes a per-account active-timer slot (a
+                # Re-enable consumes a per-account active-trigger slot (a
                 # disabled row didn't); take the lock + cap check so this
                 # can't race past the cap against concurrent adds.
                 await queries.acquire_account_triggers_lock(conn, account_id)
@@ -167,7 +260,7 @@ async def update_trigger(
                 )
                 if existing >= cap:
                     raise RateLimitedError(
-                        f"account at active-timer cap ({existing}/{cap}); remove "
+                        f"account at active-trigger cap ({existing}/{cap}); remove "
                         "or disable another trigger before re-enabling this one"
                     )
             # Reject a one-shot whose merged fire_at is already in the past:
@@ -192,6 +285,12 @@ async def update_trigger(
             enabled=update.enabled,
             metadata=update.metadata,
             next_fire=next_fire,
+            environment_id=environment_id,
+            # A re-enable is a fresh start for the failure counter — without
+            # the reset, a counter parked past MAX_CONSECUTIVE_FAILURES would
+            # never EQUAL it again and the auto-disable breaker would be
+            # permanently disarmed for a still-broken trigger.
+            reset_consecutive_failures=reenabled,
             account_id=account_id,
         )
 
@@ -204,3 +303,17 @@ async def list_triggers(
 ) -> list[TriggerEcho]:
     async with pool.acquire() as conn:
         return await queries.list_triggers(conn, session_id, account_id=account_id)
+
+
+async def list_trigger_runs(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    name: str,
+    *,
+    account_id: str,
+    limit: int = 50,
+) -> list[TriggerRunEcho]:
+    async with pool.acquire() as conn:
+        return await queries.list_trigger_runs(
+            conn, account_id=account_id, session_id=session_id, trigger_name=name, limit=limit
+        )
