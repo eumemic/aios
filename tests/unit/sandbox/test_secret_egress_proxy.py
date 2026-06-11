@@ -121,21 +121,39 @@ async def _request(
 # A single bare-host credential reused by most forwarding tests.
 PH_GH = _ph("a")
 
+ProxyAndCapture = tuple[SecretEgressProxy, list[httpx.Request]]
+MakeProxy = Callable[..., Awaitable[ProxyAndCapture]]
+
 
 @pytest.fixture
-async def gh_proxy(
+async def make_proxy(
     crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[tuple[SecretEgressProxy, list[httpx.Request]]]:
-    monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver(PINNED_IP))
-    captured: list[httpx.Request] = []
-    proxy = await _boot(
-        [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
-        _mock_upstream(captured),
-    )
-    try:
-        yield proxy, captured
-    finally:
+) -> AsyncIterator[MakeProxy]:
+    """Boot a proxy with a fixed resolver + mock upstream and stop every proxy
+    it hands out at teardown. ``resolver_ip=None`` exercises the SSRF block;
+    a custom ``transport`` exercises upstream behavior."""
+    started: list[SecretEgressProxy] = []
+
+    async def _make(
+        creds: list[ResolvedEnvVarCredential],
+        *,
+        resolver_ip: str | None = PINNED_IP,
+        transport: httpx.MockTransport | None = None,
+    ) -> ProxyAndCapture:
+        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver(resolver_ip))
+        captured: list[httpx.Request] = []
+        proxy = await _boot(creds, transport or _mock_upstream(captured))
+        started.append(proxy)
+        return proxy, captured
+
+    yield _make
+    for proxy in started:
         await proxy.stop()
+
+
+@pytest.fixture
+async def gh_proxy(make_proxy: MakeProxy) -> ProxyAndCapture:
+    return await make_proxy([_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)])
 
 
 class TestPathHelpers:
@@ -238,19 +256,10 @@ class TestSwapForwarding:
 
 class TestPathGating:
     @pytest.fixture
-    async def repo_proxy(
-        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
-    ) -> AsyncIterator[tuple[SecretEgressProxy, list[httpx.Request]]]:
-        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver(PINNED_IP))
-        captured: list[httpx.Request] = []
-        proxy = await _boot(
-            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test/repos/eumemic",), PH_GH)],
-            _mock_upstream(captured),
+    async def repo_proxy(self, make_proxy: MakeProxy) -> ProxyAndCapture:
+        return await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test/repos/eumemic",), PH_GH)]
         )
-        try:
-            yield proxy, captured
-        finally:
-            await proxy.stop()
 
     @pytest.mark.parametrize("path", ["/repos/eumemic", "/repos/eumemic/x"])
     async def test_swaps_within_prefix(
@@ -281,45 +290,31 @@ class TestPathGating:
         )
         assert captured[0].headers["authorization"] == PH_GH
 
-    async def test_mixed_case_stored_host_terminates_and_swaps(
-        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_mixed_case_stored_host_terminates_and_swaps(self, make_proxy: MakeProxy) -> None:
         # F1: parse_allowed_host_entry stores the host as-given; the proxy must
         # lowercase it so a legitimately allowed mixed-case host doesn't fail
         # closed and the swap still fires for a lowercase SNI.
-        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver(PINNED_IP))
-        captured: list[httpx.Request] = []
-        proxy = await _boot(
-            [_cred("GH_TOKEN", "ghp_REALSECRET", ("API.Allowed.Test",), PH_GH)],
-            _mock_upstream(captured),
+        proxy, captured = await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("API.Allowed.Test",), PH_GH)]
         )
-        try:
-            assert proxy._allowed_hosts == frozenset({"api.allowed.test"})
-            await _request(proxy, "api.allowed.test", "/x", headers={"Authorization": PH_GH})
-            assert captured[0].headers["authorization"] == "ghp_REALSECRET"
-        finally:
-            await proxy.stop()
+        assert proxy._allowed_hosts == frozenset({"api.allowed.test"})
+        await _request(proxy, "api.allowed.test", "/x", headers={"Authorization": PH_GH})
+        assert captured[0].headers["authorization"] == "ghp_REALSECRET"
 
     async def test_unauthorized_host_passes_placeholder_through(
-        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+        self, make_proxy: MakeProxy
     ) -> None:
         # Two allow-set hosts (so TLS terminates for both); a placeholder for
         # host A sent to host B does not swap (B has no matching cred).
-        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver(PINNED_IP))
-        captured: list[httpx.Request] = []
-        proxy = await _boot(
+        proxy, captured = await make_proxy(
             [
                 _cred("A_TOKEN", "secret_A", ("api.a.test",), PH_GH),
                 _cred("B_TOKEN", "secret_B", ("api.b.test",), _ph("b")),
-            ],
-            _mock_upstream(captured),
+            ]
         )
-        try:
-            await _request(proxy, "api.b.test", "/x", headers={"Authorization": PH_GH})
-            # PH_GH belongs to api.a.test; on api.b.test it rides through raw.
-            assert captured[0].headers["authorization"] == PH_GH
-        finally:
-            await proxy.stop()
+        await _request(proxy, "api.b.test", "/x", headers={"Authorization": PH_GH})
+        # PH_GH belongs to api.a.test; on api.b.test it rides through raw.
+        assert captured[0].headers["authorization"] == PH_GH
 
 
 class TestFailClosed:
@@ -340,62 +335,41 @@ class TestFailClosed:
             await _request(proxy, None, "/x")
         assert captured == []
 
-    async def test_ssrf_block_returns_502_without_egress(
-        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver(None))
-        captured: list[httpx.Request] = []
-        proxy = await _boot(
+    async def test_ssrf_block_returns_502_without_egress(self, make_proxy: MakeProxy) -> None:
+        proxy, captured = await make_proxy(
             [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
-            _mock_upstream(captured),
+            resolver_ip=None,
         )
-        try:
-            r = await _request(proxy, "api.allowed.test", "/x", headers={"Authorization": PH_GH})
-            assert r.status_code == 502
-            assert captured == []  # the secret never egressed
-        finally:
-            await proxy.stop()
+        r = await _request(proxy, "api.allowed.test", "/x", headers={"Authorization": PH_GH})
+        assert r.status_code == 502
+        assert captured == []  # the secret never egressed
 
-    async def test_upstream_error_returns_502(
-        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver(PINNED_IP))
-
+    async def test_upstream_error_returns_502(self, make_proxy: MakeProxy) -> None:
         async def boom(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("simulated")
 
-        proxy = await _boot(
+        proxy, _ = await make_proxy(
             [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
-            httpx.MockTransport(boom),
+            transport=httpx.MockTransport(boom),
         )
-        try:
-            r = await _request(proxy, "api.allowed.test", "/x")
-            assert r.status_code == 502
-        finally:
-            await proxy.stop()
+        r = await _request(proxy, "api.allowed.test", "/x")
+        assert r.status_code == 502
 
 
 class TestOutboundOnly:
-    async def test_response_echoing_secret_is_not_redacted(
-        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_response_echoing_secret_is_not_redacted(self, make_proxy: MakeProxy) -> None:
         # #881: responses are NOT scrubbed; the env egress allowlist is the
         # hard boundary, not this proxy. A reflecting host returns the real
         # secret straight back into the sandbox.
-        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver(PINNED_IP))
-
         async def echo(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"you sent ghp_REALSECRET")
 
-        proxy = await _boot(
+        proxy, _ = await make_proxy(
             [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
-            httpx.MockTransport(echo),
+            transport=httpx.MockTransport(echo),
         )
-        try:
-            r = await _request(proxy, "api.allowed.test", "/x")
-            assert r.content == b"you sent ghp_REALSECRET"
-        finally:
-            await proxy.stop()
+        r = await _request(proxy, "api.allowed.test", "/x")
+        assert r.content == b"you sent ghp_REALSECRET"
 
 
 class TestResolvePinnedIp:
