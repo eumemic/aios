@@ -240,16 +240,21 @@ async def test_placeholders_deterministic_per_session_distinct_across(
 async def test_other_tenants_credentials_invisible(
     vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
 ) -> None:
+    """The query's ``vc.account_id`` filter is load-bearing, so construct
+    the state where ONLY it excludes the foreign row: bind the other
+    tenant's vault directly into this session (``set_session_vaults``
+    FK-checks vault existence, not ownership, so the binding goes
+    through) and assert the foreign credential still never resolves."""
     pool = vault_pool
     theirs = await _make_vault(pool, "their-vault", account_id=ACC_OTHER)
     await _make_env_cred(pool, crypto_box, theirs, "API_KEY", "their-secret", account_id=ACC_OTHER)
     mine = await _make_vault(pool, "my-vault")
-    await _make_env_cred(pool, crypto_box, mine, "API_KEY", "my-secret")
+    await _make_env_cred(pool, crypto_box, mine, "OTHER_KEY", "my-secret")
 
-    session_id = await _make_session(pool, vault_ids=[mine])
+    session_id = await _make_session(pool, vault_ids=[theirs, mine])
     resolved = await _resolve(pool, crypto_box, session_id)
 
-    assert [r.secret_value for r in resolved] == ["my-secret"]
+    assert [(r.secret_name, r.secret_value) for r in resolved] == [("OTHER_KEY", "my-secret")]
 
 
 async def test_vaultless_session_resolves_empty(
@@ -268,3 +273,27 @@ async def test_wrong_key_fails_hard(vault_pool: asyncpg.Pool[Any], crypto_box: C
 
     with pytest.raises(CryptoDecryptError):
         await _resolve(pool, CryptoBox(os.urandom(32)), session_id)
+
+
+async def test_materializer_resolves_through_worker_runtime(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    """Execute the real ``_materialize_env_var_credentials`` (everything
+    else patches it out): it pulls pool + crypto box from the worker
+    runtime and returns the resolved tuple the plan carries."""
+    from aios.sandbox.spec import _materialize_env_var_credentials
+
+    pool = vault_pool
+    vault_id = await _make_vault(pool, "v1")
+    await _make_env_cred(pool, crypto_box, vault_id, "API_KEY", "val")
+    session_id = await _make_session(pool, vault_ids=[vault_id])
+
+    prev = runtime.crypto_box
+    runtime.crypto_box = crypto_box
+    try:
+        resolved = await _materialize_env_var_credentials(session_id, account_id=ACC)
+    finally:
+        runtime.crypto_box = prev
+
+    assert [(r.secret_name, r.secret_value) for r in resolved] == [("API_KEY", "val")]
+    assert resolved[0].placeholder.startswith(SECRET_PLACEHOLDER_PREFIX)

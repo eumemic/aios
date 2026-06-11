@@ -233,14 +233,14 @@ async def test_scheduled_task_insert_does_not_bump_spec_version(
     assert await _spec_version(pool, session_id) == before
 
 
-async def test_vault_binding_insert_does_not_bump_spec_version(
+async def test_vault_binding_insert_bumps_spec_version(
     pool_and_session: tuple[asyncpg.Pool[Any], str],
 ) -> None:
-    """Vault session-bindings deliberately have no bump trigger: header
-    credentials reach the agent via the MCP pool, and the env-var
-    credentials that DO feed the spec builder (#873) are covered by
-    Layer 1's eviction on the same update_session write path (Layer 2
-    stays silent here by design; live-sandbox drift is #877)."""
+    """Since #873 env-var credentials resolve through a session's bound
+    vaults into the provisioning plan, so vault bindings feed the spec
+    builder and get a bump trigger (migration 0082) — the Layer-1
+    eviction can't cover them (``update_session`` runs in the API
+    process, where eviction is a no-op)."""
     pool, session_id = pool_and_session
     vault = await vaults_service.create_vault(
         pool, account_id=_ACCOUNT_ID, display_name="creds", metadata={}
@@ -256,4 +256,4 @@ async def test_vault_binding_insert_does_not_bump_spec_version(
             _ACCOUNT_ID,
         )
 
-    assert await _spec_version(pool, session_id) == before
+    assert await _spec_version(pool, session_id) > before

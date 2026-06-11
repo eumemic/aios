@@ -27,9 +27,11 @@ from aios.models.vaults import (
 from aios.services import vaults as vaults_service
 from aios.services.vaults import (
     REFRESH_SKEW_SECONDS,
+    SECRET_PLACEHOLDER_PREFIX,
     _extract_auth_payload,
     _merge_auth_payload,
     is_expiring,
+    mint_secret_placeholder,
     refresh_credential,
 )
 from tests.unit.conftest import fake_pool_yielding_conn
@@ -1019,8 +1021,6 @@ class TestMintSecretPlaceholder:
         return CryptoBox(b"\xcd" * 32).derive_account_subkey("acc_alpha")
 
     def test_format(self) -> None:
-        from aios.services.vaults import SECRET_PLACEHOLDER_PREFIX, mint_secret_placeholder
-
         placeholder = mint_secret_placeholder(self._subkey(), "sess_A", "vcred_1")
         assert placeholder.startswith(SECRET_PLACEHOLDER_PREFIX)
         suffix = placeholder.removeprefix(SECRET_PLACEHOLDER_PREFIX)
@@ -1028,8 +1028,6 @@ class TestMintSecretPlaceholder:
         assert all(c in "0123456789abcdef" for c in suffix)
 
     def test_deterministic_and_distinct_per_input(self) -> None:
-        from aios.services.vaults import mint_secret_placeholder
-
         subkey = self._subkey()
         base = mint_secret_placeholder(subkey, "sess_A", "vcred_1")
         assert mint_secret_placeholder(subkey, "sess_A", "vcred_1") == base

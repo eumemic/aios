@@ -13,19 +13,20 @@ mutations here (:func:`refresh_credential`, :func:`update_vault_credential`,
 :func:`create_vault_credential`, and credential archive/delete) do NOT
 evict any sandbox: the MCP pool keys on ``(url, vault_id)`` and a rotation
 overwrites the row contents under that stable key, so the existing key
-already serves the new secret. Vault tables are also deliberately excluded
-from Layer 2's ``spec_version`` triggers. Since #873,
-``environment_variable`` credentials DO feed the sandbox spec builder
-(:func:`resolve_session_env_var_credentials` below) — drift handling for
-live sandboxes (rotation, attach/archive) is deferred to #877.
+already serves the new secret. Since #873, ``environment_variable``
+credentials DO feed the sandbox spec builder
+(:func:`resolve_session_env_var_credentials` below): vault BINDING
+changes now bump ``spec_version`` (migration 0082) so a live sandbox
+recycles, while credential-LEVEL drift in a still-bound vault (rotation,
+create/archive) stays invisible to a live sandbox until #877's drift
+key.
 """
 
 from __future__ import annotations
 
-import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, assert_never
+from typing import Any, assert_never, cast
 
 import asyncpg
 import httpx
@@ -361,18 +362,18 @@ def _extract_auth_payload(body: VaultCredentialCreate) -> dict[str, Any]:
         )
 
     payload: dict[str, Any] = {}
-    for field in _fields_for(body.auth_type):
-        val = getattr(body, field)
+    for field_name in _fields_for(body.auth_type):
+        val = getattr(body, field_name)
         if val is None:
             continue
-        if field == "token_endpoint_auth":
-            payload[field] = _serialize_token_endpoint_auth(val)
+        if field_name == "token_endpoint_auth":
+            payload[field_name] = _serialize_token_endpoint_auth(val)
         elif hasattr(val, "get_secret_value"):
-            payload[field] = val.get_secret_value()
+            payload[field_name] = val.get_secret_value()
         elif hasattr(val, "isoformat"):
-            payload[field] = val.isoformat()
+            payload[field_name] = val.isoformat()
         else:
-            payload[field] = val
+            payload[field_name] = val
     return payload
 
 
@@ -394,20 +395,20 @@ def _merge_auth_payload(
     """
     fields = _fields_for(auth_type)
     merged = dict(existing)
-    for field in fields:
-        if field not in body.model_fields_set:
+    for field_name in fields:
+        if field_name not in body.model_fields_set:
             continue
-        val = getattr(body, field)
+        val = getattr(body, field_name)
         if val is None:
-            merged.pop(field, None)
-        elif field == "token_endpoint_auth":
-            merged[field] = _serialize_token_endpoint_auth(val)
+            merged.pop(field_name, None)
+        elif field_name == "token_endpoint_auth":
+            merged[field_name] = _serialize_token_endpoint_auth(val)
         elif hasattr(val, "get_secret_value"):
-            merged[field] = val.get_secret_value()
+            merged[field_name] = val.get_secret_value()
         elif hasattr(val, "isoformat"):
-            merged[field] = val.isoformat()
+            merged[field_name] = val.isoformat()
         else:
-            merged[field] = val
+            merged[field_name] = val
     _validate_required_in_payload(merged, auth_type)
     return merged
 
@@ -586,16 +587,17 @@ class ResolvedEnvVarCredential:
     """A decrypted ``environment_variable`` credential plus its minted
     placeholder, as consumed by sandbox materialization.
 
-    ``secret_value`` is excluded from ``repr`` so a logged plan or a
-    pytest assertion diff never prints the plaintext. ``allowed_hosts``
-    holds the stored canonical entries; parse with
+    ``secret_value`` is excluded from ``repr`` so a logged plan never
+    prints the plaintext (an equality-assertion diff in pytest still
+    drills into it — don't assert equality across differing secrets).
+    ``allowed_hosts`` holds the stored canonical entries; parse with
     :func:`aios.models.vaults.parse_allowed_host_entry`.
+    ``updated_at`` feeds the recycle-on-rotation drift key (#877).
     """
 
     credential_id: str
-    vault_id: str
     secret_name: str
-    secret_value: str = dataclasses.field(repr=False)
+    secret_value: str = field(repr=False)
     allowed_hosts: tuple[str, ...]
     updated_at: datetime
     placeholder: str
@@ -623,16 +625,15 @@ async def resolve_session_env_var_credentials(
     partial credential set.
     """
     rows = await queries.list_session_env_var_credentials(conn, session_id, account_id=account_id)
-    if not rows:
-        return []
     subkey = crypto_box.derive_account_subkey(account_id)
     return [
         ResolvedEnvVarCredential(
             credential_id=row.credential_id,
-            vault_id=row.vault_id,
             secret_name=row.secret_name,
-            secret_value=str(subkey.decrypt_dict(row.blob)["secret_value"]),
-            allowed_hosts=tuple(row.allowed_hosts),
+            # The write path stores SecretStr.get_secret_value() — always
+            # a str; cast records that contract without a masking str().
+            secret_value=cast(str, subkey.decrypt_dict(row.blob)["secret_value"]),
+            allowed_hosts=row.allowed_hosts,
             updated_at=row.updated_at,
             placeholder=mint_secret_placeholder(subkey, session_id, row.credential_id),
         )

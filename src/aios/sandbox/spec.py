@@ -119,9 +119,8 @@ class ProvisioningPlan:
     # only for the provision call — the plan is dropped after
     # ``_provision`` consumes it. Materialization (placeholder env
     # injection) and the request-time placeholder→secret map are the
-    # follow-up slices (#874, #876). Defaulted so plan-shape-agnostic
-    # constructors stay valid.
-    env_var_credentials: tuple[ResolvedEnvVarCredential, ...] = ()
+    # follow-up slices (#874, #876).
+    env_var_credentials: tuple[ResolvedEnvVarCredential, ...]
 
 
 def mount_snapshot_from_echoes(

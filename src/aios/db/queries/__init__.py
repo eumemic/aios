@@ -4156,9 +4156,8 @@ class EnvVarCredentialRow(NamedTuple):
     """
 
     credential_id: str
-    vault_id: str
     secret_name: str
-    allowed_hosts: list[str]
+    allowed_hosts: tuple[str, ...]
     blob: EncryptedBlob
     updated_at: datetime
 
@@ -4183,7 +4182,7 @@ async def list_session_env_var_credentials(
     rows = await conn.fetch(
         """
         SELECT DISTINCT ON (vc.secret_name)
-               vc.id, vc.vault_id, vc.secret_name, vc.allowed_hosts,
+               vc.id, vc.secret_name, vc.allowed_hosts,
                vc.ciphertext, vc.nonce, vc.updated_at
           FROM session_vaults sv
           JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
@@ -4200,9 +4199,8 @@ async def list_session_env_var_credentials(
     return [
         EnvVarCredentialRow(
             credential_id=str(row["id"]),
-            vault_id=str(row["vault_id"]),
             secret_name=str(row["secret_name"]),
-            allowed_hosts=list(row["allowed_hosts"]),
+            allowed_hosts=tuple(row["allowed_hosts"]),
             blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
             updated_at=row["updated_at"],
         )

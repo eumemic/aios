@@ -135,3 +135,90 @@ def _assert_protocol(backend: SandboxBackend) -> None:
 
 
 _assert_protocol(FakeBackend())
+
+
+def patch_build_spec_deps(
+    *,
+    env_config: Any = None,
+    docker_image: str = "ghcr.io/eumemic/aios-sandbox:latest",
+    sandbox_disk_bytes: int | None = None,
+    env_var_credentials: Any = None,
+    github_clones: Any = None,
+    tool_broker: Any = None,
+) -> tuple[Any, ...]:
+    """Context-manager bundle stubbing every external dependency of
+    ``build_spec_from_session`` so it runs to the ``_assemble_plan`` call
+    with synthetic settings.
+
+    The three keyword overrides let a test install its OWN mock for a
+    materializer or the tool broker — each target is patched exactly
+    once, so the mock a test asserts on is unambiguously the installed
+    one (no nested re-patching).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    settings = MagicMock()
+    settings.docker_image = docker_image
+    settings.sandbox_disk_bytes = sandbox_disk_bytes
+    settings.instance_id = "inst_TEST"
+    settings.sandbox_cpu_quota = None
+    settings.sandbox_memory_bytes = None
+    settings.sandbox_pids_limit = None
+    settings.sandbox_seccomp_profile = "/app/docker/seccomp-sandbox.json"
+    settings.tool_broker_socket_path = None
+
+    if tool_broker is None:
+        tool_broker = MagicMock()
+        tool_broker.port = 54321
+        tool_broker.register_session = MagicMock()
+        tool_broker.unregister_session = MagicMock()
+
+    return (
+        patch("aios.sandbox.spec.get_settings", return_value=settings),
+        patch(
+            "aios.sandbox.spec.sessions_service.load_session_account_id",
+            AsyncMock(return_value="acct_x"),
+        ),
+        patch(
+            "aios.sandbox.spec._load_session_provisioning",
+            # (workspace_path, env, spec_version) since #713.
+            AsyncMock(return_value=("/tmp/w", {}, 0)),
+        ),
+        # ``build_spec_from_session`` imports these function-locally from
+        # ``aios.sandbox.volumes`` (deferred import to avoid a cycle), so
+        # patch them at the source module, not on ``aios.sandbox.spec``.
+        patch("aios.sandbox.volumes.validate_workspace_path", MagicMock()),
+        patch(
+            "aios.sandbox.volumes.ensure_workspace_path",
+            MagicMock(return_value=Path("/tmp/w")),
+        ),
+        patch(
+            "aios.sandbox.spec._load_environment_config",
+            AsyncMock(return_value=env_config),
+        ),
+        patch(
+            "aios.sandbox.spec._materialize_memory_mounts",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "aios.sandbox.spec._materialize_env_var_credentials",
+            env_var_credentials or AsyncMock(return_value=()),
+        ),
+        patch(
+            "aios.sandbox.spec._materialize_github_clones",
+            github_clones or AsyncMock(return_value=([], None)),
+        ),
+        patch("aios.sandbox.spec.runtime.require_pool", MagicMock()),
+        patch(
+            "aios.sandbox.spec.runtime.require_tool_broker",
+            MagicMock(return_value=tool_broker),
+        ),
+        patch(
+            "aios.sandbox.volumes.ensure_session_attachments_dir",
+            return_value=Path("/tmp/a"),
+        ),
+        patch(
+            "aios.sandbox.volumes.ensure_session_uploads_dir",
+            return_value=Path("/tmp/u"),
+        ),
+    )

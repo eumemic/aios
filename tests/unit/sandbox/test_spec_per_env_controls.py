@@ -30,6 +30,7 @@ from aios.sandbox.spec import (
     _assemble_plan,
     resolve_bash_timeout_ceiling,
 )
+from tests.helpers.sandbox import patch_build_spec_deps
 
 
 def _call_assemble(
@@ -102,81 +103,6 @@ class TestAssemblePlanImageAndDisk:
 # ── build_spec_from_session resolution (#724 image, #725 disk) ───────────────
 
 
-def _patch_build_spec_deps(
-    *,
-    env_config: EnvironmentConfig | None,
-    docker_image: str,
-    sandbox_disk_bytes: int | None,
-) -> tuple[Any, ...]:
-    """Context manager bundle that stubs every external dependency of
-    ``build_spec_from_session`` so it runs to the ``_assemble_plan`` call
-    with a synthetic environment config and synthetic settings."""
-    settings = MagicMock()
-    settings.docker_image = docker_image
-    settings.sandbox_disk_bytes = sandbox_disk_bytes
-    settings.instance_id = "inst_TEST"
-    settings.sandbox_cpu_quota = None
-    settings.sandbox_memory_bytes = None
-    settings.sandbox_pids_limit = None
-    settings.sandbox_seccomp_profile = "/app/docker/seccomp-sandbox.json"
-    settings.tool_broker_socket_path = None
-
-    tool_broker = MagicMock()
-    tool_broker.port = 54321
-    tool_broker.register_session = MagicMock()
-    tool_broker.unregister_session = MagicMock()
-
-    return (
-        patch("aios.sandbox.spec.get_settings", return_value=settings),
-        patch(
-            "aios.sandbox.spec.sessions_service.load_session_account_id",
-            AsyncMock(return_value="acct_x"),
-        ),
-        patch(
-            "aios.sandbox.spec._load_session_provisioning",
-            # (workspace_path, env, spec_version) since #713.
-            AsyncMock(return_value=("/tmp/w", {}, 0)),
-        ),
-        # ``build_spec_from_session`` imports these function-locally from
-        # ``aios.sandbox.volumes`` (deferred import to avoid a cycle), so
-        # patch them at the source module, not on ``aios.sandbox.spec``.
-        patch("aios.sandbox.volumes.validate_workspace_path", MagicMock()),
-        patch(
-            "aios.sandbox.volumes.ensure_workspace_path",
-            MagicMock(return_value=Path("/tmp/w")),
-        ),
-        patch(
-            "aios.sandbox.spec._load_environment_config",
-            AsyncMock(return_value=env_config),
-        ),
-        patch(
-            "aios.sandbox.spec._materialize_memory_mounts",
-            AsyncMock(return_value=[]),
-        ),
-        patch(
-            "aios.sandbox.spec._materialize_env_var_credentials",
-            AsyncMock(return_value=()),
-        ),
-        patch(
-            "aios.sandbox.spec._materialize_github_clones",
-            AsyncMock(return_value=([], None)),
-        ),
-        patch("aios.sandbox.spec.runtime.require_pool", MagicMock()),
-        patch(
-            "aios.sandbox.spec.runtime.require_tool_broker",
-            MagicMock(return_value=tool_broker),
-        ),
-        patch(
-            "aios.sandbox.volumes.ensure_session_attachments_dir",
-            return_value=Path("/tmp/a"),
-        ),
-        patch(
-            "aios.sandbox.volumes.ensure_session_uploads_dir",
-            return_value=Path("/tmp/u"),
-        ),
-    )
-
-
 async def _build_with(
     *,
     env_config: EnvironmentConfig | None,
@@ -188,7 +114,7 @@ async def _build_with(
     from aios.sandbox.spec import build_spec_from_session
 
     with ExitStack() as stack:
-        for cm in _patch_build_spec_deps(
+        for cm in patch_build_spec_deps(
             env_config=env_config,
             docker_image=docker_image,
             sandbox_disk_bytes=sandbox_disk_bytes,

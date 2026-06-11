@@ -16,18 +16,17 @@ from __future__ import annotations
 
 import contextlib
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from aios.errors import CryptoDecryptError
 from aios.sandbox.spec import build_spec_from_session
 from aios.services.vaults import ResolvedEnvVarCredential
-from tests.unit.sandbox.test_spec_per_env_controls import _patch_build_spec_deps
+from tests.helpers.sandbox import patch_build_spec_deps
 
 _CRED = ResolvedEnvVarCredential(
     credential_id="vcred_01TEST",
-    vault_id="vault_01TEST",
     secret_name="GITHUB_TOKEN",
     secret_value="ghp_secret",
     allowed_hosts=("api.github.com",),
@@ -38,18 +37,10 @@ _CRED = ResolvedEnvVarCredential(
 
 async def test_plan_carries_resolved_creds_but_injects_nothing() -> None:
     with contextlib.ExitStack() as stack:
-        for ctx in _patch_build_spec_deps(
-            env_config=None,
-            docker_image="aios-sandbox:test",
-            sandbox_disk_bytes=None,
+        for ctx in patch_build_spec_deps(
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
         ):
             stack.enter_context(ctx)
-        stack.enter_context(
-            patch(
-                "aios.sandbox.spec._materialize_env_var_credentials",
-                AsyncMock(return_value=(_CRED,)),
-            )
-        )
         plan = await build_spec_from_session("sess_01TEST")
 
     assert plan.env_var_credentials == (_CRED,)
@@ -63,23 +54,15 @@ async def test_plan_carries_resolved_creds_but_injects_nothing() -> None:
 
 async def test_resolve_failure_aborts_before_git_proxy_or_broker_exist() -> None:
     clones = AsyncMock(return_value=([], None))
+    broker = MagicMock()
+    broker.port = 54321
     with contextlib.ExitStack() as stack:
-        for ctx in _patch_build_spec_deps(
-            env_config=None,
-            docker_image="aios-sandbox:test",
-            sandbox_disk_bytes=None,
+        for ctx in patch_build_spec_deps(
+            env_var_credentials=AsyncMock(side_effect=CryptoDecryptError("corrupt blob")),
+            github_clones=clones,
+            tool_broker=broker,
         ):
             stack.enter_context(ctx)
-        stack.enter_context(patch("aios.sandbox.spec._materialize_github_clones", clones))
-        stack.enter_context(
-            patch(
-                "aios.sandbox.spec._materialize_env_var_credentials",
-                AsyncMock(side_effect=CryptoDecryptError("corrupt blob")),
-            )
-        )
-        broker = stack.enter_context(
-            patch("aios.sandbox.spec.runtime.require_tool_broker")
-        ).return_value
 
         with pytest.raises(CryptoDecryptError):
             await build_spec_from_session("sess_01TEST")

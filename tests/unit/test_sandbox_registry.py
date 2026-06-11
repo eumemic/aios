@@ -160,6 +160,7 @@ class TestReleaseIfMountsChanged:
                 memory_echoes=[],
                 github_echoes=[],
                 git_proxy=None,
+                env_var_credentials=(),
             )
 
         # Force a cache miss so get_or_provision contends for the lock.
@@ -359,6 +360,7 @@ def _provisioning_plan(session_id: str) -> ProvisioningPlan:
         memory_echoes=[],
         github_echoes=[],
         git_proxy=None,
+        env_var_credentials=(),
     )
 
 
@@ -388,6 +390,7 @@ def _provisioning_plan_limited(session_id: str) -> ProvisioningPlan:
         memory_echoes=[],
         github_echoes=[],
         git_proxy=None,
+        env_var_credentials=(),
     )
 
 
@@ -799,6 +802,7 @@ class TestSpecVersionDrift:
             memory_echoes=plan.memory_echoes,
             github_echoes=plan.github_echoes,
             git_proxy=plan.git_proxy,
+            env_var_credentials=(),
         )
 
         with (
