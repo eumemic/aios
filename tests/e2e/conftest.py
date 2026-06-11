@@ -18,8 +18,10 @@ import asyncio
 import contextlib
 import inspect
 import socket
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from unittest import mock
 
 import pytest
@@ -27,6 +29,38 @@ import uvicorn
 
 from tests.e2e.harness import Harness
 from tests.helpers.connections import authed_client, wait_for_health, wired_app
+
+if TYPE_CHECKING:
+    from aios.sandbox.backends.docker import DockerBackend
+
+
+@pytest.fixture
+async def daemon(tmp_path: Path) -> AsyncIterator[tuple[DockerBackend, str, str, Path]]:
+    """A real :class:`DockerBackend` + a unique (instance, session, workspace)
+    plus container/snapshot-image cleanup.
+
+    Shared by the real-daemon e2e sandbox tests (persistence, provision-path).
+    The salvage suite defines its own differently-shaped ``daemon`` fixture,
+    which overrides this one for that module (standard pytest resolution).
+    """
+    from aios.sandbox.backends.docker import DockerBackend
+    from aios.sandbox.network import ensure_sandbox_network
+    from aios.sandbox.spec import snapshot_tag
+
+    await ensure_sandbox_network()
+    backend = DockerBackend()
+    instance_id = f"test_{uuid.uuid4().hex[:8]}"
+    session_id = f"sess_{uuid.uuid4().hex[:8]}"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    try:
+        yield backend, instance_id, session_id, workspace
+    finally:
+        # Remove any containers + the snapshot image this test produced.
+        for ref in await backend.list_managed(instance_id=instance_id):
+            await backend.force_remove(ref.sandbox_id)
+        await backend.remove_image(snapshot_tag(instance_id, session_id))
+
 
 _DEFAULT_DEFER_WAKE_PATCHES: tuple[str, ...] = (
     "aios.api.routers.sessions.defer_wake",

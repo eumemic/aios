@@ -8,6 +8,7 @@ operate the management plane via the same Bearer auth as the HTTP API.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -39,6 +40,7 @@ from aios.errors import install_exception_handlers
 from aios.harness import runtime
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
+from aios.sandbox.volumes import attachments_root, memory_stores_root, uploads_root
 
 
 def create_app() -> FastAPI:
@@ -56,6 +58,27 @@ def create_app() -> FastAPI:
         app.state.crypto_box = crypto_box
         app.state.procrastinate = procrastinate_app
         app.state.db_url = settings.db_url
+
+        # #959: the api runs as uid 1000 and can't repair ownership (no
+        # CAP_CHOWN). If the worker (root) created a shared root first and
+        # left it root-owned, ``POST /sessions/{id}/files`` 500s on mkdir.
+        # The api can't fix it — but it can refuse to fail silently. Log
+        # loudly and keep serving non-FS routes; the worker's startup
+        # repair pass is what actually heals the tree.
+        euid = os.geteuid()
+        for p in (
+            settings.workspace_root,
+            uploads_root(),
+            attachments_root(),
+            memory_stores_root(),
+        ):
+            if p.exists() and not os.access(p, os.W_OK):
+                try:
+                    st_uid = p.stat().st_uid
+                except OSError:
+                    st_uid = -1
+                log.warning("api.workspace_unwritable", path=str(p), euid=euid, st_uid=st_uid)
+
         # The ``/context`` endpoint (issue #60) reuses the worker's
         # ``compose_step_context`` → ``compute_step_prelude`` path, which
         # reaches for ``runtime.require_crypto_box()`` to decrypt per-vault

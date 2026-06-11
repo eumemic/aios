@@ -24,7 +24,7 @@ from aios.harness import runtime
 from aios.harness._text import join_blocks
 from aios.logging import get_logger
 from aios.models.skills import SkillVersion
-from aios.sandbox.volumes import ensure_workspace_path
+from aios.sandbox.volumes import ensure_owned_dir, ensure_workspace_path
 from aios.services import sessions as sessions_service
 
 log = get_logger("aios.harness.skills")
@@ -117,7 +117,11 @@ async def provision_skill_files(
         sv_dir = skills_dir / sv.directory
         for path, content in sv.files.items():
             file_path = sv_dir / path
-            file_path.parent.mkdir(parents=True, exist_ok=True)
+            # ensure_owned_dir (not bare mkdir): this runs WORKER-side (root)
+            # via run_session_step, so root-created skill subdirs must be
+            # chowned to the workspaces owner or the api (uid 1000, no
+            # CAP_CHOWN) can't write into them — bug #959 reoccurring.
+            ensure_owned_dir(file_path.parent)
             file_path.write_text(content, encoding="utf-8")
 
     log.info(

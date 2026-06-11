@@ -20,6 +20,9 @@ from pathlib import Path
 
 from aios.config import get_settings
 from aios.errors import ForbiddenError
+from aios.logging import get_logger
+
+log = get_logger("aios.sandbox.volumes")
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^\w.\-]")
 _MAX_FILENAME_LEN = 200
@@ -49,6 +52,55 @@ def safe_filename(name: str | None) -> str:
     return cleaned[:_MAX_FILENAME_LEN]
 
 
+def ensure_owned_dir(path: Path) -> Path:
+    """mkdir(parents=True, exist_ok=True) ``path``, then — iff running as root —
+    chown every component newly created by THIS call (intermediates included) to
+    the configured workspaces owner uid:gid. Non-root callers (api at uid 1000,
+    dev single-uid) get exactly today's plain-mkdir behavior.
+
+    Fixes #959: the worker (root) and api (uid 1000) both write under
+    ``workspace_root``. A shared dir the worker creates first is ``root:root``
+    and the api (no CAP_CHOWN) can't write into it. Chowning the components
+    this call creates keeps the shared tree writable by the api owner.
+    """
+    settings = get_settings()
+    root = settings.workspace_root.resolve()
+    target = path.resolve()
+    newly: list[Path] = []
+    cur = target
+    while True:
+        if cur.exists():
+            break
+        newly.append(cur)
+        if cur == root or cur.parent == cur:
+            break
+        cur = cur.parent
+    path.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        uid, gid = settings.workspaces_owner_uid, settings.workspaces_owner_gid
+        for component in newly:
+            # Only chown within the workspace tree (workspace_root itself and its
+            # descendants); never touch out-of-tree ancestors. If a caller passed
+            # a path outside the tree (the mkdir honors any path — caller's
+            # contract), the component-walk collected out-of-tree ancestors; do
+            # NOT chown those.
+            if not component.is_relative_to(root):
+                continue
+            # A racing provision may have created+chowned this component first
+            # (benign), but the failure must stay observable per CLAUDE.md's
+            # no-silent-error stance — log and continue rather than crash.
+            try:
+                # lchown (not chown): closes the mkdir→chown symlink-swap race —
+                # a container with workspace write access could replace a
+                # freshly-created component with a symlink before we chown,
+                # redirecting os.chown to an out-of-tree target. Matches the
+                # repair path's lchown.
+                os.lchown(component, uid, gid)
+            except OSError as e:
+                log.warning("workspace.chown_failed", path=str(component), error=str(e))
+    return path
+
+
 # DEPRECATED post-#409 — do not use in new code; see issue #630.
 def workspace_dir_for(session_id: str) -> Path:
     """Return the absolute host directory for ``session_id``'s workspace.
@@ -71,15 +123,13 @@ def ensure_workspace_dir(session_id: str) -> Path:
     exist_ok=True`` semantics — safe to call repeatedly.
     """
     path = workspace_dir_for(session_id)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return ensure_owned_dir(path)
 
 
 def ensure_workspace_path(raw_path: str) -> Path:
     """Resolve ``raw_path`` to an absolute ``Path``, creating it if needed."""
     path = Path(raw_path).resolve()
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return ensure_owned_dir(path)
 
 
 def validate_workspace_path(
@@ -295,8 +345,7 @@ def ensure_session_attachments_dir(session_id: str) -> Path:
     even for sessions that have never received an attachment.
     """
     path = session_attachments_dir(session_id)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return ensure_owned_dir(path)
 
 
 _UPLOADS_ROOT = "_uploads"
@@ -332,8 +381,7 @@ def ensure_session_uploads_dir(session_id: str) -> Path:
     even for sessions that have never received an upload.
     """
     path = session_uploads_dir(session_id)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return ensure_owned_dir(path)
 
 
 def resolve_to_host_path(
