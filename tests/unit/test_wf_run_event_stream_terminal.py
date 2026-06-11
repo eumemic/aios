@@ -71,6 +71,45 @@ async def test_terminal_status_drains_catch_up_tail_then_done() -> None:
     subscription._conn.terminate.assert_called_once()
 
 
+async def test_annotation_event_surfaces_in_the_stream() -> None:
+    """A ``log()``/``phase()`` annotation row streams as a normal event frame — the
+    serializer is type-agnostic — in seq order ahead of the ``run_completed`` terminal.
+    This is the SSE half of the journaled-progress contract."""
+    annotation_row = {
+        "id": "wfe_a",
+        "run_id": "wfr_X",
+        "seq": 1,
+        "type": "annotation",
+        "call_key": "sha:ann#0",
+        "payload": json.dumps({"kind": "phase", "text": "build"}),
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+    }
+    run_completed_row = {
+        "id": "wfe_z",
+        "run_id": "wfr_X",
+        "seq": 2,
+        "type": "run_completed",
+        "call_key": None,
+        "payload": json.dumps({"output": None, "is_error": False}),
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+    }
+    conn = MagicMock()
+    # Backfill carries both rows; the loop yields the annotation, then closes on the
+    # run_completed (no catch-up fetch needed).
+    conn.fetch = AsyncMock(side_effect=[[annotation_row, run_completed_row]])
+    pool = _mk_pool(conn)
+    subscription = _mk_subscription()
+
+    messages = [msg async for msg in wf_run_event_stream(subscription, pool, "wfr_X", after_seq=0)]
+    events = [json.loads(str(msg.data)) for msg in messages if msg.event == "event"]
+
+    assert [msg.event for msg in messages] == ["event", "event", "done"]
+    assert events[0]["type"] == "annotation"
+    assert events[0]["payload"] == {"kind": "phase", "text": "build"}
+    assert events[1]["type"] == "run_completed"
+    subscription._conn.terminate.assert_called_once()
+
+
 async def test_terminal_status_empty_catch_up_falls_through_to_done() -> None:
     """The genuine reconnect-past-terminal case: empty backfill + status terminal +
     nothing past the cursor ⇒ a single done frame (no hang, no spurious event)."""
