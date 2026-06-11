@@ -28,8 +28,7 @@ AuthType = Literal[
 ]
 
 # Env var names the harness injects into every sandbox (see
-# ``sandbox/spec.py`` ``merged_env``, ``sandbox/setup.py``
-# ``WORKSPACE_RUNTIME_ENV``, and ``sandbox/egress_ca.py``
+# ``sandbox/spec.py`` ``merged_env`` and ``sandbox/egress_ca.py``
 # ``TRUST_STORE_ENV``). An ``environment_variable`` credential may not
 # claim one as its ``secret_name``: a collision either hijacks a load-bearing
 # sandbox variable (e.g. ``PATH`` repointed → unqualified-binary takeover) or
@@ -41,9 +40,6 @@ AuthType = Literal[
 # the live merge order so it can't drift.
 RESERVED_SANDBOX_ENV_KEYS: frozenset[str] = frozenset(
     {
-        "VIRTUAL_ENV",
-        "NPM_CONFIG_PREFIX",
-        "NODE_PATH",
         "PATH",
         "SSL_CERT_FILE",
         "REQUESTS_CA_BUNDLE",
