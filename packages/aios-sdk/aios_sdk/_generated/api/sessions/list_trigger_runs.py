@@ -7,8 +7,7 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
-from ...models.trigger_echo import TriggerEcho
-from ...models.trigger_update import TriggerUpdate
+from ...models.list_response_trigger_run_echo import ListResponseTriggerRunEcho
 from ...types import UNSET, Response, Unset
 
 
@@ -16,24 +15,27 @@ def _get_kwargs(
     session_id: str,
     name: str,
     *,
-    body: TriggerUpdate,
+    limit: int | Unset = 50,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
     if not isinstance(authorization, Unset):
         headers["Authorization"] = authorization
 
+    params: dict[str, Any] = {}
+
+    params["limit"] = limit
+
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
+
     _kwargs: dict[str, Any] = {
-        "method": "put",
-        "url": "/v1/sessions/{session_id}/triggers/{name}".format(
+        "method": "get",
+        "url": "/v1/sessions/{session_id}/triggers/{name}/runs".format(
             session_id=quote(str(session_id), safe=""),
             name=quote(str(name), safe=""),
         ),
+        "params": params,
     }
-
-    _kwargs["json"] = body.to_dict()
-
-    headers["Content-Type"] = "application/json"
 
     _kwargs["headers"] = headers
     return _kwargs
@@ -41,9 +43,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> HTTPValidationError | TriggerEcho | None:
+) -> HTTPValidationError | ListResponseTriggerRunEcho | None:
     if response.status_code == 200:
-        response_200 = TriggerEcho.from_dict(response.json())
+        response_200 = ListResponseTriggerRunEcho.from_dict(response.json())
 
         return response_200
 
@@ -60,7 +62,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[HTTPValidationError | TriggerEcho]:
+) -> Response[HTTPValidationError | ListResponseTriggerRunEcho]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -74,38 +76,36 @@ def sync_detailed(
     name: str,
     *,
     client: AuthenticatedClient | Client,
-    body: TriggerUpdate,
+    limit: int | Unset = 50,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | TriggerEcho]:
-    """Update Trigger
+) -> Response[HTTPValidationError | ListResponseTriggerRunEcho]:
+    """List Trigger Runs
 
-     Replace a trigger's source/action/enabled/metadata by name. Omitted
-    fields unchanged; ``source`` / ``action`` replace wholesale.
+     List a trigger's fires (the per-fire audit), newest first.
+
+    Keyed by name against the audit table's denormalized columns — NOT the
+    live trigger row — so one-shot tombstones and a deleted trigger's history
+    stay reachable (the audit outlives its trigger by design). Rows older
+    than the retention window are pruned.
 
     Args:
         session_id (str):
         name (str):
+        limit (int | Unset):  Default: 50.
         authorization (None | str | Unset):
-        body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
-            provided (a cron↔one-shot or sandbox↔wake conversion is just a
-            different object) — via the Replace union variants, whose
-            optional-at-create fields are required so a partial object 422s instead
-            of silently re-defaulting. ``None`` = leave alone; there is no
-            clear-to-null (both columns are NOT NULL). The next_fire / cap /
-            past-fire_at business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | TriggerEcho]
+        Response[HTTPValidationError | ListResponseTriggerRunEcho]
     """
 
     kwargs = _get_kwargs(
         session_id=session_id,
         name=name,
-        body=body,
+        limit=limit,
         authorization=authorization,
     )
 
@@ -121,39 +121,37 @@ def sync(
     name: str,
     *,
     client: AuthenticatedClient | Client,
-    body: TriggerUpdate,
+    limit: int | Unset = 50,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | TriggerEcho | None:
-    """Update Trigger
+) -> HTTPValidationError | ListResponseTriggerRunEcho | None:
+    """List Trigger Runs
 
-     Replace a trigger's source/action/enabled/metadata by name. Omitted
-    fields unchanged; ``source`` / ``action`` replace wholesale.
+     List a trigger's fires (the per-fire audit), newest first.
+
+    Keyed by name against the audit table's denormalized columns — NOT the
+    live trigger row — so one-shot tombstones and a deleted trigger's history
+    stay reachable (the audit outlives its trigger by design). Rows older
+    than the retention window are pruned.
 
     Args:
         session_id (str):
         name (str):
+        limit (int | Unset):  Default: 50.
         authorization (None | str | Unset):
-        body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
-            provided (a cron↔one-shot or sandbox↔wake conversion is just a
-            different object) — via the Replace union variants, whose
-            optional-at-create fields are required so a partial object 422s instead
-            of silently re-defaulting. ``None`` = leave alone; there is no
-            clear-to-null (both columns are NOT NULL). The next_fire / cap /
-            past-fire_at business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | TriggerEcho
+        HTTPValidationError | ListResponseTriggerRunEcho
     """
 
     return sync_detailed(
         session_id=session_id,
         name=name,
         client=client,
-        body=body,
+        limit=limit,
         authorization=authorization,
     ).parsed
 
@@ -163,38 +161,36 @@ async def asyncio_detailed(
     name: str,
     *,
     client: AuthenticatedClient | Client,
-    body: TriggerUpdate,
+    limit: int | Unset = 50,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | TriggerEcho]:
-    """Update Trigger
+) -> Response[HTTPValidationError | ListResponseTriggerRunEcho]:
+    """List Trigger Runs
 
-     Replace a trigger's source/action/enabled/metadata by name. Omitted
-    fields unchanged; ``source`` / ``action`` replace wholesale.
+     List a trigger's fires (the per-fire audit), newest first.
+
+    Keyed by name against the audit table's denormalized columns — NOT the
+    live trigger row — so one-shot tombstones and a deleted trigger's history
+    stay reachable (the audit outlives its trigger by design). Rows older
+    than the retention window are pruned.
 
     Args:
         session_id (str):
         name (str):
+        limit (int | Unset):  Default: 50.
         authorization (None | str | Unset):
-        body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
-            provided (a cron↔one-shot or sandbox↔wake conversion is just a
-            different object) — via the Replace union variants, whose
-            optional-at-create fields are required so a partial object 422s instead
-            of silently re-defaulting. ``None`` = leave alone; there is no
-            clear-to-null (both columns are NOT NULL). The next_fire / cap /
-            past-fire_at business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | TriggerEcho]
+        Response[HTTPValidationError | ListResponseTriggerRunEcho]
     """
 
     kwargs = _get_kwargs(
         session_id=session_id,
         name=name,
-        body=body,
+        limit=limit,
         authorization=authorization,
     )
 
@@ -208,32 +204,30 @@ async def asyncio(
     name: str,
     *,
     client: AuthenticatedClient | Client,
-    body: TriggerUpdate,
+    limit: int | Unset = 50,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | TriggerEcho | None:
-    """Update Trigger
+) -> HTTPValidationError | ListResponseTriggerRunEcho | None:
+    """List Trigger Runs
 
-     Replace a trigger's source/action/enabled/metadata by name. Omitted
-    fields unchanged; ``source`` / ``action`` replace wholesale.
+     List a trigger's fires (the per-fire audit), newest first.
+
+    Keyed by name against the audit table's denormalized columns — NOT the
+    live trigger row — so one-shot tombstones and a deleted trigger's history
+    stay reachable (the audit outlives its trigger by design). Rows older
+    than the retention window are pruned.
 
     Args:
         session_id (str):
         name (str):
+        limit (int | Unset):  Default: 50.
         authorization (None | str | Unset):
-        body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
-            provided (a cron↔one-shot or sandbox↔wake conversion is just a
-            different object) — via the Replace union variants, whose
-            optional-at-create fields are required so a partial object 422s instead
-            of silently re-defaulting. ``None`` = leave alone; there is no
-            clear-to-null (both columns are NOT NULL). The next_fire / cap /
-            past-fire_at business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | TriggerEcho
+        HTTPValidationError | ListResponseTriggerRunEcho
     """
 
     return (
@@ -241,7 +235,7 @@ async def asyncio(
             session_id=session_id,
             name=name,
             client=client,
-            body=body,
+            limit=limit,
             authorization=authorization,
         )
     ).parsed

@@ -328,8 +328,11 @@ async def list_wf_runs(
 ) -> list[WfRun]:
     """Keyset-paginated list of an account's runs (non-archived), newest first.
 
-    ``parent_run_id`` scopes to a run's children (the runs a workflow's nested
-    ``workflow()`` calls spawned) — the run-side analog of filtering sessions by
+    ``parent_run_id`` scopes to a run's children — the runs a workflow's nested
+    ``workflow()`` calls spawned, plus (#819) trigger-launched runs whose
+    lineage parent it is (a run_completion fire threads the completing run's
+    id; a timer fire on a workflow-child session threads that session's own
+    parent run). The run-side analog of filtering sessions by
     ``parent_run_id`` for a run's ``agent()`` children.
     """
     return await _list_scoped(
@@ -583,13 +586,22 @@ async def set_run_terminal(
 ) -> None:
     """Flip a run to its terminal ``status`` and store ``output`` in one UPDATE.
 
-    Called from ``_complete_run`` inside the same txn as the ``run_completed``
-    append. ``output`` is the script's return value on success and ``None`` on
-    error (the error detail lives in the ``run_completed`` payload).
+    Called from ``_commit_terminal_and_dispatch`` inside the same txn as the
+    ``run_completed`` append. ``output`` is the script's return value on
+    success and ``None`` on error (the error detail lives in the
+    ``run_completed`` payload).
+
+    First-writer-wins (``status NOT IN`` terminal guard): under procrastinate
+    dual execution the journal memo already makes exactly one ``run_completed``
+    append win — without this guard the LOSER's flip would still overwrite the
+    row last-writer-wins, letting ``wf_runs.status`` diverge from the journal
+    bookend and from the run_completion fires the winner dispatched (#819: a
+    statuses-filtered watcher's decision must agree with the final row).
     """
     await conn.execute(
         "UPDATE wf_runs SET status = $3, output = $4::jsonb, updated_at = now() "
-        "WHERE id = $1 AND account_id = $2",
+        "WHERE id = $1 AND account_id = $2 "
+        "AND status NOT IN ('completed', 'errored', 'cancelled')",
         run_id,
         account_id,
         status,
@@ -772,6 +784,21 @@ async def get_run_completed_event(conn: asyncpg.Connection[Any], run_id: str) ->
         "SELECT * FROM wf_run_events WHERE run_id = $1 AND type = 'run_completed'", run_id
     )
     return _row_to_wf_run_event(row) if row is not None else None
+
+
+async def resolve_run_error(conn: asyncpg.Connection[Any], run_id: str) -> dict[str, Any] | None:
+    """An errored run's ``{kind, …}`` error detail, or ``None``.
+
+    THE extraction of ``error`` from the ``run_completed`` journal payload —
+    shared by ``await_run``'s completion record and the trigger fire path's
+    composed envelope (#819), so the two surfaces can never drift on where
+    ``error.kind`` lives (the row stores only ``status`` + ``output``).
+    """
+    completed = await get_run_completed_event(conn, run_id)
+    if completed is None:
+        return None
+    error: dict[str, Any] | None = completed.payload.get("error")
+    return error
 
 
 async def find_open_gate_call_key(

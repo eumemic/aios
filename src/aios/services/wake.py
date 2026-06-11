@@ -131,3 +131,26 @@ async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:
         await deferrer.defer_async(run_id=run_id)
     except procrastinate_exceptions.AlreadyEnqueued:
         log.debug("run_wake.already_enqueued", run_id=run_id)
+
+
+async def defer_trigger_fire(trigger_id: str, trigger_run_id: str) -> None:
+    """Enqueue one ``run_trigger`` job for one run_completion fire.
+
+    One job PER event fire: the ``queueing_lock`` keys the FIRE (the
+    ``trigger_runs`` carrier row's id), never the bare trigger id — distinct
+    completions of a watched workflow must never coalesce (the scheduler
+    tick's per-trigger lock is single-flight by design; correct for cron,
+    silently lossy for events). The lock still dedups a sweep re-defer racing
+    a queued-but-unstarted job; a re-defer racing a RUNNING job is resolved by
+    the carrier row's pending→running claim instead. No ``lock``: fires must
+    not serialize against each other or session inference.
+    """
+    from aios.harness.procrastinate_app import app
+
+    try:
+        await app.configure_task(
+            "harness.run_trigger",
+            queueing_lock=f"trigger_run:{trigger_run_id}",
+        ).defer_async(trigger_id=trigger_id, trigger_run_id=trigger_run_id)
+    except procrastinate_exceptions.AlreadyEnqueued:
+        log.debug("trigger_fire.already_enqueued", trigger_run_id=trigger_run_id)

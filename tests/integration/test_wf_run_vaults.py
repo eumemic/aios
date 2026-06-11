@@ -32,7 +32,14 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.harness import runtime
 from aios.mcp.client import resolve_auth_for_target_url_run
-from aios.models.agents import Agent, HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.agents import (
+    Agent,
+    HttpPermissionPolicy,
+    HttpRouteSpec,
+    HttpServerSpec,
+    McpServerSpec,
+    ToolSpec,
+)
 from aios.models.attenuation import surface_of
 from aios.models.vaults import VaultCredentialCreate
 from aios.services import agents as agents_service
@@ -346,6 +353,151 @@ async def test_declared_surface_round_trips(vault_pool: asyncpg.Pool[Any]) -> No
     fetched = await wf_service.get_workflow(pool, wf.id, account_id=ACC)
     assert [m.url for m in fetched.mcp_servers] == ["https://s.example"]
     assert [h.base_url for h in fetched.http_servers] == ["https://h.example"]
+
+
+# ─── #939: http_servers admitted by identity, inherited launcher-frozen ──────
+#
+# The authoring gate matches http_servers on identity (name + base_url) like tools/mcp,
+# and INHERITS the agent's frozen routes into workflow storage — so a workflow declaring
+# the right server but partial/empty routes is admitted and stored with the agent's full
+# routes. Membership still gates: a server the agent lacks is still forbidden. Run-time
+# stays parent-wins-frozen (run-launch clamps to launcher-verbatim), so relaxing the
+# AUTHORING gate grants no new run-time authority.
+
+
+async def test_create_time_http_identity_inherits_frozen_routes(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """Create-time: a workflow declaring the agent's http server by identity (partial/empty
+    routes) is admitted, and stores the agent's full routes launcher-frozen."""
+    pool = vault_pool
+    agent_http = HttpServerSpec(
+        name="api",
+        base_url="https://api",
+        routes=[
+            HttpRouteSpec(
+                path_pattern="/v1/**",
+                permission_policy=HttpPermissionPolicy(type="always_ask"),
+            )
+        ],
+    )
+    agent = await _make_agent(pool, "http-creator", http_servers=[agent_http])
+    creator = await _make_session(pool, agent)
+
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id=ACC,
+        name="w-http-ct",
+        script=_SCRIPT,
+        http_servers=[HttpServerSpec(name="api", base_url="https://api", routes=[])],
+        creator_session_id=creator,
+    )
+    fetched = await wf_service.get_workflow(pool, wf.id, account_id=ACC)
+    # Routes inherited launcher-frozen — equals the agent's full spec, NOT the declared
+    # empty-routes one.
+    assert fetched.http_servers == [agent_http]
+
+
+async def test_create_time_http_missing_server_still_forbidden(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """Create-time: a server the agent lacks (different identity) is still forbidden — the
+    identity relaxation is membership-keyed, not a blanket admit. No workflow row leaks."""
+    pool = vault_pool
+    agent_http = HttpServerSpec(name="api", base_url="https://api")
+    agent = await _make_agent(pool, "http-creator-2", http_servers=[agent_http])
+    creator = await _make_session(pool, agent)
+
+    before = await _workflow_count(pool)
+    with pytest.raises(ForbiddenError, match=r"exceeds the acting agent's permissions") as ei:
+        await wf_service.create_workflow(
+            pool,
+            account_id=ACC,
+            name="w-http-missing",
+            script=_SCRIPT,
+            http_servers=[HttpServerSpec(name="other", base_url="https://other")],
+            creator_session_id=creator,
+        )
+    assert ei.value.detail["exceeds"]["http_servers"] == ["other"]
+    assert await _workflow_count(pool) == before
+
+
+async def test_update_time_http_identity_inherits_frozen_routes(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """Update-time: an actor re-declaring the agent's http server by identity (empty routes)
+    is admitted and the stored routes stay the agent's full, launcher-frozen spec."""
+    pool = vault_pool
+    agent_http = HttpServerSpec(
+        name="api",
+        base_url="https://api",
+        routes=[
+            HttpRouteSpec(
+                path_pattern="/v1/**",
+                permission_policy=HttpPermissionPolicy(type="always_ask"),
+            )
+        ],
+    )
+    agent = await _make_agent(pool, "http-updater", http_servers=[agent_http])
+    actor = await _make_session(pool, agent)
+    # Operator-create a workflow storing the server with EMPTY routes verbatim (operator
+    # path), version 1 — so the actor's inherited-frozen update is a genuine change.
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id=ACC,
+        name="w-http-up",
+        script=_SCRIPT,
+        http_servers=[HttpServerSpec(name="api", base_url="https://api", routes=[])],
+    )
+    assert wf.http_servers == [HttpServerSpec(name="api", base_url="https://api", routes=[])]
+
+    updated = await wf_service.update_workflow(
+        pool,
+        wf.id,
+        account_id=ACC,
+        expected_version=1,
+        http_servers=[HttpServerSpec(name="api", base_url="https://api", routes=[])],
+        actor_session_id=actor,
+    )
+    assert updated.version == 2
+    fetched = await wf_service.get_workflow(pool, wf.id, account_id=ACC)
+    # The actor declared empty routes but the agent's full routes are inherited frozen.
+    assert fetched.http_servers == [agent_http]
+
+
+async def test_update_time_http_missing_server_still_forbidden(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """Update-time: re-pointing to a server the agent lacks is still forbidden; the workflow
+    stays at version 1 (no write)."""
+    pool = vault_pool
+    agent_http = HttpServerSpec(
+        name="api",
+        base_url="https://api",
+        routes=[
+            HttpRouteSpec(
+                path_pattern="/v1/**",
+                permission_policy=HttpPermissionPolicy(type="always_ask"),
+            )
+        ],
+    )
+    agent = await _make_agent(pool, "http-updater-2", http_servers=[agent_http])
+    actor = await _make_session(pool, agent)
+    wf = await wf_service.create_workflow(
+        pool, account_id=ACC, name="w-http-ghost", script=_SCRIPT, http_servers=[agent_http]
+    )
+
+    with pytest.raises(ForbiddenError, match=r"exceeds the acting agent's permissions"):
+        await wf_service.update_workflow(
+            pool,
+            wf.id,
+            account_id=ACC,
+            expected_version=1,
+            http_servers=[HttpServerSpec(name="ghost", base_url="https://ghost")],
+            actor_session_id=actor,
+        )
+    fetched = await wf_service.get_workflow(pool, wf.id, account_id=ACC)
+    assert fetched.version == 1
 
 
 async def test_run_cannot_bind_foreign_or_missing_vault(vault_pool: asyncpg.Pool[Any]) -> None:

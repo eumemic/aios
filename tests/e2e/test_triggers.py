@@ -115,6 +115,48 @@ async def _create_session(pool: Any, env_id: str, agent_id: str) -> str:
     return session.id
 
 
+async def _isolated_account_session(pool: Any) -> tuple[str, str]:
+    """A fresh child account owning its own env/agent/session — for cap tests
+    that need an isolated trigger count.
+
+    Slice 2's cross-tenant fix means the caller's account must actually OWN
+    the session it attaches triggers to: the old trick of passing a synthetic
+    ``account_id`` against an ``acc_test_stub`` session now 404s — which is
+    the fix working, not a test-isolation bug.
+    """
+    tag = _uniq()
+    account_id = f"acc_iso_{tag}"
+    sid = f"sess_iso_{tag}"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+            "VALUES ($1, 'acc_test_stub', FALSE, $1)",
+            account_id,
+        )
+        await conn.execute(
+            "INSERT INTO environments (id, name, account_id) VALUES ($1, $2, $3)",
+            f"env_iso_{tag}",
+            f"iso-env-{tag}",
+            account_id,
+        )
+        await conn.execute(
+            "INSERT INTO agents (id, name, model, account_id) VALUES ($1, $2, 'fake/test', $3)",
+            f"agn_iso_{tag}",
+            f"iso-agent-{tag}",
+            account_id,
+        )
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, workspace_volume_path, "
+            "account_id) VALUES ($1, $2, $3, $4, $5)",
+            sid,
+            f"agn_iso_{tag}",
+            f"env_iso_{tag}",
+            f"/tmp/ws-iso-{tag}",
+            account_id,
+        )
+    return account_id, sid
+
+
 def _spec(name: str, schedule: str = "*/5 * * * *", command: str = "echo hi") -> TriggerCreate:
     return TriggerCreate.model_validate(
         {
@@ -386,9 +428,7 @@ class TestPerAccountCap:
         from aios.config import Settings
         from aios.errors import RateLimitedError
 
-        env_id, agent_id = env_and_agent
-        sid = await _create_session(pool, env_id, agent_id)
-        account_id = f"acc_cap_{_uniq()}"
+        account_id, sid = await _isolated_account_session(pool)
 
         original = Settings()
         monkeypatch.setattr(
@@ -398,21 +438,19 @@ class TestPerAccountCap:
 
         await trig_service.add_trigger(pool, sid, _spec("a"), account_id=account_id)
         await trig_service.add_trigger(pool, sid, _spec("b"), account_id=account_id)
-        with pytest.raises(RateLimitedError, match="active-timer cap"):
+        with pytest.raises(RateLimitedError, match="active-trigger cap"):
             await trig_service.add_trigger(pool, sid, _spec("c"), account_id=account_id)
 
     async def test_wake_owner_counts_against_cap(
         self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any
     ) -> None:
-        """A wake_owner trigger consumes a per-account active-timer slot just
+        """A wake_owner trigger consumes a per-account active-trigger slot just
         like a sandbox_command — a future 'self-delivery is cheap, skip the
         cap' refactor must not silently remove the only standing-row bound."""
         from aios.config import Settings
         from aios.errors import RateLimitedError
 
-        env_id, agent_id = env_and_agent
-        sid = await _create_session(pool, env_id, agent_id)
-        account_id = f"acc_wo_cap_{_uniq()}"
+        account_id, sid = await _isolated_account_session(pool)
         future = datetime.now(UTC) + timedelta(hours=1)
 
         original = Settings()
@@ -424,7 +462,7 @@ class TestPerAccountCap:
         await trig_service.add_trigger(
             pool, sid, _wake_owner_spec("wo1", future), account_id=account_id
         )
-        with pytest.raises(RateLimitedError, match="active-timer cap"):
+        with pytest.raises(RateLimitedError, match="active-trigger cap"):
             await trig_service.add_trigger(
                 pool, sid, _wake_owner_spec("wo2", future), account_id=account_id
             )
@@ -434,9 +472,7 @@ class TestPerAccountCap:
     ) -> None:
         from aios.config import Settings
 
-        env_id, agent_id = env_and_agent
-        sid = await _create_session(pool, env_id, agent_id)
-        account_id = f"acc_cap_dis_{_uniq()}"
+        account_id, sid = await _isolated_account_session(pool)
 
         original = Settings()
         monkeypatch.setattr(
@@ -465,9 +501,7 @@ class TestPerAccountCap:
         from aios.config import Settings
         from aios.errors import RateLimitedError
 
-        env_id, agent_id = env_and_agent
-        sid = await _create_session(pool, env_id, agent_id)
-        account_id = f"acc_cap_re_{_uniq()}"
+        account_id, sid = await _isolated_account_session(pool)
 
         original = Settings()
         monkeypatch.setattr(
@@ -486,7 +520,7 @@ class TestPerAccountCap:
         )
         await trig_service.add_trigger(pool, sid, disabled, account_id=account_id)
 
-        with pytest.raises(RateLimitedError, match="active-timer cap"):
+        with pytest.raises(RateLimitedError, match="active-trigger cap"):
             await trig_service.update_trigger(
                 pool,
                 sid,
@@ -619,11 +653,12 @@ class TestRecordFire:
         echo = await trig_service.add_trigger(pool, sid, _spec("p"), account_id="acc_test_stub")
 
         async with pool.acquire() as conn:
+            for _ in range(3):
+                await queries.record_trigger_fire(
+                    conn, echo.id, status="error", fired_at=datetime.now(UTC)
+                )
             await queries.record_trigger_fire(
-                conn, echo.id, status="error", consecutive_failures=3, fired_at=datetime.now(UTC)
-            )
-            await queries.record_trigger_fire(
-                conn, echo.id, status="ok", consecutive_failures=0, fired_at=datetime.now(UTC)
+                conn, echo.id, status="ok", fired_at=datetime.now(UTC)
             )
             row = await conn.fetchrow(
                 "SELECT consecutive_failures, last_fire_status, running_since "
@@ -838,37 +873,47 @@ class TestWakeOwnerAction:
 # ─── DB CHECK probes (§2.1) ────────────────────────────────────────────────
 
 
+async def _insert_raw(
+    pool: Any,
+    sid: str,
+    *,
+    source: str,
+    source_spec: str,
+    action: str,
+    environment_id: str | None = None,
+) -> None:
+    """Insert a raw trigger row, bypassing the Pydantic write models — the
+    probe vehicle for the live shape CHECKs."""
+    from aios.ids import TRIGGER, make_id
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO triggers
+                (id, owner_session_id, account_id, name, source, source_spec,
+                 action, enabled, environment_id, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, true, $8, '{}'::jsonb)
+            """,
+            make_id(TRIGGER),
+            sid,
+            "acc_test_stub",
+            f"raw-{_uniq()}",
+            source,
+            source_spec,
+            action,
+            environment_id,
+        )
+
+
 class TestShapeCheckConstraints:
     """The live triggers_source_spec_shape / triggers_action_shape CHECKs (and
     their load-bearing COALESCE wrappers) reject malformed rows — including the
     absent-key cases the unwrapped predicate would silently accept."""
 
-    async def _insert_raw(
-        self, pool: Any, sid: str, *, source: str, source_spec: str, action: str
-    ) -> None:
-        from aios.ids import TRIGGER, make_id
-
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO triggers
-                    (id, owner_session_id, account_id, name, source, source_spec,
-                     action, enabled, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, true, '{}'::jsonb)
-                """,
-                make_id(TRIGGER),
-                sid,
-                "acc_test_stub",
-                f"raw-{_uniq()}",
-                source,
-                source_spec,
-                action,
-            )
-
     async def test_valid_rows_insert(self, pool: Any, env_and_agent: tuple[str, str]) -> None:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
-        await self._insert_raw(
+        await _insert_raw(
             pool,
             sid,
             source="cron",
@@ -876,7 +921,7 @@ class TestShapeCheckConstraints:
             action='{"kind": "sandbox_command", "command": "x", "timeout_seconds": 300, '
             '"max_output_bytes": 65536}',
         )
-        await self._insert_raw(
+        await _insert_raw(
             pool,
             sid,
             source="one_shot",
@@ -891,7 +936,7 @@ class TestShapeCheckConstraints:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="one_shot",
@@ -906,7 +951,7 @@ class TestShapeCheckConstraints:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",
@@ -920,7 +965,7 @@ class TestShapeCheckConstraints:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",
@@ -933,7 +978,7 @@ class TestShapeCheckConstraints:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="webhook",
@@ -1580,9 +1625,7 @@ class TestPerSessionCap:
     ) -> None:
         from aios.errors import RateLimitedError
 
-        env_id, agent_id = env_and_agent
-        sid = await _create_session(pool, env_id, agent_id)
-        account_id = f"acc_session_cap_{_uniq()}"
+        account_id, sid = await _isolated_account_session(pool)
 
         monkeypatch.setattr("aios.services.triggers.MAX_TRIGGERS_PER_SESSION", 2)
 
@@ -1635,7 +1678,7 @@ class TestNotifyTrigger:
             event.clear()
             async with pool.acquire() as conn:
                 await queries.record_trigger_fire(
-                    conn, echo.id, status="ok", consecutive_failures=0, fired_at=datetime.now(UTC)
+                    conn, echo.id, status="ok", fired_at=datetime.now(UTC)
                 )
             try:
                 await _asyncio.wait_for(event.wait(), timeout=2.0)
@@ -1679,9 +1722,7 @@ class TestAdvisoryLockSerializesCapCheck:
         from aios.config import Settings
         from aios.errors import RateLimitedError
 
-        env_id, agent_id = env_and_agent
-        sid = await _create_session(pool, env_id, agent_id)
-        account_id = f"acc_lock_{_uniq()}"
+        account_id, sid = await _isolated_account_session(pool)
 
         original = Settings()
         monkeypatch.setattr(
@@ -1791,3 +1832,568 @@ class TestMigrationToolRewrite:
         # BuiltinToolType, so an unrewritten row would raise here.
         agent = await agents_service.get_agent(pool, legacy_id, account_id="acc_test_stub")
         assert [t.type for t in agent.tools] == ["trigger_create", "trigger_list"]
+
+
+# ─── slice 2 (#819): CHECK probes, write paths, clone, env column ────────────
+
+
+async def _make_workflow_e2e(
+    pool: Any, script: str = "async def main(input):\n    return 1\n"
+) -> str:
+    from aios.db.queries import workflows as wf_queries
+
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_test_stub", name=f"wf-{_uniq()}", script=script
+        )
+    return wf.id
+
+
+def _workflow_action_spec(name: str, workflow_id: str, **action_overrides: Any) -> TriggerCreate:
+    action: dict[str, Any] = {"kind": "workflow", "workflow_id": workflow_id}
+    action.update(action_overrides)
+    return TriggerCreate.model_validate(
+        {
+            "name": name,
+            "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+            "action": action,
+        }
+    )
+
+
+def _watch_spec(name: str, workflow_id: str, **source_overrides: Any) -> TriggerCreate:
+    source: dict[str, Any] = {"kind": "run_completion", "workflow_id": workflow_id}
+    source.update(source_overrides)
+    return TriggerCreate.model_validate(
+        {
+            "name": name,
+            "source": source,
+            "action": {"kind": "wake_owner", "content": "a run completed"},
+        }
+    )
+
+
+class TestSlice2ShapeChecks:
+    """Hostile-row probes for the slice-2 predicate branches, the iff env
+    constraint (both directions), and the no-next_fire guard — against the
+    LIVE constraints (the §6 matrix, executed)."""
+
+    _WF_ACTION_OK = (
+        '{"kind": "workflow", "workflow_id": "wf_x", "workflow_version": null, '
+        '"input_template": null, "vault_ids": []}'
+    )
+    _RC_SPEC_OK = '{"workflow_id": "wf_x", "statuses": ["completed"]}'
+
+    async def test_legal_slice2_rows_insert(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        # run_completion watch (wake_owner action, no env column).
+        await _insert_raw(
+            pool,
+            sid,
+            source="run_completion",
+            source_spec=self._RC_SPEC_OK,
+            action='{"kind": "wake_owner", "content": "hi"}',
+        )
+        # workflow action, float pin + null template (env column REQUIRED).
+        await _insert_raw(
+            pool,
+            sid,
+            source="cron",
+            source_spec='{"schedule": "*/5 * * * *"}',
+            action=self._WF_ACTION_OK,
+            environment_id=env_id,
+        )
+        # int pin + object template + vault list.
+        await _insert_raw(
+            pool,
+            sid,
+            source="cron",
+            source_spec='{"schedule": "*/5 * * * *"}',
+            action='{"kind": "workflow", "workflow_id": "wf_x", "workflow_version": 3, '
+            '"input_template": {"x": 1}, "vault_ids": ["vlt_a"]}',
+            environment_id=env_id,
+        )
+
+    async def test_workflow_action_without_env_column_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        with pytest.raises(asyncpg.CheckViolationError, match="environment_id_iff_workflow"):
+            await _insert_raw(
+                pool,
+                sid,
+                source="cron",
+                source_spec='{"schedule": "*/5 * * * *"}',
+                action=self._WF_ACTION_OK,
+            )
+
+    async def test_non_workflow_action_with_env_column_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        # The iff constraint covers BOTH directions.
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        with pytest.raises(asyncpg.CheckViolationError, match="environment_id_iff_workflow"):
+            await _insert_raw(
+                pool,
+                sid,
+                source="cron",
+                source_spec='{"schedule": "*/5 * * * *"}',
+                action='{"kind": "wake_owner", "content": "hi"}',
+                environment_id=env_id,
+            )
+
+    async def test_run_completion_stray_fire_at_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_raw(
+                pool,
+                sid,
+                source="run_completion",
+                source_spec='{"workflow_id": "wf_x", "statuses": ["completed"], '
+                '"fire_at": "2026-06-11T09:00:00Z"}',
+                action='{"kind": "wake_owner", "content": "hi"}',
+            )
+
+    async def test_run_completion_missing_statuses_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        # statuses ships in the kind's FIRST shape, so it joins the CHECK.
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_raw(
+                pool,
+                sid,
+                source="run_completion",
+                source_spec='{"workflow_id": "wf_x"}',
+                action='{"kind": "wake_owner", "content": "hi"}',
+            )
+
+    async def test_workflow_action_missing_version_key_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        # The §1.1 required-but-nullable idiom: the KEY must be present.
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_raw(
+                pool,
+                sid,
+                source="cron",
+                source_spec='{"schedule": "*/5 * * * *"}',
+                action='{"kind": "workflow", "workflow_id": "wf_x", '
+                '"input_template": null, "vault_ids": []}',
+                environment_id=env_id,
+            )
+
+    async def test_workflow_action_string_version_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_raw(
+                pool,
+                sid,
+                source="cron",
+                source_spec='{"schedule": "*/5 * * * *"}',
+                action='{"kind": "workflow", "workflow_id": "wf_x", "workflow_version": "3", '
+                '"input_template": null, "vault_ids": []}',
+                environment_id=env_id,
+            )
+
+    async def test_workflow_action_missing_template_key_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_raw(
+                pool,
+                sid,
+                source="cron",
+                source_spec='{"schedule": "*/5 * * * *"}',
+                action='{"kind": "workflow", "workflow_id": "wf_x", "workflow_version": null, '
+                '"vault_ids": []}',
+                environment_id=env_id,
+            )
+
+    async def test_workflow_action_object_vault_ids_rejected(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_raw(
+                pool,
+                sid,
+                source="cron",
+                source_spec='{"schedule": "*/5 * * * *"}',
+                action='{"kind": "workflow", "workflow_id": "wf_x", "workflow_version": null, '
+                '"input_template": null, "vault_ids": {}}',
+                environment_id=env_id,
+            )
+
+
+class TestSlice2WritePath:
+    """The shared write-path validator across all three write paths: watched-
+    workflow existence, pin == current, env resolution, cross-tenant 404."""
+
+    async def test_run_completion_echo_round_trips_statuses(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        from aios.models.triggers import RunCompletionSource
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        wf_id = await _make_workflow_e2e(pool)
+        echo = await trig_service.add_trigger(
+            pool,
+            sid,
+            _watch_spec("watcher", wf_id, statuses=["errored"]),
+            account_id="acc_test_stub",
+        )
+        assert isinstance(echo.source, RunCompletionSource)
+        assert echo.source.statuses == ["errored"]
+        assert echo.next_fire is None  # unschedulable by the tick
+
+        listed = await trig_service.list_triggers(pool, sid, account_id="acc_test_stub")
+        src = listed[0].source
+        assert isinstance(src, RunCompletionSource)
+        assert src.statuses == ["errored"]
+
+    async def test_bad_watch_404s(self, pool: Any, env_and_agent: tuple[str, str]) -> None:
+        # The silent-dead-watch guard: a typo'd watch fails at create instead
+        # of sitting dead forever (fire-time never surfaces a non-match).
+        from aios.errors import NotFoundError
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        with pytest.raises(NotFoundError):
+            await trig_service.add_trigger(
+                pool, sid, _watch_spec("watcher", "wf_nonexistent"), account_id="acc_test_stub"
+            )
+
+    async def test_pin_must_equal_current_version(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        # "resolve-latest-at-write": the write resolves what the pin freezes.
+        from aios.errors import ConflictError
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        wf_id = await _make_workflow_e2e(pool)
+        with pytest.raises(ConflictError) as excinfo:
+            await trig_service.add_trigger(
+                pool,
+                sid,
+                _workflow_action_spec("pinned", wf_id, workflow_version=7),
+                account_id="acc_test_stub",
+            )
+        assert excinfo.value.detail == {"pinned": 7, "current": 1}
+
+        echo = await trig_service.add_trigger(
+            pool,
+            sid,
+            _workflow_action_spec("pinned", wf_id, workflow_version=1),
+            account_id="acc_test_stub",
+        )
+        assert echo.name == "pinned"
+
+    async def test_workflow_action_resolves_env_column(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        wf_id = await _make_workflow_e2e(pool)
+        echo = await trig_service.add_trigger(
+            pool, sid, _workflow_action_spec("launcher", wf_id), account_id="acc_test_stub"
+        )
+        async with pool.acquire() as conn:
+            col = await conn.fetchval("SELECT environment_id FROM triggers WHERE id = $1", echo.id)
+        assert col == env_id  # the owner session's env, resolved at write
+
+    async def test_cross_tenant_attach_404s(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Obligation 2 + Seam A: a foreign session_id 404s for ANY action
+        kind — the unconditional account-scoped session read is FIRST in the
+        shared validator (for slice-1 sandbox_command this was cross-tenant
+        code execution at fire time)."""
+        from aios.errors import NotFoundError
+
+        _env_id, _agent_id = env_and_agent  # fixture forces the stub account to exist
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
+                VALUES ('acc_other', 'acc_test_stub', FALSE, 'other-tenant')
+                ON CONFLICT DO NOTHING;
+                INSERT INTO environments (id, name, account_id)
+                VALUES ('env_other', 'other-env', 'acc_other') ON CONFLICT DO NOTHING;
+                INSERT INTO agents (id, name, model, account_id)
+                VALUES ('agn_other', 'other-agent', 'fake/test', 'acc_other')
+                ON CONFLICT DO NOTHING;
+                INSERT INTO sessions
+                    (id, agent_id, environment_id, workspace_volume_path, account_id)
+                VALUES ('sess_other_tenant', 'agn_other', 'env_other', '/tmp/ws-o', 'acc_other')
+                ON CONFLICT DO NOTHING;
+                """
+            )
+        with pytest.raises(NotFoundError):
+            await trig_service.add_trigger(
+                pool, "sess_other_tenant", _spec("intruder"), account_id="acc_test_stub"
+            )
+
+    async def test_session_create_attach_validates_like_post(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """§10.j parity: SessionCreate.triggers routes through the SAME shared
+        validator — bad watch 404s, drifted pin 409s, and a valid workflow
+        action resolves the env column."""
+        from aios.errors import ConflictError, NotFoundError
+
+        env_id, agent_id = env_and_agent
+        wf_id = await _make_workflow_e2e(pool)
+
+        with pytest.raises(NotFoundError):
+            await sessions_service.create_session(
+                pool,
+                agent_id=agent_id,
+                environment_id=env_id,
+                title=None,
+                metadata={},
+                triggers=[_watch_spec("w", "wf_nonexistent")],
+                account_id="acc_test_stub",
+            )
+        with pytest.raises(ConflictError):
+            await sessions_service.create_session(
+                pool,
+                agent_id=agent_id,
+                environment_id=env_id,
+                title=None,
+                metadata={},
+                triggers=[_workflow_action_spec("p", wf_id, workflow_version=9)],
+                account_id="acc_test_stub",
+            )
+
+        session = await sessions_service.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=env_id,
+            title=None,
+            metadata={},
+            triggers=[_workflow_action_spec("launcher", wf_id)],
+            account_id="acc_test_stub",
+        )
+        assert [t.name for t in session.triggers] == ["launcher"]
+        async with pool.acquire() as conn:
+            col = await conn.fetchval(
+                "SELECT environment_id FROM triggers WHERE owner_session_id = $1", session.id
+            )
+        assert col == env_id
+
+    async def test_update_recomputes_env_column_on_action_change(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """§10.h: kind conversions flip the env column BOTH directions in one
+        UPDATE (the iff CHECK would abort a half-flip); a same-kind workflow
+        replacement re-resolves it."""
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        wf_id = await _make_workflow_e2e(pool)
+        echo = await trig_service.add_trigger(
+            pool, sid, _workflow_action_spec("morph", wf_id), account_id="acc_test_stub"
+        )
+
+        async def _env_col() -> str | None:
+            async with pool.acquire() as conn:
+                col: str | None = await conn.fetchval(
+                    "SELECT environment_id FROM triggers WHERE id = $1", echo.id
+                )
+            return col
+
+        assert await _env_col() == env_id
+
+        # workflow → wake_owner: column must flip to NULL in the same UPDATE.
+        await trig_service.update_trigger(
+            pool,
+            sid,
+            "morph",
+            TriggerUpdate.model_validate({"action": {"kind": "wake_owner", "content": "hi"}}),
+            account_id="acc_test_stub",
+        )
+        assert await _env_col() is None
+
+        # wake_owner → workflow: column set again.
+        await trig_service.update_trigger(
+            pool,
+            sid,
+            "morph",
+            TriggerUpdate.model_validate(
+                {
+                    "action": {
+                        "kind": "workflow",
+                        "workflow_id": wf_id,
+                        "workflow_version": None,
+                        "input_template": {"x": 1},
+                        "vault_ids": [],
+                    }
+                }
+            ),
+            account_id="acc_test_stub",
+        )
+        assert await _env_col() == env_id
+
+        # Same-kind replacement re-resolves (env is immutable, so == still).
+        await trig_service.update_trigger(
+            pool,
+            sid,
+            "morph",
+            TriggerUpdate.model_validate(
+                {
+                    "action": {
+                        "kind": "workflow",
+                        "workflow_id": wf_id,
+                        "workflow_version": None,
+                        "input_template": None,
+                        "vault_ids": [],
+                    }
+                }
+            ),
+            account_id="acc_test_stub",
+        )
+        assert await _env_col() == env_id
+
+
+class TestSlice2ClonePropagation:
+    async def test_clone_session_copies_workflow_action_trigger(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """The §6.1 clone-crash class, resurrected by the new column: without
+        the clone INSERT carrying environment_id, this aborts on the iff CHECK."""
+        env_id, agent_id = env_and_agent
+        parent_sid = await _create_session(pool, env_id, agent_id)
+        wf_id = await _make_workflow_e2e(pool)
+        await trig_service.add_trigger(
+            pool,
+            parent_sid,
+            _workflow_action_spec("launcher", wf_id),
+            account_id="acc_test_stub",
+        )
+
+        clone = await sessions_service.clone_session(pool, parent_sid, account_id="acc_test_stub")
+        assert [t.name for t in clone.triggers] == ["launcher"]
+        async with pool.acquire() as conn:
+            col = await conn.fetchval(
+                "SELECT environment_id FROM triggers WHERE owner_session_id = $1", clone.id
+            )
+        # Verbatim copy is correct-by-construction: the clone's session row
+        # copies the parent's environment, so trigger-env == owner-env holds.
+        assert col == env_id
+
+    async def test_clone_session_copies_run_completion_trigger(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        from aios.models.triggers import RunCompletionSource
+
+        env_id, agent_id = env_and_agent
+        parent_sid = await _create_session(pool, env_id, agent_id)
+        wf_id = await _make_workflow_e2e(pool)
+        await trig_service.add_trigger(
+            pool, parent_sid, _watch_spec("watcher", wf_id), account_id="acc_test_stub"
+        )
+
+        clone = await sessions_service.clone_session(pool, parent_sid, account_id="acc_test_stub")
+        clone_triggers = await trig_service.list_triggers(
+            pool, clone.id, account_id="acc_test_stub"
+        )
+        assert len(clone_triggers) == 1
+        src = clone_triggers[0].source
+        assert isinstance(src, RunCompletionSource)
+        assert src.workflow_id == wf_id
+        assert clone_triggers[0].next_fire is None  # stays tick-unschedulable
+
+
+class TestTriggerRunsRoute:
+    """GET /v1/sessions/{sid}/triggers/{name}/runs — the per-fire audit read.
+
+    Keyed by the audit table's DENORMALIZED columns, never the live trigger
+    row: one-shot tombstones and a deleted trigger's history stay reachable.
+    """
+
+    async def _seed_audit_rows(self, pool: Any, sid: str, name: str, n: int) -> str:
+        echo = await trig_service.add_trigger(
+            pool,
+            sid,
+            TriggerCreate.model_validate(
+                {
+                    "name": name,
+                    "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+                    "action": {"kind": "wake_owner", "content": "tick"},
+                }
+            ),
+            account_id="acc_test_stub",
+        )
+        async with pool.acquire() as conn:
+            for i in range(n):
+                await queries.record_trigger_run(
+                    conn,
+                    trigger_id=echo.id,
+                    account_id="acc_test_stub",
+                    owner_session_id=sid,
+                    trigger_name=name,
+                    trigger_context="cron",
+                    status="ok" if i % 2 == 0 else "error",
+                    error_summary=None if i % 2 == 0 else f"boom {i}",
+                    result_id=None,
+                    started_at=datetime.now(UTC) + timedelta(seconds=i),
+                )
+        return echo.id
+
+    async def test_lists_newest_first_with_limit(
+        self, pool: Any, http_client: httpx.AsyncClient, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        await self._seed_audit_rows(pool, sid, "audited", 3)
+
+        r = await http_client.get(f"/v1/sessions/{sid}/triggers/audited/runs")
+        assert r.status_code == 200, r.text
+        rows = r.json()["data"]
+        assert len(rows) == 3
+        created = [row["created_at"] for row in rows]
+        assert created == sorted(created, reverse=True)  # newest first
+        assert {row["trigger_context"] for row in rows} == {"cron"}
+
+        r = await http_client.get(f"/v1/sessions/{sid}/triggers/audited/runs?limit=2")
+        assert len(r.json()["data"]) == 2
+
+    async def test_history_survives_trigger_deletion(
+        self, pool: Any, http_client: httpx.AsyncClient, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        await self._seed_audit_rows(pool, sid, "ghost", 2)
+        await trig_service.remove_trigger(pool, sid, "ghost", account_id="acc_test_stub")
+
+        r = await http_client.get(f"/v1/sessions/{sid}/triggers/ghost/runs")
+        assert r.status_code == 200, r.text
+        assert len(r.json()["data"]) == 2  # the audit outlives the trigger
+
+    async def test_account_scoped(self, pool: Any, env_and_agent: tuple[str, str]) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        await self._seed_audit_rows(pool, sid, "scoped", 1)
+        rows = await trig_service.list_trigger_runs(
+            pool, sid, "scoped", account_id="acc_someone_else"
+        )
+        assert rows == []

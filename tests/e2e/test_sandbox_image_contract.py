@@ -11,6 +11,7 @@ no Postgres, no async. They require only a Docker daemon.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -103,7 +104,7 @@ def _docker_run(
         "tool",  # sandbox-native broker CLI (baked from repo bin/tool; #635)
         "node",  # so agents can run npm packages without first apt-installing the runtime
         "npm",
-        "tail",  # the image CMD is `tail -f /dev/null`
+        "tail",  # the image CMD is `/usr/bin/tail -f /dev/null`
         "cat",
         "head",
         "grep",
@@ -120,6 +121,35 @@ def test_binary_available(pulled_image: str, binary: str) -> None:
     """
     r = _docker_run(pulled_image, "which", binary)
     assert r.returncode == 0, f"{binary!r} not found: {r.stderr}"
+
+
+def test_tail_at_absolute_path(pulled_image: str) -> None:
+    """The image CMD is `/usr/bin/tail -f /dev/null` (absolute path — see
+    docker/Dockerfile.sandbox and DockerBackend._flatten). Pin the binary at
+    that exact path so a base-image swap relocating `tail` is caught in CI,
+    not at container init with an opaque `exec` failure (#925, #938)."""
+    r = _docker_run(pulled_image, "test", "-x", "/usr/bin/tail")
+    assert r.returncode == 0, f"/usr/bin/tail not executable in image: {r.stderr}"
+
+
+def test_image_cmd_uses_absolute_tail(pulled_image: str) -> None:
+    """The image's configured CMD must invoke tail by absolute path.
+
+    test_tail_at_absolute_path proves the binary exists at /usr/bin/tail;
+    this proves the image is actually configured to *use* it. Together they
+    catch both a base-image swap that relocates tail and a regression that
+    reverts the CMD to bare `tail` (PATH-dependent, the #938/#925 failure)."""
+    r = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .Config.Cmd}}", pulled_image],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert r.returncode == 0, f"docker inspect failed: {r.stderr}"
+    assert json.loads(r.stdout) == ["/usr/bin/tail", "-f", "/dev/null"], (
+        f"image CMD is {r.stdout.strip()}, expected absolute-path tail keepalive"
+    )
 
 
 # -- runtime behaviour ---------------------------------------------------------

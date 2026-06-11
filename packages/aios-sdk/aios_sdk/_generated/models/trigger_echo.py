@@ -13,9 +13,11 @@ from ..models.trigger_echo_last_fire_status_type_0 import TriggerEchoLastFireSta
 if TYPE_CHECKING:
     from ..models.cron_source import CronSource
     from ..models.one_shot_source import OneShotSource
+    from ..models.run_completion_source import RunCompletionSource
     from ..models.sandbox_command_action import SandboxCommandAction
     from ..models.trigger_echo_metadata import TriggerEchoMetadata
     from ..models.wake_owner_action import WakeOwnerAction
+    from ..models.workflow_action import WorkflowAction
 
 
 T = TypeVar("T", bound="TriggerEcho")
@@ -33,8 +35,8 @@ class TriggerEcho:
         Attributes:
             id (str):
             name (str):
-            source (CronSource | OneShotSource):
-            action (SandboxCommandAction | WakeOwnerAction):
+            source (CronSource | OneShotSource | RunCompletionSource):
+            action (SandboxCommandAction | WakeOwnerAction | WorkflowAction):
             enabled (bool):
             next_fire (datetime.datetime | None):
             last_fire_at (datetime.datetime | None):
@@ -47,8 +49,8 @@ class TriggerEcho:
 
     id: str
     name: str
-    source: CronSource | OneShotSource
-    action: SandboxCommandAction | WakeOwnerAction
+    source: CronSource | OneShotSource | RunCompletionSource
+    action: SandboxCommandAction | WakeOwnerAction | WorkflowAction
     enabled: bool
     next_fire: datetime.datetime | None
     last_fire_at: datetime.datetime | None
@@ -61,7 +63,9 @@ class TriggerEcho:
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.cron_source import CronSource
+        from ..models.one_shot_source import OneShotSource
         from ..models.sandbox_command_action import SandboxCommandAction
+        from ..models.wake_owner_action import WakeOwnerAction
 
         id = self.id
 
@@ -70,11 +74,15 @@ class TriggerEcho:
         source: dict[str, Any]
         if isinstance(self.source, CronSource):
             source = self.source.to_dict()
+        elif isinstance(self.source, OneShotSource):
+            source = self.source.to_dict()
         else:
             source = self.source.to_dict()
 
         action: dict[str, Any]
         if isinstance(self.action, SandboxCommandAction):
+            action = self.action.to_dict()
+        elif isinstance(self.action, WakeOwnerAction):
             action = self.action.to_dict()
         else:
             action = self.action.to_dict()
@@ -132,16 +140,20 @@ class TriggerEcho:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.cron_source import CronSource
         from ..models.one_shot_source import OneShotSource
+        from ..models.run_completion_source import RunCompletionSource
         from ..models.sandbox_command_action import SandboxCommandAction
         from ..models.trigger_echo_metadata import TriggerEchoMetadata
         from ..models.wake_owner_action import WakeOwnerAction
+        from ..models.workflow_action import WorkflowAction
 
         d = dict(src_dict)
         id = d.pop("id")
 
         name = d.pop("name")
 
-        def _parse_source(data: object) -> CronSource | OneShotSource:
+        def _parse_source(
+            data: object,
+        ) -> CronSource | OneShotSource | RunCompletionSource:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
@@ -150,15 +162,25 @@ class TriggerEcho:
                 return source_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                source_type_1 = OneShotSource.from_dict(data)
+
+                return source_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
             if not isinstance(data, dict):
                 raise TypeError()
-            source_type_1 = OneShotSource.from_dict(data)
+            source_type_2 = RunCompletionSource.from_dict(data)
 
-            return source_type_1
+            return source_type_2
 
         source = _parse_source(d.pop("source"))
 
-        def _parse_action(data: object) -> SandboxCommandAction | WakeOwnerAction:
+        def _parse_action(
+            data: object,
+        ) -> SandboxCommandAction | WakeOwnerAction | WorkflowAction:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
@@ -167,11 +189,19 @@ class TriggerEcho:
                 return action_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                action_type_1 = WakeOwnerAction.from_dict(data)
+
+                return action_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
             if not isinstance(data, dict):
                 raise TypeError()
-            action_type_1 = WakeOwnerAction.from_dict(data)
+            action_type_2 = WorkflowAction.from_dict(data)
 
-            return action_type_1
+            return action_type_2
 
         action = _parse_action(d.pop("action"))
 
