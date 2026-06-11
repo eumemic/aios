@@ -430,7 +430,8 @@ class TestProvisionSkillFiles:
             monkeypatch.setattr(settings, "workspaces_owner_gid", 1000)
             monkeypatch.setattr(os, "geteuid", lambda: 0)
             chowns: list[tuple[str, int, int]] = []
-            monkeypatch.setattr(os, "chown", lambda p, u, g: chowns.append((str(p), u, g)))
+            # ensure_owned_dir uses os.lchown (symlink-swap-race-safe; #959 FIX C).
+            monkeypatch.setattr(os, "lchown", lambda p, u, g: chowns.append((str(p), u, g)))
 
             # NOTE: do NOT patch ensure_workspace_path/ensure_owned_dir here —
             # the chown behaviour under test lives inside them.

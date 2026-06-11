@@ -79,11 +79,22 @@ def ensure_owned_dir(path: Path) -> Path:
     if os.geteuid() == 0:
         uid, gid = settings.workspaces_owner_uid, settings.workspaces_owner_gid
         for component in newly:
+            # The setting owns dirs UNDER workspace_root only. If a caller passed
+            # a path outside the tree (the mkdir honors any path — caller's
+            # contract), the component-walk collected out-of-tree ancestors; do
+            # NOT chown those.
+            if not component.is_relative_to(root):
+                continue
             # A racing provision may have created+chowned this component first
             # (benign), but the failure must stay observable per CLAUDE.md's
             # no-silent-error stance — log and continue rather than crash.
             try:
-                os.chown(component, uid, gid)
+                # lchown (not chown): closes the mkdir→chown symlink-swap race —
+                # a container with workspace write access could replace a
+                # freshly-created component with a symlink before we chown,
+                # redirecting os.chown to an out-of-tree target. Matches the
+                # repair path's lchown.
+                os.lchown(component, uid, gid)
             except OSError as e:
                 log.warning("workspace.chown_failed", path=str(component), error=str(e))
     return path

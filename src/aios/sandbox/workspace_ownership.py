@@ -85,13 +85,21 @@ def repair_workspace_ownership() -> int:
             return False
         except OSError as e:
             # One bad entry must not crash worker startup.
-            log.info("workspace.ownership_repair_failed", path=str(path), error=str(e))
+            log.warning("workspace.ownership_repair_failed", path=str(path), error=str(e))
             return False
 
     count = 0
     if _repair_one(root):
         count += 1
-    for entry in root.iterdir():
+    # A listing failure (workspace_root races a chmod, NFS hiccup, etc.) must
+    # not propagate out of this defense-in-depth pass and crash worker startup;
+    # log and return the partial count gathered so far.
+    try:
+        entries = list(root.iterdir())
+    except OSError as e:
+        log.warning("workspace.ownership_scan_failed", path=str(root), error=str(e))
+        return count
+    for entry in entries:
         if _repair_one(entry):
             count += 1
         # Descend exactly one level into shared roots and account/legacy dirs.
@@ -102,7 +110,12 @@ def repair_workspace_ownership() -> int:
         if not entry.is_dir(follow_symlinks=False):
             continue
         if entry.name in _SHARED_ROOTS or entry.name.startswith(_DESCEND_PREFIXES):
-            for child in entry.iterdir():
+            try:
+                children = list(entry.iterdir())
+            except OSError as e:
+                log.warning("workspace.ownership_scan_failed", path=str(entry), error=str(e))
+                continue
+            for child in children:
                 if _repair_one(child):
                     count += 1
     return count

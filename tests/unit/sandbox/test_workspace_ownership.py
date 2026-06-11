@@ -8,7 +8,7 @@ newly-created components to the configured owner when running as root;
 ``repair_workspace_ownership`` fixes pre-existing root-owned residue on a
 bounded frontier at worker startup.
 
-No root needed: ``os.geteuid`` is monkeypatched and ``os.chown`` is
+No root needed: ``os.geteuid`` is monkeypatched and ``os.lchown`` is
 recorded rather than executed.
 """
 
@@ -38,8 +38,10 @@ def _owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _record_chowns(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int, int]]:
+    """Recorder for ``ensure_owned_dir``, which uses ``os.lchown`` (symlink-aware,
+    closing the mkdir→chown symlink-swap race; see #959 hardening FIX C)."""
     chowns: list[tuple[str, int, int]] = []
-    monkeypatch.setattr(os, "chown", lambda p, u, g: chowns.append((str(p), u, g)))
+    monkeypatch.setattr(os, "lchown", lambda p, u, g: chowns.append((str(p), u, g)))
     return chowns
 
 
@@ -125,6 +127,34 @@ class TestEnsureOwnedDir:
         chowned_paths = {p for p, _u, _g in chowns}
         assert str(_owner / "_uploads") in chowned_paths
         assert str(_owner / "_uploads" / "sess_uploads") in chowned_paths
+
+    def test_ensure_owned_dir_does_not_chown_outside_workspace_root(
+        self, _owner: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FIX D: when a caller passes a path NOT under ``workspace_root`` while
+        running as root, the mkdir still runs (caller's contract) but NO
+        component outside the tree is chowned — the setting owns dirs under
+        ``workspace_root`` only."""
+        settings = get_settings()
+        # Point workspace_root at a subdir so the target is provably outside it.
+        ws = _owner / "ws"
+        monkeypatch.setattr(settings, "workspace_root", ws)
+        chowns = _record_chowns(monkeypatch)
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+        outside = _owner / "outside" / "sub"
+        try:
+            result = ensure_owned_dir(outside)
+
+            assert result == outside
+            assert outside.is_dir()  # mkdir still honored the requested path
+            # No component outside workspace_root was chowned (ideally zero).
+            assert chowns == []
+        finally:
+            # Clean up the out-of-tree dir so tmp_path teardown is unaffected.
+            for d in (outside, outside.parent):
+                if d.exists():
+                    d.rmdir()
 
 
 class TestRepairWorkspaceOwnership:
@@ -262,3 +292,44 @@ class TestRepairWorkspaceOwnership:
         # (b) No descent into the symlink target: its external child is untouched.
         assert str(external / "secret_child") not in lchowns
         assert str(external) not in lchowns
+
+    def test_repair_survives_iterdir_oserror(
+        self, _owner: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FIX A: an OSError from the directory-enumeration walk (workspace_root
+        races a chmod, NFS hiccup, etc.) must NOT propagate out of the repair
+        pass and crash worker startup. The function returns a partial/zero count
+        and logs the scan-failed warning."""
+        settings = get_settings()
+        # Pin owner to the real on-disk owner so _repair_one(root) is a no-op:
+        # the only behavior under test is the iterdir-failure handling.
+        monkeypatch.setattr(settings, "workspaces_owner_uid", os.getuid())
+        monkeypatch.setattr(settings, "workspaces_owner_gid", os.getgid())
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+        (_owner / "_uploads" / "sess_A").mkdir(parents=True)
+
+        real_iterdir = Path.iterdir
+        target = _owner.resolve()
+
+        def _boom_iterdir(self: Path) -> object:
+            if self.resolve() == target:
+                raise OSError("listing failed")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", _boom_iterdir)
+
+        warnings: list[tuple[str, dict[str, object]]] = []
+        import aios.sandbox.workspace_ownership as wo
+
+        monkeypatch.setattr(
+            wo.log,
+            "warning",
+            lambda event, **kw: warnings.append((event, kw)),
+        )
+
+        # Must not raise; returns an int (partial/zero count).
+        count = repair_workspace_ownership()
+
+        assert isinstance(count, int)
+        assert any(event == "workspace.ownership_scan_failed" for event, _ in warnings)

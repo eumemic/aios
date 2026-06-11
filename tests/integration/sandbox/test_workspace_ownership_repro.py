@@ -8,7 +8,7 @@ CI does not run as root, so we use ``chmod 0o555`` (read+exec, no write)
 as a non-root proxy for "a dir the current process can't write into" —
 the same ``PermissionError`` the api hits against a root-owned dir. The
 ``ensure_owned_dir`` chown fix and the ``repair_workspace_ownership``
-pass are exercised with ``os.geteuid`` mocked to root and ``os.chown``
+pass are exercised with ``os.geteuid`` mocked to root and ``os.lchown``
 recorded (a non-root process can't really chown to another uid).
 """
 
@@ -61,9 +61,10 @@ def test_full_sequence_worker_create_repair_then_api_write(
     """Worker-create (root, chown recorded) → repair → api-side leaf
     mkdir succeeds against the writable tree."""
     # ── Phase 1: worker creates the shared tree as root; chown recorded.
+    # ``ensure_owned_dir`` uses ``os.lchown`` (symlink-swap-race-safe; FIX C).
     settings = get_settings()
     phase1_chowns: list[tuple[str, int, int]] = []
-    monkeypatch.setattr(os, "chown", lambda p, u, g: phase1_chowns.append((str(p), u, g)))
+    monkeypatch.setattr(os, "lchown", lambda p, u, g: phase1_chowns.append((str(p), u, g)))
     monkeypatch.setattr(os, "geteuid", lambda: 0)
 
     ensure_session_uploads_dir("sess_1")
