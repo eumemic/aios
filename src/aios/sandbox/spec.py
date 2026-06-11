@@ -27,9 +27,8 @@ import os
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from aios.config import get_settings
 from aios.db import queries
@@ -68,6 +67,14 @@ from aios.services import sessions as sessions_service
 from aios.services.vaults import ResolvedEnvVarCredential, resolve_session_env_var_credentials
 
 if TYPE_CHECKING:
+    # Type-only: the step-time drift probe folds these through
+    # ``mount_snapshot_from_echoes``. A runtime import isn't needed — the param
+    # is only used structurally (``.credential_id`` / ``.updated_at``) — so a
+    # TYPE_CHECKING import keeps the annotation honest without coupling.
+    # (``aios.db.queries`` is already imported at module level, so this is no
+    # new dependency edge regardless.)
+    from aios.db.queries import EnvVarCredentialEcho
+
     # Imported for typing only at module level: a runtime top-level import
     # would pull in ``aios.tools`` (via ``secret_egress_proxy`` →
     # ``url_safety``) whose package ``__init__`` imports ``bash``, which
@@ -167,25 +174,10 @@ class ProvisioningPlan:
     secret_proxy: SecretEgressProxy | None = None
 
 
-class _EnvVarCredentialLike(Protocol):
-    """The structural shape the env-var drift fold needs from a credential.
-
-    Provision passes :class:`ResolvedEnvVarCredential`; the per-step probe
-    passes :class:`aios.db.queries.EnvVarCredentialEcho`. Both satisfy this,
-    so :func:`mount_snapshot_from_echoes` folds them identically (constraint A).
-    """
-
-    @property
-    def credential_id(self) -> str: ...
-
-    @property
-    def updated_at(self) -> datetime: ...
-
-
 def mount_snapshot_from_echoes(
     memory_echoes: list[MemoryStoreResourceEcho] | tuple[MemoryStoreResourceEcho, ...],
     github_echoes: list[GithubRepositoryResourceEcho] | tuple[GithubRepositoryResourceEcho, ...],
-    env_var_credentials: Sequence[_EnvVarCredentialLike] = (),
+    env_var_credentials: Sequence[ResolvedEnvVarCredential | EnvVarCredentialEcho] = (),
 ) -> frozenset[tuple[str, ...]]:
     """The set of inputs that determines the spec's mount/credential surface.
 
@@ -195,12 +187,12 @@ def mount_snapshot_from_echoes(
     include ``updated_at`` so a token/secret rotation (which bumps
     ``updated_at``) propagates to a sandbox recycle (#877).
 
-    ``env_var_credentials`` is structural — provision passes
-    :class:`ResolvedEnvVarCredential`, the per-step drift probe passes
-    :class:`aios.db.queries.EnvVarCredentialEcho`. Both fold to the SAME
-    ``(VAULT_CREDENTIAL, credential_id, updated_at)`` element, so the
-    provision-time snapshot stamped on the handle matches the step-time
-    echo set (no spurious first-step recycle).
+    ``env_var_credentials`` is a closed union of exactly the two co-located
+    credential shapes — provision passes :class:`ResolvedEnvVarCredential`, the
+    per-step drift probe passes :class:`aios.db.queries.EnvVarCredentialEcho`.
+    Both fold to the SAME ``(VAULT_CREDENTIAL, credential_id, updated_at)``
+    element, so the provision-time snapshot stamped on the handle matches the
+    step-time echo set (no spurious first-step recycle).
     """
     from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, VAULT_CREDENTIAL
 
@@ -507,9 +499,19 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
         # env-var credentials (#877). Inert until #878 routes egress through
         # it; the registry owns its lifecycle from the returned plan,
         # mirroring git_proxy.
+        #
+        # Construct + start into a LOCAL, and only publish to the outer
+        # ``secret_proxy`` once ``start()`` has returned cleanly. ``start()``
+        # self-cleans on failure (its own ``except`` calls ``await self.stop()``
+        # then re-raises), so a start failure must leave ``secret_proxy`` None —
+        # otherwise the outer cleanup below would stop an already-closed proxy a
+        # SECOND time. This mirrors git_proxy, whose ref comes from
+        # ``_materialize_github_clones``'s return value (only set on a clean
+        # start).
         if env_var_credentials:
-            secret_proxy = SecretEgressProxy(env_var_credentials)
-            await secret_proxy.start()
+            proxy = SecretEgressProxy(env_var_credentials)
+            await proxy.start()
+            secret_proxy = proxy
 
         tool_broker_secret = secrets.token_urlsafe(32)
         tool_broker.register_session(session_id, tool_broker_secret)

@@ -518,10 +518,29 @@ class SandboxRegistry:
             await proxy.stop()
         except Exception as err:
             log.warning(
-                f"sandbox.{kind}_stop_failed",
+                "sandbox.proxy_stop_failed",
+                kind=kind,
                 session_id=session_id,
                 error=str(err),
             )
+
+    def _spawn_evict_proxy_stop(
+        self, proxy: GitProxy | SecretEgressProxy, session_id: str, *, kind: str
+    ) -> None:
+        """Fire-and-forget stop of an evicted proxy, holding a strong ref.
+
+        ``evict`` is on a retry path and can't block on ``stop()``'s up-to-5s
+        graceful drain, so the stop runs as a detached task. asyncio only
+        weak-refs tasks, so the task is parked in ``_evict_proxy_stop_tasks``
+        (cleared via a done-callback) to keep it alive until ``stop()`` unwinds
+        the proxy's uvicorn server, httpx client and bound TCP port.
+        """
+        task = asyncio.create_task(
+            self._stop_proxy_silently(proxy, session_id, kind=kind),
+            name=f"sandbox-evict-{kind}-stop:{session_id}",
+        )
+        self._evict_proxy_stop_tasks.add(task)
+        task.add_done_callback(self._evict_proxy_stop_tasks.discard)
 
     def _release_tool_broker_secret(self, session_id: str) -> None:
         """Drop the per-session entry from the tool broker's secret map.
@@ -983,22 +1002,12 @@ class SandboxRegistry:
         # from the next provision pass. Both stops are fire-and-forget
         # (the caller is on a retry path) and share the strong-ref set so
         # neither task is GC'd before stop() unwinds its server/port.
-        proxy = self._git_proxies.pop(session_id, None)
-        if proxy is not None:
-            task = asyncio.create_task(
-                self._stop_proxy_silently(proxy, session_id, kind="git_proxy"),
-                name=f"sandbox-evict-proxy-stop:{session_id}",
-            )
-            self._evict_proxy_stop_tasks.add(task)
-            task.add_done_callback(self._evict_proxy_stop_tasks.discard)
+        git_proxy = self._git_proxies.pop(session_id, None)
+        if git_proxy is not None:
+            self._spawn_evict_proxy_stop(git_proxy, session_id, kind="git_proxy")
         secret_proxy = self._secret_proxies.pop(session_id, None)
         if secret_proxy is not None:
-            secret_task = asyncio.create_task(
-                self._stop_proxy_silently(secret_proxy, session_id, kind="secret_proxy"),
-                name=f"sandbox-evict-secret-proxy-stop:{session_id}",
-            )
-            self._evict_proxy_stop_tasks.add(secret_task)
-            secret_task.add_done_callback(self._evict_proxy_stop_tasks.discard)
+            self._spawn_evict_proxy_stop(secret_proxy, session_id, kind="secret_proxy")
         # Same story for the tool broker secret: drop it immediately; a
         # fresh sandbox will get a fresh secret from the next provision.
         self._release_tool_broker_secret(session_id)

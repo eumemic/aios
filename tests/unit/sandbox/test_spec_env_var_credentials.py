@@ -250,6 +250,50 @@ async def test_failure_after_proxy_starts_stops_both_proxies() -> None:
     broker.unregister_session.assert_called_once_with("sess_01TEST")
 
 
+async def test_secret_proxy_start_failure_does_not_double_stop() -> None:
+    """``SecretEgressProxy.start()`` self-cleans on failure (its own ``except``
+    calls ``await self.stop()`` then re-raises). The outer cleanup envelope must
+    NOT stop the proxy a SECOND time — a double ``stop()`` re-closes an
+    already-closed httpx client and mis-logs a spurious cleanup failure.
+
+    Modelled faithfully: the mock's ``start()`` calls its own ``stop()`` then
+    raises, mirroring the real self-clean. ``stop`` is therefore expected
+    exactly once (the self-clean); a second call would mean the outer ``except``
+    re-stopped a proxy it should never have tracked.
+    """
+    secret_proxy = MagicMock()
+    secret_proxy.stop = AsyncMock()
+
+    async def _start_then_self_clean() -> None:
+        # Mirror the real start(): on a bind failure it awaits self.stop()
+        # before re-raising, so the caller must never call stop() again.
+        await secret_proxy.stop()
+        raise RuntimeError("bind failed")
+
+    secret_proxy.start = AsyncMock(side_effect=_start_then_self_clean)
+    broker = MagicMock()
+    broker.port = 54321
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+            github_clones=AsyncMock(return_value=([], None)),
+            tool_broker=broker,
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(
+            patch("aios.sandbox.spec.SecretEgressProxy", MagicMock(return_value=secret_proxy))
+        )
+        with pytest.raises(RuntimeError, match="bind failed"):
+            await build_spec_from_session("sess_01TEST")
+
+    # Exactly once: the self-clean inside start(). The outer cleanup must NOT
+    # re-stop it (secret_proxy was never published past the failed start).
+    secret_proxy.stop.assert_awaited_once()
+    # The start failure fired before the broker secret was registered, so the
+    # broker is never touched on this path either.
+    broker.register_session.assert_not_called()
+
+
 def test_placeholder_is_stable_across_recycle() -> None:
     """The placeholder is a pure function of ``(subkey, session_id,
     credential_id)`` — two mints with the same ids are equal.
