@@ -77,6 +77,9 @@ async def wf_runtime(
             # The fire-and-forget tool task's own wake — patch it too, else it enqueues a
             # real wake_workflow job against the test DB (the harvest is driven manually).
             mock.patch("aios.workflows.run_tools.defer_run_wake", new=AsyncMock()),
+            # The service-level archive/delete now eagerly fail open child requests and
+            # defer a run wake after commit — patch it so they don't enqueue a real job.
+            mock.patch("aios.services.sessions.defer_run_wake", new=AsyncMock()),
         ):
             yield pool
     finally:
@@ -1443,8 +1446,10 @@ async def test_operator_archived_child_resolves_run_as_child_gone(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
     """An operator archiving a *running* child before it answers must not hang the
-    run: derive_response sees the child is no longer live and resolves the call as a
-    catchable AgentError(child_gone)."""
+    run. The service-level archive EAGERLY fails the child's open request through the
+    write_child_response seam (error child_gone) + writes its child_done signal, so the
+    run is sweep-visible within a tick — no waiting out the 1h agent deadline. The
+    harvest then resolves the call as a catchable AgentError(child_gone)."""
     pool = wf_runtime
     script = (
         "async def main(input):\n"
@@ -1456,8 +1461,24 @@ async def test_operator_archived_child_resolves_run_as_child_gone(
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     child_id = await _child_id_of(pool, run_id)
-    async with pool.acquire() as conn:  # operator archives the child mid-flight
-        await db_queries.archive_session(conn, child_id, account_id="acc_wf")
+    request_id = await _open_request_id(pool, child_id)  # capture BEFORE archiving
+
+    # Suspended, no signal, not past the agent deadline → not yet sweep-visible.
+    assert run_id not in await _needing(pool)
+
+    # Operator archives the child mid-flight, via the SERVICE-level path under test.
+    await sessions_service.archive_session(pool, child_id, account_id="acc_wf")
+
+    # CORE #904 ASSERTION: the eager child_done signal makes the run sweep-visible
+    # WITHOUT aging the wall-clock — it appears in the needs-step set immediately.
+    assert run_id in await _needing(pool)
+
+    # The request was failed immediately, before any further step ran.
+    async with pool.acquire() as conn:
+        resolved = await db_queries.derive_response(
+            conn, child_id, account_id="acc_wf", request_id=request_id
+        )
+    assert resolved == {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
 
     await run_workflow_step(run_id)  # harvest -> child_gone -> AgentError -> caught
     async with pool.acquire() as conn:
@@ -1469,8 +1490,12 @@ async def test_operator_archived_child_resolves_run_as_child_gone(
 async def test_operator_deleted_child_resolves_run_as_child_gone(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
-    """Same totality guarantee when the child is hard-deleted (its events are gone):
-    the run resolves from the child's absence, not a written response."""
+    """Same totality guarantee when the child is hard-deleted. The service-level
+    delete EAGERLY fails the open request through write_child_response FIRST (so its
+    child_gone response + child_done signal commit before the cascade wipes the child's
+    events), making the run sweep-visible within a tick. The signal survives the
+    cascade (it lives in wf_run_signals, not the child's events); the harvest resolves
+    child_gone from the signal, not a re-read of the now-absent child."""
     pool = wf_runtime
     script = (
         "async def main(input):\n"
@@ -1482,13 +1507,60 @@ async def test_operator_deleted_child_resolves_run_as_child_gone(
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     child_id = await _child_id_of(pool, run_id)
+    request_id = await _open_request_id(pool, child_id)  # the agent call_key; capture BEFORE delete
+
+    assert run_id not in await _needing(pool)
+
+    await sessions_service.delete_session(pool, child_id, account_id="acc_wf")
+
+    # Eagerness: the child_done signal makes the run sweep-visible immediately.
+    assert run_id in await _needing(pool)
+
     async with pool.acquire() as conn:
-        await db_queries.delete_session(conn, child_id, account_id="acc_wf")
+        # The child_done signal survived the events cascade (lives in wf_run_signals).
+        signal = await wf_queries.read_run_signal(conn, run_id, request_id)
+        # The child session row is gone.
+        with pytest.raises(NotFoundError):
+            await db_queries.get_session_bare(conn, child_id, account_id="acc_wf")
+    assert signal is not None and signal.kind == "child_done"
 
     await run_workflow_step(run_id)  # harvest -> child_gone -> AgentError -> caught
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "completed" and run.output == "child_gone"
+
+
+async def test_archive_child_commits_response_and_child_done_atomically(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """Acceptance #3: the child_gone response, its child_done signal, and the
+    archived_at flip all commit in ONE transaction — observable together afterward."""
+    pool = wf_runtime
+    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+    request_id = await _open_request_id(pool, child_id)
+
+    await sessions_service.archive_session(pool, child_id, account_id="acc_wf")
+
+    async with pool.acquire() as conn:
+        # (a) the request_response lifecycle event was written with error child_gone.
+        response = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=request_id
+        )
+        # (b) the child_done signal exists for (run_id, request_id).
+        signal = await wf_queries.read_run_signal(conn, run_id, request_id)
+        # (c) the session's archived_at is set.
+        archived_at = await conn.fetchval(
+            "SELECT archived_at FROM sessions WHERE id = $1 AND account_id = $2",
+            child_id,
+            "acc_wf",
+        )
+    assert response is not None and response["is_error"] is True
+    assert response["error"] == {"kind": "child_gone"}
+    assert signal is not None and signal.kind == "child_done"
+    assert archived_at is not None
 
 
 # ─── G — parallel() spawns a child fan-out and collects results ───────────────
