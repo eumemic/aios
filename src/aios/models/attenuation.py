@@ -360,9 +360,12 @@ def attenuate(
     """The lattice meet: ``declared`` clamped to never exceed ``launcher``.
 
     Per identity key in ``declared``: absent from ``launcher`` → drop; present → the
-    per-dimension meet, dropping if it bottoms out. Servers survive only on an exact
-    key match and are emitted **launcher-verbatim** (parent-wins-frozen: routes and
-    headers come from the launcher; the child narrows only by dropping whole servers).
+    per-dimension meet, dropping if it bottoms out. Servers survive only on a key match
+    and are emitted **launcher-verbatim** (parent-wins-frozen: routes and headers come
+    from the launcher; the child narrows only by dropping whole servers). http servers
+    survive on a ``base_url`` key and are emitted launcher-verbatim — the child's declared
+    routes are inert here, consistent with the authoring gate, which now admits http
+    servers by identity (``(name, base_url)``) and inherits the launcher's frozen routes.
     MCP servers key on the joint ``(name, url)`` — a re-pointed name is a different key
     and drops. Output is canonical (``attenuate(d, l)`` is a fixpoint of ``canonicalize``).
     """
@@ -410,6 +413,12 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
     ``expected`` is ``canonicalize(declared)``; ``actual`` is ``attenuate(declared,
     launcher)``. Used to build the author-edge ``ForbiddenError`` detail — names the
     exact tools/servers the declared surface exceeded the actor on.
+
+    Tools and mcp_servers are full-equality keyed checks (the value must match, not just
+    the key) — a widened per-tool policy or a re-pointed server is flagged. http_servers
+    are identity-keyed on ``(name, base_url)`` (membership only): a server is flagged iff
+    its identity is absent from ``actual``, never for a route/field divergence — the
+    authoring gate inherits the launcher's frozen routes, so identity is the whole test.
     """
     out: dict[str, list[str]] = {}
 
@@ -427,8 +436,8 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
     if bad_mcp:
         out["mcp_servers"] = bad_mcp
 
-    actual_http = {s.base_url: s for s in actual.http_servers}
-    bad_http = [s.name for s in expected.http_servers if actual_http.get(s.base_url) != s]
+    actual_ids = {(s.name, s.base_url) for s in actual.http_servers}
+    bad_http = [s.name for s in expected.http_servers if (s.name, s.base_url) not in actual_ids]
     if bad_http:
         out["http_servers"] = bad_http
 
