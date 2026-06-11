@@ -68,13 +68,17 @@ class BashArgumentError(AiosError):
 BASH_DESCRIPTION = (
     "Run a shell command inside the session's sandbox. The command is "
     "interpreted by `bash -c` inside a Linux container with curl, git, "
-    "python3, ripgrep, and standard coreutils available. The working "
-    "directory is /workspace, which is a persistent per-session volume "
-    "— files written there survive between calls. Shell state (cd, "
-    "export, functions) does NOT persist between calls; chain commands "
-    "with && or use absolute paths. The default timeout is 120 seconds "
-    "unless this session's environment raises it. A nonzero exit code is "
-    "reported in the result — not every nonzero exit is a failure."
+    "python3, ripgrep, and standard coreutils available. The sandbox "
+    "filesystem persists across calls and idle periods: files you write and "
+    "packages you install (pip, npm, apt) survive between calls and while the "
+    "session is idle, subject to retention limits — if it is reset to reclaim "
+    "space or after long inactivity you are told, and can reinstall as needed. "
+    "The working directory is /workspace, which holds the session's working "
+    "data and is never reclaimed. Shell state (cd, export, functions) does NOT "
+    "persist between calls; chain commands with && or use absolute paths. The "
+    "default timeout is 120 seconds unless this session's environment raises "
+    "it. A nonzero exit code is reported in the result — not every nonzero "
+    "exit is a failure."
 )
 
 BASH_PARAMETERS_SCHEMA: dict[str, Any] = {
