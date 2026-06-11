@@ -1,0 +1,11 @@
+{
+  "source": "+15551234567",
+  "sourceDevice": 1,
+  "timestamp": 1700000005000,
+  "receiptMessage": {
+    "when": 1700000005000,
+    "isDelivery": true,
+    "isRead": false,
+    "timestamps": [1700000004999]
+  }
+}

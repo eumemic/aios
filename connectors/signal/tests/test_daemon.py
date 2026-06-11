@@ -12,6 +12,7 @@ each before launching the connector).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from typing import Any
 import pytest
 
 from aios_signal.daemon import SignalDaemon
-from aios_signal.errors import BotAccountNotFoundError
+from aios_signal.errors import BotAccountNotFoundError, DaemonCrashError
 
 
 def _write_accounts(config_dir: Path, accounts: list[dict[str, Any]]) -> None:
@@ -106,3 +107,43 @@ async def test_discover_bot_uuids_malformed_accounts_file_raises(tmp_path: Path)
     d = _daemon(["+15550000000"], tmp_path)
     with pytest.raises(BotAccountNotFoundError):
         await d.discover_bot_uuids()
+
+
+# ── subprocess_alive: distinguishes transient listener drop from crash ──
+
+
+async def test_subprocess_alive_false_before_spawn(tmp_path: Path) -> None:
+    """No subprocess + no crash future yet → not alive (listener drops
+    before spawn can't be transient)."""
+    d = _daemon(["+15550000000"], tmp_path)
+    assert d.subprocess_alive() is False
+
+
+async def test_subprocess_alive_true_while_running(tmp_path: Path) -> None:
+    """A live subprocess (returncode None) with an unresolved crash
+    future is alive → a listener drop here is transient, reconnect."""
+
+    class _FakeProc:
+        returncode: int | None = None
+
+    d = _daemon(["+15550000000"], tmp_path)
+    d._proc = _FakeProc()  # type: ignore[assignment]
+    d._crash_future = asyncio.get_running_loop().create_future()
+    assert d.subprocess_alive() is True
+
+
+async def test_subprocess_alive_false_after_exit(tmp_path: Path) -> None:
+    """Once the subprocess exits and ``_watch_exit`` sets the crash
+    future, the daemon is no longer alive → a listener drop is fatal."""
+
+    class _FakeProc:
+        returncode: int | None = 1
+
+    d = _daemon(["+15550000000"], tmp_path)
+    d._proc = _FakeProc()  # type: ignore[assignment]
+    fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    fut.set_exception(DaemonCrashError("signal-cli exited with code 1"))
+    d._crash_future = fut
+    assert d.subprocess_alive() is False
+    # Consume the exception so the test doesn't emit a "never retrieved" warning.
+    assert fut.exception() is not None

@@ -55,7 +55,7 @@ from aios_connector_http import (
 from .addressing import decode_chat_id, encode_chat_id
 from .config import Settings
 from .daemon import GroupInfo, SignalDaemon
-from .errors import RpcError
+from .errors import ListenerClosedError, RpcError
 from .management import SignalManagementMixin
 from .markdown import convert_markdown_to_signal_styles
 from .mentions import build_mention_strings, encode_mentions
@@ -70,6 +70,22 @@ log = structlog.get_logger(__name__)
 # tens of ms; 2.0s gives generous headroom for a slow network and
 # still keeps the model's tool-call latency reasonable on failure.
 _ECHO_WAIT_S: float = 2.0
+
+# Bounded exponential backoff for reconnecting the inbound listener
+# after a transient TCP drop (daemon subprocess still alive).  Sleep,
+# then double up to the cap; reset to initial after a real ``messages()``
+# yield.  After ``_RECONNECT_MAX_ATTEMPTS`` consecutive failed reconnects
+# we re-raise ``ListenerClosedError`` rather than spin silently forever —
+# a listener that won't re-establish while the subprocess claims to be
+# alive is itself a fatal condition worth crashing on.
+_RECONNECT_BACKOFF_INITIAL_S: float = 0.5
+_RECONNECT_BACKOFF_CAP_S: float = 30.0
+_RECONNECT_MAX_ATTEMPTS: int = 10
+
+# Emit the running skip-counter roll-up (``signal.inbound.skip_counts``)
+# every N observed skips so high-frequency drops stay visible in
+# aggregate without one log line per drop at info volume.
+_SKIP_ROLLUP_EVERY: int = 100
 
 
 @dataclass
@@ -113,6 +129,14 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         # send blocks until the network round-trip completes so echoes
         # to the same chat arrive in send order.
         self._pending_echoes: dict[tuple[str, str], deque[asyncio.Future[int]]] = {}
+        # Running per-reason count of envelopes the inbound path dropped or
+        # could not handle, rolled up to ``signal.inbound.skip_counts`` every
+        # ``_SKIP_ROLLUP_EVERY`` skips so routine high-frequency drops stay
+        # visible in aggregate.  Keyed by the connector-observed reason
+        # (``parse_none`` / ``parse_error`` / ``routing_error``); the
+        # fine-grained parse-internal reason rides on each drop's
+        # ``signal.inbound.skipped`` log instead.
+        self._skip_counts: dict[str, int] = {}
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
@@ -154,11 +178,17 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         logs the failure under ``connector.connection.serve_failed`` and
         keeps the container serving its other connections.
         """
-        phone = secrets.get("phone")
+        phone = secrets.get("phone", "").strip()
         if not phone:
             raise RuntimeError(
                 f"signal connection {connection_id!r} requires a 'phone' entry in its secrets"
             )
+        # Strip once here so the whole connection — state.phone, the RPC
+        # account params, and the inbound queue key — keys on the same
+        # normalized value the dispatcher routes by (``account.strip()`` in
+        # ``_route_envelope``).  A whitespace-padded secret would otherwise
+        # enqueue under ``account.strip()`` while this loop blocked on
+        # ``_queue_for(phone)`` under the padded key → silent message loss.
         assert self._daemon is not None, "setup() must run before serve_connection()"
         # Three independent reads against signal-cli: parallelize to cut
         # connection-bring-up latency by two RPC round-trips.  verify_phone
@@ -195,10 +225,10 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
 
         Unbounded: a bounded queue with silent-drop-on-full would lose
         real user messages under a slow ``emit_inbound`` round-trip.
-        Back-pressure to signal-cli is the fail-hard alternative — the
-        listener's queue ``put`` blocks, signal-cli's stdout drain
-        buffer fills, and the operator notices via the resulting RPC
-        timeout instead of by users missing replies.
+        Routing enqueues with ``put_nowait``, which never blocks on an
+        unbounded queue — there is no back-pressure to signal-cli; a slow
+        drain grows the queue in memory rather than stalling the daemon's
+        stdout.
         """
         if phone not in self._inbound_queues:
             self._inbound_queues[phone] = asyncio.Queue()
@@ -218,9 +248,89 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         Checking each envelope's ``sourceUuid`` against every known
         bot before routing lets us correlate regardless of which
         account stream the envelope landed on.
+
+        Resilience (two layers, both fail-visible not fail-silent):
+
+        * **Transient listener drop** — ``messages()`` raises
+          ``ListenerClosedError`` while the daemon subprocess is still
+          alive (a TCP blip).  We reconnect the listener with bounded
+          exponential backoff and resume, resetting the backoff after the
+          first real yield.  After ``_RECONNECT_MAX_ATTEMPTS`` consecutive
+          failed reconnects we give up and re-raise rather than spin
+          silently.  A drop while the subprocess is *dead* is fatal: we
+          re-raise immediately so the TaskGroup tears the container down.
+        * **Malformed single envelope** — the per-envelope routing block
+          is guarded so one bad envelope dict can't kill the whole stream;
+          it's logged + counted and routing for that envelope is skipped.
+          ``ListenerClosedError`` is raised by the iterator OUTSIDE this
+          per-envelope guard, so the inner ``except`` never swallows it.
         """
         assert self._daemon is not None
-        async for account, envelope in self._daemon.listener.messages():
+        backoff = _RECONNECT_BACKOFF_INITIAL_S
+        while True:
+            try:
+                async for account, envelope in self._daemon.listener.messages():
+                    backoff = _RECONNECT_BACKOFF_INITIAL_S
+                    self._route_envelope(account, envelope)
+                # ``messages()`` completing WITHOUT raising means the stream
+                # ended cleanly — the real listener always raises
+                # ``ListenerClosedError`` on a drop, so a normal exit is a
+                # clean shutdown with nothing left to dispatch.  Return
+                # rather than re-entering the loop and re-iterating.
+                return
+            except ListenerClosedError:
+                if not self._daemon.subprocess_alive():
+                    raise  # daemon dead → fatal, propagate to TaskGroup
+                # Drive the reconnect attempts here so a single logical TCP
+                # reconnect is counted EXACTLY once: sleep+backoff, call
+                # ``reconnect()``, and on success break back out to re-enter
+                # ``messages()``.  Counting in the outer ``except`` instead
+                # would double-count — a failed ``reconnect()`` leaves
+                # ``_reader is None``, so the next ``messages()`` re-raises
+                # ``ListenerClosedError`` immediately for the SAME attempt.
+                for attempt in range(1, _RECONNECT_MAX_ATTEMPTS + 1):
+                    log.warning(
+                        "signal.listener.reconnect",
+                        attempt=attempt,
+                        backoff_s=backoff,
+                        skip_counts=dict(self._skip_counts),
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, _RECONNECT_BACKOFF_CAP_S)
+                    try:
+                        await self._daemon.listener.reconnect()
+                    except ListenerClosedError:
+                        if not self._daemon.subprocess_alive():
+                            raise  # daemon died mid-retry → fatal
+                        continue  # this attempt failed; try the next
+                    break  # reconnected → resume iterating ``messages()``
+                else:
+                    # Exhausted every attempt without a successful reconnect.
+                    log.warning(
+                        "signal.listener.reconnect_exhausted",
+                        attempts=_RECONNECT_MAX_ATTEMPTS,
+                    )
+                    raise
+
+    def _route_envelope(self, account: str, envelope: dict[str, Any]) -> None:
+        """Resolve self-echoes and route one envelope to its account queue.
+
+        The whole body is guarded: a single malformed envelope dict is
+        logged + counted rather than killing the dispatcher.  The guard
+        lives here (not in ``_inbound_dispatcher``'s ``async for``) so
+        ``ListenerClosedError`` — raised by the iterator, outside this
+        call — is never swallowed by it and reaches the reconnect/fatal
+        branch instead.
+        """
+        # Intentional defensive isolation per #908: envelope shapes in the
+        # wild are unpredictable (the postmortem was an unexpected envelope
+        # killing the read loop), so a malformed dict reaching routing must
+        # log+skip, never kill the dispatcher — even though no current code
+        # path here raises.  This is NOT dead code; it is the per-envelope
+        # blast radius the issue requires.  Scope is deliberately narrow:
+        # ``ListenerClosedError`` originates in the ``messages()`` iterator
+        # (outside this call), so the reconnect/fatal path still sees it.
+        try:
             source_uuid = envelope.get("sourceUuid")
             if isinstance(source_uuid, str) and source_uuid:
                 for state in self.state.values():
@@ -228,7 +338,27 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                         self._maybe_resolve_self_echo(state, envelope)
                         break
             queue = self._queue_for(account.strip())
-            await queue.put(envelope)
+            queue.put_nowait(envelope)
+        except Exception:
+            log.warning(
+                "signal.inbound.skipped",
+                reason="routing_error",
+                account=account,
+                exc_info=True,
+            )
+            self._record_skip("routing_error")
+
+    def _record_skip(self, reason: str) -> None:
+        """Bump the running skip counter and roll it up every N skips.
+
+        Routine high-frequency drops (receipts/typing) would drown the
+        log at one line each, so the per-drop ``signal.inbound.skipped``
+        events carry the detail and this aggregate roll-up surfaces the
+        totals periodically at info volume.
+        """
+        self._skip_counts[reason] = self._skip_counts.get(reason, 0) + 1
+        if sum(self._skip_counts.values()) % _SKIP_ROLLUP_EVERY == 0:
+            log.info("signal.inbound.skip_counts", counts=dict(self._skip_counts))
 
     async def _handle_envelope(
         self,
@@ -237,8 +367,26 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         envelope: dict[str, Any],
     ) -> None:
         await self._maybe_refresh_roster(state, envelope)
-        msg = parse_envelope(envelope, bot_account_uuid=state.bot_uuid)
+        # Guard ONLY the parse step: a malformed envelope dict must not
+        # kill the per-connection drain loop (or, via the dispatcher's
+        # routing, the whole inbound stream).  ``_maybe_refresh_roster``
+        # above and ``emit_inbound`` below are deliberately left outside
+        # this guard — a roster RPC failure or a 401/403/5xx re-raise
+        # stays fatal so a broken runtime token / daemon / server outage
+        # crashes the container instead of being silently swallowed here.
+        try:
+            msg = parse_envelope(envelope, bot_account_uuid=state.bot_uuid)
+        except Exception:
+            log.warning(
+                "signal.inbound.skipped",
+                reason="parse_error",
+                source_uuid=envelope.get("sourceUuid"),
+                exc_info=True,
+            )
+            self._record_skip("parse_error")
+            return
         if msg is None:
+            self._record_skip("parse_none")
             return
         if msg.sender_name is None:
             resolved = state.contact_names.get(msg.sender_uuid)

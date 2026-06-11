@@ -4,21 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
 from aios_signal.errors import ListenerClosedError, RpcError, RpcTimeoutError
 from aios_signal.rpc import RpcClient, RpcListener
-
-Handler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]]
-
-
-async def _start_server(handler: Handler) -> tuple[asyncio.Server, int]:
-    server = await asyncio.start_server(handler, host="127.0.0.1", port=0)
-    port = server.sockets[0].getsockname()[1]
-    return server, port
+from tests.conftest import _start_server
 
 
 async def test_rpc_client_opens_fresh_connection_per_call() -> None:

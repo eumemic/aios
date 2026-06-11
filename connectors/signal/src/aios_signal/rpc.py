@@ -7,12 +7,18 @@ Two distinct transports share the same TCP endpoint:
   correlation dict — each call owns its socket.
 - :class:`RpcListener` — **persistent** TCP connection used exclusively for
   the inbound ``receive`` notification stream. Yields envelope dicts as
-  ``AsyncIterator``; disconnection is fatal and surfaces as
+  ``AsyncIterator``; a dropped connection surfaces as
   :class:`ListenerClosedError`.
 
-Why two: jarvis multiplexes both on one socket with a futures dict. We split
-them because RPC failure modes should not depend on listener health, and a
-dead listener should kill the process (crash-is-fatal policy).
+The listener stays a thin transport: it does NOT retry. Whether a drop is
+fatal (daemon subprocess died → crash the container) or transient (listener
+TCP blip while the subprocess is alive → reconnect with bounded backoff) is a
+policy decision made one layer up, in ``SignalConnector._inbound_dispatcher``.
+:meth:`RpcListener.reconnect` lets that layer re-establish the socket without
+the transport having to know which case it's in.
+
+Why two transports: jarvis multiplexes both on one socket with a futures dict.
+We split them because RPC failure modes should not depend on listener health.
 """
 
 from __future__ import annotations
@@ -119,6 +125,19 @@ class RpcListener:
                 f"failed to connect listener to {self._host}:{self._port}: {e}"
             ) from e
 
+    async def reconnect(self) -> None:
+        """Tear down any existing socket and re-open a fresh one.
+
+        Used by ``SignalConnector._inbound_dispatcher`` to recover from a
+        transient listener drop (the daemon subprocess is still alive but
+        the TCP stream blipped).  Same failure surface as :meth:`connect`
+        — a fresh connect failure raises :class:`ListenerClosedError`, so
+        the dispatcher's bounded-backoff loop can count it as one failed
+        reconnect attempt.
+        """
+        await self.aclose()
+        await self.connect()
+
     async def messages(self) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """Yield ``(account, envelope)`` pairs from ``receive`` notifications.
 
@@ -143,7 +162,9 @@ class RpcListener:
             try:
                 message = json.loads(line)
             except json.JSONDecodeError:
-                log.warning("rpc.listener.bad_json", raw=line[:200].decode("latin-1"))
+                log.warning(
+                    "rpc.listener.bad_json", reason="bad_json", raw=line[:200].decode("latin-1")
+                )
                 continue
             # signal-cli emits receive notifications as method=receive with
             # params.envelope. Anything else (RPC responses, other methods)
@@ -156,7 +177,7 @@ class RpcListener:
             account = params.get("account")
             envelope = params.get("envelope")
             if not isinstance(account, str) or not account:
-                log.warning("rpc.listener.missing_account", params=params)
+                log.warning("rpc.listener.missing_account", reason="missing_account", params=params)
                 continue
             if isinstance(envelope, dict):
                 yield account, envelope

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -44,6 +46,19 @@ GROUP_CHAT_ID = "abcXYZ123_-"  # URL-safe base64; not a UUID
 GROUP_RAW_ID = "abcXYZ123/+"
 
 
+async def _start_server(
+    handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
+) -> tuple[asyncio.Server, int]:
+    """Start a one-shot loopback TCP server on an ephemeral port.
+
+    Returns the server (use ``async with``) and the bound port so tests
+    can point an ``RpcClient`` / ``RpcListener`` at a fake signal-cli.
+    """
+    server = await asyncio.start_server(handler, host="127.0.0.1", port=0)
+    port = server.sockets[0].getsockname()[1]
+    return server, port
+
+
 def _load(name: str) -> dict[str, Any]:
     data: dict[str, Any] = json.loads((FIXTURES_DIR / name).read_text())
     return data
@@ -71,6 +86,13 @@ def connector(tmp_path: Path) -> SignalConnector:
             "rpc": type("Rpc", (), {"call": AsyncMock(return_value=None)})(),
             "list_groups": AsyncMock(return_value=[]),
             "verify_phone": AsyncMock(return_value="bot-uuid"),
+            # ``subprocess_alive`` / ``listener`` are consulted by the
+            # inbound dispatcher's reconnect path; tests that exercise it
+            # override these (the listener stub + alive flag), but the
+            # attributes must exist so ``monkeypatch.setattr`` can patch
+            # them and so a stray dispatcher read doesn't AttributeError.
+            "subprocess_alive": lambda self: True,
+            "listener": None,
         },
     )()
     c.state[CONNECTION_ID] = _SignalConnectionState(
@@ -130,3 +152,13 @@ def envelope_typing() -> dict[str, Any]:
 @pytest.fixture
 def envelope_self() -> dict[str, Any]:
     return _load("self_message.json")
+
+
+@pytest.fixture
+def envelope_source_less_receipt() -> dict[str, Any]:
+    return _load("source_less_receipt.json")
+
+
+@pytest.fixture
+def envelope_missing_server_guid() -> dict[str, Any]:
+    return _load("missing_server_guid.json")
