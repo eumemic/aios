@@ -3,12 +3,13 @@ harness injects into every sandbox.
 
 ``models/vaults.py`` rejects an ``environment_variable`` credential whose
 ``secret_name`` collides with a harness-injected key (a collision would either
-hijack a load-bearing variable like ``PATH`` or be silently shadowed by the
-merge order). That blocklist is hardcoded in the model layer because importing
-``sandbox.setup`` there would cycle via ``aios.config``. This test builds a
-real provisioning plan with no user-supplied env and asserts the blocklist is
-exactly the harness-injected key set — so adding a key to ``merged_env`` (or to
-``WORKSPACE_RUNTIME_ENV``) fails here until the blocklist follows.
+hijack a load-bearing variable like ``TOOL_BROKER_SECRET`` or be silently
+shadowed by the merge order). That blocklist is hardcoded in the model layer
+because importing ``sandbox.egress_ca`` there would drag cryptography's x509
+machinery into every models import. This test builds a real provisioning plan
+with no user-supplied env and asserts the blocklist is exactly the
+harness-injected key set — so adding a key to ``merged_env`` fails here until
+the blocklist follows.
 """
 
 from __future__ import annotations
