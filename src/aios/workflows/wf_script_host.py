@@ -228,8 +228,11 @@ _pending: list[tuple[str, str]] = []
 def log(*args: Any) -> None:
     """Record a progress line on the run's journal (a durable ``annotation`` event,
     surfaced in the run stream). Space-joined like ``print``; re-runs on every replay
-    but the journal keeps it emit-once. ``storable_text`` keeps it total — a diagnostic
-    never fails the run, even on NUL/surrogate bytes in arbitrary logged output."""
+    but the journal keeps it emit-once. ``storable_text`` neutralizes the NUL/unpaired-
+    surrogate bytes that arbitrary logged output may carry, so the annotation's key
+    derivation can't reject it — a stray control byte never fails the run. (A value so
+    huge its frame exceeds the protocol's MAX_FRAME_BYTES is the one exception, and the
+    same pre-existing cap that bounds every frame — not specific to annotations.)"""
     _pending.append(("log", storable_text(" ".join(str(a) for a in args))))
 
 
