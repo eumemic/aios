@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from aios_whatsapp.connector import WhatsappConnector
+from aios_whatsapp.connector import WhatsappConnector, _chat_type_from_jid
 
-from .conftest import CONNECTION_ID, GROUP_JID, PEER_JID
+from .conftest import CONNECTION_ID, GROUP_JID, PEER_JID, PHONE
 
 
 async def test_whatsapp_send_dm_calls_send_message_rpc(connector: WhatsappConnector) -> None:
@@ -25,7 +25,19 @@ async def test_whatsapp_send_dm_calls_send_message_rpc(connector: WhatsappConnec
         "sendMessage",
         {"jid": PEER_JID, "text": "hello peer"},
     )
-    assert result == {"message_id": "3EB0NEW", "timestamp_ms": 1700000100000}
+    # Result stamps the resolved focal channel + chat_type.  PEER_JID
+    # ends with @s.whatsapp.net → dm.
+    assert result == {
+        "message_id": "3EB0NEW",
+        "timestamp_ms": 1700000100000,
+        "channel": f"whatsapp/{PHONE}/{PEER_JID}",
+        "chat_type": "dm",
+    }
+
+
+def test_chat_type_from_jid() -> None:
+    assert _chat_type_from_jid(PEER_JID) == "dm"
+    assert _chat_type_from_jid(GROUP_JID) == "group"
 
 
 async def test_whatsapp_send_group_passes_group_jid(connector: WhatsappConnector) -> None:
@@ -33,7 +45,7 @@ async def test_whatsapp_send_group_passes_group_jid(connector: WhatsappConnector
         "message_id": "3EB0GRP",
         "timestamp_ms": 1700000200000,
     }
-    await connector.whatsapp_send(
+    result = await connector.whatsapp_send(
         text="hello group",
         connection_id=CONNECTION_ID,
         chat_id=GROUP_JID,
@@ -42,6 +54,9 @@ async def test_whatsapp_send_group_passes_group_jid(connector: WhatsappConnector
         "sendMessage",
         {"jid": GROUP_JID, "text": "hello group"},
     )
+    # GROUP_JID ends with @g.us → group.
+    assert result["channel"] == f"whatsapp/{PHONE}/{GROUP_JID}"
+    assert result["chat_type"] == "group"
 
 
 async def test_whatsapp_send_raises_on_non_dict_result(connector: WhatsappConnector) -> None:
@@ -86,7 +101,12 @@ async def test_whatsapp_send_forwards_attachments(
             "attachments": [{"path": str(img), "mimetype": "image/jpeg", "filename": "photo.jpg"}],
         },
     )
-    assert result == {"message_id": "3EB0IMG", "timestamp_ms": 1700000200000}
+    assert result == {
+        "message_id": "3EB0IMG",
+        "timestamp_ms": 1700000200000,
+        "channel": f"whatsapp/{PHONE}/{PEER_JID}",
+        "chat_type": "dm",
+    }
 
 
 async def test_whatsapp_send_unknown_mimetype_falls_back_to_octet_stream(

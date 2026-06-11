@@ -489,6 +489,10 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         # *before* issuing the RPC closes the race where the echo
         # could arrive before we're listening.
         chat_type, _ = decode_chat_id(chat_id)
+        # Stamp the resolved focal channel + chat_type onto the result so
+        # external observers read the send target directly off the
+        # tool_result event instead of reconstructing focal heuristically.
+        base = {"channel": self.focal_channel(state.bot_uuid, chat_id), "chat_type": chat_type}
         echo_future: asyncio.Future[int] | None = None
         if chat_type == "group":
             echo_future = asyncio.get_running_loop().create_future()
@@ -509,7 +513,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                         phone=state.phone,
                         chat_id=chat_id,
                     )
-            return {"sent_at_ms": ts} if ts is not None else {"status": "ok"}
+            return {"sent_at_ms": ts, **base} if ts is not None else {"status": "ok", **base}
         finally:
             # Cancel any unresolved future so the drain-stale logic in
             # ``_maybe_resolve_self_echo`` prunes it before the NEXT
