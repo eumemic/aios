@@ -2,8 +2,16 @@
 
 Thin pool-acquiring wrappers around the queries in
 :mod:`aios.db.queries`. Owns the business logic around when to recompute
-``next_fire`` — on add, on source change, on re-enable — and exposes
-granular add/remove/update/list operations to the API + tool layers.
+``next_fire`` — on add, on source change, on re-enable, and (#957) as a
+defense-in-depth heal whenever an already-enabled row is found with
+``next_fire`` NULL — and exposes granular add/remove/update/list operations
+to the API + tool layers.
+
+Healing invariant (#957): an enabled schedulable trigger always has a
+non-NULL ``next_fire``. ``update_trigger`` re-arms a NULL on ANY update whose
+final state is enabled — closing the gap the #925 incident's manual
+``UPDATE … SET enabled=true`` opened, and complementing the startup-reconcile
+(#940 / PR #950). run_completion rows stay NULL by design.
 
 Deliberately no whole-list-replace primitive; per #270, the only mutation
 surface is granular ops.
@@ -207,6 +215,12 @@ async def update_trigger(
     - Source replaced on a row whose final state is enabled: recomputes
       ``next_fire`` (no cap re-check — an already-enabled row holds its
       slot), with the same past-``fire_at`` rejection.
+    - Healing (#957): an already-enabled row found with ``next_fire`` NULL has
+      ``next_fire`` recomputed from the merged source on ANY update whose final
+      state is enabled — no cap re-check, no failure-counter reset;
+      run_completion rows stay NULL by design; defense-in-depth with the
+      startup-reconcile (#940 / PR #950). Invariant: an enabled schedulable
+      trigger always has non-NULL ``next_fire``.
     - action / metadata / no-op: ``next_fire`` untouched.
 
     ``updated_at`` always bumps (handled in the query layer) so a no-op
@@ -243,10 +257,31 @@ async def update_trigger(
 
         next_fire: datetime | None | EllipsisType = ...  # ... = leave alone
         reenabled = new_enabled and not current.enabled
+        # Healing (#957): re-arm next_fire when the post-update state is enabled
+        # but next_fire is NULL — the state a manual `UPDATE … SET enabled=true`
+        # (the #925 incident anti-pattern) leaves a cron row in. heal_next_fire
+        # means "this is a cron row whose next_fire is NULL and therefore needs
+        # re-arming"; the enabled requirement is applied at the use site (the
+        # `elif new_enabled and (...)` gate below), so this flag is True for BOTH
+        # a genuine re-enable (a disabled row has next_fire=NULL) and a pure heal
+        # of an already-enabled row — it does not by itself distinguish them. The
+        # per-account cap re-check and the consecutive-failures reset are gated
+        # SEPARATELY on `not current.enabled` / `reenabled` below, so they apply
+        # only to a genuine false->true re-enable, never to a pure heal.
+        #
+        # Scoped to CRON sources only: the invariant is "an enabled CRON trigger
+        # always has non-NULL next_fire". One-shot rows (fire-and-delete; the
+        # existing past-fire_at guard owns their re-arm contract) and run_completion
+        # rows (NULL by design) are intentionally NOT healed — re-arming them
+        # requires an explicit source. This keeps a metadata-only or enabled=true
+        # PATCH on a stale one-shot from raising a spurious 422. (When a source IS
+        # provided, the source_provided branch below handles every source type
+        # unchanged.) Defense-in-depth with the startup-reconcile (#940 / PR #950).
+        heal_next_fire = current.next_fire is None and isinstance(current.source, CronSource)
         if not new_enabled and current.enabled:
             # Disabling: clear next_fire.
             next_fire = None
-        elif new_enabled and (source_provided or not current.enabled):
+        elif new_enabled and (source_provided or not current.enabled or heal_next_fire):
             # Re-enabling, or replacing the source on a row whose final
             # state is enabled: recompute next_fire from the merged source.
             if not current.enabled:
