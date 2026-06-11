@@ -17,16 +17,17 @@ Coverage:
 
 - memory-store and github-repository resource changes via
   ``update_session`` evict (they feed the spec).
-- vault session-BINDING changes via ``update_session`` evict as
-  defense-in-depth (they do NOT feed the spec, but Layer 1 evicts on any
-  session-resource mutation).
+- vault session-BINDING changes via ``update_session`` evict (since
+  #873 they feed the spec — env-var credentials resolve into the
+  provisioning plan; migration 0082 also bumps ``spec_version``).
 - a title-only ``update_session`` and ``create_session`` do NOT evict.
 - an idempotent re-PUT (same memory resources, same vault ids, or an
   empty list on an empty session) writes nothing: no eviction AND no
   ``spec_version`` bump, so neither layer recycles the sandbox.
 - connection attach/detach evict the bound session (defense-in-depth).
 - in-place vault credential rotation does NOT evict (the MCP pool keys on
-  ``(url, vault_id)`` and the row contents are overwritten in place).
+  ``(url, vault_id)`` and the row contents are overwritten in place; a
+  live sandbox keeps its materialized env-var set until #877's drift key).
 """
 
 from __future__ import annotations

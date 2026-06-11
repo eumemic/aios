@@ -141,16 +141,18 @@ def _evict_sandbox_for_resource_change(session_id: str) -> None:
     cleanly on the next step.
 
     Memory-store and github-repository bindings feed build_spec_from_session
-    and MUST evict. Vault session-bindings do NOT feed the sandbox spec (they
-    reach the agent via the MCP pool, keyed on (url, vault_id)); we evict
-    anyway as defense-in-depth so 'any session-resource mutation forces a
-    clean re-read' holds — harmless, one extra cold-start. In-place vault
-    credential rotation (refresh_credential / ciphertext overwrite) does NOT
-    evict: the pool keys on (url, vault_id) and a rotation overwrites the row
-    contents, so the stable key already serves the new secret. Layer 2's
-    spec_version triggers are deliberately NOT placed on vault/connection
-    tables (they don't change the spec) — this Layer1/Layer2 asymmetry is
-    intentional.
+    and MUST evict. Vault session-bindings feed it too since #873
+    (environment_variable credentials resolve into the provisioning plan) —
+    but this Layer-1 eviction is a no-op for them in practice, because
+    update_session runs in the API process; their real cover is the
+    session_vaults spec_version bump trigger (migration 0082). Header-style
+    credentials still reach the agent via the MCP pool, keyed on
+    (url, vault_id). In-place vault credential rotation (refresh_credential
+    / ciphertext overwrite) does NOT evict: the pool keys on (url, vault_id)
+    and a rotation overwrites the row contents, so the stable key already
+    serves the new secret — and a live sandbox keeps its already-
+    materialized env-var set until #877's drift handling lands. Layer 2's
+    triggers stay off the connection tables — that asymmetry is intentional.
     """
     from aios.harness import runtime
 

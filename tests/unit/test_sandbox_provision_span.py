@@ -36,6 +36,7 @@ def _make_plan() -> ProvisioningPlan:
         memory_echoes=[],
         github_echoes=[],
         git_proxy=None,
+        env_var_credentials=(),
     )
 
 
