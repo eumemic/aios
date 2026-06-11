@@ -22,9 +22,10 @@ Consequences operators should know:
   at-rest decryption.
 * **Rotation rides the vault key** (#858): the CA cannot rotate
   independently, and a rotation takes effect only after a worker
-  restart (the per-seed cache below). The trust store can hold old+new
-  certs during an overlap window — ``update-ca-certificates`` and
-  ``NODE_EXTRA_CA_CERTS`` both accept multi-PEM files.
+  restart (the per-seed cache below). No overlap window exists yet —
+  the install step writes exactly one cert; #858 can add one by
+  deriving from the previous key too (``update-ca-certificates`` and
+  ``NODE_EXTRA_CA_CERTS`` both accept multi-PEM files).
 * **The CA is unconstrained** (no x509 name constraints — allowlists are
   per-credential and dynamic, a static constraint can't express them).
   Host scoping is enforced *solely* at leaf-mint time in the egress
@@ -46,6 +47,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+
+from aios.harness import runtime
 
 # HKDF domain-separation context for the CA seed; bump the suffix if the
 # derivation scheme ever changes incompatibly.
@@ -88,14 +91,18 @@ class EgressCA:
     """
 
     def __init__(self, seed: bytes) -> None:
+        if len(seed) != 32:
+            raise ValueError(f"seed must be 32 bytes, got {len(seed)}")
         n = ec.SECP256R1.group_order
-        self._key = ec.derive_private_key(int.from_bytes(seed, "big") % (n - 1) + 1, ec.SECP256R1())
+        self.private_key = ec.derive_private_key(
+            int.from_bytes(seed, "big") % (n - 1) + 1, ec.SECP256R1()
+        )
         now = datetime.now(UTC)
-        self._cert = (
+        self.certificate = (
             x509.CertificateBuilder()
             .subject_name(_CA_SUBJECT)
             .issuer_name(_CA_SUBJECT)
-            .public_key(self._key.public_key())
+            .public_key(self.private_key.public_key())
             .serial_number(x509.random_serial_number())
             # Backdate an hour so a sandbox whose clock trails the worker
             # slightly still accepts a just-generated cert.
@@ -117,23 +124,12 @@ class EgressCA:
                 critical=True,
             )
             .add_extension(
-                x509.SubjectKeyIdentifier.from_public_key(self._key.public_key()),
+                x509.SubjectKeyIdentifier.from_public_key(self.private_key.public_key()),
                 critical=False,
             )
-            .sign(self._key, hashes.SHA256())
+            .sign(self.private_key, hashes.SHA256())
         )
-
-    @property
-    def private_key(self) -> ec.EllipticCurvePrivateKey:
-        return self._key
-
-    @property
-    def certificate(self) -> x509.Certificate:
-        return self._cert
-
-    @property
-    def cert_pem(self) -> str:
-        return self._cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+        self.cert_pem = self.certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
 
 
 @functools.cache
@@ -148,8 +144,6 @@ def get_egress_ca() -> EgressCA:
     that swaps ``runtime.crypto_box`` gets a matching CA without any
     cache-clearing choreography.
     """
-    from aios.harness import runtime
-
     return _egress_ca_from_seed(
         runtime.require_crypto_box().derive_subkey_bytes(EGRESS_CA_HKDF_INFO)
     )

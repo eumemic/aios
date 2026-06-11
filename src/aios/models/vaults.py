@@ -35,8 +35,10 @@ AuthType = Literal[
 # sandbox variable (e.g. ``PATH`` repointed → unqualified-binary takeover) or
 # is silently shadowed by the harness's own merge order — both defects, and
 # ``secret_name`` is immutable post-create. Hardcoded here rather than
-# imported from ``sandbox.setup`` (that would cycle via ``aios.config``); a
-# unit test pins this set against the live merge order so it can't drift.
+# imported from ``sandbox.setup`` (that would cycle via ``aios.config``) or
+# ``sandbox.egress_ca`` (cycle-free, but would drag cryptography's x509
+# machinery into every models import); a unit test pins this set against
+# the live merge order so it can't drift.
 RESERVED_SANDBOX_ENV_KEYS: frozenset[str] = frozenset(
     {
         "VIRTUAL_ENV",

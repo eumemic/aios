@@ -1,23 +1,25 @@
 """Backend-agnostic post-create setup for a sandbox.
 
 After the registry calls ``backend.create(spec)`` and gets a
-:class:`SandboxHandle` back, three setup steps run inside the sandbox to
+:class:`SandboxHandle` back, four setup steps run inside the sandbox to
 bring it to a usable state:
 
 1. :func:`ensure_workspace_runtime_dirs` — creates ``/workspace/.venv``
    and ``/workspace/.npm`` (the persistent install targets that survive
    idle release; see issue #227).
-2. :func:`install_packages` — runs the apt/pip/npm/cargo/gem/go
+2. :func:`install_egress_ca` — installs the worker's egress-CA cert
+   into the sandbox trust store (issue #875).
+3. :func:`install_packages` — runs the apt/pip/npm/cargo/gem/go
    commands the environment config asked for.
-3. :func:`apply_network_lockdown` — installs the iptables script that
+4. :func:`apply_network_lockdown` — installs the iptables script that
    restricts outbound traffic when the network policy is
    :class:`Limited`.
 
 Each step calls ``await backend.exec(handle, ...)`` rather than touching
 Docker directly, so they work uniformly across backends.
 
-The first two steps are best-effort enrichments — failures are logged
-but never raised; the model can retry or work around missing tooling.
+The first three steps are best-effort enrichments — a nonzero exit is
+logged, never raised; the model can retry or work around missing tooling.
 :func:`apply_network_lockdown` is different: when the policy is
 :class:`Limited` it is a **security gate**, not an enrichment. A
 :class:`Limited` sandbox whose iptables lockdown didn't apply is wide
@@ -136,18 +138,22 @@ async def install_egress_ca(backend: SandboxBackend, handle: SandboxHandle) -> N
     ``TRUST_STORE_ENV`` vars baked into the spec) trust leaf certs the
     secret-egress proxy will present for allowlisted hosts.
 
-    Failures are logged but don't fail the provision — until the egress
-    proxy terminates TLS, a missing CA costs nothing, and after that it
-    fails safe (the sandbox refuses the proxy's leaf rather than trusting
-    anything extra). Revisit the posture when env-var credentials are
-    attached (#876): a silently missing CA then turns into in-sandbox TLS
-    verification failures on exactly the allowlisted hosts.
+    A nonzero exit is logged, not raised, and doesn't fail the provision
+    (a backend exec that itself errors still propagates, same as every
+    sibling step) — until the egress proxy terminates TLS, a missing CA
+    costs nothing, and after that it fails safe (the sandbox refuses the
+    proxy's leaf rather than trusting anything extra). Revisit the
+    posture when env-var credentials are attached (#876): a silently
+    missing CA then turns into in-sandbox TLS verification failures on
+    exactly the allowlisted hosts.
 
     The ``&&`` chain keeps the exit code all-or-nothing so a partial
     install (drop-in written, bundle not regenerated — Node would trust
     the CA while curl/python don't) still trips the warning. ``printf
     '%s'`` is load-bearing: the PEM starts with ``-----BEGIN``, which
     bash's printf would otherwise parse as an (invalid) option string.
+    Single-quoting the PEM is safe because cryptography's PEM output is
+    strictly base64 alphabet plus dashes/newlines — never a quote.
     """
     cert_pem = get_egress_ca().cert_pem
     cmd = (

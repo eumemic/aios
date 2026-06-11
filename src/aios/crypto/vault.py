@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
-import hmac
 import json
 from dataclasses import dataclass
 from typing import Any
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from nacl.exceptions import CryptoError
 from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
@@ -68,22 +68,22 @@ class CryptoBox:
           cannot recover the master or any sibling subkey.
         * One-way — knowing a subkey doesn't reveal the master.
 
-        Callers own the ``info`` namespace: account subkeys use
-        ``aios-account-<id>`` (see :meth:`derive_account_subkey`), the
-        sandbox egress CA uses ``aios-egress-ca-v1``
-        (``sandbox/egress_ca.py``).
+        Callers own the ``info`` namespace — pick a globally unique
+        domain-separation string (a collision would share key material
+        between two subsystems). A golden-vector test pins the output
+        bytes: any change here strands every encrypted row in every
+        deployment.
         """
-        # Single-extract HKDF-SHA256: the "extract" step normalises an
-        # arbitrary-strength IKM (always 32 bytes for us) into a PRK,
-        # then the "expand" step stretches PRK + info into the output.
-        # Salt is a fixed application-specific constant — operators
-        # rotate by reissuing keys, not by changing salt.
-        salt = b"aios-vault-hkdf-v1"
-        prk = hmac.new(salt, self._key, hashlib.sha256).digest()
-        # Single-block expand: output is one SHA256 block (32 bytes),
-        # which matches SecretBox's KEY_BYTES so we don't need to chain
-        # multiple T(i) outputs.
-        return hmac.new(prk, info.encode() + b"\x01", hashlib.sha256).digest()
+        # RFC 5869 HKDF-SHA256. Salt is a fixed application-specific
+        # constant — operators rotate by reissuing keys, not by
+        # changing salt.
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=KEY_BYTES,
+            salt=b"aios-vault-hkdf-v1",
+            info=info.encode(),
+        )
+        return hkdf.derive(self._key)
 
     def derive_account_subkey(self, account_id: str) -> CryptoBox:
         """Return a new :class:`CryptoBox` keyed to ``account_id`` via HKDF.

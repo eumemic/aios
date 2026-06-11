@@ -25,7 +25,7 @@ from aios.sandbox.egress_ca import (
     EgressCA,
 )
 from tests.conftest import needs_docker
-from tests.e2e.harness import Harness, assistant, bash
+from tests.e2e.harness import Harness, assistant, bash, first_tool_result
 from tests.helpers.tls import mint_leaf
 
 pytestmark = pytest.mark.docker
@@ -46,8 +46,10 @@ srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 srv.serve_forever()
 PY
 python3 /tmp/tls-srv.py >/tmp/tls-srv.log 2>&1 </dev/null &
-for i in $(seq 50); do
-  if curl -sS --max-time 2 --resolve {TLS_HOST}:{TLS_PORT}:127.0.0.1 \\
+# Worst case ~36s (30 x (1s curl + 0.2s sleep)) — well under the bash
+# tool's 120s ceiling even with slow container startup in CI.
+for i in $(seq 30); do
+  if curl -sS --max-time 1 --resolve {TLS_HOST}:{TLS_PORT}:127.0.0.1 \\
        https://{TLS_HOST}:{TLS_PORT}/ >/dev/null 2>/tmp/tls-curl.err; then
     echo TLS_VERIFY_OK
     exit 0
@@ -57,11 +59,6 @@ done
 cat /tmp/tls-srv.log /tmp/tls-curl.err >&2
 exit 1
 """
-
-
-def _tool_result_content(events: list) -> str:  # type: ignore[type-arg]
-    tool_result = next(e for e in events if e.kind == "message" and e.data.get("role") == "tool")
-    return str(tool_result.data.get("content", ""))
 
 
 @needs_docker
@@ -79,10 +76,16 @@ class TestEgressCATrust:
                 assistant(
                     tool_calls=[
                         bash(
-                            f"test -s {CA_CERT_SANDBOX_PATH} && "
-                            f'grep -qF "$(sed -n 2p {CA_CERT_SANDBOX_PATH})" '
-                            f"{SYSTEM_CA_BUNDLE_PATH} && echo BUNDLE_CONTAINS_CA && "
-                            f"printenv SSL_CERT_FILE REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS"
+                            # The non-empty guard on the anchor line keeps the
+                            # grep from degrading to vacuous (grep -qF "" matches
+                            # anything) if the drop-in were ever written mangled.
+                            f'anchor="$(sed -n 2p {CA_CERT_SANDBOX_PATH})" && '
+                            f'test -n "$anchor" && '
+                            f'grep -qF "$anchor" {SYSTEM_CA_BUNDLE_PATH} && '
+                            f"echo BUNDLE_CONTAINS_CA && "
+                            f"echo SSL_CERT_FILE=$SSL_CERT_FILE && "
+                            f"echo REQUESTS_CA_BUNDLE=$REQUESTS_CA_BUNDLE && "
+                            f"echo NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS"
                         )
                     ],
                 ),
@@ -92,10 +95,11 @@ class TestEgressCATrust:
         session = await docker_harness.start("test", tools=["bash"])
         await docker_harness.run_until_idle(session.id)
 
-        content = _tool_result_content(await docker_harness.events(session.id))
+        content = str(first_tool_result(await docker_harness.events(session.id)).get("content", ""))
         assert "BUNDLE_CONTAINS_CA" in content
-        assert SYSTEM_CA_BUNDLE_PATH in content
-        assert CA_CERT_SANDBOX_PATH in content
+        assert f"SSL_CERT_FILE={SYSTEM_CA_BUNDLE_PATH}" in content
+        assert f"REQUESTS_CA_BUNDLE={SYSTEM_CA_BUNDLE_PATH}" in content
+        assert f"NODE_EXTRA_CA_CERTS={CA_CERT_SANDBOX_PATH}" in content
 
     async def test_curl_verifies_leaf_signed_by_aios_ca(self, docker_harness: Harness) -> None:
         """Issue #875 acceptance: an in-sandbox TLS server presents a
@@ -128,5 +132,5 @@ class TestEgressCATrust:
         session = await docker_harness.start("test", tools=["bash"])
         await docker_harness.run_until_idle(session.id)
 
-        content = _tool_result_content(await docker_harness.events(session.id))
+        content = str(first_tool_result(await docker_harness.events(session.id)).get("content", ""))
         assert "TLS_VERIFY_OK" in content, content

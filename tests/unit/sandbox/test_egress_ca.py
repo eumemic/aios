@@ -10,9 +10,7 @@ What matters here, in order of load-bearingness:
   instance's cert (different serial / validity window) — the
   cross-process contract that makes per-process cert regeneration sound.
 - ``install_egress_ca`` ships the exact command shape that works under
-  ``bash -c``: ``printf '%s'`` (a bare ``printf '<PEM>'`` chokes on the
-  leading ``-----BEGIN`` as an option string) and an ``&&`` chain so a
-  partial install reports nonzero.
+  ``bash -c`` (rationale in its docstring).
 """
 
 from __future__ import annotations
@@ -27,16 +25,16 @@ from cryptography.x509.verification import PolicyBuilder, Store
 
 from aios.crypto.vault import CryptoBox
 from aios.harness import runtime
+from aios.models.environments import EnvironmentConfig
 from aios.sandbox.backends.base import CommandResult
 from aios.sandbox.egress_ca import (
     CA_CERT_SANDBOX_PATH,
     SYSTEM_CA_BUNDLE_PATH,
-    TRUST_STORE_ENV,
     EgressCA,
     get_egress_ca,
 )
 from aios.sandbox.setup import install_egress_ca
-from aios.sandbox.spec import _assemble_plan
+from aios.sandbox.spec import ProvisioningPlan, _assemble_plan
 from tests.helpers.sandbox import FakeBackend, make_handle
 from tests.helpers.tls import mint_leaf
 
@@ -131,10 +129,11 @@ class TestInstallEgressCA:
 
         (call,) = [c[1] for c in backend.calls if c[0] == "exec"]
         cmd = call["command"]
-        # printf '%s' is load-bearing: the PEM's leading ``-----BEGIN``
-        # would otherwise be parsed as a printf option under bash -c.
-        assert "printf '%s' '" in cmd
-        assert "-----BEGIN CERTIFICATE-----" in cmd
+        # printf '%s' is load-bearing, and the PEM must be its quoted
+        # ARGUMENT (adjacency, not mere co-presence): the PEM's leading
+        # ``-----BEGIN`` parsed as printf's format would be an invalid
+        # option under bash -c.
+        assert "printf '%s' '-----BEGIN CERTIFICATE-----" in cmd
         assert f"> {CA_CERT_SANDBOX_PATH} && update-ca-certificates" in cmd
         assert cmd.startswith("mkdir -p /usr/local/share/ca-certificates && ")
 
@@ -143,34 +142,56 @@ class TestInstallEgressCA:
         backend.next_result = CommandResult(
             exit_code=1, stdout="", stderr="boom", timed_out=False, truncated=False
         )
+
         await install_egress_ca(backend, make_handle())
+
+        # The install was attempted (one exec) and the failure stayed a
+        # warning — no raise reached us.
+        assert [c[0] for c in backend.calls] == ["exec"]
+
+
+def _assemble_default_plan(
+    env_config: EnvironmentConfig | None = None, image: str = "aios-sandbox:test"
+) -> ProvisioningPlan:
+    with (
+        patch(
+            "aios.sandbox.volumes.ensure_session_attachments_dir",
+            return_value=Path("/tmp/a"),
+        ),
+        patch("aios.sandbox.volumes.ensure_session_uploads_dir", return_value=Path("/tmp/u")),
+    ):
+        return _assemble_plan(
+            session_id="sess_01TEST",
+            instance_id="inst_TEST",
+            image=image,
+            workspace_path=Path("/tmp/w"),
+            env_config=env_config,
+            session_env={},
+            memory_echoes=[],
+            github_echoes=[],
+            git_proxy=None,
+            tool_broker_url="http://aios-worker:54321",
+            tool_broker_secret="secret123",
+            tool_socket_host_path=None,
+        )
 
 
 class TestTrustStoreEnvOnPlan:
     def test_plan_env_points_at_debian_bundle_paths(self) -> None:
-        with (
-            patch(
-                "aios.sandbox.volumes.ensure_session_attachments_dir",
-                return_value=Path("/tmp/a"),
-            ),
-            patch("aios.sandbox.volumes.ensure_session_uploads_dir", return_value=Path("/tmp/u")),
-        ):
-            plan = _assemble_plan(
-                session_id="sess_01TEST",
-                instance_id="inst_TEST",
-                image="aios-sandbox:test",
-                workspace_path=Path("/tmp/w"),
-                env_config=None,
-                session_env={},
-                memory_echoes=[],
-                github_echoes=[],
-                git_proxy=None,
-                tool_broker_url="http://aios-worker:54321",
-                tool_broker_secret="secret123",
-                tool_socket_host_path=None,
-            )
+        plan = _assemble_default_plan()
         env = plan.spec.environment
         assert env["SSL_CERT_FILE"] == SYSTEM_CA_BUNDLE_PATH
         assert env["REQUESTS_CA_BUNDLE"] == SYSTEM_CA_BUNDLE_PATH
         assert env["NODE_EXTRA_CA_CERTS"] == CA_CERT_SANDBOX_PATH
-        assert set(TRUST_STORE_ENV) <= set(env)
+
+    def test_environment_env_overrides_trust_store_defaults(self) -> None:
+        """The documented escape hatch for custom images (#724) with a
+        non-Debian trust-store layout: an environment's ``env`` wins
+        over the trust-store defaults in the merge order."""
+        plan = _assemble_default_plan(
+            env_config=EnvironmentConfig(env={"SSL_CERT_FILE": "/etc/pki/tls/certs/ca-bundle.crt"}),
+            image="custom-image:rhel",
+        )
+        env = plan.spec.environment
+        assert env["SSL_CERT_FILE"] == "/etc/pki/tls/certs/ca-bundle.crt"
+        assert env["REQUESTS_CA_BUNDLE"] == SYSTEM_CA_BUNDLE_PATH  # untouched default
