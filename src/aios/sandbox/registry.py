@@ -39,6 +39,7 @@ from aios.sandbox.network import WORKER_NETWORK_ALIAS
 from aios.sandbox.setup import (
     apply_network_lockdown,
     ensure_workspace_runtime_dirs,
+    install_egress_ca,
     install_packages,
 )
 from aios.sandbox.spec import (
@@ -271,6 +272,7 @@ class SandboxRegistry:
         # the proxy.
         try:
             await ensure_workspace_runtime_dirs(self._backend, handle)
+            await install_egress_ca(self._backend, handle)
             await install_packages(self._backend, handle, plan.env_config)
             await self._maybe_apply_lockdown(handle, plan)
         except BaseException:

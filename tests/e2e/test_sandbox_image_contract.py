@@ -98,6 +98,7 @@ def _docker_run(
         "curl",
         "git",
         "iptables",  # required for limited-networking mode
+        "update-ca-certificates",  # egress-CA trust install (sandbox/setup.py)
         "jq",  # JSON-from-bash composition, esp. piping `tool <name> '{...}'`
         "tool",  # sandbox-native broker CLI (baked from repo bin/tool; #635)
         "node",  # so agents can run npm packages without first apt-installing the runtime
@@ -211,6 +212,21 @@ class TestRuntimeBehaviour:
         r = _docker_run(pulled_image, "bash", "-c", "echo $HOME")
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "/home/aios", f"expected /home/aios, got {r.stdout.strip()!r}"
+
+    def test_trust_store_layout_is_debian(self, pulled_image: str) -> None:
+        """The trust-store contract the egress-CA wiring depends on: a
+        Debian-layout aggregate bundle at /etc/ssl/certs/ca-certificates.crt
+        (where SSL_CERT_FILE / REQUESTS_CA_BUNDLE point) and the drop-in
+        directory update-ca-certificates folds into it. Custom per-env
+        images (#724) that diverge must override the trust-store env vars
+        via their environment's ``env`` config."""
+        r = _docker_run(
+            pulled_image,
+            "bash",
+            "-c",
+            "test -s /etc/ssl/certs/ca-certificates.crt && test -d /usr/local/share/ca-certificates",
+        )
+        assert r.returncode == 0, f"Debian trust-store layout missing: {r.stderr}"
 
     def test_tool_broker_url_default_in_image_env(self, pulled_image: str) -> None:
         """Dockerfile sets a UDS default so bash scripts reading

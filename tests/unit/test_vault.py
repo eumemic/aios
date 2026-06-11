@@ -990,6 +990,24 @@ class TestDeriveAccountSubkey:
         with pytest.raises(ValueError, match="account_id must be non-empty"):
             self._master().derive_account_subkey("")
 
+    def test_golden_vector_pins_derivation_scheme(self) -> None:
+        """Byte-for-byte pin of the HKDF construction, exercised through
+        the layer that actually encrypts rows: a blob sealed under the
+        raw golden subkey bytes must decrypt via ``derive_account_subkey``.
+        If this fails, a refactor changed the derivation and every
+        existing encrypted row in every deployment just became
+        undecryptable — captured before ``derive_subkey_bytes`` was
+        factored out of this method."""
+        golden = bytes.fromhex("29fa2ed9579b6b8d19b9149f90c16d4618f5e8752494da2fcdae11d934ca2b61")
+        blob = CryptoBox(golden).encrypt("sealed-under-golden-bytes")
+        subkey = CryptoBox(bytes(range(32))).derive_account_subkey("acct_GOLDEN")
+        assert subkey.decrypt(blob) == "sealed-under-golden-bytes"
+
+    def test_derive_subkey_bytes_domain_separation(self) -> None:
+        master = self._master()
+        assert master.derive_subkey_bytes("ctx-one") != master.derive_subkey_bytes("ctx-two")
+        assert master.derive_subkey_bytes("ctx-one") == master.derive_subkey_bytes("ctx-one")
+
 
 class TestServiceWiringIsAccountScoped:
     """End-to-end integration: a vault_credential blob written by the service
