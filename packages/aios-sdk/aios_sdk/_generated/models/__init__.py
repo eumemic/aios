@@ -135,6 +135,12 @@ from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle
     PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle,
 )
 from .recent_chat import RecentChat
+from .run_completion_source import RunCompletionSource
+from .run_completion_source_replace import RunCompletionSourceReplace
+from .run_completion_source_replace_statuses_item import (
+    RunCompletionSourceReplaceStatusesItem,
+)
+from .run_completion_source_statuses_item import RunCompletionSourceStatusesItem
 from .runtime_lifecycle_request import RuntimeLifecycleRequest
 from .runtime_lifecycle_request_data_type_0 import RuntimeLifecycleRequestDataType0
 from .runtime_management_call_result_request import RuntimeManagementCallResultRequest
@@ -245,6 +251,8 @@ from .whatsapp_start_pairing_request import WhatsappStartPairingRequest
 from .whatsapp_start_pairing_response import WhatsappStartPairingResponse
 from .whatsapp_unpair_request import WhatsappUnpairRequest
 from .workflow import Workflow
+from .workflow_action import WorkflowAction
+from .workflow_action_replace import WorkflowActionReplace
 from .workflow_create import WorkflowCreate
 from .workflow_create_input_schema_type_0 import WorkflowCreateInputSchemaType0
 from .workflow_create_output_schema_type_0 import WorkflowCreateOutputSchemaType0
@@ -382,6 +390,10 @@ __all__ = (
     "OneShotSource",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "RecentChat",
+    "RunCompletionSource",
+    "RunCompletionSourceReplace",
+    "RunCompletionSourceReplaceStatusesItem",
+    "RunCompletionSourceStatusesItem",
     "RuntimeLifecycleRequest",
     "RuntimeLifecycleRequestDataType0",
     "RuntimeManagementCallResultRequest",
@@ -488,6 +500,8 @@ __all__ = (
     "WhatsappStartPairingResponse",
     "WhatsappUnpairRequest",
     "Workflow",
+    "WorkflowAction",
+    "WorkflowActionReplace",
     "WorkflowCreate",
     "WorkflowCreateInputSchemaType0",
     "WorkflowCreateOutputSchemaType0",

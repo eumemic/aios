@@ -88,9 +88,11 @@ def sync_detailed(
         authorization (None | str | Unset):
         body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
             provided (a cron↔one-shot or sandbox↔wake conversion is just a
-            different object). ``None`` = leave alone; there is no clear-to-null
-            (both columns are NOT NULL). The next_fire / cap / past-fire_at
-            business rules are enforced in the service layer (§2.4).
+            different object) — via the Replace union variants, whose
+            optional-at-create fields are required so a partial object 422s instead
+            of silently re-defaulting. ``None`` = leave alone; there is no
+            clear-to-null (both columns are NOT NULL). The next_fire / cap /
+            past-fire_at business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -133,9 +135,11 @@ def sync(
         authorization (None | str | Unset):
         body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
             provided (a cron↔one-shot or sandbox↔wake conversion is just a
-            different object). ``None`` = leave alone; there is no clear-to-null
-            (both columns are NOT NULL). The next_fire / cap / past-fire_at
-            business rules are enforced in the service layer (§2.4).
+            different object) — via the Replace union variants, whose
+            optional-at-create fields are required so a partial object 422s instead
+            of silently re-defaulting. ``None`` = leave alone; there is no
+            clear-to-null (both columns are NOT NULL). The next_fire / cap /
+            past-fire_at business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -173,9 +177,11 @@ async def asyncio_detailed(
         authorization (None | str | Unset):
         body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
             provided (a cron↔one-shot or sandbox↔wake conversion is just a
-            different object). ``None`` = leave alone; there is no clear-to-null
-            (both columns are NOT NULL). The next_fire / cap / past-fire_at
-            business rules are enforced in the service layer (§2.4).
+            different object) — via the Replace union variants, whose
+            optional-at-create fields are required so a partial object 422s instead
+            of silently re-defaulting. ``None`` = leave alone; there is no
+            clear-to-null (both columns are NOT NULL). The next_fire / cap /
+            past-fire_at business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -216,9 +222,11 @@ async def asyncio(
         authorization (None | str | Unset):
         body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
             provided (a cron↔one-shot or sandbox↔wake conversion is just a
-            different object). ``None`` = leave alone; there is no clear-to-null
-            (both columns are NOT NULL). The next_fire / cap / past-fire_at
-            business rules are enforced in the service layer (§2.4).
+            different object) — via the Replace union variants, whose
+            optional-at-create fields are required so a partial object 422s instead
+            of silently re-defaulting. ``None`` = leave alone; there is no
+            clear-to-null (both columns are NOT NULL). The next_fire / cap /
+            past-fire_at business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

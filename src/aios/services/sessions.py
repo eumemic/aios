@@ -55,6 +55,7 @@ from aios.sandbox.volumes import validate_workspace_path
 from aios.services import agents as agents_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
+from aios.services import triggers as triggers_service
 from aios.services.await_completion import await_completion
 
 
@@ -255,12 +256,20 @@ async def create_session(
                 )
                 if existing + enabled_new > cap:
                     raise RateLimitedError(
-                        f"account at active-timer cap ({existing}/{cap}); the "
+                        f"account at active-trigger cap ({existing}/{cap}); the "
                         f"{enabled_new} enabled trigger(s) in this session would "
                         "exceed the cap — disable some entries or remove an "
                         "older session's triggers first"
                     )
             for spec in triggers:
+                # Same shared validation as POST /triggers (watched-workflow
+                # existence, pin == current, env resolution) — this loop calls
+                # queries.add_trigger directly, so without it a session-create
+                # body would be an unvalidated write path into triggers. The
+                # freshly inserted session row is visible on this conn.
+                trigger_env = await triggers_service.validate_trigger_spec(
+                    conn, spec.source, spec.action, session_id=session.id, account_id=account_id
+                )
                 next_fire = compute_initial_next_fire(spec.source, now) if spec.enabled else None
                 await queries.add_trigger(
                     conn,
@@ -272,6 +281,7 @@ async def create_session(
                     enabled=spec.enabled,
                     metadata=spec.metadata,
                     next_fire=next_fire,
+                    environment_id=trigger_env,
                     account_id=account_id,
                 )
             trigger_echoes = await queries.list_triggers(conn, session.id, account_id=account_id)

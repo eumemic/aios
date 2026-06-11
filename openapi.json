@@ -12650,6 +12650,75 @@
         "title": "RecentChat",
         "description": "Distinct chat_id observed on a connection's account, with the\nmost-recent inbound timestamp.\n\nReturned by ``GET /v1/connections/{id}/recent-chats`` so operators\ncan find the chat_id for a specific peer without digging through\nevent logs before calling ``bind-chat``."
       },
+      "RunCompletionSource": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "run_completion",
+            "title": "Kind",
+            "default": "run_completion"
+          },
+          "workflow_id": {
+            "type": "string",
+            "title": "Workflow Id"
+          },
+          "statuses": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "completed",
+                "errored",
+                "cancelled"
+              ]
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Statuses"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "workflow_id"
+        ],
+        "title": "RunCompletionSource",
+        "description": "Reactive source: fires once per terminal completion of any run of the\nwatched workflow whose status is in ``statuses``.\n\nNo ``next_fire`` \u2014 never scheduled by the tick (the claim/MIN queries'\n``next_fire IS NOT NULL`` predicate plus the DB guard make a reactive row\nunschedulable by construction); fires are dispatched from the watched\nrun's completion transaction instead. The watch is account-scoped: the\ntrigger is only ever handed run data its owner could already read via the\naccount-scoped run reads."
+      },
+      "RunCompletionSourceReplace": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "run_completion",
+            "title": "Kind",
+            "default": "run_completion"
+          },
+          "workflow_id": {
+            "type": "string",
+            "title": "Workflow Id"
+          },
+          "statuses": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "completed",
+                "errored",
+                "cancelled"
+              ]
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Statuses"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "workflow_id",
+          "statuses"
+        ],
+        "title": "RunCompletionSourceReplace",
+        "description": "Update-side variant (\u00a72.2 Replace rule): ``statuses`` is REQUIRED, so a\npartial source on update 422s instead of silently resetting a narrowed\nfilter back to all-three. (The first SOURCE member with a defaulted field,\nhence the first ``TriggerSourceReplace`` union.)"
+      },
       "RuntimeLifecycleRequest": {
         "properties": {
           "connection_id": {
@@ -14456,6 +14525,9 @@
               },
               {
                 "$ref": "#/components/schemas/OneShotSource"
+              },
+              {
+                "$ref": "#/components/schemas/RunCompletionSource"
               }
             ],
             "title": "Source",
@@ -14463,7 +14535,8 @@
               "propertyName": "kind",
               "mapping": {
                 "cron": "#/components/schemas/CronSource",
-                "one_shot": "#/components/schemas/OneShotSource"
+                "one_shot": "#/components/schemas/OneShotSource",
+                "run_completion": "#/components/schemas/RunCompletionSource"
               }
             }
           },
@@ -14474,6 +14547,9 @@
               },
               {
                 "$ref": "#/components/schemas/WakeOwnerAction"
+              },
+              {
+                "$ref": "#/components/schemas/WorkflowAction"
               }
             ],
             "title": "Action",
@@ -14481,7 +14557,8 @@
               "propertyName": "kind",
               "mapping": {
                 "sandbox_command": "#/components/schemas/SandboxCommandAction",
-                "wake_owner": "#/components/schemas/WakeOwnerAction"
+                "wake_owner": "#/components/schemas/WakeOwnerAction",
+                "workflow": "#/components/schemas/WorkflowAction"
               }
             }
           },
@@ -14523,6 +14600,9 @@
               },
               {
                 "$ref": "#/components/schemas/OneShotSource"
+              },
+              {
+                "$ref": "#/components/schemas/RunCompletionSource"
               }
             ],
             "title": "Source",
@@ -14530,7 +14610,8 @@
               "propertyName": "kind",
               "mapping": {
                 "cron": "#/components/schemas/CronSource",
-                "one_shot": "#/components/schemas/OneShotSource"
+                "one_shot": "#/components/schemas/OneShotSource",
+                "run_completion": "#/components/schemas/RunCompletionSource"
               }
             }
           },
@@ -14541,6 +14622,9 @@
               },
               {
                 "$ref": "#/components/schemas/WakeOwnerAction"
+              },
+              {
+                "$ref": "#/components/schemas/WorkflowAction"
               }
             ],
             "title": "Action",
@@ -14548,7 +14632,8 @@
               "propertyName": "kind",
               "mapping": {
                 "sandbox_command": "#/components/schemas/SandboxCommandAction",
-                "wake_owner": "#/components/schemas/WakeOwnerAction"
+                "wake_owner": "#/components/schemas/WakeOwnerAction",
+                "workflow": "#/components/schemas/WorkflowAction"
               }
             }
           },
@@ -14646,13 +14731,17 @@
                   },
                   {
                     "$ref": "#/components/schemas/OneShotSource"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RunCompletionSourceReplace"
                   }
                 ],
                 "discriminator": {
                   "propertyName": "kind",
                   "mapping": {
                     "cron": "#/components/schemas/CronSource",
-                    "one_shot": "#/components/schemas/OneShotSource"
+                    "one_shot": "#/components/schemas/OneShotSource",
+                    "run_completion": "#/components/schemas/RunCompletionSourceReplace"
                   }
                 }
               },
@@ -14671,13 +14760,17 @@
                   },
                   {
                     "$ref": "#/components/schemas/WakeOwnerAction"
+                  },
+                  {
+                    "$ref": "#/components/schemas/WorkflowActionReplace"
                   }
                 ],
                 "discriminator": {
                   "propertyName": "kind",
                   "mapping": {
                     "sandbox_command": "#/components/schemas/SandboxCommandActionReplace",
-                    "wake_owner": "#/components/schemas/WakeOwnerAction"
+                    "wake_owner": "#/components/schemas/WakeOwnerAction",
+                    "workflow": "#/components/schemas/WorkflowActionReplace"
                   }
                 }
               },
@@ -14714,7 +14807,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "TriggerUpdate",
-        "description": "Update body. ``source`` / ``action`` are replaced WHOLESALE when\nprovided (a cron\u2194one-shot or sandbox\u2194wake conversion is just a\ndifferent object). ``None`` = leave alone; there is no clear-to-null\n(both columns are NOT NULL). The next_fire / cap / past-fire_at\nbusiness rules are enforced in the service layer (\u00a72.4)."
+        "description": "Update body. ``source`` / ``action`` are replaced WHOLESALE when\nprovided (a cron\u2194one-shot or sandbox\u2194wake conversion is just a\ndifferent object) \u2014 via the Replace union variants, whose\noptional-at-create fields are required so a partial object 422s instead\nof silently re-defaulting. ``None`` = leave alone; there is no\nclear-to-null (both columns are NOT NULL). The next_fire / cap /\npast-fire_at business rules are enforced in the service layer (\u00a72.4)."
       },
       "UnrestrictedNetworking": {
         "properties": {
@@ -16068,6 +16161,97 @@
         ],
         "title": "Workflow",
         "description": "A versioned workflow definition (updated in place; ``version`` bumps per change)."
+      },
+      "WorkflowAction": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "workflow",
+            "title": "Kind",
+            "default": "workflow"
+          },
+          "workflow_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Workflow Id"
+          },
+          "workflow_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Version"
+          },
+          "input_template": {
+            "title": "Input Template"
+          },
+          "vault_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Vault Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "workflow_id"
+        ],
+        "title": "WorkflowAction",
+        "description": "Launch a run of ``workflow_id`` at fire time \u2014 deterministic, no model\nwake.\n\nThe run's input is ALWAYS the envelope ``{\"trigger\": <firing context>,\n\"input\": <input_template verbatim>}`` \u2014 no placeholder substitution. A\nworkflow built to be triggered reads ``input[\"trigger\"]`` for the firing\ncontext (for run_completion fires: the completing run's id, status,\noutput, and error kind) and ``input[\"input\"]`` for this template.\n\n``environment_id`` is deliberately NOT a field: the run always binds to\nthe owner session's environment, resolved at write time into the\nfirst-class ``triggers.environment_id`` column (sessions' environment is\nimmutable, so write-time freeze equals fire-time resolution). Anything on\nthis model is agent-reachable through the ``trigger_create`` tool \u2014 a\ncaller-chosen environment would bypass the same-stance refusal on the\n``create_run`` builtin.\n\n``workflow_version``: ``None`` = run the workflow's CURRENT version at\neach fire (float); an integer is a DRIFT ASSERTION \u2014 it must equal the\nworkflow's current version at write, and a fire whose workflow has since\nbeen edited records an error instead of running the unreviewed script\n(workflows have no version-history table: a pin cannot resolve an old\nscript, only refuse a new one).\n\nThis member is STRUCTURE-ONLY (no serialized-byte validator here): the\n``input_template`` size bound lives on the write models, because byte\nbounds are not jsonb-round-trip stable \u2014 Postgres numeric normalization\ncan expand a written template ~50x, and a read-side bound would make\nlegally-persisted rows unreadable inside the scheduler's claim batch."
+      },
+      "WorkflowActionReplace": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "workflow",
+            "title": "Kind",
+            "default": "workflow"
+          },
+          "workflow_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Workflow Id"
+          },
+          "workflow_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Version"
+          },
+          "input_template": {
+            "title": "Input Template"
+          },
+          "vault_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Vault Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "workflow_id",
+          "workflow_version",
+          "input_template",
+          "vault_ids"
+        ],
+        "title": "WorkflowActionReplace",
+        "description": "Update-side variant (\u00a72.2): optional-at-create fields are REQUIRED, so\na partial action 422s instead of silently flipping a pin to float, nulling\nthe template, or dropping vault bindings. Explicit null/[] are explicit."
       },
       "WorkflowCreate": {
         "properties": {

@@ -328,8 +328,11 @@ async def list_wf_runs(
 ) -> list[WfRun]:
     """Keyset-paginated list of an account's runs (non-archived), newest first.
 
-    ``parent_run_id`` scopes to a run's children (the runs a workflow's nested
-    ``workflow()`` calls spawned) — the run-side analog of filtering sessions by
+    ``parent_run_id`` scopes to a run's children — the runs a workflow's nested
+    ``workflow()`` calls spawned, plus (#819) trigger-launched runs whose
+    lineage parent it is (a run_completion fire threads the completing run's
+    id; a timer fire on a workflow-child session threads that session's own
+    parent run). The run-side analog of filtering sessions by
     ``parent_run_id`` for a run's ``agent()`` children.
     """
     return await _list_scoped(

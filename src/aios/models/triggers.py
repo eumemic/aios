@@ -16,6 +16,7 @@ DB CHECK constraint swap (zero row rewrites) plus a Pydantic union member.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -43,6 +44,7 @@ MAX_COMMAND_CHARS = 16_384
 MAX_SCHEDULE_CHARS = 128
 MAX_NAME_CHARS = 64
 MAX_WAKE_CONTENT_CHARS = 16_384  # ≈ today's implicit bound (content rode inside command)
+MAX_INPUT_TEMPLATE_BYTES = 16_384  # compact-JSON serialized; enforced WRITE-PATH ONLY (see below)
 
 CRON_OCCURRENCE_HORIZON_YEARS = 1
 
@@ -111,7 +113,52 @@ class OneShotSource(BaseModel):
         return v
 
 
-TriggerSource = Annotated[CronSource | OneShotSource, Field(discriminator="kind")]
+RunTerminalStatus = Literal["completed", "errored", "cancelled"]
+
+
+def _all_terminal_statuses() -> list[RunTerminalStatus]:
+    return ["completed", "errored", "cancelled"]
+
+
+class RunCompletionSource(BaseModel):
+    """Reactive source: fires once per terminal completion of any run of the
+    watched workflow whose status is in ``statuses``.
+
+    No ``next_fire`` — never scheduled by the tick (the claim/MIN queries'
+    ``next_fire IS NOT NULL`` predicate plus the DB guard make a reactive row
+    unschedulable by construction); fires are dispatched from the watched
+    run's completion transaction instead. The watch is account-scoped: the
+    trigger is only ever handed run data its owner could already read via the
+    account-scoped run reads.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["run_completion"] = "run_completion"
+    workflow_id: str
+    # Materialized at write (the row is self-describing; the matcher carries no
+    # defaults knowledge). Fire-on-everything is the no-silent-omission default;
+    # narrow explicitly (e.g. ["errored"]) for failure-only pipelines.
+    statuses: list[RunTerminalStatus] = Field(
+        default_factory=_all_terminal_statuses,
+        min_length=1,
+    )
+
+
+class RunCompletionSourceReplace(RunCompletionSource):
+    """Update-side variant (§2.2 Replace rule): ``statuses`` is REQUIRED, so a
+    partial source on update 422s instead of silently resetting a narrowed
+    filter back to all-three. (The first SOURCE member with a defaulted field,
+    hence the first ``TriggerSourceReplace`` union.)"""
+
+    statuses: list[RunTerminalStatus] = Field(min_length=1)
+
+
+TriggerSource = Annotated[
+    CronSource | OneShotSource | RunCompletionSource, Field(discriminator="kind")
+]
+TriggerSourceReplace = Annotated[
+    CronSource | OneShotSource | RunCompletionSourceReplace, Field(discriminator="kind")
+]
 
 
 # ─── action: what runs at fire time ──────────────────────────────────────────
@@ -162,19 +209,97 @@ class WakeOwnerAction(BaseModel):
     content: str = Field(min_length=1, max_length=MAX_WAKE_CONTENT_CHARS)
 
 
-TriggerAction = Annotated[SandboxCommandAction | WakeOwnerAction, Field(discriminator="kind")]
+class WorkflowAction(BaseModel):
+    """Launch a run of ``workflow_id`` at fire time — deterministic, no model
+    wake.
+
+    The run's input is ALWAYS the envelope ``{"trigger": <firing context>,
+    "input": <input_template verbatim>}`` — no placeholder substitution. A
+    workflow built to be triggered reads ``input["trigger"]`` for the firing
+    context (for run_completion fires: the completing run's id, status,
+    output, and error kind) and ``input["input"]`` for this template.
+
+    ``environment_id`` is deliberately NOT a field: the run always binds to
+    the owner session's environment, resolved at write time into the
+    first-class ``triggers.environment_id`` column (sessions' environment is
+    immutable, so write-time freeze equals fire-time resolution). Anything on
+    this model is agent-reachable through the ``trigger_create`` tool — a
+    caller-chosen environment would bypass the same-stance refusal on the
+    ``create_run`` builtin.
+
+    ``workflow_version``: ``None`` = run the workflow's CURRENT version at
+    each fire (float); an integer is a DRIFT ASSERTION — it must equal the
+    workflow's current version at write, and a fire whose workflow has since
+    been edited records an error instead of running the unreviewed script
+    (workflows have no version-history table: a pin cannot resolve an old
+    script, only refuse a new one).
+
+    This member is STRUCTURE-ONLY (no serialized-byte validator here): the
+    ``input_template`` size bound lives on the write models, because byte
+    bounds are not jsonb-round-trip stable — Postgres numeric normalization
+    can expand a written template ~50x, and a read-side bound would make
+    legally-persisted rows unreadable inside the scheduler's claim batch.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["workflow"] = "workflow"
+    workflow_id: str = Field(min_length=1)
+    workflow_version: int | None = Field(default=None, ge=1)
+    input_template: Any = None  # arbitrary JSON, any type; null = no payload
+    vault_ids: list[str] = Field(default_factory=list)
+
+
+class WorkflowActionReplace(WorkflowAction):
+    """Update-side variant (§2.2): optional-at-create fields are REQUIRED, so
+    a partial action 422s instead of silently flipping a pin to float, nulling
+    the template, or dropping vault bindings. Explicit null/[] are explicit."""
+
+    workflow_version: int | None = Field(ge=1)
+    input_template: Any
+    vault_ids: list[str]
+
+
+TriggerAction = Annotated[
+    SandboxCommandAction | WakeOwnerAction | WorkflowAction, Field(discriminator="kind")
+]
 TriggerActionReplace = Annotated[
-    SandboxCommandActionReplace | WakeOwnerAction, Field(discriminator="kind")
+    SandboxCommandActionReplace | WakeOwnerAction | WorkflowActionReplace,
+    Field(discriminator="kind"),
 ]
 
 # Module-level adapters for the query/runner read path. Structure-only —
 # they must accept every row the write path ever accepted, so they carry NO
-# cron occurrence check (that is write-side only; a legally-persisted rare
-# cron must still read back).
-TRIGGER_SOURCE_ADAPTER: TypeAdapter[CronSource | OneShotSource] = TypeAdapter(TriggerSource)
-TRIGGER_ACTION_ADAPTER: TypeAdapter[SandboxCommandAction | WakeOwnerAction] = TypeAdapter(
-    TriggerAction
+# cron occurrence check and NO input_template byte bound (both are write-side
+# only; a legally-persisted rare cron or numeric-expanded template must still
+# read back — the action adapter runs inside the scheduler's claim
+# transaction, where one unreadable row would halt every trigger).
+TRIGGER_SOURCE_ADAPTER: TypeAdapter[CronSource | OneShotSource | RunCompletionSource] = TypeAdapter(
+    TriggerSource
 )
+TRIGGER_ACTION_ADAPTER: TypeAdapter[SandboxCommandAction | WakeOwnerAction | WorkflowAction] = (
+    TypeAdapter(TriggerAction)
+)
+
+
+def _validate_input_template_bound(action: Any) -> None:
+    """WRITE-PATH ONLY (``TriggerCreate`` / ``TriggerUpdate``) — never on read
+    models or the query-layer TypeAdapters.
+
+    Serialized-byte bounds are not jsonb-round-trip stable (numeric
+    normalization can expand a written template ~50x: ``1e+308`` is 6 chars on
+    the wire and 309 digits back from jsonb), so this must never run on read.
+    ``allow_nan=False`` measures exactly what jsonb will accept — a
+    NaN/Infinity template becomes a 422 here instead of a 500 at INSERT.
+    """
+    if not isinstance(action, WorkflowAction):
+        return
+    n = len(
+        json.dumps(
+            action.input_template, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+    )
+    if n > MAX_INPUT_TEMPLATE_BYTES:
+        raise ValueError(f"input_template serializes to {n} bytes (max {MAX_INPUT_TEMPLATE_BYTES})")
 
 
 # ─── request / response models ───────────────────────────────────────────────
@@ -202,30 +327,34 @@ class TriggerCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _validate_cron_write_path(self) -> TriggerCreate:
+    def _validate_write_path(self) -> TriggerCreate:
         if isinstance(self.source, CronSource):
             _validate_cron_expression(self.source.schedule)
+        _validate_input_template_bound(self.action)
         return self
 
 
 class TriggerUpdate(BaseModel):
     """Update body. ``source`` / ``action`` are replaced WHOLESALE when
     provided (a cron↔one-shot or sandbox↔wake conversion is just a
-    different object). ``None`` = leave alone; there is no clear-to-null
-    (both columns are NOT NULL). The next_fire / cap / past-fire_at
-    business rules are enforced in the service layer (§2.4).
+    different object) — via the Replace union variants, whose
+    optional-at-create fields are required so a partial object 422s instead
+    of silently re-defaulting. ``None`` = leave alone; there is no
+    clear-to-null (both columns are NOT NULL). The next_fire / cap /
+    past-fire_at business rules are enforced in the service layer (§2.4).
     """
 
     model_config = ConfigDict(extra="forbid")
-    source: TriggerSource | None = None
+    source: TriggerSourceReplace | None = None
     action: TriggerActionReplace | None = None
     enabled: bool | None = None
     metadata: dict[str, Any] | None = None
 
     @model_validator(mode="after")
-    def _validate_cron_write_path(self) -> TriggerUpdate:
+    def _validate_write_path(self) -> TriggerUpdate:
         if isinstance(self.source, CronSource):
             _validate_cron_expression(self.source.schedule)
+        _validate_input_template_bound(self.action)
         return self
 
 
@@ -294,13 +423,21 @@ def compute_next_fire(schedule: str, from_time: datetime) -> datetime:
     return next_time
 
 
-def compute_initial_next_fire(source: CronSource | OneShotSource, now: datetime) -> datetime:
+def compute_initial_next_fire(
+    source: CronSource | OneShotSource | RunCompletionSource, now: datetime
+) -> datetime | None:
     """Return the initial ``next_fire`` for a freshly-enabled row.
 
     Cron: the next slot strictly after ``now``. One-shot: ``fire_at``
     verbatim — even if in the past, the scheduler treats it as due
     immediately and fire-and-deletes on the next tick (today's semantic).
+    run_completion: ``None`` — reactive rows are unschedulable by the tick BY
+    PREDICATE (the claim/MIN queries' ``next_fire IS NOT NULL``) and by the
+    ``triggers_run_completion_no_next_fire`` DB guard; their fires dispatch
+    from the watched run's completion transaction.
     """
+    if isinstance(source, RunCompletionSource):
+        return None
     if isinstance(source, OneShotSource):
         return source.fire_at
     return compute_next_fire(source.schedule, now)

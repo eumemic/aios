@@ -1988,10 +1988,10 @@ async def clone_session(
             """
             INSERT INTO triggers (
                 id, owner_session_id, account_id, name, source, source_spec,
-                action, enabled, next_fire, metadata
+                action, enabled, next_fire, environment_id, metadata
             )
             SELECT i.id, $2, s.account_id, s.name, s.source, s.source_spec,
-                   s.action, s.enabled, s.next_fire, s.metadata
+                   s.action, s.enabled, s.next_fire, s.environment_id, s.metadata
               FROM (
                 SELECT *, row_number() OVER (ORDER BY created_at) AS rn
                   FROM triggers WHERE owner_session_id = $1
@@ -7902,7 +7902,8 @@ class TriggerRow(NamedTuple):
     ``source`` is the raw discriminator text and ``source_spec`` the raw
     parsed dict (the scheduler/runner branch lifecycle on the source
     string); ``action`` is the validated union (the runner dispatches on
-    ``action.kind``).
+    ``action.kind``). ``environment_id`` is the first-class FK column —
+    non-NULL iff the action kind is ``workflow`` (the iff CHECK).
     """
 
     id: str
@@ -7918,6 +7919,7 @@ class TriggerRow(NamedTuple):
     last_fire_at: datetime | None
     last_fire_status: TriggerFireStatus | None
     consecutive_failures: int
+    environment_id: str | None
     session_archived_at: datetime | None
 
 
@@ -7959,15 +7961,23 @@ async def add_trigger(
     enabled: bool,
     metadata: dict[str, Any],
     next_fire: datetime | None,
+    environment_id: str | None,
     account_id: str,
 ) -> TriggerEcho:
     """Insert a trigger.
 
     ``source`` / ``source_spec`` / ``action`` are the serialized union forms
     (the service layer materializes action defaults and the union models
-    enforce shape; the DB CHECK is a backstop). Maps unique-name violations
-    to :class:`ConflictError` and missing-session FK violations to
-    :class:`NotFoundError`.
+    enforce shape; the DB CHECK is a backstop). ``environment_id`` is a
+    REQUIRED kwarg (no default) so mypy forces every call site through the
+    resolution decision: the owner session's environment for ``workflow``
+    actions, ``None`` otherwise (``services.triggers.validate_trigger_spec``).
+    Maps unique-name violations to :class:`ConflictError` and FK violations
+    to :class:`NotFoundError` — the session FK is the only one reachable
+    today (the environment FK is pre-validated in the same transaction by the
+    service layer, and environments have no delete path; if an env-delete
+    feature ever ships, this blanket mapping must learn to tell the two
+    apart or it will name the wrong missing resource).
     """
     trigger_id = make_id(TRIGGER)
     try:
@@ -7975,8 +7985,8 @@ async def add_trigger(
             """
             INSERT INTO triggers
                 (id, owner_session_id, account_id, name, source, source_spec,
-                 action, enabled, next_fire, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 action, enabled, next_fire, environment_id, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
             """,
             trigger_id,
@@ -7988,6 +7998,7 @@ async def add_trigger(
             json.dumps(action),
             enabled,
             next_fire,
+            environment_id,
             json.dumps(metadata),
         )
     except asyncpg.UniqueViolationError as exc:
@@ -8101,18 +8112,23 @@ async def update_trigger(
     enabled: bool | None = None,
     metadata: dict[str, Any] | None = None,
     next_fire: datetime | None | EllipsisType = ...,
+    environment_id: str | None | EllipsisType = ...,
     account_id: str,
 ) -> TriggerEcho:
     """Update fields by name. Raises :class:`NotFoundError` if absent.
 
     ``source`` / ``source_spec`` are set together (wholesale replacement of
     the source union) or both left alone (``None``). ``action`` is replaced
-    wholesale or left alone. ``next_fire`` uses ``...`` (Ellipsis) as the
-    leave-alone sentinel because ``None`` is a meaningful clear-to-null
-    (used on disable). Source/action SHAPES are validated upstream by the
-    discriminated-union models (a 422 fires before the DB CHECK), so no
-    merged-XOR re-validation is needed here — invalid shapes are
-    unrepresentable.
+    wholesale or left alone. ``next_fire`` and ``environment_id`` use ``...``
+    (Ellipsis) as the leave-alone sentinel because ``None`` is a meaningful
+    clear-to-null. The service layer MUST pass ``environment_id`` whenever it
+    passes ``action`` (the resolved env for ``workflow``, ``None`` otherwise)
+    so the jsonb and the column flip in ONE UPDATE — the iff CHECK catches a
+    forgotten kind conversion loudly, but a same-kind workflow→workflow
+    replacement with a stale column would be silent. Source/action SHAPES are
+    validated upstream by the discriminated-union models (a 422 fires before
+    the DB CHECK), so no merged-XOR re-validation is needed here — invalid
+    shapes are unrepresentable.
     """
     set_clauses: list[str] = []
     args: list[Any] = []
@@ -8133,6 +8149,8 @@ async def update_trigger(
         add("metadata", json.dumps(metadata))
     if not isinstance(next_fire, EllipsisType):
         add("next_fire", next_fire)
+    if not isinstance(environment_id, EllipsisType):
+        add("environment_id", environment_id)
 
     # Always bump ``updated_at`` so a no-op PATCH still records a write —
     # external pollers using ``updated_at > <since>`` mustn't miss it.
@@ -8171,7 +8189,7 @@ async def unscoped_get_trigger_row(
         "SELECT t.id, t.owner_session_id, t.account_id, t.name, t.source, "
         "t.source_spec, t.action, t.enabled, t.next_fire, t.running_since, "
         "t.last_fire_at, t.last_fire_status, t.consecutive_failures, "
-        "s.archived_at AS session_archived_at "
+        "t.environment_id, s.archived_at AS session_archived_at "
         "FROM triggers AS t "
         "JOIN sessions AS s ON s.id = t.owner_session_id "
         "WHERE t.id = $1",
@@ -8196,6 +8214,7 @@ async def unscoped_get_trigger_row(
         last_fire_at=row["last_fire_at"],
         last_fire_status=row["last_fire_status"],
         consecutive_failures=row["consecutive_failures"],
+        environment_id=row["environment_id"],
         session_archived_at=row["session_archived_at"],
     )
 
@@ -8242,7 +8261,7 @@ async def fetch_and_claim_due_triggers(
                t.source_spec, t.source_spec ->> 'schedule' AS schedule,
                t.action, t.enabled, t.next_fire, t.running_since,
                t.last_fire_at, t.last_fire_status, t.consecutive_failures,
-               s.archived_at AS session_archived_at
+               t.environment_id, s.archived_at AS session_archived_at
         FROM triggers AS t
         JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.enabled
@@ -8306,6 +8325,7 @@ async def fetch_and_claim_due_triggers(
                 last_fire_at=r["last_fire_at"],
                 last_fire_status=r["last_fire_status"],
                 consecutive_failures=r["consecutive_failures"],
+                environment_id=r["environment_id"],
                 session_archived_at=r["session_archived_at"],
             )
         )
@@ -8317,29 +8337,44 @@ async def record_trigger_fire(
     trigger_id: str,
     *,
     status: TriggerFireStatus,
-    consecutive_failures: int,
     fired_at: datetime,
-) -> None:
-    """Record the outcome of a fire and clear ``running_since``.
+) -> int | None:
+    """Record the outcome of a fire and clear ``running_since``; return the
+    post-update ``consecutive_failures``.
+
+    The counter is computed SQL-side (ok → 0, skipped → unchanged, else +1):
+    run_completion fires are unserialized (no ``running_since`` claim, no
+    per-trigger queueing lock), so a Python read-modify-write would lose
+    updates under concurrent fires — bursts could fail forever without ever
+    reaching the auto-disable threshold, or a stale failure could clobber a
+    success's reset. The UPDATE's row lock serializes concurrent records, so
+    the RETURNING value is the true serialized count; behavior-identical for
+    single-flight cron. Returns ``None`` when the row vanished mid-fire (an
+    API DELETE racing the fire — benign; callers must tolerate it).
 
     Does NOT touch ``next_fire`` — that was advanced by the tick when the
-    row was claimed.
+    row was claimed (and is permanently NULL for run_completion rows).
     """
-    await conn.execute(
+    result: int | None = await conn.fetchval(
         """
         UPDATE triggers
         SET running_since = NULL,
             last_fire_at = $1,
             last_fire_status = $2,
-            consecutive_failures = $3,
+            consecutive_failures = CASE
+                WHEN $2 = 'ok' THEN 0
+                WHEN $2 = 'skipped' THEN consecutive_failures
+                ELSE consecutive_failures + 1
+            END,
             updated_at = $1
-        WHERE id = $4
+        WHERE id = $3
+        RETURNING consecutive_failures
         """,
         fired_at,
         status,
-        consecutive_failures,
         trigger_id,
     )
+    return result
 
 
 async def disable_trigger(
@@ -8643,6 +8678,7 @@ async def record_trigger_run(
         status,
         error_summary,
         result_id,
+        started_at,
     )
     return trigger_run_id
 
