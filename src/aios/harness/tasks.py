@@ -60,13 +60,23 @@ async def wake_session(
     retry=False,
     pass_context=False,
 )
-async def run_trigger(trigger_id: str) -> None:
-    """Fire one trigger — runs its action (sandbox_command or wake_owner).
+async def run_trigger(trigger_id: str, trigger_run_id: str | None = None) -> None:
+    """Fire one trigger — runs its action (sandbox_command / wake_owner /
+    workflow).
 
-    Per-trigger ``queueing_lock`` (set by the scheduler tick at defer time)
-    deduplicates pending fires. No decorator-level ``lock`` — fires must not
-    block concurrent session inference; overlap-prevention is enforced
-    upstream via the ``running_since`` column on the row.
+    Two defer origins, distinguished by ``trigger_run_id`` (the §1.2 additive
+    per-event kwarg — old tick payloads still deserialize):
+
+    - Scheduler tick (cron/one_shot): per-trigger ``queueing_lock`` set at
+      defer time deduplicates pending fires; ``trigger_run_id`` is ``None``.
+    - run_completion dispatch: one job per completed run, ``queueing_lock``
+      keyed on the ``trigger_runs`` carrier row (never the bare trigger id —
+      distinct completions must not coalesce); ``trigger_run_id`` names the
+      carrier the runner claims.
+
+    No decorator-level ``lock`` — fires must not block concurrent session
+    inference; overlap-prevention is the ``running_since`` claim for tick
+    fires and the carrier-row claim for event fires.
 
     Renamed from ``harness.run_scheduled_task`` (#818, delete-don't-deprecate).
     Deploy-window caveat: a job enqueued pre-restart under the old name
@@ -75,7 +85,7 @@ async def run_trigger(trigger_id: str) -> None:
     """
     from aios.harness.trigger_runner import run_trigger_step
 
-    await run_trigger_step(trigger_id)
+    await run_trigger_step(trigger_id, trigger_run_id=trigger_run_id)
 
 
 @app.task(

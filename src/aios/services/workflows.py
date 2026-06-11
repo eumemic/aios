@@ -63,17 +63,25 @@ async def _enforce_surface_attenuation(
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerSpec],
-) -> None:
-    """Raise ``ForbiddenError`` unless the declared surface is a fixpoint of the meet
-    against the acting agent's surface — i.e. it grants nothing the agent lacks.
+) -> Surface:
+    """Raise ``ForbiddenError`` unless the declared surface is admissible against the acting
+    agent's; return the effective (clamped) surface for storage.
 
     Serves both create (the creator's declared surface) and update (the editor's merged
-    final surface). The predicate is ``attenuate(declared, actor) ==
-    canonicalize(declared)``: equal iff the meet did not have to narrow anything, which
-    is exactly "``declared`` ≤ ``actor``" on every axis — membership *and* per-tool
-    permission/transport, MCP server identity (joint name+url), and http routes (which
-    are parent-wins-frozen, so the agent's must be declared verbatim; R1). The HTTP path
-    passes no actor and skips this — operator authority.
+    final surface). The predicate is per-dimension:
+
+    * tools / mcp_servers — byte-equality of ``clamp(declared, actor)`` against
+      ``canonicalize(declared)``: equal iff the meet did not narrow anything, which is
+      exactly "``declared`` ≤ ``actor``" on membership *and* per-tool permission/transport
+      and MCP server identity (joint name+url).
+    * http_servers — identity survival: every declared ``(name, base_url)`` must appear in
+      the clamp's http servers. The agent's routes/fields are inherited launcher-frozen
+      into storage (the returned ``effective``), so a workflow need only name the server,
+      not reproduce its routes byte-perfect.
+
+    http servers remain parent-wins-frozen at run-time (run-launch clamps to
+    launcher-verbatim) — only the AUTHORING gate relaxes to identity, which grants no new
+    run-time authority. The HTTP/operator path passes no actor and skips this entirely.
     """
     session = await sessions_service.get_session_basic(
         pool, actor_session_id, account_id=account_id
@@ -82,11 +90,18 @@ async def _enforce_surface_attenuation(
     declared = Surface(tools, mcp_servers, http_servers)
     expected = attenuation_service.normalize(declared)
     effective = attenuation_service.clamp(declared, surface_of(agent))
-    if effective != expected:
+    surviving_http = {(s.name, s.base_url) for s in effective.http_servers}
+    exceeds = (
+        effective.tools != expected.tools
+        or effective.mcp_servers != expected.mcp_servers
+        or any((s.name, s.base_url) not in surviving_http for s in expected.http_servers)
+    )
+    if exceeds:
         raise ForbiddenError(
             "workflow surface exceeds the acting agent's permissions",
             detail={"exceeds": surface_diff(expected, effective)},
         )
+    return effective
 
 
 async def create_workflow(
@@ -108,11 +123,14 @@ async def create_workflow(
     **Create-time attenuation:** when ``creator_session_id`` is set (an agent authoring
     the workflow), the declared surface (``tools``/``mcp_servers``/``http_servers``) must
     be a subset of the creating agent's own — an agent cannot grant a workflow a tool or
-    server it does not itself have; a breach raises :class:`ForbiddenError`. With no
-    creator (the HTTP/operator path) any surface may be declared, account-scoped.
+    server it does not itself have; a breach raises :class:`ForbiddenError`. http servers
+    are admitted by identity (name + base_url) and their routes inherited launcher-frozen
+    into storage. With no creator (the HTTP/operator path) any surface may be declared
+    verbatim, account-scoped.
     """
+    effective: Surface | None = None
     if creator_session_id is not None:
-        await _enforce_surface_attenuation(
+        effective = await _enforce_surface_attenuation(
             pool,
             account_id=account_id,
             actor_session_id=creator_session_id,
@@ -120,6 +138,9 @@ async def create_workflow(
             mcp_servers=mcp_servers or [],
             http_servers=http_servers or [],
         )
+    # Agent-authored: store the agent's launcher-frozen http routes (inherited by identity).
+    # Operator path: store the declared http servers verbatim.
+    http_to_store = effective.http_servers if effective is not None else http_servers
     async with pool.acquire() as conn:
         return await wf_queries.insert_workflow(
             conn,
@@ -131,7 +152,7 @@ async def create_workflow(
             description=description,
             tools=tools,
             mcp_servers=mcp_servers,
-            http_servers=http_servers,
+            http_servers=http_to_store,
         )
 
 
@@ -162,7 +183,11 @@ async def update_workflow(
 
     In-flight runs are unaffected: a run snapshots ``script`` + the declared surface at
     launch; only runs created after the update see the new definition.
+
+    http servers are admitted by identity and their routes inherited launcher-frozen into
+    storage (mirroring create); the operator path stores declared http verbatim.
     """
+    effective: Surface | None = None
     if actor_session_id is not None:
         current = await get_workflow(pool, workflow_id, account_id=account_id)
         if current.version != expected_version:
@@ -180,7 +205,7 @@ async def update_workflow(
                     "id": workflow_id,
                 },
             )
-        await _enforce_surface_attenuation(
+        effective = await _enforce_surface_attenuation(
             pool,
             account_id=account_id,
             actor_session_id=actor_session_id,
@@ -188,6 +213,14 @@ async def update_workflow(
             mcp_servers=mcp_servers if mcp_servers is not None else current.mcp_servers,
             http_servers=http_servers if http_servers is not None else current.http_servers,
         )
+    # Agent-actor touching http: store the inherited launcher-frozen routes. Operator path,
+    # or an edit that didn't touch http (``http_servers is None`` → query preserves current):
+    # pass the original argument through unchanged.
+    http_to_store = (
+        effective.http_servers
+        if (effective is not None and http_servers is not None)
+        else http_servers
+    )
     async with pool.acquire() as conn:
         return await wf_queries.update_workflow(
             conn,
@@ -201,7 +234,7 @@ async def update_workflow(
             description=description,
             tools=tools,
             mcp_servers=mcp_servers,
-            http_servers=http_servers,
+            http_servers=http_to_store,
         )
 
 
@@ -310,8 +343,7 @@ async def await_run(
     if is_error:
         # ``error.kind`` lives only in the run_completed payload, not on the run row.
         async with pool.acquire() as conn:
-            completed = await wf_queries.get_run_completed_event(conn, run_id)
-        error = completed.payload.get("error") if completed is not None else None
+            error = await wf_queries.resolve_run_error(conn, run_id)
     return WfRunWaitResponse(
         run_status=run.status, done=done, output=run.output, is_error=is_error, error=error
     )
