@@ -46,13 +46,17 @@ from datetime import UTC, datetime, timedelta
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from aios.harness import runtime
 
 # HKDF domain-separation context for the CA seed; bump the suffix if the
 # derivation scheme ever changes incompatibly.
 EGRESS_CA_HKDF_INFO = "aios-egress-ca-v1"
+
+# Server-leaf validity window. Short by design — leaves are minted per SNI
+# host for one session's lifetime, never persisted.
+LEAF_VALIDITY_DAYS = 7
 
 # Debian convention: drop-in .crt files under this directory are folded
 # into the aggregate bundle by ``update-ca-certificates``.
@@ -149,11 +153,59 @@ def get_egress_ca() -> EgressCA:
     )
 
 
+def mint_server_leaf(
+    ca: EgressCA, hostname: str
+) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
+    """A server leaf for ``hostname`` signed by ``ca`` — the leaf contract
+    pinned in this module's docstring.
+
+    Carries a DNS SAN (the authoritative identity; CN-only verification is
+    deprecated), ``CA:FALSE``, EKU ``serverAuth``, a short validity window,
+    and a **keyid-only** AuthorityKeyIdentifier (``from_issuer_public_key``).
+    The SKI hashes the deterministic public key, so it matches any worker
+    process's CA cert copy; the CA serial does not and must never appear in
+    a chain reference. This is the single authoritative mint — the egress
+    proxy and the ``tests/helpers/tls.py`` helper both call it.
+
+    The subject is left EMPTY and the SAN is marked critical. The hostname is
+    deliberately NOT placed in the CN: X.509 caps the CN at 64 chars
+    (ub-common-name), but a credential's ``allowed_hosts`` admits any DNS name
+    up to 253 chars — a 65-253-char host would make a CN-bearing mint raise
+    and render that allowed host permanently unreachable through the proxy.
+    The DNS SAN has no such limit, and an empty subject is valid precisely
+    when the SAN is critical (RFC 5280 §4.2.1.6).
+    """
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([]))
+        .issuer_name(ca.certificate.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        # Backdate an hour so a sandbox whose clock trails the worker still
+        # accepts a just-minted leaf (mirrors the CA cert's backdating).
+        .not_valid_before(now - timedelta(hours=1))
+        .not_valid_after(now + timedelta(days=LEAF_VALIDITY_DAYS))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=True)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca.private_key.public_key()),
+            critical=False,
+        )
+        .sign(ca.private_key, hashes.SHA256())
+    )
+    return cert, key
+
+
 __all__ = [
     "CA_CERT_SANDBOX_PATH",
     "EGRESS_CA_HKDF_INFO",
+    "LEAF_VALIDITY_DAYS",
     "SYSTEM_CA_BUNDLE_PATH",
     "TRUST_STORE_ENV",
     "EgressCA",
     "get_egress_ca",
+    "mint_server_leaf",
 ]

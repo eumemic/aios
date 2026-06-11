@@ -49,6 +49,27 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return ip in _CGNAT_NETWORK
 
 
+def is_blocked_hostname(host: str) -> bool:
+    """True if ``host`` is a known-internal name (cloud-metadata etc.).
+
+    Public wrapper over :data:`_BLOCKED_HOSTNAMES` for the secret-egress proxy's
+    resolve-time SSRF gate, so it doesn't import a private name.
+    """
+    return host.strip().lower() in _BLOCKED_HOSTNAMES
+
+
+def is_blocked_ip(ip_str: str) -> bool:
+    """True if ``ip_str`` resolves to a blocked range — or fails to parse.
+
+    Fail-closed wrapper over :func:`_is_blocked_ip`: an address string the proxy
+    cannot parse is treated as blocked rather than forwarded toward.
+    """
+    try:
+        return _is_blocked_ip(ipaddress.ip_address(ip_str))
+    except ValueError:
+        return True
+
+
 def is_safe_url(url: str) -> bool:
     """Return True if the URL target is not a private/internal address.
 
