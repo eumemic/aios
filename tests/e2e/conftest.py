@@ -21,7 +21,7 @@ import socket
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest import mock
 
 import pytest
@@ -30,9 +30,12 @@ import uvicorn
 from tests.e2e.harness import Harness
 from tests.helpers.connections import authed_client, wait_for_health, wired_app
 
+if TYPE_CHECKING:
+    from aios.sandbox.backends.docker import DockerBackend
+
 
 @pytest.fixture
-async def daemon(tmp_path: Path) -> AsyncIterator[tuple[Any, str, str, Path]]:
+async def daemon(tmp_path: Path) -> AsyncIterator[tuple[DockerBackend, str, str, Path]]:
     """A real :class:`DockerBackend` + a unique (instance, session, workspace)
     plus container/snapshot-image cleanup.
 

@@ -28,7 +28,7 @@ from aios.sandbox.backends.base import (
 )
 
 
-async def run_sandbox(backend: Any, handle: SandboxHandle, cmd: str) -> tuple[int, str]:
+async def run_sandbox(backend: SandboxBackend, handle: SandboxHandle, cmd: str) -> tuple[int, str]:
     """Exec ``cmd`` in a real-daemon sandbox; return ``(exit_code, stdout+stderr)``.
 
     Shared by the real-Docker e2e sandbox tests (persistence, provision-path),
