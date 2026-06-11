@@ -22,7 +22,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
-WfRunEventType = Literal["run_started", "call_started", "call_result", "run_completed"]
+WfRunEventType = Literal[
+    "run_started", "call_started", "call_result", "run_completed", "annotation"
+]
 WfRunSignalKind = Literal["gate_resume", "child_done", "cancel", "tool_result"]
 
 # The terminal run statuses — monotonic: once here, a run never leaves. The one source for
@@ -89,8 +91,11 @@ class WfRun(BaseModel):
 class WfRunEvent(BaseModel):
     """One row of a run's append-only journal (the replay-with-memo source).
 
-    ``call_key`` is set for ``call_started``/``call_result`` (the memo key) and
-    ``None`` for the ``run_started``/``run_completed`` bookends.
+    ``call_key`` is set for ``call_started``/``call_result`` (the memo key) and for
+    ``annotation`` (the branch-local dedup key that makes ``log()``/``phase()``
+    emit-once across replays); it is ``None`` for the ``run_started``/``run_completed``
+    bookends. An ``annotation`` is a journaled progress marker (``payload`` =
+    ``{"kind": "log" | "phase", "text": ...}``), not a capability call.
     """
 
     id: str
