@@ -2319,3 +2319,79 @@ class TestSlice2ClonePropagation:
         assert isinstance(src, RunCompletionSource)
         assert src.workflow_id == wf_id
         assert clone_triggers[0].next_fire is None  # stays tick-unschedulable
+
+
+class TestTriggerRunsRoute:
+    """GET /v1/sessions/{sid}/triggers/{name}/runs — the per-fire audit read.
+
+    Keyed by the audit table's DENORMALIZED columns, never the live trigger
+    row: one-shot tombstones and a deleted trigger's history stay reachable.
+    """
+
+    async def _seed_audit_rows(self, pool: Any, sid: str, name: str, n: int) -> str:
+        echo = await trig_service.add_trigger(
+            pool,
+            sid,
+            TriggerCreate.model_validate(
+                {
+                    "name": name,
+                    "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+                    "action": {"kind": "wake_owner", "content": "tick"},
+                }
+            ),
+            account_id="acc_test_stub",
+        )
+        async with pool.acquire() as conn:
+            for i in range(n):
+                await queries.record_trigger_run(
+                    conn,
+                    trigger_id=echo.id,
+                    account_id="acc_test_stub",
+                    owner_session_id=sid,
+                    trigger_name=name,
+                    trigger_context="cron",
+                    status="ok" if i % 2 == 0 else "error",
+                    error_summary=None if i % 2 == 0 else f"boom {i}",
+                    result_id=None,
+                    started_at=datetime.now(UTC) + timedelta(seconds=i),
+                )
+        return echo.id
+
+    async def test_lists_newest_first_with_limit(
+        self, pool: Any, http_client: httpx.AsyncClient, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        await self._seed_audit_rows(pool, sid, "audited", 3)
+
+        r = await http_client.get(f"/v1/sessions/{sid}/triggers/audited/runs")
+        assert r.status_code == 200, r.text
+        rows = r.json()["data"]
+        assert len(rows) == 3
+        created = [row["created_at"] for row in rows]
+        assert created == sorted(created, reverse=True)  # newest first
+        assert {row["trigger_context"] for row in rows} == {"cron"}
+
+        r = await http_client.get(f"/v1/sessions/{sid}/triggers/audited/runs?limit=2")
+        assert len(r.json()["data"]) == 2
+
+    async def test_history_survives_trigger_deletion(
+        self, pool: Any, http_client: httpx.AsyncClient, env_and_agent: tuple[str, str]
+    ) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        await self._seed_audit_rows(pool, sid, "ghost", 2)
+        await trig_service.remove_trigger(pool, sid, "ghost", account_id="acc_test_stub")
+
+        r = await http_client.get(f"/v1/sessions/{sid}/triggers/ghost/runs")
+        assert r.status_code == 200, r.text
+        assert len(r.json()["data"]) == 2  # the audit outlives the trigger
+
+    async def test_account_scoped(self, pool: Any, env_and_agent: tuple[str, str]) -> None:
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        await self._seed_audit_rows(pool, sid, "scoped", 1)
+        rows = await trig_service.list_trigger_runs(
+            pool, sid, "scoped", account_id="acc_someone_else"
+        )
+        assert rows == []

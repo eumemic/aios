@@ -65,6 +65,27 @@ _SOURCE_SCHEMA: dict[str, Any] = {
             "required": ["kind", "fire_at"],
             "additionalProperties": False,
         },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"const": "run_completion"},
+                "workflow_id": {
+                    "type": "string",
+                    "description": "Id of the workflow whose run completions fire this trigger.",
+                },
+                "statuses": {
+                    "type": "array",
+                    "items": {"enum": ["completed", "errored", "cancelled"]},
+                    "minItems": 1,
+                    "description": (
+                        "Which terminal statuses fire (required on update — no "
+                        "implicit default; send the complete filter)."
+                    ),
+                },
+            },
+            "required": ["kind", "workflow_id", "statuses"],
+            "additionalProperties": False,
+        },
     ],
 }
 
@@ -113,6 +134,43 @@ _ACTION_SCHEMA: dict[str, Any] = {
                 },
             },
             "required": ["kind", "content"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"const": "workflow"},
+                "workflow_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the workflow to launch at each fire.",
+                },
+                "workflow_version": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "description": (
+                        "Required on update — explicit null floats to the current "
+                        "version; an integer must equal the workflow's current version "
+                        "and is re-asserted at each fire (drift records an error)."
+                    ),
+                },
+                "input_template": {
+                    "description": (
+                        "Required on update (explicit null = no payload). The run's "
+                        "input is the envelope {'trigger': <firing context>, 'input': "
+                        "<this template verbatim>}."
+                    ),
+                },
+                "vault_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Required on update (explicit [] = none) — must be a subset of "
+                        "this session's vaults, re-checked at every fire."
+                    ),
+                },
+            },
+            "required": ["kind", "workflow_id", "workflow_version", "input_template", "vault_ids"],
             "additionalProperties": False,
         },
     ],

@@ -84,6 +84,7 @@ from .list_response_session_template import ListResponseSessionTemplate
 from .list_response_skill import ListResponseSkill
 from .list_response_skill_version import ListResponseSkillVersion
 from .list_response_trigger_echo import ListResponseTriggerEcho
+from .list_response_trigger_run_echo import ListResponseTriggerRunEcho
 from .list_response_union_memory_memory_prefix import (
     ListResponseUnionMemoryMemoryPrefix,
 )
@@ -209,6 +210,8 @@ from .trigger_create_metadata import TriggerCreateMetadata
 from .trigger_echo import TriggerEcho
 from .trigger_echo_last_fire_status_type_0 import TriggerEchoLastFireStatusType0
 from .trigger_echo_metadata import TriggerEchoMetadata
+from .trigger_run_echo import TriggerRunEcho
+from .trigger_run_echo_event_type_0 import TriggerRunEchoEventType0
 from .trigger_update import TriggerUpdate
 from .trigger_update_metadata_type_0 import TriggerUpdateMetadataType0
 from .unrestricted_networking import UnrestrictedNetworking
@@ -345,6 +348,7 @@ __all__ = (
     "ListResponseSkill",
     "ListResponseSkillVersion",
     "ListResponseTriggerEcho",
+    "ListResponseTriggerRunEcho",
     "ListResponseUnionMemoryMemoryPrefix",
     "ListResponseVault",
     "ListResponseVaultCredential",
@@ -460,6 +464,8 @@ __all__ = (
     "TriggerEcho",
     "TriggerEchoLastFireStatusType0",
     "TriggerEchoMetadata",
+    "TriggerRunEcho",
+    "TriggerRunEchoEventType0",
     "TriggerUpdate",
     "TriggerUpdateMetadataType0",
     "UnrestrictedNetworking",

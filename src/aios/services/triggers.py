@@ -34,6 +34,7 @@ from aios.models.triggers import (
     RunCompletionSource,
     TriggerCreate,
     TriggerEcho,
+    TriggerRunEcho,
     TriggerUpdate,
     WorkflowAction,
     compute_initial_next_fire,
@@ -281,3 +282,20 @@ async def list_triggers(
 ) -> list[TriggerEcho]:
     async with pool.acquire() as conn:
         return await queries.list_triggers(conn, session_id, account_id=account_id)
+
+
+async def list_trigger_runs(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    name: str,
+    *,
+    account_id: str,
+    limit: int = 50,
+) -> list[TriggerRunEcho]:
+    """A trigger's per-fire audit, newest first — keyed by the audit table's
+    denormalized name, never the live trigger row (one-shot tombstones and
+    deleted-trigger history must stay reachable)."""
+    async with pool.acquire() as conn:
+        return await queries.list_trigger_runs(
+            conn, account_id=account_id, session_id=session_id, trigger_name=name, limit=limit
+        )

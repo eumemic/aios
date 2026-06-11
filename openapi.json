@@ -2461,6 +2461,86 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/triggers/{name}/runs": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "List Trigger Runs",
+        "description": "List a trigger's fires (the per-fire audit), newest first.\n\nKeyed by name against the audit table's denormalized columns \u2014 NOT the\nlive trigger row \u2014 so one-shot tombstones and a deleted trigger's history\nstay reachable (the audit outlives its trigger by design). Rows older\nthan the retention window are pruned.",
+        "operationId": "list_trigger_runs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_TriggerRunEcho_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sessions/{session_id}/archive": {
       "post": {
         "tags": [
@@ -11534,6 +11614,38 @@
         ],
         "title": "ListResponse[TriggerEcho]"
       },
+      "ListResponse_TriggerRunEcho_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/TriggerRunEcho"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[TriggerRunEcho]"
+      },
       "ListResponse_Union_Memory__MemoryPrefix__": {
         "properties": {
           "data": {
@@ -14719,6 +14831,104 @@
         ],
         "title": "TriggerEcho",
         "description": "Read view of a trigger as echoed on ``Session.triggers``.\n\nRuntime fields (``last_fire_at`` / ``last_fire_status`` /\n``consecutive_failures``) reflect the most recent fire outcome.\n``running_since`` is internal scheduler bookkeeping and is not exposed\nhere."
+      },
+      "TriggerRunEcho": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "trigger_id": {
+            "type": "string",
+            "title": "Trigger Id"
+          },
+          "trigger_context": {
+            "type": "string",
+            "title": "Trigger Context"
+          },
+          "event": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "result_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Id"
+          },
+          "error_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Summary"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "trigger_id",
+          "trigger_context",
+          "event",
+          "status",
+          "result_id",
+          "error_summary",
+          "created_at",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "TriggerRunEcho",
+        "description": "Read view of one ``trigger_runs`` row \u2014 a single fire of a trigger.\n\n``trigger_context`` echoes the firing source (``cron`` / ``one_shot`` /\n``run_completion``); ``event`` carries the per-event context for\n``run_completion`` fires (``{run_id, workflow_id, status}``) and is\n``None`` for timer fires. ``status`` is an open string on read (rows\nwritten by future writers must always read back); the current writer\nvocabulary is ``pending``/``running``/``ok``/``error``/``timeout``/\n``skipped``. ``result_id`` is the prefixed id of the resource the fire\ncreated (a ``wfr_\u2026`` run today), or ``None`` when the fire produced no\nresource or failed. ``created_at`` is when the fire INTENT was created\n(the match transaction for event fires; insert time for timer rows);\n``started_at`` is when execution claimed it."
       },
       "TriggerUpdate": {
         "properties": {
