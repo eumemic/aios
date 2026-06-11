@@ -27,15 +27,18 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, RateLimitedError, ValidationError
+from aios.models.sessions import Session
 from aios.models.triggers import (
     MAX_TRIGGERS_PER_SESSION,
     CronSource,
     OneShotSource,
     RunCompletionSource,
+    SandboxCommandAction,
     TriggerCreate,
     TriggerEcho,
     TriggerRunEcho,
     TriggerUpdate,
+    WakeOwnerAction,
     WorkflowAction,
     compute_initial_next_fire,
 )
@@ -44,23 +47,29 @@ from aios.models.triggers import (
 async def validate_trigger_spec(
     conn: asyncpg.Connection[Any],
     source: CronSource | OneShotSource | RunCompletionSource | None,
-    action: Any,
+    action: SandboxCommandAction | WakeOwnerAction | WorkflowAction | None,
     *,
     session_id: str,
     account_id: str,
+    session: Session | None = None,
 ) -> str | None:
     """Shared write-path validation for a trigger's source/action references;
     returns the resolved ``environment_id`` (``workflow`` actions) or ``None``.
 
     Called from EVERY write path into ``triggers`` — ``add_trigger``,
     ``update_trigger`` (provided pieces only), and ``create_session``'s
-    ``SessionCreate.triggers`` attachment — so the three stay consistent.
+    ``SessionCreate.triggers`` attachment — so the three stay consistent. The
+    typed ``action`` is part of the contract: only PARSED union members reach
+    this chokepoint (the Replace variants are subclasses), so a caller cannot
+    silently skip workflow validation with an unparsed dict.
 
     The account-scoped session read is FIRST and UNCONDITIONAL: the HTTP path
     takes ``session_id`` from the URL, and without this check account A could
     attach a trigger to account B's session (for ``sandbox_command`` that is
     cross-tenant code execution at fire time). 404s like every other scoped
-    read.
+    read. ``create_session``'s attach loop passes its just-inserted ``session``
+    instead — same-transaction, same-account by construction — so attaching N
+    specs doesn't re-read the row N times.
 
     Reference checks are correctness, not authority (authority is enforced at
     every fire by ``create_run``, where it cannot go stale): the watched
@@ -74,7 +83,8 @@ async def validate_trigger_spec(
     the owner's live vaults at every fire — a write-time subset check would go
     stale in both directions.
     """
-    session = await queries.get_session_bare(conn, session_id, account_id=account_id)
+    if session is None:
+        session = await queries.get_session_bare(conn, session_id, account_id=account_id)
     if isinstance(source, RunCompletionSource):
         await wf_queries.get_workflow(conn, source.workflow_id, account_id=account_id)
     if not isinstance(action, WorkflowAction):
@@ -292,9 +302,6 @@ async def list_trigger_runs(
     account_id: str,
     limit: int = 50,
 ) -> list[TriggerRunEcho]:
-    """A trigger's per-fire audit, newest first — keyed by the audit table's
-    denormalized name, never the live trigger row (one-shot tombstones and
-    deleted-trigger history must stay reachable)."""
     async with pool.acquire() as conn:
         return await queries.list_trigger_runs(
             conn, account_id=account_id, session_id=session_id, trigger_name=name, limit=limit

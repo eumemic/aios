@@ -720,12 +720,12 @@ async def test_sweep_readers_and_prune(trig_runtime: asyncpg.Pool[Any]) -> None:
             await queries.claim_trigger_run(conn, ref.trigger_run_id, started_at=datetime.now(UTC))
             is not None
         )
-        assert await queries.count_stuck_running_trigger_runs(conn) == 0
+        assert await queries.count_stuck_running_trigger_runs(conn, older_than_seconds=7200.0) == 0
         await conn.execute(
             "UPDATE trigger_runs SET created_at = created_at - interval '3 hours' WHERE id = $1",
             ref.trigger_run_id,
         )
-        assert await queries.count_stuck_running_trigger_runs(conn) == 1
+        assert await queries.count_stuck_running_trigger_runs(conn, older_than_seconds=7200.0) == 1
 
         # Retention prune is age-keyed on created_at.
         assert await queries.prune_trigger_runs(conn, retention_days=30) == 0

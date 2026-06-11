@@ -7904,6 +7904,9 @@ class TriggerRow(NamedTuple):
     string); ``action`` is the validated union (the runner dispatches on
     ``action.kind``). ``environment_id`` is the first-class FK column —
     non-NULL iff the action kind is ``workflow`` (the iff CHECK).
+    ``session_parent_run_id`` is the owning session's own (immutable) parent
+    run — the lineage a timer-fired workflow action threads, projected here
+    off the JOIN the row already pays for.
     """
 
     id: str
@@ -7921,6 +7924,7 @@ class TriggerRow(NamedTuple):
     consecutive_failures: int
     environment_id: str | None
     session_archived_at: datetime | None
+    session_parent_run_id: str | None
 
 
 def _row_to_trigger_echo(row: asyncpg.Record) -> TriggerEcho:
@@ -8189,7 +8193,8 @@ async def unscoped_get_trigger_row(
         "SELECT t.id, t.owner_session_id, t.account_id, t.name, t.source, "
         "t.source_spec, t.action, t.enabled, t.next_fire, t.running_since, "
         "t.last_fire_at, t.last_fire_status, t.consecutive_failures, "
-        "t.environment_id, s.archived_at AS session_archived_at "
+        "t.environment_id, s.archived_at AS session_archived_at, "
+        "s.parent_run_id AS session_parent_run_id "
         "FROM triggers AS t "
         "JOIN sessions AS s ON s.id = t.owner_session_id "
         "WHERE t.id = $1",
@@ -8216,6 +8221,7 @@ async def unscoped_get_trigger_row(
         consecutive_failures=row["consecutive_failures"],
         environment_id=row["environment_id"],
         session_archived_at=row["session_archived_at"],
+        session_parent_run_id=row["session_parent_run_id"],
     )
 
 
@@ -8261,7 +8267,8 @@ async def fetch_and_claim_due_triggers(
                t.source_spec, t.source_spec ->> 'schedule' AS schedule,
                t.action, t.enabled, t.next_fire, t.running_since,
                t.last_fire_at, t.last_fire_status, t.consecutive_failures,
-               t.environment_id, s.archived_at AS session_archived_at
+               t.environment_id, s.archived_at AS session_archived_at,
+               s.parent_run_id AS session_parent_run_id
         FROM triggers AS t
         JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.enabled
@@ -8327,6 +8334,7 @@ async def fetch_and_claim_due_triggers(
                 consecutive_failures=r["consecutive_failures"],
                 environment_id=r["environment_id"],
                 session_archived_at=r["session_archived_at"],
+                session_parent_run_id=r["session_parent_run_id"],
             )
         )
     return claimed
@@ -8560,24 +8568,22 @@ async def insert_run_completion_fires(
         status,
     )
     event = json.dumps({"run_id": run_id, "workflow_id": workflow_id, "status": status})
-    refs: list[TriggerFireRef] = []
-    for r in rows:
-        trigger_run_id = make_id(TRIGGER_RUN)
-        await conn.execute(
-            """
-            INSERT INTO trigger_runs
-                (id, trigger_id, account_id, owner_session_id, trigger_name,
-                 trigger_context, event, status)
-            VALUES ($1, $2, $3, $4, $5, 'run_completion', $6::jsonb, 'pending')
-            """,
-            trigger_run_id,
-            r["id"],
-            r["account_id"],
-            r["owner_session_id"],
-            r["name"],
-            event,
-        )
-        refs.append(TriggerFireRef(trigger_run_id, r["id"]))
+    refs = [TriggerFireRef(make_id(TRIGGER_RUN), r["id"]) for r in rows]
+    # One pipelined statement for the whole batch — this runs inside the
+    # run-completion transaction, so per-row round-trips would extend the
+    # terminal commit window for nothing.
+    await conn.executemany(
+        """
+        INSERT INTO trigger_runs
+            (id, trigger_id, account_id, owner_session_id, trigger_name,
+             trigger_context, event, status)
+        VALUES ($1, $2, $3, $4, $5, 'run_completion', $6::jsonb, 'pending')
+        """,
+        [
+            (ref.trigger_run_id, r["id"], r["account_id"], r["owner_session_id"], r["name"], event)
+            for ref, r in zip(refs, rows, strict=True)
+        ],
+    )
     return refs
 
 
@@ -8697,8 +8703,7 @@ async def list_trigger_runs(
     reachable (the audit outlives its trigger by design). Name reuse merges
     incarnations in the listing; rows carry ``trigger_id`` to disambiguate.
 
-    No dedicated index — a porcelain read over a retention-pruned table; the
-    scan is bounded by ``trigger_runs_retention_days``.
+    Served by the ``trigger_runs_by_owner_name`` index.
     """
     rows = await conn.fetch(
         """
@@ -8718,7 +8723,7 @@ async def list_trigger_runs(
 async def list_pending_trigger_run_refs(
     conn: asyncpg.Connection[Any],
     *,
-    older_than_seconds: float = 60.0,
+    older_than_seconds: float,
 ) -> list[TriggerFireRef]:
     """Fires whose post-commit defer was lost (worker crash between the
     run-completion commit and ``defer_async``). The periodic sweep re-defers
@@ -8738,7 +8743,7 @@ async def list_pending_trigger_run_refs(
 async def count_stuck_running_trigger_runs(
     conn: asyncpg.Connection[Any],
     *,
-    older_than_seconds: float = 7200.0,
+    older_than_seconds: float,
 ) -> int:
     """Count fires claimed ``running`` longer than the threshold — a worker
     crashed mid-fire. Deliberately surfaced (sweep warning log) but NEVER

@@ -396,7 +396,11 @@ CREATE TABLE trigger_runs (
                                                    -- fired_at and record_trigger_fire's stamp
     finished_at      timestamptz
 );
-CREATE INDEX trigger_runs_by_trigger ON trigger_runs (trigger_id, created_at DESC);
+-- the listing index (list_trigger_runs keys on the DENORMALIZED columns)
+CREATE INDEX trigger_runs_by_owner_name
+    ON trigger_runs (account_id, owner_session_id, trigger_name, created_at DESC);
+-- the retention prune's time-range scan (the events-table BRIN precedent)
+CREATE INDEX trigger_runs_created_brin ON trigger_runs USING BRIN (created_at);
 -- sweep scan set: pending = lost defer (re-defer); running = crashed mid-fire (count + log only)
 CREATE INDEX trigger_runs_unfinished ON trigger_runs (created_at)
     WHERE status IN ('pending', 'running');
@@ -650,7 +654,7 @@ errors; shared ceiling with `agent()` recursion). A cycle re-armed by fresh oper
 termination per chain guaranteed, waste observable in `trigger_runs`. Horizontal amplification (N
 watchers × cycles) is throttled in-flight by the synchronous account cap. Slice-4 additivity
 obligations recorded: the matcher is a FOURTH `JOIN sessions … archived_at IS NULL` trigger query
-(extend the contract's LEFT-JOIN list); `get_session_workflow_context` needs an owner-present
+(extend the contract's LEFT-JOIN list); the TriggerRow `session_parent_run_id` projection (as built: the timer lineage rides the row's own sessions JOIN) needs the owner-present
 guard; owner-NULL fires degrade to `launcher_session_id=None` = operator authority via `create_run`'s
 existing path — correct for operator-owned triggers, and the slice-4 CHECK swap is what stands
 between a nullable-owner migration and accidentally operator-privileged fires.
@@ -985,9 +989,8 @@ async def _run_workflow(
                     completed_error = ev.payload.get("error") if ev else None
             parent_run_id = completed_run.id    # depth cap bounds reactive cascades (§4d)
         else:                                   # cron / one_shot fire
-            async with pool.acquire() as conn:
-                ctx = await queries.get_session_workflow_context(conn, trigger.owner_session_id)
-            parent_run_id = ctx[1] if ctx is not None else None   # owner lineage (§4d)
+            parent_run_id = trigger.session_parent_run_id  # owner lineage (§4d),
+            # projected onto TriggerRow off its sessions JOIN (immutable)
         composed = compose_workflow_run_input(
             trigger_id=trigger.id, trigger_name=trigger.name, source=trigger.source,
             fired_at=started_at, input_template=action.input_template,

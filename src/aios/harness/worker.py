@@ -35,7 +35,6 @@ import asyncpg
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
-from aios.db import queries
 from aios.db.listen import listen_for_session_interrupts
 from aios.db.pool import create_pool, normalize_dsn
 from aios.harness import runtime
@@ -421,32 +420,9 @@ async def _periodic_sweep(
             if woken_runs:
                 log.info("periodic_sweep.workflows", woken_runs=woken_runs)
 
-            # Trigger fires (#819): re-defer run_completion fire intents whose
-            # post-commit defer was lost (worker crash between the completion
-            # commit and defer_async — the carrier row is the durable record;
-            # the pending→running claim makes a re-defer racing a live job
-            # safe). 'running' rows past the stale threshold are a worker
-            # crash mid-fire: surfaced, deliberately NEVER retried (re-firing
-            # could double-launch a run — at-most-once after claim).
-            from aios.services.wake import defer_trigger_fire
+            from aios.harness.trigger_runner import sweep_trigger_fires
 
-            async with pool.acquire() as conn:
-                pending = await queries.list_pending_trigger_run_refs(conn, older_than_seconds=60.0)
-            for ref in pending:
-                await defer_trigger_fire(ref.trigger_id, ref.trigger_run_id)
-            if pending:
-                log.info("periodic_sweep.trigger_fires_redeferred", count=len(pending))
-            async with pool.acquire() as conn:
-                stuck = await queries.count_stuck_running_trigger_runs(
-                    conn, older_than_seconds=7200.0
-                )
-                pruned = await queries.prune_trigger_runs(
-                    conn, retention_days=get_settings().trigger_runs_retention_days
-                )
-            if stuck:
-                log.warning("trigger.fires_stuck_running", count=stuck)
-            if pruned:
-                log.info("periodic_sweep.trigger_runs_pruned", count=pruned)
+            await sweep_trigger_fires(pool)
         except Exception:
             log.exception("periodic_sweep.failed")
 

@@ -45,6 +45,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import asyncpg
+
+from aios.config import get_settings
 from aios.db import queries
 from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError
@@ -58,7 +61,7 @@ from aios.models.triggers import (
 )
 from aios.models.workflows import WfRun
 from aios.services import sessions as sessions_service
-from aios.services.wake import defer_wake
+from aios.services.wake import defer_trigger_fire, defer_wake
 
 log = get_logger("aios.harness.trigger_runner")
 
@@ -123,38 +126,34 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
     """
     pool = runtime.require_pool()
     started_at = datetime.now(UTC)
-    is_event_fire = trigger_run_id is not None
 
     event: dict[str, Any] | None = None
-    if trigger_run_id is not None:
-        async with pool.acquire() as conn:
-            event = await queries.claim_trigger_run(conn, trigger_run_id, started_at=started_at)
-        if event is None:
-            # Already claimed: a sweep re-defer raced the live job. The claim,
-            # not queue dedup, is what makes that race safe.
-            log.info("trigger.fire_already_claimed", trigger_run_id=trigger_run_id)
-            return
-
-    try:
-        async with pool.acquire() as conn:
-            trigger = await queries.unscoped_get_trigger_row(conn, trigger_id)
-    except NotFoundError:
-        # Row was deleted between claim and execute (e.g. the agent or
-        # operator removed it). For an event fire the carrier row outlives the
-        # trigger by design and MUST be finalized — an unfinished claim row
-        # would be sweep-re-deferred until retention pruned it.
-        log.info("trigger.skip_deleted", trigger_id=trigger_id)
+    async with pool.acquire() as conn:
         if trigger_run_id is not None:
-            async with pool.acquire() as conn:
+            event = await queries.claim_trigger_run(conn, trigger_run_id, started_at=started_at)
+            if event is None:
+                # Already claimed: a sweep re-defer raced the live job. The
+                # claim, not queue dedup, is what makes that race safe.
+                log.info("trigger.fire_already_claimed", trigger_run_id=trigger_run_id)
+                return
+        try:
+            trigger = await queries.unscoped_get_trigger_row(conn, trigger_id)
+        except NotFoundError:
+            # Row was deleted between claim and execute (e.g. the agent or
+            # operator removed it). For an event fire the carrier row outlives
+            # the trigger by design and MUST be finalized — an unfinished
+            # claim row would be sweep-re-deferred until retention pruned it.
+            log.info("trigger.skip_deleted", trigger_id=trigger_id)
+            if trigger_run_id is not None:
                 await queries.finalize_trigger_run(
                     conn, trigger_run_id, status="skipped", error_summary="trigger deleted"
                 )
-        return
+            return
 
     # Lifecycle derives from the fire's ORIGIN: an event fire never takes the
     # one-shot arm, no matter what the row's source says at reload (the fire's
     # source identity was fixed at match time, stamped on the carrier row).
-    is_one_shot = (not is_event_fire) and trigger.source == "one_shot"
+    is_one_shot = trigger_run_id is None and trigger.source == "one_shot"
 
     if trigger.session_archived_at is not None:
         # Session was archived between claim and execute. Archive is the
@@ -167,7 +166,6 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
         )
         await _skip_claimed_fire(
             trigger,
-            is_one_shot=is_one_shot,
             trigger_run_id=trigger_run_id,
             reason="owner session archived",
             fired_at=started_at,
@@ -180,7 +178,6 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
         log.debug("trigger.skip_disabled", trigger_id=trigger_id)
         await _skip_claimed_fire(
             trigger,
-            is_one_shot=is_one_shot,
             trigger_run_id=trigger_run_id,
             reason="trigger disabled",
             fired_at=started_at,
@@ -217,40 +214,38 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
         # action and this insert loses the record — the at-most-once spirit;
         # journaling before the action is forbidden for tick fires.)
         async with pool.acquire() as conn:
-            await queries.record_trigger_run(
+            await _record_timer_audit(
                 conn,
-                trigger_id=trigger.id,
-                account_id=trigger.account_id,
-                owner_session_id=trigger.owner_session_id,
-                trigger_name=trigger.name,
+                trigger,
                 trigger_context="one_shot",
                 status=status,
                 error_summary=error_summary,
                 result_id=result_id,
                 started_at=started_at,
             )
+        # Surface a one-shot failure so the agent isn't left with unexplained
+        # silence: the sandbox command's job was to deliver a marker that never
+        # arrived (the string is byte-frozen — backfilled rows keep producing
+        # it); a workflow launch failure gets its own runtime-truthful string
+        # (nothing was a "wake" and nothing was being "delivered"). A failed
+        # wake_owner means the append ITSELF failed (DB-level) — surfacing
+        # through the same append path would fail identically; logged in
+        # _run_wake_owner.
         if status != "ok":
             if isinstance(action, SandboxCommandAction):
-                # Byte-frozen marker string — backfilled rows keep producing it.
-                await _surface_one_shot_failure(
+                await _surface_failure(
                     trigger.owner_session_id,
                     trigger.account_id,
-                    trigger.name,
-                    status=status,
-                    error_summary=error_summary,
+                    f"[Scheduled wake '{trigger.name}' failed to deliver: "
+                    f"{error_summary or status}]",
                 )
             elif isinstance(action, WorkflowAction):
-                # New kind, new runtime-truthful string (nothing was a "wake"
-                # and nothing was being "delivered").
                 await _surface_failure(
                     trigger.owner_session_id,
                     trigger.account_id,
                     f"[Trigger '{trigger.name}' failed to launch its workflow run: "
                     f"{error_summary or status}]",
                 )
-            # wake_owner: the append ITSELF failed (DB-level) — surfacing
-            # through the same append path would fail identically; logged in
-            # _run_wake_owner.
         return
 
     # Standing rows (cron tick fires + run_completion event fires): echo
@@ -269,12 +264,9 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
                 result_id=result_id,
             )
         else:
-            await queries.record_trigger_run(
+            await _record_timer_audit(
                 conn,
-                trigger_id=trigger.id,
-                account_id=trigger.account_id,
-                owner_session_id=trigger.owner_session_id,
-                trigger_name=trigger.name,
+                trigger,
                 trigger_context="cron",
                 status=status,
                 error_summary=error_summary,
@@ -311,14 +303,14 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
 async def _skip_claimed_fire(
     trigger: queries.TriggerRow,
     *,
-    is_one_shot: bool,
     trigger_run_id: str | None,
     reason: str,
     fired_at: datetime,
 ) -> None:
     """Resolve a claimed fire we've decided to skip (archived or disabled).
 
-    Per-origin matrix:
+    Per-origin matrix (origin derived the same way as the caller's
+    ``is_one_shot``):
 
     - EVENT fire: record ``skipped`` on the trigger row (counter unchanged)
       AND finalize the carrier row — an unfinished claim row would be
@@ -337,15 +329,12 @@ async def _skip_claimed_fire(
             await queries.finalize_trigger_run(
                 conn, trigger_run_id, status="skipped", error_summary=reason
             )
-    elif is_one_shot:
+    elif trigger.source == "one_shot":
         async with pool.acquire() as conn, conn.transaction():
             await queries.delete_trigger_by_id(conn, trigger.id)
-            await queries.record_trigger_run(
+            await _record_timer_audit(
                 conn,
-                trigger_id=trigger.id,
-                account_id=trigger.account_id,
-                owner_session_id=trigger.owner_session_id,
-                trigger_name=trigger.name,
+                trigger,
                 trigger_context="one_shot",
                 status="skipped",
                 error_summary=reason,
@@ -355,6 +344,31 @@ async def _skip_claimed_fire(
     else:
         async with pool.acquire() as conn:
             await queries.record_trigger_fire(conn, trigger.id, status="skipped", fired_at=fired_at)
+
+
+async def _record_timer_audit(
+    conn: asyncpg.Connection[Any],
+    trigger: queries.TriggerRow,
+    *,
+    trigger_context: str,
+    status: TriggerFireStatus,
+    error_summary: str | None,
+    result_id: str | None,
+    started_at: datetime,
+) -> None:
+    """Write a timer fire's audit row — owns the TriggerRow → kwargs projection."""
+    await queries.record_trigger_run(
+        conn,
+        trigger_id=trigger.id,
+        account_id=trigger.account_id,
+        owner_session_id=trigger.owner_session_id,
+        trigger_name=trigger.name,
+        trigger_context=trigger_context,
+        status=status,
+        error_summary=error_summary,
+        result_id=result_id,
+        started_at=started_at,
+    )
 
 
 async def _run_sandbox_command(
@@ -522,14 +536,13 @@ async def _run_workflow(
             # WORKFLOW_RUN_MAX_DEPTH by construction.
             parent_run_id = completed_run.id
         else:
-            # Timer fires inherit the owner session's own lineage — exactly
-            # what the create_run builtin threads. None for normal sessions
+            # Timer fires inherit the owner session's own (immutable) lineage
+            # — exactly what the create_run builtin threads, projected onto
+            # the TriggerRow off its sessions JOIN. None for normal sessions
             # (root run); for a workflow-child owner this closes the
             # depth-laundering bypass (a past-fire_at one-shot is create_run
             # with a 0s delay).
-            async with pool.acquire() as conn:
-                ctx = await queries.get_session_workflow_context(conn, trigger.owner_session_id)
-            parent_run_id = ctx[1] if ctx is not None else None
+            parent_run_id = trigger.session_parent_run_id
         composed = compose_workflow_run_input(
             trigger_id=trigger.id,
             trigger_name=trigger.name,
@@ -574,7 +587,8 @@ async def _surface_failure(session_id: str, account_id: str, content: str) -> No
     """Append a synthetic user message + defer a wake (best-effort).
 
     Shared by the one-shot failure paths and the auto-disable path so all
-    surface a user-visible event instead of failing silently.
+    surface a user-visible event instead of failing silently — the model sees
+    a deterministic failure event instead of unexplained silence.
     """
     pool = runtime.require_pool()
     try:
@@ -588,24 +602,38 @@ async def _surface_failure(session_id: str, account_id: str, content: str) -> No
         )
 
 
-async def _surface_one_shot_failure(
-    session_id: str,
-    account_id: str,
-    name: str,
-    *,
-    status: TriggerFireStatus,
-    error_summary: str | None,
-) -> None:
-    """Append a session message + defer wake when a one-shot sandbox fire fails.
+# Sweep thresholds — the single source (the query functions take them as
+# required kwargs, so a default can't silently drift from the sweep).
+_PENDING_REDEFER_SECONDS = 60.0  # a lost post-commit defer re-defers after this
+_STUCK_RUNNING_SECONDS = 7200.0  # crashed mid-fire: surfaced, deliberately never retried
 
-    The sandbox command's job for a ``schedule_wake``-style one-shot is to
-    deliver a user-role message. When that fails (broker unreachable,
-    sandbox error, command timeout), no marker reaches the session log and
-    the agent has no way to know what happened. Synthesizing a user message
-    here closes the loop: the model sees a deterministic failure event and
-    can decide what to do next. The marker string is byte-frozen — backfilled
-    rows keep producing it.
+
+async def sweep_trigger_fires(pool: asyncpg.Pool[Any]) -> None:
+    """Periodic-sweep arm for run_completion fire intents + audit retention.
+
+    Re-defers ``pending`` carrier rows whose post-commit defer was lost (a
+    worker crash between the completion commit and ``defer_async`` — the
+    durable row is the recovery anchor; the ``pending → running`` claim makes
+    a re-defer racing a live job safe). ``running`` rows past the stale
+    threshold are a worker crash mid-fire: counted and warned, deliberately
+    NEVER retried (re-firing could double-launch a run — at-most-once after
+    claim). Finally prunes audit rows past the retention window.
     """
-    detail = error_summary or status
-    content = f"[Scheduled wake '{name}' failed to deliver: {detail}]"
-    await _surface_failure(session_id, account_id, content)
+    async with pool.acquire() as conn:
+        pending = await queries.list_pending_trigger_run_refs(
+            conn, older_than_seconds=_PENDING_REDEFER_SECONDS
+        )
+        stuck = await queries.count_stuck_running_trigger_runs(
+            conn, older_than_seconds=_STUCK_RUNNING_SECONDS
+        )
+        pruned = await queries.prune_trigger_runs(
+            conn, retention_days=get_settings().trigger_runs_retention_days
+        )
+    for ref in pending:
+        await defer_trigger_fire(ref.trigger_id, ref.trigger_run_id)
+    if pending:
+        log.info("sweep.trigger_fires_redeferred", count=len(pending))
+    if stuck:
+        log.warning("trigger.fires_stuck_running", count=stuck)
+    if pruned:
+        log.info("sweep.trigger_runs_pruned", count=pruned)

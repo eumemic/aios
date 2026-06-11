@@ -11,12 +11,22 @@ from __future__ import annotations
 
 from typing import Any
 
+from aios.models.triggers import RUN_TERMINAL_STATUSES
+from aios.models.workflows import TERMINAL_RUN_STATUSES
 from aios.tools.trigger_create import (
     TRIGGER_CREATE_PARAMETERS_SCHEMA,
 )
 from aios.tools.trigger_update import (
     TRIGGER_UPDATE_PARAMETERS_SCHEMA,
 )
+
+
+def test_terminal_status_vocabulary_single_sourced() -> None:
+    """The trigger-side vocabulary must equal the workflows-side truth the
+    completion matcher fires on — a fourth terminal status added upstream
+    without updating the watch vocabulary would make watchers silently never
+    fire for it."""
+    assert set(RUN_TERMINAL_STATUSES) == TERMINAL_RUN_STATUSES
 
 
 def _branch(schema: dict[str, Any], field: str, kind: str) -> dict[str, Any]:
@@ -32,8 +42,8 @@ class TestCreateSchemaBranches:
         branch = _branch(TRIGGER_CREATE_PARAMETERS_SCHEMA, "source", "run_completion")
         assert branch["required"] == ["kind", "workflow_id"]
         statuses = branch["properties"]["statuses"]
-        assert statuses["items"]["enum"] == ["completed", "errored", "cancelled"]
-        assert statuses["default"] == ["completed", "errored", "cancelled"]
+        assert statuses["items"]["enum"] == list(RUN_TERMINAL_STATUSES)
+        assert statuses["default"] == list(RUN_TERMINAL_STATUSES)
         assert branch["additionalProperties"] is False
 
     def test_workflow_branch(self) -> None:

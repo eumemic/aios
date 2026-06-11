@@ -229,13 +229,23 @@ def upgrade() -> None:
             finished_at      timestamptz
         )
     """)
-    op.execute("CREATE INDEX trigger_runs_by_trigger ON trigger_runs (trigger_id, created_at DESC)")
+    # The listing index — list_trigger_runs keys on the DENORMALIZED columns
+    # (never the live trigger row, so one-shot tombstones and deleted-trigger
+    # history stay reachable).
+    op.execute(
+        "CREATE INDEX trigger_runs_by_owner_name "
+        "ON trigger_runs (account_id, owner_session_id, trigger_name, created_at DESC)"
+    )
     # The sweep's scan set: pending = lost defer (re-defer); running = crashed
     # mid-fire (counted + warned, deliberately never retried).
     op.execute(
         "CREATE INDEX trigger_runs_unfinished ON trigger_runs (created_at) "
         "WHERE status IN ('pending', 'running')"
     )
+    # The retention prune runs every sweep tick (DELETE ... WHERE created_at <
+    # now() - retention); BRIN serves the time-range scan at near-zero
+    # maintenance cost on this append-mostly table (the events-table precedent).
+    op.execute("CREATE INDEX trigger_runs_created_brin ON trigger_runs USING BRIN (created_at)")
 
     # 6. The completion matcher's index (account-scoped expression match on the
     #    watched workflow).

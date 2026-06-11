@@ -15,6 +15,7 @@ from typing import Any
 from aios.harness import runtime
 from aios.models.triggers import (
     MAX_COMMAND_CHARS,
+    MAX_INPUT_TEMPLATE_BYTES,
     MAX_MAX_OUTPUT_BYTES,
     MAX_NAME_CHARS,
     MAX_SCHEDULE_CHARS,
@@ -22,6 +23,7 @@ from aios.models.triggers import (
     MAX_WAKE_CONTENT_CHARS,
     MIN_MAX_OUTPUT_BYTES,
     MIN_TIMEOUT_SECONDS,
+    RUN_TERMINAL_STATUSES,
     TriggerUpdate,
 )
 from aios.services import sessions as sessions_service
@@ -75,7 +77,7 @@ _SOURCE_SCHEMA: dict[str, Any] = {
                 },
                 "statuses": {
                     "type": "array",
-                    "items": {"enum": ["completed", "errored", "cancelled"]},
+                    "items": {"enum": list(RUN_TERMINAL_STATUSES)},
                     "minItems": 1,
                     "description": (
                         "Which terminal statuses fire (required on update — no "
@@ -156,7 +158,8 @@ _ACTION_SCHEMA: dict[str, Any] = {
                 },
                 "input_template": {
                     "description": (
-                        "Required on update (explicit null = no payload). The run's "
+                        "Required on update (explicit null = no payload; at most "
+                        f"{MAX_INPUT_TEMPLATE_BYTES} serialized bytes). The run's "
                         "input is the envelope {'trigger': <firing context>, 'input': "
                         "<this template verbatim>}."
                     ),

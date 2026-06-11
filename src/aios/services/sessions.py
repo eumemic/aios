@@ -266,9 +266,15 @@ async def create_session(
                 # existence, pin == current, env resolution) — this loop calls
                 # queries.add_trigger directly, so without it a session-create
                 # body would be an unvalidated write path into triggers. The
-                # freshly inserted session row is visible on this conn.
+                # just-inserted session is passed through so N specs don't
+                # re-read the row N times.
                 trigger_env = await triggers_service.validate_trigger_spec(
-                    conn, spec.source, spec.action, session_id=session.id, account_id=account_id
+                    conn,
+                    spec.source,
+                    spec.action,
+                    session_id=session.id,
+                    account_id=account_id,
+                    session=session,
                 )
                 next_fire = compute_initial_next_fire(spec.source, now) if spec.enabled else None
                 await queries.add_trigger(

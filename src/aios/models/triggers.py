@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from croniter import CroniterBadDateError, croniter
 from pydantic import (
@@ -114,10 +114,11 @@ class OneShotSource(BaseModel):
 
 
 RunTerminalStatus = Literal["completed", "errored", "cancelled"]
-
-
-def _all_terminal_statuses() -> list[RunTerminalStatus]:
-    return ["completed", "errored", "cancelled"]
+# The single source for every restatement of the terminal-status vocabulary
+# (the statuses default, the tool-schema enums). A unit test ties it to
+# ``models.workflows.TERMINAL_RUN_STATUSES`` — the upstream truth the
+# completion matcher fires on — so the two cannot drift silently.
+RUN_TERMINAL_STATUSES: tuple[RunTerminalStatus, ...] = get_args(RunTerminalStatus)
 
 
 class RunCompletionSource(BaseModel):
@@ -139,7 +140,7 @@ class RunCompletionSource(BaseModel):
     # defaults knowledge). Fire-on-everything is the no-silent-omission default;
     # narrow explicitly (e.g. ["errored"]) for failure-only pipelines.
     statuses: list[RunTerminalStatus] = Field(
-        default_factory=_all_terminal_statuses,
+        default_factory=lambda: list(RUN_TERMINAL_STATUSES),
         min_length=1,
     )
 
@@ -234,11 +235,9 @@ class WorkflowAction(BaseModel):
     (workflows have no version-history table: a pin cannot resolve an old
     script, only refuse a new one).
 
-    This member is STRUCTURE-ONLY (no serialized-byte validator here): the
-    ``input_template`` size bound lives on the write models, because byte
-    bounds are not jsonb-round-trip stable — Postgres numeric normalization
-    can expand a written template ~50x, and a read-side bound would make
-    legally-persisted rows unreadable inside the scheduler's claim batch.
+    This member is STRUCTURE-ONLY: the ``input_template`` size bound lives on
+    the write models — see :func:`_validate_input_template_bound` for why a
+    read-side byte bound is unsafe.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -269,10 +268,8 @@ TriggerActionReplace = Annotated[
 
 # Module-level adapters for the query/runner read path. Structure-only —
 # they must accept every row the write path ever accepted, so they carry NO
-# cron occurrence check and NO input_template byte bound (both are write-side
-# only; a legally-persisted rare cron or numeric-expanded template must still
-# read back — the action adapter runs inside the scheduler's claim
-# transaction, where one unreadable row would halt every trigger).
+# cron occurrence check and NO input_template byte bound (write-side only;
+# see _validate_input_template_bound).
 TRIGGER_SOURCE_ADAPTER: TypeAdapter[CronSource | OneShotSource | RunCompletionSource] = TypeAdapter(
     TriggerSource
 )
@@ -423,9 +420,7 @@ def compute_next_fire(schedule: str, from_time: datetime) -> datetime:
     return next_time
 
 
-def compute_initial_next_fire(
-    source: CronSource | OneShotSource | RunCompletionSource, now: datetime
-) -> datetime | None:
+def compute_initial_next_fire(source: TriggerSource, now: datetime) -> datetime | None:
     """Return the initial ``next_fire`` for a freshly-enabled row.
 
     Cron: the next slot strictly after ``now``. One-shot: ``fire_at``

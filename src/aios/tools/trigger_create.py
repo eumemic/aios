@@ -20,6 +20,7 @@ from aios.models.triggers import (
     DEFAULT_MAX_OUTPUT_BYTES,
     DEFAULT_TIMEOUT_SECONDS,
     MAX_COMMAND_CHARS,
+    MAX_INPUT_TEMPLATE_BYTES,
     MAX_MAX_OUTPUT_BYTES,
     MAX_NAME_CHARS,
     MAX_SCHEDULE_CHARS,
@@ -27,6 +28,7 @@ from aios.models.triggers import (
     MAX_WAKE_CONTENT_CHARS,
     MIN_MAX_OUTPUT_BYTES,
     MIN_TIMEOUT_SECONDS,
+    RUN_TERMINAL_STATUSES,
     TriggerCreate,
 )
 from aios.services import sessions as sessions_service
@@ -107,9 +109,9 @@ _SOURCE_SCHEMA: dict[str, Any] = {
                 },
                 "statuses": {
                     "type": "array",
-                    "items": {"enum": ["completed", "errored", "cancelled"]},
+                    "items": {"enum": list(RUN_TERMINAL_STATUSES)},
                     "minItems": 1,
-                    "default": ["completed", "errored", "cancelled"],
+                    "default": list(RUN_TERMINAL_STATUSES),
                     "description": (
                         "Which terminal statuses fire the trigger. Defaults to all "
                         "three; narrow to e.g. ['errored'] for failure-only reactions."
@@ -208,8 +210,8 @@ _ACTION_SCHEMA: dict[str, Any] = {
                 "input_template": {
                     "default": None,
                     "description": (
-                        "Arbitrary JSON (any type; null = no payload), at most 16384 "
-                        "serialized bytes. The launched run's input is ALWAYS the "
+                        "Arbitrary JSON (any type; null = no payload), at most "
+                        f"{MAX_INPUT_TEMPLATE_BYTES} serialized bytes. The launched run's input is ALWAYS the "
                         "envelope {'trigger': <firing context>, 'input': <this template "
                         "verbatim>} — for run_completion fires the context carries the "
                         "completing run's id, status, output, and error kind under "

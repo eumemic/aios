@@ -41,11 +41,9 @@ class WorkflowAction:
     (workflows have no version-history table: a pin cannot resolve an old
     script, only refuse a new one).
 
-    This member is STRUCTURE-ONLY (no serialized-byte validator here): the
-    ``input_template`` size bound lives on the write models, because byte
-    bounds are not jsonb-round-trip stable — Postgres numeric normalization
-    can expand a written template ~50x, and a read-side bound would make
-    legally-persisted rows unreadable inside the scheduler's claim batch.
+    This member is STRUCTURE-ONLY: the ``input_template`` size bound lives on
+    the write models — see :func:`_validate_input_template_bound` for why a
+    read-side byte bound is unsafe.
 
         Attributes:
             workflow_id (str):

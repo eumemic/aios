@@ -873,45 +873,47 @@ class TestWakeOwnerAction:
 # ─── DB CHECK probes (§2.1) ────────────────────────────────────────────────
 
 
+async def _insert_raw(
+    pool: Any,
+    sid: str,
+    *,
+    source: str,
+    source_spec: str,
+    action: str,
+    environment_id: str | None = None,
+) -> None:
+    """Insert a raw trigger row, bypassing the Pydantic write models — the
+    probe vehicle for the live shape CHECKs."""
+    from aios.ids import TRIGGER, make_id
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO triggers
+                (id, owner_session_id, account_id, name, source, source_spec,
+                 action, enabled, environment_id, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, true, $8, '{}'::jsonb)
+            """,
+            make_id(TRIGGER),
+            sid,
+            "acc_test_stub",
+            f"raw-{_uniq()}",
+            source,
+            source_spec,
+            action,
+            environment_id,
+        )
+
+
 class TestShapeCheckConstraints:
     """The live triggers_source_spec_shape / triggers_action_shape CHECKs (and
     their load-bearing COALESCE wrappers) reject malformed rows — including the
     absent-key cases the unwrapped predicate would silently accept."""
 
-    async def _insert_raw(
-        self,
-        pool: Any,
-        sid: str,
-        *,
-        source: str,
-        source_spec: str,
-        action: str,
-        environment_id: str | None = None,
-    ) -> None:
-        from aios.ids import TRIGGER, make_id
-
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO triggers
-                    (id, owner_session_id, account_id, name, source, source_spec,
-                     action, enabled, environment_id, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, true, $8, '{}'::jsonb)
-                """,
-                make_id(TRIGGER),
-                sid,
-                "acc_test_stub",
-                f"raw-{_uniq()}",
-                source,
-                source_spec,
-                action,
-                environment_id,
-            )
-
     async def test_valid_rows_insert(self, pool: Any, env_and_agent: tuple[str, str]) -> None:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
-        await self._insert_raw(
+        await _insert_raw(
             pool,
             sid,
             source="cron",
@@ -919,7 +921,7 @@ class TestShapeCheckConstraints:
             action='{"kind": "sandbox_command", "command": "x", "timeout_seconds": 300, '
             '"max_output_bytes": 65536}',
         )
-        await self._insert_raw(
+        await _insert_raw(
             pool,
             sid,
             source="one_shot",
@@ -934,7 +936,7 @@ class TestShapeCheckConstraints:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="one_shot",
@@ -949,7 +951,7 @@ class TestShapeCheckConstraints:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",
@@ -963,7 +965,7 @@ class TestShapeCheckConstraints:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",
@@ -976,7 +978,7 @@ class TestShapeCheckConstraints:
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="webhook",
@@ -1871,7 +1873,7 @@ def _watch_spec(name: str, workflow_id: str, **source_overrides: Any) -> Trigger
     )
 
 
-class TestSlice2ShapeChecks(TestShapeCheckConstraints):
+class TestSlice2ShapeChecks:
     """Hostile-row probes for the slice-2 predicate branches, the iff env
     constraint (both directions), and the no-next_fire guard — against the
     LIVE constraints (the §6 matrix, executed)."""
@@ -1888,7 +1890,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         # run_completion watch (wake_owner action, no env column).
-        await self._insert_raw(
+        await _insert_raw(
             pool,
             sid,
             source="run_completion",
@@ -1896,7 +1898,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
             action='{"kind": "wake_owner", "content": "hi"}',
         )
         # workflow action, float pin + null template (env column REQUIRED).
-        await self._insert_raw(
+        await _insert_raw(
             pool,
             sid,
             source="cron",
@@ -1905,7 +1907,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
             environment_id=env_id,
         )
         # int pin + object template + vault list.
-        await self._insert_raw(
+        await _insert_raw(
             pool,
             sid,
             source="cron",
@@ -1921,7 +1923,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError, match="environment_id_iff_workflow"):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",
@@ -1936,7 +1938,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError, match="environment_id_iff_workflow"):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",
@@ -1951,7 +1953,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="run_completion",
@@ -1967,7 +1969,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="run_completion",
@@ -1982,7 +1984,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",
@@ -1998,7 +2000,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",
@@ -2014,7 +2016,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",
@@ -2030,7 +2032,7 @@ class TestSlice2ShapeChecks(TestShapeCheckConstraints):
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         with pytest.raises(asyncpg.CheckViolationError):
-            await self._insert_raw(
+            await _insert_raw(
                 pool,
                 sid,
                 source="cron",

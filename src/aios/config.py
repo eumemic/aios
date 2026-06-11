@@ -346,10 +346,8 @@ class Settings(BaseSettings):
         ge=1,
         description="Days of per-fire trigger audit rows (``trigger_runs``) to "
         "retain; older rows are pruned by the worker's periodic sweep. "
-        "Time-based only, never count-capped: a count-cap could evict a young "
-        "``run_completion`` claim row inside the dispatch-recovery horizon and "
-        "re-arm a duplicate fire — the retention floor must stay comfortably "
-        "above that hours-scale horizon.",
+        "Time-based by design — see ``prune_trigger_runs`` for why a "
+        "count-cap would be unsafe.",
     )
     schedule_wake_max_delay_seconds: int = Field(
         default=60 * 60 * 24 * 30,  # 30 days
