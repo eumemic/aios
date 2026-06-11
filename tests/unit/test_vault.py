@@ -15,7 +15,13 @@ from pydantic import SecretStr
 
 from aios.crypto.vault import KEY_BYTES, NONCE_BYTES, CryptoBox, EncryptedBlob
 from aios.db import queries
+from aios.db.queries import EnvVarCredentialRow
 from aios.errors import CryptoDecryptError, OAuthRefreshError, ValidationError
+from aios.models.environments import (
+    EnvironmentConfig,
+    LimitedNetworking,
+    UnrestrictedNetworking,
+)
 from aios.models.vaults import (
     TokenEndpointAuthBasic,
     TokenEndpointAuthNone,
@@ -24,12 +30,14 @@ from aios.models.vaults import (
     VaultCredentialCreate,
     VaultCredentialUpdate,
 )
+from aios.services import sessions as sessions_service
 from aios.services import vaults as vaults_service
 from aios.services.vaults import (
     REFRESH_SKEW_SECONDS,
     SECRET_PLACEHOLDER_PREFIX,
     _extract_auth_payload,
     _merge_auth_payload,
+    env_var_credential_containment_error,
     is_expiring,
     mint_secret_placeholder,
     refresh_credential,
@@ -1123,3 +1131,180 @@ class TestServiceWiringIsAccountScoped:
                 body=VaultCredentialUpdate(display_name="renamed"),
                 account_id="acc_a",
             )
+
+
+# ── #879 env-var credential containment gate ─────────────────────────────────
+
+
+def _limited(*allowed_hosts: str) -> EnvironmentConfig:
+    """An EnvironmentConfig whose networking is Limited to ``allowed_hosts``."""
+    return EnvironmentConfig(
+        networking=LimitedNetworking(type="limited", allowed_hosts=list(allowed_hosts))
+    )
+
+
+class TestEnvVarCredentialContainment:
+    """Pure-function verdict for the two-layer #879 gate
+    (:func:`env_var_credential_containment_error`).
+
+    No DB, no async: the caller supplies the per-credential ``allowed_hosts``
+    tuples already fetched, so the helper stays unit-testable."""
+
+    def test_no_credentials_returns_none_even_without_env(self) -> None:
+        assert env_var_credential_containment_error(None, []) is None
+
+    def test_no_credentials_returns_none_with_unrestricted_env(self) -> None:
+        env = EnvironmentConfig(networking=UnrestrictedNetworking())
+        assert env_var_credential_containment_error(env, []) is None
+
+    def test_unrestricted_env_with_creds_rejected(self) -> None:
+        env = EnvironmentConfig(networking=UnrestrictedNetworking())
+        verdict = env_var_credential_containment_error(env, [("api.github.com",)])
+        assert verdict is not None
+        assert "Limited" in verdict
+
+    def test_no_env_config_with_creds_rejected(self) -> None:
+        verdict = env_var_credential_containment_error(None, [("api.github.com",)])
+        assert verdict is not None
+
+    def test_no_networking_config_with_creds_rejected(self) -> None:
+        # EnvironmentConfig() leaves networking unset (None) — not Limited.
+        verdict = env_var_credential_containment_error(EnvironmentConfig(), [("api.github.com",)])
+        assert verdict is not None
+
+    def test_covered_host_passes(self) -> None:
+        env = _limited("api.github.com")
+        assert env_var_credential_containment_error(env, [("api.github.com",)]) is None
+
+    def test_uncovered_host_rejected_names_offending_host(self) -> None:
+        env = _limited("api.github.com")
+        verdict = env_var_credential_containment_error(env, [("evil.example.com",)])
+        assert verdict is not None
+        assert "'evil.example.com'" in verdict
+
+    def test_cred_path_prefix_compared_host_only(self) -> None:
+        # A credential with a path prefix only tightens below an allowed host.
+        env = _limited("api.github.com")
+        assert (
+            env_var_credential_containment_error(env, [("api.github.com/repos/eumemic",)]) is None
+        )
+
+    def test_env_side_parsed_through_grammar_authority(self) -> None:
+        # The env side is parsed through ``parse_allowed_host_entry`` too (not a
+        # raw string compare), so a bare cred host matches a bare env host. NOTE:
+        # ``LimitedNetworking.allowed_hosts`` rejects path-prefixed entries
+        # (bare hostnames only — see HOSTNAME_RE), so an env *path prefix* is
+        # unconstructable; the host-only parse is what keeps env↔cred comparison
+        # symmetric with the path-prefixed CRED side.
+        env = _limited("api.github.com")
+        assert env_var_credential_containment_error(env, [("api.github.com",)]) is None
+
+    def test_multiple_creds_one_uncovered_rejected(self) -> None:
+        env = _limited("api.github.com")
+        verdict = env_var_credential_containment_error(env, [("api.github.com",), ("pypi.org",)])
+        assert verdict is not None
+        assert "'pypi.org'" in verdict
+
+    def test_cred_with_empty_allowed_hosts_still_requires_limited(self) -> None:
+        # An empty allowed_hosts tuple still counts as "has a credential":
+        # the OUTER list is non-empty, so the Limited check still fires.
+        env = EnvironmentConfig(networking=UnrestrictedNetworking())
+        verdict = env_var_credential_containment_error(env, [()])
+        assert verdict is not None
+        assert "Limited" in verdict
+
+
+def _evc_row(*allowed_hosts: str) -> EnvVarCredentialRow:
+    """One ``EnvVarCredentialRow`` carrying ``allowed_hosts`` — the only field
+    the attach gate reads. The blob is a throwaway (never decrypted here)."""
+    return EnvVarCredentialRow(
+        credential_id="vcred_01TEST",
+        secret_name="GITHUB_TOKEN",
+        allowed_hosts=tuple(allowed_hosts),
+        blob=EncryptedBlob(ciphertext=b"x", nonce=b"y"),
+        updated_at=datetime(2026, 6, 10, tzinfo=UTC),
+    )
+
+
+class TestEnvVarCredentialAttachGate:
+    """The in-transaction advisory gate (:func:`_assert_env_var_creds_contained`)
+    that produces a fast 422 at attach. ``queries`` is patched for the two reads
+    (credential list + env config), mirroring the call-site test style above."""
+
+    @pytest.mark.asyncio
+    async def test_attach_unrestricted_env_with_creds_raises_422(self) -> None:
+        conn = MagicMock()
+        env = EnvironmentConfig(networking=UnrestrictedNetworking())
+        with (
+            patch.object(
+                queries,
+                "list_session_env_var_credentials",
+                AsyncMock(return_value=[_evc_row("api.github.com")]),
+            ),
+            patch.object(
+                queries,
+                "get_environment_config_for_session",
+                AsyncMock(return_value=env),
+            ),
+            pytest.raises(ValidationError, match="Limited") as exc,
+        ):
+            await sessions_service._assert_env_var_creds_contained(
+                conn, "sess_01TEST", account_id="acct_x"
+            )
+        assert exc.value.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_attach_uncovered_host_raises_422_names_host(self) -> None:
+        conn = MagicMock()
+        with (
+            patch.object(
+                queries,
+                "list_session_env_var_credentials",
+                AsyncMock(return_value=[_evc_row("evil.example.com")]),
+            ),
+            patch.object(
+                queries,
+                "get_environment_config_for_session",
+                AsyncMock(return_value=_limited("api.github.com")),
+            ),
+            pytest.raises(ValidationError, match=r"evil\.example\.com"),
+        ):
+            await sessions_service._assert_env_var_creds_contained(
+                conn, "sess_01TEST", account_id="acct_x"
+            )
+
+    @pytest.mark.asyncio
+    async def test_attach_covered_host_no_raise(self) -> None:
+        conn = MagicMock()
+        env_getter = AsyncMock(return_value=_limited("api.github.com"))
+        with (
+            patch.object(
+                queries,
+                "list_session_env_var_credentials",
+                AsyncMock(return_value=[_evc_row("api.github.com")]),
+            ),
+            patch.object(queries, "get_environment_config_for_session", env_getter),
+        ):
+            await sessions_service._assert_env_var_creds_contained(
+                conn, "sess_01TEST", account_id="acct_x"
+            )
+        # The env config WAS read (the gate didn't short-circuit on no creds).
+        env_getter.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_attach_no_env_var_creds_skips_env_query(self) -> None:
+        conn = MagicMock()
+        env_getter = AsyncMock(return_value=_limited("api.github.com"))
+        with (
+            patch.object(
+                queries,
+                "list_session_env_var_credentials",
+                AsyncMock(return_value=[]),
+            ),
+            patch.object(queries, "get_environment_config_for_session", env_getter),
+        ):
+            await sessions_service._assert_env_var_creds_contained(
+                conn, "sess_01TEST", account_id="acct_x"
+            )
+        # No credentials ⇒ the gate returns before reading the env config.
+        env_getter.assert_not_awaited()

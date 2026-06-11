@@ -56,6 +56,7 @@ from aios.services import agents as agents_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
 from aios.services.await_completion import await_completion
+from aios.services.vaults import env_var_credential_containment_error
 
 
 async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
@@ -161,6 +162,32 @@ def _evict_sandbox_for_resource_change(session_id: str) -> None:
         runtime.sandbox_registry.evict(session_id, unload_session_caches=False)
 
 
+async def _assert_env_var_creds_contained(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
+    """Advisory #879 gate at attach: fast console 422 if the session's
+    env-var credentials aren't contained by its Limited environment.
+
+    Best-effort UX only — ``build_spec_from_session`` is the authoritative
+    gate (both sides are independently mutable after attach). Runs INSIDE
+    the caller's transaction, AFTER ``set_session_vaults`` has written the
+    binding, so the credential read reflects the new vault set.
+    """
+    cred_rows = await queries.list_session_env_var_credentials(
+        conn, session_id, account_id=account_id
+    )
+    if not cred_rows:
+        return
+    env_config = await queries.get_environment_config_for_session(
+        conn, session_id, account_id=account_id
+    )
+    error = env_var_credential_containment_error(
+        env_config, [row.allowed_hosts for row in cred_rows]
+    )
+    if error is not None:
+        raise ValidationError(error)
+
+
 async def create_session(
     pool: asyncpg.Pool[Any],
     *,
@@ -224,6 +251,7 @@ async def create_session(
         )
         if vault_ids:
             await queries.set_session_vaults(conn, session.id, vault_ids, account_id=account_id)
+            await _assert_env_var_creds_contained(conn, session.id, account_id=account_id)
             session = session.model_copy(update={"vault_ids": vault_ids})
         if resources:
             memory_resources, github_resources = split_resources_by_type(resources)
@@ -340,6 +368,7 @@ async def create_child_session(
             return False  # replay: row exists — do NOT re-deliver the request
         if vault_ids:
             await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
+            await _assert_env_var_creds_contained(conn, session_id, account_id=account_id)
         request_meta: dict[str, Any] = {
             "request_id": request_id,
             "caller": {"kind": "run", "id": parent_run_id},
@@ -1143,6 +1172,7 @@ async def update_session(
             )
             if vault_ids != old_vault_ids:
                 await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
+                await _assert_env_var_creds_contained(conn, session_id, account_id=account_id)
                 changed = True
         if resources is not None:
             # Wire-level semantics is full-list-replace across all

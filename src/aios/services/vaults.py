@@ -24,6 +24,7 @@ key.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, assert_never, cast
@@ -35,6 +36,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import NotFoundError, OAuthRefreshError, ValidationError
 from aios.logging import get_logger
+from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.vaults import (
     AuthType,
     TokenEndpointAuth,
@@ -43,6 +45,7 @@ from aios.models.vaults import (
     VaultCredential,
     VaultCredentialCreate,
     VaultCredentialUpdate,
+    parse_allowed_host_entry,
 )
 
 MAX_CREDENTIALS_PER_VAULT = 20
@@ -639,3 +642,65 @@ async def resolve_session_env_var_credentials(
         )
         for row in rows
     ]
+
+
+def env_var_credential_containment_error(
+    env_config: EnvironmentConfig | None,
+    credential_allowed_hosts: Iterable[Sequence[str]],
+) -> str | None:
+    """Verdict for the #879 env-var-credential security gate.
+
+    Returns a human-readable error string if the session's
+    ``environment_variable`` credentials are NOT safely contained by the
+    environment, or ``None`` if the configuration is acceptable (including
+    the no-credentials common path).
+
+    ``credential_allowed_hosts`` is one ``allowed_hosts`` tuple per bound
+    env-var credential (the stored canonical entries). The caller supplies
+    these already-fetched — this function does no DB I/O so it stays pure
+    and unit-testable.
+
+    Two checks (both authoritative at provision; advisory at attach):
+
+    1. Networking must be ``Limited`` — the swap proxy only sees traffic
+       via the Limited lockdown DNAT, so under Unrestricted (or no env /
+       no networking config) the credential silently leaks/non-functions.
+    2. Every credential host must appear in the env's ``allowed_hosts``
+       host set (egress-escalation prevention). Host parts are compared
+       via ``parse_allowed_host_entry`` on BOTH sides — the single grammar
+       authority — so a credential path-prefix only tightens below an
+       already-allowed host.
+
+    Stored entries are canonical (validated at credential-create and at
+    ``LimitedNetworking`` model-validate), so ``parse_allowed_host_entry``
+    does not raise on stored data in normal flow. This helper does NOT
+    catch ``ValueError`` — a malformed stored entry is a real integrity
+    problem and should surface (at provision it becomes a refusal to
+    provision, the safe direction).
+    """
+    cred_lists = [tuple(h) for h in credential_allowed_hosts]
+    # Iterate the OUTER list, not flattened hosts: a credential with an
+    # EMPTY allowed_hosts tuple still counts as "has a credential". Only a
+    # session with zero env-var credentials skips the gate entirely.
+    if not cred_lists:
+        return None
+
+    networking = env_config.networking if env_config else None
+    if not isinstance(networking, LimitedNetworking):
+        return (
+            "environment_variable credential requires a Limited environment "
+            "(networking is not 'limited'); env allowed_hosts is the containment "
+            "boundary for the egress swap proxy"
+        )
+
+    env_hosts = {parse_allowed_host_entry(entry)[0] for entry in networking.allowed_hosts}
+    for cred_hosts in cred_lists:
+        for entry in cred_hosts:
+            cred_host = parse_allowed_host_entry(entry)[0]
+            if cred_host not in env_hosts:
+                return (
+                    "environment_variable credential requires a Limited environment whose "
+                    f"allowed_hosts cover the credential's hosts (credential host {cred_host!r} "
+                    "not covered)"
+                )
+    return None
