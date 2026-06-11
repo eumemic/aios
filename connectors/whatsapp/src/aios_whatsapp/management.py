@@ -71,6 +71,12 @@ class WhatsappManagementMixin:
 
         Returns ``{external_account_id, status, jid?, push_name?, reason?}``.
         ``status`` is ``"success"``, ``"timeout"``, or ``"error"``.
+
+        On a successful pair we verify the scanned account's JID user
+        part matches the connection's phone.  A mismatch means the
+        operator scanned the wrong WhatsApp account onto this
+        connection: we immediately unpair the device on the server and
+        return an error so no foreign device is left paired.
         """
         state = self._state_for_phone(external_account_id)
         outcome = await state.daemon.confirm_pairing()
@@ -87,6 +93,32 @@ class WhatsappManagementMixin:
             # meaningful value (0, False) aren't silently dropped.
             if (value := outcome.get(key)) is not None:
                 response[key] = value
+
+        jid = outcome.get("jid")
+        if response["status"] == "success" and jid:
+            scanned = jid.split("@")[0].split(":")[0]
+            expected = normalize_phone(external_account_id)[1:]
+            if scanned != expected:
+                # Wrong account scanned onto this connection.  Unpair
+                # the foreign device before returning so we never leave
+                # it paired; if the unpair itself fails, say so but
+                # still report the mismatch as an error.
+                response["status"] = "error"
+                response["jid"] = jid
+                try:
+                    await state.daemon.unpair()
+                except Exception as exc:
+                    response["reason"] = (
+                        f"paired_jid_mismatch: scanned account +{scanned} "
+                        f"does not match connection +{expected}; "
+                        f"auto-unpair FAILED ({exc}) — device may still be paired"
+                    )
+                else:
+                    response["reason"] = (
+                        f"paired_jid_mismatch: scanned account +{scanned} "
+                        f"does not match connection +{expected}; "
+                        f"device has been unpaired"
+                    )
         return response
 
     @management_handler()
