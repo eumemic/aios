@@ -11,12 +11,15 @@ bring it to a usable state:
    into the sandbox trust store (issue #875).
 3. :func:`install_packages` — runs the apt/pip/npm/cargo/gem/go
    commands the environment config asked for.
-4. :func:`apply_network_lockdown` — installs the iptables script that
-   restricts outbound traffic when the network policy is
-   :class:`Limited`.
+4. :func:`apply_network_lockdown` — applies (and read-back verifies) the
+   iptables egress rules when the network policy is :class:`Limited`, from
+   an ephemeral operator-image sidecar joined to the sandbox's netns (§5.8)
+   — NOT from the tenant-writable sandbox filesystem.
 
-Each step calls ``await backend.exec(handle, ...)`` rather than touching
-Docker directly, so they work uniformly across backends.
+The first two steps call ``await backend.exec(handle, ...)`` rather than
+touching Docker directly, so they work uniformly across backends; the
+lockdown goes through :func:`SandboxBackend.run_netns_sidecar` (the sandbox
+holds no ``NET_ADMIN``, so it cannot apply or subvert its own lockdown).
 
 The first three steps are best-effort enrichments — a nonzero exit is
 logged, never raised; the model can retry or work around missing tooling.
@@ -278,6 +281,21 @@ def build_iptables_script(
     return "\n".join(lines)
 
 
+# Docker's embedded DNS, served inside every user-defined-network netns (the
+# sandbox runs on the ``aios-sandbox`` user-defined bridge). The lockdown
+# sidecar joins that netns but inherits the operator image's (typically empty)
+# ``/etc/resolv.conf`` — Docker does NOT manage resolv.conf for a
+# netns-joining container — so the sidecar script points itself at the
+# embedded resolver before ``getent`` resolves the allowed hosts. A DNS miss
+# fails CLOSED (the host gets no ACCEPT rule → blocked), never a bypass.
+_EMBEDDED_DNS_ADDRESS = "127.0.0.11"
+
+# Read-back assertion that the default OUTPUT policy is DROP — proves the
+# lockdown actually took effect in the shared netns, not just that the apply
+# script exited 0.
+_LOCKDOWN_VERIFY_SCRIPT = "iptables -S OUTPUT | grep -qx -- '-P OUTPUT DROP'"
+
+
 async def apply_network_lockdown(
     backend: SandboxBackend,
     handle: SandboxHandle,
@@ -285,40 +303,53 @@ async def apply_network_lockdown(
     *,
     extra_host_ports: Sequence[tuple[str, int]] = (),
 ) -> None:
-    """Apply iptables rules to restrict outbound traffic.
+    """Apply + verify iptables egress rules via an ephemeral operator-image sidecar.
 
-    Called after package installation so that ``pip install`` etc. can
-    reach registries before the lockdown takes effect.
+    Called after package installation so ``pip install`` etc. can reach
+    registries before the lockdown takes effect.
 
-    **Fails closed.** For a :class:`Limited` policy the lockdown *is* the
-    network boundary, not a best-effort enrichment. If the iptables
-    script exits nonzero — missing ``iptables``/``getent`` (e.g. a
-    pared-down per-env image, #724), no ``NET_ADMIN``, a partial flush —
-    the sandbox would otherwise stay up with *unrestricted* outbound
-    traffic, silently bypassing the operator's :class:`Limited` intent.
-    So a nonzero exit (or a backend exec that itself errors) raises
-    :class:`SandboxBackendError`; the caller
-    (:meth:`SandboxRegistry._provision`) tears the sandbox down and
-    aborts the provision rather than handing back an open box.
+    **Off the tenant-writable filesystem (§5.8).** Under durable persistence,
+    running the lockdown *inside* the sandbox (its own ``iptables``/``getent``)
+    was a bypass: a tenant could replace ``/usr/sbin/iptables`` with ``exit 0``
+    in an Unrestricted session, persist it in the snapshot, and have the
+    fail-closed gate trust the poisoned binary's exit 0 when the environment
+    later flipped to Limited. So the lockdown is applied from an **ephemeral
+    sidecar** that joins the sandbox's netns but executes the *operator-trusted*
+    image's binaries (:func:`SandboxBackend.run_netns_sidecar`), and the sandbox
+    holds no ``NET_ADMIN`` — root-in-sandbox can no longer touch netfilter at
+    all. This also closes the pre-existing ``iptables -F your own lockdown``
+    hole.
+
+    **Fails closed.** A Limited policy whose apply OR read-back verification
+    fails (sidecar errors, nonzero exit, or ``OUTPUT`` policy not ``DROP``)
+    raises :class:`SandboxBackendError`; the caller
+    (:meth:`SandboxRegistry._provision`) tears the sandbox down and aborts the
+    provision rather than handing back an open box.
     """
     allowed: set[str] = set(networking.allowed_hosts)
     if networking.allow_package_managers:
         allowed |= PACKAGE_REGISTRY_HOSTS
 
-    script = build_iptables_script(allowed, extra_host_ports=extra_host_ports)
+    iptables_script = build_iptables_script(allowed, extra_host_ports=extra_host_ports)
+    # Point the sidecar at the netns's embedded resolver before getent runs.
+    apply_script = (
+        f"printf 'nameserver {_EMBEDDED_DNS_ADDRESS}\\n' > /etc/resolv.conf 2>/dev/null || true\n"
+        f"{iptables_script}"
+    )
     settings = get_settings()
+
     try:
-        result = await backend.exec(
-            handle, script, timeout_seconds=30, max_output_bytes=settings.bash_max_output_bytes
+        result = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=apply_script,
+            timeout_seconds=30,
+            max_output_bytes=settings.bash_max_output_bytes,
         )
     except SandboxBackendError:
-        # Don't swallow an infra failure into a wide-open sandbox: a
-        # Limited policy whose lockdown couldn't even run must fail the
-        # provision. Re-raise so the registry tears the box down.
-        log.warning(
-            "sandbox.network_lockdown_exec_error",
-            session_id=handle.session_id,
-        )
+        # Don't swallow an infra failure into a wide-open sandbox: a Limited
+        # policy whose lockdown couldn't even run must fail the provision.
+        log.warning("sandbox.network_lockdown_sidecar_error", session_id=handle.session_id)
         raise
 
     if result.exit_code != 0:
@@ -328,13 +359,34 @@ async def apply_network_lockdown(
             exit_code=result.exit_code,
             stderr=result.stderr[:500],
         )
-        # Fail closed: a Limited sandbox without a successful lockdown is
-        # a silent unrestricted-networking bypass. Aborting the provision
-        # (sandbox torn down by the caller) is the safe outcome.
         raise SandboxBackendError(
             f"network lockdown failed (exit {result.exit_code}) for session "
             f"{handle.session_id}; refusing to run a Limited sandbox with "
             f"unrestricted networking"
+        )
+
+    # Read-back verify the DROP policy actually landed in the shared netns.
+    try:
+        verify = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=_LOCKDOWN_VERIFY_SCRIPT,
+            timeout_seconds=15,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+    except SandboxBackendError:
+        log.warning("sandbox.network_lockdown_verify_error", session_id=handle.session_id)
+        raise
+    if verify.exit_code != 0:
+        log.warning(
+            "sandbox.network_lockdown_verify_failed",
+            session_id=handle.session_id,
+            exit_code=verify.exit_code,
+        )
+        raise SandboxBackendError(
+            f"network lockdown verification failed for session {handle.session_id}: "
+            "OUTPUT policy is not DROP after apply; refusing to run a Limited "
+            "sandbox with unverified networking"
         )
 
     log.info(

@@ -89,6 +89,18 @@ NetworkingConfig = Annotated[
 
 # ── environment config ────────────────────────────────────────────────────────
 
+# Reserved prefix for per-session snapshot images (durable session sandboxes,
+# §5.8). Snapshot tags are ``aios-sbx-{instance}-{session}:latest`` — single
+# path component, so they resolve locally with no registry pull. Because
+# persistence makes another session's snapshot mountable via a free-form
+# ``image`` string, a tenant-supplied image starting with this prefix would
+# mount a victim session's entire root FS (and its baked secrets); ULIDs are
+# not secrets (they appear in URLs/logs). The cross-tenant gate rejects it at
+# two layers covering different writer sets: this pydantic validator (422 at
+# the API boundary, UX + window-shrinking) and the spec-build choke point all
+# writers traverse including direct SQL (``build_spec_from_session``).
+RESERVED_SANDBOX_IMAGE_PREFIX = "aios-sbx-"
+
 
 class EnvironmentConfig(BaseModel):
     """Container configuration for an environment."""
@@ -133,19 +145,19 @@ class EnvironmentConfig(BaseModel):
             "placeholder, not the value set here."
         ),
     )
-    disk_bytes: int | None = Field(
+    snapshot_budget_bytes: int | None = Field(
         default=None,
         ge=10 * 1024 * 1024,
         description=(
-            "Maximum writable-layer size, in bytes, for sandbox containers "
-            "bound to this environment. When unset, falls back to the "
-            "worker's global ``settings.sandbox_disk_bytes`` (itself "
-            "unbounded by default). Translates to ``docker run "
-            "--storage-opt size=`` so a heavy dev build can't fill the host "
-            "disk and take down the worker. Only honored by storage drivers "
-            "that support per-container quotas; on an unsupported driver "
-            "Docker rejects the flag at create time. Minimum 10 MiB (issue "
-            "#725)."
+            "Per-session snapshot budget in **unique** bytes for sessions "
+            "bound to this environment (durable session sandboxes). When "
+            "unset, falls back to the worker's global "
+            "``settings.sandbox_snapshot_budget_bytes`` (4 GiB). When a "
+            "session's unique snapshot bytes would exceed this at teardown, "
+            "the snapshot flattens (collapse + whiteout) instead of growing "
+            "another layer — commit-and-flag, never a refusal. Replaces the "
+            "former ``disk_bytes`` writable-layer cap, which required "
+            "overlay2+pquota and never worked on prod ext4. Minimum 10 MiB."
         ),
     )
     bash_timeout_seconds: int | None = Field(
@@ -161,6 +173,25 @@ class EnvironmentConfig(BaseModel):
             "is the maximum it is capped to (issue #725)."
         ),
     )
+
+    @field_validator("image", mode="after")
+    @classmethod
+    def _reject_reserved_image_prefix(cls, v: str | None) -> str | None:
+        """Reject the reserved per-session-snapshot image prefix (422).
+
+        Persistence makes another session's snapshot mountable via this
+        free-form string; the prefix is reserved so a tenant can't point an
+        environment at ``aios-sbx-<victim>`` and mount its root FS + baked
+        secrets. Case-insensitive (Docker lowercases image refs). This is the
+        UX/window-shrinking layer; ``build_spec_from_session`` is the boundary
+        gate that also catches direct-SQL writers.
+        """
+        if v is not None and v.lower().startswith(RESERVED_SANDBOX_IMAGE_PREFIX):
+            raise ValueError(
+                f"image may not use the reserved {RESERVED_SANDBOX_IMAGE_PREFIX!r} prefix "
+                "(reserved for per-session snapshot images)"
+            )
+        return v
 
     @model_validator(mode="before")
     @classmethod

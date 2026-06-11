@@ -393,7 +393,9 @@ async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
         runtime.tool_provider,
     ) = prev
     await task_reg.shutdown()
-    await sandbox_reg.release_all()
+    from tests.helpers.sandbox import purge_all_sandboxes
+
+    await purge_all_sandboxes(sandbox_reg)
     await tool_broker.stop()
     await pool.close()
 

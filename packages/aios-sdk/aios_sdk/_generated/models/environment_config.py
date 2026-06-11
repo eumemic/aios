@@ -37,11 +37,12 @@ class EnvironmentConfig:
             using this environment.  Per-session env overrides these. A vaulted environment_variable credential whose
             secret_name matches a key — here or in the per-session env — outranks both: that key resolves to the
             credential's opaque placeholder, not the value set here.
-        disk_bytes (int | None | Unset): Maximum writable-layer size, in bytes, for sandbox containers bound to this
-            environment. When unset, falls back to the worker's global ``settings.sandbox_disk_bytes`` (itself unbounded by
-            default). Translates to ``docker run --storage-opt size=`` so a heavy dev build can't fill the host disk and
-            take down the worker. Only honored by storage drivers that support per-container quotas; on an unsupported
-            driver Docker rejects the flag at create time. Minimum 10 MiB (issue #725).
+        snapshot_budget_bytes (int | None | Unset): Per-session snapshot budget in **unique** bytes for sessions bound
+            to this environment (durable session sandboxes). When unset, falls back to the worker's global
+            ``settings.sandbox_snapshot_budget_bytes`` (4 GiB). When a session's unique snapshot bytes would exceed this at
+            teardown, the snapshot flattens (collapse + whiteout) instead of growing another layer — commit-and-flag, never
+            a refusal. Replaces the former ``disk_bytes`` writable-layer cap, which required overlay2+pquota and never
+            worked on prod ext4. Minimum 10 MiB.
         bash_timeout_seconds (int | None | Unset): Ceiling, in seconds, for a single bash tool call in sessions bound to
             this environment. When unset, falls back to the worker's global ``settings.bash_default_timeout_seconds``
             (120s). Lets heavy dev workloads run >120s commands without raising the global default for every session on the
@@ -53,7 +54,7 @@ class EnvironmentConfig:
     packages: EnvironmentConfigPackagesType0 | None | Unset = UNSET
     networking: LimitedNetworking | None | UnrestrictedNetworking | Unset = UNSET
     env: EnvironmentConfigEnvType0 | None | Unset = UNSET
-    disk_bytes: int | None | Unset = UNSET
+    snapshot_budget_bytes: int | None | Unset = UNSET
     bash_timeout_seconds: int | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
@@ -96,11 +97,11 @@ class EnvironmentConfig:
         else:
             env = self.env
 
-        disk_bytes: int | None | Unset
-        if isinstance(self.disk_bytes, Unset):
-            disk_bytes = UNSET
+        snapshot_budget_bytes: int | None | Unset
+        if isinstance(self.snapshot_budget_bytes, Unset):
+            snapshot_budget_bytes = UNSET
         else:
-            disk_bytes = self.disk_bytes
+            snapshot_budget_bytes = self.snapshot_budget_bytes
 
         bash_timeout_seconds: int | None | Unset
         if isinstance(self.bash_timeout_seconds, Unset):
@@ -119,8 +120,8 @@ class EnvironmentConfig:
             field_dict["networking"] = networking
         if env is not UNSET:
             field_dict["env"] = env
-        if disk_bytes is not UNSET:
-            field_dict["disk_bytes"] = disk_bytes
+        if snapshot_budget_bytes is not UNSET:
+            field_dict["snapshot_budget_bytes"] = snapshot_budget_bytes
         if bash_timeout_seconds is not UNSET:
             field_dict["bash_timeout_seconds"] = bash_timeout_seconds
 
@@ -209,14 +210,16 @@ class EnvironmentConfig:
 
         env = _parse_env(d.pop("env", UNSET))
 
-        def _parse_disk_bytes(data: object) -> int | None | Unset:
+        def _parse_snapshot_budget_bytes(data: object) -> int | None | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
             return cast(int | None | Unset, data)
 
-        disk_bytes = _parse_disk_bytes(d.pop("disk_bytes", UNSET))
+        snapshot_budget_bytes = _parse_snapshot_budget_bytes(
+            d.pop("snapshot_budget_bytes", UNSET)
+        )
 
         def _parse_bash_timeout_seconds(data: object) -> int | None | Unset:
             if data is None:
@@ -234,7 +237,7 @@ class EnvironmentConfig:
             packages=packages,
             networking=networking,
             env=env,
-            disk_bytes=disk_bytes,
+            snapshot_budget_bytes=snapshot_budget_bytes,
             bash_timeout_seconds=bash_timeout_seconds,
         )
 

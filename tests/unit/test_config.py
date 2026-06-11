@@ -179,46 +179,62 @@ def test_github_clone_session_timeout_mirror_matches_harness_constant(
     assert _HARNESS_STEP_TIMEOUT_S == _JOB_TIMEOUT_S
 
 
-def test_sandbox_disk_bytes_default_is_none(
+def test_sandbox_snapshot_budget_bytes_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The disk cap (issue #725) defaults to ``None`` so current behavior
-    (host default, unbounded) is unchanged unless the operator opts in."""
+    """The per-session snapshot budget (durable session sandboxes) defaults to
+    4 GiB — over budget at teardown triggers flatten, never a refusal."""
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
-    monkeypatch.delenv("AIOS_SANDBOX_DISK_BYTES", raising=False)
+    monkeypatch.delenv("AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
-    assert s.sandbox_disk_bytes is None
+    assert s.sandbox_snapshot_budget_bytes == 4 * 1024 * 1024 * 1024
 
 
-def test_sandbox_disk_bytes_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``AIOS_SANDBOX_DISK_BYTES`` sets the global writable-layer cap."""
+def test_sandbox_snapshot_budget_bytes_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES`` sets the global per-session budget."""
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
-    monkeypatch.setenv("AIOS_SANDBOX_DISK_BYTES", str(4 * 1024 * 1024 * 1024))
+    monkeypatch.setenv("AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES", str(8 * 1024 * 1024 * 1024))
 
     s = Settings(_env_file=(str(secrets),))
-    assert s.sandbox_disk_bytes == 4 * 1024 * 1024 * 1024
+    assert s.sandbox_snapshot_budget_bytes == 8 * 1024 * 1024 * 1024
 
 
-def test_sandbox_disk_bytes_rejects_below_floor(
+def test_sandbox_snapshot_budget_bytes_rejects_below_floor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Below the 10 MiB floor the cap can't fit the image's own base size,
-    so Settings construction rejects it loudly rather than provisioning a
-    container that can't start."""
+    """Below the 10 MiB floor the budget can't fit the image's base, so
+    Settings construction rejects it loudly."""
     from pydantic import ValidationError
 
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
-    monkeypatch.setenv("AIOS_SANDBOX_DISK_BYTES", "1024")
+    monkeypatch.setenv("AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES", "1024")
 
     with pytest.raises(ValidationError):
         Settings(_env_file=(str(secrets),))
+
+
+def test_container_idle_timeout_default_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Durable session sandboxes raise the idle default 300 → 1800 (§5.10):
+    teardown now costs a commit, so keeping an idle container alive is cheap."""
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.delenv("AIOS_CONTAINER_IDLE_TIMEOUT_SECONDS", raising=False)
+
+    s = Settings(_env_file=(str(secrets),))
+    assert s.container_idle_timeout_seconds == 1800

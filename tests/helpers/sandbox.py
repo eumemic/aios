@@ -18,10 +18,13 @@ from typing import Any
 
 from aios.sandbox.backends.base import (
     CommandResult,
+    ManagedImage,
     ManagedSandboxRef,
     SandboxBackend,
+    SandboxBackendError,
     SandboxHandle,
     SandboxSpec,
+    SnapshotOutcome,
 )
 
 
@@ -67,6 +70,24 @@ class FakeBackend:
     # Default-empty so existing tests behave as before; tests covering
     # the stale-handle path (#691) populate this.
     dead_sandbox_ids: set[str] = field(default_factory=set)
+    # ── durable-session-sandbox surface (drives registry lifecycle tests
+    #    without Docker) ──────────────────────────────────────────────────
+    # The outcome ``snapshot`` returns (default: a committed layer). Set to
+    # exercise skip/flatten paths; set ``snapshot_raises`` to simulate an
+    # infra failure (corpse retained, no rm).
+    next_snapshot_outcome: SnapshotOutcome | None = None
+    snapshot_raises: bool = False
+    managed_images: list[ManagedImage] = field(default_factory=list)
+    # In-memory image table the store seam reads through (image ref → labels);
+    # ``None`` value models "absent" for verified-negative ``image_labels``.
+    image_labels_by_ref: dict[str, dict[str, str] | None] = field(default_factory=dict)
+    image_sizes_by_ref: dict[str, int] = field(default_factory=dict)
+    # Refs ``remove_image`` should refuse (return False) rather than remove.
+    refuse_remove_refs: set[str] = field(default_factory=set)
+    removed_image_refs: list[str] = field(default_factory=list)
+    # Results ``run_netns_sidecar`` returns, popped in order (apply, verify);
+    # default exit-0 when drained. Set to exercise lockdown apply/verify paths.
+    sidecar_results: list[CommandResult] = field(default_factory=list)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         self.calls.append(("create", {"session_id": spec.session_id}))
@@ -76,6 +97,8 @@ class FakeBackend:
             workspace_path=spec.workspace.host_path,
             mount_snapshot=spec.mount_snapshot,
             spec_version=spec.spec_version,
+            snapshot_image=spec.snapshot_image,
+            disk_limit_bytes=spec.snapshot_budget_bytes,
         )
 
     async def is_alive(self, handle: SandboxHandle) -> bool:
@@ -121,12 +144,156 @@ class FakeBackend:
             ("destroy", {"session_id": handle.session_id, "sandbox_id": handle.sandbox_id})
         )
 
-    async def list_managed(self, *, instance_id: str) -> list[ManagedSandboxRef]:
-        self.calls.append(("list_managed", {"instance_id": instance_id}))
-        return list(self.managed)
+    async def list_managed(
+        self, *, instance_id: str, session_id: str | None = None
+    ) -> list[ManagedSandboxRef]:
+        self.calls.append(("list_managed", {"instance_id": instance_id, "session_id": session_id}))
+        if session_id is None:
+            return list(self.managed)
+        return [ref for ref in self.managed if ref.session_id == session_id]
 
     async def force_remove(self, sandbox_id: str) -> None:
         self.calls.append(("force_remove", {"sandbox_id": sandbox_id}))
+
+    async def stop(self, sandbox_id: str) -> None:
+        self.calls.append(("stop", {"sandbox_id": sandbox_id}))
+
+    async def snapshot(
+        self,
+        sandbox_id: str,
+        tag: str,
+        *,
+        empty_floor_bytes: int,
+        flatten_if_unique_bytes_over: int | None,
+    ) -> SnapshotOutcome:
+        self.calls.append(
+            (
+                "snapshot",
+                {
+                    "sandbox_id": sandbox_id,
+                    "tag": tag,
+                    "empty_floor_bytes": empty_floor_bytes,
+                    "flatten_if_unique_bytes_over": flatten_if_unique_bytes_over,
+                },
+            )
+        )
+        if self.snapshot_raises:
+            raise SandboxBackendError("fake snapshot failure")
+        if self.next_snapshot_outcome is not None:
+            return self.next_snapshot_outcome
+        return SnapshotOutcome(
+            kind="committed", image_id=f"sha256:{tag}", unique_bytes=1024, depth=1
+        )
+
+    async def list_managed_images(self, *, instance_id: str) -> list[ManagedImage]:
+        self.calls.append(("list_managed_images", {"instance_id": instance_id}))
+        return list(self.managed_images)
+
+    async def remove_image(self, ref: str) -> bool:
+        self.calls.append(("remove_image", {"ref": ref}))
+        if ref in self.refuse_remove_refs:
+            return False
+        self.removed_image_refs.append(ref)
+        self.image_labels_by_ref.pop(ref, None)
+        self.image_sizes_by_ref.pop(ref, None)
+        return True
+
+    async def image_size(self, image: str) -> int:
+        self.calls.append(("image_size", {"image": image}))
+        if image not in self.image_sizes_by_ref:
+            raise SandboxBackendError(f"fake image not found: {image}")
+        return self.image_sizes_by_ref[image]
+
+    async def image_labels(self, image: str) -> dict[str, str] | None:
+        self.calls.append(("image_labels", {"image": image}))
+        # Absent key OR explicit None value ⇒ verified-not-found.
+        return self.image_labels_by_ref.get(image)
+
+    async def run_netns_sidecar(
+        self,
+        target_sandbox_id: str,
+        *,
+        image: str,
+        script: str,
+        timeout_seconds: int,
+        max_output_bytes: int,
+    ) -> CommandResult:
+        self.calls.append(
+            (
+                "run_netns_sidecar",
+                {
+                    "target_sandbox_id": target_sandbox_id,
+                    "image": image,
+                    "script": script,
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+        )
+        # Each call pops the next queued result (apply, then verify); default
+        # exit-0 once the queue is drained.
+        if self.sidecar_results:
+            return self.sidecar_results.pop(0)
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+
+async def purge_all_sandboxes(registry: Any) -> None:
+    """Hard test-teardown for a real-Docker registry (durable session sandboxes).
+
+    ``stop_all`` only STOPS containers (their filesystems are meant to survive
+    for the next worker's GC tick) and never touches snapshot images, so a test
+    that truncates the sessions table would leak stopped corpses + snapshot
+    images across runs. This removes both for the test instance so each test
+    starts from a clean daemon. Refused image removals (a child still
+    references the layer) are ignored — the leaf's removal cascades.
+    """
+    from aios.config import get_settings
+
+    await registry.stop_all()
+    backend = registry._backend
+    instance_id = get_settings().instance_id
+    for ref in await backend.list_managed(instance_id=instance_id):
+        await backend.force_remove(ref.sandbox_id)
+    for img in await backend.list_managed_images(instance_id=instance_id):
+        removal_ref = img.repo_tags[0] if img.repo_tags else img.image_id
+        await backend.remove_image(removal_ref)
+
+
+class _FakeConn:
+    """Minimal asyncpg-conn stand-in for the snapshot-pointer queries the
+    registry runs (``execute``/``fetchrow``/``fetchval``). Reads return benign
+    defaults; ``fetchval`` returns a stub account id for ``load_session_account_id``."""
+
+    async def execute(self, *args: Any, **kwargs: Any) -> str:
+        return "OK"
+
+    async def fetchrow(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+
+    async def fetchval(self, *args: Any, **kwargs: Any) -> Any:
+        return "acct_test"
+
+    async def fetch(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+
+class _FakeAcquire:
+    async def __aenter__(self) -> _FakeConn:
+        return _FakeConn()
+
+    async def __aexit__(self, *args: Any) -> bool:
+        return False
+
+
+class FakePool:
+    """A fake asyncpg pool whose ``acquire()`` yields a no-op :class:`_FakeConn`.
+
+    Lets registry snapshot/pointer code that calls ``runtime.require_pool()``
+    run under unit tests without a real database (the pointer writes are
+    no-op ``execute``s). Set ``runtime.pool`` to an instance and restore it.
+    """
+
+    def acquire(self) -> _FakeAcquire:
+        return _FakeAcquire()
 
 
 # Static check that FakeBackend satisfies the Protocol.
@@ -142,7 +309,7 @@ def patch_build_spec_deps(
     env_config: Any = None,
     session_env: dict[str, str] | None = None,
     docker_image: str = "ghcr.io/eumemic/aios-sandbox:latest",
-    sandbox_disk_bytes: int | None = None,
+    sandbox_snapshot_budget_bytes: int | None = None,
     env_var_credentials: Any = None,
     github_clones: Any = None,
     tool_broker: Any = None,
@@ -160,7 +327,7 @@ def patch_build_spec_deps(
 
     settings = MagicMock()
     settings.docker_image = docker_image
-    settings.sandbox_disk_bytes = sandbox_disk_bytes
+    settings.sandbox_snapshot_budget_bytes = sandbox_snapshot_budget_bytes
     settings.instance_id = "inst_TEST"
     settings.sandbox_cpu_quota = None
     settings.sandbox_memory_bytes = None
@@ -182,8 +349,8 @@ def patch_build_spec_deps(
         ),
         patch(
             "aios.sandbox.spec._load_session_provisioning",
-            # (workspace_path, session_env, spec_version) since #713.
-            AsyncMock(return_value=("/tmp/w", session_env or {}, 0)),
+            # (workspace_path, session_env, spec_version, snapshot_ref).
+            AsyncMock(return_value=("/tmp/w", session_env or {}, 0, None)),
         ),
         # ``build_spec_from_session`` imports these function-locally from
         # ``aios.sandbox.volumes`` (deferred import to avoid a cycle), so

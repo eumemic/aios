@@ -102,13 +102,12 @@ class TestResourceCapFlags:
         assert argv[i + 1] == "512"
 
     @pytest.mark.asyncio
-    async def test_disk_bytes_emits_storage_opt_size(self) -> None:
-        """A disk cap flips ``--storage-opt size=<bytes>`` (issue #725) so a
-        heavy build can't grow the container's writable layer past the cap."""
-        argv = await _capture_argv(_spec(disk_bytes=2 * 1024 * 1024 * 1024))
-        assert "--storage-opt" in argv
-        i = argv.index("--storage-opt")
-        assert argv[i + 1] == f"size={2 * 1024 * 1024 * 1024}"
+    async def test_no_storage_opt_ever_emitted(self) -> None:
+        """Durable session sandboxes deleted the ``--storage-opt size=`` cap
+        (§5.7): it required overlay2+pquota and never worked on prod ext4.
+        Disk pressure is now bounded by the snapshot pool budget (GC eviction)."""
+        argv = await _capture_argv(_spec(snapshot_budget_bytes=2 * 1024 * 1024 * 1024))
+        assert "--storage-opt" not in argv
 
     @pytest.mark.asyncio
     async def test_no_caps_emits_no_resource_flags(self) -> None:
@@ -130,13 +129,28 @@ class TestResourceCapFlags:
                 cpu_quota=2.0,
                 memory_bytes=128 * 1024 * 1024,
                 pids_limit=64,
-                disk_bytes=512 * 1024 * 1024,
             )
         )
         assert "--cpus" in argv
         assert "--memory" in argv
         assert "--memory-swap" in argv
         assert "--pids-limit" in argv
-        assert "--storage-opt" in argv
-        i = argv.index("--storage-opt")
-        assert argv[i + 1] == f"size={512 * 1024 * 1024}"
+        # The writable-layer cap is gone — never emitted.
+        assert "--storage-opt" not in argv
+
+    @pytest.mark.asyncio
+    async def test_sandbox_has_no_net_admin(self) -> None:
+        """Durable session sandboxes strip ``--cap-add NET_ADMIN`` from the
+        sandbox (§5.8) — even a Limited-networking spec; the lockdown is
+        applied from an ephemeral operator-image sidecar instead."""
+        from aios.sandbox.backends.base import Limited
+
+        argv = await _capture_argv(_spec(network_policy=Limited(allowed_hosts=frozenset({"x"}))))
+        assert "NET_ADMIN" not in argv
+
+    @pytest.mark.asyncio
+    async def test_no_rm_flag(self) -> None:
+        """No ``--rm`` (durable session sandboxes): an unplanned death must
+        leave a stopped corpse for the next provision / GC tick to salvage."""
+        argv = await _capture_argv(_spec())
+        assert "--rm" not in argv

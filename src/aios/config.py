@@ -146,22 +146,53 @@ class Settings(BaseSettings):
         "Translates to ``docker run --pids-limit``. Mitigates fork-bomb "
         "denial-of-service; ``None`` leaves the host's default in place.",
     )
-    sandbox_disk_bytes: int | None = Field(
-        default=None,
+    sandbox_snapshot_budget_bytes: int | None = Field(
+        default=4 * 1024 * 1024 * 1024,
         ge=10 * 1024 * 1024,
-        description="Maximum writable-layer size a sandbox container can "
-        "grow to, in bytes. Translates to ``docker run --storage-opt "
-        "size=`` so a heavy build (``npm ci``, large test artifacts) "
-        "can't fill the host disk and take down the worker + sibling "
-        "sandboxes. ``None`` leaves the host's default (unbounded) in "
-        "place. NOTE: ``--storage-opt size=`` is only honored by storage "
-        "drivers that support per-container quotas (``overlay2`` on an "
-        "``xfs``/``btrfs`` backing filesystem with ``pquota``, or "
-        "``devicemapper``); on an unsupported driver Docker rejects the "
-        "flag at ``create`` time, surfacing as a SandboxBackendError "
-        "rather than a silent no-op. Minimum 10 MiB to stay above the "
-        "image's own base size. Per-environment overridable via "
-        "``EnvironmentConfig.disk_bytes`` (issue #725).",
+        description="Per-session snapshot budget in **unique** bytes (durable "
+        "session sandboxes, §5.7). When a session's unique snapshot bytes "
+        "would exceed this at idle/teardown, the snapshot verb FLATTENS "
+        "(collapse + whiteout, the definitive secret scrub) instead of "
+        "committing another layer; commit-and-flag, never refuse (refusal "
+        "would destroy the agent's work as punishment for a state it wasn't "
+        "awake to prevent). Replaces the dead ``sandbox_disk_bytes`` "
+        "writable-layer cap, which required overlay2-on-xfs+pquota and never "
+        "worked on prod ext4. ``None`` ⇒ unbounded (the depth backstop still "
+        "applies). Per-environment overridable via "
+        "``EnvironmentConfig.snapshot_budget_bytes``.",
+    )
+    sandbox_snapshot_ttl_seconds: int = Field(
+        default=2_592_000,  # 30 days
+        ge=60,
+        description="Dormancy TTL for a persisted session snapshot. The GC "
+        "reconciler removes a snapshot whose session's last activity is older "
+        "than this (appending a model-visible ``sandbox_fs_expired`` notice), "
+        "keyed on the session's ``(session_id, last_event_seq)`` event row. "
+        "Bounds supply-chain accumulation (agent-installed software re-executes "
+        "at every resume) and unbounded snapshot retention.",
+    )
+    sandbox_snapshot_pool_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Per-host snapshot disk budget in bytes (durable session "
+        "sandboxes, §5.7) — the load-bearing pool bound. When this host's "
+        "total snapshot bytes exceed it, the GC evicts the MOST-DORMANT "
+        "sessions first (``sandbox_fs_expired {disk_pressure}``). Required in "
+        "production once the eumemic-ops prune-cron exemption lands (that "
+        "exemption removes the only existing disk control). ``None`` ⇒ "
+        "unbounded retention (dev default); operators MUST set real host "
+        "headroom in production. v1 enforces per-host and reports global.",
+    )
+    sandbox_snapshot_empty_floor_bytes: int = Field(
+        default=8192,
+        ge=0,
+        description="Writable-layer byte floor at/below which a snapshot is "
+        "treated as a no-write identity (``skipped_empty`` — no new image, no "
+        "chain growth). NOT zero: on the production **containerd image store** "
+        "a no-write container reports ``SizeRw == 4096``, not 0, so an "
+        "``== 0`` test would never fire in prod and chat-only / read-only "
+        "sessions would grow a chain every idle. The floor (default 8 KiB) is "
+        "what keeps them from ever snapshotting.",
     )
     sandbox_seccomp_profile: str = Field(
         default=str(Path(__file__).resolve().parents[2] / "docker" / "seccomp-sandbox.json"),
@@ -233,10 +264,17 @@ class Settings(BaseSettings):
 
     # ── container lifecycle ────────────────────────────────────────────────
     container_idle_timeout_seconds: int = Field(
-        default=300,
+        default=1800,
         ge=30,
         description="Seconds of inactivity before a session's sandbox container "
-        "is released. The idle reaper checks every 60s.",
+        "is released. The idle reaper checks every 60s. Raised from 300 to 1800 "
+        "(30 min) for durable session sandboxes (§5.10): teardown now costs a "
+        "commit + a layer + eventual flatten, so keeping an idle ``tail -f`` "
+        "container alive (~1 MB RSS) is the cheap option. At 300s a daily-driver "
+        "session would commit 20-80x/day and a 15-min cron-trigger session "
+        "~96x/day, hitting the flatten wall in days; at 1800s a 15-min cron "
+        "session never idles out (zero commits until it stops) and a "
+        "conversational session commits a handful of times a day.",
     )
     mcp_pool_idle_timeout_seconds: int = Field(
         default=900,

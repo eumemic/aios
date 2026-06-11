@@ -67,6 +67,62 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
 # for the model to use them as continuation context.
 _THINKING_FIELDS: frozenset[str] = frozenset({"thinking_blocks", "reasoning_content"})
 
+# Durable-session-sandbox FS-loss notices (§5.9): the only non-``message``
+# events ``build_messages`` renders. They are append-only (each at its seq
+# position, so monotonicity holds) and NOT stimulus-bearing — they never
+# advance ``reacting_to`` and so never, on their own, wake the session; the
+# notice is read at the next genuine wake. Event text is runtime-vocabulary
+# only (no repo/PR/issue refs — the agent can't act on those).
+_MODEL_VISIBLE_LIFECYCLE: frozenset[str] = frozenset(
+    {"sandbox_fs_reset", "sandbox_fs_expired", "sandbox_fs_over_limit"}
+)
+
+# Unaffected-resources tail shared by the reset/expired notices.
+_FS_UNAFFECTED = (
+    " /workspace and mounted directories (memory stores, uploads, attachments, "
+    "github working trees) are unaffected."
+)
+
+
+def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
+    """Render an FS-loss lifecycle event as a bracketed user-role notice.
+
+    Total by contract — a pure function of ``data`` that never raises (an
+    unknown event/reason falls back to a generic line), since it runs inside
+    the per-wake replay where a raise would brick the session.
+    """
+    event = data.get("event")
+    reason = data.get("reason")
+    if event == "sandbox_fs_over_limit":
+        return (
+            "[The persisted sandbox filesystem for this session exceeded its size budget. "
+            "Installed packages and files are retained, but older write history may be "
+            "collapsed to reclaim space; keep the persistent footprint small — large data "
+            "belongs in /workspace, which is unaffected.]"
+        )
+    if event == "sandbox_fs_expired":
+        cause = (
+            "to reclaim disk space"
+            if reason == "disk_pressure"
+            else "after a period of inactivity (retention limit)"
+        )
+        return (
+            f"[The persisted sandbox filesystem for this session was discarded {cause}. "
+            f"The next command runs on a fresh base filesystem;{_FS_UNAFFECTED}]"
+        )
+    # sandbox_fs_reset (or any other allowlisted reset-shaped event).
+    if reason == "environment_image_changed":
+        detail = "the environment's base image was changed"
+    elif reason == "snapshot_missing":
+        detail = "the persisted filesystem could no longer be found"
+    else:
+        detail = "the persisted filesystem was reset"
+    return (
+        f"[The sandbox filesystem for this session was reset because {detail}. "
+        f"The next command runs on a fresh base filesystem;{_FS_UNAFFECTED}]"
+    )
+
+
 # Notification markers truncate the source content to this many chars
 # (plus an ellipsis when truncated) so a busy non-focal channel
 # contributes O(tens-of-tokens) per inbound to the context — cheap
@@ -801,6 +857,14 @@ def build_messages(
     max_stimulus_seq: int = 0
 
     for e in events:
+        # Durable-session-sandbox FS-loss notices (§5.9): the only non-message
+        # events that render. Append-only at this seq position (monotonic) and
+        # NOT stimulus-bearing — deliberately does not touch max_stimulus_seq,
+        # so a GC/reset append never advances ``reacting_to`` or wakes the
+        # session; the model reads the notice at its next genuine wake.
+        if e.kind == "lifecycle" and e.data.get("event") in _MODEL_VISIBLE_LIFECYCLE:
+            messages.append({"role": "user", "content": _render_fs_lifecycle_notice(e.data)})
+            continue
         if e.kind != "message":
             continue
         # Quarantine backstop (#686): build_messages is a pure replay over

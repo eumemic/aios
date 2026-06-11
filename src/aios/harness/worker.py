@@ -203,10 +203,14 @@ async def worker_main() -> None:
         if woken_runs:
             log.info("worker.startup_sweep.workflows", woken_runs=woken_runs)
 
-        # Reap orphaned sandbox containers from prior worker runs.
-        reaped = await sandbox_registry.reap_orphans()
-        if reaped:
-            log.info("worker.reaped_orphan_containers", count=reaped)
+        # Start the snapshot GC reconciler (durable session sandboxes). Its
+        # immediate first tick replaces the old boot-time orphan reap: rather
+        # than removing every managed container at boot (which lost their
+        # filesystems), it salvages crash corpses and reconciles images +
+        # pointers against store truth, then repeats hourly. Boot is not
+        # blocked — a session waking mid-reconcile salvages its own corpse
+        # inline under its own lock.
+        sandbox_registry.start_gc(pool)
 
         # Start container + MCP-pool idle-TTL reapers.
         sandbox_registry.start_reaper(idle_timeout=settings.container_idle_timeout_seconds)
@@ -281,10 +285,14 @@ async def worker_main() -> None:
                 await scheduler_task
         if sandbox_registry is not None:
             sandbox_registry.stop_reaper()
+            sandbox_registry.stop_gc()
         if task_registry is not None:
             await task_registry.shutdown()
         if sandbox_registry is not None:
-            await sandbox_registry.release_all()
+            # Durable session sandboxes: STOP (don't destroy) every container
+            # so their filesystems survive; the next worker's boot GC tick
+            # salvages the stopped corpses.
+            await sandbox_registry.stop_all()
         if mcp_session_pool is not None:
             mcp_session_pool.stop_reaper()
             await mcp_session_pool.close_all()
