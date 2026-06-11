@@ -44,7 +44,12 @@ from aios.workflows._protocol import (
     read_frame_sync,
     write_frame_sync,
 )
-from aios.workflows.determinism import CallKeyer, canonical_schema_json, validate_value
+from aios.workflows.determinism import (
+    CallKeyer,
+    canonical_schema_json,
+    storable_text,
+    validate_value,
+)
 
 
 class WorkflowScriptError(Exception):
@@ -220,26 +225,18 @@ def pipeline(items: Any, *stages: Any) -> _ParallelAwait:
 _pending: list[tuple[str, str]] = []
 
 
-def _storable(text: str) -> str:
-    """Neutralize the two byte classes Postgres jsonb (and the call_key validator)
-    reject — NUL and unpaired surrogates — so a progress line can never fail the run.
-    ``log()``/``phase()`` are diagnostics: total by construction, the way their
-    pre-journal stderr form never crashed. Lossless for ordinary text (only the
-    rejected bytes are replaced)."""
-    return text.encode("utf-8", "replace").decode("utf-8").replace("\x00", "�")
-
-
 def log(*args: Any) -> None:
     """Record a progress line on the run's journal (a durable ``annotation`` event,
     surfaced in the run stream). Space-joined like ``print``; re-runs on every replay
-    but the journal keeps it emit-once."""
-    _pending.append(("log", _storable(" ".join(str(a) for a in args))))
+    but the journal keeps it emit-once. ``storable_text`` keeps it total — a diagnostic
+    never fails the run, even on NUL/surrogate bytes in arbitrary logged output."""
+    _pending.append(("log", storable_text(" ".join(str(a) for a in args))))
 
 
 def phase(title: Any) -> None:
     """Record a phase marker on the run's journal (a durable ``annotation`` event) —
     a lightweight progress label, not a step boundary. Emit-once across replays."""
-    _pending.append(("phase", _storable(str(title))))
+    _pending.append(("phase", storable_text(str(title))))
 
 
 def _flush_annotations(branch: _Branch, emit: Any) -> None:
@@ -251,7 +248,7 @@ def _flush_annotations(branch: _Branch, emit: Any) -> None:
     ``type`` discriminator keeps an annotation distinct from a same-keyed capability).
     Drained right after the producing step so attribution to the branch is exact.
 
-    Total by construction: ``_storable`` already made every text jsonb-storable, so
+    Total by construction: ``storable_text`` already made every text jsonb-storable, so
     ``keyer.next`` (which validates against that same domain) cannot raise here — a
     raise would propagate out of the driver's inner ``finally`` and wrongly error the
     run (or mask a clean return)."""

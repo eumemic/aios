@@ -18,9 +18,9 @@ from typing import Any
 
 import pytest
 
-from aios.workflows.determinism import content_hash
+from aios.workflows.determinism import content_hash, storable_text
 from aios.workflows.host_launcher import EmittedAnnotation, HostOutcome, run_script_host
-from aios.workflows.wf_script_host import MAX_PARALLEL_FANOUT, _storable
+from aios.workflows.wf_script_host import MAX_PARALLEL_FANOUT
 
 
 async def _run(
@@ -798,6 +798,6 @@ async def test_log_with_unstorable_text_does_not_kill_the_run() -> None:
 
 
 def test_storable_neutralizes_nul_and_surrogates_losslessly() -> None:
-    assert _storable("ordinary text — é 🎉") == "ordinary text — é 🎉"
-    assert "\x00" not in _storable("a\x00b")
-    _storable("x" + chr(0xD800)).encode("utf-8")  # no raise → storable
+    assert storable_text("ordinary text — é 🎉") == "ordinary text — é 🎉"
+    assert "\x00" not in storable_text("a\x00b")
+    storable_text("x" + chr(0xD800)).encode("utf-8")  # no raise → storable

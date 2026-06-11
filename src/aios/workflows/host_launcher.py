@@ -130,10 +130,12 @@ class HostOutcome:
     value: Any = None
     error_repr: str | None = None
     error_kind: HostErrorKind | None = None
-    # CRASH DIAGNOSTICS ONLY — the child's real stderr (a Python traceback from a host
-    # crash, an rlimit message). log()/phase() no longer route through here (they are
-    # journaled annotation frames on stdout); the step never reads this field. It exists
-    # solely so a host crash/timeout leaves an attributable diagnostic in the worker log.
+    # The child's real stderr — crash diagnostics only (a host-crash traceback, an
+    # rlimit message). log()/phase() no longer route through here; they are journaled
+    # annotation frames on stdout. The step deliberately does NOT consume this field:
+    # capturing-at-the-boundary-then-dropping is the "explicitly dropped" disposition the
+    # design calls for — it is never plumbed into the run journal (author-visible output
+    # is the annotations now), and is here for a host-crash post-mortem path to read.
     stderr: str = ""
 
 
