@@ -268,7 +268,7 @@ async def test_create_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
 
     # Declares a server the creator lacks → ForbiddenError, no workflow row leaks.
     before = await _workflow_count(pool)
-    with pytest.raises(ForbiddenError):
+    with pytest.raises(ForbiddenError, match=r"exceeds the acting agent's permissions"):
         await wf_service.create_workflow(
             pool,
             account_id=ACC,

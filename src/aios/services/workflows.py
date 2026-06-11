@@ -84,7 +84,7 @@ async def _enforce_surface_attenuation(
     effective = attenuation_service.clamp(declared, surface_of(agent))
     if effective != expected:
         raise ForbiddenError(
-            "workflow surface exceeds the acting agent's",
+            "workflow surface exceeds the acting agent's permissions",
             detail={"exceeds": surface_diff(expected, effective)},
         )
 
