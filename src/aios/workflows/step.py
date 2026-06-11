@@ -349,7 +349,28 @@ async def _run_workflow_step_body(
         # Gated on a non-crash outcome: a crashed/killed host emits nothing, and
         # that emptiness is a crash (handled above), never divergence.
         emitted_keys = {cap.call_key for cap in outcome.emitted}
-        diverged = sorted(k for k in inflight if k not in emitted_keys)
+        # A call_key with a `frontier_deferred` marker but no `call_started` (and not
+        # yet resolved into memo) is a WAITING-to-be-admitted agent frontier. On a
+        # completed replay the script MUST re-emit it (it has neither started nor
+        # resolved); if it didn't, the run diverged just as surely as a vanished
+        # inflight call — fail closed rather than strand a frontier that will never
+        # be admitted. A key that later gets a `call_started` (admitted) is tracked
+        # by `inflight` instead, and one that resolved is in `memo` — both excluded.
+        started_keys = {
+            e.call_key for e in events if e.type == "call_started" and e.call_key is not None
+        }
+        deferred_pending = {
+            e.call_key
+            for e in events
+            if e.type == "frontier_deferred"
+            and e.call_key is not None
+            and e.call_key not in started_keys
+            and e.call_key not in memo
+        }
+        diverged = sorted(
+            {k for k in inflight if k not in emitted_keys}
+            | {k for k in deferred_pending if k not in emitted_keys}
+        )
         if diverged:
             await _complete_run(
                 conn,
@@ -396,6 +417,21 @@ async def _run_workflow_step_body(
             )
             return
 
+        # Per-run wave admission (#784): bound the number of concurrently in-flight
+        # agent() children. Count this run's currently in-flight agents (harvested
+        # `inflight` map), and admit at most `slots` NEW agent frontiers this wake;
+        # journal the rest as `frontier_deferred` (no spawn, no call_started). Freed
+        # slots admit deferred frontiers on the next wake — the existing child-
+        # completion re-wake re-runs this step, no new machinery. Gate and tool
+        # frontiers are UNTHROTTLED. H1 above already counted the full new-agent set,
+        # so the wave gate neither masks nor false-trips the lifetime cap; a
+        # re-emitted deferred frontier is still "new" (no call_started), so H1's
+        # count is identical across wakes.
+        inflight_agents = sum(
+            1 for e in inflight.values() if e.payload.get("capability") == "agent"
+        )
+        slots = max(0, get_settings().workflow_max_inflight_children_per_run - inflight_agents)
+
         # Suspended: open any *new* frontier capability, then park.
         for cap in outcome.emitted:
             if cap.call_key in memo or cap.call_key in inflight:
@@ -417,11 +453,29 @@ async def _run_workflow_step_body(
                 if cap.call_key in signals:
                     needs_rewake = True
             elif cap.capability_id == "agent":
-                spawn = await _open_agent_capability(conn, pool, run, cap)
-                if spawn.rejected:
-                    return  # the frontier was terminally rejected (bad call) — run errored
-                if spawn.needs_rewake:
-                    needs_rewake = True  # C1'/C4: harvest the already-present marker next step
+                if slots > 0:
+                    spawn = await _open_agent_capability(conn, pool, run, cap)
+                    if spawn.rejected:
+                        return  # the frontier was terminally rejected (bad call) — run errored
+                    if spawn.needs_rewake:
+                        needs_rewake = True  # C1'/C4: harvest the already-present marker next step
+                    slots -= 1
+                else:
+                    # Over the per-run wave cap: defer this frontier. Journal a
+                    # `frontier_deferred` marker (idempotent on (run_id, call_key,
+                    # type)) so the divergence guard sees a waiting agent. Do NOT
+                    # spawn and do NOT journal call_started. A later wake re-emits this
+                    # same frontier (no call_started ⇒ still "new"); when a child
+                    # resolves and frees a slot, it is admitted then. Deferral is a
+                    # WAIT, never an error — it must never reach _open_agent_capability.
+                    await wf_queries.append_run_event(
+                        conn,
+                        account_id=account_id,
+                        run_id=run_id,
+                        type="frontier_deferred",
+                        call_key=cap.call_key,
+                        payload={"capability": "agent"},
+                    )
             elif cap.capability_id == "tool":
                 spec = cap.spec if isinstance(cap.spec, dict) else {}
                 tool_name = spec.get("tool_name")

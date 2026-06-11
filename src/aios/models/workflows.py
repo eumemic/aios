@@ -23,7 +23,12 @@ from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal[
-    "run_started", "call_started", "call_result", "run_completed", "annotation"
+    "run_started",
+    "call_started",
+    "call_result",
+    "run_completed",
+    "annotation",
+    "frontier_deferred",
 ]
 WfRunSignalKind = Literal["gate_resume", "child_done", "cancel", "tool_result"]
 
