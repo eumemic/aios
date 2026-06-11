@@ -25,10 +25,22 @@ from telegram import InputFile
 from aios_telegram.connector import (
     TelegramConnector,
     _build_media_group,
-    _chat_type_from_chat_id,
     _classify,
 )
 from tests.conftest import BOT_ID, CONNECTION_ID
+
+
+def _sent(message_id: int, chat_type: str = "private") -> MagicMock:
+    """Build a mock PTB ``Message`` return value for a send_* call.
+
+    ``telegram_send`` derives the result's ``chat_type`` from the
+    returned message's ``.chat.type`` via the same ``_chat_kind`` helper
+    inbound uses, so the mock must carry a realistic Telegram chat-type
+    string ("private"/"group"/"supergroup"/"channel").
+    """
+    m = MagicMock(message_id=message_id)
+    m.chat.type = chat_type
+    return m
 
 
 def test_classify_extensions() -> None:
@@ -91,18 +103,13 @@ def test_telegram_connector_subclasses_http_connector() -> None:
 @pytest.fixture
 def bot() -> Any:
     b = MagicMock()
-    b.send_message = AsyncMock(return_value=MagicMock(message_id=42))
-    b.send_photo = AsyncMock(return_value=MagicMock(message_id=43))
-    b.send_voice = AsyncMock(return_value=MagicMock(message_id=44))
-    b.send_video = AsyncMock(return_value=MagicMock(message_id=45))
-    b.send_audio = AsyncMock(return_value=MagicMock(message_id=46))
-    b.send_document = AsyncMock(return_value=MagicMock(message_id=47))
-    b.send_media_group = AsyncMock(
-        return_value=[
-            MagicMock(message_id=100),
-            MagicMock(message_id=101),
-        ]
-    )
+    b.send_message = AsyncMock(return_value=_sent(42))
+    b.send_photo = AsyncMock(return_value=_sent(43))
+    b.send_voice = AsyncMock(return_value=_sent(44))
+    b.send_video = AsyncMock(return_value=_sent(45))
+    b.send_audio = AsyncMock(return_value=_sent(46))
+    b.send_document = AsyncMock(return_value=_sent(47))
+    b.send_media_group = AsyncMock(return_value=[_sent(100), _sent(101)])
     return b
 
 
@@ -111,8 +118,9 @@ def bot() -> Any:
 
 async def test_telegram_send_text_only(connector: TelegramConnector, bot: Any) -> None:
     result = await connector.telegram_send(text="hello", chat_id="123", connection_id=CONNECTION_ID)
-    # Result stamps the resolved focal channel + chat_type.  chat_id
-    # "123" is positive → dm per Telegram's sign convention.
+    # Result stamps the resolved focal channel + chat_type.  ``chat_type``
+    # is derived from the chat the send API returned (``.chat.type ==
+    # "private"``) via the same ``_chat_kind`` helper inbound uses → "dm".
     assert result == {
         "message_id": 42,
         "channel": f"telegram/{BOT_ID}/123",
@@ -121,22 +129,37 @@ async def test_telegram_send_text_only(connector: TelegramConnector, bot: Any) -
     bot.send_message.assert_awaited_once_with(chat_id=123, text="hello", parse_mode=None)
 
 
-def test_chat_type_from_chat_id() -> None:
-    assert _chat_type_from_chat_id(123) == "dm"
-    assert _chat_type_from_chat_id(0) == "dm"
-    assert _chat_type_from_chat_id(-987654321) == "group"
-    # Supergroups/channels use the -100... prefix — still negative → group.
-    assert _chat_type_from_chat_id(-1001234567890) == "group"
-
-
 async def test_telegram_send_group_result_chat_type_group(
     connector: TelegramConnector, bot: Any
 ) -> None:
+    """A legacy ``group`` chat reports ``chat_type == "group"`` — derived
+    from the returned message's ``.chat.type``, matching inbound's
+    ``_chat_kind`` mapping."""
+    bot.send_message = AsyncMock(return_value=_sent(42, chat_type="group"))
     result = await connector.telegram_send(
         text="hello group", chat_id="-987654321", connection_id=CONNECTION_ID
     )
     assert result["channel"] == f"telegram/{BOT_ID}/-987654321"
     assert result["chat_type"] == "group"
+
+
+async def test_telegram_send_supergroup_result_chat_type_supergroup(
+    connector: TelegramConnector, bot: Any
+) -> None:
+    """Regression for #943: a supergroup (chat_id with the ``-100…``
+    prefix) MUST report ``chat_type == "supergroup"`` outbound, exactly
+    as inbound stamps it.  The old ``_chat_type_from_chat_id`` guessed
+    from the chat_id sign and flattened every negative id to "group",
+    so a supergroup recorded ``"supergroup"`` inbound but ``"group"``
+    outbound — breaking inbound↔outbound correlation.  Deriving from the
+    returned ``.chat.type`` via ``_chat_kind`` makes the two byte-identical.
+    """
+    bot.send_message = AsyncMock(return_value=_sent(42, chat_type="supergroup"))
+    result = await connector.telegram_send(
+        text="hello supergroup", chat_id="-1001234567890", connection_id=CONNECTION_ID
+    )
+    assert result["channel"] == f"telegram/{BOT_ID}/-1001234567890"
+    assert result["chat_type"] == "supergroup"
 
 
 async def test_telegram_send_reply_to_message_id_threads_through(
