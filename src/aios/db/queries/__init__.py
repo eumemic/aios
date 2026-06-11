@@ -4145,6 +4145,71 @@ async def resolve_run_credential(
     )
 
 
+class EnvVarCredentialRow(NamedTuple):
+    """One ``environment_variable`` credential resolved for a session.
+
+    ``updated_at`` rides along for the recycle-on-rotation drift key
+    (#877); ``allowed_hosts`` entries are the stored canonical
+    ``host[/path-prefix]`` strings — consumers parse them with
+    :func:`aios.models.vaults.parse_allowed_host_entry`, the single
+    grammar authority.
+    """
+
+    credential_id: str
+    vault_id: str
+    secret_name: str
+    allowed_hosts: list[str]
+    blob: EncryptedBlob
+    updated_at: datetime
+
+
+async def list_session_env_var_credentials(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> list[EnvVarCredentialRow]:
+    """All active ``environment_variable`` credentials across a session's
+    bound vaults — a *list*, unlike the single-``target_url`` lookup above.
+
+    Duplicate ``secret_name`` across two attached vaults resolves
+    first-vault-wins: ``DISTINCT ON (secret_name)`` keeps the lowest
+    ``session_vaults.rank`` row (within one vault duplicates are
+    impossible — the partial unique index on ``(vault_id, secret_name)``).
+    Rank uniqueness per session is an ``enumerate()`` artifact of
+    ``set_session_vaults``, the same invariant ``resolve_session_credential``
+    already leans on.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (vc.secret_name)
+               vc.id, vc.vault_id, vc.secret_name, vc.allowed_hosts,
+               vc.ciphertext, vc.nonce, vc.updated_at
+          FROM session_vaults sv
+          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
+         WHERE sv.session_id = $1
+           AND vc.auth_type = 'environment_variable'
+           AND vc.archived_at IS NULL
+           AND sv.account_id = $2
+           AND vc.account_id = $2
+         ORDER BY vc.secret_name, sv.rank
+        """,
+        session_id,
+        account_id,
+    )
+    return [
+        EnvVarCredentialRow(
+            credential_id=str(row["id"]),
+            vault_id=str(row["vault_id"]),
+            secret_name=str(row["secret_name"]),
+            allowed_hosts=list(row["allowed_hosts"]),
+            blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
+            updated_at=row["updated_at"],
+        )
+        for row in rows
+    ]
+
+
 # ─── skills ──────────────────────────────────────────────────────────────────
 
 

@@ -1009,6 +1009,36 @@ class TestDeriveAccountSubkey:
         assert master.derive_subkey_bytes("ctx-one") == master.derive_subkey_bytes("ctx-one")
 
 
+class TestMintSecretPlaceholder:
+    """``mint_secret_placeholder`` — the opaque per-(session, credential)
+    stand-in (#873). Deterministic by design: it must survive container
+    recycles and re-derive identically on any worker sharing the vault
+    key, while staying unique per session and unlinkable to the secret."""
+
+    def _subkey(self) -> CryptoBox:
+        return CryptoBox(b"\xcd" * 32).derive_account_subkey("acc_alpha")
+
+    def test_format(self) -> None:
+        from aios.services.vaults import SECRET_PLACEHOLDER_PREFIX, mint_secret_placeholder
+
+        placeholder = mint_secret_placeholder(self._subkey(), "sess_A", "vcred_1")
+        assert placeholder.startswith(SECRET_PLACEHOLDER_PREFIX)
+        suffix = placeholder.removeprefix(SECRET_PLACEHOLDER_PREFIX)
+        assert len(suffix) == 32
+        assert all(c in "0123456789abcdef" for c in suffix)
+
+    def test_deterministic_and_distinct_per_input(self) -> None:
+        from aios.services.vaults import mint_secret_placeholder
+
+        subkey = self._subkey()
+        base = mint_secret_placeholder(subkey, "sess_A", "vcred_1")
+        assert mint_secret_placeholder(subkey, "sess_A", "vcred_1") == base
+        assert mint_secret_placeholder(subkey, "sess_B", "vcred_1") != base
+        assert mint_secret_placeholder(subkey, "sess_A", "vcred_2") != base
+        other_subkey = CryptoBox(b"\xee" * 32).derive_account_subkey("acc_alpha")
+        assert mint_secret_placeholder(other_subkey, "sess_A", "vcred_1") != base
+
+
 class TestServiceWiringIsAccountScoped:
     """End-to-end integration: a vault_credential blob written by the service
     under ``account_a`` must NOT be decryptable when fetched under ``account_b``.

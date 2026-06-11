@@ -56,6 +56,7 @@ from aios.sandbox.github_clone import (
 from aios.sandbox.network import WORKER_NETWORK_ALIAS, is_running_in_container
 from aios.sandbox.setup import WORKSPACE_RUNTIME_ENV
 from aios.services import sessions as sessions_service
+from aios.services.vaults import ResolvedEnvVarCredential, resolve_session_env_var_credentials
 
 log = get_logger("aios.sandbox.spec")
 
@@ -114,6 +115,13 @@ class ProvisioningPlan:
     memory_echoes: list[MemoryStoreResourceEcho]
     github_echoes: list[GithubRepositoryResourceEcho]
     git_proxy: GitProxy | None
+    # Decrypted env-var credentials + minted placeholders (#873). Alive
+    # only for the provision call — the plan is dropped after
+    # ``_provision`` consumes it. Materialization (placeholder env
+    # injection) and the request-time placeholder→secret map are the
+    # follow-up slices (#874, #876). Defaulted so plan-shape-agnostic
+    # constructors stay valid.
+    env_var_credentials: tuple[ResolvedEnvVarCredential, ...] = ()
 
 
 def mount_snapshot_from_echoes(
@@ -223,6 +231,30 @@ async def _materialize_memory_mounts(
                 conn, store_id=echo.memory_store_id, account_id=account_id
             )
     return list(echoes)
+
+
+async def _materialize_env_var_credentials(
+    session_id: str,
+    *,
+    account_id: str,
+) -> tuple[ResolvedEnvVarCredential, ...]:
+    """Resolve + decrypt the session's env-var credentials and mint their
+    placeholders (#873).
+
+    Runs BEFORE :func:`_materialize_github_clones` in
+    :func:`build_spec_from_session` by design: this step holds no
+    host-side resources, so its deliberate fail-hard on a corrupt blob
+    (one bad credential aborts the provision) raises while there is
+    nothing to clean up — after the clones step a raise would have to
+    unwind a running GitProxy.
+    """
+    pool = runtime.require_pool()
+    crypto_box = runtime.require_crypto_box()
+    async with pool.acquire() as conn:
+        resolved = await resolve_session_env_var_credentials(
+            conn, crypto_box, session_id, account_id=account_id
+        )
+    return tuple(resolved)
 
 
 async def _materialize_github_clones(
@@ -380,6 +412,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     workspace_path = ensure_workspace_path(raw_path)
     env_config = await _load_environment_config(session_id, account_id=account_id)
     memory_echoes = await _materialize_memory_mounts(session_id, account_id=account_id)
+    env_var_credentials = await _materialize_env_var_credentials(session_id, account_id=account_id)
     github_echoes, git_proxy = await _materialize_github_clones(session_id, account_id=account_id)
 
     tool_broker = runtime.require_tool_broker()
@@ -426,6 +459,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             tool_broker_secret=tool_broker_secret,
             tool_socket_host_path=tool_socket_host_path,
             spec_version=spec_version,
+            env_var_credentials=env_var_credentials,
         )
     except BaseException:
         # Both proxies hold worker-process state (ports, token maps,
@@ -462,6 +496,7 @@ def _assemble_plan(
     tool_socket_host_path: Path | None = None,
     disk_bytes: int | None = None,
     spec_version: int = 0,
+    env_var_credentials: tuple[ResolvedEnvVarCredential, ...] = (),
 ) -> ProvisioningPlan:
     """Pure assembly of the plan from already-materialized inputs.
 
@@ -618,4 +653,5 @@ def _assemble_plan(
         memory_echoes=memory_echoes,
         github_echoes=github_echoes,
         git_proxy=git_proxy,
+        env_var_credentials=env_var_credentials,
     )

@@ -14,12 +14,16 @@ mutations here (:func:`refresh_credential`, :func:`update_vault_credential`,
 evict any sandbox: the MCP pool keys on ``(url, vault_id)`` and a rotation
 overwrites the row contents under that stable key, so the existing key
 already serves the new secret. Vault tables are also deliberately excluded
-from Layer 2's ``spec_version`` triggers — they don't change the sandbox
-spec.
+from Layer 2's ``spec_version`` triggers. Since #873,
+``environment_variable`` credentials DO feed the sandbox spec builder
+(:func:`resolve_session_env_var_credentials` below) — drift handling for
+live sandboxes (rotation, attach/archive) is deferred to #877.
 """
 
 from __future__ import annotations
 
+import dataclasses
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, assert_never
 
@@ -563,3 +567,74 @@ async def delete_vault_credential(
 ) -> None:
     async with pool.acquire() as conn:
         await queries.delete_vault_credential(conn, vault_id, credential_id, account_id=account_id)
+
+
+# ─── environment_variable resolution (#873) ──────────────────────────────────
+
+# The opaque per-(session, credential) stand-in for an env-var secret.
+# Same shape as the probed CMA reference (ANTHROPIC_SECRET_PLACEHOLDER_<32
+# hex>): a distinctive greppable prefix plus 128 bits derived via HKDF from
+# the account subkey — deterministic, so it survives container recycles
+# (anything the agent persisted into /workspace keeps working) and is
+# identical across workers, with zero stored state. Not derived from the
+# secret; worthless outside this session's egress proxy.
+SECRET_PLACEHOLDER_PREFIX = "AIOS_SECRET_PLACEHOLDER_"
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedEnvVarCredential:
+    """A decrypted ``environment_variable`` credential plus its minted
+    placeholder, as consumed by sandbox materialization.
+
+    ``secret_value`` is excluded from ``repr`` so a logged plan or a
+    pytest assertion diff never prints the plaintext. ``allowed_hosts``
+    holds the stored canonical entries; parse with
+    :func:`aios.models.vaults.parse_allowed_host_entry`.
+    """
+
+    credential_id: str
+    vault_id: str
+    secret_name: str
+    secret_value: str = dataclasses.field(repr=False)
+    allowed_hosts: tuple[str, ...]
+    updated_at: datetime
+    placeholder: str
+
+
+def mint_secret_placeholder(subkey: CryptoBox, session_id: str, credential_id: str) -> str:
+    """The placeholder for ``credential_id`` in ``session_id`` — a pure
+    function of the account subkey and the two ids."""
+    digest = subkey.derive_subkey_bytes(f"aios-secret-placeholder-{session_id}-{credential_id}")
+    return SECRET_PLACEHOLDER_PREFIX + digest[:16].hex()
+
+
+async def resolve_session_env_var_credentials(
+    conn: asyncpg.Connection[Any],
+    crypto_box: CryptoBox,
+    session_id: str,
+    *,
+    account_id: str,
+) -> list[ResolvedEnvVarCredential]:
+    """Decrypt every active env-var credential bound to ``session_id``.
+
+    First-vault-wins on duplicate ``secret_name`` comes from the query
+    (rank-ordered ``DISTINCT ON``). Decrypt failures propagate — one
+    corrupt blob aborts the provision loudly rather than materializing a
+    partial credential set.
+    """
+    rows = await queries.list_session_env_var_credentials(conn, session_id, account_id=account_id)
+    if not rows:
+        return []
+    subkey = crypto_box.derive_account_subkey(account_id)
+    return [
+        ResolvedEnvVarCredential(
+            credential_id=row.credential_id,
+            vault_id=row.vault_id,
+            secret_name=row.secret_name,
+            secret_value=str(subkey.decrypt_dict(row.blob)["secret_value"]),
+            allowed_hosts=tuple(row.allowed_hosts),
+            updated_at=row.updated_at,
+            placeholder=mint_secret_placeholder(subkey, session_id, row.credential_id),
+        )
+        for row in rows
+    ]

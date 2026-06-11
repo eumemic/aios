@@ -154,6 +154,10 @@ def _patch_build_spec_deps(
             AsyncMock(return_value=[]),
         ),
         patch(
+            "aios.sandbox.spec._materialize_env_var_credentials",
+            AsyncMock(return_value=()),
+        ),
+        patch(
             "aios.sandbox.spec._materialize_github_clones",
             AsyncMock(return_value=([], None)),
         ),
