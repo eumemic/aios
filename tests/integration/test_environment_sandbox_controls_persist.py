@@ -2,7 +2,7 @@
 through the ``environments.config`` JSONB column without any schema
 migration.
 
-``image``, ``disk_bytes``, and ``bash_timeout_seconds`` are stored
+``image``, ``snapshot_budget_bytes``, and ``bash_timeout_seconds`` are stored
 inside the existing schemaless JSONB ``config`` column (added by
 migration 0004), so adding them to :class:`EnvironmentConfig` is purely
 additive at the DB layer. These tests prove an insert carrying the new
@@ -48,13 +48,13 @@ async def pool_with_account(
 async def test_new_fields_round_trip_through_jsonb(
     pool_with_account: tuple[asyncpg.Pool[Any], str],
 ) -> None:
-    """An environment created with image + disk + bash-timeout overrides
+    """An environment created with image + snapshot-budget + bash-timeout overrides
     reads back with all three intact — no migration required."""
     pool, account_id = pool_with_account
 
     config = EnvironmentConfig(
         image="ghcr.io/eumemic/aios-dev-env:pinned",
-        disk_bytes=8 * 1024 * 1024 * 1024,
+        snapshot_budget_bytes=8 * 1024 * 1024 * 1024,
         bash_timeout_seconds=600,
         packages={"pip": ["pytest"]},
     )
@@ -62,7 +62,7 @@ async def test_new_fields_round_trip_through_jsonb(
         pool, account_id=account_id, name="dev-env", config=config
     )
     assert created.config.image == "ghcr.io/eumemic/aios-dev-env:pinned"
-    assert created.config.disk_bytes == 8 * 1024 * 1024 * 1024
+    assert created.config.snapshot_budget_bytes == 8 * 1024 * 1024 * 1024
     assert created.config.bash_timeout_seconds == 600
 
     # Read back through a fresh query to confirm the JSONB persisted, not
@@ -86,7 +86,7 @@ async def test_unset_fields_persist_as_none(
     )
     fetched = await environments_service.get_environment(pool, created.id, account_id=account_id)
     assert fetched.config.image is None
-    assert fetched.config.disk_bytes is None
+    assert fetched.config.snapshot_budget_bytes is None
     assert fetched.config.bash_timeout_seconds is None
 
 
@@ -95,12 +95,12 @@ async def test_get_environment_config_for_session_carries_new_fields(
 ) -> None:
     """The session-scoped read used by the sandbox spec builder surfaces
     the new fields, so ``build_spec_from_session`` can resolve the
-    per-env image / disk / bash-timeout overrides (issues #724, #725)."""
+    per-env image / snapshot-budget / bash-timeout overrides."""
     pool, account_id = pool_with_account
 
     config = EnvironmentConfig(
         image="ghcr.io/eumemic/aios-dev-env:pinned",
-        disk_bytes=4 * 1024 * 1024 * 1024,
+        snapshot_budget_bytes=4 * 1024 * 1024 * 1024,
         bash_timeout_seconds=300,
     )
     env = await environments_service.create_environment(
@@ -137,5 +137,5 @@ async def test_get_environment_config_for_session_carries_new_fields(
 
     assert loaded is not None
     assert loaded.image == "ghcr.io/eumemic/aios-dev-env:pinned"
-    assert loaded.disk_bytes == 4 * 1024 * 1024 * 1024
+    assert loaded.snapshot_budget_bytes == 4 * 1024 * 1024 * 1024
     assert loaded.bash_timeout_seconds == 300

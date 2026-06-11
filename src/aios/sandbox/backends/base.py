@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,12 +58,14 @@ class Unrestricted(NetworkPolicy):
 class Limited(NetworkPolicy):
     """Allow outbound only to ``allowed_hosts`` (resolved at apply time).
 
-    The Docker backend interprets this as ``--cap-add NET_ADMIN`` on
-    create, with the actual iptables script applied separately via
-    :func:`aios.sandbox.setup.apply_network_lockdown` after create
-    returns. The script-application path is shared logic, not a backend
-    concern, so backends that can't enforce it surface failures the same
-    way as backends that can.
+    The sandbox itself is granted NO ``NET_ADMIN`` (durable session
+    sandboxes, §5.8). The iptables lockdown is applied + read-back verified
+    separately via :func:`aios.sandbox.setup.apply_network_lockdown` after
+    create returns, from an ephemeral operator-image sidecar that joins the
+    sandbox's netns — so a tenant can neither poison the binaries that apply
+    the lockdown nor flush it from inside. The application path is shared
+    logic, not a backend concern, so backends that can't enforce it surface
+    failures the same way as backends that can.
     """
 
     allowed_hosts: frozenset[str]
@@ -99,6 +101,15 @@ class SandboxSpec:
     network_policy: NetworkPolicy
     host_gateway_alias: str | None
     image: str
+    # Resume source (durable session sandboxes): the locally-resolved
+    # snapshot tag a resuming session runs from, set by the registry's
+    # provision path after it resolves ``sessions.snapshot_ref`` through
+    # the store (verified-negative, base-drift checked). ``None`` ⇒ cold
+    # start from ``image``. The backend runs from ``snapshot_image or
+    # image``; everything else (env, mounts, lockdown) is re-derived fresh
+    # so resume is structurally a cold start that happens to run on a
+    # persisted rootfs.
+    snapshot_image: str | None = None
     mount_snapshot: frozenset[tuple[str, ...]] = frozenset()
     # ``sessions.spec_version`` snapshot at build time (issue #713). Bumped
     # by Postgres triggers on the resource tables that feed this spec
@@ -112,12 +123,16 @@ class SandboxSpec:
     cpu_quota: float | None = None
     memory_bytes: int | None = None
     pids_limit: int | None = None
-    # Writable-layer disk cap (issue #725). ``None`` leaves the host's
-    # default (unbounded) in place. The spec builder resolves this from
-    # the environment's ``disk_bytes`` override, falling back to the
-    # global ``settings.sandbox_disk_bytes``; the backend injects
-    # ``--storage-opt size=`` when set.
-    disk_bytes: int | None = None
+    # Per-session snapshot budget in unique bytes (durable session
+    # sandboxes, §5.7). Drives the release-time flatten trigger: when a
+    # session's unique snapshot bytes would exceed this, the snapshot verb
+    # flattens (collapse + whiteout) instead of committing another layer.
+    # The backend stamps it onto the handle as ``disk_limit_bytes`` so the
+    # release path (which only holds the handle) can pass it back. ``None``
+    # ⇒ unbounded (never flatten on budget; the depth backstop still
+    # applies). Replaces the dead ``--storage-opt size=`` writable-layer
+    # cap, which never worked on prod ext4.
+    snapshot_budget_bytes: int | None = None
     # Authored seccomp profile (#807). Always set by the spec builder to the
     # configured path (a host filesystem path the docker CLI reads), or the
     # literal "unconfined" for emergency rollback. The backend ALWAYS emits
@@ -154,6 +169,15 @@ class SandboxHandle:
     workspace_path: Path
     mount_snapshot: frozenset[tuple[str, ...]] = frozenset()
     spec_version: int = 0
+    # The locally-resolved snapshot tag this container was created from
+    # (durable session sandboxes), or ``None`` for a cold start from base.
+    # Stamped from ``spec.snapshot_image`` so the provision span can record
+    # whether a resume ran from a snapshot or cold-started.
+    snapshot_image: str | None = None
+    # Per-session snapshot budget in unique bytes (§5.7), copied from
+    # ``spec.snapshot_budget_bytes``. The release path passes it back to
+    # ``backend.snapshot`` as the flatten trigger. ``None`` ⇒ unbounded.
+    disk_limit_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,18 +193,86 @@ class CommandResult:
 
 @dataclass(frozen=True, slots=True)
 class ManagedSandboxRef:
-    """A reference to a sandbox the orphan reaper wants to inspect.
+    """A reference to a managed sandbox container the GC/salvage paths inspect.
 
-    The reaper compares each ``session_id`` against the worker's set of
-    active session ids; sandboxes whose session is no longer active are
-    removed via ``force_remove``. ``session_id`` is ``None`` when the
-    backend can't recover it (e.g. a Docker container missing the
-    ``aios.session_id`` label, which shouldn't happen but the reaper is
-    defensive).
+    The GC corpse pass compares each ``session_id`` against the worker's
+    set of active session ids; a corpse whose session is dormant/deleted
+    is salvaged then removed. ``session_id`` is ``None`` when the backend
+    can't recover it (a container missing the ``aios.session_id`` label,
+    which shouldn't happen but the sweep is defensive).
+
+    ``running`` distinguishes a live container from a stopped corpse —
+    the salvage path only ``stop``s the former, and a still-running
+    container for a session this worker isn't stepping is a crash
+    survivor that the GC tick stops + salvages. Populated from ``docker
+    ps --all`` (the listing now includes stopped containers — under
+    persistence a corpse is salvageable, not just removable).
     """
 
     sandbox_id: str
     session_id: str | None
+    running: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedImage:
+    """A managed snapshot image (or untagged residue) the GC image pass classifies.
+
+    Enumerated by :meth:`SandboxBackend.list_managed_images` via ``docker
+    images -a`` so untagged crash/flatten residue is visible (it is
+    invisible without ``-a`` — verified). ``parent_id`` is the image's
+    ``.Parent`` (``None`` when absent); the GC excludes any image that is
+    the parent of another listed image so it never removes the untagged
+    interior of a live chain. On the containerd image store ``.Parent``
+    can be empty even for genuine chains — the structural skip then
+    no-ops and the ``remove_image`` refusal (a child still references the
+    layer) is the safety net, which is correct, just noisier.
+
+    ``repo_tags`` is empty for untagged residue. ``labels`` carries the
+    ``aios.*`` metadata (``session_id``, ``base_image``, ``flattened``)
+    the classifier keys on without any DB lookup.
+    """
+
+    image_id: str
+    repo_tags: tuple[str, ...]
+    parent_id: str | None
+    size_bytes: int
+    labels: dict[str, str]
+
+
+# Outcome of a single snapshot verb (``SandboxBackend.snapshot``).
+SnapshotKind = Literal["committed", "flattened", "skipped_empty", "skipped_stale"]
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotOutcome:
+    """What a :meth:`SandboxBackend.snapshot` call did to the canonical tag.
+
+    - ``committed`` — a new layer was committed onto the chain.
+    - ``flattened`` — the chain was collapsed to a single standalone layer
+      (``export | import``), stripping baked config (the definitive secret
+      scrub) and re-rooting off the base.
+    - ``skipped_empty`` — the writable layer was at/below the empty floor
+      (identity short-circuit), so no new image; the prior tag, if any,
+      stays canonical. ``image_id`` is ``None`` only when no prior tag
+      existed (a chat/read-only session that never wrote).
+    - ``skipped_stale`` — the corpse's parent is a *child* of the existing
+      tag (content-equal crash residue under the salvage-before-provision
+      invariant); the corpse is discarded without a commit and the
+      existing newer tag stays canonical.
+
+    ``image_id`` is the winning canonical image id after the op (``None``
+    iff no snapshot exists). ``unique_bytes`` is the accounting figure
+    written to ``sessions.snapshot_bytes`` (tag size minus base size, or
+    full size for a flattened/standalone image). ``depth`` is the chain
+    depth of the canonical image after the op (0 when ``image_id`` is
+    ``None``) — surfaced for the provision span and the flatten tests.
+    """
+
+    kind: SnapshotKind
+    image_id: str | None
+    unique_bytes: int
+    depth: int
 
 
 class SandboxBackendError(Exception):
@@ -244,15 +336,133 @@ class SandboxBackend(Protocol):
         """
         ...
 
-    async def list_managed(self, *, instance_id: str) -> list[ManagedSandboxRef]:
-        """List sandboxes belonging to this aios instance.
+    async def list_managed(
+        self, *, instance_id: str, session_id: str | None = None
+    ) -> list[ManagedSandboxRef]:
+        """List managed sandbox containers belonging to this aios instance.
 
-        Used by the worker's orphan reaper at startup. ``instance_id``
-        scopes the list to this deployment so a reaper can't kill
-        sandboxes belonging to a concurrent worker on the same machine.
+        Includes **stopped** containers (``docker ps --all``): under
+        durable persistence a crashed corpse is salvageable, not merely
+        removable, so the GC corpse pass and the provision-preamble
+        salvage must see stopped containers too. Each ref's ``running``
+        flag distinguishes a live container from a corpse.
+
+        ``instance_id`` scopes the list to this deployment so a sweep
+        can't touch a concurrent worker's containers. ``session_id``, when
+        given, narrows to one session's containers (the salvage preamble
+        targets a single session).
 
         Raises :class:`SandboxBackendError` if the backend cannot
         enumerate (e.g. Docker daemon unreachable).
+        """
+        ...
+
+    async def snapshot(
+        self,
+        sandbox_id: str,
+        tag: str,
+        *,
+        empty_floor_bytes: int,
+        flatten_if_unique_bytes_over: int | None,
+    ) -> SnapshotOutcome:
+        """Commit (or flatten) a container's writable rootfs to ``tag``.
+
+        The planned-teardown verb of durable session sandboxes (§5.2):
+        ``stop -t 5`` → inspect → **lineage gate** (proceed iff ``tag``
+        absent or ``tag.Id == corpse.Image``; else ``skipped_stale``) →
+        ``SizeRw <= empty_floor_bytes`` short-circuit (``skipped_empty``)
+        → commit-or-flatten. The container is **not** removed — the caller
+        removes it only after this returns successfully.
+
+        Flatten (``export | import``, collapsing the chain to one
+        standalone layer and stripping baked config — the definitive
+        secret scrub) fires when the chain depth would cross the backend's
+        soft ceiling, or when ``flatten_if_unique_bytes_over`` is not
+        ``None`` and the projected unique bytes exceed it. Commit scrubs
+        exactly the ``aios.env_keys`` label's named vars from the image
+        config (``ENV K=``); ``base_image``/``env_keys`` are read from the
+        container's labels so a salvaged crash corpse needs no spec.
+
+        Raises :class:`SandboxBackendError` on infra failure (daemon down,
+        commit/export timeout) — the caller then retains the corpse and
+        converges via salvage; it never removes a container whose snapshot
+        verb failed.
+        """
+        ...
+
+    async def stop(self, sandbox_id: str) -> None:
+        """``docker stop -t 5`` a container. Idempotent on a stopped corpse.
+
+        Logs but does not raise on a missing container (already gone).
+        Raises :class:`SandboxBackendError` on a hung/unreachable daemon.
+        """
+        ...
+
+    async def list_managed_images(self, *, instance_id: str) -> list[ManagedImage]:
+        """Enumerate this instance's managed snapshot images via ``docker images -a``.
+
+        The ``-a`` is load-bearing: untagged crash/flatten residue is
+        invisible without it. Each :class:`ManagedImage` carries the
+        ``.Parent`` (for the GC's structural skip of live-chain interiors),
+        size, repo tags, and ``aios.*`` labels.
+
+        Raises :class:`SandboxBackendError` if the backend cannot enumerate.
+        """
+        ...
+
+    async def remove_image(self, ref: str) -> bool:
+        """``docker rmi`` (no ``--force``) ``ref``. Returns success.
+
+        ``True`` when the image was removed or was already gone
+        (idempotent goal-state). ``False`` when the daemon **refused** —
+        a container or child image still references it; the GC treats a
+        refusal as "retained this tick, retry next tick" rather than
+        forcing. Removing a tag cascade-deletes its untagged parent chain
+        down to the first still-referenced image.
+
+        Raises :class:`SandboxBackendError` only on infra failure
+        (daemon unreachable / timeout).
+        """
+        ...
+
+    async def image_size(self, image: str) -> int:
+        """Return ``image``'s ``.Size`` in bytes.
+
+        Raises :class:`SandboxBackendError` if the image is absent or the
+        daemon is unreachable (callers that tolerate absence catch it).
+        """
+        ...
+
+    async def image_labels(self, image: str) -> dict[str, str] | None:
+        """Return ``image``'s ``.Config.Labels``, or ``None`` if absent.
+
+        Verified-negative: a confirmed not-found returns ``None``; an
+        indeterminate probe (daemon hiccup, timeout) raises
+        :class:`SandboxBackendError` so the caller fails loud rather than
+        treating a hiccup as "no labels". Used by the resume path's
+        base-image drift check.
+        """
+        ...
+
+    async def run_netns_sidecar(
+        self,
+        target_sandbox_id: str,
+        *,
+        image: str,
+        script: str,
+        timeout_seconds: int,
+        max_output_bytes: int,
+    ) -> CommandResult:
+        """Run ``script`` in an ephemeral sidecar joined to a sandbox's netns.
+
+        The network-lockdown apply/verify path (§5.8). The sidecar runs the
+        **operator-trusted** ``image`` (never the tenant ``env_config.image``)
+        with ``NET_ADMIN``, joins ``target_sandbox_id``'s network namespace so
+        its iptables edits apply to the sandbox's traffic, and is removed on
+        exit. The sandbox itself holds no ``NET_ADMIN``, so root-in-sandbox
+        can neither flush its own lockdown nor poison the binaries that apply
+        it. Returns the script's :class:`CommandResult`; raises
+        :class:`SandboxBackendError` on infra failure / timeout.
         """
         ...
 
@@ -297,3 +507,21 @@ MANAGED_LABEL_KEY = "aios.managed"
 MANAGED_LABEL_VALUE = "true"
 INSTANCE_LABEL_KEY = "aios.instance_id"
 SESSION_LABEL_KEY = "aios.session_id"
+
+# ── Durable-session-sandbox labels (§5.1) ───────────────────────────────────
+#
+# All stamped at ``docker run`` and inherited into committed images
+# automatically (verified). They make a container/image self-describing so
+# the commit-time scrub and the GC/accounting work off labels alone — no DB
+# lookup, including for a crash corpse salvaged after its spec is gone.
+#
+# ``ENV_KEYS_LABEL_KEY`` carries the comma-separated NAMES (never values) of
+# every run-injected env var; the snapshot commit scrubs exactly that set
+# from the image config. ``BASE_IMAGE_LABEL_KEY`` records which base ref the
+# chain is rooted on (drives resume base-drift detection and unique-bytes
+# accounting). ``FLATTENED_LABEL_KEY`` marks standalone export|import images
+# that share no layers with the base, so accounting charges them full size.
+ENV_KEYS_LABEL_KEY = "aios.env_keys"
+BASE_IMAGE_LABEL_KEY = "aios.base_image"
+FLATTENED_LABEL_KEY = "aios.flattened"
+FLATTENED_LABEL_VALUE = "true"

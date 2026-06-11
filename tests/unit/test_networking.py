@@ -178,13 +178,15 @@ class TestDockerBackendArgs:
     """The DockerBackend translates SandboxSpec.network_policy to the right argv."""
 
     @pytest.mark.asyncio
-    async def test_limited_adds_cap_net_admin(self) -> None:
+    async def test_limited_does_not_add_cap_net_admin(self) -> None:
+        """Durable session sandboxes (§5.8): the sandbox holds NO ``NET_ADMIN``
+        even under Limited networking — the lockdown is applied from an
+        ephemeral operator-image sidecar joined to the netns, so root-in-sandbox
+        can neither poison nor flush its own lockdown."""
         argv = await _capture_docker_argv(
             _make_spec(Limited(allowed_hosts=frozenset({"example.com"})))
         )
-        assert "--cap-add" in argv
-        cap_idx = argv.index("--cap-add")
-        assert argv[cap_idx + 1] == "NET_ADMIN"
+        assert "NET_ADMIN" not in argv
 
     @pytest.mark.asyncio
     async def test_unrestricted_no_cap_net_admin(self) -> None:
@@ -300,21 +302,35 @@ class TestDockerBackendIsAlive:
 
 
 class TestApplyNetworkLockdown:
-    """apply_network_lockdown builds the script and runs it via backend.exec."""
+    """apply_network_lockdown builds the script and applies + verifies it via
+    the operator-image netns sidecar (durable session sandboxes, §5.8)."""
+
+    @staticmethod
+    def _sidecar_scripts(backend: FakeBackend) -> list[str]:
+        return [c[1]["script"] for c in backend.calls if c[0] == "run_netns_sidecar"]
 
     @pytest.mark.asyncio
-    async def test_calls_backend_exec_with_script(self) -> None:
+    async def test_applies_and_verifies_via_sidecar(self) -> None:
         backend = FakeBackend()
         handle = make_handle()
         networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
 
         await apply_network_lockdown(backend, handle, networking)
 
-        exec_calls = [c for c in backend.calls if c[0] == "exec"]
-        assert len(exec_calls) == 1
-        script = exec_calls[0][1]["command"]
-        assert "iptables -P OUTPUT DROP" in script
-        assert "getent ahosts api.example.com" in script
+        scripts = self._sidecar_scripts(backend)
+        # Two sidecar invocations: apply, then read-back verify.
+        assert len(scripts) == 2
+        apply_script, verify_script = scripts
+        assert "iptables -P OUTPUT DROP" in apply_script
+        assert "getent ahosts api.example.com" in apply_script
+        # The sidecar inherits the operator image's (empty) resolv.conf, so the
+        # apply script points itself at the netns embedded DNS before getent.
+        assert "127.0.0.11" in apply_script
+        assert "OUTPUT DROP" in verify_script
+        # The sidecar runs the OPERATOR image, never env_config.image.
+        sidecar_call = next(c for c in backend.calls if c[0] == "run_netns_sidecar")
+        assert sidecar_call[1]["image"].endswith("aios-sandbox:latest")
+        assert sidecar_call[1]["target_sandbox_id"] == handle.sandbox_id
 
     @pytest.mark.asyncio
     async def test_includes_package_registries_when_enabled(self) -> None:
@@ -328,7 +344,7 @@ class TestApplyNetworkLockdown:
 
         await apply_network_lockdown(backend, handle, networking)
 
-        script = backend.calls[0][1]["command"]
+        script = self._sidecar_scripts(backend)[0]
         assert "pypi.org" in script
         assert "registry.npmjs.org" in script
         assert "api.example.com" in script
@@ -345,7 +361,7 @@ class TestApplyNetworkLockdown:
 
         await apply_network_lockdown(backend, handle, networking)
 
-        script = backend.calls[0][1]["command"]
+        script = self._sidecar_scripts(backend)[0]
         assert "pypi.org" not in script
         assert "api.example.com" in script
 
@@ -362,7 +378,7 @@ class TestApplyNetworkLockdown:
             extra_host_ports=[("aios-worker", 8765)],
         )
 
-        script = backend.calls[0][1]["command"]
+        script = self._sidecar_scripts(backend)[0]
         assert "aios-worker:8765" in script
 
 
@@ -370,24 +386,25 @@ class TestApplyNetworkLockdown:
 
 
 class TestApplyNetworkLockdownFailsClosed:
-    """A :class:`Limited` sandbox whose iptables lockdown didn't apply is a
-    silent unrestricted-networking bypass — especially dangerous combined
-    with the per-environment image override (#724), where a tenant-supplied
-    image might lack ``iptables``/``getent``. The lockdown is a security
-    gate, so a nonzero exit (or a backend exec error) must raise rather than
-    log-and-continue, letting the registry tear the sandbox down.
+    """A :class:`Limited` sandbox whose lockdown didn't apply (or whose DROP
+    policy didn't verify) is a silent unrestricted-networking bypass. The
+    lockdown is a security gate, so a nonzero apply, a failed read-back verify,
+    or a sidecar infra error must raise rather than log-and-continue, letting
+    the registry tear the sandbox down.
     """
 
     @pytest.mark.asyncio
-    async def test_nonzero_exit_raises_sandbox_backend_error(self) -> None:
+    async def test_nonzero_apply_raises_sandbox_backend_error(self) -> None:
         backend = FakeBackend()
-        backend.next_result = CommandResult(
-            exit_code=3,
-            stdout="",
-            stderr="iptables: command not found",
-            timed_out=False,
-            truncated=False,
-        )
+        backend.sidecar_results = [
+            CommandResult(
+                exit_code=3,
+                stdout="",
+                stderr="iptables: command not found",
+                timed_out=False,
+                truncated=False,
+            )
+        ]
         handle = make_handle()
         networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
 
@@ -395,12 +412,26 @@ class TestApplyNetworkLockdownFailsClosed:
             await apply_network_lockdown(backend, handle, networking)
 
     @pytest.mark.asyncio
-    async def test_backend_exec_error_propagates(self) -> None:
-        """An infra failure to even run the lockdown script must not be
+    async def test_failed_verify_raises(self) -> None:
+        """Apply succeeds but the read-back shows the OUTPUT policy is not DROP
+        (the lockdown didn't actually land) → fail closed."""
+        backend = FakeBackend()
+        ok = CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+        bad = CommandResult(exit_code=1, stdout="", stderr="", timed_out=False, truncated=False)
+        backend.sidecar_results = [ok, bad]  # apply ok, verify fails
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
+
+        with pytest.raises(SandboxBackendError, match="verification failed"):
+            await apply_network_lockdown(backend, handle, networking)
+
+    @pytest.mark.asyncio
+    async def test_sidecar_error_propagates(self) -> None:
+        """An infra failure to even run the lockdown sidecar must not be
         swallowed into a wide-open sandbox — it propagates so the provision
         aborts."""
         backend = FakeBackend()
-        backend.exec = AsyncMock(  # type: ignore[method-assign]
+        backend.run_netns_sidecar = AsyncMock(  # type: ignore[method-assign]
             side_effect=SandboxBackendError("daemon hiccup")
         )
         handle = make_handle()
@@ -411,8 +442,8 @@ class TestApplyNetworkLockdownFailsClosed:
 
     @pytest.mark.asyncio
     async def test_zero_exit_does_not_raise(self) -> None:
-        """The happy path (exit 0) is unchanged — no exception."""
-        backend = FakeBackend()  # default exec returns exit 0
+        """The happy path (apply + verify both exit 0) is unchanged — no exception."""
+        backend = FakeBackend()  # default sidecar returns exit 0 for both calls
         handle = make_handle()
         networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
 

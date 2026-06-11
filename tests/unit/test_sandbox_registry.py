@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -32,7 +33,21 @@ from aios.sandbox.backends.base import (
 )
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.spec import ProvisioningPlan
-from tests.helpers.sandbox import FakeBackend, make_handle
+from tests.helpers.sandbox import FakeBackend, FakePool, make_handle
+
+
+@pytest.fixture(autouse=True)
+def _fake_runtime_pool() -> Iterator[None]:
+    """Provide a fake ``runtime.pool`` so ``release()``'s snapshot-pointer write
+    succeeds — otherwise ``require_pool()`` raises, the pointer write is treated
+    as a snapshot failure, and ``backend.destroy`` is never reached (which would
+    hang the blocking-destroy test and fail the mount-drift destroy assertions)."""
+    prev = runtime.pool
+    runtime.pool = cast(Any, FakePool())
+    try:
+        yield
+    finally:
+        runtime.pool = prev
 
 
 def _echo(
@@ -194,7 +209,7 @@ class TestReleaseIfMountsChanged:
 
 class TestLocksDictCleanup:
     """``SandboxRegistry._locks`` is reclaimed at registry teardown
-    (``release_all``) only.  Both ``release()`` and ``evict()``
+    (``stop_all``) only.  Both ``release()`` and ``evict()``
     deliberately keep the per-session entry so a concurrent
     ``get_or_provision`` (or one already in-flight) serializes via
     the same lock instance — popping while another task is mid-
@@ -204,7 +219,7 @@ class TestLocksDictCleanup:
     that the worker's eventual restart clears; the race is
     unacceptable."""
 
-    async def test_release_all_clears_locks(self) -> None:
+    async def test_stop_all_clears_locks(self) -> None:
         backend = FakeBackend()
         registry = SandboxRegistry(backend=backend)
         _seed(registry, "sess_X")
@@ -213,7 +228,7 @@ class TestLocksDictCleanup:
         _ = registry._lock_for("sess_Y")
         assert set(registry._locks) == {"sess_X", "sess_Y"}
 
-        await registry.release_all()
+        await registry.stop_all()
 
         assert registry._locks == {}
 
@@ -401,16 +416,19 @@ class TestLockdownFailsClosed:
 
     async def test_lockdown_failure_destroys_sandbox_and_raises(self) -> None:
         backend = FakeBackend()
-        # The post-create setup execs all route through backend.exec; make
-        # the lockdown script (the only exec the cold path runs here, since
-        # the other setup steps are patched out) return nonzero.
-        backend.next_result = CommandResult(
-            exit_code=2,
-            stdout="",
-            stderr="iptables: not found",
-            timed_out=False,
-            truncated=False,
-        )
+        # Durable session sandboxes: the lockdown is applied from the netns
+        # sidecar, not backend.exec. Make the apply sidecar return nonzero so
+        # the fail-closed gate fires (a poisoned/missing iptables in the
+        # sidecar's operator image, or a partial flush).
+        backend.sidecar_results = [
+            CommandResult(
+                exit_code=2,
+                stdout="",
+                stderr="iptables: not found",
+                timed_out=False,
+                truncated=False,
+            )
+        ]
         registry = SandboxRegistry(backend=backend)
 
         broker = MagicMock()

@@ -27,7 +27,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError, SandboxHandle
+from aios.sandbox.backends.base import (
+    SandboxBackend,
+    SandboxBackendError,
+    SandboxHandle,
+    SnapshotOutcome,
+)
 from aios.sandbox.registry import SandboxRegistry
 
 
@@ -43,6 +48,14 @@ def _backend_with_destroy(destroy: Any) -> SandboxBackend:
     backend = MagicMock(spec=SandboxBackend)
     backend.destroy = destroy
     backend.name = "stub"
+    # Durable session sandboxes: ``release()`` snapshots before destroying.
+    # These reaper tests are about loop resilience + locking, not snapshot
+    # content, so the snapshot is a no-write ``skipped_empty`` (image_id=None)
+    # — that path writes NO DB pointer, so the reaper needs no ``runtime.pool``
+    # and still proceeds to the ``destroy`` the tests assert on.
+    backend.snapshot = AsyncMock(
+        return_value=SnapshotOutcome(kind="skipped_empty", image_id=None, unique_bytes=0, depth=0)
+    )
     return backend
 
 

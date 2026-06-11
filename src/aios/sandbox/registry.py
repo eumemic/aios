@@ -16,8 +16,11 @@ torn down.
 Sandbox lifecycle is decoupled from step lifecycle via an idle-TTL
 reaper. Sandboxes stay alive across consecutive steps for the same
 session and are released when idle for longer than
-``container_idle_timeout_seconds``. Worker shutdown calls
-:meth:`release_all` to clean up everything.
+``container_idle_timeout_seconds`` (which now snapshots the rootfs before
+removing — durable session sandboxes). Worker shutdown calls
+:meth:`stop_all`, which STOPS every container (leaving its filesystem in a
+stopped corpse for the next worker's GC tick to salvage) rather than
+destroying them.
 
 The registry owns the per-session :class:`GitProxy`, not the handle —
 the proxy is a host-side process whose lifetime tracks the session, not
@@ -28,12 +31,27 @@ addition to destroying the sandbox.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Literal
 
+from aios.config import get_settings
 from aios.db import queries
 from aios.logging import get_logger
-from aios.sandbox.backends.base import CommandResult, SandboxBackend, SandboxHandle
+from aios.sandbox.backends.base import (
+    BASE_IMAGE_LABEL_KEY,
+    FLATTENED_LABEL_KEY,
+    FLATTENED_LABEL_VALUE,
+    SESSION_LABEL_KEY,
+    CommandResult,
+    ManagedImage,
+    SandboxBackend,
+    SandboxBackendError,
+    SandboxHandle,
+    SandboxSpec,
+)
 from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.network import WORKER_NETWORK_ALIAS
 from aios.sandbox.setup import (
@@ -42,11 +60,13 @@ from aios.sandbox.setup import (
     install_egress_ca,
     install_packages,
 )
+from aios.sandbox.snapshot_store import LocalDaemonStore, SnapshotStore
 from aios.sandbox.spec import (
     ProvisioningPlan,
     build_spec_from_session,
     cleanup_session_secret_file,
     mount_snapshot_from_echoes,
+    snapshot_tag,
 )
 
 if TYPE_CHECKING:
@@ -56,6 +76,125 @@ if TYPE_CHECKING:
     from aios.models.memory_stores import MemoryStoreResourceEcho
 
 log = get_logger("aios.sandbox.registry")
+
+# Model-visible FS-loss lifecycle events (durable session sandboxes, §5.9).
+# Appended append-only and NON-stimulus-bearing (a GC append never wakes a
+# session); rendered by ``harness.context`` as bracketed user-role notices.
+SANDBOX_FS_RESET_EVENT = "sandbox_fs_reset"
+SANDBOX_FS_EXPIRED_EVENT = "sandbox_fs_expired"
+SANDBOX_FS_OVER_LIMIT_EVENT = "sandbox_fs_over_limit"
+
+# Overall deadline for the worker-shutdown ``stop_all`` (durable session
+# sandboxes, §5.4): a hung daemon must not eat the SIGTERM grace.
+_STOP_ALL_TIMEOUT_S = 8.0
+
+# GC reconciler tick interval (durable session sandboxes, §5.5): hourly, with
+# an immediate first tick at boot (replacing the old boot-time orphan reap).
+_GC_INTERVAL_SECONDS = 3600.0
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSnapshotState:
+    """The GC's per-session decision inputs (one existing session row).
+
+    A session *absent* from the GC's state map is **deleted** — its snapshot
+    is collectible without an event (the model is gone). ``last_event_at`` is
+    the dormancy probe (the ``created_at`` of the event at ``last_event_seq``);
+    ``None`` only on the should-not-happen no-events edge, treated as *not*
+    dormant (conservative — never wipe on a missing probe).
+    """
+
+    session_id: str
+    account_id: str
+    archived: bool
+    last_event_at: datetime | None
+    snapshot_ref: str | None
+    snapshot_host: str | None
+    snapshot_bytes: int | None
+
+
+_GcVerdict = Literal["retain", "remove"]
+_GcReason = Literal["live", "retention_ttl", "deleted", "residue"]
+
+
+@dataclass(frozen=True, slots=True)
+class GcImageVerdict:
+    """A classified managed image and what the GC should do with it."""
+
+    image: ManagedImage
+    session_id: str | None
+    is_canonical: bool
+    removal_ref: str  # the tag for a canonical image (cascade-deletes the chain), else the image id
+    verdict: _GcVerdict
+    reason: _GcReason
+
+
+def _is_session_dormant(state: SessionSnapshotState, now: datetime, ttl_seconds: int) -> bool:
+    """A session is dormant iff its last activity is older than the TTL.
+
+    Archived sessions follow the same rule (unarchive exists; immediate
+    deletion would strand it). A missing dormancy probe reads as *not* dormant.
+    """
+    if state.last_event_at is None:
+        return False
+    return (now - state.last_event_at).total_seconds() > ttl_seconds
+
+
+def _classify_images(
+    images: list[ManagedImage],
+    states: dict[str, SessionSnapshotState],
+    *,
+    now: datetime,
+    ttl_seconds: int,
+    this_host: str,
+) -> list[GcImageVerdict]:
+    """Pure retain-rule classifier for the GC image pass (§5.5), table-driven.
+
+    The single rule: **an image is retained iff it is the canonical tag of an
+    existing session whose last activity is within the TTL.** Everything else
+    managed-and-mine is removed — crash residue, flatten leftovers, deleted
+    sessions (the delete hook), and dormant sessions (the latter flagged
+    ``retention_ttl`` so the caller emits ``sandbox_fs_expired``).
+
+    Untagged interiors of *live* chains are skipped **structurally** — any
+    image that is the ``.Parent`` of another listed image is excluded (the
+    leaf's removal cascade-deletes the chain; removing an interior directly
+    would be refused anyway). On the containerd store ``.Parent`` may be empty;
+    the structural skip then no-ops and the ``remove_image`` refusal is the
+    safety net.
+    """
+    parent_ids = {img.parent_id for img in images if img.parent_id}
+    verdicts: list[GcImageVerdict] = []
+    for img in images:
+        # Structural skip: interior of a (possibly live) chain.
+        if img.image_id in parent_ids:
+            continue
+        sid = img.labels.get(SESSION_LABEL_KEY)
+        canonical_tag = snapshot_tag(this_host, sid) if sid else None
+        is_canonical = canonical_tag is not None and canonical_tag in img.repo_tags
+        removal_ref = canonical_tag if (is_canonical and canonical_tag) else img.image_id
+        state = states.get(sid) if sid else None
+
+        if is_canonical and state is not None and not _is_session_dormant(state, now, ttl_seconds):
+            verdict: _GcVerdict = "retain"
+            reason: _GcReason = "live"
+        elif is_canonical and state is not None:
+            verdict, reason = "remove", "retention_ttl"  # dormant → emit expired event
+        elif is_canonical and state is None:
+            verdict, reason = "remove", "deleted"  # session deleted → no event
+        else:
+            verdict, reason = "remove", "residue"  # crash/flatten leftover, non-canonical
+        verdicts.append(
+            GcImageVerdict(
+                image=img,
+                session_id=sid,
+                is_canonical=is_canonical,
+                removal_ref=removal_ref,
+                verdict=verdict,
+                reason=reason,
+            )
+        )
+    return verdicts
 
 
 class SandboxRegistry:
@@ -70,11 +209,16 @@ class SandboxRegistry:
 
     def __init__(self, backend: SandboxBackend) -> None:
         self._backend = backend
+        # Snapshot transport seam (durable session sandboxes). v1 is the
+        # identity store over the local daemon; multi-host is a drop-in
+        # replacement here with no lifecycle changes.
+        self._store: SnapshotStore = LocalDaemonStore(backend)
         self._handles: dict[str, SandboxHandle] = {}
         self._git_proxies: dict[str, GitProxy] = {}
         self._last_used: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
+        self._gc_task: asyncio.Task[None] | None = None
         # Strong refs for evict()'s fire-and-forget proxy-stop tasks.
         # asyncio only weak-refs tasks, so without this the task can be
         # GC'd before stop() unwinds the proxy's uvicorn server, httpx
@@ -119,10 +263,11 @@ class SandboxRegistry:
         a ``pool`` is supplied (the cold-start span path already passes
         one) and is best-effort — a transient DB error returns the live
         handle rather than churning a healthy sandbox. A drifted version
-        triggers a recycle: the alive container is explicitly destroyed
-        via ``_destroy_quietly`` before re-provisioning so it doesn't
-        run until the next worker restart the way a dead-container evict
-        would.
+        triggers a recycle: the alive container is SNAPSHOT then removed
+        via ``_snapshot_and_remove`` before re-provisioning (durable session
+        sandboxes — the FS survives the recycle so the immediately-following
+        provision resolves the just-written tag, an FS-preserving reboot onto
+        the current mounts).
 
         Best-effort, not a hard guarantee. The probe runs lock-free, so a
         container can still die between the probe and the caller's use,
@@ -162,14 +307,18 @@ class SandboxRegistry:
                 return current
             if current is not None:
                 if spec_version_drifted:
-                    # Container is still alive — must destroy it, not just
-                    # evict (evict drops the cache entry but skips
-                    # backend.destroy, which is correct for dead containers
-                    # but would leak a live one). _destroy_quietly is
-                    # best-effort so a Docker hiccup doesn't block
-                    # re-provisioning (#713).
+                    # Container is still alive — SNAPSHOT then remove (durable
+                    # session sandboxes, §5.4): the FS must survive the recycle
+                    # so the immediately-following provision resolves the
+                    # just-written snapshot tag — an FS-preserving reboot onto
+                    # the current mounts. ``evict`` drops the cache/proxy/secret
+                    # (the snapshot reads the container's labels, not the cache);
+                    # ``_snapshot_and_remove`` stops + commits + writes the
+                    # pointer + removes. On snapshot failure the corpse is
+                    # retained and the following provision's salvage preamble
+                    # recovers it.
                     self.evict(session_id, unload_session_caches=False)
-                    await self._destroy_quietly(current, session_id)
+                    await self._snapshot_and_remove(session_id, current)
                 else:
                     log.warning(
                         "sandbox.stale_handle_recycling",
@@ -247,8 +396,30 @@ class SandboxRegistry:
             )
 
     async def _provision(self, session_id: str) -> SandboxHandle:
-        """Build the plan, ask the backend to create the sandbox, run setup."""
+        """Salvage corpses, resolve the snapshot, create the sandbox, run setup.
+
+        Runs under the per-session lock (held by :meth:`get_or_provision`), so
+        the salvage preamble's stop/commit/remove is serialized against
+        release and the idle reaper.
+        """
+        # Provision preamble (durable session sandboxes, §5.4): salvage any
+        # crash corpse for this session BEFORE provisioning — container death
+        # no longer loses data. Salvage failure fails the provision loud (raw
+        # error into the tool result, model-actionable); never a silent resume
+        # from a stale tag.
+        await self._salvage_session_corpses(session_id)
+        # First-commit crash heal (§5.3): a commit that succeeded but whose
+        # pointer write crashed leaves a canonical tag with a NULL pointer.
+        # Reconcile it from local truth so resolution below can't miss a local
+        # snapshot (the GC tick covers the same case out-of-band).
+        await self._reconcile_pointer_from_local(session_id)
+
         plan = await build_spec_from_session(session_id)
+        # Resolve the snapshot pointer through the store: verified-negative
+        # existence, base-image drift, missing-snapshot detection. Returns the
+        # spec to run from — snapshot tag resolved to a local image, or cleared
+        # to None (cold start) on a detected reset.
+        spec = await self._resolve_snapshot(session_id, plan.spec)
 
         # Record the GitProxy before backend.create so a failure midway
         # has us in a state where release() will find and stop it.
@@ -256,7 +427,7 @@ class SandboxRegistry:
             self._git_proxies[session_id] = plan.git_proxy
 
         try:
-            handle = await self._backend.create(plan.spec)
+            handle = await self._backend.create(spec)
         except BaseException:
             # Spec was built (proxy may be running, broker secret is
             # registered) but the backend couldn't create the sandbox.
@@ -286,6 +457,11 @@ class SandboxRegistry:
             workspace_path=str(handle.workspace_path),
             backend=self._backend.name,
             networking=type(plan.spec.network_policy).__name__,
+            # Whether this was a snapshot resume or a cold start — so
+            # "why did this session cold-start" is answerable after the fact
+            # (consecutive provisions flipping snapshot→base expose even
+            # operator-caused wipes). §5.9.
+            resumed_from_snapshot=handle.snapshot_image is not None,
         )
         return handle
 
@@ -377,6 +553,245 @@ class SandboxRegistry:
             await self._stop_proxy_silently(proxy, session_id)
         self._release_tool_broker_secret(session_id)
 
+    # ── durable-session-sandbox lifecycle helpers (§5.2-§5.4) ───────────────
+
+    async def _snapshot_and_remove(self, session_id: str, handle: SandboxHandle) -> None:
+        """Snapshot ``handle``'s rootfs → write the pointer → remove the container.
+
+        **Ordering invariant**: the container is removed only after the
+        snapshot verb AND the pointer write both succeed. On failure the
+        stopped corpse is retained (no ``rm``) — the next provision's salvage
+        preamble or the GC tick converges. Best-effort by contract: a snapshot
+        failure here must not propagate (release/recycle callers continue).
+        """
+        if await self._snapshot_and_record(
+            session_id, handle.sandbox_id, disk_limit_bytes=handle.disk_limit_bytes
+        ):
+            await self._backend.destroy(handle)
+
+    async def _snapshot_and_record(
+        self, session_id: str, sandbox_id: str, *, disk_limit_bytes: int | None
+    ) -> bool:
+        """Run the snapshot verb and write the DB pointer for ``sandbox_id``.
+
+        Returns ``True`` iff the container may now be removed (snapshot verb
+        and pointer write both succeeded). A failed pointer write is treated
+        identically to a failed snapshot verb (§5.2): corpse retained, return
+        ``False``, converge via salvage.
+        """
+        settings = get_settings()
+        tag = snapshot_tag(settings.instance_id, session_id)
+        try:
+            outcome = await self._backend.snapshot(
+                sandbox_id,
+                tag,
+                empty_floor_bytes=settings.sandbox_snapshot_empty_floor_bytes,
+                flatten_if_unique_bytes_over=disk_limit_bytes,
+            )
+        except Exception as err:
+            log.warning(
+                "sandbox.snapshot_failed_corpse_retained",
+                session_id=session_id,
+                container_id=sandbox_id[:12],
+                error=str(err),
+            )
+            return False
+
+        # ``image_id is None`` ⇒ skipped_empty with no prior tag (a session
+        # that never wrote): nothing to point at, leave the pointer NULL.
+        if outcome.image_id is not None:
+            # Edge-trigger the over-limit notice only on the crossing — read
+            # the prior bytes only when we're actually over budget (rare).
+            prev_bytes: int | None = None
+            over_now = disk_limit_bytes is not None and outcome.unique_bytes > disk_limit_bytes
+            if over_now:
+                prev_bytes = await self._read_snapshot_bytes(session_id)
+            try:
+                await self._write_snapshot_pointer(session_id, tag, outcome.unique_bytes)
+            except Exception as err:
+                log.warning(
+                    "sandbox.snapshot_pointer_write_failed_corpse_retained",
+                    session_id=session_id,
+                    container_id=sandbox_id[:12],
+                    error=str(err),
+                )
+                return False
+            if (
+                disk_limit_bytes is not None
+                and over_now
+                and (prev_bytes is None or prev_bytes <= disk_limit_bytes)
+            ):
+                await self._append_fs_event(
+                    session_id,
+                    SANDBOX_FS_OVER_LIMIT_EVENT,
+                    {"unique_bytes": outcome.unique_bytes, "limit_bytes": disk_limit_bytes},
+                )
+
+        log.info(
+            "sandbox.snapshot",
+            session_id=session_id,
+            container_id=sandbox_id[:12],
+            kind=outcome.kind,
+            unique_bytes=outcome.unique_bytes,
+            depth=outcome.depth,
+        )
+        return True
+
+    async def _salvage_session_corpses(self, session_id: str) -> None:
+        """Provision preamble: snapshot + remove every corpse of ``session_id``.
+
+        Container death no longer loses data — a crash/OOM/daemon-restart
+        corpse is committed here before the session's next container starts.
+        **Salvage failure fails the provision** (raw error, model-actionable):
+        a retained corpse must never be silently bypassed into a stale-tag
+        resume. Per-corpse budget falls back to the global default (a crash
+        corpse has no spec/handle to carry a per-env override).
+        """
+        settings = get_settings()
+        refs = await self._backend.list_managed(
+            instance_id=settings.instance_id, session_id=session_id
+        )
+        for ref in refs:
+            removable = await self._snapshot_and_record(
+                session_id,
+                ref.sandbox_id,
+                disk_limit_bytes=settings.sandbox_snapshot_budget_bytes,
+            )
+            if not removable:
+                raise SandboxBackendError(
+                    f"salvage of corpse {ref.sandbox_id[:12]} for session {session_id} "
+                    "failed (snapshot or pointer write); refusing to provision over "
+                    "unrecovered state"
+                )
+            await self._backend.force_remove(ref.sandbox_id)
+
+    async def _reconcile_pointer_from_local(self, session_id: str) -> None:
+        """First-commit crash heal (§5.3): if the canonical tag exists locally,
+        ensure the pointer points at it.
+
+        Closes the window where a commit succeeded but its pointer write
+        crashed (and the container was already removed), leaving a tag with a
+        NULL pointer that resolution would otherwise miss. Idempotent — a
+        no-op when the pointer already matches. ``snapshot_bytes`` is set to
+        the full image size here (reporting-only; the next real commit writes
+        the accurate unique figure).
+        """
+        tag = snapshot_tag(get_settings().instance_id, session_id)
+        try:
+            if not await self._store.exists(tag):
+                return
+            size = await self._store.size(tag)
+        except SandboxBackendError as err:
+            log.warning(
+                "sandbox.pointer_reconcile_probe_failed", session_id=session_id, error=str(err)
+            )
+            return
+        await self._write_snapshot_pointer(session_id, tag, size)
+
+    async def _resolve_snapshot(self, session_id: str, spec: SandboxSpec) -> SandboxSpec:
+        """Resolve the DB snapshot pointer to a runnable spec (§5.3).
+
+        ``spec.snapshot_image`` arrives as the raw pointer ref. Returns a spec
+        whose ``snapshot_image`` is the locally-runnable tag for a valid
+        resume, or ``None`` (cold start) on a detected reset. Verified-negative
+        throughout: an indeterminate store probe raises and fails the provision
+        rather than silently cold-starting (which the next idle's lineage gate
+        would then punish as ``skipped_stale``).
+        """
+        ref = spec.snapshot_image
+        if ref is None:
+            return spec  # cold start — no pointer
+
+        # Verified-negative existence through the store (raises on indeterminate).
+        if not await self._store.exists(ref):
+            # Pointer set + store verified-not-found ⇒ external mutation
+            # (operator rmi, image-store loss, host replacement w/o transport).
+            await self._reset_snapshot(session_id, reason="snapshot_missing")
+            return dataclasses.replace(spec, snapshot_image=None)
+
+        # Base-image drift: the snapshot's recorded base vs the currently
+        # resolved env image. A mismatch means the operator deliberately
+        # redefined the environment image.
+        snap_labels = await self._backend.image_labels(ref)
+        if snap_labels is None:
+            # The image was removed between the existence probe and here (an
+            # operator rmi racing resume). That's the snapshot-missing case, not
+            # base drift — record the right reason and cold-start; nothing to
+            # remove (it's already gone).
+            await self._reset_snapshot(session_id, reason="snapshot_missing")
+            return dataclasses.replace(spec, snapshot_image=None)
+        snap_base = snap_labels.get(BASE_IMAGE_LABEL_KEY)
+        if snap_base != spec.image:
+            # Discard — the artifact must actually be GONE: a surviving tag
+            # would be re-pointered by GC pass 4, and the next idle's lineage
+            # gate would see a corpse rooted on the new base against the old
+            # tag and discard live post-drift work as skipped_stale. remove +
+            # clear + event, in the same step.
+            await self._store.remove(ref)
+            await self._reset_snapshot(session_id, reason="environment_image_changed")
+            return dataclasses.replace(spec, snapshot_image=None)
+
+        # Valid resume: make the ref locally runnable (identity for v1).
+        local_tag = await self._store.get(ref)
+        return dataclasses.replace(spec, snapshot_image=local_tag)
+
+    async def _reset_snapshot(self, session_id: str, *, reason: str) -> None:
+        """Clear the snapshot pointer and append a model-visible reset notice."""
+        from aios.harness import runtime
+
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            await queries.unscoped_clear_session_snapshot(conn, session_id)
+        await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
+        log.info("sandbox.fs_reset", session_id=session_id, reason=reason)
+
+    async def _write_snapshot_pointer(self, session_id: str, ref: str, unique_bytes: int) -> None:
+        """Write the DB snapshot pointer under the deployment's host id.
+
+        ``snapshot_host`` is ``settings.instance_id`` in v1 (one worker), kept
+        distinct from the deployment namespace that derives ``ref`` so a future
+        multi-host deployment never changes a session's ref on handoff (§5.11).
+        """
+        from aios.harness import runtime
+
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            await queries.unscoped_set_session_snapshot(
+                conn,
+                session_id,
+                ref=ref,
+                host=get_settings().instance_id,
+                snapshot_bytes=unique_bytes,
+            )
+
+    async def _read_snapshot_bytes(self, session_id: str) -> int | None:
+        from aios.harness import runtime
+
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            return await queries.unscoped_get_session_snapshot_bytes(conn, session_id)
+
+    async def _append_fs_event(self, session_id: str, event: str, payload: dict[str, Any]) -> None:
+        """Append a model-visible FS-loss lifecycle event (§5.9).
+
+        Append-only and **not** stimulus-bearing — ``append_event`` only
+        advances ``last_stimulus_seq`` for user/tool roles, and a lifecycle
+        event carries no role, so a GC/reset append never wakes the session or
+        costs a model call; the notice is read at the next genuine wake.
+        """
+        from aios.harness import runtime
+        from aios.services import sessions as sessions_service
+
+        pool = runtime.require_pool()
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "lifecycle",
+            {"event": event, **payload},
+            account_id=account_id,
+        )
+
     async def exec(
         self,
         handle: SandboxHandle,
@@ -437,7 +852,7 @@ class SandboxRegistry:
         # new sandbox.  The accumulation of one ``asyncio.Lock`` per
         # ever-touched session is a bounded leak that the worker's
         # eventual restart clears; the race is unacceptable.
-        # ``release_all()`` clears the whole dict at teardown.
+        # ``stop_all()`` clears the whole dict at teardown.
         proxy = self._git_proxies.pop(session_id, None)
 
         if proxy is not None:
@@ -447,7 +862,12 @@ class SandboxRegistry:
         runtime.clear_session_read_shas(session_id)
         if handle is None:
             return
-        await self._backend.destroy(handle)
+        # Durable session sandboxes: snapshot the rootfs → write the DB
+        # pointer → remove (instead of a bare destroy). On snapshot/pointer
+        # failure the corpse is retained and converges via the next
+        # provision's salvage preamble or the GC tick. Host-side cleanup above
+        # already ran, so a retained corpse never leaves a stale proxy/secret.
+        await self._snapshot_and_remove(session_id, handle)
 
     async def release_if_mounts_changed(
         self,
@@ -497,7 +917,7 @@ class SandboxRegistry:
         The per-session :class:`GitProxy` is stopped in the background:
         the caller is on a retry path and can't block on stop()'s up-to-5s
         graceful drain. Skipping stop() entirely would strand the proxy's
-        uvicorn server, httpx client and bound TCP port — ``release_all``
+        uvicorn server, httpx client and bound TCP port — ``stop_all``
         only sees ``_git_proxies`` (which we've popped here), so without
         the background stop the proxy leaks for the worker's lifetime.
 
@@ -548,15 +968,24 @@ class SandboxRegistry:
             runtime.clear_session_memory_mounts(session_id)
             runtime.clear_session_read_shas(session_id)
 
-    async def release_all(self) -> None:
-        """Tear down every sandbox + proxy. Called at worker shutdown."""
+    async def stop_all(self) -> None:
+        """Worker shutdown: bounded parallel STOP (no commits) + host cleanup.
+
+        Under durable persistence, shutdown does NOT commit — a commit per
+        container is unbounded and could eat the SIGTERM grace. It stops the
+        containers under one overall ``wait_for`` so a hung daemon can't wedge
+        teardown, leaving stopped corpses (``--restart no``) that the next
+        worker's immediate first GC tick salvages. Per-container stop failures
+        are ops-log noise; the boot tick converges regardless.
+
+        Replaces the old destroy-everything ``release_all`` — destroying at
+        shutdown would lose every active session's filesystem.
+        """
         handles = list(self._handles.values())
         proxies = list(self._git_proxies.values())
-        # Drop the per-session tool broker secret (and its on-disk
-        # ``.secret`` file when UDS transport is in use) for every active
-        # session, matching the cleanup path in ``release()``/``evict()``.
-        # Without this, ``.secret`` files leak on every clean worker
-        # shutdown.
+        # Drop the per-session tool broker secret (and its on-disk ``.secret``
+        # file when UDS transport is in use) for every active session, matching
+        # the cleanup path in ``release()``/``evict()``.
         for h in handles:
             self._release_tool_broker_secret(h.session_id)
         self._handles.clear()
@@ -570,63 +999,30 @@ class SandboxRegistry:
             )
             for _p, result in zip(proxies, proxy_results, strict=True):
                 if isinstance(result, BaseException):
-                    log.warning(
-                        "sandbox.release_all_proxy_error",
-                        error=str(result),
-                    )
+                    log.warning("sandbox.stop_all_proxy_error", error=str(result))
 
         if not handles:
             return
-        log.info("sandbox.release_all", count=len(handles))
-        results = await asyncio.gather(
-            *(self._backend.destroy(h) for h in handles), return_exceptions=True
-        )
+        log.info("sandbox.stop_all", count=len(handles))
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(self._backend.stop(h.sandbox_id) for h in handles),
+                    return_exceptions=True,
+                ),
+                timeout=_STOP_ALL_TIMEOUT_S,
+            )
+        except TimeoutError:
+            log.warning("sandbox.stop_all_timeout", count=len(handles), timeout=_STOP_ALL_TIMEOUT_S)
+            return
         for h, result in zip(handles, results, strict=True):
             if isinstance(result, BaseException):
                 log.warning(
-                    "sandbox.release_all_error",
+                    "sandbox.stop_all_error",
                     session_id=h.session_id,
                     container_id=h.sandbox_id[:12],
                     error=str(result),
                 )
-
-    async def reap_orphans(self) -> int:
-        """At startup, remove every sandbox we manage.
-
-        Called once per worker boot, before any step or tool task runs;
-        the worker's ``task_registry`` is empty by construction, so every
-        managed container is a corpse from a prior run. Sessions that
-        resume on this worker will spawn fresh containers on their next
-        step.
-        """
-        from aios.config import get_settings
-
-        instance_id = get_settings().instance_id
-        try:
-            managed = await self._backend.list_managed(instance_id=instance_id)
-        except Exception as err:
-            log.warning("sandbox.reap_list_failed", error=str(err))
-            return 0
-        if not managed:
-            return 0
-
-        removed = 0
-        for ref in managed:
-            log.info(
-                "sandbox.reap_orphan",
-                container_id=ref.sandbox_id[:12],
-                session_id=ref.session_id or "<no-label>",
-            )
-            try:
-                await self._backend.force_remove(ref.sandbox_id)
-                removed += 1
-            except Exception as err:
-                log.warning(
-                    "sandbox.reap_remove_failed",
-                    container_id=ref.sandbox_id[:12],
-                    error=str(err),
-                )
-        return removed
 
     # ── idle-TTL reaper ──────────────────────────────────────────────────
 
@@ -691,3 +1087,333 @@ class SandboxRegistry:
         if self._reaper_task is not None:
             self._reaper_task.cancel()
             self._reaper_task = None
+
+    # ── GC: one retain-rule reconciler (§5.5) ───────────────────────────────
+
+    def start_gc(self, pool: asyncpg.Pool[Any]) -> None:
+        """Start the snapshot GC reconciler (hourly, immediate first tick).
+
+        Replaces the old boot-time ``reap_orphans``: instead of removing every
+        managed container at boot, the first tick salvages crash corpses and
+        reconciles images/pointers against store truth, then repeats hourly.
+        Boot is not blocked — a session waking mid-reconcile salvages its own
+        corpse inline under its own lock.
+        """
+        if self._gc_task is not None:
+            return
+        self._gc_task = asyncio.create_task(self._gc_loop(pool), name="sandbox-snapshot-gc")
+
+    def stop_gc(self) -> None:
+        """Cancel the GC reconciler."""
+        if self._gc_task is not None:
+            self._gc_task.cancel()
+            self._gc_task = None
+
+    async def _gc_loop(self, pool: asyncpg.Pool[Any]) -> None:
+        """Background loop: immediate first tick, then hourly.
+
+        The try/except is nested INSIDE the loop (mirroring the idle reaper):
+        a Docker/DB hiccup in one tick must not silently disable the GC for the
+        worker's lifetime. ``CancelledError`` is not an ``Exception``, so
+        ``stop_gc()`` still exits cleanly.
+        """
+        first = True
+        while True:
+            try:
+                if not first:
+                    await asyncio.sleep(_GC_INTERVAL_SECONDS)
+                first = False
+                await self._gc_once(pool)
+            except Exception:
+                log.exception("sandbox.gc_tick_failed")
+
+    async def _gc_once(self, pool: asyncpg.Pool[Any]) -> None:
+        """One GC tick: corpse pass, image pass, pool-budget pass, pointer reconcile."""
+        settings = get_settings()
+        instance_id = settings.instance_id
+        now = datetime.now(UTC)
+
+        # Pass 1 — corpses (may commit + remove, so it runs before the image enum).
+        containers = await self._backend.list_managed(instance_id=instance_id)
+        corpse_states = await self._load_gc_states(
+            pool, {c.session_id for c in containers if c.session_id}
+        )
+        await self._gc_corpse_pass(containers, corpse_states, now, settings, instance_id)
+
+        # Pass 2 — images (enumerated AFTER the corpse pass settled).
+        images = await self._backend.list_managed_images(instance_id=instance_id)
+        image_states = await self._load_gc_states(
+            pool,
+            {sid for img in images if (sid := img.labels.get(SESSION_LABEL_KEY)) is not None},
+        )
+        verdicts = _classify_images(
+            images,
+            image_states,
+            now=now,
+            ttl_seconds=settings.sandbox_snapshot_ttl_seconds,
+            this_host=instance_id,
+        )
+        retained = await self._gc_image_pass(
+            verdicts, image_states, now, settings.sandbox_snapshot_ttl_seconds, instance_id
+        )
+
+        # Pass 3 — per-host pool budget.
+        await self._gc_pool_budget_pass(
+            retained, image_states, settings.sandbox_snapshot_pool_bytes, instance_id
+        )
+
+        # Pass 4 — pointer reconciliation against local store truth.
+        await self._gc_reconcile_pointers(retained, image_states, instance_id)
+
+        log.info(
+            "sandbox.gc_tick",
+            corpses=len(containers),
+            images=len(images),
+            retained=len(retained),
+            removed=len(verdicts) - len(retained),
+        )
+
+    async def _load_gc_states(
+        self, pool: asyncpg.Pool[Any], session_ids: set[str]
+    ) -> dict[str, SessionSnapshotState]:
+        """Batch-load per-session GC inputs; absent ⇒ deleted (collectible)."""
+        if not session_ids:
+            return {}
+        async with pool.acquire() as conn:
+            rows = await queries.gc_snapshot_session_states(conn, list(session_ids))
+        return {
+            row["id"]: SessionSnapshotState(
+                session_id=row["id"],
+                account_id=row["account_id"],
+                archived=row["archived_at"] is not None,
+                last_event_at=row["last_event_at"],
+                snapshot_ref=row["snapshot_ref"],
+                snapshot_host=row["snapshot_host"],
+                snapshot_bytes=row["snapshot_bytes"],
+            )
+            for row in rows
+        }
+
+    async def _fresh_session_state(self, session_id: str) -> SessionSnapshotState | None:
+        """Re-read one session's GC state — the **condition re-verify** the
+        retain rule needs under the per-session lock (§5.5).
+
+        The tick-start ``states`` snapshot can be stale for a session that woke
+        (or crossed back under the TTL) between the load and a drop decision;
+        re-deriving dormancy from a fresh single-row read under the lock is what
+        keeps the GC from force-removing a just-woke session's corpse without
+        salvage, or removing its canonical snapshot a tick too early. ``None``
+        ⇒ the session is genuinely gone (deleted), still collectible.
+        """
+        from aios.harness import runtime
+
+        states = await self._load_gc_states(runtime.require_pool(), {session_id})
+        return states.get(session_id)
+
+    async def _gc_corpse_pass(
+        self,
+        containers: list[Any],
+        states: dict[str, SessionSnapshotState],
+        now: datetime,
+        settings: Any,
+        instance_id: str,
+    ) -> None:
+        """Salvage (or drop) every managed container that isn't a live cached handle.
+
+        Retain rule first: a deleted/dormant session's corpse is removed
+        WITHOUT paying a commit; a live-within-TTL corpse is salvaged (commit)
+        then removed. Best-effort — a snapshot failure leaves the corpse for
+        the next tick (the GC never raises). Each corpse is handled under the
+        per-session lock with the cached-handle re-check.
+        """
+        for ref in containers:
+            sid = ref.session_id
+            if sid is None:
+                # Unlabeled container — can't salvage without a session; drop it.
+                await self._backend.force_remove(ref.sandbox_id)
+                continue
+            async with self._lock_for(sid):
+                cached = self._handles.get(sid)
+                if cached is not None and cached.sandbox_id == ref.sandbox_id:
+                    continue  # the live, in-use container — never touch it
+                ttl = settings.sandbox_snapshot_ttl_seconds
+                state = states.get(sid)
+                keep_fs = state is not None and not _is_session_dormant(state, now, ttl)
+                if not keep_fs:
+                    # Drop candidate (deleted/dormant per the tick-start snapshot)
+                    # — re-verify dormancy under the lock (§5.5). A session that
+                    # woke since the load must be salvaged, not dropped without a
+                    # commit. (Only the drop direction can be wrong: a session
+                    # can't grow MORE dormant within one tick.)
+                    fresh = await self._fresh_session_state(sid)
+                    keep_fs = fresh is not None and not _is_session_dormant(fresh, now, ttl)
+                if keep_fs:
+                    removable = await self._snapshot_and_record(
+                        sid, ref.sandbox_id, disk_limit_bytes=settings.sandbox_snapshot_budget_bytes
+                    )
+                    if removable:
+                        await self._backend.force_remove(ref.sandbox_id)
+                    # else: snapshot failed — leave the corpse for the next tick.
+                else:
+                    # Deleted/dormant: remove without paying a commit.
+                    await self._backend.force_remove(ref.sandbox_id)
+
+    async def _gc_image_pass(
+        self,
+        verdicts: list[GcImageVerdict],
+        states: dict[str, SessionSnapshotState],
+        now: datetime,
+        ttl_seconds: int,
+        instance_id: str,
+    ) -> list[GcImageVerdict]:
+        """Remove every non-retained image (under per-session locks); return the retained."""
+        retained: list[GcImageVerdict] = []
+        for v in verdicts:
+            if v.verdict == "retain":
+                retained.append(v)
+                continue
+            sid = v.session_id
+            if sid is None:
+                # Residue with no session label — remove directly.
+                await self._backend.remove_image(v.removal_ref)
+                continue
+            async with self._lock_for(sid):
+                # Re-check under the lock: a waking session may now hold a
+                # cached handle (raced between corpse-salvage and docker run);
+                # never rmi a just-salvaged snapshot out from under it.
+                if self._handles.get(sid) is not None:
+                    retained.append(v)
+                    continue
+                # Condition re-verify (§5.5): a TTL-expiry removal is decided
+                # from the tick-start snapshot — re-read dormancy under the lock
+                # so a session that woke since the load keeps its canonical
+                # snapshot instead of being expired a tick early. (Deleted /
+                # residue verdicts can't flip back within a tick.)
+                if v.reason == "retention_ttl":
+                    fresh = await self._fresh_session_state(sid)
+                    if fresh is not None and not _is_session_dormant(fresh, now, ttl_seconds):
+                        retained.append(v)
+                        continue
+                removed = await self._backend.remove_image(v.removal_ref)
+                if not removed:
+                    # Refused (a child still references it) — retain this tick.
+                    retained.append(v)
+                    continue
+                if v.reason == "retention_ttl":
+                    await self._append_fs_event(
+                        sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "retention_ttl"}
+                    )
+                if v.is_canonical:
+                    await self._clear_pointer_if_owned(sid, instance_id, states)
+        return retained
+
+    async def _gc_pool_budget_pass(
+        self,
+        retained: list[GcImageVerdict],
+        states: dict[str, SessionSnapshotState],
+        pool_bytes: int | None,
+        instance_id: str,
+    ) -> None:
+        """Evict most-dormant sessions first while this host is over its pool budget."""
+        if pool_bytes is None:
+            return
+        base_sizes: dict[str, int] = {}
+        sized: list[tuple[GcImageVerdict, int]] = []
+        total = 0
+        for v in retained:
+            if not v.is_canonical:
+                continue
+            ub = await self._unique_bytes_for_image(v.image, base_sizes)
+            total += ub
+            sized.append((v, ub))
+        if total <= pool_bytes:
+            return
+
+        def _dormancy_key(item: tuple[GcImageVerdict, int]) -> datetime:
+            st = item[0].session_id and states.get(item[0].session_id)
+            if st and st.last_event_at is not None:
+                return st.last_event_at
+            return datetime.min.replace(tzinfo=UTC)  # unknown dormancy ⇒ evict first
+
+        for v, ub in sorted(sized, key=_dormancy_key):
+            if total <= pool_bytes:
+                break
+            sid = v.session_id
+            if sid is None:
+                continue
+            async with self._lock_for(sid):
+                if self._handles.get(sid) is not None:
+                    continue  # waking — skip
+                if await self._backend.remove_image(v.removal_ref):
+                    total -= ub
+                    await self._append_fs_event(
+                        sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "disk_pressure"}
+                    )
+                    await self._clear_pointer_if_owned(sid, instance_id, states)
+
+    async def _gc_reconcile_pointers(
+        self,
+        retained: list[GcImageVerdict],
+        states: dict[str, SessionSnapshotState],
+        instance_id: str,
+    ) -> None:
+        """Heal a NULL/stale pointer for a retained canonical tag (§5.5 pass 4).
+
+        Ownership-gated: a tick touches ``sessions.snapshot_*`` only for
+        sessions whose ``snapshot_host`` is this host (or NULL, for the crash
+        heal). Multi-host compare-and-swap is deferred — the ``snapshot_host``
+        column is the seam that makes it additive.
+        """
+        base_sizes: dict[str, int] = {}  # shared across the pass (sessions share a base)
+        for v in retained:
+            if not v.is_canonical:
+                continue
+            sid = v.session_id
+            if sid is None:
+                continue
+            st = states.get(sid)
+            if st is None:
+                continue
+            if st.snapshot_host not in (None, instance_id):
+                continue  # owned by another host — never reach across
+            if st.snapshot_ref == v.removal_ref:
+                continue  # already correct
+            async with self._lock_for(sid):
+                if self._handles.get(sid) is not None:
+                    continue  # active; its own commit owns the pointer
+                ub = await self._unique_bytes_for_image(v.image, base_sizes)
+                await self._write_snapshot_pointer(sid, v.removal_ref, ub)
+
+    async def _unique_bytes_for_image(self, image: ManagedImage, base_sizes: dict[str, int]) -> int:
+        """Unique bytes for accounting: full size for a flattened (standalone)
+        image, else ``tag.Size - base.Size``. ``base_sizes`` caches base lookups."""
+        if image.labels.get(FLATTENED_LABEL_KEY) == FLATTENED_LABEL_VALUE:
+            return image.size_bytes
+        base_ref = image.labels.get(BASE_IMAGE_LABEL_KEY)
+        if not base_ref:
+            return image.size_bytes
+        if base_ref not in base_sizes:
+            try:
+                base_sizes[base_ref] = await self._backend.image_size(base_ref)
+            except SandboxBackendError:
+                base_sizes[base_ref] = 0  # over-count is safe; never under-report
+        return max(0, image.size_bytes - base_sizes[base_ref])
+
+    async def _clear_pointer_if_owned(
+        self, session_id: str, instance_id: str, states: dict[str, SessionSnapshotState]
+    ) -> None:
+        """Clear a session's pointer when removing its canonical artifact.
+
+        Ownership-gated: skip when the pointer is owned by another host (a
+        local cache of a peer's artifact, never the canonical copy). A deleted
+        session (absent from ``states``) is cleared unconditionally — the
+        ``UPDATE`` is a harmless no-op against the vanished row.
+        """
+        st = states.get(session_id)
+        if st is not None and st.snapshot_host not in (None, instance_id):
+            return
+        from aios.harness import runtime
+
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            await queries.unscoped_clear_session_snapshot(conn, session_id)

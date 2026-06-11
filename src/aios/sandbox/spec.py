@@ -32,10 +32,16 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.harness import runtime
 from aios.logging import get_logger
-from aios.models.environments import EnvironmentConfig, LimitedNetworking
+from aios.models.environments import (
+    RESERVED_SANDBOX_IMAGE_PREFIX,
+    EnvironmentConfig,
+    LimitedNetworking,
+)
 from aios.models.github_repositories import GithubRepositoryResourceEcho
 from aios.models.memory_stores import MemoryStoreResourceEcho
 from aios.sandbox.backends.base import (
+    BASE_IMAGE_LABEL_KEY,
+    ENV_KEYS_LABEL_KEY,
     INSTANCE_LABEL_KEY,
     MANAGED_LABEL_KEY,
     MANAGED_LABEL_VALUE,
@@ -73,6 +79,26 @@ TOOL_BROKER_SOCKET_SANDBOX_PATH = "/var/run/aios/tool-broker.sock"
 # transport is in use. The in-sandbox ``bin/tool`` CLI reads this file
 # as a fallback when ``TOOL_BROKER_SECRET`` isn't in the environment.
 TOOL_BROKER_SECRET_SANDBOX_PATH = "/var/run/aios/tool-broker-secret"
+
+
+def snapshot_tag(deployment: str, session_id: str) -> str:
+    """The deterministic snapshot ref for a session (durable session sandboxes).
+
+    ``aios-sbx-{deployment}-{session_id.lower()}:latest`` — a single path
+    component, so ``_is_registry_image`` returns False and the ``--pull
+    always`` logic never reaches the registry for a snapshot. ULID lowercasing
+    is bijective, so the mapping is collision-free.
+
+    ``deployment`` is the **deployment namespace** (the ``instance_id`` in v1),
+    kept conceptually distinct from the *host id* (``snapshot_host``): the ref
+    must be a pure function of (deployment, session), NEVER of which worker
+    committed it. If a future multi-host deployment minted refs from a
+    per-worker id, every cross-host handoff would change a session's ref and
+    reopen the first-commit crash window (§5.11 invariant 7). The reserved
+    prefix this produces (``aios-sbx-``) is gated against tenant ``image``
+    overrides at the API boundary and the spec-build choke point.
+    """
+    return f"{RESERVED_SANDBOX_IMAGE_PREFIX}{deployment}-{session_id.lower()}:latest"
 
 
 def cleanup_session_secret_file(session_id: str, tool_socket_host_path: Path | None) -> None:
@@ -197,9 +223,9 @@ async def resolve_bash_timeout_ceiling(session_id: str) -> int:
 
 async def _load_session_provisioning(
     session_id: str, *, account_id: str
-) -> tuple[str, dict[str, str], int]:
-    """Load workspace path, env, and ``spec_version`` from the session row
-    in one query (issue #713 adds ``spec_version`` to the tuple)."""
+) -> tuple[str, dict[str, str], int, str | None]:
+    """Load workspace path, env, ``spec_version``, and the snapshot pointer
+    (``snapshot_ref``) from the session row in one query."""
 
     pool = runtime.require_pool()
     async with pool.acquire() as conn:
@@ -393,7 +419,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
 
     settings = get_settings()
     account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
-    raw_path, session_env, spec_version = await _load_session_provisioning(
+    raw_path, session_env, spec_version, snapshot_ref = await _load_session_provisioning(
         session_id, account_id=account_id
     )
     # Re-validate at the bind-mount boundary: ``validate_workspace_path``
@@ -433,13 +459,26 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     # the only resolution point — everything downstream (backend create,
     # the --pull decision) consumes ``spec.image`` blindly.
     image = env_config.image if (env_config and env_config.image) else settings.docker_image
-    # Per-environment writable-layer disk cap (#725): environment
-    # override wins; otherwise the worker-global default (which is itself
-    # ``None`` = unbounded unless the operator set AIOS_SANDBOX_DISK_BYTES).
-    disk_bytes = (
-        env_config.disk_bytes
-        if (env_config and env_config.disk_bytes is not None)
-        else settings.sandbox_disk_bytes
+    # Cross-tenant snapshot gate (durable session sandboxes, §5.8): this is
+    # the spec-build choke point ALL writers traverse, including direct SQL —
+    # the boundary layer of the two-layer gate (the other being the pydantic
+    # ``image`` validator). Reject any image in the reserved snapshot
+    # namespace so a tenant can't point ``env_config.image`` at another
+    # session's snapshot tag (``aios-sbx-<victim>``) and mount its root FS +
+    # baked secrets. Case-insensitive (Docker lowercases refs).
+    if image.lower().startswith(RESERVED_SANDBOX_IMAGE_PREFIX):
+        raise ValueError(
+            f"environment image {image!r} uses the reserved "
+            f"{RESERVED_SANDBOX_IMAGE_PREFIX!r} prefix (reserved for per-session "
+            "snapshot images); refusing to provision"
+        )
+    # Per-session snapshot budget (durable session sandboxes, §5.7):
+    # environment override wins; otherwise the worker-global default
+    # (4 GiB unless the operator set AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES).
+    snapshot_budget_bytes = (
+        env_config.snapshot_budget_bytes
+        if (env_config and env_config.snapshot_budget_bytes is not None)
+        else settings.sandbox_snapshot_budget_bytes
     )
 
     try:
@@ -448,7 +487,8 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             instance_id=settings.instance_id,
             image=image,
             workspace_path=workspace_path,
-            disk_bytes=disk_bytes,
+            snapshot_ref=snapshot_ref,
+            snapshot_budget_bytes=snapshot_budget_bytes,
             env_config=env_config,
             session_env=session_env,
             memory_echoes=memory_echoes,
@@ -493,7 +533,8 @@ def _assemble_plan(
     tool_broker_url: str,
     tool_broker_secret: str,
     tool_socket_host_path: Path | None = None,
-    disk_bytes: int | None = None,
+    snapshot_ref: str | None = None,
+    snapshot_budget_bytes: int | None = None,
     spec_version: int = 0,
     env_var_credentials: tuple[ResolvedEnvVarCredential, ...] = (),
 ) -> ProvisioningPlan:
@@ -635,6 +676,17 @@ def _assemble_plan(
         MANAGED_LABEL_KEY: MANAGED_LABEL_VALUE,
         INSTANCE_LABEL_KEY: instance_id,
         SESSION_LABEL_KEY: session_id,
+        # Durable session sandboxes (§5.1), inherited into committed images.
+        # ``env_keys`` lists the NAMES of every run-injected env var so the
+        # commit-time scrub empties exactly that set (never the base image's
+        # PATH/HOME — those aren't here). Every name listed is re-injected via
+        # ``docker run --env`` at resume, so emptying it in the image config
+        # only sanitizes the artifact (no value leaks to ``docker save`` /
+        # layer inspect) without affecting the resumed runtime. ``base_image``
+        # records the chain root for resume base-drift detection and
+        # unique-bytes accounting.
+        ENV_KEYS_LABEL_KEY: ",".join(sorted(merged_env)),
+        BASE_IMAGE_LABEL_KEY: image,
     }
 
     snapshot = mount_snapshot_from_echoes(memory_echoes, github_echoes)
@@ -649,6 +701,12 @@ def _assemble_plan(
         network_policy=_network_policy_from_config(env_config),
         host_gateway_alias=None if is_running_in_container() else WORKER_NETWORK_ALIAS,
         image=image,
+        # Resume source (durable session sandboxes): the raw DB snapshot
+        # pointer. The registry's provision path resolves it through the store
+        # (verified-negative, base-drift checked) and replaces it with the
+        # locally-runnable tag — or clears it to None on a detected reset —
+        # before ``backend.create``. ``None`` ⇒ cold start.
+        snapshot_image=snapshot_ref,
         mount_snapshot=snapshot,
         # Provision-time ``sessions.spec_version`` snapshot (issue #713):
         # the backend copies it onto the handle so the registry's warm-hit
@@ -661,10 +719,12 @@ def _assemble_plan(
         cpu_quota=settings.sandbox_cpu_quota,
         memory_bytes=settings.sandbox_memory_bytes,
         pids_limit=settings.sandbox_pids_limit,
-        # Writable-layer disk cap (#725): already resolved by the caller
-        # (environment override → global default), so pass it straight
-        # through rather than re-reading settings here.
-        disk_bytes=disk_bytes,
+        # Per-session snapshot budget (durable session sandboxes, §5.7):
+        # already resolved by the caller (environment override → global
+        # default). The backend stamps it onto the handle as
+        # ``disk_limit_bytes``; the release path passes it back to
+        # ``backend.snapshot`` as the flatten trigger.
+        snapshot_budget_bytes=snapshot_budget_bytes,
         # Authored seccomp deny-list (#807). Always set from settings (never
         # left at the dataclass "unconfined" fallback) so the backend ships
         # the deny-list profile by default; the literal "unconfined" only

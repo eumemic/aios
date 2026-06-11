@@ -168,7 +168,9 @@ async def shared_docker_harness(
             runtime.tool_provider,
         ) = prev
         await task_reg.shutdown()
-        await sandbox_reg.release_all()
+        from tests.helpers.sandbox import purge_all_sandboxes
+
+        await purge_all_sandboxes(sandbox_reg)
         await tool_broker.stop()
         await pool.close()
         get_settings.cache_clear()
@@ -188,7 +190,9 @@ async def _reset_memory_test_state(shared_docker_harness: Harness, migrated_db_u
     survive between tests.
     """
     sandbox = runtime.require_sandbox_registry()
-    await sandbox.release_all()
+    from tests.helpers.sandbox import purge_all_sandboxes
+
+    await purge_all_sandboxes(sandbox)
 
     conn = await asyncpg.connect(migrated_db_url)
     try:
@@ -634,10 +638,19 @@ class TestMountUpdateRecyclesContainer:
         )
         sandbox = runtime.require_sandbox_registry()
         await sandbox.get_or_provision(session.id, pool=shared_docker_harness._pool)
+        # Write a sentinel into the mounted store so the post-detach check can
+        # assert the store's CONTENT is unmounted, not merely that a directory
+        # name vanished.
         before = await bash_handler(
-            session.id, {"command": "ls -d /mnt/memory/detach-mount && echo OK"}
+            session.id,
+            {
+                "command": (
+                    "echo data > /mnt/memory/detach-mount/sentinel "
+                    "&& cat /mnt/memory/detach-mount/sentinel"
+                )
+            },
         )
-        assert "OK" in before["stdout"], before
+        assert "data" in before["stdout"], before
 
         await sessions_service.update_session(
             shared_docker_harness._pool, session.id, resources=[], account_id=account_id
@@ -646,8 +659,17 @@ class TestMountUpdateRecyclesContainer:
             shared_docker_harness._pool, session.id, account_id="acc_test_stub"
         )
 
-        after = await bash_handler(session.id, {"command": "ls /mnt/memory 2>&1; true"})
-        assert "detach-mount" not in after["stdout"]
+        # The store is unmounted: its content is gone from the container. Under
+        # durable session sandboxes the recycled container resumes from the
+        # snapshot (not a fresh base), so the now-empty mountpoint DIRECTORY may
+        # linger in the persisted root FS — a harmless cosmetic artifact, not a
+        # data leak (the bind-mounted store content is excluded from the
+        # snapshot). Assert the meaningful property: the store's content is no
+        # longer accessible.
+        after = await bash_handler(
+            session.id, {"command": "cat /mnt/memory/detach-mount/sentinel 2>&1; true"}
+        )
+        assert "data" not in after["stdout"], after
 
     async def test_idempotent_update_does_not_recycle(self, shared_docker_harness: Harness) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding

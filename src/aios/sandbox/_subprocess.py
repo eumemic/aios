@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 
 from aios.sandbox.backends.base import SandboxBackendError
 
@@ -98,3 +99,94 @@ async def run_docker_cli(
     if timed_out:
         raise SandboxBackendError(f"docker cli timed out after {timeout_s}s: {' '.join(argv)}")
     return rc, stdout_bytes, stderr_bytes
+
+
+async def run_docker_pipeline(
+    producer_argv: list[str],
+    consumer_argv: list[str],
+    *,
+    timeout_s: float,
+) -> tuple[int, bytes, bytes]:
+    """Run ``producer_argv | consumer_argv`` joined by an ``os.pipe()`` fd pair.
+
+    Used for the flatten path ``docker export <id> | docker import - <tag>``
+    without a host shell: both argvs go straight to ``execve`` and are
+    connected at the OS level, so no shell metacharacter interpretation
+    happens on the host (same security posture as
+    :func:`run_subprocess_with_timeout`). Returns the **consumer's**
+    ``(returncode, stdout, stderr)`` — ``docker import`` prints the new
+    image id to stdout — so the caller can read the flattened image id.
+
+    Raises :class:`SandboxBackendError` on launch failure, on timeout
+    (both children are SIGKILLed), or when the **producer** exits nonzero
+    (a failed ``export`` would otherwise feed the consumer a truncated
+    stream that imports as a silently-corrupt image). The consumer's own
+    nonzero exit is returned for the caller to interpret, mirroring
+    :func:`run_docker_cli`.
+    """
+    rd, wr = os.pipe()
+    producer: asyncio.subprocess.Process | None = None
+    consumer: asyncio.subprocess.Process | None = None
+    try:
+        try:
+            producer = await asyncio.create_subprocess_exec(
+                *producer_argv, stdout=wr, stderr=asyncio.subprocess.PIPE
+            )
+        except (OSError, FileNotFoundError) as host_err:
+            raise SandboxBackendError(
+                f"failed to launch {producer_argv[0]}: {host_err}"
+            ) from host_err
+        # The producer now holds the only writer; the parent must drop its
+        # copy so the consumer sees EOF when the producer exits.
+        os.close(wr)
+        wr = -1
+        try:
+            consumer = await asyncio.create_subprocess_exec(
+                *consumer_argv,
+                stdin=rd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except (OSError, FileNotFoundError) as host_err:
+            raise SandboxBackendError(
+                f"failed to launch {consumer_argv[0]}: {host_err}"
+            ) from host_err
+        os.close(rd)
+        rd = -1
+
+        async def _drain() -> tuple[tuple[bytes, bytes], tuple[bytes, bytes]]:
+            # Drive both concurrently so neither stderr/stdout pipe can
+            # fill and deadlock the other. Both are non-None here (assigned
+            # above before _drain is ever awaited).
+            return await asyncio.gather(consumer.communicate(), producer.communicate())
+
+        try:
+            (cons_out, cons_err), (_prod_out, prod_err) = await asyncio.wait_for(
+                _drain(), timeout=timeout_s
+            )
+        except TimeoutError as timeout_err:
+            for proc in (producer, consumer):
+                if proc is not None:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+            raise SandboxBackendError(
+                f"docker pipeline timed out after {timeout_s}s: "
+                f"{' '.join(producer_argv)} | {' '.join(consumer_argv)}"
+            ) from timeout_err
+
+        if producer.returncode != 0:
+            raise SandboxBackendError(
+                f"{producer_argv[0]} export failed (exit {producer.returncode}): "
+                f"{prod_err.decode('utf-8', errors='replace').strip()}"
+            )
+        return (
+            consumer.returncode if consumer.returncode is not None else -1,
+            cons_out,
+            cons_err,
+        )
+    finally:
+        # Close any fd we still own (launch-failure / early-raise paths).
+        for fd in (rd, wr):
+            if fd != -1:
+                with contextlib.suppress(OSError):
+                    os.close(fd)

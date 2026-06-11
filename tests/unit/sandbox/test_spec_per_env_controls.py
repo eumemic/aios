@@ -1,17 +1,18 @@
-"""Per-environment sandbox controls: image override, disk cap, and the
-bash-timeout ceiling resolver (issues #724, #725).
+"""Per-environment sandbox controls: image override, snapshot budget, and the
+bash-timeout ceiling resolver (issues #724, #725; durable session sandboxes).
 
-#724 adds an optional :attr:`EnvironmentConfig.image`; #725 adds a
-per-environment writable-layer disk cap and a per-environment bash
-timeout ceiling. All three default to current behavior when unset:
+#724 adds an optional :attr:`EnvironmentConfig.image`; durable session
+sandboxes replace the former writable-layer ``disk_bytes`` cap with a
+per-session ``snapshot_budget_bytes`` (over budget at teardown → flatten,
+never refuse). All three default to current behavior when unset:
 
 - ``image`` unset → the worker-global ``settings.docker_image``.
-- ``disk_bytes`` unset → the worker-global ``settings.sandbox_disk_bytes``
-  (itself ``None`` = unbounded by default).
+- ``snapshot_budget_bytes`` unset → the worker-global
+  ``settings.sandbox_snapshot_budget_bytes`` (4 GiB by default).
 - ``bash_timeout_seconds`` unset → the worker-global
   ``settings.bash_default_timeout_seconds``.
 
-The image/disk resolution lives in ``build_spec_from_session``; the
+The image/budget resolution lives in ``build_spec_from_session``; the
 plumbing onto the spec lives in ``_assemble_plan``; the bash ceiling
 lives in ``resolve_bash_timeout_ceiling``. These tests pin each.
 """
@@ -36,7 +37,8 @@ from tests.helpers.sandbox import patch_build_spec_deps
 def _call_assemble(
     *,
     image: str = "aios-sandbox:test",
-    disk_bytes: int | None = None,
+    snapshot_budget_bytes: int | None = None,
+    snapshot_ref: str | None = None,
     env_config: EnvironmentConfig | None = None,
 ) -> ProvisioningPlan:
     # ``_assemble_plan`` imports its volume helpers function-locally, so
@@ -65,25 +67,48 @@ def _call_assemble(
             tool_broker_url="http://aios-worker:54321",
             tool_broker_secret="secret123",
             tool_socket_host_path=None,
-            disk_bytes=disk_bytes,
+            snapshot_ref=snapshot_ref,
+            snapshot_budget_bytes=snapshot_budget_bytes,
         )
 
 
-class TestAssemblePlanImageAndDisk:
-    """``_assemble_plan`` copies the resolved image + disk cap onto the
-    spec verbatim — it does not itself read settings for these."""
+class TestAssemblePlanImageAndBudget:
+    """``_assemble_plan`` copies the resolved image + snapshot budget + pointer
+    onto the spec verbatim — it does not itself read settings for these."""
 
     def test_image_lands_on_spec(self) -> None:
         plan = _call_assemble(image="ghcr.io/eumemic/aios-sandbox:pinned")
         assert plan.spec.image == "ghcr.io/eumemic/aios-sandbox:pinned"
 
-    def test_disk_bytes_lands_on_spec_when_set(self) -> None:
-        plan = _call_assemble(disk_bytes=2 * 1024 * 1024 * 1024)
-        assert plan.spec.disk_bytes == 2 * 1024 * 1024 * 1024
+    def test_snapshot_budget_lands_on_spec_when_set(self) -> None:
+        plan = _call_assemble(snapshot_budget_bytes=2 * 1024 * 1024 * 1024)
+        assert plan.spec.snapshot_budget_bytes == 2 * 1024 * 1024 * 1024
 
-    def test_disk_bytes_none_by_default(self) -> None:
+    def test_snapshot_budget_none_by_default(self) -> None:
         plan = _call_assemble()
-        assert plan.spec.disk_bytes is None
+        assert plan.spec.snapshot_budget_bytes is None
+
+    def test_snapshot_ref_lands_on_spec_image(self) -> None:
+        """The DB snapshot pointer arrives on the spec as ``snapshot_image``;
+        the registry resolves it through the store before ``backend.create``."""
+        plan = _call_assemble(snapshot_ref="aios-sbx-inst_test-sess_01test:latest")
+        assert plan.spec.snapshot_image == "aios-sbx-inst_test-sess_01test:latest"
+
+    def test_snapshot_ref_none_by_default(self) -> None:
+        plan = _call_assemble()
+        assert plan.spec.snapshot_image is None
+
+    def test_env_keys_and_base_image_labels_stamped(self) -> None:
+        """Durable session sandboxes stamp ``aios.env_keys`` (the names of every
+        run-injected env var) and ``aios.base_image`` (the chain root) so the
+        commit-time scrub and accounting work off labels alone."""
+        plan = _call_assemble(image="ghcr.io/eumemic/aios-sandbox:pinned")
+        labels = plan.spec.labels
+        assert labels["aios.base_image"] == "ghcr.io/eumemic/aios-sandbox:pinned"
+        env_keys = set(labels["aios.env_keys"].split(","))
+        # The names (never values) of the run-injected env — includes the broker
+        # secret's KEY but the scrub only ever empties it, never reads a value.
+        assert {"PATH", "TOOL_BROKER_SECRET", "AIOS_SESSION_ID"} <= env_keys
 
     def test_seccomp_profile_from_settings_lands_on_spec(self) -> None:
         """#807: ``_assemble_plan`` copies ``settings.sandbox_seccomp_profile``
@@ -100,14 +125,14 @@ class TestAssemblePlanImageAndDisk:
         assert plan.spec.seccomp_profile == "/x/seccomp.json"
 
 
-# ── build_spec_from_session resolution (#724 image, #725 disk) ───────────────
+# ── build_spec_from_session resolution (#724 image, snapshot budget) ─────────
 
 
 async def _build_with(
     *,
     env_config: EnvironmentConfig | None,
     docker_image: str = "ghcr.io/eumemic/aios-sandbox:latest",
-    sandbox_disk_bytes: int | None = None,
+    sandbox_snapshot_budget_bytes: int | None = None,
 ) -> ProvisioningPlan:
     from contextlib import ExitStack
 
@@ -117,7 +142,7 @@ async def _build_with(
         for cm in patch_build_spec_deps(
             env_config=env_config,
             docker_image=docker_image,
-            sandbox_disk_bytes=sandbox_disk_bytes,
+            sandbox_snapshot_budget_bytes=sandbox_snapshot_budget_bytes,
         ):
             stack.enter_context(cm)
         return await build_spec_from_session("sess_01TEST")
@@ -152,33 +177,45 @@ class TestBuildSpecImageResolution:
         )
         assert plan.spec.image == "ghcr.io/eumemic/aios-sandbox:latest"
 
+    @pytest.mark.asyncio
+    async def test_reserved_prefix_image_is_rejected(self) -> None:
+        """Cross-tenant gate (§5.8): the spec-build choke point rejects a
+        tenant ``image`` in the reserved per-session-snapshot namespace, so a
+        tenant can't mount another session's snapshot (and its baked secrets)."""
+        with pytest.raises(ValueError, match="reserved"):
+            await _build_with(
+                env_config=EnvironmentConfig.model_construct(
+                    image="aios-sbx-default-sess_victim:latest"
+                ),
+            )
 
-class TestBuildSpecDiskResolution:
-    """#725: per-env ``disk_bytes`` wins; else the global default; else None."""
+
+class TestBuildSpecSnapshotBudgetResolution:
+    """Per-env ``snapshot_budget_bytes`` wins; else the global default; else None."""
 
     @pytest.mark.asyncio
-    async def test_env_disk_overrides_global(self) -> None:
+    async def test_env_budget_overrides_global(self) -> None:
         plan = await _build_with(
-            env_config=EnvironmentConfig(disk_bytes=8 * 1024 * 1024 * 1024),
-            sandbox_disk_bytes=2 * 1024 * 1024 * 1024,
+            env_config=EnvironmentConfig(snapshot_budget_bytes=8 * 1024 * 1024 * 1024),
+            sandbox_snapshot_budget_bytes=2 * 1024 * 1024 * 1024,
         )
-        assert plan.spec.disk_bytes == 8 * 1024 * 1024 * 1024
+        assert plan.spec.snapshot_budget_bytes == 8 * 1024 * 1024 * 1024
 
     @pytest.mark.asyncio
-    async def test_unset_env_disk_falls_back_to_global(self) -> None:
+    async def test_unset_env_budget_falls_back_to_global(self) -> None:
         plan = await _build_with(
             env_config=EnvironmentConfig(packages={"pip": ["x"]}),
-            sandbox_disk_bytes=2 * 1024 * 1024 * 1024,
+            sandbox_snapshot_budget_bytes=2 * 1024 * 1024 * 1024,
         )
-        assert plan.spec.disk_bytes == 2 * 1024 * 1024 * 1024
+        assert plan.spec.snapshot_budget_bytes == 2 * 1024 * 1024 * 1024
 
     @pytest.mark.asyncio
     async def test_both_unset_is_none(self) -> None:
         plan = await _build_with(
             env_config=None,
-            sandbox_disk_bytes=None,
+            sandbox_snapshot_budget_bytes=None,
         )
-        assert plan.spec.disk_bytes is None
+        assert plan.spec.snapshot_budget_bytes is None
 
 
 # ── resolve_bash_timeout_ceiling (#725) ──────────────────────────────────────
