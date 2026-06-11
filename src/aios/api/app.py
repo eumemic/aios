@@ -40,6 +40,7 @@ from aios.errors import install_exception_handlers
 from aios.harness import runtime
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
+from aios.sandbox.volumes import attachments_root, memory_stores_root, uploads_root
 
 
 def create_app() -> FastAPI:
@@ -64,12 +65,6 @@ def create_app() -> FastAPI:
         # The api can't fix it — but it can refuse to fail silently. Log
         # loudly and keep serving non-FS routes; the worker's startup
         # repair pass is what actually heals the tree.
-        from aios.sandbox.volumes import (
-            attachments_root,
-            memory_stores_root,
-            uploads_root,
-        )
-
         euid = os.geteuid()
         for p in (
             settings.workspace_root,

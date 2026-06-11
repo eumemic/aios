@@ -79,7 +79,8 @@ def ensure_owned_dir(path: Path) -> Path:
     if os.geteuid() == 0:
         uid, gid = settings.workspaces_owner_uid, settings.workspaces_owner_gid
         for component in newly:
-            # The setting owns dirs UNDER workspace_root only. If a caller passed
+            # Only chown within the workspace tree (workspace_root itself and its
+            # descendants); never touch out-of-tree ancestors. If a caller passed
             # a path outside the tree (the mkdir honors any path — caller's
             # contract), the component-walk collected out-of-tree ancestors; do
             # NOT chown those.
