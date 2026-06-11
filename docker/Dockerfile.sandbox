@@ -28,7 +28,9 @@
 # `docker run --label`, so the worker's orphan reaper can find containers
 # started by previous worker processes.
 #
-# Entry point is `tail -f /dev/null` — the container stays alive between
+# Entry point is `/usr/bin/tail -f /dev/null` (absolute path — PATH-regression
+# defense-in-depth after #925; bare `tail` fails at OCI init on an empty PATH).
+# The container stays alive between
 # `docker exec` calls. Each bash/read/write/edit/glob/grep tool invocation
 # is a fresh `docker exec`, so shell state does not persist across calls
 # (one-shot exec model, see aios_v1_decisions.md).
@@ -66,7 +68,7 @@ RUN chmod 0755 /usr/local/bin/tool
 # Named non-root user `aios` (uid:gid 1000:1000) with a writable home.
 #
 # DELIBERATELY no top-level `USER aios` directive. The image runs on a
-# one-shot-exec model: `CMD ["tail","-f","/dev/null"]` keeps the
+# one-shot-exec model: `CMD ["/usr/bin/tail","-f","/dev/null"]` keeps the
 # container alive as **root**, and every tool call is a separate
 # `docker exec`. The agent uid is supplied per-exec via
 # `docker exec --user 1000:1000 ...` (follow-up seam issue), never as the
@@ -95,4 +97,4 @@ WORKDIR /workspace
 
 # Keep the container alive until we remove it. Each tool call is a
 # `docker exec`, not a `docker run`.
-CMD ["tail", "-f", "/dev/null"]
+CMD ["/usr/bin/tail", "-f", "/dev/null"]
