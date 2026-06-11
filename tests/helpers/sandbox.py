@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.sandbox.backends.base import (
     CommandResult,
     ManagedImage,
@@ -26,6 +27,13 @@ from aios.sandbox.backends.base import (
     SandboxSpec,
     SnapshotOutcome,
 )
+
+
+def limited_env(*allowed_hosts: str) -> EnvironmentConfig:
+    """An EnvironmentConfig whose networking is Limited to ``allowed_hosts``."""
+    return EnvironmentConfig(
+        networking=LimitedNetworking(type="limited", allowed_hosts=list(allowed_hosts))
+    )
 
 
 async def run_sandbox(backend: SandboxBackend, handle: SandboxHandle, cmd: str) -> tuple[int, str]:

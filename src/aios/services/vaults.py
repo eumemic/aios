@@ -24,6 +24,7 @@ key.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, assert_never, cast
@@ -35,6 +36,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import NotFoundError, OAuthRefreshError, ValidationError
 from aios.logging import get_logger
+from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.vaults import (
     AuthType,
     TokenEndpointAuth,
@@ -43,6 +45,7 @@ from aios.models.vaults import (
     VaultCredential,
     VaultCredentialCreate,
     VaultCredentialUpdate,
+    parse_allowed_host_entry,
 )
 
 MAX_CREDENTIALS_PER_VAULT = 20
@@ -639,3 +642,94 @@ async def resolve_session_env_var_credentials(
         )
         for row in rows
     ]
+
+
+def env_var_credential_containment_error(
+    env_config: EnvironmentConfig | None,
+    credential_allowed_hosts: Iterable[Sequence[str]],
+) -> str | None:
+    """Verdict for the #879 env-var-credential security gate.
+
+    Returns a human-readable error string if the session's
+    ``environment_variable`` credentials are NOT safely contained by the
+    environment, or ``None`` if the configuration is acceptable (including
+    the no-credentials common path).
+
+    ``credential_allowed_hosts`` is one ``allowed_hosts`` tuple per bound
+    env-var credential (the stored canonical entries). The caller supplies
+    these already-fetched — this function does no DB I/O so it stays pure
+    and unit-testable.
+
+    Two checks (both authoritative at provision; advisory at attach):
+
+    1. Networking must be ``Limited`` — the swap proxy only sees traffic
+       via the Limited lockdown DNAT, so under Unrestricted (or no env /
+       no networking config) the credential silently leaks/non-functions.
+    2. Every credential host must appear in the env's ``allowed_hosts``
+       host set (egress-escalation prevention). Host parts are compared
+       via ``parse_allowed_host_entry`` on BOTH sides — the single grammar
+       authority — so a credential path-prefix only tightens below an
+       already-allowed host.
+
+    The two sides parse asymmetrically. ``LimitedNetworking`` validates
+    its ``allowed_hosts`` against ``HOSTNAME_RE``, which accepts IP
+    literals; the credential grammar (``parse_allowed_host_entry`` →
+    ``_validate_credential_host``) is stricter and rejects them. So an env
+    entry can be a bare IP that the credential parse refuses. The ENV-side
+    extraction therefore skips entries ``parse_allowed_host_entry`` rejects
+    (an IP env host can never cover a non-IP credential host anyway — fail
+    closed, the credential is then rejected with the actionable message).
+    The CREDENTIAL side does NOT catch ``ValueError``: credential hosts are
+    canonicalized at create, so a malformed stored credential entry is a
+    real integrity problem and should surface (at provision it becomes a
+    refusal to provision, the safe direction).
+    """
+    cred_lists = list(credential_allowed_hosts)
+    # Iterate the OUTER list, not flattened hosts: a credential with an
+    # EMPTY allowed_hosts tuple still counts as "has a credential". Only a
+    # session with zero env-var credentials skips the gate entirely.
+    if not cred_lists:
+        return None
+
+    networking = env_config.networking if env_config else None
+    if not isinstance(networking, LimitedNetworking):
+        if env_config is None:
+            return (
+                "environment_variable credential requires a Limited environment, but the "
+                "session has no environment configured; the environment's allowed_hosts "
+                "is the containment boundary for the egress swap proxy"
+            )
+        return (
+            "environment_variable credential requires a Limited environment "
+            "(networking is not 'limited'); env allowed_hosts is the containment "
+            "boundary for the egress swap proxy"
+        )
+
+    # DNS hostnames are case-insensitive but ``HOSTNAME_RE`` (and thus
+    # ``parse_allowed_host_entry``) preserves the stored casing, so case-fold
+    # both sides — mirrors ``_validate_credential_host`` in ``models/vaults.py``,
+    # which documents that downstream comparisons (this is one) case-fold.
+    env_hosts: set[str] = set()
+    for entry in networking.allowed_hosts:
+        try:
+            env_hosts.add(parse_allowed_host_entry(entry)[0].lower())
+        except ValueError:
+            # LimitedNetworking validates allowed_hosts with HOSTNAME_RE, which
+            # accepts IP literals that parse_allowed_host_entry (the stricter
+            # credential grammar) rejects. Such an env entry can never cover a
+            # credential host — credential hosts are validated non-IP hostnames
+            # — so drop it from the comparable set. Fail closed: an otherwise
+            # uncovered credential host is then rejected with the actionable
+            # message instead of crashing the advisory 422 / provision gate.
+            continue
+    for cred_hosts in cred_lists:
+        for entry in cred_hosts:
+            # Keep the stored spelling for the message; compare case-folded.
+            cred_host = parse_allowed_host_entry(entry)[0]
+            if cred_host.lower() not in env_hosts:
+                return (
+                    "environment_variable credential requires a Limited environment whose "
+                    f"allowed_hosts cover the credential's hosts (credential host {cred_host!r} "
+                    "not covered)"
+                )
+    return None
