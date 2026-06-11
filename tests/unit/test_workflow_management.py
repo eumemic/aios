@@ -26,9 +26,10 @@ import pytest
 
 import aios.tools  # noqa: F401 — registers the builtins
 from aios.errors import CryptoDecryptError, ForbiddenError
-from aios.models.workflows import WfRunWaitResponse, Workflow
+from aios.models.workflows import WfRunWaitResponse, Workflow, WorkflowCreate, WorkflowUpdate
 from aios.tools import workflow_management as wm
 from aios.tools.invoke import ToolBail, invoke_builtin
+from aios.tools.registry import registry
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -40,6 +41,23 @@ def _stub_runtime(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         "aios.services.sessions.load_session_account_id", AsyncMock(return_value="acc_x")
     )
+
+
+def _assert_script_contract_text(text: str | None) -> None:
+    assert text
+    for snippet in ("async def main", "agent", "tool", "gate", "parallel", "pipeline", "log"):
+        assert snippet in text
+
+
+class TestWorkflowScriptContractDiscovery:
+    def test_create_and_update_script_schema_descriptions_include_contract(self) -> None:
+        for model in (WorkflowCreate, WorkflowUpdate):
+            description = model.model_json_schema()["properties"]["script"]["description"]
+            _assert_script_contract_text(description)
+
+    def test_registered_create_and_update_tool_descriptions_include_contract(self) -> None:
+        for tool_name in ("create_workflow", "update_workflow"):
+            _assert_script_contract_text(registry.get(tool_name).description)
 
 
 def _workflow(**over: Any) -> Workflow:

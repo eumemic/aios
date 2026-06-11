@@ -22,6 +22,9 @@ a child session and harvests its completion marker). ``parallel()``/``pipeline()
 fan a run out across concurrent branches, scheduled cooperatively by the driver:
 each branch keys its own capabilities (so every ``call_key`` is deterministic across
 replays), and the whole live frontier is emitted at once when the run suspends.
+
+The model-facing statement of this contract is
+``aios.models.workflows.WORKFLOW_SCRIPT_CONTRACT``; keep it in sync.
 """
 
 from __future__ import annotations

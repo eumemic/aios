@@ -43,7 +43,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.harness import runtime
-from aios.models.workflows import WorkflowCreate, WorkflowUpdate
+from aios.models.workflows import WORKFLOW_SCRIPT_CONTRACT, WorkflowCreate, WorkflowUpdate
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail
@@ -209,14 +209,16 @@ CREATE_WORKFLOW_DESCRIPTION = (
     "Author a new workflow (a deterministic Python orchestrator) under your account. "
     "Its declared tool/server surface must be a subset of your own — you cannot grant a "
     "workflow a tool, MCP server, or HTTP server you don't yourself have. Returns the "
-    "created workflow (id, name, version)."
+    "created workflow (id, name, version).\n\n"
+    f"{WORKFLOW_SCRIPT_CONTRACT}"
 )
 UPDATE_WORKFLOW_DESCRIPTION = (
     "Update one of your workflows in place, bumping its version. Pass the current "
     "'version' as an optimistic-concurrency token (a stale token is rejected — re-read "
     "and retry). Omitted fields are preserved. The resulting tool/server surface must "
     "still be a subset of your own. In-flight runs are unaffected (a run pins its "
-    "workflow's script + surface at launch)."
+    "workflow's script + surface at launch).\n\n"
+    f"{WORKFLOW_SCRIPT_CONTRACT}"
 )
 CREATE_RUN_DESCRIPTION = (
     "Launch a run of a workflow you can access. The run executes with the workflow's "
