@@ -268,6 +268,16 @@ async def test_resume_integrity_path_home_pwd(
     )
     await backend.destroy(h1)
 
+    if flatten:
+        # The flattened image's baked CMD is the keepalive set by ``_flatten``'s
+        # ``--change`` — assert docker's actual ``--change`` parse produced the
+        # absolute-path form (#925/#938), not just that we emitted the string.
+        rc, out, err = await _docker(["image", "inspect", "--format", "{{json .Config.Cmd}}", tag])
+        assert rc == 0, err
+        assert out.strip() == '["/usr/bin/tail","-f","/dev/null"]', (
+            f"flattened image CMD not the absolute-path keepalive: {out.strip()!r}"
+        )
+
     h2 = await backend.create(
         _spec(
             instance_id=instance_id, session_id=session_id, workspace=workspace, snapshot_image=tag

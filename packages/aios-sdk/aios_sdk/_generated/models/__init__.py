@@ -84,6 +84,7 @@ from .list_response_session_template import ListResponseSessionTemplate
 from .list_response_skill import ListResponseSkill
 from .list_response_skill_version import ListResponseSkillVersion
 from .list_response_trigger_echo import ListResponseTriggerEcho
+from .list_response_trigger_run_echo import ListResponseTriggerRunEcho
 from .list_response_union_memory_memory_prefix import (
     ListResponseUnionMemoryMemoryPrefix,
 )
@@ -135,6 +136,12 @@ from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle
     PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle,
 )
 from .recent_chat import RecentChat
+from .run_completion_source import RunCompletionSource
+from .run_completion_source_replace import RunCompletionSourceReplace
+from .run_completion_source_replace_statuses_item import (
+    RunCompletionSourceReplaceStatusesItem,
+)
+from .run_completion_source_statuses_item import RunCompletionSourceStatusesItem
 from .runtime_lifecycle_request import RuntimeLifecycleRequest
 from .runtime_lifecycle_request_data_type_0 import RuntimeLifecycleRequestDataType0
 from .runtime_management_call_result_request import RuntimeManagementCallResultRequest
@@ -203,6 +210,8 @@ from .trigger_create_metadata import TriggerCreateMetadata
 from .trigger_echo import TriggerEcho
 from .trigger_echo_last_fire_status_type_0 import TriggerEchoLastFireStatusType0
 from .trigger_echo_metadata import TriggerEchoMetadata
+from .trigger_run_echo import TriggerRunEcho
+from .trigger_run_echo_event_type_0 import TriggerRunEchoEventType0
 from .trigger_update import TriggerUpdate
 from .trigger_update_metadata_type_0 import TriggerUpdateMetadataType0
 from .unrestricted_networking import UnrestrictedNetworking
@@ -245,6 +254,8 @@ from .whatsapp_start_pairing_request import WhatsappStartPairingRequest
 from .whatsapp_start_pairing_response import WhatsappStartPairingResponse
 from .whatsapp_unpair_request import WhatsappUnpairRequest
 from .workflow import Workflow
+from .workflow_action import WorkflowAction
+from .workflow_action_replace import WorkflowActionReplace
 from .workflow_create import WorkflowCreate
 from .workflow_create_input_schema_type_0 import WorkflowCreateInputSchemaType0
 from .workflow_create_output_schema_type_0 import WorkflowCreateOutputSchemaType0
@@ -337,6 +348,7 @@ __all__ = (
     "ListResponseSkill",
     "ListResponseSkillVersion",
     "ListResponseTriggerEcho",
+    "ListResponseTriggerRunEcho",
     "ListResponseUnionMemoryMemoryPrefix",
     "ListResponseVault",
     "ListResponseVaultCredential",
@@ -382,6 +394,10 @@ __all__ = (
     "OneShotSource",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "RecentChat",
+    "RunCompletionSource",
+    "RunCompletionSourceReplace",
+    "RunCompletionSourceReplaceStatusesItem",
+    "RunCompletionSourceStatusesItem",
     "RuntimeLifecycleRequest",
     "RuntimeLifecycleRequestDataType0",
     "RuntimeManagementCallResultRequest",
@@ -448,6 +464,8 @@ __all__ = (
     "TriggerEcho",
     "TriggerEchoLastFireStatusType0",
     "TriggerEchoMetadata",
+    "TriggerRunEcho",
+    "TriggerRunEchoEventType0",
     "TriggerUpdate",
     "TriggerUpdateMetadataType0",
     "UnrestrictedNetworking",
@@ -488,6 +506,8 @@ __all__ = (
     "WhatsappStartPairingResponse",
     "WhatsappUnpairRequest",
     "Workflow",
+    "WorkflowAction",
+    "WorkflowActionReplace",
     "WorkflowCreate",
     "WorkflowCreateInputSchemaType0",
     "WorkflowCreateOutputSchemaType0",

@@ -277,8 +277,9 @@ class TestFlattenConfigRestore:
         self, fake_docker: _FakeDocker
     ) -> None:
         """Import strips all config; flatten restores WORKDIR/HOME/CMD and
-        re-stamps labels, but deliberately NOT PATH (Docker injects a default,
-        which keeps the restored CMD execable). §5.2."""
+        re-stamps labels, but deliberately NOT PATH. The restored CMD invokes
+        ``tail`` by absolute path (``/usr/bin/tail``), so it no longer depends
+        on PATH resolution at all. §5.2."""
         fake_docker.container_labels = {
             "aios.base_image": "ghcr.io/eumemic/aios-sandbox:latest",
             "aios.session_id": "sess_x",
@@ -294,7 +295,7 @@ class TestFlattenConfigRestore:
         joined = " ".join(consumer)
         assert "WORKDIR /workspace" in joined
         assert "ENV HOME=/home/aios" in joined
-        assert 'CMD ["tail","-f","/dev/null"]' in joined
+        assert 'CMD ["/usr/bin/tail","-f","/dev/null"]' in joined
         assert "aios.flattened=true" in joined
         assert "aios.base_image=ghcr.io/eumemic/aios-sandbox:latest" in joined
         # PATH is NOT restored.

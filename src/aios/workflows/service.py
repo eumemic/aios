@@ -14,7 +14,7 @@ import asyncpg
 from aios.config import get_settings
 from aios.db.queries import get_environment, get_session_bare, get_session_vault_ids
 from aios.db.queries import workflows as wf_queries
-from aios.errors import AiosError, ForbiddenError, NotFoundError, RateLimitedError
+from aios.errors import AiosError, ConflictError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.models.attenuation import Surface, surface_of
 from aios.models.workflows import WfRun
 from aios.services import agents as agents_service
@@ -45,6 +45,7 @@ async def create_run(
     vault_ids: list[str] | None = None,
     launcher_session_id: str | None = None,
     parent_run_id: str | None = None,
+    expected_version: int | None = None,
 ) -> WfRun:
     """Create a run that snapshots the workflow's current script, then wake it.
 
@@ -68,6 +69,13 @@ async def create_run(
     :class:`WorkflowRunDepthExceededError`. The operator/HTTP path passes none, so it is
     a root run (never capped).
 
+    ``expected_version`` is the trigger ``workflow`` action's drift-assertion pin:
+    when set, the workflow's CURRENT version must equal it or the launch raises
+    :class:`ConflictError` — checked here, at the same consistency point as the
+    script snapshot (a caller-side pre-check would race a concurrent
+    ``update_workflow`` between check and snapshot). ``None`` (every existing
+    caller) floats to the current version.
+
     **Horizontal fan-out caps:** outstanding (non-terminal) runs are bounded per
     launcher session (``workflow_runs_per_launcher_max``, agent path only) and per
     account (``workflow_runs_per_account_max``, every launch) — a breach raises
@@ -88,6 +96,15 @@ async def create_run(
     async with pool.acquire() as conn, conn.transaction():
         await get_environment(conn, environment_id, account_id=account_id)  # 404s foreign/absent
         workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
+        if expected_version is not None and workflow.version != expected_version:
+            raise ConflictError(
+                f"workflow version drift: pinned {expected_version}, current {workflow.version}",
+                detail={
+                    "pinned": expected_version,
+                    "current": workflow.version,
+                    "id": workflow_id,
+                },
+            )
         script_sha = hashlib.sha256(workflow.script.encode("utf-8")).hexdigest()
         if launcher_session_id is not None:
             launcher_session = await get_session_bare(
@@ -105,12 +122,17 @@ async def create_run(
             else surface_of(workflow)
         )
         if parent_run_id is not None:
-            # ``parent_run_id`` is trusted same-account: the only caller that sets it is
-            # the builtin, threading the launcher session's own ``parent_run_id`` (set by
-            # the run-spawn machinery to a same-account run). The account-scoped ancestor
-            # walk relies on that — a foreign parent would resolve to depth 0 and read as
-            # a root. If a future path ever lets ``parent_run_id`` be caller-supplied, it
-            # must be account-validated here (like ``environment_id`` above).
+            # ``parent_run_id`` is trusted same-account. Two callers set it: the
+            # ``create_run`` builtin, threading the launcher session's own
+            # ``parent_run_id`` (set by the run-spawn machinery to a same-account
+            # run), and the trigger fire path (#819), threading either the
+            # completing run's id (same-account by the completion matcher's
+            # account-equality conjunct) or the owner session's own
+            # ``parent_run_id`` — the same provenance as the builtin. The
+            # account-scoped ancestor walk relies on that — a foreign parent
+            # would resolve to depth 0 and read as a root. If a future path ever
+            # lets ``parent_run_id`` be caller-supplied, it must be
+            # account-validated here (like ``environment_id`` above).
             parent_depth = await wf_queries.run_ancestor_depth(
                 conn, parent_run_id, account_id=account_id
             )

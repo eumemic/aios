@@ -552,6 +552,9 @@ def _source_summary(row: dict[str, Any]) -> str:
             return f"cron: {source.get('schedule')}"
         if source.get("kind") == "one_shot":
             return f"once @ {source.get('fire_at')}"
+        if source.get("kind") == "run_completion":
+            statuses = source.get("statuses") or []
+            return f"on-completion: {source.get('workflow_id')} {statuses}"
     return ""
 
 
@@ -565,6 +568,10 @@ def _action_summary(row: dict[str, Any]) -> str:
         return f"sandbox: {_preview(action.get('command') or '')}"
     if kind == "wake_owner":
         return f"wake_owner: {_preview(action.get('content') or '')}"
+    if kind == "workflow":
+        pin = action.get("workflow_version")
+        suffix = f" @v{pin}" if pin is not None else ""
+        return f"workflow: {action.get('workflow_id')}{suffix}"
     return str(kind or "")
 
 
@@ -710,5 +717,38 @@ def triggers_update(
             )
         render_single(obj)
         return None
+
+    run_or_die(_run)
+
+
+_TRIGGER_RUN_COLS = (
+    "id",
+    "trigger_context",
+    "status",
+    "result_id",
+    "error_summary",
+    "created_at",
+    "started_at",
+    "finished_at",
+)
+
+
+@triggers_app.command("runs", help="List a trigger's fires (the per-fire audit), newest first.")
+@covers("list_trigger_runs")
+def triggers_runs(
+    ctx: typer.Context,
+    session_id: str,
+    name: str,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
+) -> None:
+    def _run() -> None:
+        state, client = with_client(ctx)
+        with client:
+            envelope = client.request(
+                "GET",
+                f"/v1/sessions/{session_id}/triggers/{name}/runs",
+                params={"limit": limit},
+            )
+        render_list(state.output_format, envelope, columns=_TRIGGER_RUN_COLS)
 
     run_or_die(_run)

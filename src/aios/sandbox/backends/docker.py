@@ -571,14 +571,16 @@ class DockerBackend:
         Flatten applies overlay whiteouts (so "delete files to shrink" finally
         works) and strips ALL baked config (the definitive secret scrub). Import
         loses the base image's config, so restore ``WORKDIR``/``HOME``/``CMD``
-        and re-stamp the managed labels. ``PATH`` is deliberately NOT restored
-        — Docker injects its default for a config with no PATH, which is what
-        keeps the restored ``CMD`` execable (an empty PATH would break it). The
-        resumed container's env is re-injected fresh via ``docker run --env``
-        regardless, so config env doesn't affect runtime — only the artifact.
+        and re-stamp the managed labels. ``PATH`` is deliberately NOT restored.
+        The restored ``CMD`` invokes ``tail`` by absolute path
+        (``/usr/bin/tail``), so it no longer depends on PATH resolution — a
+        PATH regression can't break container init (defense-in-depth after
+        #925). The resumed container's env is re-injected fresh via
+        ``docker run --env`` regardless, so config env doesn't affect runtime
+        — only the artifact.
         """
         changes = [
-            'CMD ["tail","-f","/dev/null"]',
+            'CMD ["/usr/bin/tail","-f","/dev/null"]',
             "WORKDIR /workspace",
             "ENV HOME=/home/aios",
             f"LABEL {MANAGED_LABEL_KEY}={MANAGED_LABEL_VALUE}",

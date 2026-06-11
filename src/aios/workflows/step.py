@@ -49,7 +49,7 @@ from aios.models.attenuation import surface_of
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
 from aios.services import attenuation as attenuation_service
 from aios.services.sessions import create_child_session
-from aios.services.wake import defer_run_wake, defer_wake
+from aios.services.wake import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.workflows import run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.host_launcher import EmittedCapability, run_script_host
@@ -658,17 +658,13 @@ async def _complete_run(
     payload: dict[str, Any] = {"output": output, "is_error": is_error}
     if error_kind is not None:
         payload["error"] = {"kind": error_kind}
-    async with conn.transaction():
-        await wf_queries.append_run_event(
-            conn, account_id=run.account_id, run_id=run.id, type="run_completed", payload=payload
-        )
-        await wf_queries.set_run_terminal(
-            conn,
-            run.id,
-            status="errored" if is_error else "completed",
-            output=None if is_error else output,
-            account_id=run.account_id,
-        )
+    await _commit_terminal_and_dispatch(
+        conn,
+        run,
+        status="errored" if is_error else "completed",
+        payload=payload,
+        output=None if is_error else output,
+    )
 
 
 async def _cancel_run(conn: asyncpg.Connection[Any], run: WfRun, *, reason: Any = None) -> None:
@@ -678,16 +674,55 @@ async def _cancel_run(conn: asyncpg.Connection[Any], run: WfRun, *, reason: Any 
     ``run_completed`` bookend (``cancelled: True``, so a live ``/stream`` closes on
     the event) + a ``cancelled`` terminal status, atomically. Reached only from the
     pre-replay cancel harvest, so it runs under the lock as the journal's single
-    writer. Like a natural completion, child reclaim is left to the deferred
-    quiescence sweep (see :func:`_complete_run`).
+    writer. A cancel is a terminal completion too — watchers with ``cancelled`` in
+    their statuses filter fire. Like a natural completion, child reclaim is left to
+    the deferred quiescence sweep (see :func:`_complete_run`).
     """
     payload: dict[str, Any] = {"output": None, "is_error": False, "cancelled": True}
     if reason is not None:
         payload["reason"] = reason
+    await _commit_terminal_and_dispatch(conn, run, status="cancelled", payload=payload, output=None)
+
+
+async def _commit_terminal_and_dispatch(
+    conn: asyncpg.Connection[Any],
+    run: WfRun,
+    *,
+    status: str,
+    payload: dict[str, Any],
+    output: Any,
+) -> None:
+    """THE terminal chokepoint: ``run_completed`` + status flip + run_completion
+    trigger dispatch (#819), one transaction; the fire defers post-commit.
+
+    Exactly-once dispatch gate: the journal memo (``UNIQUE NULLS NOT DISTINCT
+    (run_id, call_key, type)``) guarantees exactly one ``run_completed`` insert
+    per run EVER commits — under procrastinate dual execution the loser's
+    append returns ``None`` and dispatches nothing. The pending carrier rows
+    commit atomically with the terminal transition ("the run completed" and
+    "these fires are owed" are one fact). The post-commit defers are
+    best-effort by design — they ride procrastinate's separate psycopg pool,
+    so a loss (worker crash, broker blip) leaves durable ``pending`` carrier
+    rows the periodic sweep re-defers; never a silently dropped event fire.
+    """
+    fires: list[db_queries.TriggerFireRef] = []
     async with conn.transaction():
-        await wf_queries.append_run_event(
+        inserted = await wf_queries.append_run_event(
             conn, account_id=run.account_id, run_id=run.id, type="run_completed", payload=payload
         )
         await wf_queries.set_run_terminal(
-            conn, run.id, status="cancelled", output=None, account_id=run.account_id
+            conn, run.id, status=status, output=output, account_id=run.account_id
         )
+        if inserted is not None:
+            fires = await db_queries.insert_run_completion_fires(
+                conn,
+                account_id=run.account_id,
+                workflow_id=run.workflow_id,
+                run_id=run.id,
+                status=status,
+            )
+    for fire in fires:
+        try:
+            await defer_trigger_fire(fire.trigger_id, fire.trigger_run_id)
+        except Exception:
+            log.exception("trigger.fire_defer_failed", trigger_run_id=fire.trigger_run_id)
