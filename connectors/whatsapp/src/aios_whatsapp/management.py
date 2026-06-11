@@ -100,6 +100,16 @@ class WhatsappManagementMixin:
             # which can never equal `expected`, so it fails closed.
             scanned = _jid_identity_key(jid)
             expected = normalize_phone(external_account_id).removeprefix("+")
+            # No special-case for non-phone JID spaces (e.g. WhatsApp LID —
+            # `@lid` identities that live in a separate identifier space and
+            # cannot be mapped to a phone number): `_jid_identity_key` would
+            # produce a value that can never equal a phone-digit `expected`,
+            # so they fall into the fail-closed branch below BY DESIGN.
+            # Treating an unverifiable identity as a failure (unpair) rather
+            # than passing it through is the whole point of this gate — a
+            # fail-open path would reopen the exact wrong-account bypass it
+            # closes.  A LID-aware verification path, should the daemon ever
+            # report a LID self-JID at pairing, is tracked as a followup.
             if scanned != expected:
                 if scanned:
                     mismatch = (
