@@ -225,10 +225,10 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
 
         Unbounded: a bounded queue with silent-drop-on-full would lose
         real user messages under a slow ``emit_inbound`` round-trip.
-        Back-pressure to signal-cli is the fail-hard alternative — the
-        listener's queue ``put`` blocks, signal-cli's stdout drain
-        buffer fills, and the operator notices via the resulting RPC
-        timeout instead of by users missing replies.
+        Routing enqueues with ``put_nowait``, which never blocks on an
+        unbounded queue — there is no back-pressure to signal-cli; a slow
+        drain grows the queue in memory rather than stalling the daemon's
+        stdout.
         """
         if phone not in self._inbound_queues:
             self._inbound_queues[phone] = asyncio.Queue()
@@ -369,10 +369,11 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         await self._maybe_refresh_roster(state, envelope)
         # Guard ONLY the parse step: a malformed envelope dict must not
         # kill the per-connection drain loop (or, via the dispatcher's
-        # routing, the whole inbound stream).  ``emit_inbound`` is
-        # deliberately left outside this guard — its 401/403/5xx re-raise
-        # stays fatal so a broken runtime token / server outage crashes
-        # the container instead of being silently swallowed here.
+        # routing, the whole inbound stream).  ``_maybe_refresh_roster``
+        # above and ``emit_inbound`` below are deliberately left outside
+        # this guard — a roster RPC failure or a 401/403/5xx re-raise
+        # stays fatal so a broken runtime token / daemon / server outage
+        # crashes the container instead of being silently swallowed here.
         try:
             msg = parse_envelope(envelope, bot_account_uuid=state.bot_uuid)
         except Exception:

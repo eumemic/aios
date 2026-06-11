@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -42,6 +44,19 @@ GROUP_CHAT_ID = "abcXYZ123_-"  # URL-safe base64; not a UUID
 # decode_chat_id reverses URL-safe → standard base64 before handing the
 # raw form to signal-cli.
 GROUP_RAW_ID = "abcXYZ123/+"
+
+
+async def _start_server(
+    handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
+) -> tuple[asyncio.Server, int]:
+    """Start a one-shot loopback TCP server on an ephemeral port.
+
+    Returns the server (use ``async with``) and the bound port so tests
+    can point an ``RpcClient`` / ``RpcListener`` at a fake signal-cli.
+    """
+    server = await asyncio.start_server(handler, host="127.0.0.1", port=0)
+    port = server.sockets[0].getsockname()[1]
+    return server, port
 
 
 def _load(name: str) -> dict[str, Any]:

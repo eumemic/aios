@@ -33,7 +33,7 @@ from aios_signal.connector import SignalConnector, _SignalConnectionState
 from aios_signal.errors import ListenerClosedError
 from aios_signal.parse import parse_envelope
 from aios_signal.rpc import RpcListener
-from tests.conftest import ALICE_UUID, BOT_UUID, CONNECTION_ID, PHONE
+from tests.conftest import ALICE_UUID, BOT_UUID, CONNECTION_ID, PHONE, _start_server
 
 # ── shared helpers ────────────────────────────────────────────────────
 
@@ -58,14 +58,6 @@ def _receive_line(account: str, envelope: dict[str, Any]) -> bytes:
         "params": {"account": account, "envelope": envelope},
     }
     return json.dumps(notification).encode() + b"\n"
-
-
-async def _start_server(
-    handler: Any,
-) -> tuple[asyncio.Server, int]:
-    server = await asyncio.start_server(handler, host="127.0.0.1", port=0)
-    port = server.sockets[0].getsockname()[1]
-    return server, port
 
 
 def _state() -> _SignalConnectionState:
