@@ -168,6 +168,7 @@ class TestReleaseIfMountsChanged:
         with (
             patch("aios.sandbox.registry.build_spec_from_session", slow_build_spec),
             patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
         ):
@@ -419,6 +420,7 @@ class TestLockdownFailsClosed:
                 AsyncMock(return_value=_provisioning_plan_limited("sess_X")),
             ),
             patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             # NOTE: apply_network_lockdown is NOT patched — we want the real
             # fail-closed behavior to fire against the failing backend.exec.
@@ -480,6 +482,7 @@ class TestStaleHandleDetection:
                 AsyncMock(return_value=_provisioning_plan("sess_X")),
             ),
             patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
         ):
@@ -504,6 +507,7 @@ class TestStaleHandleDetection:
                 AsyncMock(return_value=_provisioning_plan("sess_X")),
             ),
             patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
         ):
@@ -548,6 +552,7 @@ class TestStaleHandleDetection:
                 AsyncMock(return_value=_provisioning_plan("sess_X")),
             ),
             patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
         ):
@@ -593,6 +598,7 @@ class TestStaleHandleDetection:
                     AsyncMock(return_value=_provisioning_plan("sess_X")),
                 ),
                 patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+                patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
                 patch("aios.sandbox.registry.install_packages", AsyncMock()),
                 patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
             ):
@@ -637,6 +643,7 @@ class TestStaleHandleDetection:
         with (
             patch("aios.sandbox.registry.build_spec_from_session", slow_build_spec),
             patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
         ):
@@ -712,6 +719,7 @@ class TestSpecVersionDrift:
                 AsyncMock(return_value=_provisioning_plan("sess_X")),
             ),
             patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
         ):
@@ -799,6 +807,7 @@ class TestSpecVersionDrift:
                 AsyncMock(return_value=plan),
             ),
             patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
         ):

@@ -43,6 +43,7 @@ from aios.config import get_settings
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError, SandboxHandle
+from aios.sandbox.egress_ca import CA_CERT_SANDBOX_PATH, get_egress_ca
 
 log = get_logger("aios.sandbox.setup")
 
@@ -121,6 +122,46 @@ async def ensure_workspace_runtime_dirs(backend: SandboxBackend, handle: Sandbox
     if result.exit_code != 0:
         log.warning(
             "sandbox.workspace_runtime_dirs_setup_failed",
+            session_id=handle.session_id,
+            exit_code=result.exit_code,
+            stderr=result.stderr[:500],
+        )
+
+
+async def install_egress_ca(backend: SandboxBackend, handle: SandboxHandle) -> None:
+    """Install the worker's egress-CA cert into the sandbox trust store.
+
+    Writes the PEM into the Debian drop-in directory and regenerates the
+    aggregate bundle, so OpenSSL-based clients and Node (via the
+    ``TRUST_STORE_ENV`` vars baked into the spec) trust leaf certs the
+    secret-egress proxy will present for allowlisted hosts.
+
+    Failures are logged but don't fail the provision — until the egress
+    proxy terminates TLS, a missing CA costs nothing, and after that it
+    fails safe (the sandbox refuses the proxy's leaf rather than trusting
+    anything extra). Revisit the posture when env-var credentials are
+    attached (#876): a silently missing CA then turns into in-sandbox TLS
+    verification failures on exactly the allowlisted hosts.
+
+    The ``&&`` chain keeps the exit code all-or-nothing so a partial
+    install (drop-in written, bundle not regenerated — Node would trust
+    the CA while curl/python don't) still trips the warning. ``printf
+    '%s'`` is load-bearing: the PEM starts with ``-----BEGIN``, which
+    bash's printf would otherwise parse as an (invalid) option string.
+    """
+    cert_pem = get_egress_ca().cert_pem
+    cmd = (
+        f"mkdir -p {CA_CERT_SANDBOX_PATH.rsplit('/', 1)[0]} && "
+        f"printf '%s' '{cert_pem}' > {CA_CERT_SANDBOX_PATH} && "
+        "update-ca-certificates"
+    )
+    settings = get_settings()
+    result = await backend.exec(
+        handle, cmd, timeout_seconds=60, max_output_bytes=settings.bash_max_output_bytes
+    )
+    if result.exit_code != 0:
+        log.warning(
+            "sandbox.egress_ca_install_failed",
             session_id=handle.session_id,
             exit_code=result.exit_code,
             stderr=result.stderr[:500],

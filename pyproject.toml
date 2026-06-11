@@ -31,6 +31,7 @@ dependencies = [
     "aiodocker>=0.23",
     # Crypto + ids
     "pynacl>=1.5",
+    "cryptography>=46",         # egress-CA x509 cert + EC key (sandbox/egress_ca.py)
     "python-ulid>=3.0",
     # LLM client
     "litellm>=1.55",

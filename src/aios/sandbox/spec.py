@@ -46,6 +46,7 @@ from aios.sandbox.backends.base import (
     SandboxSpec,
     Unrestricted,
 )
+from aios.sandbox.egress_ca import TRUST_STORE_ENV
 from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.github_clone import (
     GithubCloneError,
@@ -478,6 +479,11 @@ def _assemble_plan(
 
     merged_env: dict[str, str] = {
         **WORKSPACE_RUNTIME_ENV,
+        # Trust-store defaults precede env_config.env/session_env so a
+        # custom image (#724) with a non-Debian CA layout can override
+        # them; vault credential secret_names can't claim them either
+        # way (RESERVED_SANDBOX_ENV_KEYS).
+        **TRUST_STORE_ENV,
         **(env_config.env if env_config and env_config.env else {}),
         **session_env,
         "TOOL_BROKER_URL": tool_broker_url,

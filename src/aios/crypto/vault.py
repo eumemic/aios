@@ -57,38 +57,45 @@ class CryptoBox:
         self._key = master_key
         self._box = SecretBox(master_key)
 
-    def derive_account_subkey(self, account_id: str) -> CryptoBox:
-        """Return a new :class:`CryptoBox` keyed to ``account_id`` via HKDF.
+    def derive_subkey_bytes(self, info: str) -> bytes:
+        """Derive a 32-byte HKDF-SHA256 subkey for the domain context ``info``.
 
-        Uses HKDF-SHA256 with the current box's key as IKM, an aios-specific
-        salt, and ``f"aios-account-{account_id}"`` as the info context.
         Properties:
 
-        * Deterministic — re-deriving for the same account_id returns
-          the same subkey bytes.
-        * Domain-separated — two different account_ids produce two
+        * Deterministic — the same ``info`` always yields the same bytes.
+        * Domain-separated — two different ``info`` strings produce two
           unrelated 32-byte subkeys; an attacker holding one subkey
           cannot recover the master or any sibling subkey.
         * One-way — knowing a subkey doesn't reveal the master.
 
-        The returned subkey is itself a :class:`CryptoBox` and supports
-        ``encrypt`` / ``decrypt`` exactly like the master.
+        Callers own the ``info`` namespace: account subkeys use
+        ``aios-account-<id>`` (see :meth:`derive_account_subkey`), the
+        sandbox egress CA uses ``aios-egress-ca-v1``
+        (``sandbox/egress_ca.py``).
         """
-        if not account_id:
-            raise ValueError("account_id must be non-empty")
         # Single-extract HKDF-SHA256: the "extract" step normalises an
         # arbitrary-strength IKM (always 32 bytes for us) into a PRK,
         # then the "expand" step stretches PRK + info into the output.
         # Salt is a fixed application-specific constant — operators
         # rotate by reissuing keys, not by changing salt.
         salt = b"aios-vault-hkdf-v1"
-        info = f"aios-account-{account_id}".encode()
         prk = hmac.new(salt, self._key, hashlib.sha256).digest()
         # Single-block expand: output is one SHA256 block (32 bytes),
         # which matches SecretBox's KEY_BYTES so we don't need to chain
         # multiple T(i) outputs.
-        t1 = hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
-        return CryptoBox(t1)
+        return hmac.new(prk, info.encode() + b"\x01", hashlib.sha256).digest()
+
+    def derive_account_subkey(self, account_id: str) -> CryptoBox:
+        """Return a new :class:`CryptoBox` keyed to ``account_id`` via HKDF.
+
+        A :meth:`derive_subkey_bytes` wrapper with the
+        ``f"aios-account-{account_id}"`` info context; the returned
+        subkey is itself a :class:`CryptoBox` and supports ``encrypt`` /
+        ``decrypt`` exactly like the master.
+        """
+        if not account_id:
+            raise ValueError("account_id must be non-empty")
+        return CryptoBox(self.derive_subkey_bytes(f"aios-account-{account_id}"))
 
     @classmethod
     def from_base64(cls, encoded: str) -> CryptoBox:
