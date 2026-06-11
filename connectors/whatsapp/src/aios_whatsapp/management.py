@@ -99,7 +99,12 @@ class WhatsappManagementMixin:
             # truth for JID parsing in this package.  An empty jid yields "",
             # which can never equal `expected`, so it fails closed.
             scanned = _jid_identity_key(jid)
-            expected = normalize_phone(external_account_id).removeprefix("+")
+            # Compare digits-only (mirrors connector._phone_to_jid):
+            # normalize_phone strips only spaces/dashes, so a phone stored
+            # as "+1 (555) 111-2222" or "+1.555.111.2222" would otherwise
+            # never equal the scanned JID's pure-digit user part and a
+            # CORRECTLY paired device would be falsely auto-unpaired.
+            expected = "".join(c for c in external_account_id if c.isdigit())
             # No special-case for non-phone JID spaces (e.g. WhatsApp LID —
             # `@lid` identities that live in a separate identifier space and
             # cannot be mapped to a phone number): `_jid_identity_key` would
@@ -109,7 +114,7 @@ class WhatsappManagementMixin:
             # than passing it through is the whole point of this gate — a
             # fail-open path would reopen the exact wrong-account bypass it
             # closes.  A LID-aware verification path, should the daemon ever
-            # report a LID self-JID at pairing, is tracked as a followup.
+            # report a LID self-JID at pairing, is tracked as a followup (#971).
             if scanned != expected:
                 if scanned:
                     mismatch = (

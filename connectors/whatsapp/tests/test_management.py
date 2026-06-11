@@ -175,6 +175,43 @@ async def test_confirm_pairing_match_returns_success_without_unpair(
     }
 
 
+@pytest.mark.parametrize(
+    "formatted_phone",
+    [
+        "+1 (555) 111-2222",
+        "+1.555.111.2222",
+        "+1-555-111-2222",
+    ],
+)
+async def test_confirm_pairing_formatted_phone_digits_match_succeeds(
+    connector: WhatsappConnector, formatted_phone: str
+) -> None:
+    """A phone stored with separators normalize_phone doesn't strip (parens,
+    dots) must still compare digits-only against the scanned JID — a
+    correctly paired device must NOT be falsely auto-unpaired.  (Ported from
+    the parallel PR #969, whose comparison-semantics catch this encodes; the
+    issue spec's normalize_phone-based comparison was the latent bug.)"""
+    # Model the real scenario: the connection was CREATED with a formatted
+    # phone — serve_connection stores state.phone = normalize_phone(...),
+    # which keeps parens/dots — and confirmPairing is invoked with the same
+    # formatted id, so the lookup succeeds and the gate sees formatted input.
+    connector.state[CONNECTION_ID].phone = normalize_phone(formatted_phone)
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return(
+            {
+                "status": "success",
+                "jid": "15551112222@s.whatsapp.net",
+                "push_name": "Bot",
+            }
+        )
+    )
+    unpair = _async_return(None)
+    connector.state[CONNECTION_ID].daemon.unpair = unpair  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=formatted_phone)
+    unpair.assert_not_awaited()  # type: ignore[attr-defined]
+    assert result["status"] == "success"
+
+
 async def test_confirm_pairing_mismatch_unpair_failure_still_errors(
     connector: WhatsappConnector,
 ) -> None:
