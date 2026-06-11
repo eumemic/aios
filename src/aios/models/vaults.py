@@ -1,20 +1,140 @@
 """Vault and vault credential resources.
 
 Vaults are named collections of credentials for authenticated outbound
-services (MCP servers, HTTP APIs). Each credential is keyed by
-``target_url`` and encrypted at rest via the CryptoBox. Secrets
-(tokens, client secrets, passwords) are write-only — never returned in
-API responses.
+services (MCP servers, HTTP APIs). Most credentials are keyed by an
+immutable ``target_url`` and consumed worker-side as outbound auth headers.
+The ``environment_variable`` kind is different: it has no ``target_url`` and
+is keyed by ``secret_name`` (the env var materialized into the sandbox),
+carrying an ``allowed_hosts`` egress scope instead. Secrets are encrypted at
+rest via the CryptoBox and are write-only — never returned in API responses.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
-AuthType = Literal["bearer_header", "oauth2_refresh", "basic", "custom_header"]
+from aios.models.environments import HOSTNAME_RE
+
+AuthType = Literal[
+    "bearer_header",
+    "oauth2_refresh",
+    "basic",
+    "custom_header",
+    "environment_variable",
+]
+
+# Env var names the harness injects into every sandbox (see
+# ``sandbox/spec.py`` ``merged_env`` and ``sandbox/setup.py``
+# ``WORKSPACE_RUNTIME_ENV``). An ``environment_variable`` credential may not
+# claim one as its ``secret_name``: a collision either hijacks a load-bearing
+# sandbox variable (e.g. ``PATH`` repointed → unqualified-binary takeover) or
+# is silently shadowed by the harness's own merge order — both defects, and
+# ``secret_name`` is immutable post-create. Hardcoded here rather than
+# imported from ``sandbox.setup`` (that would cycle via ``aios.config``); a
+# unit test pins this set against the live merge order so it can't drift.
+RESERVED_SANDBOX_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "VIRTUAL_ENV",
+        "NPM_CONFIG_PREFIX",
+        "NODE_PATH",
+        "PATH",
+        "TOOL_BROKER_URL",
+        "TOOL_BROKER_SECRET",
+        "AIOS_SESSION_ID",
+    }
+)
+
+# A path-prefix segment: RFC 3986 ``pchar`` minus percent-encoding. ``%`` is
+# excluded so stored entries stay canonical (the swap proxy owns request-side
+# percent-decoding); ``/`` is the segment separator, handled by the split.
+_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~!$&'()*+,;=:@-]+$")
+
+# POSIX portable env var name: a leading letter/underscore, then word chars.
+_SECRET_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# A final hostname label that is a pure numeric token in any base — decimal
+# ("10", "2130706433"), hex ("0x7f000001", "0xA"), or octal ("0177"). The last
+# octet of every IPv4-literal spelling is such a token, so rejecting these
+# labels rejects IP literals without a libc parse. A must-contain-a-letter
+# test would be both too weak (hex octets contain letters) and too strict
+# (rejects legitimate digit-hyphen labels), which is why this is a token match.
+_NUMERIC_LABEL_RE = re.compile(r"0[xX][0-9A-Fa-f]+|[0-9]+")
+
+# Upper bound on one ``allowed_hosts`` entry (host[/path]). The host part is
+# already capped at 253; this bounds the optional path prefix.
+_MAX_ALLOWED_HOST_ENTRY_LEN = 512
+
+
+def _validate_credential_host(host: str) -> str:
+    """Validate the host part of one ``allowed_hosts`` entry.
+
+    Bare hostname only (same grammar as environment ``allowed_hosts``), and
+    DNS-names-only: the swap proxy (#876) matches on the request ``Host``/SNI
+    name, so an IP-literal entry could never match as intended. Rejecting a
+    final label that is a pure numeric token (decimal, hex, or octal) rejects
+    every IP-literal spelling — dotted-quad, integer, and hex/octal — without
+    a libc parse. Resolve-time SSRF — a NAME that *resolves* to an internal
+    address, incl. DNS rebinding — is the egress boundary's job (#876), not
+    create-time's. Returns the host unchanged (stored as-given, like
+    environment ``allowed_hosts``; downstream comparisons case-fold both
+    sides).
+    """
+    # HOSTNAME_RE rejects the empty string and anything with a port/slash/
+    # wildcard; the explicit length bound is the only thing the regex lacks.
+    # fullmatch, not match: the trailing ``$`` would otherwise admit a single
+    # trailing newline ("host\n") and store an unmatchable control char.
+    if len(host) > 253 or not HOSTNAME_RE.fullmatch(host):
+        raise ValueError(
+            f"invalid host {host!r}: a bare hostname is required "
+            "(no scheme, port, path, wildcard, or IPv6)"
+        )
+    if _NUMERIC_LABEL_RE.fullmatch(host.rsplit(".", 1)[-1]):
+        raise ValueError(f"invalid host {host!r}: a DNS hostname is required, not an IP literal")
+    return host
+
+
+def parse_allowed_host_entry(entry: str) -> tuple[str, str | None]:
+    """Split one ``allowed_hosts`` entry into ``(host, path_prefix)``.
+
+    Grammar: ``host`` or ``host/<path-prefix>``. A bare host (and the
+    explicit-whole-host spelling ``host/``) returns ``(host, None)``;
+    otherwise the prefix is returned in canonical leading-slash form
+    (``/repos/eumemic``). One trailing slash is dropped, so ``host/`` ≡
+    ``host`` and ``host/foo/`` ≡ ``host/foo`` — exactly one parse per
+    semantics.
+
+    This is the single grammar authority: the egress swap proxy (#876) and
+    the cred-⊆-env check (#879) import it rather than re-deriving the split,
+    so the stored entry and the runtime matcher can never disagree.
+
+    Raises ``ValueError`` on a malformed entry.
+    """
+    if not entry or len(entry) > _MAX_ALLOWED_HOST_ENTRY_LEN:
+        raise ValueError(f"invalid allowed_hosts entry {entry!r}: empty or too long")
+    host_part, sep, rest = entry.partition("/")
+    host = _validate_credential_host(host_part)
+    if not sep:
+        return host, None
+    if rest.endswith("/"):
+        rest = rest[:-1]
+    if not rest:
+        return host, None
+    segments = rest.split("/")
+    for seg in segments:
+        if not seg:
+            raise ValueError(f"invalid allowed_hosts entry {entry!r}: empty path segment")
+        if seg in (".", ".."):
+            raise ValueError(f"invalid allowed_hosts entry {entry!r}: '.'/'..' path segment")
+        # The pchar charset excludes ``%`` (and every shell/URL metachar), so
+        # percent-encoding and illegal characters are both rejected here.
+        # fullmatch, not match: ``$`` would otherwise admit a trailing newline.
+        if not _PATH_SEGMENT_RE.fullmatch(seg):
+            raise ValueError(f"invalid allowed_hosts entry {entry!r}: illegal path character")
+    return host, "/" + "/".join(segments)
 
 
 # ── Token endpoint auth (for OAuth refresh) ─────────────────────────────────
@@ -120,26 +240,79 @@ class _VaultCredentialSecrets(BaseModel):
     header_name: str | None = None
     header_value: SecretStr | None = None
 
+    # environment_variable
+    secret_value: SecretStr | None = None
+
 
 class VaultCredentialCreate(_VaultCredentialSecrets):
     """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
 
-    All secret fields are write-only. The ``target_url`` is immutable
-    after creation. The service layer validates required fields per
-    ``auth_type``.
+    All secret fields are write-only. The structural fields — ``target_url``,
+    ``secret_name``, ``allowed_hosts``, and ``auth_type`` — are immutable after
+    creation; only the secret (and ``display_name``/``metadata``) can be
+    rotated via PUT, so changing a credential's egress scope means archiving
+    and recreating it. The service layer validates required secret fields per
+    ``auth_type``; this model validates the structural shape (which kind
+    carries ``target_url`` vs ``secret_name``/``allowed_hosts``).
     """
 
     display_name: str | None = Field(default=None, max_length=128)
-    target_url: str = Field(min_length=1)
     auth_type: AuthType
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    # Header credentials (everything except ``environment_variable``) carry a
+    # ``target_url``; ``environment_variable`` carries ``secret_name`` +
+    # ``allowed_hosts`` instead. The ``_validate_shape`` validator enforces
+    # the xor.
+    target_url: str | None = Field(default=None, min_length=1)
+    secret_name: str | None = Field(default=None, max_length=128)
+    allowed_hosts: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> VaultCredentialCreate:
+        if self.auth_type == "environment_variable":
+            if self.target_url is not None:
+                raise ValueError("environment_variable credentials must not set target_url")
+            if not self.secret_name:
+                raise ValueError("environment_variable credentials require secret_name")
+            if not _SECRET_NAME_RE.fullmatch(self.secret_name):
+                raise ValueError(
+                    f"invalid secret_name {self.secret_name!r}: must be a POSIX env var name "
+                    "([A-Za-z_][A-Za-z0-9_]*)"
+                )
+            if self.secret_name in RESERVED_SANDBOX_ENV_KEYS:
+                raise ValueError(
+                    f"secret_name {self.secret_name!r} is reserved by the sandbox runtime"
+                )
+            if not self.allowed_hosts:
+                raise ValueError(
+                    "environment_variable credentials require a non-empty allowed_hosts"
+                )
+            # Canonicalize every entry so there is one stored spelling per
+            # semantics (``host/`` → ``host``, ``host/foo/`` → ``host/foo``),
+            # then drop cross-entry duplicates (the list is a set of egress
+            # scopes; ``dict.fromkeys`` preserves first-seen order).
+            canonical: list[str] = []
+            for entry in self.allowed_hosts:
+                host, prefix = parse_allowed_host_entry(entry)
+                canonical.append(host if prefix is None else host + prefix)
+            self.allowed_hosts = list(dict.fromkeys(canonical))
+        else:
+            if not self.target_url:
+                raise ValueError(f"{self.auth_type} credentials require target_url")
+            if self.secret_name is not None or self.allowed_hosts is not None:
+                raise ValueError(
+                    f"{self.auth_type} credentials must not set secret_name/allowed_hosts"
+                )
+        return self
 
 
 class VaultCredentialUpdate(_VaultCredentialSecrets):
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
 
-    ``target_url`` and ``auth_type`` are immutable — not accepted here.
-    Omitted secret fields are preserved (decrypt-merge-encrypt).
+    ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
+    immutable — not accepted here. Omitted secret fields are preserved
+    (decrypt-merge-encrypt).
     """
 
     display_name: str | None = Field(default=None, max_length=128)
@@ -147,13 +320,19 @@ class VaultCredentialUpdate(_VaultCredentialSecrets):
 
 
 class VaultCredential(BaseModel):
-    """Read view of a vault credential. Secrets are never returned."""
+    """Read view of a vault credential. Secrets are never returned.
+
+    ``target_url`` is null for ``environment_variable`` credentials;
+    ``secret_name``/``allowed_hosts`` are null for every other kind.
+    """
 
     id: str
     vault_id: str
     display_name: str | None
-    target_url: str
+    target_url: str | None
     auth_type: AuthType
+    secret_name: str | None = None
+    allowed_hosts: list[str] | None = None
     metadata: dict[str, Any]
     created_at: datetime
     updated_at: datetime

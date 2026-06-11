@@ -4333,7 +4333,7 @@
           "vaults"
         ],
         "summary": "Create Credential",
-        "description": "Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.\n\nValidates required fields per ``auth_type``: ``oauth2_refresh`` requires\n``access_token`` (plus the refresh fields needed for rotation);\n``bearer_header`` requires ``token``; ``basic`` requires ``username``\nand ``password``. Caps at 20 active credentials per vault. The\n``target_url`` is immutable after creation \u2014 to retarget a credential,\narchive the existing one and create a new credential at the new URL.",
+        "description": "Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.\n\nValidates required fields per ``auth_type``: ``oauth2_refresh`` requires\n``access_token`` (plus the refresh fields needed for rotation);\n``bearer_header`` requires ``token``; ``basic`` requires ``username``\nand ``password``; ``custom_header`` requires ``header_name`` and\n``header_value``. ``environment_variable`` is the sandbox-materialized\nkind: it requires ``secret_name`` (a POSIX env var name) + a non-empty\n``allowed_hosts`` egress scope and ``secret_value``, and carries no\n``target_url``. Caps at 20 active credentials per vault. ``target_url``,\n``secret_name``, and ``auth_type`` are immutable after creation \u2014 archive\nand recreate to change them.",
         "operationId": "create_vault_credential",
         "parameters": [
           {
@@ -14813,7 +14813,14 @@
             "title": "Display Name"
           },
           "target_url": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Target Url"
           },
           "auth_type": {
@@ -14822,9 +14829,35 @@
               "bearer_header",
               "oauth2_refresh",
               "basic",
-              "custom_header"
+              "custom_header",
+              "environment_variable"
             ],
             "title": "Auth Type"
+          },
+          "secret_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Name"
+          },
+          "allowed_hosts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Hosts"
           },
           "metadata": {
             "additionalProperties": true,
@@ -14866,7 +14899,7 @@
           "updated_at"
         ],
         "title": "VaultCredential",
-        "description": "Read view of a vault credential. Secrets are never returned."
+        "description": "Read view of a vault credential. Secrets are never returned.\n\n``target_url`` is null for ``environment_variable`` credentials;\n``secret_name``/``allowed_hosts`` are null for every other kind."
       },
       "VaultCredentialCreate": {
         "properties": {
@@ -15044,6 +15077,19 @@
             ],
             "title": "Header Value"
           },
+          "secret_value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Value"
+          },
           "display_name": {
             "anyOf": [
               {
@@ -15056,18 +15102,14 @@
             ],
             "title": "Display Name"
           },
-          "target_url": {
-            "type": "string",
-            "minLength": 1,
-            "title": "Target Url"
-          },
           "auth_type": {
             "type": "string",
             "enum": [
               "bearer_header",
               "oauth2_refresh",
               "basic",
-              "custom_header"
+              "custom_header",
+              "environment_variable"
             ],
             "title": "Auth Type"
           },
@@ -15075,16 +15117,53 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
+          },
+          "target_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Url"
+          },
+          "secret_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Name"
+          },
+          "allowed_hosts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Hosts"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "target_url",
           "auth_type"
         ],
         "title": "VaultCredentialCreate",
-        "description": "Request body for ``POST /v1/vaults/{vault_id}/credentials``.\n\nAll secret fields are write-only. The ``target_url`` is immutable\nafter creation. The service layer validates required fields per\n``auth_type``."
+        "description": "Request body for ``POST /v1/vaults/{vault_id}/credentials``.\n\nAll secret fields are write-only. The structural fields \u2014 ``target_url``,\n``secret_name``, ``allowed_hosts``, and ``auth_type`` \u2014 are immutable after\ncreation; only the secret (and ``display_name``/``metadata``) can be\nrotated via PUT, so changing a credential's egress scope means archiving\nand recreating it. The service layer validates required secret fields per\n``auth_type``; this model validates the structural shape (which kind\ncarries ``target_url`` vs ``secret_name``/``allowed_hosts``)."
       },
       "VaultCredentialUpdate": {
         "properties": {
@@ -15262,6 +15341,19 @@
             ],
             "title": "Header Value"
           },
+          "secret_value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Value"
+          },
           "display_name": {
             "anyOf": [
               {
@@ -15290,7 +15382,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "VaultCredentialUpdate",
-        "description": "Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.\n\n``target_url`` and ``auth_type`` are immutable \u2014 not accepted here.\nOmitted secret fields are preserved (decrypt-merge-encrypt)."
+        "description": "Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.\n\n``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are\nimmutable \u2014 not accepted here. Omitted secret fields are preserved\n(decrypt-merge-encrypt)."
       },
       "VaultUpdate": {
         "properties": {

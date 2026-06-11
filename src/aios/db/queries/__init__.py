@@ -3563,6 +3563,8 @@ def _row_to_vault_credential(row: asyncpg.Record) -> VaultCredential:
         display_name=row["display_name"],
         target_url=row["target_url"],
         auth_type=row["auth_type"],
+        secret_name=row["secret_name"],
+        allowed_hosts=row["allowed_hosts"],
         metadata=metadata,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -3576,7 +3578,9 @@ async def insert_vault_credential(
     account_id: str,
     vault_id: str,
     display_name: str | None,
-    target_url: str,
+    target_url: str | None,
+    secret_name: str | None,
+    allowed_hosts: list[str] | None,
     auth_type: AuthType,
     blob: EncryptedBlob,
     metadata: dict[str, Any],
@@ -3587,16 +3591,18 @@ async def insert_vault_credential(
         row = await conn.fetchrow(
             """
             INSERT INTO vault_credentials (
-                id, vault_id, display_name, target_url,
-                auth_type, ciphertext, nonce, metadata, account_id
+                id, vault_id, display_name, target_url, secret_name,
+                allowed_hosts, auth_type, ciphertext, nonce, metadata, account_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
             RETURNING *
             """,
             new_id,
             vault_id,
             display_name,
             target_url,
+            secret_name,
+            allowed_hosts,
             auth_type,
             blob.ciphertext,
             blob.nonce,
@@ -3604,6 +3610,16 @@ async def insert_vault_credential(
             account_id,
         )
     except asyncpg.UniqueViolationError as exc:
+        # By construction each insert shape can violate exactly one partial
+        # unique index: env-var rows have target_url NULL (NULLS DISTINCT, can
+        # never trip the url index) and every other kind has secret_name NULL
+        # (can never trip the secret_name index). Branch on the kind rather
+        # than introspecting the constraint name.
+        if auth_type == "environment_variable":
+            raise ConflictError(
+                f"an active credential named {secret_name!r} already exists in this vault",
+                detail={"secret_name": secret_name, "vault_id": vault_id},
+            ) from exc
         raise ConflictError(
             f"an active credential for {target_url!r} already exists in this vault",
             detail={"target_url": target_url, "vault_id": vault_id},

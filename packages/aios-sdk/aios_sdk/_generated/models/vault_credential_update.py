@@ -25,8 +25,9 @@ T = TypeVar("T", bound="VaultCredentialUpdate")
 class VaultCredentialUpdate:
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
 
-    ``target_url`` and ``auth_type`` are immutable — not accepted here.
-    Omitted secret fields are preserved (decrypt-merge-encrypt).
+    ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
+    immutable — not accepted here. Omitted secret fields are preserved
+    (decrypt-merge-encrypt).
 
         Attributes:
             access_token (None | str | Unset):
@@ -42,6 +43,7 @@ class VaultCredentialUpdate:
             password (None | str | Unset):
             header_name (None | str | Unset):
             header_value (None | str | Unset):
+            secret_value (None | str | Unset):
             display_name (None | str | Unset):
             metadata (None | Unset | VaultCredentialUpdateMetadataType0):
     """
@@ -65,6 +67,7 @@ class VaultCredentialUpdate:
     password: None | str | Unset = UNSET
     header_name: None | str | Unset = UNSET
     header_value: None | str | Unset = UNSET
+    secret_value: None | str | Unset = UNSET
     display_name: None | str | Unset = UNSET
     metadata: None | Unset | VaultCredentialUpdateMetadataType0 = UNSET
 
@@ -162,6 +165,12 @@ class VaultCredentialUpdate:
         else:
             header_value = self.header_value
 
+        secret_value: None | str | Unset
+        if isinstance(self.secret_value, Unset):
+            secret_value = UNSET
+        else:
+            secret_value = self.secret_value
+
         display_name: None | str | Unset
         if isinstance(self.display_name, Unset):
             display_name = UNSET
@@ -205,6 +214,8 @@ class VaultCredentialUpdate:
             field_dict["header_name"] = header_name
         if header_value is not UNSET:
             field_dict["header_value"] = header_value
+        if secret_value is not UNSET:
+            field_dict["secret_value"] = secret_value
         if display_name is not UNSET:
             field_dict["display_name"] = display_name
         if metadata is not UNSET:
@@ -395,6 +406,15 @@ class VaultCredentialUpdate:
 
         header_value = _parse_header_value(d.pop("header_value", UNSET))
 
+        def _parse_secret_value(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        secret_value = _parse_secret_value(d.pop("secret_value", UNSET))
+
         def _parse_display_name(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -437,6 +457,7 @@ class VaultCredentialUpdate:
             password=password,
             header_name=header_name,
             header_value=header_value,
+            secret_value=secret_value,
             display_name=display_name,
             metadata=metadata,
         )

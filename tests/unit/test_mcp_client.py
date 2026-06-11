@@ -14,12 +14,23 @@ import pytest
 
 from aios.crypto.vault import CryptoBox
 from aios.mcp.client import (
+    _auth_headers_from_payload,
     call_mcp_tool,
     discover_mcp_tools,
     resolve_auth_for_target_url,
     resolve_auth_for_target_url_run,
 )
 from tests.unit.conftest import fake_pool_yielding_conn
+
+
+class TestAuthHeadersFromPayload:
+    def test_environment_variable_is_not_header_rendered(self) -> None:
+        # env-var creds carry a NULL target_url, so the target_url-keyed
+        # resolvers never select them; reaching header rendering is an
+        # invariant violation that must fail hard, not return empty headers.
+        with pytest.raises(ValueError, match="not rendered as auth headers"):
+            _auth_headers_from_payload({"secret_value": "x"}, "environment_variable")
+
 
 # ── resolve_auth_for_target_url ──────────────────────────────────────────────────────
 

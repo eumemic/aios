@@ -74,6 +74,12 @@ class TestLimitedNetworking:
         with pytest.raises(ValueError, match="invalid hostname"):
             LimitedNetworking(type="limited", allowed_hosts=["example.com; rm -rf /"])
 
+    def test_rejects_hostname_with_trailing_newline(self) -> None:
+        # The hostname regex is anchored ^...$; `re.match` would forgive a
+        # single trailing newline and let it through into the iptables script.
+        with pytest.raises(ValueError, match="invalid hostname"):
+            LimitedNetworking(type="limited", allowed_hosts=["example.com\n"])
+
     def test_rejects_hostname_with_path(self) -> None:
         with pytest.raises(ValueError, match="invalid hostname"):
             LimitedNetworking(type="limited", allowed_hosts=["example.com/path"])

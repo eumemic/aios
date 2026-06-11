@@ -162,6 +162,13 @@ def _auth_headers_from_payload(payload: dict[str, Any], auth_type: AuthType) -> 
         if not header_name or not header_value:
             return {}
         return {header_name: header_value}
+    if auth_type == "environment_variable":
+        # environment_variable credentials are materialized into the sandbox
+        # env, never rendered as outbound auth headers. They carry no
+        # target_url, so the target_url-keyed resolvers cannot select them —
+        # reaching here means a resolver returned a NULL-target_url row, an
+        # invariant violation rather than a model-recoverable error.
+        raise ValueError("environment_variable credentials are not rendered as auth headers")
     assert_never(auth_type)
 
 

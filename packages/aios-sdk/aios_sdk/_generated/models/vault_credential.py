@@ -22,26 +22,33 @@ T = TypeVar("T", bound="VaultCredential")
 class VaultCredential:
     """Read view of a vault credential. Secrets are never returned.
 
-    Attributes:
-        id (str):
-        vault_id (str):
-        display_name (None | str):
-        target_url (str):
-        auth_type (VaultCredentialAuthType):
-        metadata (VaultCredentialMetadata):
-        created_at (datetime.datetime):
-        updated_at (datetime.datetime):
-        archived_at (datetime.datetime | None | Unset):
+    ``target_url`` is null for ``environment_variable`` credentials;
+    ``secret_name``/``allowed_hosts`` are null for every other kind.
+
+        Attributes:
+            id (str):
+            vault_id (str):
+            display_name (None | str):
+            target_url (None | str):
+            auth_type (VaultCredentialAuthType):
+            metadata (VaultCredentialMetadata):
+            created_at (datetime.datetime):
+            updated_at (datetime.datetime):
+            secret_name (None | str | Unset):
+            allowed_hosts (list[str] | None | Unset):
+            archived_at (datetime.datetime | None | Unset):
     """
 
     id: str
     vault_id: str
     display_name: None | str
-    target_url: str
+    target_url: None | str
     auth_type: VaultCredentialAuthType
     metadata: VaultCredentialMetadata
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    secret_name: None | str | Unset = UNSET
+    allowed_hosts: list[str] | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -53,6 +60,7 @@ class VaultCredential:
         display_name: None | str
         display_name = self.display_name
 
+        target_url: None | str
         target_url = self.target_url
 
         auth_type = self.auth_type.value
@@ -62,6 +70,21 @@ class VaultCredential:
         created_at = self.created_at.isoformat()
 
         updated_at = self.updated_at.isoformat()
+
+        secret_name: None | str | Unset
+        if isinstance(self.secret_name, Unset):
+            secret_name = UNSET
+        else:
+            secret_name = self.secret_name
+
+        allowed_hosts: list[str] | None | Unset
+        if isinstance(self.allowed_hosts, Unset):
+            allowed_hosts = UNSET
+        elif isinstance(self.allowed_hosts, list):
+            allowed_hosts = self.allowed_hosts
+
+        else:
+            allowed_hosts = self.allowed_hosts
 
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
@@ -85,6 +108,10 @@ class VaultCredential:
                 "updated_at": updated_at,
             }
         )
+        if secret_name is not UNSET:
+            field_dict["secret_name"] = secret_name
+        if allowed_hosts is not UNSET:
+            field_dict["allowed_hosts"] = allowed_hosts
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -106,7 +133,12 @@ class VaultCredential:
 
         display_name = _parse_display_name(d.pop("display_name"))
 
-        target_url = d.pop("target_url")
+        def _parse_target_url(data: object) -> None | str:
+            if data is None:
+                return data
+            return cast(None | str, data)
+
+        target_url = _parse_target_url(d.pop("target_url"))
 
         auth_type = VaultCredentialAuthType(d.pop("auth_type"))
 
@@ -115,6 +147,32 @@ class VaultCredential:
         created_at = isoparse(d.pop("created_at"))
 
         updated_at = isoparse(d.pop("updated_at"))
+
+        def _parse_secret_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        secret_name = _parse_secret_name(d.pop("secret_name", UNSET))
+
+        def _parse_allowed_hosts(data: object) -> list[str] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                allowed_hosts_type_0 = cast(list[str], data)
+
+                return allowed_hosts_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[str] | None | Unset, data)
+
+        allowed_hosts = _parse_allowed_hosts(d.pop("allowed_hosts", UNSET))
 
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -142,6 +200,8 @@ class VaultCredential:
             metadata=metadata,
             created_at=created_at,
             updated_at=updated_at,
+            secret_name=secret_name,
+            allowed_hosts=allowed_hosts,
             archived_at=archived_at,
         )
 

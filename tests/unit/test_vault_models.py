@@ -6,6 +6,7 @@ import pytest
 from pydantic import SecretStr, TypeAdapter, ValidationError
 
 from aios.models.vaults import (
+    RESERVED_SANDBOX_ENV_KEYS,
     TokenEndpointAuth,
     TokenEndpointAuthBasic,
     TokenEndpointAuthNone,
@@ -14,6 +15,7 @@ from aios.models.vaults import (
     VaultCredentialCreate,
     VaultCredentialUpdate,
     VaultUpdate,
+    parse_allowed_host_entry,
 )
 
 
@@ -216,6 +218,179 @@ class TestVaultCredentialCreate:
                 token=SecretStr("t"),
                 bogus="x",  # type: ignore[call-arg]
             )
+
+
+class TestEnvironmentVariableCredential:
+    def _create(self, **overrides: object) -> VaultCredentialCreate:
+        kwargs: dict[str, object] = {
+            "auth_type": "environment_variable",
+            "secret_name": "GITHUB_TOKEN",
+            "allowed_hosts": ["api.github.com"],
+            "secret_value": SecretStr("ghp_xxx"),
+        }
+        kwargs.update(overrides)
+        return VaultCredentialCreate(**kwargs)
+
+    def test_valid_bare_host(self) -> None:
+        c = self._create()
+        assert c.auth_type == "environment_variable"
+        assert c.secret_name == "GITHUB_TOKEN"
+        assert c.allowed_hosts == ["api.github.com"]
+        assert c.target_url is None
+        assert c.secret_value is not None
+        assert c.secret_value.get_secret_value() == "ghp_xxx"
+
+    def test_valid_host_with_path_prefix(self) -> None:
+        c = self._create(allowed_hosts=["api.github.com/repos/eumemic"])
+        assert c.allowed_hosts == ["api.github.com/repos/eumemic"]
+
+    def test_explicit_whole_host_canonicalizes_to_bare(self) -> None:
+        c = self._create(allowed_hosts=["api.github.com/"])
+        assert c.allowed_hosts == ["api.github.com"]
+
+    def test_trailing_slash_prefix_canonicalizes(self) -> None:
+        c = self._create(allowed_hosts=["api.github.com/repos/eumemic/"])
+        assert c.allowed_hosts == ["api.github.com/repos/eumemic"]
+
+    def test_multiple_hosts(self) -> None:
+        c = self._create(allowed_hosts=["api.github.com", "api.tavily.com"])
+        assert c.allowed_hosts == ["api.github.com", "api.tavily.com"]
+
+    def test_rejects_missing_secret_name(self) -> None:
+        with pytest.raises(ValidationError):
+            self._create(secret_name=None)
+
+    def test_rejects_target_url_on_env_var(self) -> None:
+        with pytest.raises(ValidationError):
+            self._create(target_url="https://x.com")
+
+    def test_rejects_empty_allowed_hosts(self) -> None:
+        with pytest.raises(ValidationError):
+            self._create(allowed_hosts=[])
+
+    @pytest.mark.parametrize("name", ["1FOO", "FOO-BAR", "FOO BAR", "FOO.BAR", "", "FOO$"])
+    def test_rejects_bad_secret_name(self, name: str) -> None:
+        with pytest.raises(ValidationError):
+            self._create(secret_name=name)
+
+    @pytest.mark.parametrize("name", sorted(RESERVED_SANDBOX_ENV_KEYS))
+    def test_rejects_reserved_secret_name(self, name: str) -> None:
+        with pytest.raises(ValidationError):
+            self._create(secret_name=name)
+
+    def test_rejects_secret_name_too_long(self) -> None:
+        with pytest.raises(ValidationError):
+            self._create(secret_name="A" * 129)
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "api.example.com:443",  # port
+            "*.example.com",  # wildcard
+            "exa_mple.com",  # underscore
+            "127.0.0.1",  # IPv4 literal
+            "169.254.169.254",  # metadata IPv4
+            "2130706433",  # integer IP form / all-numeric label
+            "10",  # bare numeric label
+            "::1",  # IPv6
+            "0x7f000001",  # hex IPv4 literal (alpha letters, still an IP)
+            "0xA.0xB.0xC.0xD",  # dotted hex IPv4 literal
+            "0Xa",  # short hex IPv4 literal, uppercase prefix
+            "0177.0.0.1",  # octal-leading IPv4 literal
+            "api.github.com\n",  # trailing newline — the regex `$` anchor must not admit it
+            "api.github.com\nevil.com",  # embedded newline
+        ],
+    )
+    def test_rejects_bad_host(self, host: str) -> None:
+        with pytest.raises(ValidationError):
+            self._create(allowed_hosts=[host])
+
+    def test_dedups_canonical_allowed_hosts(self) -> None:
+        c = self._create(
+            allowed_hosts=["api.github.com", "api.github.com/", "api.github.com", "api.tavily.com"]
+        )
+        # All three github spellings canonicalize to one entry; order preserved.
+        assert c.allowed_hosts == ["api.github.com", "api.tavily.com"]
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "0xdeadbeef.example.com",  # hex-looking label is fine when it isn't the final label
+            "c0ffee.io",  # alphanumeric label with digits
+            "3m.com",  # leading-digit label
+            "xn--p1ai",  # punycode
+            "example.9-9",  # letterless final label that is NOT an IP literal — only IP
+            "foo.1-2",  # literals are rejected, not every digits-only-looking label
+        ],
+    )
+    def test_accepts_non_ip_numeric_looking_labels(self, host: str) -> None:
+        c = self._create(allowed_hosts=[host])
+        assert c.allowed_hosts == [host]
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "api.github.com/repos/../gists",  # dot-segment
+            "api.github.com/repos/./x",  # single-dot segment
+            "api.github.com//repos",  # empty segment
+            "api.github.com/repos/%2e%2e",  # percent-encoding
+        ],
+    )
+    def test_rejects_bad_path_prefix(self, entry: str) -> None:
+        with pytest.raises(ValidationError):
+            self._create(allowed_hosts=[entry])
+
+    def test_other_secret_fields_ignored_not_rejected(self) -> None:
+        # Cross-kind secret fields follow the shared-base accept-and-ignore
+        # convention (a bearer create silently ignores username, etc.); only
+        # the structural fields are governed by the shape validator.
+        c = self._create(token=SecretStr("ignored"))
+        assert c.auth_type == "environment_variable"
+
+
+class TestHeaderCredentialShape:
+    @pytest.mark.parametrize("extra", [{"secret_name": "FOO"}, {"allowed_hosts": ["x.com"]}])
+    def test_rejects_env_var_fields_on_bearer(self, extra: dict[str, object]) -> None:
+        with pytest.raises(ValidationError):
+            VaultCredentialCreate(
+                target_url="https://x.com",
+                auth_type="bearer_header",
+                token=SecretStr("t"),
+                **extra,
+            )
+
+
+class TestParseAllowedHostEntry:
+    @pytest.mark.parametrize(
+        "entry,expected",
+        [
+            ("api.github.com", ("api.github.com", None)),
+            ("api.github.com/", ("api.github.com", None)),
+            ("api.github.com/repos/eumemic", ("api.github.com", "/repos/eumemic")),
+            ("api.github.com/repos/eumemic/", ("api.github.com", "/repos/eumemic")),
+            ("registry.npmjs.org/@myorg", ("registry.npmjs.org", "/@myorg")),
+            ("host.example/v1/r:action", ("host.example", "/v1/r:action")),
+        ],
+    )
+    def test_parses(self, entry: str, expected: tuple[str, str | None]) -> None:
+        assert parse_allowed_host_entry(entry) == expected
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "",
+            "127.0.0.1",
+            "0x7f000001",
+            "host//x",
+            "host/../x",
+            "host/%2e",
+            "host\n",  # trailing newline in the host part
+            "host/repos\n",  # trailing newline in a path segment
+        ],
+    )
+    def test_rejects(self, entry: str) -> None:
+        with pytest.raises(ValueError):
+            parse_allowed_host_entry(entry)
 
 
 class TestVaultCredentialUpdate:

@@ -133,9 +133,13 @@ async def create_credential(
     Validates required fields per ``auth_type``: ``oauth2_refresh`` requires
     ``access_token`` (plus the refresh fields needed for rotation);
     ``bearer_header`` requires ``token``; ``basic`` requires ``username``
-    and ``password``. Caps at 20 active credentials per vault. The
-    ``target_url`` is immutable after creation — to retarget a credential,
-    archive the existing one and create a new credential at the new URL.
+    and ``password``; ``custom_header`` requires ``header_name`` and
+    ``header_value``. ``environment_variable`` is the sandbox-materialized
+    kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
+    ``allowed_hosts`` egress scope and ``secret_value``, and carries no
+    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
+    ``secret_name``, and ``auth_type`` are immutable after creation — archive
+    and recreate to change them.
     """
     return await service.create_vault_credential(
         pool, crypto_box, vault_id=vault_id, body=body, account_id=account_id
