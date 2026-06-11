@@ -151,6 +151,22 @@ async def test_author_exception_is_terminal_raised() -> None:
     assert "ValueError: boom" in (out.error_repr or "")
 
 
+async def test_author_exception_traceback_is_author_sanitized() -> None:
+    out = await _run(
+        "async def main(input):\n"
+        "    x = 1\n"
+        "    raise RuntimeError('kapow')\n"
+        "    return x\n"
+    )
+    assert out.kind == "raised"
+    assert out.error_repr == "RuntimeError: kapow"
+    assert out.error_traceback is not None
+    assert 'File "<workflow>", line 3, in main' in out.error_traceback
+    assert "raise RuntimeError('kapow')" in out.error_traceback
+    assert "RuntimeError: kapow" in out.error_traceback
+    assert "wf_script_host.py" not in out.error_traceback
+
+
 async def test_agent_emits_a_frontier_for_block2() -> None:
     out = await _run("async def main(input):\n    return await agent('a1', input={'p': 1})")
     assert out.kind == "suspended"

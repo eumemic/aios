@@ -32,6 +32,7 @@ from __future__ import annotations
 import builtins
 import contextlib
 import inspect
+import linecache
 import os
 import sys
 import traceback
@@ -498,18 +499,35 @@ def _build_coroutine(source: str, input_value: Any) -> Any:
     # breaks dataclasses' ClassVar/InitVar detection. Compiled clean, annotations
     # are live objects, evaluated eagerly against the script's own namespace.
     code = compile(source, "<workflow>", "exec", dont_inherit=True)
+    linecache.cache["<workflow>"] = (len(source), None, source.splitlines(True), "<workflow>")
     exec(code, namespace)
     entry = namespace.get("main")
     if entry is None or not callable(entry):
         raise WorkflowScriptError("workflow script must define `async def main(input)`")
     coro = entry(input_value)
     if not hasattr(coro, "send"):
-        raise WorkflowScriptError("`main` must be an async function (`async def main(input)`)")
+        raise WorkflowScriptError("workflow script must define `async def main(input)`")
     return coro
 
 
 def _exc_repr(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+def _author_traceback(exc: BaseException) -> str:
+    """Return an author-facing traceback containing only workflow source frames.
+
+    The subprocess host stack is implementation detail (and may include sandbox
+    internals). The script itself is author-visible by definition, so keep its
+    filename/line/function/code entries plus the exception type/message footer.
+    """
+    frames = [frame for frame in traceback.extract_tb(exc.__traceback__) if frame.filename == "<workflow>"]
+    if not frames:
+        return ""
+    lines = ["Traceback (most recent call last):\n"]
+    lines.extend(traceback.format_list(frames))
+    lines.extend(traceback.format_exception_only(type(exc), exc))
+    return "".join(lines)
 
 
 def _emit_error(emit: Any, repr_: str, tb: str = "", *, kind: str | None = None) -> None:
@@ -522,7 +540,7 @@ def _emit_error(emit: Any, repr_: str, tb: str = "", *, kind: str | None = None)
 
 
 def _emit_raised(emit: Any, exc: BaseException) -> None:
-    _emit_error(emit, _exc_repr(exc), traceback.format_exc())
+    _emit_error(emit, _exc_repr(exc), _author_traceback(exc))
 
 
 _AGENT_ERROR_DEFAULT_MESSAGES: dict[str | None, str] = {

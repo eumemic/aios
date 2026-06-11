@@ -476,7 +476,12 @@ async def _run_workflow_step_body(
                 # sweep re-wakes the (still non-terminal) run when capacity returns.
                 raise RuntimeError(f"workflow {run_id}: {outcome.error_repr}")
             await _complete_run(
-                conn, run, output=outcome.error_repr, is_error=True, error_kind=outcome.error_kind
+                conn,
+                run,
+                output=outcome.error_repr,
+                is_error=True,
+                error_kind=outcome.error_kind,
+                error_traceback=outcome.error_traceback,
             )
             return
 
@@ -936,6 +941,7 @@ async def _complete_run(
     output: Any,
     is_error: bool,
     error_kind: str | None = None,
+    error_traceback: str | None = None,
 ) -> None:
     """Append ``run_completed`` + flip status (+ store output) atomically.
 
@@ -957,13 +963,18 @@ async def _complete_run(
         "duration_ms": max(0, int((datetime.now(UTC) - run.created_at).total_seconds() * 1000)),
     }
     if error_kind is not None:
-        payload["error"] = {"kind": error_kind}
+        error: dict[str, Any] = {"kind": error_kind}
+        if output is not None:
+            error["message"] = str(output)
+        if error_traceback:
+            error["traceback"] = error_traceback
+        payload["error"] = error
     await _commit_terminal_and_dispatch(
         conn,
         run,
         status="errored" if is_error else "completed",
         payload=payload,
-        output=None if is_error else output,
+        output=output,
     )
 
 
