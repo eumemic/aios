@@ -40,6 +40,10 @@ dependencies = [
     "fastapi-mcp>=0.4",
     # Web tools
     "httpx>=0.27",
+    # HTTP/1.1 framing for the TLS-terminating secret-egress proxy
+    # (sandbox/secret_egress_proxy.py). Already transitive via httpcore;
+    # pinned direct because we use it as a sans-IO server parser.
+    "h11>=0.14",
     # CLI
     "typer>=0.12",
     # Observability
