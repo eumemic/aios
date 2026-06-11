@@ -212,6 +212,25 @@ async def test_inflight_gate_is_never_stale(sweep_pool: asyncpg.Pool[Any]) -> No
     assert run_id not in await _needing(pool)
 
 
+async def test_deferred_frontier_does_not_trip_sweep(sweep_pool: asyncpg.Pool[Any]) -> None:
+    """A ``frontier_deferred`` marker (a wave-deferred agent frontier, #784) with NO
+    ``call_started`` is a WAIT, not work: the child that frees its slot wakes the run,
+    so the sweep must leave a deferred-only parked run alone (the stale-inflight clause
+    only matches ``call_started``)."""
+    pool = sweep_pool
+    run_id = await _make_run(pool)
+    async with pool.acquire() as conn:
+        await wf_queries.append_run_event(
+            conn,
+            account_id="acc_sw",
+            run_id=run_id,
+            type="frontier_deferred",
+            call_key="sha:fd#0",
+            payload={"capability": "agent"},
+        )
+    assert run_id not in await _needing(pool)
+
+
 async def test_archived_run_is_never_swept(sweep_pool: asyncpg.Pool[Any]) -> None:
     pool = sweep_pool
     run_id = await _make_run(pool, status="pending")

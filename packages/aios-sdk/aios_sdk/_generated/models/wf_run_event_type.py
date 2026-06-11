@@ -5,6 +5,7 @@ class WfRunEventType(str, Enum):
     ANNOTATION = "annotation"
     CALL_RESULT = "call_result"
     CALL_STARTED = "call_started"
+    FRONTIER_DEFERRED = "frontier_deferred"
     RUN_COMPLETED = "run_completed"
     RUN_STARTED = "run_started"
 
