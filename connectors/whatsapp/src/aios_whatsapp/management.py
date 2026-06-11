@@ -11,10 +11,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import structlog
 from aios_connector_http import ManagementHandlerError, management_handler
+
+from .prompts import _jid_identity_key
 
 if TYPE_CHECKING:
     from .connector import _WhatsappConnectionState
+
+log = structlog.get_logger(__name__)
 
 
 def normalize_phone(phone: str) -> str:
@@ -83,32 +88,58 @@ class WhatsappManagementMixin:
         # live exposure — the operator would be sending/receiving as an
         # account they don't control.  Whatsmeow reports the scanned
         # device's jid; if its phone part doesn't match the connection's
-        # external_account_id we must NEVER persist the pairing.  Hard-fail
-        # and auto-unpair the device so it can't linger live.
-        if status == "success" and outcome.get("jid"):
-            jid = outcome["jid"]
-            # jid is `NNN@s.whatsapp.net` or `NNN:D@s.whatsapp.net` (the
-            # `:D` is whatsmeow's device suffix) — strip both to the phone.
-            scanned = jid.split("@")[0].split(":")[0]
+        # external_account_id we must NEVER persist the pairing.  We verify
+        # EVERY success: a success with no jid is unverifiable, which is just
+        # as dangerous as a mismatch, so it takes the same hard-fail +
+        # auto-unpair path.
+        if status == "success":
+            jid = outcome.get("jid") or ""
+            # `_jid_identity_key` strips the `@host` and the `:D` device
+            # suffix to the phone-bearing local part — the single source of
+            # truth for JID parsing in this package.  An empty jid yields "",
+            # which can never equal `expected`, so it fails closed.
+            scanned = _jid_identity_key(jid)
             expected = normalize_phone(external_account_id).removeprefix("+")
             if scanned != expected:
+                if scanned:
+                    mismatch = (
+                        f"paired_jid_mismatch: scanned account +{scanned} does not "
+                        f"match connection +{expected}"
+                    )
+                else:
+                    mismatch = (
+                        "paired_jid_mismatch: daemon reported success without a JID, "
+                        f"cannot verify against connection +{expected}"
+                    )
                 status = "error"
                 try:
                     await state.daemon.unpair()
-                    reason = (
-                        f"paired_jid_mismatch: scanned account +{scanned} does not "
-                        f"match connection +{expected}; device has been unpaired"
-                    )
+                    reason = f"{mismatch}; device has been unpaired"
+                    unpaired = True
                 except Exception as exc:
                     reason = (
-                        f"paired_jid_mismatch: scanned account +{scanned} does not "
-                        f"match connection +{expected}; auto-unpair ALSO failed "
-                        f"({exc!r}) — device may still be paired"
+                        f"{mismatch}; auto-unpair ALSO failed ({exc!r}) "
+                        "— device may still be paired"
                     )
-                # Surface the offending jid + mismatch reason; drop
-                # push_name so a failed pairing can't masquerade as a
-                # successful one via a display name.
-                outcome = {"jid": jid, "reason": reason}
+                    unpaired = False
+                # A wrong-account linkage (or an unverifiable success) is a
+                # security event — possible hijack attempt or misconfigured
+                # connection.  Surface it server-side; the response only
+                # reaches the operator.
+                log.warning(
+                    "whatsapp_pairing_jid_mismatch",
+                    external_account_id=external_account_id,
+                    jid=outcome.get("jid"),
+                    expected=expected,
+                    unpaired=unpaired,
+                )
+                # Surface the mismatch reason and, when present, the offending
+                # jid; drop push_name so a failed pairing can't masquerade as
+                # a successful one via a display name.  No jid key when the
+                # daemon gave us none — don't fabricate one.
+                outcome = {"reason": reason}
+                if jid:
+                    outcome["jid"] = jid
         response: dict[str, Any] = {
             "external_account_id": external_account_id,
             "status": status,

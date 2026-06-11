@@ -131,6 +131,24 @@ async def test_confirm_pairing_mismatch_unpairs_and_errors(
     assert "push_name" not in result
 
 
+async def test_confirm_pairing_success_without_jid_fails_closed(
+    connector: WhatsappConnector,
+) -> None:
+    """A daemon ``success`` with NO jid is unverifiable: we can't confirm the
+    scanned account matches the connection, so we must fail closed — unpair
+    the device and return an error rather than persist an unverified pairing."""
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return({"status": "success"})
+    )
+    unpair = _async_return(None)
+    connector.state[CONNECTION_ID].daemon.unpair = unpair  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=PHONE)
+    unpair.assert_awaited_once()  # type: ignore[attr-defined]
+    assert result["status"] == "error"
+    assert "without a JID" in result["reason"]
+    assert "jid" not in result
+
+
 async def test_confirm_pairing_match_returns_success_without_unpair(
     connector: WhatsappConnector,
 ) -> None:
@@ -176,7 +194,6 @@ async def test_confirm_pairing_mismatch_unpair_failure_still_errors(
     result = await connector.confirmPairing(external_account_id=PHONE)
     unpair.assert_awaited_once()  # type: ignore[attr-defined]
     assert result["status"] == "error"
-    assert result["status"] != "success"
     assert result["jid"] == "16268643289@s.whatsapp.net"
     assert "16268643289" in result["reason"]
     assert "15551112222" in result["reason"]
