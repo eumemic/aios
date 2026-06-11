@@ -671,12 +671,18 @@ def env_var_credential_containment_error(
        authority — so a credential path-prefix only tightens below an
        already-allowed host.
 
-    Stored entries are canonical (validated at credential-create and at
-    ``LimitedNetworking`` model-validate), so ``parse_allowed_host_entry``
-    does not raise on stored data in normal flow. This helper does NOT
-    catch ``ValueError`` — a malformed stored entry is a real integrity
-    problem and should surface (at provision it becomes a refusal to
-    provision, the safe direction).
+    The two sides parse asymmetrically. ``LimitedNetworking`` validates
+    its ``allowed_hosts`` against ``HOSTNAME_RE``, which accepts IP
+    literals; the credential grammar (``parse_allowed_host_entry`` →
+    ``_validate_credential_host``) is stricter and rejects them. So an env
+    entry can be a bare IP that the credential parse refuses. The ENV-side
+    extraction therefore skips entries ``parse_allowed_host_entry`` rejects
+    (an IP env host can never cover a non-IP credential host anyway — fail
+    closed, the credential is then rejected with the actionable message).
+    The CREDENTIAL side does NOT catch ``ValueError``: credential hosts are
+    canonicalized at create, so a malformed stored credential entry is a
+    real integrity problem and should surface (at provision it becomes a
+    refusal to provision, the safe direction).
     """
     cred_lists = list(credential_allowed_hosts)
     # Iterate the OUTER list, not flattened hosts: a credential with an
@@ -687,6 +693,12 @@ def env_var_credential_containment_error(
 
     networking = env_config.networking if env_config else None
     if not isinstance(networking, LimitedNetworking):
+        if env_config is None:
+            return (
+                "environment_variable credential requires a Limited environment, but the "
+                "session has no environment configured; the environment's allowed_hosts "
+                "is the containment boundary for the egress swap proxy"
+            )
         return (
             "environment_variable credential requires a Limited environment "
             "(networking is not 'limited'); env allowed_hosts is the containment "
@@ -697,7 +709,19 @@ def env_var_credential_containment_error(
     # ``parse_allowed_host_entry``) preserves the stored casing, so case-fold
     # both sides — mirrors ``_validate_credential_host`` in ``models/vaults.py``,
     # which documents that downstream comparisons (this is one) case-fold.
-    env_hosts = {parse_allowed_host_entry(entry)[0].lower() for entry in networking.allowed_hosts}
+    env_hosts: set[str] = set()
+    for entry in networking.allowed_hosts:
+        try:
+            env_hosts.add(parse_allowed_host_entry(entry)[0].lower())
+        except ValueError:
+            # LimitedNetworking validates allowed_hosts with HOSTNAME_RE, which
+            # accepts IP literals that parse_allowed_host_entry (the stricter
+            # credential grammar) rejects. Such an env entry can never cover a
+            # credential host — credential hosts are validated non-IP hostnames
+            # — so drop it from the comparable set. Fail closed: an otherwise
+            # uncovered credential host is then rejected with the actionable
+            # message instead of crashing the advisory 422 / provision gate.
+            continue
     for cred_hosts in cred_lists:
         for entry in cred_hosts:
             # Keep the stored spelling for the message; compare case-folded.

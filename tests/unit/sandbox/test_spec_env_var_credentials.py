@@ -202,20 +202,19 @@ async def test_env_var_cred_uncovered_host_rejected_names_host() -> None:
 
 
 async def test_env_var_cred_covered_host_provisions() -> None:
-    plan = await _build_with(
-        env_config=limited_env("api.github.com"), creds=(_cred(["api.github.com"]),)
-    )
-    # A covered cred provisions and its placeholder lands in the env.
-    assert plan.spec.environment["GITHUB_TOKEN"] == _CRED.placeholder  # type: ignore[attr-defined]
+    cred = _cred(["api.github.com"])
+    plan = await _build_with(env_config=limited_env("api.github.com"), creds=(cred,))
+    # A covered cred provisions and its placeholder lands in the env. Assert
+    # against the injected cred's OWN placeholder, not the module-level _CRED's
+    # — the two happen to match only because _cred() hardcodes the constant.
+    assert plan.spec.environment["GITHUB_TOKEN"] == cred.placeholder  # type: ignore[attr-defined]
 
 
 async def test_env_var_cred_path_prefix_provisions_host_only() -> None:
     # A path-prefixed cred is compared host-only against the env's host set.
-    plan = await _build_with(
-        env_config=limited_env("api.github.com"),
-        creds=(_cred(["api.github.com/repos/eumemic"]),),
-    )
-    assert plan.spec.environment["GITHUB_TOKEN"] == _CRED.placeholder  # type: ignore[attr-defined]
+    cred = _cred(["api.github.com/repos/eumemic"])
+    plan = await _build_with(env_config=limited_env("api.github.com"), creds=(cred,))
+    assert plan.spec.environment["GITHUB_TOKEN"] == cred.placeholder  # type: ignore[attr-defined]
 
 
 async def test_vaults_but_no_env_var_creds_with_unrestricted_provisions() -> None:
@@ -231,8 +230,9 @@ async def test_env_multi_host_covers_each_cred_host_provisions() -> None:
     # path prefix), so the plan's "env-side path prefix" case is unconstructable.
     # The host-only env parse is still exercised: a multi-host Limited env
     # covers a bare cred host that is one of several allowed.
+    cred = _cred(["api.github.com"])
     plan = await _build_with(
         env_config=limited_env("pypi.org", "api.github.com"),
-        creds=(_cred(["api.github.com"]),),
+        creds=(cred,),
     )
-    assert plan.spec.environment["GITHUB_TOKEN"] == _CRED.placeholder  # type: ignore[attr-defined]
+    assert plan.spec.environment["GITHUB_TOKEN"] == cred.placeholder  # type: ignore[attr-defined]

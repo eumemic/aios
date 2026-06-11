@@ -1152,15 +1152,23 @@ class TestEnvVarCredentialContainment:
         verdict = env_var_credential_containment_error(env, [("api.github.com",)])
         assert verdict is not None
         assert "Limited" in verdict
+        # An env IS bound (just not Limited) — the message must say so, distinct
+        # from the no-environment-configured branch below.
+        assert "networking is not" in verdict
 
     def test_no_env_config_with_creds_rejected(self) -> None:
         verdict = env_var_credential_containment_error(None, [("api.github.com",)])
         assert verdict is not None
+        # No environment bound at all — the message must NOT point the operator
+        # at a networking setting that doesn't exist.
+        assert "no environment configured" in verdict
 
     def test_no_networking_config_with_creds_rejected(self) -> None:
         # EnvironmentConfig() leaves networking unset (None) — not Limited.
         verdict = env_var_credential_containment_error(EnvironmentConfig(), [("api.github.com",)])
         assert verdict is not None
+        # An env IS bound; networking is just unset — the "not 'limited'" branch.
+        assert "networking is not" in verdict
 
     def test_covered_host_passes(self) -> None:
         env = limited_env("api.github.com")
@@ -1217,6 +1225,34 @@ class TestEnvVarCredentialContainment:
         verdict = env_var_credential_containment_error(env, [()])
         assert verdict is not None
         assert "Limited" in verdict
+
+    def test_ip_literal_env_host_is_skipped_not_crash(self) -> None:
+        # LimitedNetworking.allowed_hosts accepts IP literals (HOSTNAME_RE), but
+        # the stricter credential grammar (parse_allowed_host_entry) rejects
+        # them. The env-side extraction must SKIP such entries rather than let
+        # the ValueError propagate as a crash. The remaining real env host still
+        # covers the cred, so the verdict is None.
+        env = limited_env("192.168.1.1", "api.github.com")
+        assert env_var_credential_containment_error(env, [("api.github.com",)]) is None
+
+    def test_env_with_only_ip_host_rejects_cred_cleanly(self) -> None:
+        # An env whose only allowed_host is an IP literal covers no credential
+        # host (IP entries are skipped). The cred is rejected with the actionable
+        # message naming its host — a clean rejection, not a ValueError crash.
+        env = limited_env("192.168.1.1")
+        verdict = env_var_credential_containment_error(env, [("api.github.com",)])
+        assert verdict is not None
+        assert "'api.github.com'" in verdict
+
+    def test_limited_env_with_empty_cred_hosts_vacuously_passes(self) -> None:
+        # A credential with an empty allowed_hosts tuple under a Limited env
+        # returns None: the inner host loop never executes, so ∅ ⊆ env is
+        # vacuously true. Such a credential is inert — there is no host for the
+        # egress swap proxy to DNAT — and is prevented at create by
+        # VaultCredentialCreate._validate_shape. Note Check 1 (requires Limited)
+        # STILL fires for empty-hosts creds under Unrestricted, which
+        # test_cred_with_empty_allowed_hosts_still_requireslimited_env covers.
+        assert env_var_credential_containment_error(limited_env("api.github.com"), [()]) is None
 
 
 def _evc_row(*allowed_hosts: str) -> EnvVarCredentialRow:
