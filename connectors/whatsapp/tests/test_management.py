@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 from aios_connector_http import ManagementHandlerError
 
@@ -102,6 +104,179 @@ async def test_confirm_pairing_empty_status_falls_back_to_error(
     assert result == {"external_account_id": PHONE, "status": "error"}
 
 
+async def test_confirm_pairing_mismatch_unpairs_and_errors(
+    connector: WhatsappConnector,
+) -> None:
+    """A device scanned into the wrong account is live exposure: the
+    mismatch must hard-fail, the offending jid surface, and the device
+    be auto-unpaired — never a success-looking response."""
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return(
+            {
+                "status": "success",
+                "jid": "16268643289@s.whatsapp.net",
+                "push_name": "Mallory",
+            }
+        )
+    )
+    unpair = _async_return(None)
+    connector.state[CONNECTION_ID].daemon.unpair = unpair  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=PHONE)
+    unpair.assert_awaited_once()  # type: ignore[attr-defined]
+    assert result["status"] == "error"
+    assert result["jid"] == "16268643289@s.whatsapp.net"
+    assert "16268643289" in result["reason"]
+    assert "15551112222" in result["reason"]
+    assert "unpaired" in result["reason"]
+    assert "push_name" not in result
+
+
+async def test_confirm_pairing_success_without_jid_fails_closed(
+    connector: WhatsappConnector,
+) -> None:
+    """A daemon ``success`` with NO jid is unverifiable: we can't confirm the
+    scanned account matches the connection, so we must fail closed — unpair
+    the device and return an error rather than persist an unverified pairing."""
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return({"status": "success"})
+    )
+    unpair = _async_return(None)
+    connector.state[CONNECTION_ID].daemon.unpair = unpair  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=PHONE)
+    unpair.assert_awaited_once()  # type: ignore[attr-defined]
+    assert result["status"] == "error"
+    assert "without a JID" in result["reason"]
+    assert "jid" not in result
+
+
+async def test_confirm_pairing_match_returns_success_without_unpair(
+    connector: WhatsappConnector,
+) -> None:
+    """The scanned account matches the connection — pass through untouched,
+    and never call unpair on the live device."""
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return(
+            {
+                "status": "success",
+                "jid": "15551112222@s.whatsapp.net",
+                "push_name": "Bot",
+            }
+        )
+    )
+    unpair = _async_return(None)
+    connector.state[CONNECTION_ID].daemon.unpair = unpair  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=PHONE)
+    unpair.assert_not_awaited()  # type: ignore[attr-defined]
+    assert result == {
+        "external_account_id": PHONE,
+        "status": "success",
+        "jid": "15551112222@s.whatsapp.net",
+        "push_name": "Bot",
+    }
+
+
+@pytest.mark.parametrize(
+    "formatted_phone",
+    [
+        "+1 (555) 111-2222",
+        "+1.555.111.2222",
+        "+1-555-111-2222",
+    ],
+)
+async def test_confirm_pairing_formatted_phone_digits_match_succeeds(
+    connector: WhatsappConnector, formatted_phone: str
+) -> None:
+    """A phone stored with separators normalize_phone doesn't strip (parens,
+    dots) must still compare digits-only against the scanned JID — a
+    correctly paired device must NOT be falsely auto-unpaired.  (Ported from
+    the parallel PR #969, whose comparison-semantics catch this encodes; the
+    issue spec's normalize_phone-based comparison was the latent bug.)"""
+    # Model the real scenario: the connection was CREATED with a formatted
+    # phone — serve_connection stores state.phone = normalize_phone(...),
+    # which keeps parens/dots — and confirmPairing is invoked with the same
+    # formatted id, so the lookup succeeds and the gate sees formatted input.
+    connector.state[CONNECTION_ID].phone = normalize_phone(formatted_phone)
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return(
+            {
+                "status": "success",
+                "jid": "15551112222@s.whatsapp.net",
+                "push_name": "Bot",
+            }
+        )
+    )
+    unpair = _async_return(None)
+    connector.state[CONNECTION_ID].daemon.unpair = unpair  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=formatted_phone)
+    unpair.assert_not_awaited()  # type: ignore[attr-defined]
+    assert result["status"] == "success"
+
+
+async def test_confirm_pairing_mismatch_unpair_failure_still_errors(
+    connector: WhatsappConnector,
+) -> None:
+    """If auto-unpair itself fails, we still must not return success — the
+    error response surfaces both the mismatch and the unpair-failure fact."""
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return(
+            {
+                "status": "success",
+                "jid": "16268643289@s.whatsapp.net",
+                "push_name": "Mallory",
+            }
+        )
+    )
+    unpair = _async_raise(RuntimeError("rpc down"))
+    connector.state[CONNECTION_ID].daemon.unpair = unpair  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=PHONE)
+    unpair.assert_awaited_once()  # type: ignore[attr-defined]
+    assert result["status"] == "error"
+    assert result["jid"] == "16268643289@s.whatsapp.net"
+    assert "16268643289" in result["reason"]
+    assert "15551112222" in result["reason"]
+    assert "unpair" in result["reason"].lower()
+
+
+@pytest.mark.parametrize(
+    "jid",
+    ["15551112222@s.whatsapp.net", "15551112222:12@s.whatsapp.net"],
+)
+async def test_confirm_pairing_accepts_both_jid_formats(
+    connector: WhatsappConnector, jid: str
+) -> None:
+    """Both bare ``NNN@`` and device-suffixed ``NNN:D@`` jids are accepted
+    when the phone part matches the connection."""
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return({"status": "success", "jid": jid, "push_name": "Bot"})
+    )
+    unpair = _async_return(None)
+    connector.state[CONNECTION_ID].daemon.unpair = unpair  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=PHONE)
+    unpair.assert_not_awaited()  # type: ignore[attr-defined]
+    assert result["status"] == "success"
+    assert result["jid"] == jid
+
+
+@pytest.mark.parametrize(
+    "jid",
+    ["16268643289@s.whatsapp.net", "16268643289:7@s.whatsapp.net"],
+)
+async def test_confirm_pairing_mismatch_detected_for_both_jid_formats(
+    connector: WhatsappConnector, jid: str
+) -> None:
+    """A mismatch is caught for both bare and device-suffixed jid formats."""
+    connector.state[CONNECTION_ID].daemon.confirm_pairing = (  # type: ignore[attr-defined]
+        _async_return({"status": "success", "jid": jid})
+    )
+    unpair = _async_return(None)
+    connector.state[CONNECTION_ID].daemon.unpair = unpair  # type: ignore[attr-defined]
+    result = await connector.confirmPairing(external_account_id=PHONE)
+    unpair.assert_awaited_once()  # type: ignore[attr-defined]
+    assert result["status"] == "error"
+    assert result["jid"] == jid
+    assert "16268643289" in result["reason"]
+
+
 @pytest.mark.parametrize(
     ("input_phone", "expected"),
     [
@@ -138,6 +313,9 @@ async def test_state_lookup_matches_formatting_variants(
 
 def _async_return(value: object) -> object:
     """Build an AsyncMock that returns ``value`` from a single call."""
-    from unittest.mock import AsyncMock
-
     return AsyncMock(return_value=value)
+
+
+def _async_raise(exc: BaseException) -> object:
+    """Build an AsyncMock that raises ``exc`` when awaited."""
+    return AsyncMock(side_effect=exc)

@@ -50,14 +50,50 @@ def test_build_params_with_attachments() -> None:
 # ── signal_send: direct method calls with already-resolved paths ─────
 
 
-async def test_signal_send_text_only(connector: SignalConnector) -> None:
+async def test_signal_send_dm_result_carries_channel_and_chat_type(
+    connector: SignalConnector,
+) -> None:
     result = await connector.signal_send(
         text="hello there", chat_id=ALICE_UUID, connection_id=CONNECTION_ID
     )
-    assert result == {"status": "ok"}
+    # The result stamps the resolved focal channel + chat_type so
+    # external observers don't have to reconstruct focal heuristically.
+    # The connector fixture's bot_uuid is the literal "bot-uuid".
+    assert result == {
+        "status": "ok",
+        "channel": f"signal/bot-uuid/{ALICE_UUID}",
+        "chat_type": "dm",
+    }
     sent_params = connector._daemon.rpc.call.call_args.args[1]  # type: ignore[union-attr]
     assert sent_params["message"] == "hello there"
     assert "attachments" not in sent_params
+
+
+async def test_signal_send_group_result_carries_channel_and_chat_type(
+    connector: SignalConnector,
+) -> None:
+    connector.state[CONNECTION_ID].groups = [
+        GroupInfo(id=GROUP_CHAT_ID, name="Tea Party", member_uuids=[ALICE_UUID, BOB_UUID])
+    ]
+    result = await connector.signal_send(
+        text="hello group", chat_id=GROUP_CHAT_ID, connection_id=CONNECTION_ID
+    )
+    assert result["channel"] == f"signal/bot-uuid/{GROUP_CHAT_ID}"
+    assert result["chat_type"] == "group"
+
+
+async def test_signal_send_sent_at_ms_branch_carries_channel(
+    connector: SignalConnector,
+) -> None:
+    # When signal-cli returns a timestamp inline (DM path), the result
+    # still stamps channel + chat_type alongside ``sent_at_ms``.
+    connector._daemon.rpc.call.return_value = {"timestamp": 1700000000000}  # type: ignore[union-attr]
+    result = await connector.signal_send(text="hi", chat_id=ALICE_UUID, connection_id=CONNECTION_ID)
+    assert result == {
+        "sent_at_ms": 1700000000000,
+        "channel": f"signal/bot-uuid/{ALICE_UUID}",
+        "chat_type": "dm",
+    }
 
 
 async def test_signal_send_with_resolved_attachments(

@@ -20,11 +20,13 @@ import contextlib
 import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.crypto.vault import CryptoBox
 from aios.errors import CryptoDecryptError
+from aios.ids import VAULT_CREDENTIAL
 from aios.models.environments import (
     EnvironmentConfig,
     LimitedNetworking,
@@ -32,7 +34,7 @@ from aios.models.environments import (
 )
 from aios.models.vaults import RESERVED_SANDBOX_ENV_KEYS
 from aios.sandbox.spec import build_spec_from_session
-from aios.services.vaults import ResolvedEnvVarCredential
+from aios.services.vaults import ResolvedEnvVarCredential, mint_secret_placeholder
 from tests.helpers.sandbox import limited_env, patch_build_spec_deps
 
 # A distinctive sentinel rather than a real-looking token, so a leak is
@@ -236,3 +238,182 @@ async def test_env_multi_host_covers_each_cred_host_provisions() -> None:
         creds=(cred,),
     )
     assert plan.spec.environment["GITHUB_TOKEN"] == cred.placeholder  # type: ignore[attr-defined]
+
+
+# ── SecretEgressProxy lifecycle (#877) ───────────────────────────────────────
+
+
+async def test_secret_proxy_constructed_and_started_when_creds_present() -> None:
+    """A provision with env-var creds constructs the per-session
+    ``SecretEgressProxy`` with those creds, awaits its ``start()``, and hands
+    the live instance back on ``plan.secret_proxy`` for the registry to own."""
+    proxy_instance = MagicMock()
+    proxy_instance.start = AsyncMock()
+    proxy_cls = MagicMock(return_value=proxy_instance)
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            # The #879 gate requires a containing Limited env for any
+            # env-var credential — supply one that covers the cred's host.
+            env_config=_LIMITED_GITHUB,
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(patch("aios.sandbox.spec.SecretEgressProxy", proxy_cls))
+        plan = await build_spec_from_session("sess_01TEST")
+
+    # Constructed with the resolved creds and started exactly once.
+    proxy_cls.assert_called_once_with((_CRED,))
+    proxy_instance.start.assert_awaited_once()
+    assert plan.secret_proxy is proxy_instance
+
+
+async def test_secret_proxy_not_constructed_when_no_creds() -> None:
+    """No env-var creds ⇒ the proxy is never constructed and the plan carries
+    ``secret_proxy is None`` (the inert empty case)."""
+    proxy_cls = MagicMock()
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_var_credentials=AsyncMock(return_value=()),
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(patch("aios.sandbox.spec.SecretEgressProxy", proxy_cls))
+        plan = await build_spec_from_session("sess_01TEST")
+
+    proxy_cls.assert_not_called()
+    assert plan.secret_proxy is None
+
+
+async def test_provision_time_fold_lands_cred_on_mount_snapshot() -> None:
+    """The provision-time half of constraint A: the resolved cred's
+    ``(VAULT_CREDENTIAL, credential_id, updated_at)`` tuple lands on
+    ``plan.spec.mount_snapshot`` so the handle the backend stamps it onto
+    matches the step-time echo set."""
+    proxy_instance = MagicMock()
+    proxy_instance.start = AsyncMock()
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            # Containing Limited env: required by the #879 gate.
+            env_config=_LIMITED_GITHUB,
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(
+            patch("aios.sandbox.spec.SecretEgressProxy", MagicMock(return_value=proxy_instance))
+        )
+        plan = await build_spec_from_session("sess_01TEST")
+
+    assert (
+        VAULT_CREDENTIAL,
+        _CRED.credential_id,
+        _CRED.updated_at.isoformat(),
+    ) in plan.spec.mount_snapshot
+
+
+async def test_failure_after_proxy_starts_stops_both_proxies() -> None:
+    """A raise in the post-proxy-start span (here the reserved-image gate)
+    must tear down BOTH the git proxy and the secret-egress proxy.
+
+    Both proxies and the broker secret are allocated BEFORE the spec is
+    assembled; a single cleanup envelope must cover all of them so a
+    failed provision can't leak a live proxy for the worker's lifetime.
+    """
+    git_proxy = MagicMock()
+    git_proxy.stop = AsyncMock()
+    secret_proxy = MagicMock()
+    secret_proxy.start = AsyncMock()
+    secret_proxy.stop = AsyncMock()
+    broker = MagicMock()
+    broker.port = 54321
+    broker.register_session = MagicMock()
+    broker.unregister_session = MagicMock()
+    # A reserved-prefix image trips the cross-tenant snapshot gate's
+    # ValueError after both proxies have started and the broker secret is
+    # registered. ``MagicMock`` env_config bypasses the pydantic ``image``
+    # validator so the gate (not construction) is what raises. Its
+    # ``networking`` is a REAL LimitedNetworking covering the cred's host so
+    # the #879 containment gate (which fires pre-envelope, before any proxy
+    # exists) passes and the reserved-image gate is what raises.
+    env_config = MagicMock()
+    env_config.image = "aios-sbx-victim"
+    env_config.networking = LimitedNetworking(type="limited", allowed_hosts=["api.github.com"])
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_config=env_config,
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+            github_clones=AsyncMock(return_value=([], git_proxy)),
+            tool_broker=broker,
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(
+            patch("aios.sandbox.spec.SecretEgressProxy", MagicMock(return_value=secret_proxy))
+        )
+        with pytest.raises(ValueError, match="reserved"):
+            await build_spec_from_session("sess_01TEST")
+
+    # Everything allocated before the failure is torn down: both proxies
+    # stopped and the broker secret unregistered.
+    git_proxy.stop.assert_awaited_once()
+    secret_proxy.stop.assert_awaited_once()
+    broker.unregister_session.assert_called_once_with("sess_01TEST")
+
+
+async def test_secret_proxy_start_failure_does_not_double_stop() -> None:
+    """``SecretEgressProxy.start()`` self-cleans on failure (its own ``except``
+    calls ``await self.stop()`` then re-raises). The outer cleanup envelope must
+    NOT stop the proxy a SECOND time — a double ``stop()`` re-closes an
+    already-closed httpx client and mis-logs a spurious cleanup failure.
+
+    Modelled faithfully: the mock's ``start()`` calls its own ``stop()`` then
+    raises, mirroring the real self-clean. ``stop`` is therefore expected
+    exactly once (the self-clean); a second call would mean the outer ``except``
+    re-stopped a proxy it should never have tracked.
+    """
+    secret_proxy = MagicMock()
+    secret_proxy.stop = AsyncMock()
+
+    async def _start_then_self_clean() -> None:
+        # Mirror the real start(): on a bind failure it awaits self.stop()
+        # before re-raising, so the caller must never call stop() again.
+        await secret_proxy.stop()
+        raise RuntimeError("bind failed")
+
+    secret_proxy.start = AsyncMock(side_effect=_start_then_self_clean)
+    broker = MagicMock()
+    broker.port = 54321
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            # Containing Limited env: required by the #879 gate.
+            env_config=_LIMITED_GITHUB,
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+            github_clones=AsyncMock(return_value=([], None)),
+            tool_broker=broker,
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(
+            patch("aios.sandbox.spec.SecretEgressProxy", MagicMock(return_value=secret_proxy))
+        )
+        with pytest.raises(RuntimeError, match="bind failed"):
+            await build_spec_from_session("sess_01TEST")
+
+    # Exactly once: the self-clean inside start(). The outer cleanup must NOT
+    # re-stop it (secret_proxy was never published past the failed start).
+    secret_proxy.stop.assert_awaited_once()
+    # The start failure fired before the broker secret was registered, so the
+    # broker is never touched on this path either.
+    broker.register_session.assert_not_called()
+
+
+def test_placeholder_is_stable_across_recycle() -> None:
+    """The placeholder is a pure function of ``(subkey, session_id,
+    credential_id)`` — two mints with the same ids are equal.
+
+    This locks the piece-4 reconstruction invariant: a recycled sandbox
+    re-derives the SAME placeholder, so anything the agent persisted into
+    /workspace keeps resolving through the fresh proxy. Already deterministic
+    — no production change; this test documents/guards it.
+    """
+    box = CryptoBox(bytes(range(32)))
+    subkey = box.derive_account_subkey("acct_x")
+    first = mint_secret_placeholder(subkey, "sess_01TEST", "vcr_01")
+    second = mint_secret_placeholder(subkey, "sess_01TEST", "vcr_01")
+    assert first == second

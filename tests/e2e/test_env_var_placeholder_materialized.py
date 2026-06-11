@@ -18,11 +18,11 @@ from pydantic import SecretStr
 
 from aios.db import queries
 from aios.harness import runtime
+from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.vaults import VaultCredentialCreate
 from aios.services import vaults as vaults_service
 from aios.services.vaults import mint_secret_placeholder
 from tests.conftest import needs_docker
-from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from tests.e2e.harness import Harness, assistant, bash, first_tool_result
 
 pytestmark = pytest.mark.docker

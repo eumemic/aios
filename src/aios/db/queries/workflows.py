@@ -631,12 +631,13 @@ async def list_run_ids_needing_step(
     - a stale inflight call: an ``agent`` past the wall-clock deadline (the step
       must force-resolve its timeout — this clause DRIVES that backstop) or a
       ``tool`` past the re-dispatch horizon (its task crashed without a signal).
-      A ``gate`` maps to NULL — resume-driven only, never stale. The agent
-      deadline is also the (deliberately slow) backstop for a child archived or
-      deleted BEFORE answering: that path writes no signal, so the run waits out
-      the deadline before the harvest resolves ``child_gone`` — acceptable for a
-      rare operator action, but a recall mode this filter covers only at the
-      horizon, not within a tick.
+      A ``gate`` maps to NULL — resume-driven only, never stale. Operator
+      archive/delete of a child BEFORE it answers now COMPLETES the open request
+      EAGERLY (the service layer fails it ``child_gone`` and writes a ``child_done``
+      signal atomically with the archive/delete, like every other completion), so
+      it is recalled via the unharvested-signal clause above within a tick — not
+      this deadline. The agent deadline remains only the backstop for a genuinely
+      stuck or non-responding LIVE child.
 
     (No ``account_id``: ``defer_run_wake`` needs none and appends no journal span.)
     """

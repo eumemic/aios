@@ -56,7 +56,6 @@ from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.network import WORKER_NETWORK_ALIAS
 from aios.sandbox.setup import (
     apply_network_lockdown,
-    ensure_workspace_runtime_dirs,
     install_egress_ca,
     install_packages,
 )
@@ -72,8 +71,17 @@ from aios.sandbox.spec import (
 if TYPE_CHECKING:
     import asyncpg
 
+    from aios.db.queries import EnvVarCredentialEcho
     from aios.models.github_repositories import GithubRepositoryResourceEcho
     from aios.models.memory_stores import MemoryStoreResourceEcho
+
+    # Type-only: a runtime top-level import would pull in ``aios.tools`` (via
+    # ``secret_egress_proxy`` → ``url_safety``), whose package ``__init__``
+    # imports ``bash`` → back into ``aios.sandbox.spec`` — a cycle. The
+    # registry only ever annotates with this type (it constructs the proxy in
+    # ``spec.build_spec_from_session`` and receives it on the plan), so a
+    # TYPE_CHECKING import is sufficient.
+    from aios.sandbox.secret_egress_proxy import SecretEgressProxy
 
 log = get_logger("aios.sandbox.registry")
 
@@ -215,6 +223,7 @@ class SandboxRegistry:
         self._store: SnapshotStore = LocalDaemonStore(backend)
         self._handles: dict[str, SandboxHandle] = {}
         self._git_proxies: dict[str, GitProxy] = {}
+        self._secret_proxies: dict[str, SecretEgressProxy] = {}
         self._last_used: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
@@ -415,26 +424,35 @@ class SandboxRegistry:
         await self._reconcile_pointer_from_local(session_id)
 
         plan = await build_spec_from_session(session_id)
-        # Resolve the snapshot pointer through the store: verified-negative
-        # existence, base-image drift, missing-snapshot detection. Returns the
-        # spec to run from — snapshot tag resolved to a local image, or cleared
-        # to None (cold start) on a detected reset.
-        spec = await self._resolve_snapshot(session_id, plan.spec)
-
-        # Record the GitProxy before backend.create so a failure midway
-        # has us in a state where release() will find and stop it.
+        # Record the proxies before anything else fallible runs: once
+        # build_spec_from_session returns, its proxies are RUNNING and the
+        # broker secret is REGISTERED, so a raise from _resolve_snapshot (below)
+        # would otherwise escape with the proxies absent from these dicts —
+        # release/evict/stop_all could never find them. Storing here keeps the
+        # whole span through backend.create leak-safe via the cleanup below.
         if plan.git_proxy is not None:
             self._git_proxies[session_id] = plan.git_proxy
+        if plan.secret_proxy is not None:
+            self._secret_proxies[session_id] = plan.secret_proxy
 
         try:
+            # Resolve the snapshot pointer through the store: verified-negative
+            # existence, base-image drift, missing-snapshot detection. Returns
+            # the spec to run from — snapshot tag resolved to a local image, or
+            # cleared to None (cold start) on a detected reset.
+            spec = await self._resolve_snapshot(session_id, plan.spec)
             handle = await self._backend.create(spec)
         except BaseException:
-            # Spec was built (proxy may be running, broker secret is
-            # registered) but the backend couldn't create the sandbox.
-            # Drop both so their port + token map + secret map don't leak.
+            # Spec was built (proxies are running, broker secret is registered)
+            # but resolution or backend.create failed before the sandbox
+            # exists. Drop all so their ports + token/secret maps don't leak.
+            # No backend.destroy here — there is no sandbox yet.
             self._git_proxies.pop(session_id, None)
             if plan.git_proxy is not None:
-                await self._stop_proxy_silently(plan.git_proxy, session_id)
+                await self._stop_proxy_silently(plan.git_proxy, session_id, kind="git_proxy")
+            self._secret_proxies.pop(session_id, None)
+            if plan.secret_proxy is not None:
+                await self._stop_proxy_silently(plan.secret_proxy, session_id, kind="secret_proxy")
             self._release_tool_broker_secret(session_id)
             raise
 
@@ -442,7 +460,6 @@ class SandboxRegistry:
         # sandbox down so we don't leak an empty container alongside
         # the proxy.
         try:
-            await ensure_workspace_runtime_dirs(self._backend, handle)
             await install_egress_ca(self._backend, handle)
             await install_packages(self._backend, handle, plan.env_config)
             await self._maybe_apply_lockdown(handle, plan)
@@ -478,6 +495,9 @@ class SandboxRegistry:
         ]
         if plan.git_proxy is not None:
             extra_host_ports.append((WORKER_NETWORK_ALIAS, plan.git_proxy.port))
+        # The secret-egress proxy port is intentionally NOT opened here: it is
+        # inert until #878 wires nat DNAT egress routing through it. Opening a
+        # host port with no consumer would be wrong; #878 adds it.
         await apply_network_lockdown(
             self._backend,
             handle,
@@ -485,21 +505,44 @@ class SandboxRegistry:
             extra_host_ports=extra_host_ports,
         )
 
-    async def _stop_proxy_silently(self, proxy: GitProxy, session_id: str) -> None:
+    async def _stop_proxy_silently(
+        self, proxy: GitProxy | SecretEgressProxy, session_id: str, *, kind: str
+    ) -> None:
         """Stop ``proxy``, log + swallow any error.
 
         Used by every cleanup path; a stuck proxy must never block
         sandbox teardown or propagate a secondary exception over a
-        primary one.
+        primary one. ``kind`` (``"git_proxy"`` / ``"secret_proxy"``)
+        names the proxy type in the failure log so a secret-egress stop
+        failure isn't mis-attributed to the git proxy in logs/alerts.
         """
         try:
             await proxy.stop()
         except Exception as err:
             log.warning(
-                "sandbox.git_proxy_stop_failed",
+                "sandbox.proxy_stop_failed",
+                kind=kind,
                 session_id=session_id,
                 error=str(err),
             )
+
+    def _spawn_evict_proxy_stop(
+        self, proxy: GitProxy | SecretEgressProxy, session_id: str, *, kind: str
+    ) -> None:
+        """Fire-and-forget stop of an evicted proxy, holding a strong ref.
+
+        ``evict`` is on a retry path and can't block on ``stop()``'s up-to-5s
+        graceful drain, so the stop runs as a detached task. asyncio only
+        weak-refs tasks, so the task is parked in ``_evict_proxy_stop_tasks``
+        (cleared via a done-callback) to keep it alive until ``stop()`` unwinds
+        the proxy's uvicorn server, httpx client and bound TCP port.
+        """
+        task = asyncio.create_task(
+            self._stop_proxy_silently(proxy, session_id, kind=kind),
+            name=f"sandbox-evict-{kind}-stop:{session_id}",
+        )
+        self._evict_proxy_stop_tasks.add(task)
+        task.add_done_callback(self._evict_proxy_stop_tasks.discard)
 
     def _release_tool_broker_secret(self, session_id: str) -> None:
         """Drop the per-session entry from the tool broker's secret map.
@@ -550,7 +593,10 @@ class SandboxRegistry:
             )
         proxy = self._git_proxies.pop(session_id, None)
         if proxy is not None:
-            await self._stop_proxy_silently(proxy, session_id)
+            await self._stop_proxy_silently(proxy, session_id, kind="git_proxy")
+        secret_proxy = self._secret_proxies.pop(session_id, None)
+        if secret_proxy is not None:
+            await self._stop_proxy_silently(secret_proxy, session_id, kind="secret_proxy")
         self._release_tool_broker_secret(session_id)
 
     # ── durable-session-sandbox lifecycle helpers (§5.2-§5.4) ───────────────
@@ -854,9 +900,12 @@ class SandboxRegistry:
         # eventual restart clears; the race is unacceptable.
         # ``stop_all()`` clears the whole dict at teardown.
         proxy = self._git_proxies.pop(session_id, None)
+        secret_proxy = self._secret_proxies.pop(session_id, None)
 
         if proxy is not None:
-            await self._stop_proxy_silently(proxy, session_id)
+            await self._stop_proxy_silently(proxy, session_id, kind="git_proxy")
+        if secret_proxy is not None:
+            await self._stop_proxy_silently(secret_proxy, session_id, kind="secret_proxy")
         self._release_tool_broker_secret(session_id)
         runtime.clear_session_memory_mounts(session_id)
         runtime.clear_session_read_shas(session_id)
@@ -874,6 +923,7 @@ class SandboxRegistry:
         session_id: str,
         memory_echoes: list[MemoryStoreResourceEcho],
         github_echoes: list[GithubRepositoryResourceEcho],
+        env_var_credential_echoes: list[EnvVarCredentialEcho],
     ) -> None:
         """Release the cached sandbox if its mount snapshot has drifted.
 
@@ -881,15 +931,19 @@ class SandboxRegistry:
         can't race with the release via ``get_or_provision``.
 
         Drift includes: memory store attachments added/removed, github
-        repos added/removed, github token rotated (the ``updated_at``
-        timestamp on the github echo is part of the snapshot key, see
-        :func:`mount_snapshot_from_echoes`).
+        repos added/removed, github token rotated, and env-var credentials
+        added/removed/rotated (the ``updated_at`` timestamp on the github
+        echo and the env-var echo are part of the snapshot key, see
+        :func:`mount_snapshot_from_echoes`). The secret-egress proxy is
+        stopped via the delegated ``release()`` call.
         """
         async with self._lock_for(session_id):
             handle = self._handles.get(session_id)
             if handle is None:
                 return
-            if handle.mount_snapshot == mount_snapshot_from_echoes(memory_echoes, github_echoes):
+            if handle.mount_snapshot == mount_snapshot_from_echoes(
+                memory_echoes, github_echoes, env_var_credential_echoes
+            ):
                 return
             log.info(
                 "sandbox.released_for_mount_change",
@@ -946,16 +1000,16 @@ class SandboxRegistry:
         # broker secret, wedging the new sandbox.
         if self._handles.pop(session_id, None) is not None:
             log.info("sandbox.evicted", session_id=session_id)
-        # Drop the proxy too — a fresh sandbox will get a fresh proxy
-        # from the next provision pass.
-        proxy = self._git_proxies.pop(session_id, None)
-        if proxy is not None:
-            task = asyncio.create_task(
-                self._stop_proxy_silently(proxy, session_id),
-                name=f"sandbox-evict-proxy-stop:{session_id}",
-            )
-            self._evict_proxy_stop_tasks.add(task)
-            task.add_done_callback(self._evict_proxy_stop_tasks.discard)
+        # Drop the proxies too — a fresh sandbox will get fresh proxies
+        # from the next provision pass. Both stops are fire-and-forget
+        # (the caller is on a retry path) and share the strong-ref set so
+        # neither task is GC'd before stop() unwinds its server/port.
+        git_proxy = self._git_proxies.pop(session_id, None)
+        if git_proxy is not None:
+            self._spawn_evict_proxy_stop(git_proxy, session_id, kind="git_proxy")
+        secret_proxy = self._secret_proxies.pop(session_id, None)
+        if secret_proxy is not None:
+            self._spawn_evict_proxy_stop(secret_proxy, session_id, kind="secret_proxy")
         # Same story for the tool broker secret: drop it immediately; a
         # fresh sandbox will get a fresh secret from the next provision.
         self._release_tool_broker_secret(session_id)
@@ -983,6 +1037,7 @@ class SandboxRegistry:
         """
         handles = list(self._handles.values())
         proxies = list(self._git_proxies.values())
+        secret_proxies = list(self._secret_proxies.values())
         # Drop the per-session tool broker secret (and its on-disk ``.secret``
         # file when UDS transport is in use) for every active session, matching
         # the cleanup path in ``release()``/``evict()``.
@@ -992,14 +1047,31 @@ class SandboxRegistry:
         self._last_used.clear()
         self._locks.clear()
         self._git_proxies.clear()
+        self._secret_proxies.clear()
 
-        if proxies:
+        kinded_proxies: list[tuple[str, GitProxy | SecretEgressProxy]] = [
+            *(("git_proxy", p) for p in proxies),
+            *(("secret_proxy", p) for p in secret_proxies),
+        ]
+        if kinded_proxies:
             proxy_results = await asyncio.gather(
-                *(p.stop() for p in proxies), return_exceptions=True
+                *(p.stop() for _kind, p in kinded_proxies), return_exceptions=True
             )
-            for _p, result in zip(proxies, proxy_results, strict=True):
+            for (kind, _p), result in zip(kinded_proxies, proxy_results, strict=True):
                 if isinstance(result, BaseException):
-                    log.warning("sandbox.stop_all_proxy_error", error=str(result))
+                    log.warning("sandbox.stop_all_proxy_error", kind=kind, error=str(result))
+
+        # Drain any evict-triggered fire-and-forget proxy-stop tasks still in
+        # flight: evict() pops the proxy out of ``_git_proxies`` /
+        # ``_secret_proxies`` (so the gather above can't see it) and stops it in
+        # the background. Without awaiting them here, shutdown would abandon an
+        # in-progress teardown, leaking the proxy's server/port past worker
+        # exit. Snapshot first — each task removes itself from the set via its
+        # done-callback. These tasks already log+swallow internally, so
+        # ``return_exceptions=True`` is belt-and-suspenders.
+        evict_tasks = list(self._evict_proxy_stop_tasks)
+        if evict_tasks:
+            await asyncio.gather(*evict_tasks, return_exceptions=True)
 
         if not handles:
             return

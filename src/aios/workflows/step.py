@@ -309,6 +309,13 @@ async def _run_workflow_step_body(
     outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
 
     needs_rewake = False
+    # A spawn rejection journaled this wake (a catchable agent() error). The run owes one
+    # more drive so the replay throws the AgentError at the await — so we DON'T settle into
+    # a quiet 'suspended' (which the next wake's quiet-wake guard would early-exit), we hand
+    # the lease back as 'running' and let the guaranteed self-wake (needs_rewake) drive it.
+    # One-shot by construction: a rejected call lands in memo, so its capability is skipped
+    # on replay (never re-journaled), and the driven wake re-suspends/completes normally.
+    rejected_any = False
     # (call_key, tool_name, input) for tool frontiers opened this wake — launched AFTER
     # the txn commits (below), so call_started is visible before a task can signal+wake.
     tools_to_launch: list[tuple[str, str, Any]] = []
@@ -349,7 +356,30 @@ async def _run_workflow_step_body(
         # Gated on a non-crash outcome: a crashed/killed host emits nothing, and
         # that emptiness is a crash (handled above), never divergence.
         emitted_keys = {cap.call_key for cap in outcome.emitted}
-        diverged = sorted(k for k in inflight if k not in emitted_keys)
+        # A call_key with a `frontier_deferred` marker but no `call_started` (and not
+        # yet resolved into memo) is a WAITING-to-be-admitted agent frontier. On a
+        # completed replay the script MUST re-emit it (it has neither started nor
+        # resolved); if it didn't, the run diverged just as surely as a vanished
+        # inflight call — fail closed rather than strand a frontier that will never
+        # be admitted. A key that later gets a `call_started` (admitted) is tracked
+        # by `inflight` instead, and one that resolved is in `memo` — both excluded.
+        # A key is no longer waiting iff it is open (`inflight`: has a `call_started`
+        # without a `call_result`) or resolved (`memo`: has a `call_result` — either
+        # a completed call, or a spawn REJECTION journaled directly as a catchable
+        # error result with no `call_started` at all). Both sets together are exactly
+        # the not-pending keys — no separate scan of `events` needed.
+        started_keys = set(inflight) | set(memo)
+        deferred_pending = {
+            e.call_key
+            for e in events
+            if e.type == "frontier_deferred"
+            and e.call_key is not None
+            and e.call_key not in started_keys
+        }
+        diverged = sorted(
+            {k for k in inflight if k not in emitted_keys}
+            | {k for k in deferred_pending if k not in emitted_keys}
+        )
         if diverged:
             await _complete_run(
                 conn,
@@ -365,36 +395,41 @@ async def _run_workflow_step_body(
             return
 
         # Lifetime agent-call cap (H1): bound a runaway that spawns children in an
-        # unbounded loop. Counted from the monotonic call_started journal plus this
-        # step's new agent frontier, checked BEFORE any spawn so an over-cap step
-        # errors atomically — never leaving a partial fan-out of orphan children.
-        # (A single parallel()'s width is bounded separately in the host.) Gated on
-        # there BEING new spawns: a harvest-only re-suspend (no new agents) must never
-        # error — else lowering the cap mid-flight would retroactively kill a run whose
-        # children are already all inflight, orphaning them. H1 blocks NEW spawns only.
-        new_agent_caps = [
-            cap
-            for cap in outcome.emitted
-            if cap.capability_id == "agent"
-            and cap.call_key not in memo
-            and cap.call_key not in inflight
-        ]
+        # unbounded loop. Counted from the monotonic call_started journal (prior real
+        # spawns) plus each child this step ACTUALLY creates — enforced per-spawn at the
+        # gate (see ``_open_agent_capability``), the moment before a child is created, so
+        # the over-cap child is never created. Per-spawn (not a batch pre-count) because a
+        # rejected cap (agent_not_found / bad_agent_call) spawns no child and consumes no
+        # slot, so it must NOT count toward the cap: a batch count over the frontier would
+        # pessimistically tip the quota on caps that never spawn, terminating a run whose
+        # only real over-cap pressure is illusory. (Good children spawned earlier in an
+        # over-cap frontier do persist as orphans the quiescence sweep reclaims — same
+        # terminal outcome, no correctness cost.) A harvest-only re-suspend (no new spawns)
+        # thus naturally never errors — H1 gates NEW real spawns only, so lowering the cap
+        # mid-flight can't retroactively kill a run whose children are already all inflight.
+        # (parallel()'s width is bounded separately in the host.)
         prior_agent_calls = sum(
             1 for e in events if e.type == "call_started" and e.payload.get("capability") == "agent"
         )
         max_agent_calls = get_settings().workflow_max_agent_calls
-        if new_agent_caps and prior_agent_calls + len(new_agent_caps) > max_agent_calls:
-            await _complete_run(
-                conn,
-                run,
-                output=(
-                    f"workflow exceeded the {max_agent_calls}-agent call cap "
-                    f"({prior_agent_calls} started, {len(new_agent_caps)} more requested)"
-                ),
-                is_error=True,
-                error_kind="too_many_agents",
-            )
-            return
+        # The running tally of real agent children: prior journaled spawns + this step's.
+        agent_spawns = prior_agent_calls
+
+        # Per-run wave admission (#784): bound the number of concurrently in-flight
+        # agent() children. Count this run's currently in-flight agents (harvested
+        # `inflight` map), and admit at most `slots` NEW agent frontiers this wake;
+        # journal the rest as `frontier_deferred` (no spawn, no call_started). Freed
+        # slots admit deferred frontiers on the next wake — the existing child-
+        # completion re-wake re-runs this step, no new machinery. Gate and tool
+        # frontiers are UNTHROTTLED. Orthogonal to H1: the lifetime cap is enforced
+        # per-spawn at the gate (above), and only ADMITTED frontiers reach the gate —
+        # a deferred frontier consumes no lifetime quota until admitted (no spawn, no
+        # call_started), and when admitted on a later wake it is counted exactly once,
+        # so the wave gate neither masks nor double-counts the lifetime cap.
+        inflight_agents = sum(
+            1 for e in inflight.values() if e.payload.get("capability") == "agent"
+        )
+        slots = max(0, get_settings().workflow_max_inflight_children_per_run - inflight_agents)
 
         # Suspended: open any *new* frontier capability, then park.
         for cap in outcome.emitted:
@@ -417,11 +452,68 @@ async def _run_workflow_step_body(
                 if cap.call_key in signals:
                     needs_rewake = True
             elif cap.capability_id == "agent":
-                spawn = await _open_agent_capability(conn, pool, run, cap)
-                if spawn.rejected:
-                    return  # the frontier was terminally rejected (bad call) — run errored
-                if spawn.needs_rewake:
-                    needs_rewake = True  # C1'/C4: harvest the already-present marker next step
+                if slots > 0:
+                    spawn = await _open_agent_capability(
+                        conn,
+                        pool,
+                        run,
+                        cap,
+                        agent_spawns=agent_spawns,
+                        max_agent_calls=max_agent_calls,
+                    )
+                    # Lifetime cap hit (H1): this cap passed every rejection gate and WOULD
+                    # create a real child, but that child would exceed the cap — terminate the
+                    # run (terminal, not catchable). Checked at the spawn point, before the
+                    # child exists, so no orphan is created; any good children already spawned
+                    # earlier in this frontier share the run's terminal outcome.
+                    if spawn.quota_exceeded:
+                        await _complete_run(
+                            conn,
+                            run,
+                            output=(
+                                f"workflow exceeded the {max_agent_calls}-agent call cap "
+                                f"({agent_spawns + 1} total agent calls attempted)"
+                            ),
+                            is_error=True,
+                            error_kind="too_many_agents",
+                        )
+                        return
+                    # rejected: this call's catchable error was journaled — self-wake so the
+                    # run replays and throws the AgentError at the await. A spawn error on ONE
+                    # capability must NOT abort spawning the others, so continue the loop.
+                    # needs_rewake (C1'/C4): a re-attached child already has its marker.
+                    if spawn.rejected or spawn.needs_rewake:
+                        needs_rewake = True
+                    if spawn.rejected:
+                        rejected_any = True
+                    else:
+                        # A real child was created (or re-attached): it counts toward the
+                        # lifetime tally AND occupies a wave slot. A REJECTED cap consumes
+                        # neither — no child exists, so it neither tips the lifetime quota
+                        # nor blocks admission of the remaining frontier.
+                        agent_spawns += 1
+                        slots -= 1
+                else:
+                    # Over the per-run wave cap: defer this frontier. Journal a
+                    # `frontier_deferred` marker (idempotent on (run_id, call_key,
+                    # type)) so the divergence guard sees a waiting agent. Do NOT
+                    # spawn and do NOT journal call_started. A later wake re-emits this
+                    # same frontier (no call_started ⇒ still "new"); when a child
+                    # resolves and frees a slot, it is admitted then. Deferral is a
+                    # WAIT, never an error — it must never reach _open_agent_capability,
+                    # so it can never route through the catchable spawn-failure path
+                    # (#779): rejection means an ATTEMPTED spawn failed; deferral means
+                    # the spawn was POSTPONED, invisible to the script. No stall: slots
+                    # can only be exhausted while ≥1 real child is in flight, and that
+                    # child's completion re-wake re-drives admission.
+                    await wf_queries.append_run_event(
+                        conn,
+                        account_id=account_id,
+                        run_id=run_id,
+                        type="frontier_deferred",
+                        call_key=cap.call_key,
+                        payload={"capability": "agent"},
+                    )
             elif cap.capability_id == "tool":
                 spec = cap.spec if isinstance(cap.spec, dict) else {}
                 tool_name = spec.get("tool_name")
@@ -461,7 +553,12 @@ async def _run_workflow_step_body(
                     error_kind="not_implemented",
                 )
                 return
-        await wf_queries.set_run_status(conn, run_id, "suspended", account_id=account_id)
+        # Hand the lease back. A reject journaled this wake leaves the run 'running' (a
+        # drive is owed: the self-wake replays and throws the catchable AgentError);
+        # otherwise park as a settled 'suspended'.
+        await wf_queries.set_run_status(
+            conn, run_id, "running" if rejected_any else "suspended", account_id=account_id
+        )
 
     # Outside the txn (after the suspend commits): launch this wake's tool tasks — now
     # that their call_started rows are committed, a task that signals+wakes lands a step
@@ -478,8 +575,12 @@ async def _run_workflow_step_body(
 class _SpawnResult(NamedTuple):
     """Outcome of opening one ``agent()`` frontier."""
 
-    rejected: bool  # the call was terminally rejected (run errored) — stop the step
+    # this call's catchable error was journaled — self-wake so the run replays and throws
+    rejected: bool
     needs_rewake: bool  # a re-attached child already has its marker — self-wake to harvest
+    # the cap passed every rejection gate but creating its child would exceed the lifetime
+    # agent-call cap — the caller terminates the run (``too_many_agents``); no child created
+    quota_exceeded: bool = False
 
 
 async def _open_agent_capability(
@@ -487,6 +588,9 @@ async def _open_agent_capability(
     pool: asyncpg.Pool[Any],
     run: WfRun,
     cap: EmittedCapability,
+    *,
+    agent_spawns: int,
+    max_agent_calls: int,
 ) -> _SpawnResult:
     """Spawn (or, on replay/C1', re-attach) the ``agent()`` child for a frontier,
     then journal ``call_started{child_session_id, child_agent_version}``.
@@ -496,16 +600,43 @@ async def _open_agent_capability(
     ``call_started`` dedups on the memo. On replay the child id already exists →
     re-attach, journaling the *row's* pinned version (not a re-resolved one).
 
-    Returns ``rejected=True`` iff the call was terminally rejected (the run was
-    errored — the caller should stop the step). ``defer_wake`` fires **only on
+    Returns ``rejected=True`` iff this call was rejected and its catchable error was
+    journaled (a ``call_result`` error for ``cap.call_key``): the caller self-wakes so
+    the run replays and ``_agent_error_from`` throws an ``AgentError`` at the
+    ``await``, where the author can catch it. ``defer_wake`` fires **only on
     first spawn** (``created``): on a re-attach the child is already sweep-wakeable
     via its own first user message and may even be terminal, so appending a wake
     span to it would crash. ``needs_rewake=True`` asks the caller for a self-wake
     when a re-attached child *already* has its completion marker (C1'/C4: it
     finished before this wake journaled ``call_started``, so the pre-replay harvest
     — which only sees inflight ``call_started`` events — missed it).
+
+    The lifetime agent-call cap (H1) is enforced here, at the spawn point: ``agent_spawns``
+    is the count of real children already created (prior journaled + this step's so far).
+    A cap is checked AFTER its rejection gates and BEFORE ``create_child_session`` — a
+    rejected cap creates no child and never counts, and a cap that would create the
+    (``max_agent_calls`` + 1)-th child returns ``quota_exceeded=True`` so the caller
+    terminates the run before that child exists.
     """
     account_id = run.account_id
+
+    async def _reject(kind: str, message: str) -> _SpawnResult:
+        # Journal the rejection as a CATCHABLE call_result error for this call_key —
+        # the same channel every other agent failure uses — instead of terminally
+        # erroring the run. The descriptive ``message`` is the author's only source
+        # (``_AGENT_ERROR_DEFAULT_MESSAGES`` has no entry for these kinds), so it is
+        # preserved verbatim. The caller self-wakes; the next step's replay throws
+        # ``_agent_error_from`` at the ``await``, where the author can try/except it.
+        await wf_queries.append_run_event(
+            conn,
+            account_id=account_id,
+            run_id=run.id,
+            type="call_result",
+            call_key=cap.call_key,
+            payload={"result": None, "is_error": True, "error": {"kind": kind, "message": message}},
+        )
+        return _SpawnResult(rejected=True, needs_rewake=False)
+
     spec = cap.spec if isinstance(cap.spec, dict) else {}
     # agent() carries output_schema as a canonical JSON *string* (so a schema's floats
     # survive the call_key hash); reconstruct the dict. None means no schema demanded.
@@ -517,45 +648,34 @@ async def _open_agent_capability(
         # Structured output: the child must return a value matching this schema (the
         # return tool enforces it; see workflow_completion). Reject a bad schema here —
         # author-facing — rather than letting it brick the child when it applies the
-        # schema. Three author-facing failures: a non-object schema (a bare boolean is
-        # valid JSON Schema, but `false` rejects every value and `true` disables
-        # enforcement), a structurally-invalid schema, and one with an unresolvable
-        # reference (passes check_schema but raises at validation time).
-        schema_error: str | None = None
+        # schema. Three sequentially-dependent author-facing failures, each an early
+        # reject: a non-object schema (a bare boolean is valid JSON Schema, but `false`
+        # rejects every value and `true` disables enforcement), a structurally-invalid
+        # schema, and one with an unresolvable reference (passes check_schema but raises
+        # at validation time).
         if not isinstance(output_schema, dict):
-            schema_error = (
-                f"output_schema must be a JSON object schema, got {type(output_schema).__name__}"
+            return await _reject(
+                "bad_agent_call",
+                f"agent() output_schema must be a JSON object schema, "
+                f"got {type(output_schema).__name__}",
             )
-        else:
-            try:
-                jsonschema.Draft202012Validator.check_schema(output_schema)
-            except jsonschema.SchemaError as exc:
-                schema_error = f"output_schema is not a valid JSON Schema: {exc.message}"
-            else:
-                if (bad_ref := _unresolvable_ref(output_schema)) is not None:
-                    schema_error = (
-                        f"output_schema has an unresolvable reference {bad_ref!r} "
-                        "(references must resolve within the schema; remote refs are unsupported)"
-                    )
-        if schema_error is not None:
-            await _complete_run(
-                conn,
-                run,
-                output=f"agent() {schema_error}",
-                is_error=True,
-                error_kind="bad_agent_call",
+        try:
+            jsonschema.Draft202012Validator.check_schema(output_schema)
+        except jsonschema.SchemaError as exc:
+            return await _reject(
+                "bad_agent_call", f"agent() output_schema is not a valid JSON Schema: {exc.message}"
             )
-            return _SpawnResult(rejected=True, needs_rewake=False)
+        if (bad_ref := _unresolvable_ref(output_schema)) is not None:
+            return await _reject(
+                "bad_agent_call",
+                f"agent() output_schema has an unresolvable reference {bad_ref!r} "
+                "(references must resolve within the schema; remote refs are unsupported)",
+            )
     agent_id = spec.get("agent_id")
     if not isinstance(agent_id, str):
-        await _complete_run(
-            conn,
-            run,
-            output=f"agent() requires a string agent_id, got {agent_id!r}",
-            is_error=True,
-            error_kind="bad_agent_call",
+        return await _reject(
+            "bad_agent_call", f"agent() requires a string agent_id, got {agent_id!r}"
         )
-        return _SpawnResult(rejected=True, needs_rewake=False)
 
     child_id = child_session_id(run.id, cap.call_key)
     try:
@@ -563,14 +683,12 @@ async def _open_agent_capability(
         # which the run clamps. One query, same NotFoundError contract as before.
         agent = await db_queries.get_agent(conn, agent_id, account_id=account_id)
     except NotFoundError:
-        await _complete_run(
-            conn,
-            run,
-            output=f"agent {agent_id!r} not found",
-            is_error=True,
-            error_kind="agent_not_found",
-        )
-        return _SpawnResult(rejected=True, needs_rewake=False)
+        return await _reject("agent_not_found", f"agent {agent_id!r} not found")
+    # Lifetime cap (H1) enforced HERE — past every rejection gate, before the child is
+    # created — so only caps that genuinely spawn count. ``agent_spawns`` already excludes
+    # rejected caps; this child would be the (agent_spawns + 1)-th, so cap it on strict ``>``.
+    if agent_spawns + 1 > max_agent_calls:
+        return _SpawnResult(rejected=False, needs_rewake=False, quota_exceeded=True)
     pinned = agent.version
     # #794: the child wields agent ∩ run, frozen at spawn; its vaults are the run's.
     child_surface = attenuation_service.clamp(surface_of(agent), surface_of(run))

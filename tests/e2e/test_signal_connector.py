@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -433,6 +434,168 @@ class TestSignalMultiConnection:
             await harness.run_step(session_a.id)
             events = await harness.events(session_a.id)
             assert last_assistant_content(events) == "done"
+        finally:
+            connector_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await connector_task
+
+    async def test_outbound_send_result_stamps_channel(
+        self,
+        harness: Harness,
+        live_server: str,
+        aios_env: dict[str, str],
+        mocked_signal_daemon: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The persisted ``signal_send`` tool_result stamps the RESOLVED
+        focal channel + chat_type directly onto its payload (#943), so an
+        external observer reads the send target off the tool event alone —
+        no heuristic reconstruction from prior events.
+
+        Drives the full ``switch_channel`` → ``signal_send`` path: an
+        inbound stamps a bound channel on session A, the model switches
+        focal to it, then calls ``signal_send`` WITHOUT an explicit
+        ``chat_id``.  The runtime injects ``chat_id`` from the switched
+        focal, and the connector echoes the same channel back in the
+        result — proving the stamped channel tracks focal, not the call
+        args.
+        """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        from aios_signal.config import Settings
+        from aios_signal.connector import SignalConnector
+
+        from aios.services import agents as agents_service
+        from aios.services import connections as connections_service
+        from aios.services import environments as env_svc
+        from aios.services import sessions as sess_svc
+
+        target_channel = f"signal/{BOT_UUID_A}/{ALICE_UUID}"
+
+        agent = await agents_service.create_agent(
+            harness._pool,
+            name=f"sig-stamp-{id(self)}",
+            model="fake/test",
+            system="",
+            tools=[],
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+            account_id=account_id,
+        )
+        env = await env_svc.create_environment(
+            harness._pool, name=f"env-stamp-{id(self)}", account_id=account_id
+        )
+        session_a = await sess_svc.create_session(
+            harness._pool,
+            agent_id=agent.id,
+            environment_id=env.id,
+            title=None,
+            metadata={},
+            account_id=account_id,
+        )
+
+        api_key = aios_env["AIOS_API_KEY"]
+        conn_a = await _create_signal_connection(
+            api_key, live_server, PHONE_A + "-stamp", {"phone": PHONE_A}
+        )
+        await connections_service.attach_connection(
+            harness._pool, conn_a, session_id=session_a.id, account_id=account_id
+        )
+        await _publish_signal_tools_schema(harness)
+        token = await issue_runtime_token(api_key, live_server, "signal")
+
+        monkeypatch.setenv("AIOS_URL", live_server)
+        monkeypatch.setenv("AIOS_RUNTIME_TOKEN", token)
+        cfg = Settings(config_dir=tmp_path / "cfg", cli_bin="/usr/bin/signal-cli")
+        connector = SignalConnector(cfg)
+
+        # Inbound on the target channel makes it a bound, switchable
+        # channel (list_session_channels derives from the event log's
+        # ``channel`` column, stamped from this message's metadata).
+        await sess_svc.append_user_message(
+            harness._pool,
+            session_a.id,
+            "hi from alice",
+            metadata={"channel": target_channel},
+            account_id=account_id,
+        )
+
+        harness.script_model(
+            [
+                assistant(
+                    tool_calls=[
+                        tool_call(
+                            "switch_channel",
+                            {"channel_id": target_channel},
+                            call_id="call_switch",
+                        )
+                    ]
+                ),
+                # No explicit chat_id — the runtime injects it from the
+                # switched focal channel.
+                assistant(
+                    tool_calls=[
+                        tool_call(
+                            "signal_send",
+                            {"text": "ack"},
+                            call_id="call_send",
+                        )
+                    ]
+                ),
+                assistant("done"),
+            ]
+        )
+
+        connector_task = asyncio.create_task(connector.run())
+        rpc_call: AsyncMock = mocked_signal_daemon["rpc_call"]
+        try:
+            await connector.wait_connection_served(conn_a)
+
+            # Step 1: switch_channel (in-process built-in) mutates focal.
+            await harness.run_step(session_a.id)
+            await harness.wait_for_tools(session_a.id)
+            session = await harness.session(session_a.id)
+            assert session.focal_channel == target_channel
+
+            # Step 2: signal_send — the connector executes it out-of-process.
+            await harness.run_step(session_a.id)
+
+            async def _signal_send_called() -> bool:
+                return any(c.args and c.args[0] == "send" for c in rpc_call.call_args_list)
+
+            deadline = asyncio.get_running_loop().time() + 10.0
+            while not await _signal_send_called():
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("signal_send never reached the daemon RPC")
+                await asyncio.sleep(0.1)
+
+            # Poll for the SEND result specifically — the switch_channel
+            # tool_result is also ``role="tool"`` and lands first, so a
+            # bare "any tool result" predicate would race ahead of the
+            # connector's out-of-process signal_send POST.
+            async def _send_results() -> list[Any]:
+                msgs = await harness.events(session_a.id)
+                return [
+                    e
+                    for e in msgs
+                    if e.data.get("role") == "tool" and e.data.get("tool_call_id") == "call_send"
+                ]
+
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while not await _send_results():
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("signal_send tool_result event never persisted")
+                await asyncio.sleep(0.1)
+
+            # Read the connector's signal_send tool_result and assert the
+            # stamped channel + chat_type WITHOUT scanning prior events.
+            send_results = await _send_results()
+            assert len(send_results) == 1
+            payload = json.loads(send_results[0].data["content"])
+            assert payload["channel"] == target_channel
+            assert payload["chat_type"] == "dm"
         finally:
             connector_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
