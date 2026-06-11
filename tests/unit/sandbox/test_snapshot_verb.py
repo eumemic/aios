@@ -294,7 +294,7 @@ class TestFlattenConfigRestore:
         joined = " ".join(consumer)
         assert "WORKDIR /workspace" in joined
         assert "ENV HOME=/home/aios" in joined
-        assert 'CMD ["tail","-f","/dev/null"]' in joined
+        assert 'CMD ["/usr/bin/tail","-f","/dev/null"]' in joined
         assert "aios.flattened=true" in joined
         assert "aios.base_image=ghcr.io/eumemic/aios-sandbox:latest" in joined
         # PATH is NOT restored.

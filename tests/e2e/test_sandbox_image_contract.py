@@ -103,7 +103,7 @@ def _docker_run(
         "tool",  # sandbox-native broker CLI (baked from repo bin/tool; #635)
         "node",  # so agents can run npm packages without first apt-installing the runtime
         "npm",
-        "tail",  # the image CMD is `tail -f /dev/null`
+        "tail",  # the image CMD is `/usr/bin/tail -f /dev/null`
         "cat",
         "head",
         "grep",
@@ -120,6 +120,15 @@ def test_binary_available(pulled_image: str, binary: str) -> None:
     """
     r = _docker_run(pulled_image, "which", binary)
     assert r.returncode == 0, f"{binary!r} not found: {r.stderr}"
+
+
+def test_tail_at_absolute_path(pulled_image: str) -> None:
+    """The image CMD is `/usr/bin/tail -f /dev/null` (absolute path — see
+    docker/Dockerfile.sandbox and DockerBackend._flatten). Pin the binary at
+    that exact path so a base-image swap relocating `tail` is caught in CI,
+    not at container init with an opaque `exec` failure (#925, #938)."""
+    r = _docker_run(pulled_image, "test", "-x", "/usr/bin/tail")
+    assert r.returncode == 0, f"/usr/bin/tail not executable in image: {r.stderr}"
 
 
 # -- runtime behaviour ---------------------------------------------------------
