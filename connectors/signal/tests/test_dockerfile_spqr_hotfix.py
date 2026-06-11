@@ -69,6 +69,13 @@ def test_has_revert_to_stock_marker(dockerfile_text: str) -> None:
     assert "#2059" in dockerfile_text
 
 
+def test_runtime_stage_is_python_base(dockerfile_text: str) -> None:
+    # The build stage is JDK 25, but the FINAL runtime stage must stay a
+    # Python image — the connector runs ``python -m aios_signal``, so a
+    # regression that shipped a JRE-only runtime base would have no Python.
+    assert "FROM python:3.13-slim-bookworm" in dockerfile_text
+
+
 def test_no_active_native_tarball_download(dockerfile_text: str) -> None:
     native_tarball = re.compile(r"signal-cli-.*-Linux-native\.tar\.gz")
     active = [

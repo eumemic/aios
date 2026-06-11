@@ -55,6 +55,13 @@ RUN apt-get update \
 # bf1376d carries the Mode-A SPQR parse fix (libsignal-service _147→_148);
 # the Mode-B receipt-handler NPE is patched in below.  ``git fetch --depth 1``
 # of the reachable commit SHA avoids cloning years of history on cold CI.
+#
+# TRADE-OFF: this build depends on bf1376d remaining reachable on the
+# AsamK/signal-cli remote — there is no release artifact to pin to (that
+# unreleased fix is the whole reason for this hotfix).  An accepted,
+# short-lived risk for the incident response: revert to the stock release
+# tarball (see the REVERT-TO-STOCK marker above) once upstream ships a
+# fixed release, at which point this from-source fetch goes away entirely.
 RUN git init /signal-cli
 WORKDIR /signal-cli
 RUN git remote add origin https://github.com/AsamK/signal-cli.git \
@@ -77,7 +84,11 @@ RUN ./gradlew installDist -x test --no-daemon
 # JRE 25.  Copy the env-resolved JAVA_HOME to a fixed path so the runtime
 # COPY --from doesn't depend on the base image's internal layout.
 FROM azul/zulu-openjdk:25-jre-headless AS jre
-RUN cp -r "$JAVA_HOME" /opt/jre
+# Copy CONTENTS (``/.``) into a pre-created /opt/jre with ``cp -a`` so the
+# result is /opt/jre/bin/java whether or not /opt/jre pre-exists, and so
+# the JRE's symlinks + perms are preserved (``cp -r`` would nest into an
+# existing dir and dereference symlinks).
+RUN mkdir -p /opt/jre && cp -a "$JAVA_HOME/." /opt/jre/
 
 # ─── Python runtime stage ────────────────────────────────────────────────
 # glibc base (python:3.13-slim-bookworm) is mandatory: libsignal bundles

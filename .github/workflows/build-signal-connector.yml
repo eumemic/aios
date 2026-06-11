@@ -32,7 +32,7 @@ on:
 # One build at a time per ref; a second push cancels the in-flight build.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   build:
