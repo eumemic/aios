@@ -151,8 +151,9 @@ services:
 
   signal:
     profiles: [signal]
-    # signal-cli upstream native build is amd64-only; on Apple Silicon
-    # this runs under emulation.  Acceptable for local dev.
+    # signal-cli is now built from source as a JVM app (#907 SPQR hotfix),
+    # but stays amd64-pinned: libsignal's bundled JNI .so is glibc/amd64, so
+    # on Apple Silicon this runs under emulation.  Acceptable for local dev.
     platform: linux/amd64
     build:
       context: .

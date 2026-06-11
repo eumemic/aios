@@ -126,6 +126,27 @@ def test_missing_source_uuid_returns_none(bot_uuid: str) -> None:
     assert parse_envelope(envelope, bot_account_uuid=bot_uuid) is None
 
 
+def test_source_less_receipt_returns_none(bot_uuid: str) -> None:
+    """A source-less sealed-sender receipt envelope (#907) — no
+    ``sourceUuid``/``source`` — must not raise in the Python connector.
+    ``parse_envelope`` drops it to None at its source-uuid guard, BEFORE
+    reaching the ``receiptMessage`` branch, so this pins the Python side's
+    None-safety for that envelope shape.  The substantive Mode-B NPE fix
+    (where signal-cli's IncomingMessageHandler would NPE on getSender())
+    lives in the Java guard patch, signal-cli-modeb-receipt-guard.patch,
+    not in Python."""
+    envelope: dict[str, Any] = {
+        "timestamp": 1700000005000,
+        "receiptMessage": {
+            "when": 1700000005000,
+            "isDelivery": False,
+            "isRead": True,
+            "timestamps": [1700000004999],
+        },
+    }
+    assert parse_envelope(envelope, bot_account_uuid=bot_uuid) is None
+
+
 def test_build_content_text_attachment_only_is_empty(
     envelope_attachment_only: dict[str, Any], bot_uuid: str
 ) -> None:

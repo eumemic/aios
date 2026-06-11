@@ -1,0 +1,67 @@
+name: Build signal connector image
+
+# Builds the signal connector image FROM SOURCE and smoke-tests it (#907).
+#
+# Unlike the native-tarball install it replaced, the signal-cli hotfix
+# compiles signal-cli from upstream ``bf1376d`` with JDK 25 and applies the
+# Mode-B receipt-guard patch (see connectors/signal/SPQR-HOTFIX.md).  That
+# build is non-trivial, so this workflow gates it in CI: a broken
+# Dockerfile, an unappliable patch, or a JRE/jar mismatch fails here
+# instead of at deploy time.  This is a BUILD GATE only — no GHCR push.
+#
+# Triggers are paths-filtered to the inputs that actually change the image:
+# the Dockerfile, any ``.patch`` it applies, and this workflow.
+#
+# Security note: this workflow does not interpolate any untrusted input
+# (issue titles, PR bodies, head_ref, etc.) into ``run:`` commands.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - connectors/signal/Dockerfile
+      - connectors/signal/*.patch
+      - .github/workflows/build-signal-connector.yml
+  pull_request:
+    paths:
+      - connectors/signal/Dockerfile
+      - connectors/signal/*.patch
+      - .github/workflows/build-signal-connector.yml
+  workflow_dispatch:
+
+# One build at a time per ref; a second push cancels the in-flight build.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # From-source gradle build of signal-cli is slow (clone + compile +
+    # installDist); give it headroom over the default 6h cap but well
+    # under it so a hung build fails fast.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # amd64 only — libsignal's bundled JNI .so is glibc/amd64, so there
+      # is no arm64 image to build and no QEMU emulation to set up.
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build signal connector image
+        uses: docker/build-push-action@v5
+        with:
+          # Build context is the repo root (matches compose.yml) so the
+          # Dockerfile can COPY connectors/signal/...
+          context: .
+          file: connectors/signal/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: aios-signal:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test — signal-cli runs and reports a version
+        run: docker run --rm --entrypoint signal-cli aios-signal:ci --version | grep -q 'signal-cli'
