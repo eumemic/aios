@@ -10459,7 +10459,7 @@
               }
             ],
             "title": "Env",
-            "description": "Environment variables injected into every session container using this environment.  Per-session env overrides these."
+            "description": "Environment variables injected into every session container using this environment.  Per-session env overrides these. A vaulted environment_variable credential whose secret_name matches a key \u2014 here or in the per-session env \u2014 outranks both: that key resolves to the credential's opaque placeholder, not the value set here."
           },
           "disk_bytes": {
             "anyOf": [
@@ -13346,7 +13346,7 @@
             },
             "type": "object",
             "title": "Env",
-            "description": "Environment variables injected into the sandbox container."
+            "description": "Environment variables injected into the sandbox container. A vaulted environment_variable credential whose secret_name matches a key here takes precedence: that key resolves to the credential's opaque placeholder, not the value set here."
           },
           "initial_message": {
             "anyOf": [

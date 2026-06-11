@@ -140,6 +140,7 @@ _assert_protocol(FakeBackend())
 def patch_build_spec_deps(
     *,
     env_config: Any = None,
+    session_env: dict[str, str] | None = None,
     docker_image: str = "ghcr.io/eumemic/aios-sandbox:latest",
     sandbox_disk_bytes: int | None = None,
     env_var_credentials: Any = None,
@@ -150,10 +151,10 @@ def patch_build_spec_deps(
     ``build_spec_from_session`` so it runs to the ``_assemble_plan`` call
     with synthetic settings.
 
-    The three keyword overrides let a test install its OWN mock for a
-    materializer or the tool broker — each target is patched exactly
-    once, so the mock a test asserts on is unambiguously the installed
-    one (no nested re-patching).
+    The keyword overrides let a test install its OWN mock for a
+    materializer, the tool broker, or the per-session env — each target
+    is patched exactly once, so the mock a test asserts on is
+    unambiguously the installed one (no nested re-patching).
     """
     from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -181,8 +182,8 @@ def patch_build_spec_deps(
         ),
         patch(
             "aios.sandbox.spec._load_session_provisioning",
-            # (workspace_path, env, spec_version) since #713.
-            AsyncMock(return_value=("/tmp/w", {}, 0)),
+            # (workspace_path, session_env, spec_version) since #713.
+            AsyncMock(return_value=("/tmp/w", session_env or {}, 0)),
         ),
         # ``build_spec_from_session`` imports these function-locally from
         # ``aios.sandbox.volumes`` (deferred import to avoid a cycle), so

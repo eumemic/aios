@@ -34,7 +34,9 @@ class EnvironmentConfig:
         networking (LimitedNetworking | None | UnrestrictedNetworking | Unset): Network access rules.  None or {"type":
             "unrestricted"} for full access; {"type": "limited", "allowed_hosts": [...]} to restrict.
         env (EnvironmentConfigEnvType0 | None | Unset): Environment variables injected into every session container
-            using this environment.  Per-session env overrides these.
+            using this environment.  Per-session env overrides these. A vaulted environment_variable credential whose
+            secret_name matches a key — here or in the per-session env — outranks both: that key resolves to the
+            credential's opaque placeholder, not the value set here.
         disk_bytes (int | None | Unset): Maximum writable-layer size, in bytes, for sandbox containers bound to this
             environment. When unset, falls back to the worker's global ``settings.sandbox_disk_bytes`` (itself unbounded by
             default). Translates to ``docker run --storage-opt size=`` so a heavy dev build can't fill the host disk and
