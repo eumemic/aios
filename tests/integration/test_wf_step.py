@@ -1854,7 +1854,9 @@ async def test_lowering_cap_mid_flight_does_not_kill_a_harvest_only_step(
     with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
         await workflow_completion.return_handler(children[0], {"request_id": rid0, "value": "r0"})
 
-    await run_workflow_step(run_id)  # harvest child0; child1 inflight; new_agent_caps == []
+    await run_workflow_step(
+        run_id
+    )  # harvest child0; child1 still inflight; no new agent spawns this step
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "suspended"  # NOT errored — no new spawns

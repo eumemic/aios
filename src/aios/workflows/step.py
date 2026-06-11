@@ -427,7 +427,7 @@ async def _run_workflow_step_body(
                         run,
                         output=(
                             f"workflow exceeded the {max_agent_calls}-agent call cap "
-                            f"({prior_agent_calls} started before this step)"
+                            f"({agent_spawns + 1} total agent calls attempted)"
                         ),
                         is_error=True,
                         error_kind="too_many_agents",
