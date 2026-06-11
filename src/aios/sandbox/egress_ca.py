@@ -159,20 +159,27 @@ def mint_server_leaf(
     """A server leaf for ``hostname`` signed by ``ca`` — the leaf contract
     pinned in this module's docstring.
 
-    Carries a DNS SAN (CN-only verification is deprecated fallback), an
-    explicit CN subject (an empty subject would force a critical SAN to
-    verify), ``CA:FALSE``, EKU ``serverAuth``, a short validity window, and
-    a **keyid-only** AuthorityKeyIdentifier (``from_issuer_public_key``).
+    Carries a DNS SAN (the authoritative identity; CN-only verification is
+    deprecated), ``CA:FALSE``, EKU ``serverAuth``, a short validity window,
+    and a **keyid-only** AuthorityKeyIdentifier (``from_issuer_public_key``).
     The SKI hashes the deterministic public key, so it matches any worker
     process's CA cert copy; the CA serial does not and must never appear in
     a chain reference. This is the single authoritative mint — the egress
     proxy and the ``tests/helpers/tls.py`` helper both call it.
+
+    The subject is left EMPTY and the SAN is marked critical. The hostname is
+    deliberately NOT placed in the CN: X.509 caps the CN at 64 chars
+    (ub-common-name), but a credential's ``allowed_hosts`` admits any DNS name
+    up to 253 chars — a 65-253-char host would make a CN-bearing mint raise
+    and render that allowed host permanently unreachable through the proxy.
+    The DNS SAN has no such limit, and an empty subject is valid precisely
+    when the SAN is critical (RFC 5280 §4.2.1.6).
     """
     key = ec.generate_private_key(ec.SECP256R1())
     now = datetime.now(UTC)
     cert = (
         x509.CertificateBuilder()
-        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)]))
+        .subject_name(x509.Name([]))
         .issuer_name(ca.certificate.subject)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
@@ -180,7 +187,7 @@ def mint_server_leaf(
         # accepts a just-minted leaf (mirrors the CA cert's backdating).
         .not_valid_before(now - timedelta(hours=1))
         .not_valid_after(now + timedelta(days=LEAF_VALIDITY_DAYS))
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=True)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
         .add_extension(

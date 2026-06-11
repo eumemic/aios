@@ -117,14 +117,15 @@ class TestMintServerLeaf:
         assert akid.authority_cert_serial_number is None
         assert akid.authority_cert_issuer is None
 
-        # Not a CA; DNS SAN present; explicit CN subject (empty subject would
-        # force a critical SAN to verify).
+        # Not a CA; critical DNS SAN as the authoritative identity; empty
+        # subject (no CN — avoids the 64-char ub-common-name limit; valid
+        # precisely because the SAN is critical).
         bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
         assert bc.ca is False
-        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-        assert san.get_values_for_type(x509.DNSName) == ["api.example.com"]
-        cn = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        assert cn == "api.example.com"
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        assert san.critical is True
+        assert san.value.get_values_for_type(x509.DNSName) == ["api.example.com"]
+        assert list(cert.subject) == []
 
         eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
         assert x509.oid.ExtendedKeyUsageOID.SERVER_AUTH in eku
@@ -139,6 +140,20 @@ class TestMintServerLeaf:
         span = cert.not_valid_after_utc - cert.not_valid_before_utc
         # LEAF_VALIDITY_DAYS plus the one-hour backdate.
         assert span == timedelta(days=LEAF_VALIDITY_DAYS, hours=1)
+
+    def test_long_host_mints_and_chains(self) -> None:
+        # A 65-253-char host is valid per the credential validator but exceeds
+        # the 64-char CN limit — it must still mint (SAN-only) and chain.
+        host = ("a" * 61) + ".example.com"  # 73 chars
+        assert len(host) > 64
+        leaf, _ = mint_server_leaf(EgressCA(SEED_A), host)
+        fresh_ca = EgressCA(SEED_A)  # same key, different serial (cross-process)
+        verifier = (
+            PolicyBuilder()
+            .store(Store([fresh_ca.certificate]))
+            .build_server_verifier(x509.DNSName(host))
+        )
+        assert verifier.verify(leaf, [])[-1] == fresh_ca.certificate
 
 
 @pytest.fixture

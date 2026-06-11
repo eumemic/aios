@@ -12,13 +12,16 @@ No docker, no real upstream host, no real secret egress.
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
+from typing import cast
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from aios.crypto.vault import CryptoBox
 from aios.harness import runtime
@@ -444,6 +447,124 @@ class TestLifecycle:
         proxy, _ = gh_proxy
         await proxy.stop()
         await proxy.stop()  # idempotent
+
+
+async def _open_tls(
+    proxy: SecretEgressProxy, sni: str
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """A raw TLS connection to the proxy (for tests that need wire-level
+    control the httpx client doesn't expose, e.g. 100-continue / framing)."""
+    return await asyncio.open_connection(
+        "127.0.0.1", proxy.port, ssl=_client_ctx(), server_hostname=sni
+    )
+
+
+class TestSecretNeverLogged:
+    async def test_upstream_error_does_not_log_the_secret(self, make_proxy: MakeProxy) -> None:
+        # An upstream exception whose message embeds the post-swap header value
+        # (httpcore's h11 serializer quotes an illegal header verbatim) must not
+        # carry the real secret into the logs.
+        secret = "ghp_REALSECRET"
+
+        async def boom(request: httpx.Request) -> httpx.Response:
+            raise httpx.LocalProtocolError(
+                f"Illegal header value {request.headers['authorization']!r}"
+            )
+
+        proxy, _ = await make_proxy(
+            [_cred("GH_TOKEN", secret, ("api.allowed.test",), PH_GH)],
+            transport=httpx.MockTransport(boom),
+        )
+        with capture_logs() as logs:
+            r = await _request(proxy, "api.allowed.test", "/x", headers={"Authorization": PH_GH})
+        assert r.status_code == 502
+        # The swap fired (the boom message proves it) yet no log entry — in any
+        # field — contains the secret.
+        assert not any(secret in str(v) for entry in logs for v in entry.values())
+
+
+class TestSniCallbackGuards:
+    """The fail-closed leaf-mint gate, tested directly so the explicit guards
+    are pinned (a broad ``except`` would otherwise mask their removal)."""
+
+    async def test_absent_sni_returns_unrecognized_name(self, make_proxy: MakeProxy) -> None:
+        proxy, _ = await make_proxy([_cred("GH_TOKEN", "s", ("api.allowed.test",), PH_GH)])
+        verdict = proxy._sni_callback(cast(ssl.SSLObject, None), None, cast(ssl.SSLContext, None))
+        assert verdict == ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
+
+    async def test_unauthorized_host_returns_unrecognized_name(self, make_proxy: MakeProxy) -> None:
+        proxy, _ = await make_proxy([_cred("GH_TOKEN", "s", ("api.allowed.test",), PH_GH)])
+        verdict = proxy._sni_callback(
+            cast(ssl.SSLObject, None), "evil.test", cast(ssl.SSLContext, None)
+        )
+        assert verdict == ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
+
+
+class TestExpect100Continue:
+    async def test_emits_100_then_forwards_body(self, make_proxy: MakeProxy) -> None:
+        proxy, captured = await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)]
+        )
+        reader, writer = await _open_tls(proxy, "api.allowed.test")
+        try:
+            writer.write(
+                b"POST /x HTTP/1.1\r\nHost: api.allowed.test\r\n"
+                b"Content-Length: 4\r\nExpect: 100-continue\r\n\r\n"
+            )
+            await writer.drain()
+            # The proxy is the TLS origin and answers 100 before the body.
+            interim = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+            assert interim.startswith(b"HTTP/1.1 100")
+            writer.write(b"body")
+            await writer.drain()
+            await asyncio.wait_for(reader.read(4096), 5)
+        finally:
+            writer.close()
+        assert captured[0].content == b"body"
+
+    async def test_blocked_host_502s_before_requiring_the_body(self, make_proxy: MakeProxy) -> None:
+        # The gate runs before the body is drained, so a huge declared body
+        # toward a blocked host never makes the worker buffer it.
+        proxy, captured = await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
+            resolver_ip=None,
+        )
+        reader, writer = await _open_tls(proxy, "api.allowed.test")
+        try:
+            writer.write(
+                b"POST /x HTTP/1.1\r\nHost: api.allowed.test\r\n"
+                b"Content-Length: 1000000\r\nExpect: 100-continue\r\n\r\n"
+            )
+            await writer.drain()
+            # We never send the 1 MB body; the 502 arrives on the gate alone.
+            resp = await asyncio.wait_for(reader.read(4096), 5)
+            assert b" 502 " in resp
+        finally:
+            writer.close()
+        assert captured == []
+
+
+class TestResponseFraming:
+    async def test_known_length_response_is_length_framed(self, make_proxy: MakeProxy) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"hello")  # httpx sets content-length: 5
+
+        proxy, _ = await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
+            transport=httpx.MockTransport(handler),
+        )
+        reader, writer = await _open_tls(proxy, "api.allowed.test")
+        try:
+            writer.write(b"GET /x HTTP/1.1\r\nHost: api.allowed.test\r\n\r\n")
+            await writer.drain()
+            head = (await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)).lower()
+            body = await asyncio.wait_for(reader.read(4096), 5)
+        finally:
+            writer.close()
+        # No content-encoding → length is accurate → length-framed, not chunked.
+        assert b"content-length: 5" in head
+        assert b"transfer-encoding" not in head
+        assert b"hello" in body
 
 
 def test_module_exports() -> None:

@@ -84,6 +84,10 @@ _UPSTREAM_PORT = 443
 # upload or download. Matches git_proxy.
 _UPSTREAM_TIMEOUT_S = 300.0
 _READ_CHUNK = 65536
+# Idle bound on a single inbound read: a client that stalls mid-request (or
+# never sends one) must not pin a handler indefinitely. Bounds idle time
+# between chunks, not total transfer, so a slow-but-steady upload is unaffected.
+_INBOUND_IDLE_TIMEOUT_S = 60.0
 
 # Stripped before forwarding the request upstream. ``authorization`` is
 # deliberately ABSENT: the placeholder rides in it and we swap+forward it.
@@ -106,14 +110,13 @@ _HOP_BY_HOP_REQUEST_HEADERS: frozenset[str] = frozenset(
 )
 
 # Stripped from the response before streaming it back. ``content-encoding``
-# is dropped because httpx decodes the body (we re-stream decoded bytes);
-# ``content-length`` because h11 re-frames the body (close-delimited /
-# chunked) once we drop the other hop-by-hops.
+# is dropped because httpx decodes the body (we re-stream decoded bytes).
+# ``content-length`` is handled separately in ``_stream_response`` (kept when
+# the length is still accurate, dropped when we re-decode the body).
 _HOP_BY_HOP_RESPONSE_HEADERS: frozenset[str] = frozenset(
     {
         "connection",
         "content-encoding",
-        "content-length",
         "transfer-encoding",
         "keep-alive",
         "proxy-authenticate",
@@ -295,12 +298,16 @@ class SecretEgressProxy:
         ``Server.wait_closed()`` only JOINS in-flight handlers, so a handler
         streaming a slow upstream would block teardown for up to
         ``_UPSTREAM_TIMEOUT_S`` (and keep the secret swap map alive that
-        whole time). Cancel the tracked handlers first so the join returns
-        promptly. None-guarded so a failed-bind start() can still clean up.
+        whole time). ``abort_clients()`` tears down every accepted transport —
+        including a connection whose TLS handshake is still completing and
+        whose handler is therefore not yet in ``_conns`` — and cancelling the
+        tracked handlers unwinds their frames promptly. None-guarded so a
+        failed-bind start() can still clean up.
         """
         try:
             if self._server is not None:
                 self._server.close()
+                self._server.abort_clients()
                 tasks = list(self._conns)
                 for task in tasks:
                     task.cancel()
@@ -308,6 +315,10 @@ class SecretEgressProxy:
                     await asyncio.gather(*tasks, return_exceptions=True)
                 await self._server.wait_closed()
         finally:
+            # Drop the secret map and per-host leaves (the documented contract);
+            # they are otherwise only reclaimed when the proxy object is GC'd.
+            self._rules = []
+            self._leaf_ctx = {}
             await self._client.aclose()
         log.info("secret_egress_proxy.stopped", port=self._port)
 
@@ -371,8 +382,10 @@ class SecretEgressProxy:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            # Never log the request — it carries the real secret post-swap.
-            log.warning("secret_egress_proxy.handler_error", error=str(exc))
+            # Log only the exception TYPE, never str(exc): post-swap, an
+            # exception message can carry the real secret (e.g. an illegal-
+            # header error quotes the offending header value verbatim).
+            log.warning("secret_egress_proxy.handler_error", error_type=type(exc).__name__)
         finally:
             if task is not None:
                 self._conns.discard(task)
@@ -389,9 +402,13 @@ class SecretEgressProxy:
             return
 
         conn = h11.Connection(h11.SERVER)
-        request, body = await self._read_request(conn, reader)
+        # Read the head FIRST, gate, and only THEN read the body. A request to
+        # a host whose egress is blocked gets a 502 before its body is ever
+        # drained, so a sandbox can't force the worker to buffer an arbitrary
+        # payload toward a host it will never reach.
+        request = await self._read_head(conn, reader)
         if request is None:
-            return  # client hung up before a complete request
+            return  # client hung up / stalled before a complete request head
 
         method = request.method.decode("ascii")
         target = request.target.decode("latin-1")  # request-target is bytes
@@ -408,8 +425,21 @@ class SecretEgressProxy:
 
         pinned = await _resolve_pinned_ip(host, _UPSTREAM_PORT)
         if pinned is None:
+            # A final status before the body also tells an Expect: 100-continue
+            # client not to send it (RFC 7231 §5.1.1).
             await self._send_simple(conn, writer, 502, b"egress blocked")
             return
+
+        # We are the TLS-terminating origin, so we own the 100-continue
+        # handshake the upstream never sees (we strip Expect): tell the client
+        # to send the body now that the host has cleared the egress gate.
+        if conn.client_is_waiting_for_100_continue:
+            writer.write(_h11_send(conn, h11.InformationalResponse(status_code=100, headers=[])))
+            await writer.drain()
+
+        body = await self._read_body(conn, reader)
+        if body is None:
+            return  # client stalled mid-body
 
         fwd_headers = self._forward_headers(request.headers.raw_items(), host, swaps)
         swapped_body = _apply_swaps_bytes(body, swaps)
@@ -427,8 +457,14 @@ class SecretEgressProxy:
                 extensions={"sni_hostname": host},
             )
             upstream = await self._client.send(upstream_req, stream=True)
-        except httpx.RequestError as exc:
-            log.warning("secret_egress_proxy.upstream_error", host=host, error=str(exc))
+        except Exception as exc:
+            # Broad by design: build_request can raise non-RequestError (e.g.
+            # UnicodeEncodeError on a non-ASCII swapped header value), and the
+            # model should see a clean 502 and retry rather than a reset
+            # connection. Log only the type — str(exc) can carry the secret.
+            log.warning(
+                "secret_egress_proxy.upstream_error", host=host, error_type=type(exc).__name__
+            )
             await self._send_simple(conn, writer, 502, b"upstream error")
             return
         try:
@@ -436,28 +472,48 @@ class SecretEgressProxy:
         finally:
             await upstream.aclose()
 
-    async def _read_request(
+    async def _read_until_data(self, reader: asyncio.StreamReader) -> bytes | None:
+        """One inbound read bounded by the idle timeout; ``None`` on stall."""
+        try:
+            return await asyncio.wait_for(reader.read(_READ_CHUNK), _INBOUND_IDLE_TIMEOUT_S)
+        except TimeoutError:
+            return None
+
+    async def _read_head(
         self, conn: h11.Connection, reader: asyncio.StreamReader
-    ) -> tuple[h11.Request | None, bytes]:
-        """Read one full HTTP/1.1 request (head + body) via h11."""
-        request: h11.Request | None = None
+    ) -> h11.Request | None:
+        """Read up to and including the request head (the ``Request`` event)."""
+        while True:
+            event = conn.next_event()
+            if event is h11.NEED_DATA:
+                data = await self._read_until_data(reader)
+                if not data:
+                    return None  # EOF or idle timeout before the head
+                conn.receive_data(data)
+                continue
+            if isinstance(event, h11.Request):
+                return event
+            return None  # connection closed before a request
+
+    async def _read_body(self, conn: h11.Connection, reader: asyncio.StreamReader) -> bytes | None:
+        """Read the request body (h11 ``Data`` events) up to ``EndOfMessage``.
+
+        The body is buffered whole so the placeholder can be swapped across
+        chunk boundaries; this runs only after the egress gate has passed.
+        """
         body = bytearray()
         while True:
             event = conn.next_event()
             if event is h11.NEED_DATA:
-                data = await reader.read(_READ_CHUNK)
+                data = await self._read_until_data(reader)
+                if data is None:
+                    return None  # idle timeout mid-body
                 conn.receive_data(data)
-                if not data and request is None:
-                    return None, b""  # EOF before any request
                 continue
-            if isinstance(event, h11.Request):
-                request = event
-            elif isinstance(event, h11.Data):
+            if isinstance(event, h11.Data):
                 body += event.data
-            elif isinstance(event, (h11.EndOfMessage, h11.ConnectionClosed)):
-                return request, bytes(body)
-            else:  # h11.PAUSED — nothing more to read this cycle
-                return request, bytes(body)
+            else:  # EndOfMessage / ConnectionClosed / PAUSED
+                return bytes(body)
 
     def _forward_headers(
         self, raw_items: list[tuple[bytes, bytes]], host: str, swaps: list[tuple[str, str]]
@@ -475,11 +531,22 @@ class SecretEgressProxy:
     async def _stream_response(
         self, conn: h11.Connection, writer: asyncio.StreamWriter, upstream: httpx.Response
     ) -> None:
-        resp_headers = [
-            (name, value)
-            for name, value in upstream.headers.raw
-            if name.decode("latin-1").lower() not in _HOP_BY_HOP_RESPONSE_HEADERS
-        ]
+        # httpx decodes content-encoding in aiter_bytes, so a content-length
+        # from an encoded response would be wrong — drop it then and let h11
+        # re-frame as chunked. With no content-encoding the length is accurate;
+        # keep it so a known-length or bodiless response (e.g. a HEAD reply) is
+        # length-framed instead of carrying a spurious Transfer-Encoding.
+        had_encoding = any(name.lower() == b"content-encoding" for name, _ in upstream.headers.raw)
+        resp_headers: list[tuple[bytes, bytes]] = []
+        for name, value in upstream.headers.raw:
+            lname = name.decode("latin-1").lower()
+            if lname == "content-length":
+                if not had_encoding:
+                    resp_headers.append((name, value))
+                continue
+            if lname in _HOP_BY_HOP_RESPONSE_HEADERS:
+                continue
+            resp_headers.append((name, value))
         resp_headers.append((b"connection", b"close"))
         writer.write(
             _h11_send(conn, h11.Response(status_code=upstream.status_code, headers=resp_headers))
