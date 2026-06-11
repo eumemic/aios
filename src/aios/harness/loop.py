@@ -30,7 +30,11 @@ from structlog.contextvars import bind_contextvars, clear_contextvars
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
 from aios.harness.completion import call_litellm, stream_litellm
-from aios.harness.step_context import compose_step_context, compute_step_prelude
+from aios.harness.step_context import (
+    compose_step_context,
+    compute_step_prelude,
+    prelude_overhead_local,
+)
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
@@ -352,24 +356,17 @@ async def _run_session_step_body(
         channels=channels,
         memory_store_echoes=memory_echoes,
     )
-    overhead_local = (
-        approx_tokens(
-            [{"role": "system", "content": prelude.system_prompt}],
-            tools=prelude.tools,
-        )
-        + prelude.tail_block_upper_bound_local
-    )
-
     # Read windowed message events for this session.
-    events = await sessions_service.read_windowed_events(
+    windowed = await sessions_service.read_windowed_events(
         pool,
         session_id,
         window_min=agent.window_min,
         window_max=agent.window_max,
         model=agent.model,
-        overhead_local=overhead_local,
+        overhead_local=prelude_overhead_local(prelude),
         account_id=account_id,
     )
+    events = windowed.events
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
     # The sweep's case (c) ensures we passed the guard above.
@@ -424,6 +421,7 @@ async def _run_session_step_body(
             prelude=prelude,
             events=events,
             in_flight_tool_call_ids=frozenset(task_registry.in_flight_tool_call_ids(session_id)),
+            omission=windowed.omission,
         )
     except Exception:
         await sessions_service.append_event(

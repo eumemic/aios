@@ -30,11 +30,14 @@ from typing import TYPE_CHECKING, Any
 
 from aios.harness._text import join_blocks
 from aios.harness.context import (
+    OMISSION_MARKER_UPPER_BOUND_LOCAL,
     build_messages,
     merge_adjacent_user_messages,
     message_is_notification_marker,
     stub_missing_reasoning_content,
 )
+from aios.harness.tokens import approx_tokens
+from aios.harness.window import WindowOmission
 from aios.tools.registry import to_openai_tools
 
 if TYPE_CHECKING:
@@ -125,6 +128,26 @@ class StepPrelude:
     tools: list[dict[str, Any]]
     skill_versions: list[SkillVersion]
     tail_block_upper_bound_local: int
+
+
+def prelude_overhead_local(prelude: StepPrelude) -> int:
+    """Token cost the composer adds on top of the windowed events, in
+    local (``approx_tokens``) units — the ``overhead_local`` argument to
+    ``read_windowed_events``.
+
+    System prompt + tool schemas, plus the reserved upper bounds for the
+    two post-windowing additions: the channels tail block and the
+    omission marker (#738). Both are reserved unconditionally — either
+    may not render, but the budget must hold when they do.
+    """
+    return (
+        approx_tokens(
+            [{"role": "system", "content": prelude.system_prompt}],
+            tools=prelude.tools,
+        )
+        + prelude.tail_block_upper_bound_local
+        + OMISSION_MARKER_UPPER_BOUND_LOCAL
+    )
 
 
 @dataclass(frozen=True)
@@ -307,6 +330,7 @@ async def compose_step_context(
     prelude: StepPrelude,
     events: list[Event],
     in_flight_tool_call_ids: frozenset[str] = frozenset(),
+    omission: WindowOmission | None = None,
 ) -> StepContext:
     """Compose the chat-completions payload for a step.
 
@@ -353,6 +377,7 @@ async def compose_step_context(
         workspace_path=workspace_path,
         in_flight_tool_call_ids=in_flight_tool_call_ids,
         tz_name=tz_name,
+        omission=omission,
     )
 
     # Tail block lives *after* build_messages so its per-step mutations

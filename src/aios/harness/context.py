@@ -47,6 +47,7 @@ from aios.harness.vision import (
     make_image_url_part,
     text_marker,
 )
+from aios.harness.window import WindowOmission
 from aios.logging import get_logger
 from aios.models.events import Event
 from aios.sandbox.volumes import resolve_to_host_path
@@ -794,6 +795,61 @@ def _quarantine_placeholder(seq: int) -> dict[str, Any]:
     return {"role": "user", "content": f"[unrenderable event seq={seq} — quarantined]"}
 
 
+# Upper bound (local approx_tokens units) reserved in the window budget for
+# the omission marker, mirroring ``tail_block_upper_bound_local``: the marker
+# is appended after windowing runs, so without a reserve it would push the
+# send-time payload past ``window_max`` (the PR #165 full-payload invariant).
+# Reserved unconditionally — like the tail block, which also may not render.
+# ``TestOmissionMarker`` pins a worst-case render under this bound.
+OMISSION_MARKER_UPPER_BOUND_LOCAL = 128
+
+
+def _approx_count(n: int) -> str:
+    """Round ``n`` down to two significant figures, comma-grouped.
+
+    Deterministic (pure floor, no banker's rounding ambiguity) so the
+    omission marker it feeds stays byte-stable across rebuilds.
+    """
+    if n >= 100:
+        magnitude = 10 ** (len(str(n)) - 2)
+        n -= n % magnitude
+    return f"{n:,}"
+
+
+def _omission_marker(omission: WindowOmission, boundary: datetime, tz_name: str) -> dict[str, Any]:
+    """Head marker telling the model the window omits transcript (#738).
+
+    Byte-stable within a snap chunk — see :class:`WindowOmission` for the
+    cache-stability rationale.  The boundary timestamp reuses
+    :func:`_format_received` so it renders identically to the
+    ``received=`` envelope headers; the start date uses the same account
+    timezone, date-only.  ``_prune_leading_orphans`` may hide a few more
+    rendered messages at/after the boundary — "everything before" remains
+    true regardless, so the claim direction is safe.
+    """
+    began = omission.began_at.astimezone(ZoneInfo(tz_name)).date().isoformat()
+    before = _format_received(boundary, tz_name)
+    if omission.omitted_messages > 0:
+        scrolled = (
+            f"Everything before {before} — about "
+            f"{_approx_count(omission.omitted_messages)} messages, including your own — "
+            "has scrolled out of view."
+        )
+    else:
+        # Degenerate: the omitted span holds only tool results.
+        scrolled = f"Everything before {before} has scrolled out of view."
+    return {
+        "role": "user",
+        "content": (
+            f"[history: this conversation began {began}. {scrolled} "
+            "Nothing is lost: the full transcript remains queryable with search_events. "
+            "What seems unfamiliar is usually forgotten, not new: when in doubt about "
+            "anything that's referred to, search first rather than fill the gap by "
+            "assumption.]"
+        ),
+    }
+
+
 def build_messages(
     events: list[Event],
     *,
@@ -803,6 +859,7 @@ def build_messages(
     workspace_path: Path | None = None,
     in_flight_tool_call_ids: frozenset[str] = frozenset(),
     tz_name: str = "UTC",
+    omission: WindowOmission | None = None,
 ) -> ContextResult:
     """Assemble a chat-completions message list from pre-windowed events.
 
@@ -1006,6 +1063,15 @@ def build_messages(
     # leaving orphan tool results or an assistant with missing paired
     # results.
     messages = _prune_leading_orphans(messages)
+
+    # Head omission marker (#738): when the window omits transcript, tell
+    # the model how much and how to recall it. After the prune (so it can't
+    # be pruned), before the system insert (so it lands at messages[1]).
+    # ``read_windowed_events`` guarantees a non-empty window whenever it
+    # reports an omission (drop < total by construction), so ``events[0]``
+    # is the first retained event — the boundary.
+    if omission is not None:
+        messages.insert(0, _omission_marker(omission, events[0].created_at, tz_name))
 
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})

@@ -32,8 +32,45 @@ output, no side effects.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 
 from aios.harness.tokens import tokens_to_drop as _tokens_to_drop
+from aios.models.events import Event
+
+
+@dataclass(frozen=True, slots=True)
+class WindowOmission:
+    """Facts about the transcript a window omits (issue #738) — the
+    inputs to the head omission marker.
+
+    ``began_at`` is the ``created_at`` of the session's first message
+    event; ``omitted_messages`` counts omitted user+assistant events
+    only (tool results would dominate tool-heavy sessions without
+    conveying conversational depth).
+
+    Cache-stability rationale (canonical home — other sites reference
+    this): both fields are pure functions of the drop boundary over the
+    immutable log, so the marker rendered from them is byte-identical
+    within a snap chunk and re-renders exactly when the boundary moves —
+    a snap, when the head changes anyway.  Producer:
+    :func:`~aios.db.queries.read_windowed_events`; consumer:
+    :func:`~aios.harness.context.build_messages`.
+    """
+
+    began_at: datetime
+    omitted_messages: int
+
+
+@dataclass(frozen=True, slots=True)
+class WindowedEvents:
+    """A context window over a session log: the retained trailing slate,
+    plus facts about what the drop boundary excluded.  ``omission`` is
+    ``None`` when nothing is excluded — the whole transcript fits, or an
+    oversized first event straddles the boundary."""
+
+    events: list[Event]
+    omission: WindowOmission | None
 
 
 def select_window[T](

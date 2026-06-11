@@ -32,6 +32,7 @@ from aios.errors import (
     NotFoundError,
     ValidationError,
 )
+from aios.harness.window import WindowedEvents, WindowOmission
 from aios.ids import (
     ACCOUNT,
     ACCOUNT_KEY,
@@ -3309,7 +3310,7 @@ async def read_windowed_events(
     window_max: int,
     model: str,
     overhead_local: int,
-) -> list[Event]:
+) -> WindowedEvents:
     """Read message events for the session's trailing context window.
 
     Uses the ``cumulative_tokens`` column to compute the chunked-window
@@ -3353,13 +3354,21 @@ async def read_windowed_events(
     Falls back to :func:`read_message_events` (loading all events) when
     cumulative data is not available (pre-backfill sessions or rolling
     deploys) or when the entire session fits within ``window_max``.
+
+    When the boundary excludes message events, the result carries a
+    :class:`~aios.harness.window.WindowOmission` (issue #738), computed
+    against the same ``cumulative_tokens`` boundary as the retained scan
+    — exact complements.  Cache-stability rationale lives on the class.
     """
     # Index seek: total cumulative tokens from the latest message event.
     total = await _latest_cumulative_tokens(conn, session_id)
 
     # Fallback: no cumulative data yet — load everything.
     if total is None:
-        return await read_message_events(conn, session_id, account_id=account_id)
+        return WindowedEvents(
+            events=await read_message_events(conn, session_id, account_id=account_id),
+            omission=None,
+        )
 
     ratio = await model_token_ratio(conn, model, account_id=account_id)
 
@@ -3377,7 +3386,10 @@ async def read_windowed_events(
 
     total_effective = round(total * ratio)
     if total_effective <= events_window_max:
-        return await read_message_events(conn, session_id, account_id=account_id)
+        return WindowedEvents(
+            events=await read_message_events(conn, session_id, account_id=account_id),
+            omission=None,
+        )
 
     from aios.harness.tokens import tokens_to_drop
 
@@ -3390,7 +3402,10 @@ async def read_windowed_events(
         total_effective, window_min=events_window_min, window_max=events_window_max
     )
     if drop_effective == 0:
-        return await read_message_events(conn, session_id, account_id=account_id)
+        return WindowedEvents(
+            events=await read_message_events(conn, session_id, account_id=account_id),
+            omission=None,
+        )
 
     drop = math.ceil(drop_effective / ratio)
 
@@ -3404,7 +3419,34 @@ async def read_windowed_events(
         drop,
         account_id,
     )
-    return [_row_to_event(r) for r in rows]
+
+    # The omitted complement: same boundary expression as the retained
+    # scan (``<=`` vs ``>``), and a seq-prefix of the log — so its
+    # ``min(created_at)`` IS the conversation start, and NULL means the
+    # boundary excludes nothing (oversized first event straddling it).
+    # The aggregate re-scans the omitted span each windowed step; if it
+    # ever profiles hot, the escape hatch is a ``cumulative_messages``
+    # counter column (the ``cumulative_tokens`` mechanism).
+    omission_row = await conn.fetchrow(
+        "SELECT min(created_at) AS began_at, "
+        "count(*) FILTER (WHERE role IN ('user', 'assistant')) AS omitted_messages "
+        "FROM events "
+        "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
+        "AND cumulative_tokens <= $2",
+        session_id,
+        drop,
+        account_id,
+    )
+    assert omission_row is not None  # aggregate query always returns one row
+    omission = (
+        WindowOmission(
+            began_at=omission_row["began_at"],
+            omitted_messages=omission_row["omitted_messages"],
+        )
+        if omission_row["began_at"] is not None
+        else None
+    )
+    return WindowedEvents(events=[_row_to_event(r) for r in rows], omission=omission)
 
 
 # ─── vaults ─────────────────────────────────────────────────────────────────

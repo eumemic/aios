@@ -9,12 +9,20 @@ layer.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from aios.db import queries
+from aios.harness.window import WindowOmission
+
+_BEGAN_AT = datetime(2026, 2, 19, 9, 0, 0, tzinfo=UTC)
+
+# ``list[Any]`` so equality checks against ``WindowedEvents.events``
+# (statically ``list[Event]``) don't trip mypy's comparison-overlap.
+_FALLBACK_SENTINEL: list[Any] = ["_fallback_sentinel"]
 
 
 class _FakeConn:
@@ -22,7 +30,8 @@ class _FakeConn:
 
     ``fetchval`` serves ``_latest_cumulative_tokens`` (total local tokens).
     ``fetchrow`` serves ``model_token_ratio`` (the lifetime calibration
-    aggregate row).  ``fetch`` captures the bounded range scan's args so
+    aggregate row) and the omission-complement aggregate, dispatched on
+    the SQL text.  ``fetch`` captures the bounded range scan's args so
     tests can assert the computed ``drop_local``.
     """
 
@@ -32,15 +41,24 @@ class _FakeConn:
         total_local: int | None,
         ratio_n: int,
         ratio_mean: float,
+        omission_row: dict[str, Any] | None = None,
     ) -> None:
         self.total_local = total_local
         self.ratio_row = {"n": ratio_n, "mean_ratio": ratio_mean}
+        self.omission_row = omission_row or {
+            "began_at": _BEGAN_AT,
+            "omitted_messages": 7,
+        }
         self.fetch_calls: list[tuple[Any, ...]] = []
+        self.omission_calls: list[tuple[Any, ...]] = []
 
     async def fetchval(self, _sql: str, *_args: Any) -> int | None:
         return self.total_local
 
-    async def fetchrow(self, _sql: str, *_args: Any) -> dict[str, Any]:
+    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any]:
+        if "began_at" in sql:
+            self.omission_calls.append(args)
+            return self.omission_row
         return self.ratio_row
 
     async def fetch(self, _sql: str, *args: Any) -> list[Any]:
@@ -57,7 +75,7 @@ def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) ->
     monkeypatch.setattr(
         queries,
         "read_message_events",
-        AsyncMock(return_value=["_fallback_sentinel"]),
+        AsyncMock(return_value=_FALLBACK_SENTINEL),
     )
 
 
@@ -65,7 +83,7 @@ def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) ->
 async def test_no_cumulative_falls_back_to_full_read() -> None:
     account_id = "acc_test_stub"  # PR 3 scaffolding
     conn = _FakeConn(total_local=None, ratio_n=0, ratio_mean=0.0)
-    result: list[Any] = await queries.read_windowed_events(
+    result = await queries.read_windowed_events(
         conn,
         "sess_x",
         window_min=1_000,
@@ -74,8 +92,9 @@ async def test_no_cumulative_falls_back_to_full_read() -> None:
         overhead_local=0,
         account_id=account_id,
     )
-    # Fallback short-circuit — ratio never consulted.
-    assert result == ["_fallback_sentinel"]
+    # Fallback short-circuit — ratio never consulted, no omission.
+    assert result.events == _FALLBACK_SENTINEL
+    assert result.omission is None
 
 
 @pytest.mark.asyncio
@@ -139,7 +158,7 @@ async def test_ratio_below_1_drops_fewer() -> None:
     """ratio=0.5 deflates total_effective below window_max → no drop."""
     account_id = "acc_test_stub"  # PR 3 scaffolding
     conn = _FakeConn(total_local=3_000, ratio_n=5, ratio_mean=0.5)
-    result: list[Any] = await queries.read_windowed_events(
+    result = await queries.read_windowed_events(
         conn,
         "sess_x",
         window_min=1_000,
@@ -149,8 +168,58 @@ async def test_ratio_below_1_drops_fewer() -> None:
         account_id=account_id,
     )
     # total_effective = 1500 < 2000 → drop_effective = 0 → fallback.
-    assert result == ["_fallback_sentinel"]
+    assert result.events == _FALLBACK_SENTINEL
+    assert result.omission is None
     assert not conn.fetch_calls
+
+
+# ─── omission metadata (#738) ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_windowed_read_reports_omission() -> None:
+    """A real drop returns the omitted-span facts, queried against the
+    SAME boundary value as the retained range scan (exact complements)."""
+    account_id = "acc_test_stub"
+    conn = _FakeConn(total_local=3_000, ratio_n=4, ratio_mean=0.0)
+    result = await queries.read_windowed_events(
+        conn,
+        "sess_x",
+        window_min=1_000,
+        window_max=2_000,
+        model="m",
+        overhead_local=0,
+        account_id=account_id,
+    )
+    assert result.omission == WindowOmission(began_at=_BEGAN_AT, omitted_messages=7)
+    # Complement check: both queries saw the same drop boundary.
+    assert conn.omission_calls, "expected the omission aggregate to be queried"
+    _sid, retained_drop, *_ = conn.fetch_calls[-1]
+    _sid2, omitted_drop, *_ = conn.omission_calls[-1]
+    assert retained_drop == omitted_drop
+
+
+@pytest.mark.asyncio
+async def test_empty_complement_reports_no_omission() -> None:
+    """drop > 0 but the boundary excludes nothing (oversized first event
+    straddling it) → omission is None, not a zero-count marker."""
+    account_id = "acc_test_stub"
+    conn = _FakeConn(
+        total_local=3_000,
+        ratio_n=4,
+        ratio_mean=0.0,
+        omission_row={"began_at": None, "omitted_messages": 0},
+    )
+    result = await queries.read_windowed_events(
+        conn,
+        "sess_x",
+        window_min=1_000,
+        window_max=2_000,
+        model="m",
+        overhead_local=0,
+        account_id=account_id,
+    )
+    assert result.omission is None
 
 
 @pytest.mark.asyncio
@@ -170,6 +239,9 @@ async def test_ceil_div_never_overshoots_window(
     )
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=total_local)
+    conn.fetchrow = AsyncMock(  # serves the omission-complement aggregate
+        return_value={"began_at": None, "omitted_messages": 0}
+    )
 
     captured: dict[str, int] = {}
 

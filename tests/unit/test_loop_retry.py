@@ -22,6 +22,7 @@ from aios.harness.loop import (
     _retry_delay_for_attempt,
     run_session_step,
 )
+from aios.harness.window import WindowedEvents
 
 
 class TestRetryDelayForAttempt:
@@ -180,7 +181,7 @@ def mock_step_dependencies() -> Any:
         ),
         patch(
             "aios.harness.loop.sessions_service.read_windowed_events",
-            AsyncMock(return_value=[]),
+            AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
         ),
         patch(
             "aios.harness.loop._dispatch_confirmed_tools",

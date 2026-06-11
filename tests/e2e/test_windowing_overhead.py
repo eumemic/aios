@@ -89,6 +89,14 @@ class TestWindowingOverhead:
             f"tools={len(call.get('tools') or [])})"
         )
 
+        # The forced drop must surface the omission marker (#738) — its
+        # reserved budget is part of the invariant this asserts, so a
+        # payload without it would pass vacuously.
+        assert any(
+            isinstance(m.get("content"), str) and m["content"].startswith("[history: ")
+            for m in call["messages"]
+        ), "expected the omission marker in a windowed payload"
+
     async def test_full_payload_fits_window_max_with_tail_block(self, harness: Harness) -> None:
         """Same invariant, but with channel bindings active so
         :func:`~aios.harness.channels.build_channels_tail_block` emits

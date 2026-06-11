@@ -28,6 +28,7 @@ from aios.errors import (
     RateLimitedError,
     ValidationError,
 )
+from aios.harness.window import WindowedEvents
 from aios.models.agents import (
     Agent,
     AgentVersion,
@@ -1002,7 +1003,7 @@ async def read_windowed_events(
     window_max: int,
     model: str,
     overhead_local: int,
-) -> list[Event]:
+) -> WindowedEvents:
     async with pool.acquire() as conn:
         return await queries.read_windowed_events(
             conn,
