@@ -35,7 +35,6 @@ mixed in via :class:`SignalManagementMixin`.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -138,7 +137,6 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         # fine-grained parse-internal reason rides on each drop's
         # ``signal.inbound.skipped`` log instead.
         self._skip_counts: dict[str, int] = {}
-        self._skip_total: int = 0
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
@@ -180,11 +178,17 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         logs the failure under ``connector.connection.serve_failed`` and
         keeps the container serving its other connections.
         """
-        phone = secrets.get("phone")
+        phone = secrets.get("phone", "").strip()
         if not phone:
             raise RuntimeError(
                 f"signal connection {connection_id!r} requires a 'phone' entry in its secrets"
             )
+        # Strip once here so the whole connection — state.phone, the RPC
+        # account params, and the inbound queue key — keys on the same
+        # normalized value the dispatcher routes by (``account.strip()`` in
+        # ``_route_envelope``).  A whitespace-padded secret would otherwise
+        # enqueue under ``account.strip()`` while this loop blocked on
+        # ``_queue_for(phone)`` under the padded key → silent message loss.
         assert self._daemon is not None, "setup() must run before serve_connection()"
         # Three independent reads against signal-cli: parallelize to cut
         # connection-bring-up latency by two RPC round-trips.  verify_phone
@@ -263,12 +267,10 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         """
         assert self._daemon is not None
         backoff = _RECONNECT_BACKOFF_INITIAL_S
-        failed_reconnects = 0
         while True:
             try:
                 async for account, envelope in self._daemon.listener.messages():
                     backoff = _RECONNECT_BACKOFF_INITIAL_S
-                    failed_reconnects = 0
                     self._route_envelope(account, envelope)
                 # ``messages()`` completing WITHOUT raising means the stream
                 # ended cleanly — the real listener always raises
@@ -279,25 +281,36 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
             except ListenerClosedError:
                 if not self._daemon.subprocess_alive():
                     raise  # daemon dead → fatal, propagate to TaskGroup
-                failed_reconnects += 1
-                if failed_reconnects > _RECONNECT_MAX_ATTEMPTS:
+                # Drive the reconnect attempts here so a single logical TCP
+                # reconnect is counted EXACTLY once: sleep+backoff, call
+                # ``reconnect()``, and on success break back out to re-enter
+                # ``messages()``.  Counting in the outer ``except`` instead
+                # would double-count — a failed ``reconnect()`` leaves
+                # ``_reader is None``, so the next ``messages()`` re-raises
+                # ``ListenerClosedError`` immediately for the SAME attempt.
+                for attempt in range(1, _RECONNECT_MAX_ATTEMPTS + 1):
                     log.warning(
-                        "signal.listener.reconnect_exhausted", attempts=failed_reconnects - 1
+                        "signal.listener.reconnect",
+                        attempt=attempt,
+                        backoff_s=backoff,
+                        skip_counts=dict(self._skip_counts),
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, _RECONNECT_BACKOFF_CAP_S)
+                    try:
+                        await self._daemon.listener.reconnect()
+                    except ListenerClosedError:
+                        if not self._daemon.subprocess_alive():
+                            raise  # daemon died mid-retry → fatal
+                        continue  # this attempt failed; try the next
+                    break  # reconnected → resume iterating ``messages()``
+                else:
+                    # Exhausted every attempt without a successful reconnect.
+                    log.warning(
+                        "signal.listener.reconnect_exhausted",
+                        attempts=_RECONNECT_MAX_ATTEMPTS,
                     )
                     raise
-                log.warning(
-                    "signal.listener.reconnect",
-                    attempt=failed_reconnects,
-                    backoff_s=backoff,
-                    skip_counts=dict(self._skip_counts),
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, _RECONNECT_BACKOFF_CAP_S)
-                with contextlib.suppress(ListenerClosedError):
-                    # A reconnect that itself fails counts as one failed
-                    # attempt; the next loop iteration's ``messages()`` will
-                    # re-raise ListenerClosedError and we'll back off again.
-                    await self._daemon.listener.reconnect()
 
     def _route_envelope(self, account: str, envelope: dict[str, Any]) -> None:
         """Resolve self-echoes and route one envelope to its account queue.
@@ -309,6 +322,14 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         call — is never swallowed by it and reaches the reconnect/fatal
         branch instead.
         """
+        # Intentional defensive isolation per #908: envelope shapes in the
+        # wild are unpredictable (the postmortem was an unexpected envelope
+        # killing the read loop), so a malformed dict reaching routing must
+        # log+skip, never kill the dispatcher — even though no current code
+        # path here raises.  This is NOT dead code; it is the per-envelope
+        # blast radius the issue requires.  Scope is deliberately narrow:
+        # ``ListenerClosedError`` originates in the ``messages()`` iterator
+        # (outside this call), so the reconnect/fatal path still sees it.
         try:
             source_uuid = envelope.get("sourceUuid")
             if isinstance(source_uuid, str) and source_uuid:
@@ -336,8 +357,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         totals periodically at info volume.
         """
         self._skip_counts[reason] = self._skip_counts.get(reason, 0) + 1
-        self._skip_total += 1
-        if self._skip_total % _SKIP_ROLLUP_EVERY == 0:
+        if sum(self._skip_counts.values()) % _SKIP_ROLLUP_EVERY == 0:
             log.info("signal.inbound.skip_counts", counts=dict(self._skip_counts))
 
     async def _handle_envelope(

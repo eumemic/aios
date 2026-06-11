@@ -368,6 +368,10 @@ async def test_dispatcher_reconnects_on_transient_listener_drop(
         await connector._inbound_dispatcher()
 
     assert any(e["event"] == "signal.listener.reconnect" for e in logs)
+    # A real reconnect happened to advance to the second batch (and the
+    # exhaustion retries after it); the first successful reconnect must be
+    # counted exactly once, not skipped or doubled.
+    assert listener.reconnect_calls >= 1
     queue = connector._inbound_queues[ACCOUNT]
     drained = [queue.get_nowait() for _ in range(queue.qsize())]
     assert env_a in drained
@@ -394,14 +398,25 @@ async def test_reconnect_gives_up_after_max_attempts(
     connector: SignalConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``subprocess_alive`` stays True but every ``reconnect()`` raises;
-    the dispatcher gives up after ``_RECONNECT_MAX_ATTEMPTS`` and re-raises."""
-    monkeypatch.setattr(connector_module, "_RECONNECT_MAX_ATTEMPTS", 3)
+    the dispatcher gives up after ``_RECONNECT_MAX_ATTEMPTS`` and re-raises.
+
+    LOCKS the #908 single-count fix: exactly ``_RECONNECT_MAX_ATTEMPTS``
+    real ``reconnect()`` TCP calls are made — no more, no less.  A
+    regression to the old double-counting shape (where a failed
+    ``reconnect()`` left ``_reader is None`` and the next ``messages()``
+    re-raised for the SAME logical attempt, halving the real attempts)
+    fails this exact-count assertion and the ``attempts=`` log assertion.
+    """
+    max_attempts = 3
+    monkeypatch.setattr(connector_module, "_RECONNECT_MAX_ATTEMPTS", max_attempts)
 
     class _AlwaysFailListener:
         def __init__(self) -> None:
             self.reconnect_calls = 0
+            self.messages_calls = 0
 
         async def messages(self) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+            self.messages_calls += 1
             # Drop immediately with no progress — like the real listener
             # raising when the connection is closed before any line arrives.
             if self.reconnect_calls < 0:  # always False; forces async-generator typing
@@ -417,10 +432,22 @@ async def test_reconnect_gives_up_after_max_attempts(
     monkeypatch.setattr(connector._daemon, "subprocess_alive", lambda: True)
     connector.state[CONNECTION_ID] = _state()
 
-    with pytest.raises(ListenerClosedError):
+    with capture_logs() as logs, pytest.raises(ListenerClosedError):
         await connector._inbound_dispatcher()
 
-    assert listener.reconnect_calls == 3
+    # Exactly one real reconnect() call per attempt, no double-count.
+    assert listener.reconnect_calls == max_attempts
+    # ``messages()`` runs once (initial drop); the failed reconnects never
+    # re-enter it, so it is NOT a second counting path.
+    assert listener.messages_calls == 1
+    exhausted = [e for e in logs if e["event"] == "signal.listener.reconnect_exhausted"]
+    assert len(exhausted) == 1
+    assert exhausted[0]["attempts"] == max_attempts
+    # The per-attempt reconnect log reports true 1-based attempt numbers.
+    attempts_logged = sorted(
+        e["attempt"] for e in logs if e["event"] == "signal.listener.reconnect"
+    )
+    assert attempts_logged == list(range(1, max_attempts + 1))
 
 
 # ── D. Observability ──────────────────────────────────────────────────
