@@ -16,13 +16,16 @@ from __future__ import annotations
 import asyncio
 import gc
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.db.queries import EnvVarCredentialEcho
 from aios.harness import runtime
+from aios.ids import VAULT_CREDENTIAL
 from aios.models.memory_stores import Access, MemoryStoreResourceEcho
 from aios.sandbox.backends.base import (
     CommandResult,
@@ -63,6 +66,20 @@ def _echo(
     )
 
 
+def _env_echo(credential_id: str, updated_at: datetime) -> EnvVarCredentialEcho:
+    return EnvVarCredentialEcho(credential_id=credential_id, updated_at=updated_at)
+
+
+class FakeSecretProxy:
+    """Stand-in for ``SecretEgressProxy`` — records ``stop()`` calls and
+    exposes a fake ``port`` so registry lifecycle paths can be exercised
+    without booting a real TLS server (#877)."""
+
+    def __init__(self, port: int = 49152) -> None:
+        self.port = port
+        self.stop = AsyncMock()
+
+
 def _seed(
     registry: SandboxRegistry,
     session_id: str,
@@ -78,7 +95,7 @@ class TestReleaseIfMountsChanged:
     async def test_no_cached_handle_is_noop(self) -> None:
         backend = FakeBackend()
         registry = SandboxRegistry(backend=backend)
-        await registry.release_if_mounts_changed("sess_NONE", [_echo("memstore_a", "a")], [])
+        await registry.release_if_mounts_changed("sess_NONE", [_echo("memstore_a", "a")], [], [])
         destroys = [c for c in backend.calls if c[0] == "destroy"]
         assert destroys == []
 
@@ -88,7 +105,7 @@ class TestReleaseIfMountsChanged:
         snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
         _seed(registry, "sess_X", snapshot)
 
-        await registry.release_if_mounts_changed("sess_X", [_echo("memstore_a", "a")], [])
+        await registry.release_if_mounts_changed("sess_X", [_echo("memstore_a", "a")], [], [])
 
         destroys = [c for c in backend.calls if c[0] == "destroy"]
         assert destroys == []
@@ -108,6 +125,7 @@ class TestReleaseIfMountsChanged:
         await registry.release_if_mounts_changed(
             "sess_X",
             [_echo("memstore_b", "b", "read_only"), _echo("memstore_a", "a")],
+            [],
             [],
         )
 
@@ -133,7 +151,7 @@ class TestReleaseIfMountsChanged:
         snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
         handle = _seed(registry, "sess_X", snapshot)
 
-        await registry.release_if_mounts_changed("sess_X", current_echoes, [])
+        await registry.release_if_mounts_changed("sess_X", current_echoes, [], [])
 
         destroys = [c for c in backend.calls if c[0] == "destroy"]
         assert len(destroys) == 1
@@ -192,7 +210,7 @@ class TestReleaseIfMountsChanged:
             await provision_started.wait()
 
             release_task = asyncio.create_task(
-                registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")], [])
+                registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")], [], [])
             )
             # release_task is blocked on the lock provision_task is holding.
             await asyncio.sleep(0)
@@ -838,3 +856,195 @@ class TestSpecVersionDrift:
         handle = registry.peek("sess_X")
         assert handle is not None
         assert handle.spec_version == 7
+
+
+class TestSecretProxyLifecycle:
+    """The per-session ``SecretEgressProxy`` is owned by the registry, not the
+    handle (mirroring ``GitProxy``): stopped on release, mount-drift release,
+    evict, and stop_all, and stored at provision time (#877).
+
+    LIFECYCLE-ONLY and inert until #878 wires egress routing — these tests
+    never drive a secret swap, only the start/store/stop bookkeeping.
+    """
+
+    async def test_release_stops_secret_proxy(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        _seed(registry, "sess_X")
+        proxy = FakeSecretProxy()
+        registry._secret_proxies["sess_X"] = cast(Any, proxy)
+
+        await registry.release("sess_X")
+
+        proxy.stop.assert_awaited_once()
+        assert "sess_X" not in registry._secret_proxies
+
+    async def test_release_if_mounts_changed_stops_secret_proxy(self) -> None:
+        """A diverged echo set fires release(), which stops the secret proxy."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
+        _seed(registry, "sess_X", snapshot)
+        proxy = FakeSecretProxy()
+        registry._secret_proxies["sess_X"] = cast(Any, proxy)
+
+        # Detach all memory stores → snapshot diverges → release fires.
+        await registry.release_if_mounts_changed("sess_X", [], [], [])
+
+        proxy.stop.assert_awaited_once()
+        assert "sess_X" not in registry._secret_proxies
+
+    async def test_evict_stops_secret_proxy(self) -> None:
+        """``evict`` stops the secret proxy in the background (reusing the
+        evict task-keepalive set); await the tracked task to observe it."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        registry._handles["sess_X"] = make_handle(session_id="sess_X")
+        registry._last_used["sess_X"] = 0.0
+        proxy = FakeSecretProxy()
+        registry._secret_proxies["sess_X"] = cast(Any, proxy)
+
+        registry.evict("sess_X")
+        assert "sess_X" not in registry._secret_proxies
+        # The stop is fire-and-forget — drain the tracked tasks.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        proxy.stop.assert_awaited_once()
+
+    async def test_stop_all_stops_all_secret_proxies(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        _seed(registry, "sess_X")
+        _seed(registry, "sess_Y")
+        proxy_x = FakeSecretProxy()
+        proxy_y = FakeSecretProxy()
+        registry._secret_proxies["sess_X"] = cast(Any, proxy_x)
+        registry._secret_proxies["sess_Y"] = cast(Any, proxy_y)
+
+        await registry.stop_all()
+
+        proxy_x.stop.assert_awaited_once()
+        proxy_y.stop.assert_awaited_once()
+        assert registry._secret_proxies == {}
+
+    async def test_provision_stores_secret_proxy(self) -> None:
+        """A cold provision whose plan carries a non-None ``secret_proxy``
+        stores it on ``registry._secret_proxies`` (mirrors
+        ``test_handle_carries_spec_version_from_spec``)."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        proxy = FakeSecretProxy()
+        plan = _provisioning_plan("sess_X")
+        plan = ProvisioningPlan(
+            spec=plan.spec,
+            env_config=plan.env_config,
+            memory_echoes=plan.memory_echoes,
+            github_echoes=plan.github_echoes,
+            git_proxy=plan.git_proxy,
+            env_var_credentials=(),
+            secret_proxy=cast(Any, proxy),
+        )
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=plan),
+            ),
+            patch("aios.sandbox.registry.ensure_workspace_runtime_dirs", AsyncMock()),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+        ):
+            await registry.get_or_provision("sess_X")
+
+        assert registry._secret_proxies["sess_X"] is cast(Any, proxy)
+
+    async def test_provision_failure_after_build_spec_stops_both_proxies(self) -> None:
+        """A raise from ``_resolve_snapshot`` — after ``build_spec_from_session``
+        has started the proxies and registered the broker secret, but before the
+        sandbox exists — must stop BOTH proxies exactly once, unregister the
+        broker, and leave neither proxy in the registry dicts. Without the
+        cleanup span covering resolution, the proxies leak (their ports + the
+        broker secret outlive the worker) (#877)."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        git_proxy = FakeSecretProxy()
+        secret_proxy = FakeSecretProxy()
+        plan = _provisioning_plan("sess_X")
+        plan = ProvisioningPlan(
+            spec=plan.spec,
+            env_config=plan.env_config,
+            memory_echoes=plan.memory_echoes,
+            github_echoes=plan.github_echoes,
+            git_proxy=cast(Any, git_proxy),
+            env_var_credentials=(),
+            secret_proxy=cast(Any, secret_proxy),
+        )
+        broker = MagicMock()
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=plan),
+            ),
+            patch.object(
+                registry,
+                "_resolve_snapshot",
+                AsyncMock(side_effect=RuntimeError("store probe indeterminate")),
+            ),
+            patch("aios.harness.runtime.require_tool_broker", return_value=broker),
+            pytest.raises(RuntimeError, match="store probe indeterminate"),
+        ):
+            await registry.get_or_provision("sess_X")
+
+        git_proxy.stop.assert_awaited_once()
+        secret_proxy.stop.assert_awaited_once()
+        broker.unregister_session.assert_called_once_with("sess_X")
+        assert "sess_X" not in registry._git_proxies
+        assert "sess_X" not in registry._secret_proxies
+        # No sandbox was ever created — teardown must not destroy a phantom.
+        assert [c for c in backend.calls if c[0] in ("create", "destroy")] == []
+
+
+class TestEnvVarCredentialDrift:
+    """The step-time half of constraint A: an env-var credential rotation
+    (bumped ``updated_at``), add, or remove diverges the mount snapshot and
+    recycles the cached sandbox; an identical echo set does not (#877)."""
+
+    _TS_V1 = datetime(2026, 6, 10, tzinfo=UTC)
+    _TS_V2 = datetime(2026, 6, 11, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        "current_echoes,description,expect_release",
+        [
+            ([_env_echo("vcr_01", _TS_V2)], "rotated (updated_at bumped)", True),
+            (
+                [_env_echo("vcr_01", _TS_V1), _env_echo("vcr_02", _TS_V1)],
+                "added a cred",
+                True,
+            ),
+            ([], "removed the cred", True),
+            ([_env_echo("vcr_01", _TS_V1)], "identical", False),
+        ],
+    )
+    async def test_env_var_drift(
+        self,
+        current_echoes: list[EnvVarCredentialEcho],
+        description: str,
+        expect_release: bool,
+    ) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        snapshot = frozenset([(VAULT_CREDENTIAL, "vcr_01", self._TS_V1.isoformat())])
+        handle = _seed(registry, "sess_X", snapshot)
+
+        await registry.release_if_mounts_changed("sess_X", [], [], current_echoes)
+
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        if expect_release:
+            assert len(destroys) == 1, f"{description!r} should recycle the sandbox"
+            assert destroys[0][1]["sandbox_id"] == handle.sandbox_id
+            assert registry.peek("sess_X") is None
+        else:
+            assert destroys == [], f"{description!r} must not recycle the sandbox"
+            assert registry.peek("sess_X") is not None

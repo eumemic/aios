@@ -341,8 +341,20 @@ def patch_build_spec_deps(
         tool_broker.register_session = MagicMock()
         tool_broker.unregister_session = MagicMock()
 
+    # Stub the SecretEgressProxy (#877) so a provision with env-var creds
+    # doesn't boot a real TLS server / reach for the egress CA (which needs a
+    # worker-context crypto_box). Tests asserting on the proxy re-patch this
+    # symbol AFTER entering the bundle, so their mock wins (last patch binds).
+    secret_proxy_instance = MagicMock()
+    secret_proxy_instance.start = AsyncMock()
+    secret_proxy_instance.stop = AsyncMock()
+
     return (
         patch("aios.sandbox.spec.get_settings", return_value=settings),
+        patch(
+            "aios.sandbox.spec.SecretEgressProxy",
+            MagicMock(return_value=secret_proxy_instance),
+        ),
         patch(
             "aios.sandbox.spec.sessions_service.load_session_account_id",
             AsyncMock(return_value="acct_x"),
