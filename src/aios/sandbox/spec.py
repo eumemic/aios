@@ -60,6 +60,7 @@ from aios.sandbox.github_clone import (
     ensure_session_working_tree,
 )
 from aios.sandbox.network import WORKER_NETWORK_ALIAS, is_running_in_container
+from aios.sandbox.setup import WORKSPACE_RUNTIME_ENV
 from aios.services import sessions as sessions_service
 from aios.services.vaults import ResolvedEnvVarCredential, resolve_session_env_var_credentials
 
@@ -578,6 +579,7 @@ def _assemble_plan(
         )
 
     merged_env: dict[str, str] = {
+        **WORKSPACE_RUNTIME_ENV,
         # Trust-store defaults precede operator env so a custom image
         # (#724) with a non-Debian CA layout can override them.
         **TRUST_STORE_ENV,

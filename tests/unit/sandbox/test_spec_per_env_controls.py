@@ -108,7 +108,7 @@ class TestAssemblePlanImageAndBudget:
         env_keys = set(labels["aios.env_keys"].split(","))
         # The names (never values) of the run-injected env — includes the broker
         # secret's KEY but the scrub only ever empties it, never reads a value.
-        assert {"TOOL_BROKER_SECRET", "AIOS_SESSION_ID"} <= env_keys
+        assert {"PATH", "TOOL_BROKER_SECRET", "AIOS_SESSION_ID"} <= env_keys
 
     def test_seccomp_profile_from_settings_lands_on_spec(self) -> None:
         """#807: ``_assemble_plan`` copies ``settings.sandbox_seccomp_profile``
