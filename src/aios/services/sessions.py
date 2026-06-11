@@ -777,6 +777,32 @@ def _nudge_content(request_ids: list[str]) -> str:
     )
 
 
+async def write_gate_opened(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    request_id: str,
+    run_id: str,
+    gate_nonce: str,
+) -> bool:
+    """Deliver a ``gate_opened`` notification to a run's launcher exactly once.
+
+    ``request_id`` is the gate ``call_key``: replaying the same open gate attempts the
+    same ledger slot, so ``write_response_if_absent``'s first-writer-wins guard dedupes
+    without consuming any sibling request's response slot.
+    """
+    return await queries.write_response_if_absent(
+        conn,
+        session_id,
+        account_id=account_id,
+        request_id=request_id,
+        is_error=False,
+        result={"event": "gate_opened", "run_id": run_id, "gate_nonce": gate_nonce},
+        error=None,
+    )
+
+
 async def write_child_response(
     conn: asyncpg.Connection[Any],
     session_id: str,
