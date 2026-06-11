@@ -309,6 +309,13 @@ async def _run_workflow_step_body(
     outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
 
     needs_rewake = False
+    # A spawn rejection journaled this wake (a catchable agent() error). The run owes one
+    # more drive so the replay throws the AgentError at the await — so we DON'T settle into
+    # a quiet 'suspended' (which the next wake's quiet-wake guard would early-exit), we hand
+    # the lease back as 'running' and let the guaranteed self-wake (needs_rewake) drive it.
+    # One-shot by construction: a rejected call lands in memo, so its capability is skipped
+    # on replay (never re-journaled), and the driven wake re-suspends/completes normally.
+    rejected_any = False
     # (call_key, tool_name, input) for tool frontiers opened this wake — launched AFTER
     # the txn commits (below), so call_started is visible before a task can signal+wake.
     tools_to_launch: list[tuple[str, str, Any]] = []
@@ -418,10 +425,14 @@ async def _run_workflow_step_body(
                     needs_rewake = True
             elif cap.capability_id == "agent":
                 spawn = await _open_agent_capability(conn, pool, run, cap)
+                # rejected: this call's catchable error was journaled — self-wake so the
+                # run replays and throws the AgentError at the await. A spawn error on ONE
+                # capability must NOT abort spawning the others, so continue the loop.
+                # needs_rewake (C1'/C4): a re-attached child already has its marker.
+                if spawn.rejected or spawn.needs_rewake:
+                    needs_rewake = True
                 if spawn.rejected:
-                    return  # the frontier was terminally rejected (bad call) — run errored
-                if spawn.needs_rewake:
-                    needs_rewake = True  # C1'/C4: harvest the already-present marker next step
+                    rejected_any = True
             elif cap.capability_id == "tool":
                 spec = cap.spec if isinstance(cap.spec, dict) else {}
                 tool_name = spec.get("tool_name")
@@ -461,7 +472,12 @@ async def _run_workflow_step_body(
                     error_kind="not_implemented",
                 )
                 return
-        await wf_queries.set_run_status(conn, run_id, "suspended", account_id=account_id)
+        # Hand the lease back. A reject journaled this wake leaves the run 'running' (a
+        # drive is owed: the self-wake replays and throws the catchable AgentError);
+        # otherwise park as a settled 'suspended'.
+        await wf_queries.set_run_status(
+            conn, run_id, "running" if rejected_any else "suspended", account_id=account_id
+        )
 
     # Outside the txn (after the suspend commits): launch this wake's tool tasks — now
     # that their call_started rows are committed, a task that signals+wakes lands a step
@@ -478,7 +494,8 @@ async def _run_workflow_step_body(
 class _SpawnResult(NamedTuple):
     """Outcome of opening one ``agent()`` frontier."""
 
-    rejected: bool  # the call was terminally rejected (run errored) — stop the step
+    # this call's catchable error was journaled — self-wake so the run replays and throws
+    rejected: bool
     needs_rewake: bool  # a re-attached child already has its marker — self-wake to harvest
 
 
@@ -496,8 +513,10 @@ async def _open_agent_capability(
     ``call_started`` dedups on the memo. On replay the child id already exists →
     re-attach, journaling the *row's* pinned version (not a re-resolved one).
 
-    Returns ``rejected=True`` iff the call was terminally rejected (the run was
-    errored — the caller should stop the step). ``defer_wake`` fires **only on
+    Returns ``rejected=True`` iff this call was rejected and its catchable error was
+    journaled (a ``call_result`` error for ``cap.call_key``): the caller self-wakes so
+    the run replays and ``_agent_error_from`` throws an ``AgentError`` at the
+    ``await``, where the author can catch it. ``defer_wake`` fires **only on
     first spawn** (``created``): on a re-attach the child is already sweep-wakeable
     via its own first user message and may even be terminal, so appending a wake
     span to it would crash. ``needs_rewake=True`` asks the caller for a self-wake
@@ -506,6 +525,24 @@ async def _open_agent_capability(
     — which only sees inflight ``call_started`` events — missed it).
     """
     account_id = run.account_id
+
+    async def _reject(kind: str, message: str) -> _SpawnResult:
+        # Journal the rejection as a CATCHABLE call_result error for this call_key —
+        # the same channel every other agent failure uses — instead of terminally
+        # erroring the run. The descriptive ``message`` is the author's only source
+        # (``_AGENT_ERROR_DEFAULT_MESSAGES`` has no entry for these kinds), so it is
+        # preserved verbatim. The caller self-wakes; the next step's replay throws
+        # ``_agent_error_from`` at the ``await``, where the author can try/except it.
+        await wf_queries.append_run_event(
+            conn,
+            account_id=account_id,
+            run_id=run.id,
+            type="call_result",
+            call_key=cap.call_key,
+            payload={"result": None, "is_error": True, "error": {"kind": kind, "message": message}},
+        )
+        return _SpawnResult(rejected=True, needs_rewake=False)
+
     spec = cap.spec if isinstance(cap.spec, dict) else {}
     # agent() carries output_schema as a canonical JSON *string* (so a schema's floats
     # survive the call_key hash); reconstruct the dict. None means no schema demanded.
@@ -538,24 +575,12 @@ async def _open_agent_capability(
                         "(references must resolve within the schema; remote refs are unsupported)"
                     )
         if schema_error is not None:
-            await _complete_run(
-                conn,
-                run,
-                output=f"agent() {schema_error}",
-                is_error=True,
-                error_kind="bad_agent_call",
-            )
-            return _SpawnResult(rejected=True, needs_rewake=False)
+            return await _reject("bad_agent_call", f"agent() {schema_error}")
     agent_id = spec.get("agent_id")
     if not isinstance(agent_id, str):
-        await _complete_run(
-            conn,
-            run,
-            output=f"agent() requires a string agent_id, got {agent_id!r}",
-            is_error=True,
-            error_kind="bad_agent_call",
+        return await _reject(
+            "bad_agent_call", f"agent() requires a string agent_id, got {agent_id!r}"
         )
-        return _SpawnResult(rejected=True, needs_rewake=False)
 
     child_id = child_session_id(run.id, cap.call_key)
     try:
@@ -563,14 +588,7 @@ async def _open_agent_capability(
         # which the run clamps. One query, same NotFoundError contract as before.
         agent = await db_queries.get_agent(conn, agent_id, account_id=account_id)
     except NotFoundError:
-        await _complete_run(
-            conn,
-            run,
-            output=f"agent {agent_id!r} not found",
-            is_error=True,
-            error_kind="agent_not_found",
-        )
-        return _SpawnResult(rejected=True, needs_rewake=False)
+        return await _reject("agent_not_found", f"agent {agent_id!r} not found")
     pinned = agent.version
     # #794: the child wields agent ∩ run, frozen at spawn; its vaults are the run's.
     child_surface = attenuation_service.clamp(surface_of(agent), surface_of(run))
