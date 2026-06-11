@@ -785,10 +785,17 @@ async def fail_open_child_requests_conn(
     still-open request on a workflow child through the fused :func:`write_child_response`
     seam, INSIDE the caller's open transaction, so the ``child_gone`` response + its
     ``child_done`` signal commit atomically with the archive/delete that terminates the
-    child. Returns the ``parent_run_id`` to wake when at least one response was written
-    (so the pool-level caller can ``defer_run_wake`` after commit), else ``None`` — a
-    no-op for non-child sessions (``parent_run_id`` is None) and children that owe
-    nothing.
+    child. What actually *survives* differs by caller: archive only flips ``archived_at``,
+    so the ``request_response`` event persists and ``derive_response`` returns the written
+    ``child_gone``; delete's cascade erases that event, leaving the ``child_done`` signal
+    (in ``wf_run_signals``, keyed by ``run_id`` — a separate table) as the sole survivor
+    that keeps the run sweep-visible, while ``derive_response`` resolves ``child_gone`` via
+    its liveness fallback (the session row is gone). Routing both paths through the seam is
+    deliberate: it keeps the single response-writer/signal chokepoint — the erased delete-path
+    event is the harmless cost of one uniform seam, not a bug. Returns the ``parent_run_id``
+    to wake when at least one response was written (so the pool-level caller can
+    ``defer_run_wake`` after commit), else ``None`` — a no-op for non-child sessions
+    (``parent_run_id`` is None) and children that owe nothing.
 
     The pool-level ``fail_all_open_requests`` is the harness-erroring path (the model
     failed past its retry budget) and acquires its own connection + wakes itself; this
@@ -1196,11 +1203,14 @@ async def clone_session(
 async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> None:
     # Deleting a workflow child that still owes its agent() response is a
     # COMPLETION (#904): fail its open requests through write_child_response (error
-    # child_gone) FIRST — before delete_session's cascade wipes the child's events —
-    # so the child_gone response + its child_done signal commit atomically with the
-    # delete. The child_done signal lives in wf_run_signals (NOT the child's events),
-    # so it survives the cascade and makes the run sweep-visible within a tick rather
-    # than waiting out the 1h agent deadline.
+    # child_gone) FIRST — same single response-writer/signal seam as archive. The
+    # cascade then wipes the child's events, INCLUDING the child_gone request_response
+    # this just wrote — that erasure is harmless (routing through the one seam is the
+    # point; see fail_open_child_requests_conn). What carries the completion is the
+    # child_done signal, which lives in wf_run_signals (keyed by run_id, NOT the child's
+    # events), so it survives the cascade and makes the run sweep-visible within a tick
+    # rather than waiting out the 1h agent deadline; derive_response resolves child_gone
+    # via its liveness fallback once the session row is gone.
     async with pool.acquire() as conn, conn.transaction():
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
