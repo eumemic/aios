@@ -99,12 +99,15 @@ jobs:
           # eventually-consistent search index) and exact-match the title in jq,
           # so rapid consecutive failures update the one issue instead of
           # spawning duplicates.
+          # `set -e` would abort this step on a transient `gh issue list`
+          # failure before any issue is filed; fall through to creating one
+          # instead (mirrors the `|| true` on the label create above).
           EXISTING=$(gh issue list \
             --label incident \
             --state open \
             --limit 100 \
             --json number,title \
-            --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty")
+            --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty" || echo "")
 
           if [ -n "${EXISTING}" ]; then
             echo "Updating existing incident issue #${EXISTING}."
