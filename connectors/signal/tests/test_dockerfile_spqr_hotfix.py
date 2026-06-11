@@ -13,19 +13,27 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 DOCKERFILE = Path(__file__).parent.parent / "Dockerfile"
 PATCH = Path(__file__).parent.parent / "signal-cli-modeb-receipt-guard.patch"
 
-DOCKERFILE_TEXT = DOCKERFILE.read_text()
+
+@pytest.fixture(scope="module")
+def dockerfile_text() -> str:
+    # Read inside a fixture (not at import time) so a missing/unreadable
+    # Dockerfile yields a clean named test failure instead of crashing
+    # pytest collection.
+    return DOCKERFILE.read_text()
 
 
-def test_pins_full_upstream_commit_sha() -> None:
-    assert "bf1376d74da494d687d4ee60abc20d288ab4fa40" in DOCKERFILE_TEXT
+def test_pins_full_upstream_commit_sha(dockerfile_text: str) -> None:
+    assert "bf1376d74da494d687d4ee60abc20d288ab4fa40" in dockerfile_text
 
 
-def test_is_multistage_with_jdk25_build_stage() -> None:
+def test_is_multistage_with_jdk25_build_stage(dockerfile_text: str) -> None:
     from_lines = [
-        line for line in DOCKERFILE_TEXT.splitlines() if line.lstrip().startswith("FROM ")
+        line for line in dockerfile_text.splitlines() if line.lstrip().startswith("FROM ")
     ]
     assert len(from_lines) >= 2
     # A build stage on the full JDK 25 image (the ``-jre`` runtime image
@@ -34,8 +42,8 @@ def test_is_multistage_with_jdk25_build_stage() -> None:
     assert build_stage, from_lines
 
 
-def test_applies_modeb_patch() -> None:
-    assert re.search(r"git apply\b.*modeb", DOCKERFILE_TEXT) is not None
+def test_applies_modeb_patch(dockerfile_text: str) -> None:
+    assert re.search(r"git apply\b.*modeb", dockerfile_text) is not None
 
 
 def test_patch_file_exists_on_disk() -> None:
@@ -45,27 +53,27 @@ def test_patch_file_exists_on_disk() -> None:
     assert "getSourceServiceId() == null" in patch_text
 
 
-def test_retains_version_smoke() -> None:
-    assert re.search(r"signal-cli\s+--version", DOCKERFILE_TEXT) is not None
+def test_retains_version_smoke(dockerfile_text: str) -> None:
+    assert re.search(r"signal-cli\s+--version", dockerfile_text) is not None
 
 
-def test_has_revert_to_stock_marker() -> None:
+def test_has_revert_to_stock_marker(dockerfile_text: str) -> None:
     marker_lines = [
         line
-        for line in DOCKERFILE_TEXT.splitlines()
+        for line in dockerfile_text.splitlines()
         if line.lstrip().startswith("#") and "REVERT-TO-STOCK" in line.upper()
     ]
     assert marker_lines, "expected a REVERT-TO-STOCK marker comment"
     # The marker block must reference both this issue and the upstream bug.
-    assert "#907" in DOCKERFILE_TEXT
-    assert "#2059" in DOCKERFILE_TEXT
+    assert "#907" in dockerfile_text
+    assert "#2059" in dockerfile_text
 
 
-def test_no_active_native_tarball_download() -> None:
+def test_no_active_native_tarball_download(dockerfile_text: str) -> None:
     native_tarball = re.compile(r"signal-cli-.*-Linux-native\.tar\.gz")
     active = [
         line
-        for line in DOCKERFILE_TEXT.splitlines()
+        for line in dockerfile_text.splitlines()
         if native_tarball.search(line) and not line.lstrip().startswith("#")
     ]
     assert not active, f"native-tarball download must be commented out, found: {active}"

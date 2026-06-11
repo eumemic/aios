@@ -64,4 +64,4 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Smoke test — signal-cli runs and reports a version
-        run: docker run --rm aios-signal:ci signal-cli --version | grep -q 'signal-cli'
+        run: docker run --rm --entrypoint signal-cli aios-signal:ci --version | grep -q 'signal-cli'

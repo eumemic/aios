@@ -51,12 +51,15 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Clone + pin the FULL upstream SHA (never ``master`` — the tree moves).
+# Shallow-fetch the FULL upstream SHA (never ``master`` — the tree moves).
 # bf1376d carries the Mode-A SPQR parse fix (libsignal-service _147→_148);
-# the Mode-B receipt-handler NPE is patched in below.
-RUN git clone https://github.com/AsamK/signal-cli.git /signal-cli
+# the Mode-B receipt-handler NPE is patched in below.  ``git fetch --depth 1``
+# of the reachable commit SHA avoids cloning years of history on cold CI.
+RUN git init /signal-cli
 WORKDIR /signal-cli
-RUN git checkout bf1376d74da494d687d4ee60abc20d288ab4fa40
+RUN git remote add origin https://github.com/AsamK/signal-cli.git \
+ && git fetch --depth 1 origin bf1376d74da494d687d4ee60abc20d288ab4fa40 \
+ && git checkout FETCH_HEAD
 
 # Mode-B receipt-guard patch — drops sealed-sender receipts that carry no
 # resolvable sender before getSender() can NPE.  See SPQR-HOTFIX.md.
