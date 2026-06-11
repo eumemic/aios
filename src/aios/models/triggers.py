@@ -252,6 +252,34 @@ class TriggerEcho(BaseModel):
     updated_at: datetime
 
 
+class TriggerRunEcho(BaseModel):
+    """Read view of one ``trigger_runs`` row — a single fire of a trigger.
+
+    ``trigger_context`` echoes the firing source (``cron`` / ``one_shot`` /
+    ``run_completion``); ``event`` carries the per-event context for
+    ``run_completion`` fires (``{run_id, workflow_id, status}``) and is
+    ``None`` for timer fires. ``status`` is an open string on read (rows
+    written by future writers must always read back); the current writer
+    vocabulary is ``pending``/``running``/``ok``/``error``/``timeout``/
+    ``skipped``. ``result_id`` is the prefixed id of the resource the fire
+    created (a ``wfr_…`` run today), or ``None`` when the fire produced no
+    resource or failed. ``created_at`` is when the fire INTENT was created
+    (the match transaction for event fires; insert time for timer rows);
+    ``started_at`` is when execution claimed it.
+    """
+
+    id: str
+    trigger_id: str
+    trigger_context: str
+    event: dict[str, Any] | None
+    status: str
+    result_id: str | None
+    error_summary: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
 def compute_next_fire(schedule: str, from_time: datetime) -> datetime:
     """Compute the next cron-fire time strictly after ``from_time``.
 

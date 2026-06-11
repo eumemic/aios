@@ -52,6 +52,10 @@ SCHEDULED_TASK: Final = "sched"
 # from the pre-rename table remain valid (both kept in `_PREFIXES`), so
 # `split_id` works on old rows without a data migration.
 TRIGGER: Final = "trig"
+# Per-fire audit row for a trigger (#819). References triggers by PLAIN id —
+# one-shot rows are deleted before firing, so the audit must outlive the
+# trigger row (no FK; see migration 0085).
+TRIGGER_RUN: Final = "trun"
 # Short-lived server-side state for an in-progress interactive OAuth
 # authorization-code flow (vault credential "Connect"). Rows are pruned on
 # expiry — see ``oauth_flows`` (migration 0061).
@@ -88,6 +92,7 @@ _PREFIXES: Final = frozenset(
         ACCOUNT_KEY,
         SCHEDULED_TASK,
         TRIGGER,
+        TRIGGER_RUN,
         OAUTH_FLOW,
         WORKFLOW,
         WORKFLOW_RUN,

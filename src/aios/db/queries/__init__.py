@@ -51,6 +51,7 @@ from aios.ids import (
     SESSION_TEMPLATE,
     SKILL,
     TRIGGER,
+    TRIGGER_RUN,
     VAULT,
     VAULT_CREDENTIAL,
     make_id,
@@ -82,6 +83,7 @@ from aios.models.triggers import (
     TriggerAction,
     TriggerEcho,
     TriggerFireStatus,
+    TriggerRunEcho,
     compute_next_fire,
 )
 from aios.models.vaults import AuthType, Vault, VaultCredential
@@ -7813,10 +7815,14 @@ async def hard_delete_account(conn: asyncpg.Connection[Any], account_id: str) ->
     """Hard-delete an already-archived account row.
 
     Returns ``True`` iff a row was actually deleted. Returns ``False``
-    when the row didn't exist, was not archived, or was prevented by a
-    ``ON DELETE RESTRICT`` FK from a resource table — the FKs all use
-    RESTRICT, so the caller must already have ensured zero archived
-    AND zero non-archived rows reference this account before invoking.
+    when the row didn't exist, was not archived, or was prevented by an
+    ``ON DELETE RESTRICT`` FK from a resource table. The core resource
+    tables use RESTRICT, so the caller must already have ensured zero
+    archived AND zero non-archived rows reference this account before
+    invoking — but NOT all FKs do: ``oauth_flows`` (0061), the workflows
+    tables (0064), ``wf_run_vaults`` (0073), and ``trigger_runs`` (0085)
+    CASCADE, so their rows vanish silently with the account (desired for
+    transient/audit data).
 
     Compliance / GDPR-style hard deletes use this — the soft-archive
     ``archive_account`` is the normal path. Idempotent.
@@ -8454,6 +8460,283 @@ async def count_session_triggers(
         account_id,
     )
     return result or 0
+
+
+# ─── trigger_runs: per-fire audit + run_completion dispatch carrier (#819) ───
+
+
+class TriggerFireRef(NamedTuple):
+    """A dispatchable run_completion fire: the carrier row + its trigger."""
+
+    trigger_run_id: str
+    trigger_id: str
+
+
+def _row_to_trigger_run_echo(row: asyncpg.Record) -> TriggerRunEcho:
+    return TriggerRunEcho(
+        id=row["id"],
+        trigger_id=row["trigger_id"],
+        trigger_context=row["trigger_context"],
+        event=parse_jsonb(row["event"]) if row["event"] is not None else None,
+        status=row["status"],
+        result_id=row["result_id"],
+        error_summary=row["error_summary"],
+        created_at=row["created_at"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+    )
+
+
+async def insert_run_completion_fires(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    workflow_id: str,
+    run_id: str,
+    status: str,
+) -> list[TriggerFireRef]:
+    """Match watching ``run_completion`` triggers and insert one ``pending``
+    fire-carrier row per match.
+
+    MUST run inside the run-completion transaction (the single consistency
+    point: commit makes "the run completed" and "these fires are owed"
+    atomic). The ``t.account_id = $1`` conjunct is the tenant boundary —
+    write-path validation is UX, this is enforcement: a trigger is only ever
+    handed run data its owner could already read via the account-scoped run
+    reads. Matching is covered by the ``triggers_run_completion_watch``
+    partial index; the insert loop is bounded by the per-account
+    enabled-trigger cap.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT t.id, t.account_id, t.owner_session_id, t.name
+        FROM triggers AS t
+        JOIN sessions AS s ON s.id = t.owner_session_id
+        WHERE t.source = 'run_completion'
+          AND t.account_id = $1
+          AND t.source_spec ->> 'workflow_id' = $2
+          AND t.source_spec -> 'statuses' ? $3
+          AND t.enabled
+          AND s.archived_at IS NULL
+        ORDER BY t.created_at
+        """,
+        account_id,
+        workflow_id,
+        status,
+    )
+    event = json.dumps({"run_id": run_id, "workflow_id": workflow_id, "status": status})
+    refs: list[TriggerFireRef] = []
+    for r in rows:
+        trigger_run_id = make_id(TRIGGER_RUN)
+        await conn.execute(
+            """
+            INSERT INTO trigger_runs
+                (id, trigger_id, account_id, owner_session_id, trigger_name,
+                 trigger_context, event, status)
+            VALUES ($1, $2, $3, $4, $5, 'run_completion', $6::jsonb, 'pending')
+            """,
+            trigger_run_id,
+            r["id"],
+            r["account_id"],
+            r["owner_session_id"],
+            r["name"],
+            event,
+        )
+        refs.append(TriggerFireRef(trigger_run_id, r["id"]))
+    return refs
+
+
+async def claim_trigger_run(
+    conn: asyncpg.Connection[Any],
+    trigger_run_id: str,
+    *,
+    started_at: datetime,
+) -> dict[str, Any] | None:
+    """Claim a fire-carrier row (``pending`` → ``running``); return its event.
+
+    ``None`` means the row was already claimed (a duplicate job — the sweep
+    re-deferred a fire whose live job won the race) and the caller must exit
+    without firing. ``started_at`` is the runner's single fire timestamp.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE trigger_runs
+        SET status = 'running', started_at = $2
+        WHERE id = $1 AND status = 'pending'
+        RETURNING event
+        """,
+        trigger_run_id,
+        started_at,
+    )
+    if row is None:
+        return None
+    event = parse_jsonb(row["event"])
+    assert isinstance(event, dict)  # run_completion rows always carry an event
+    return event
+
+
+async def finalize_trigger_run(
+    conn: asyncpg.Connection[Any],
+    trigger_run_id: str,
+    *,
+    status: str,
+    error_summary: str | None = None,
+    result_id: str | None = None,
+) -> None:
+    """Record an event fire's outcome on its carrier row.
+
+    First-writer-wins via the ``status = 'running'`` guard (the
+    ``set_run_status`` terminal-guard idiom): a re-dispatched job racing a
+    finished one cannot overwrite the outcome.
+    """
+    await conn.execute(
+        """
+        UPDATE trigger_runs
+        SET status = $2, error_summary = $3, result_id = $4, finished_at = now()
+        WHERE id = $1 AND status = 'running'
+        """,
+        trigger_run_id,
+        status,
+        error_summary,
+        result_id,
+    )
+
+
+async def record_trigger_run(
+    conn: asyncpg.Connection[Any],
+    *,
+    trigger_id: str,
+    account_id: str,
+    owner_session_id: str,
+    trigger_name: str,
+    trigger_context: str,
+    status: str,
+    error_summary: str | None,
+    result_id: str | None,
+    started_at: datetime,
+) -> str:
+    """Timer-fire audit writer: one complete row at fire completion.
+
+    Used for cron fires (inside ``record_trigger_fire``'s transaction, so the
+    echo cache and the audit can never disagree), one-shot fires (standalone
+    post-action — by then the trigger row is already deleted, making this row
+    the only persistent record the fire ever happened), and the one-shot
+    skip tombstone. Timer rows are NEVER written at tick-claim time: the tick
+    tail is contractually frozen (task-id-only payload, per-trigger
+    queueing_lock whose coalesce would orphan a claim-time row as 'pending').
+    """
+    trigger_run_id = make_id(TRIGGER_RUN)
+    await conn.execute(
+        """
+        INSERT INTO trigger_runs
+            (id, trigger_id, account_id, owner_session_id, trigger_name,
+             trigger_context, status, error_summary, result_id,
+             started_at, finished_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+        """,
+        trigger_run_id,
+        trigger_id,
+        account_id,
+        owner_session_id,
+        trigger_name,
+        trigger_context,
+        status,
+        error_summary,
+        result_id,
+    )
+    return trigger_run_id
+
+
+async def list_trigger_runs(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    session_id: str,
+    trigger_name: str,
+    limit: int = 50,
+) -> list[TriggerRunEcho]:
+    """List a trigger's fires, newest first — keyed by the DENORMALIZED
+    ``(account_id, owner_session_id, trigger_name)``, never by resolving the
+    live trigger row: one-shot tombstones and deleted-trigger audits must stay
+    reachable (the audit outlives its trigger by design). Name reuse merges
+    incarnations in the listing; rows carry ``trigger_id`` to disambiguate.
+
+    No dedicated index — a porcelain read over a retention-pruned table; the
+    scan is bounded by ``trigger_runs_retention_days``.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT * FROM trigger_runs
+        WHERE account_id = $1 AND owner_session_id = $2 AND trigger_name = $3
+        ORDER BY created_at DESC
+        LIMIT $4
+        """,
+        account_id,
+        session_id,
+        trigger_name,
+        limit,
+    )
+    return [_row_to_trigger_run_echo(r) for r in rows]
+
+
+async def list_pending_trigger_run_refs(
+    conn: asyncpg.Connection[Any],
+    *,
+    older_than_seconds: float = 60.0,
+) -> list[TriggerFireRef]:
+    """Fires whose post-commit defer was lost (worker crash between the
+    run-completion commit and ``defer_async``). The periodic sweep re-defers
+    these; the ``pending → running`` claim makes a re-defer racing a live job
+    safe. Covered by the ``trigger_runs_unfinished`` partial index.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT id, trigger_id FROM trigger_runs
+        WHERE status = 'pending' AND created_at < now() - make_interval(secs => $1)
+        """,
+        older_than_seconds,
+    )
+    return [TriggerFireRef(r["id"], r["trigger_id"]) for r in rows]
+
+
+async def count_stuck_running_trigger_runs(
+    conn: asyncpg.Connection[Any],
+    *,
+    older_than_seconds: float = 7200.0,
+) -> int:
+    """Count fires claimed ``running`` longer than the threshold — a worker
+    crashed mid-fire. Deliberately surfaced (sweep warning log) but NEVER
+    retried: re-firing could double-launch a run; the at-most-once-after-claim
+    trade, observable instead of silent.
+    """
+    result: int | None = await conn.fetchval(
+        """
+        SELECT COUNT(*) FROM trigger_runs
+        WHERE status = 'running' AND created_at < now() - make_interval(secs => $1)
+        """,
+        older_than_seconds,
+    )
+    return result or 0
+
+
+async def prune_trigger_runs(
+    conn: asyncpg.Connection[Any],
+    *,
+    retention_days: int,
+) -> int:
+    """Delete audit rows older than the retention window; returns the count.
+
+    Age-keyed on ``created_at`` (the intent timestamp operators sort by).
+    Time-based only — a count-cap could evict a young ``run_completion`` claim
+    row inside the dispatch-recovery horizon and re-arm a duplicate fire; the
+    multi-day retention floor makes that structurally unreachable.
+    """
+    result = await conn.execute(
+        "DELETE FROM trigger_runs WHERE created_at < now() - make_interval(days => $1)",
+        retention_days,
+    )
+    # asyncpg returns e.g. "DELETE 3"
+    return int(result.split()[-1])
 
 
 async def acquire_account_triggers_lock(
