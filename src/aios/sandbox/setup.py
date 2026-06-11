@@ -295,12 +295,16 @@ def build_iptables_script(
         lines.append("")
         lines.append("# Route credential-host HTTPS through the secret-egress proxy (#878)")
         # Resolve the proxy alias to an IP ONCE — iptables --to-destination
-        # needs an IP, not a DNS name. The whole block is guarded on a
-        # non-empty $PROXY_IP, so a proxy-alias DNS miss emits no malformed
-        # ":<port>" rule and the credential host's :443 falls through to the
-        # filter table (which won't ACCEPT it unless it is also in
-        # allowed_hosts) — fail-closed: a proxy-resolution miss drops egress
-        # rather than leaking the placeholder un-proxied.
+        # needs an IP, not a DNS name. The block is guarded on a non-empty
+        # $PROXY_IP, so a proxy-alias DNS miss emits no malformed ":<port>"
+        # rule; the credential host's :443 then falls through to the filter
+        # table. If the host is not independently allow-listed on :443 it hits
+        # the DROP policy — fail-closed, no un-proxied placeholder leak. Under
+        # #879's `cred ⊆ env` the host is also in allowed_hosts (filter-
+        # ACCEPTed), so keeping that overlap closed on a proxy miss is #879's
+        # job, not this loop's. (In practice the alias is the load-bearing
+        # WORKER_NETWORK_ALIAS, so a miss already means a non-functional
+        # sandbox.)
         lines.append(
             f"PROXY_IP=$(getent ahosts {proxy_alias} 2>/dev/null "
             "| awk '{print $1}' | sort -u | head -n1)"
