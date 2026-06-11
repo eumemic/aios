@@ -1,0 +1,120 @@
+name: Migration chain canary
+
+# Post-merge guard against a forked alembic revision chain reaching master.
+#
+# The pinned-head assertion in tests/unit/test_migration_chain.py forces a
+# *textual* git conflict when two PRs claim DIFFERENT revision numbers — that
+# is the PR-time defense. It does NOT conflict when two PRs claim the SAME
+# number with an identical head edit: git sees no textual conflict, branch
+# protection is strict:false, and stale-green checks let the second merge in.
+# Alembic's duplicate-revision load error covers that case, but only when the
+# test runs against the true merged master tree. A real merge queue would
+# prevent this structurally, but requires an org-owned repo (eumemic is a User
+# account). Hence this canary: run the chain test on master immediately after
+# every migration-touching merge, and shout within a minute if it broke.
+#
+# Security note: this workflow does not interpolate any untrusted ${{ }}
+# expression (issue/PR titles, head_ref, commit messages) into run: commands.
+# The issue title and label are workflow-authored constants; only trusted
+# contexts (secrets.GITHUB_TOKEN in env:, github.server_url / github.repository
+# / github.run_id / github.sha) are referenced, and those are used as quoted
+# shell values, never eval'd.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - migrations/**
+      - tests/unit/test_migration_chain.py
+      - .github/workflows/migration-chain-canary.yml
+
+# Serialize per-ref. cancel-in-progress:false is load-bearing: this is the
+# authoritative "did master's chain break" verdict — a later push must not
+# cancel an in-flight canary whose failure-issue creation is still running.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Parse-only defaults: get_settings() runs at import for some unit modules.
+    # tests/conftest.py already os.environ.setdefault()s these, so the chain
+    # test passes without them; set them explicitly anyway so the canary never
+    # depends on conftest's default values staying in place.
+    env:
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Migration chain check
+        # ONLY this file — pure-Python, no DB/Docker, ~seconds. Running the
+        # whole suite here would be slow and would couple the canary's verdict
+        # to unrelated test flakes; the point is a fast, specific signal.
+        run: uv run pytest tests/unit/test_migration_chain.py -q
+
+      - name: Open or update incident issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          TITLE="ALEMBIC CHAIN BROKEN on master"
+
+          # The incident label may not exist yet; create it idempotently so
+          # `gh issue create --label incident` can't fail on a missing label.
+          gh label create incident \
+            --color B60205 \
+            --description "Production-impacting break that needs immediate attention" \
+            2>/dev/null || true
+
+          BODY=$(printf '%s\n' \
+            "The alembic migration chain is broken on \`master\`." \
+            "" \
+            "\`tests/unit/test_migration_chain.py\` failed on the merged master tree." \
+            "This usually means two migration PRs claimed the same revision number, or the chain forked / lost its single head." \
+            "" \
+            "- Commit: \`${COMMIT_SHA}\`" \
+            "- Run: ${RUN_URL}" \
+            "" \
+            "Fix forward by renumbering the duplicate/forked revision so the ladder is a single linear chain, then re-run this workflow.")
+
+          # Create-or-update via gh (no github-script, matching repo idiom).
+          EXISTING=$(gh issue list \
+            --search "\"${TITLE}\" in:title" \
+            --state open \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty")
+
+          if [ -n "${EXISTING}" ]; then
+            echo "Updating existing incident issue #${EXISTING}."
+            gh issue comment "${EXISTING}" --body "${BODY}"
+          else
+            echo "Creating new incident issue."
+            gh issue create \
+              --title "${TITLE}" \
+              --label incident \
+              --body "${BODY}"
+          fi
