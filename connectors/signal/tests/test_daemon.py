@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
+from aios_signal import daemon as daemon_module
 from aios_signal.daemon import SignalDaemon
 from aios_signal.errors import BotAccountNotFoundError, DaemonCrashError
 
@@ -147,3 +150,55 @@ async def test_subprocess_alive_false_after_exit(tmp_path: Path) -> None:
     assert d.subprocess_alive() is False
     # Consume the exception so the test doesn't emit a "never retrieved" warning.
     assert fut.exception() is not None
+
+
+# ── daemon stdout observability ────────────────────────────────────────
+
+
+async def _drain_lines(*lines: bytes) -> list[MutableMapping[str, Any]]:
+    reader = asyncio.StreamReader()
+    for line in lines:
+        reader.feed_data(line)
+    reader.feed_eof()
+
+    with capture_logs() as logs:
+        await daemon_module._drain(reader, "signal.daemon.stdout")
+    return logs
+
+
+async def test_daemon_stdout_exception_logs_warning_with_fields() -> None:
+    daemon_module.daemon_exception_count = 0
+    line = {
+        "error": {
+            "code": -32603,
+            "message": 'Unexpected error: Cannot invoke "org.whispersystems.signalservice.api.push.ServiceId.toString()" because the return value of "org.asamk.signal.manager.api.MessageEnvelope.getServerGuid()" is null',
+        },
+        "exception": {
+            "type": "java.lang.NullPointerException",
+            "message": 'Cannot invoke "org.whispersystems.signalservice.api.push.ServiceId.toString()" because the return value of "org.asamk.signal.manager.api.MessageEnvelope.getServerGuid()" is null',
+        },
+    }
+
+    logs = await _drain_lines(json.dumps(line).encode() + b"\n")
+
+    assert any(e["event"] == "signal.daemon.stdout" and e["log_level"] == "info" for e in logs)
+    warnings = [e for e in logs if e["event"] == "signal.daemon.exception"]
+    assert warnings == [
+        {
+            "event": "signal.daemon.exception",
+            "log_level": "warning",
+            "exception_type": "java.lang.NullPointerException",
+            "exception_message": 'Cannot invoke "org.whispersystems.signalservice.api.push.ServiceId.toString()" because the return value of "org.asamk.signal.manager.api.MessageEnvelope.getServerGuid()" is null',
+            "count": 1,
+        }
+    ]
+    assert daemon_module.daemon_exception_count == 1
+
+
+async def test_daemon_stdout_normal_json_line_does_not_log_warning() -> None:
+    daemon_module.daemon_exception_count = 0
+    logs = await _drain_lines(b'{"jsonrpc":"2.0","method":"receive","params":{}}\n')
+
+    assert any(e["event"] == "signal.daemon.stdout" and e["log_level"] == "info" for e in logs)
+    assert [e for e in logs if e["event"] == "signal.daemon.exception"] == []
+    assert daemon_module.daemon_exception_count == 0

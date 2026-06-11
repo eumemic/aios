@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import signal
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,8 @@ READY_POLL_INTERVAL_S = 0.2
 READY_POLL_TIMEOUT_S = 2.0
 
 SHUTDOWN_GRACE_S = 5.0
+
+daemon_exception_count = 0
 
 
 class SignalDaemon:
@@ -451,8 +454,33 @@ async def _drain(reader: asyncio.StreamReader, log_event: str) -> None:
             line = await reader.readline()
             if not line:
                 return
-            log.info(log_event, line=line.rstrip(b"\n").decode("utf-8", errors="replace"))
+            decoded = line.rstrip(b"\n").decode("utf-8", errors="replace")
+            log.info(log_event, line=decoded)
+            if log_event == "signal.daemon.stdout":
+                _log_daemon_exception(decoded)
     except asyncio.CancelledError:
         raise
     except Exception as e:
         log.warning(f"{log_event}.read_error", error=str(e))
+
+
+def _log_daemon_exception(line: str) -> None:
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, dict) or "exception" not in payload:
+        return
+
+    exception = payload["exception"]
+    if not isinstance(exception, dict):
+        return
+
+    global daemon_exception_count
+    daemon_exception_count += 1
+    log.warning(
+        "signal.daemon.exception",
+        exception_type=exception.get("type"),
+        exception_message=exception.get("message"),
+        count=daemon_exception_count,
+    )
