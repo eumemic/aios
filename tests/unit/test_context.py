@@ -14,6 +14,7 @@ import pytest
 
 from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
+    _approx_count,
     _concat_user_messages,
     _is_degenerate_empty_assistant,
     _quarantine_placeholder,
@@ -22,6 +23,7 @@ from aios.harness.context import (
     render_user_event,
     stub_missing_reasoning_content,
 )
+from aios.harness.window import WindowOmission
 from aios.models.events import Event
 
 
@@ -2149,3 +2151,166 @@ class TestPoisonEventQuarantine:
         ctx = build_messages([e], system_prompt=None)
         assert len(ctx.messages) == 1
         assert ctx.messages[0] == _quarantine_placeholder(5)
+
+
+# ─── omission marker (#738) ──────────────────────────────────────────────────
+
+
+_BEGAN_AT = datetime(2025, 11, 5, 14, 30, tzinfo=UTC)
+
+_MARKER_TAIL = (
+    "Nothing is lost: the full transcript remains queryable with search_events. "
+    "What seems unfamiliar is usually forgotten, not new: when in doubt about "
+    "anything that's referred to, search first rather than fill the gap by "
+    "assumption.]"
+)
+
+
+class TestOmissionMarker:
+    """Head marker rendered when the window omits transcript (#738).
+
+    The load-bearing property is prompt-cache stability: the marker is a
+    pure function of (omission, boundary event, tz) — byte-identical
+    across rebuilds while the drop boundary is unchanged, changing only
+    when the boundary moves (a snap, when the head changes anyway).
+    """
+
+    def _omission(self, *, omitted_messages: int = 9_837) -> WindowOmission:
+        return WindowOmission(began_at=_BEGAN_AT, omitted_messages=omitted_messages)
+
+    def test_exact_marker_text_and_placement(self) -> None:
+        events = [_evt(50, "user", content="hi")]
+        ctx = build_messages(events, system_prompt="SYS", omission=self._omission())
+        assert ctx.messages[0] == {"role": "system", "content": "SYS"}
+        assert ctx.messages[1] == {
+            "role": "user",
+            "content": (
+                f"[history: this conversation began 2025-11-05. "
+                f"Everything before {RECEIVED} — about 9,800 messages, "
+                f"including your own — has scrolled out of view. " + _MARKER_TAIL
+            ),
+        }
+
+    def test_no_omission_no_marker(self) -> None:
+        events = [_evt(1, "user", content="hi")]
+        ctx = build_messages(events, system_prompt="SYS")
+        assert ctx.messages == [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": f"[received={RECEIVED}]\nhi"},
+        ]
+
+    def test_marker_first_when_no_system_prompt(self) -> None:
+        events = [_evt(50, "user", content="hi")]
+        ctx = build_messages(events, system_prompt=None, omission=self._omission())
+        assert ctx.messages[0]["content"].startswith("[history: ")
+
+    def test_byte_stable_while_context_grows_within_chunk(self) -> None:
+        """Appending tail events with an unchanged boundary must not perturb
+        a single byte of the marker — the prompt-cache invariant."""
+        omission = self._omission()
+        head = [_evt(50, "user", content="hi"), _evt(51, "assistant", content="yo")]
+        grown = [*head, _evt(52, "user", content="more"), _evt(53, "assistant", content="ok")]
+        ctx_before = build_messages(head, system_prompt="SYS", omission=omission)
+        ctx_after = build_messages(grown, system_prompt="SYS", omission=omission)
+        _assert_prefix(ctx_before.messages, ctx_after.messages)
+
+    def test_marker_changes_when_boundary_moves(self) -> None:
+        """After a snap the head event differs → the marker re-renders with
+        the new boundary timestamp (and changes exactly then, with the rest
+        of the head)."""
+        omission = self._omission()
+        before_snap = [_evt(50, "user", content="a")]
+        after_snap = [
+            _evt(
+                150,
+                "user",
+                content="b",
+                created_at=datetime(2026, 1, 9, 12, 0, tzinfo=UTC),
+            )
+        ]
+        m1 = build_messages(before_snap, system_prompt=None, omission=omission).messages[0]
+        m2 = build_messages(after_snap, system_prompt=None, omission=omission).messages[0]
+        assert "2026-01-02T03:04:05+00:00" in m1["content"]
+        assert "2026-01-09T12:00:00+00:00" in m2["content"]
+
+    def test_zero_message_count_drops_count_clause(self) -> None:
+        """An omitted span holding only tool results renders without the
+        'about N messages' clause rather than claiming 'about 0 messages'."""
+        events = [_evt(50, "user", content="hi")]
+        ctx = build_messages(
+            events, system_prompt=None, omission=self._omission(omitted_messages=0)
+        )
+        content = ctx.messages[0]["content"]
+        assert f"Everything before {RECEIVED} has scrolled out of view." in content
+        assert "— about" not in content
+        assert "including your own" not in content
+
+    def test_account_timezone_applies_to_both_timestamps(self) -> None:
+        """Boundary uses _format_received in the account tz; the began date
+        is the account-tz calendar date (here UTC 2025-11-06 04:00 is still
+        Nov 5 in Los Angeles)."""
+        omission = WindowOmission(
+            began_at=datetime(2025, 11, 6, 4, 0, tzinfo=UTC), omitted_messages=3
+        )
+        events = [_evt(50, "user", content="hi")]
+        ctx = build_messages(
+            events, system_prompt=None, omission=omission, tz_name="America/Los_Angeles"
+        )
+        content = ctx.messages[0]["content"]
+        assert "began 2025-11-05." in content
+        # November → PST (-08:00).
+        assert "Everything before 2026-01-01T19:04:05-08:00 (America/Los_Angeles)" in content
+
+    def test_upper_bound_covers_worst_case_render(self) -> None:
+        """The window budget reserves OMISSION_MARKER_UPPER_BOUND_LOCAL for
+        the marker (PR #165 full-payload invariant); a worst-case render —
+        eight-digit count, longest-form IANA zone — must fit under it.
+        Fails when someone fattens the marker text without bumping the
+        reserve."""
+        from aios.harness.context import OMISSION_MARKER_UPPER_BOUND_LOCAL
+        from aios.harness.tokens import approx_tokens
+
+        omission = WindowOmission(
+            began_at=datetime(2025, 11, 5, 14, 30, tzinfo=UTC),
+            omitted_messages=98_765_432,
+        )
+        marker = build_messages(
+            [_evt(50, "user", content="x")],
+            system_prompt=None,
+            omission=omission,
+            tz_name="America/Argentina/ComodRivadavia",
+        ).messages[0]
+        assert approx_tokens([marker]) <= OMISSION_MARKER_UPPER_BOUND_LOCAL
+
+    def test_marker_merges_with_leading_user_inbound(self) -> None:
+        """On the wire the user-role marker merges with a leading user
+        inbound (Anthropic requires alternating roles); both parts are
+        byte-stable so the merged turn is too."""
+        events = [_evt(50, "user", content="hi")]
+        ctx = build_messages(events, system_prompt=None, omission=self._omission())
+        merged = merge_adjacent_user_messages(ctx.messages)
+        assert len(merged) == 1
+        content = merged[0]["content"]
+        assert content.startswith("[history: ")
+        assert content.endswith(f"[received={RECEIVED}]\nhi")
+
+
+class TestApproxCount:
+    """Floor-to-two-significant-figures rendering for the omission marker."""
+
+    @pytest.mark.parametrize(
+        ("n", "expected"),
+        [
+            (1, "1"),
+            (7, "7"),
+            (97, "97"),
+            (99, "99"),
+            (100, "100"),
+            (123, "120"),
+            (9_837, "9,800"),
+            (10_000, "10,000"),
+            (1_234_567, "1,200,000"),
+        ],
+    )
+    def test_rounding(self, n: int, expected: str) -> None:
+        assert _approx_count(n) == expected

@@ -22,6 +22,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.harness.window import WindowedEvents
+
 
 def _span_events(append_event: AsyncMock) -> list[dict[str, object]]:
     """Extract every span payload (the 4th positional arg) in order."""
@@ -187,7 +189,7 @@ class TestEntrySweepSpan:
             ),
             patch(
                 "aios.harness.loop.sessions_service.read_windowed_events",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
             ),
             patch(
                 "aios.harness.loop._dispatch_confirmed_tools",

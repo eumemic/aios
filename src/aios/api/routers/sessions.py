@@ -645,8 +645,11 @@ async def get_context(
     bind-mount source from the session row, not a worker-only sandbox
     handle.
     """
-    from aios.harness.step_context import compose_step_context, compute_step_prelude
-    from aios.harness.tokens import approx_tokens
+    from aios.harness.step_context import (
+        compose_step_context,
+        compute_step_prelude,
+        prelude_overhead_local,
+    )
     from aios.services import agents as agents_service
     from aios.services.channels import list_session_channels
 
@@ -670,21 +673,13 @@ async def get_context(
         channels=channels,
         memory_store_echoes=memory_echoes,
     )
-    overhead_local = (
-        approx_tokens(
-            [{"role": "system", "content": prelude.system_prompt}],
-            tools=prelude.tools,
-        )
-        + prelude.tail_block_upper_bound_local
-    )
-
-    events = await service.read_windowed_events(
+    windowed = await service.read_windowed_events(
         pool,
         session_id,
         window_min=agent.window_min,
         window_max=agent.window_max,
         model=agent.model,
-        overhead_local=overhead_local,
+        overhead_local=prelude_overhead_local(prelude),
         account_id=account_id,
     )
 
@@ -699,7 +694,8 @@ async def get_context(
         agent=agent,
         channels=channels,
         prelude=prelude,
-        events=events,
+        events=windowed.events,
+        omission=windowed.omission,
     )
     return ContextResponse(
         session_id=session_id,

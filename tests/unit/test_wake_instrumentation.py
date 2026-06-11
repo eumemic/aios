@@ -19,6 +19,8 @@ import pytest
 from procrastinate import App
 from procrastinate.testing import InMemoryConnector
 
+from aios.harness.window import WindowedEvents
+
 
 class TestE2EConftestMockSignatures:
     """The e2e conftest installs a no-op mock in place of ``defer_wake``.
@@ -239,7 +241,7 @@ class TestStepStartEndSpans:
             ),
             patch(
                 "aios.harness.loop.sessions_service.read_windowed_events",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
             ),
             patch(
                 "aios.harness.loop._dispatch_confirmed_tools",
@@ -342,7 +344,7 @@ class TestStepStartEndSpans:
             ),
             patch(
                 "aios.harness.loop.sessions_service.read_windowed_events",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
             ),
             patch(
                 "aios.harness.loop._dispatch_confirmed_tools",
@@ -451,7 +453,7 @@ class TestStepStartEndSpans:
             patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
             patch(
                 "aios.harness.loop.sessions_service.read_windowed_events",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
             ),
             patch("aios.harness.loop._dispatch_confirmed_tools", AsyncMock(return_value=[])),
             patch(
@@ -549,7 +551,7 @@ class TestStepStartEndSpans:
             patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
             patch(
                 "aios.harness.loop.sessions_service.read_windowed_events",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
             ),
             patch("aios.harness.loop._dispatch_confirmed_tools", AsyncMock(return_value=[])),
             patch(
@@ -648,7 +650,7 @@ class TestStepStartEndSpans:
             ),
             patch(
                 "aios.harness.loop.sessions_service.read_windowed_events",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
             ),
             patch(
                 "aios.harness.loop._dispatch_confirmed_tools",
@@ -737,7 +739,8 @@ async def _harness_with_guard(
         patch("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)),
         patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         patch(
-            "aios.harness.loop.sessions_service.read_windowed_events", AsyncMock(return_value=[])
+            "aios.harness.loop.sessions_service.read_windowed_events",
+            AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
         ),
         patch("aios.harness.loop._dispatch_confirmed_tools", AsyncMock(return_value=[])),
         patch(
