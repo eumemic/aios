@@ -25,6 +25,7 @@ import pytest
 
 from aios.db.queries import EnvVarCredentialEcho
 from aios.harness import runtime
+from aios.ids import VAULT_CREDENTIAL
 from aios.models.memory_stores import Access, MemoryStoreResourceEcho
 from aios.sandbox.backends.base import (
     CommandResult,
@@ -958,6 +959,52 @@ class TestSecretProxyLifecycle:
 
         assert registry._secret_proxies["sess_X"] is cast(Any, proxy)
 
+    async def test_provision_failure_after_build_spec_stops_both_proxies(self) -> None:
+        """A raise from ``_resolve_snapshot`` — after ``build_spec_from_session``
+        has started the proxies and registered the broker secret, but before the
+        sandbox exists — must stop BOTH proxies exactly once, unregister the
+        broker, and leave neither proxy in the registry dicts. Without the
+        cleanup span covering resolution, the proxies leak (their ports + the
+        broker secret outlive the worker) (#877)."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        git_proxy = FakeSecretProxy()
+        secret_proxy = FakeSecretProxy()
+        plan = _provisioning_plan("sess_X")
+        plan = ProvisioningPlan(
+            spec=plan.spec,
+            env_config=plan.env_config,
+            memory_echoes=plan.memory_echoes,
+            github_echoes=plan.github_echoes,
+            git_proxy=cast(Any, git_proxy),
+            env_var_credentials=(),
+            secret_proxy=cast(Any, secret_proxy),
+        )
+        broker = MagicMock()
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=plan),
+            ),
+            patch.object(
+                registry,
+                "_resolve_snapshot",
+                AsyncMock(side_effect=RuntimeError("store probe indeterminate")),
+            ),
+            patch("aios.harness.runtime.require_tool_broker", return_value=broker),
+            pytest.raises(RuntimeError, match="store probe indeterminate"),
+        ):
+            await registry.get_or_provision("sess_X")
+
+        git_proxy.stop.assert_awaited_once()
+        secret_proxy.stop.assert_awaited_once()
+        broker.unregister_session.assert_called_once_with("sess_X")
+        assert "sess_X" not in registry._git_proxies
+        assert "sess_X" not in registry._secret_proxies
+        # No sandbox was ever created — teardown must not destroy a phantom.
+        assert [c for c in backend.calls if c[0] in ("create", "destroy")] == []
+
 
 class TestEnvVarCredentialDrift:
     """The step-time half of constraint A: an env-var credential rotation
@@ -988,7 +1035,7 @@ class TestEnvVarCredentialDrift:
     ) -> None:
         backend = FakeBackend()
         registry = SandboxRegistry(backend=backend)
-        snapshot = frozenset([("vcr", "vcr_01", self._TS_V1.isoformat())])
+        snapshot = frozenset([(VAULT_CREDENTIAL, "vcr_01", self._TS_V1.isoformat())])
         handle = _seed(registry, "sess_X", snapshot)
 
         await registry.release_if_mounts_changed("sess_X", [], [], current_echoes)

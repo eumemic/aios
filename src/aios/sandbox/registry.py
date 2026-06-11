@@ -425,25 +425,29 @@ class SandboxRegistry:
         await self._reconcile_pointer_from_local(session_id)
 
         plan = await build_spec_from_session(session_id)
-        # Resolve the snapshot pointer through the store: verified-negative
-        # existence, base-image drift, missing-snapshot detection. Returns the
-        # spec to run from — snapshot tag resolved to a local image, or cleared
-        # to None (cold start) on a detected reset.
-        spec = await self._resolve_snapshot(session_id, plan.spec)
-
-        # Record the proxies before backend.create so a failure midway
-        # has us in a state where release() will find and stop them.
+        # Record the proxies before anything else fallible runs: once
+        # build_spec_from_session returns, its proxies are RUNNING and the
+        # broker secret is REGISTERED, so a raise from _resolve_snapshot (below)
+        # would otherwise escape with the proxies absent from these dicts —
+        # release/evict/stop_all could never find them. Storing here keeps the
+        # whole span through backend.create leak-safe via the cleanup below.
         if plan.git_proxy is not None:
             self._git_proxies[session_id] = plan.git_proxy
         if plan.secret_proxy is not None:
             self._secret_proxies[session_id] = plan.secret_proxy
 
         try:
+            # Resolve the snapshot pointer through the store: verified-negative
+            # existence, base-image drift, missing-snapshot detection. Returns
+            # the spec to run from — snapshot tag resolved to a local image, or
+            # cleared to None (cold start) on a detected reset.
+            spec = await self._resolve_snapshot(session_id, plan.spec)
             handle = await self._backend.create(spec)
         except BaseException:
-            # Spec was built (proxies may be running, broker secret is
-            # registered) but the backend couldn't create the sandbox.
-            # Drop all so their ports + token/secret maps don't leak.
+            # Spec was built (proxies are running, broker secret is registered)
+            # but resolution or backend.create failed before the sandbox
+            # exists. Drop all so their ports + token/secret maps don't leak.
+            # No backend.destroy here — there is no sandbox yet.
             self._git_proxies.pop(session_id, None)
             if plan.git_proxy is not None:
                 await self._stop_proxy_silently(plan.git_proxy, session_id, kind="git_proxy")
@@ -1047,14 +1051,17 @@ class SandboxRegistry:
         self._git_proxies.clear()
         self._secret_proxies.clear()
 
-        all_proxies: list[GitProxy | SecretEgressProxy] = [*proxies, *secret_proxies]
-        if all_proxies:
+        kinded_proxies: list[tuple[str, GitProxy | SecretEgressProxy]] = [
+            *(("git_proxy", p) for p in proxies),
+            *(("secret_proxy", p) for p in secret_proxies),
+        ]
+        if kinded_proxies:
             proxy_results = await asyncio.gather(
-                *(p.stop() for p in all_proxies), return_exceptions=True
+                *(p.stop() for _kind, p in kinded_proxies), return_exceptions=True
             )
-            for _p, result in zip(all_proxies, proxy_results, strict=True):
+            for (kind, _p), result in zip(kinded_proxies, proxy_results, strict=True):
                 if isinstance(result, BaseException):
-                    log.warning("sandbox.stop_all_proxy_error", error=str(result))
+                    log.warning("sandbox.stop_all_proxy_error", kind=kind, error=str(result))
 
         # Drain any evict-triggered fire-and-forget proxy-stop tasks still in
         # flight: evict() pops the proxy out of ``_git_proxies`` /
