@@ -16,8 +16,8 @@ The function name and channel string stay byte-identical, and the existing
 recreate needed. Backward-compatible: pre-deploy code that already NOTIFYs on
 the gated columns is unaffected; this only widens when a NOTIFY is emitted.
 
-Revision ID: 0086
-Revises: 0085
+Revision ID: 0087
+Revises: 0086
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0086"
-down_revision: str = "0085"
+revision: str = "0087"
+down_revision: str = "0086"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

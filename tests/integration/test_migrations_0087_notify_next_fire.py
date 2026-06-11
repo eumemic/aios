@@ -1,15 +1,15 @@
-"""Integration tests for migration 0086 (NOTIFY on ``next_fire`` change, #940).
+"""Integration tests for migration 0087 (NOTIFY on ``next_fire`` change, #940).
 
-The pre-0086 ``notify_scheduled_tasks_due`` UPDATE gate fired only on
+The pre-0087 ``notify_scheduled_tasks_due`` UPDATE gate fired only on
 source / source_spec / enabled / running_since→NULL changes — NOT on a bare
 ``next_fire`` edit. Any path that reschedules a row without touching those
 columns left the sleeping event-driven scheduler unaware for up to
-``_HEARTBEAT_SECONDS``. 0086 adds ``OR OLD.next_fire IS DISTINCT FROM
+``_HEARTBEAT_SECONDS``. 0087 adds ``OR OLD.next_fire IS DISTINCT FROM
 NEW.next_fire`` to that gate.
 
-These tests migrate a real Postgres to 0086, seed one valid ``triggers`` row,
+These tests migrate a real Postgres to 0087, seed one valid ``triggers`` row,
 and assert a PURE ``next_fire`` UPDATE produces a NOTIFY on
-``aios_scheduled_tasks_due`` — and that downgrading to 0085 restores the
+``aios_scheduled_tasks_due`` — and that downgrading to 0086 restores the
 silent behavior. The e2e suite runs at head where ``triggers`` is created
 empty, so the NOTIFY-on-next_fire edge is only exercised here.
 
@@ -27,7 +27,7 @@ import pytest
 from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
-# FK chain required to land a ``triggers`` row at revision 0086:
+# FK chain required to land a ``triggers`` row at revision 0087:
 # accounts → environments → agents → sessions → triggers. Only NOT-NULL-
 # without-default columns are supplied; everything else takes its default.
 _CHAIN_SQL = """
@@ -110,37 +110,37 @@ async def _next_fire_update_notifies(db_url: str, *, timeout_s: float) -> bool:
 
 @needs_docker
 @pytest.mark.integration
-def test_upgrade_0086_next_fire_only_update_notifies(postgres: object) -> None:
-    """At 0086, a pure ``next_fire`` UPDATE emits a NOTIFY within ~2s."""
+def test_upgrade_0087_next_fire_only_update_notifies(postgres: object) -> None:
+    """At 0087, a pure ``next_fire`` UPDATE emits a NOTIFY within ~2s."""
     db_url = _alembic_url(postgres)
 
-    up = _run_alembic(["upgrade", "0086"], db_url)
-    assert up.returncode == 0, f"upgrade to 0086 failed:\n{up.stderr}\n{up.stdout}"
+    up = _run_alembic(["upgrade", "0087"], db_url)
+    assert up.returncode == 0, f"upgrade to 0087 failed:\n{up.stderr}\n{up.stdout}"
 
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _TRIGGER_SQL))
 
     assert asyncio.run(_next_fire_update_notifies(db_url, timeout_s=2.0)), (
-        "next_fire-only UPDATE did not produce a NOTIFY at revision 0086"
+        "next_fire-only UPDATE did not produce a NOTIFY at revision 0087"
     )
 
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_0085_next_fire_only_update_does_not_notify(postgres: object) -> None:
-    """Downgrading to 0085 restores the pre-fix body: a pure ``next_fire``
+def test_downgrade_0086_next_fire_only_update_does_not_notify(postgres: object) -> None:
+    """Downgrading to 0086 restores the pre-fix body: a pure ``next_fire``
     UPDATE is silent (mirrors the action-only negative test)."""
     db_url = _alembic_url(postgres)
 
-    up = _run_alembic(["upgrade", "0086"], db_url)
-    assert up.returncode == 0, f"upgrade to 0086 failed:\n{up.stderr}\n{up.stdout}"
+    up = _run_alembic(["upgrade", "0087"], db_url)
+    assert up.returncode == 0, f"upgrade to 0087 failed:\n{up.stderr}\n{up.stdout}"
 
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _TRIGGER_SQL))
 
-    down = _run_alembic(["downgrade", "0085"], db_url)
-    assert down.returncode == 0, f"downgrade to 0085 failed:\n{down.stderr}\n{down.stdout}"
+    down = _run_alembic(["downgrade", "0086"], db_url)
+    assert down.returncode == 0, f"downgrade to 0086 failed:\n{down.stderr}\n{down.stdout}"
 
     assert not asyncio.run(_next_fire_update_notifies(db_url, timeout_s=0.5)), (
-        "next_fire-only UPDATE produced a NOTIFY after downgrade to 0085"
+        "next_fire-only UPDATE produced a NOTIFY after downgrade to 0086"
     )
