@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import os
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from aios.config import get_settings
 from aios.db import queries
@@ -63,6 +66,15 @@ from aios.sandbox.network import WORKER_NETWORK_ALIAS, is_running_in_container
 from aios.sandbox.setup import WORKSPACE_RUNTIME_ENV
 from aios.services import sessions as sessions_service
 from aios.services.vaults import ResolvedEnvVarCredential, resolve_session_env_var_credentials
+
+if TYPE_CHECKING:
+    # Imported for typing only at module level: a runtime top-level import
+    # would pull in ``aios.tools`` (via ``secret_egress_proxy`` →
+    # ``url_safety``) whose package ``__init__`` imports ``bash``, which
+    # imports back from this module — a cycle. The concrete class is bound
+    # at module bottom (after every def runs) so it's still a patchable
+    # ``aios.sandbox.spec.SecretEgressProxy`` attribute.
+    from aios.sandbox.secret_egress_proxy import SecretEgressProxy
 
 log = get_logger("aios.sandbox.spec")
 
@@ -147,26 +159,58 @@ class ProvisioningPlan:
     # injection) and the request-time placeholder→secret map are the
     # follow-up slices (#874, #876).
     env_var_credentials: tuple[ResolvedEnvVarCredential, ...]
+    # Per-session :class:`SecretEgressProxy` (#877), started here when the
+    # session has env-var credentials. Like ``git_proxy``, the registry owns
+    # its lifecycle: it records the proxy at provision time and stops it on
+    # release / recycle. ``None`` when the session has no env-var creds.
+    # INERT until #878 wires nat DNAT egress routing into it.
+    secret_proxy: SecretEgressProxy | None = None
+
+
+class _EnvVarCredentialLike(Protocol):
+    """The structural shape the env-var drift fold needs from a credential.
+
+    Provision passes :class:`ResolvedEnvVarCredential`; the per-step probe
+    passes :class:`aios.db.queries.EnvVarCredentialEcho`. Both satisfy this,
+    so :func:`mount_snapshot_from_echoes` folds them identically (constraint A).
+    """
+
+    @property
+    def credential_id(self) -> str: ...
+
+    @property
+    def updated_at(self) -> datetime: ...
 
 
 def mount_snapshot_from_echoes(
     memory_echoes: list[MemoryStoreResourceEcho] | tuple[MemoryStoreResourceEcho, ...],
     github_echoes: list[GithubRepositoryResourceEcho] | tuple[GithubRepositoryResourceEcho, ...],
+    env_var_credentials: Sequence[_EnvVarCredentialLike] = (),
 ) -> frozenset[tuple[str, ...]]:
-    """The set of inputs that determines the spec's mount list.
+    """The set of inputs that determines the spec's mount/credential surface.
 
     Order-independent so rank reorders don't trigger spurious recycles.
-    Each tuple is type-prefixed so memory and github namespaces can't
-    collide. The github tuple includes ``updated_at`` so token rotation
-    (which bumps ``updated_at``) propagates to a sandbox recycle.
+    Each tuple is type-prefixed so memory, github, and vault-credential
+    namespaces can't collide. Both the github tuple and the env-var tuple
+    include ``updated_at`` so a token/secret rotation (which bumps
+    ``updated_at``) propagates to a sandbox recycle (#877).
+
+    ``env_var_credentials`` is structural — provision passes
+    :class:`ResolvedEnvVarCredential`, the per-step drift probe passes
+    :class:`aios.db.queries.EnvVarCredentialEcho`. Both fold to the SAME
+    ``(VAULT_CREDENTIAL, credential_id, updated_at)`` element, so the
+    provision-time snapshot stamped on the handle matches the step-time
+    echo set (no spurious first-step recycle).
     """
-    from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE
+    from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, VAULT_CREDENTIAL
 
     items: set[tuple[str, ...]] = set()
     for m in memory_echoes:
         items.add((MEMORY_STORE, m.memory_store_id, m.name, m.access))
     for g in github_echoes:
         items.add((GITHUB_REPOSITORY, g.id, g.mount_path, g.updated_at.isoformat()))
+    for c in env_var_credentials:
+        items.add((VAULT_CREDENTIAL, c.credential_id, c.updated_at.isoformat()))
     return frozenset(items)
 
 
@@ -439,6 +483,16 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     memory_echoes = await _materialize_memory_mounts(session_id, account_id=account_id)
     env_var_credentials = await _materialize_env_var_credentials(session_id, account_id=account_id)
     github_echoes, git_proxy = await _materialize_github_clones(session_id, account_id=account_id)
+    # Start the per-session secret-egress proxy when the session has env-var
+    # credentials (#877). Inert until #878 routes egress through it; the
+    # registry owns its lifecycle from the returned plan, mirroring git_proxy.
+    # Started AFTER the clones step so its failure-exposure window matches
+    # git_proxy's: a raise from here on is caught by the try/except below
+    # (which stops both proxies); a clones failure unwinds itself before this.
+    secret_proxy: SecretEgressProxy | None = None
+    if env_var_credentials:
+        secret_proxy = SecretEgressProxy(env_var_credentials)
+        await secret_proxy.start()
 
     tool_broker = runtime.require_tool_broker()
     tool_broker_secret = secrets.token_urlsafe(32)
@@ -499,12 +553,13 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             tool_socket_host_path=tool_socket_host_path,
             spec_version=spec_version,
             env_var_credentials=env_var_credentials,
+            secret_proxy=secret_proxy,
         )
     except BaseException:
-        # Both proxies hold worker-process state (ports, token maps,
+        # All proxies hold worker-process state (ports, token maps,
         # secret-to-session bindings). Anything that raises before we
-        # hand back a plan must clean up both on the way out, otherwise
-        # state leaks for the worker's lifetime.
+        # hand back a plan must clean up everything on the way out,
+        # otherwise state leaks for the worker's lifetime.
         tool_broker.unregister_session(session_id)
         cleanup_session_secret_file(session_id, tool_socket_host_path)
         if git_proxy is not None:
@@ -513,6 +568,15 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             except Exception as cleanup_err:
                 log.warning(
                     "sandbox.git_proxy_cleanup_after_spec_failure",
+                    session_id=session_id,
+                    error=str(cleanup_err),
+                )
+        if secret_proxy is not None:
+            try:
+                await secret_proxy.stop()
+            except Exception as cleanup_err:
+                log.warning(
+                    "sandbox.secret_proxy_cleanup_after_spec_failure",
                     session_id=session_id,
                     error=str(cleanup_err),
                 )
@@ -537,6 +601,7 @@ def _assemble_plan(
     snapshot_budget_bytes: int | None = None,
     spec_version: int = 0,
     env_var_credentials: tuple[ResolvedEnvVarCredential, ...] = (),
+    secret_proxy: SecretEgressProxy | None = None,
 ) -> ProvisioningPlan:
     """Pure assembly of the plan from already-materialized inputs.
 
@@ -689,7 +754,7 @@ def _assemble_plan(
         BASE_IMAGE_LABEL_KEY: image,
     }
 
-    snapshot = mount_snapshot_from_echoes(memory_echoes, github_echoes)
+    snapshot = mount_snapshot_from_echoes(memory_echoes, github_echoes, env_var_credentials)
     settings = get_settings()
     spec = SandboxSpec(
         session_id=session_id,
@@ -739,4 +804,12 @@ def _assemble_plan(
         github_echoes=github_echoes,
         git_proxy=git_proxy,
         env_var_credentials=env_var_credentials,
+        secret_proxy=secret_proxy,
     )
+
+
+# Runtime binding for ``SecretEgressProxy`` (see the TYPE_CHECKING note at the
+# top). Imported at module bottom — after every def has run — so it resolves
+# the spec↔tools cycle while still exposing a patchable
+# ``aios.sandbox.spec.SecretEgressProxy`` attribute for unit tests.
+from aios.sandbox.secret_egress_proxy import SecretEgressProxy  # noqa: E402

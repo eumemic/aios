@@ -4211,6 +4211,19 @@ class EnvVarCredentialRow(NamedTuple):
     updated_at: datetime
 
 
+class EnvVarCredentialEcho(NamedTuple):
+    """Metadata-only drift echo for a session's env-var credentials (#877).
+
+    The per-step recycle-on-rotation probe needs ONLY the (id, updated_at)
+    set membership — never the ciphertext. INTERNAL type (not a pydantic
+    model, never on Session.resources or any API response), so the FastAPI
+    surface is unchanged.
+    """
+
+    credential_id: str
+    updated_at: datetime
+
+
 async def list_session_env_var_credentials(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -4253,6 +4266,41 @@ async def list_session_env_var_credentials(
             blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
             updated_at=row["updated_at"],
         )
+        for row in rows
+    ]
+
+
+async def list_session_env_var_credential_echoes(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> list[EnvVarCredentialEcho]:
+    """Metadata-only env-var credential echoes for the per-step drift probe (#877).
+
+    Selects ONLY ``(id, updated_at)`` — never the ciphertext — under the SAME
+    ``DISTINCT ON (secret_name)`` / ``archived_at IS NULL`` / rank-order filter
+    as :func:`list_session_env_var_credentials`, so the resolved set (provision)
+    and the echo set (step) have IDENTICAL membership. Mirrors
+    :func:`list_session_github_repo_echoes`.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (vc.secret_name) vc.id, vc.updated_at
+          FROM session_vaults sv
+          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
+         WHERE sv.session_id = $1
+           AND vc.auth_type = 'environment_variable'
+           AND vc.archived_at IS NULL
+           AND sv.account_id = $2
+           AND vc.account_id = $2
+         ORDER BY vc.secret_name, sv.rank
+        """,
+        session_id,
+        account_id,
+    )
+    return [
+        EnvVarCredentialEcho(credential_id=str(row["id"]), updated_at=row["updated_at"])
         for row in rows
     ]
 

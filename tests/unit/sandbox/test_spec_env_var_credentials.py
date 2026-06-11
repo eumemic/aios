@@ -19,15 +19,17 @@ from __future__ import annotations
 import contextlib
 import logging
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.crypto.vault import CryptoBox
 from aios.errors import CryptoDecryptError
+from aios.ids import VAULT_CREDENTIAL
 from aios.models.environments import EnvironmentConfig
 from aios.models.vaults import RESERVED_SANDBOX_ENV_KEYS
 from aios.sandbox.spec import build_spec_from_session
-from aios.services.vaults import ResolvedEnvVarCredential
+from aios.services.vaults import ResolvedEnvVarCredential, mint_secret_placeholder
 from tests.helpers.sandbox import patch_build_spec_deps
 
 # A distinctive sentinel rather than a real-looking token, so a leak is
@@ -138,3 +140,83 @@ async def test_resolve_failure_aborts_before_git_proxy_or_broker_exist() -> None
     # started, no broker secret registered.
     clones.assert_not_awaited()
     broker.register_session.assert_not_called()
+
+
+# ── SecretEgressProxy lifecycle (#877) ───────────────────────────────────────
+
+
+async def test_secret_proxy_constructed_and_started_when_creds_present() -> None:
+    """A provision with env-var creds constructs the per-session
+    ``SecretEgressProxy`` with those creds, awaits its ``start()``, and hands
+    the live instance back on ``plan.secret_proxy`` for the registry to own."""
+    proxy_instance = MagicMock()
+    proxy_instance.start = AsyncMock()
+    proxy_cls = MagicMock(return_value=proxy_instance)
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(patch("aios.sandbox.spec.SecretEgressProxy", proxy_cls))
+        plan = await build_spec_from_session("sess_01TEST")
+
+    # Constructed with the resolved creds and started exactly once.
+    proxy_cls.assert_called_once_with((_CRED,))
+    proxy_instance.start.assert_awaited_once()
+    assert plan.secret_proxy is proxy_instance
+
+
+async def test_secret_proxy_not_constructed_when_no_creds() -> None:
+    """No env-var creds ⇒ the proxy is never constructed and the plan carries
+    ``secret_proxy is None`` (the inert empty case)."""
+    proxy_cls = MagicMock()
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_var_credentials=AsyncMock(return_value=()),
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(patch("aios.sandbox.spec.SecretEgressProxy", proxy_cls))
+        plan = await build_spec_from_session("sess_01TEST")
+
+    proxy_cls.assert_not_called()
+    assert plan.secret_proxy is None
+
+
+async def test_provision_time_fold_lands_cred_on_mount_snapshot() -> None:
+    """The provision-time half of constraint A: the resolved cred's
+    ``(VAULT_CREDENTIAL, credential_id, updated_at)`` tuple lands on
+    ``plan.spec.mount_snapshot`` so the handle the backend stamps it onto
+    matches the step-time echo set."""
+    proxy_instance = MagicMock()
+    proxy_instance.start = AsyncMock()
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(
+            patch("aios.sandbox.spec.SecretEgressProxy", MagicMock(return_value=proxy_instance))
+        )
+        plan = await build_spec_from_session("sess_01TEST")
+
+    assert (
+        VAULT_CREDENTIAL,
+        _CRED.credential_id,
+        _CRED.updated_at.isoformat(),
+    ) in plan.spec.mount_snapshot
+
+
+def test_placeholder_is_stable_across_recycle() -> None:
+    """The placeholder is a pure function of ``(subkey, session_id,
+    credential_id)`` — two mints with the same ids are equal.
+
+    This locks the piece-4 reconstruction invariant: a recycled sandbox
+    re-derives the SAME placeholder, so anything the agent persisted into
+    /workspace keeps resolving through the fresh proxy. Already deterministic
+    — no production change; this test documents/guards it.
+    """
+    box = CryptoBox(bytes(range(32)))
+    subkey = box.derive_account_subkey("acct_x")
+    first = mint_secret_placeholder(subkey, "sess_01TEST", "vcr_01")
+    second = mint_secret_placeholder(subkey, "sess_01TEST", "vcr_01")
+    assert first == second
