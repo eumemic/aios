@@ -1,4 +1,4 @@
-"""Integration tests for migration 0085 (triggers slice 2).
+"""Integration tests for migration 0086 (triggers slice 2).
 
 The e2e suite runs against a DB already at head; these tests own the migration
 mechanics themselves: a clean up/down round-trip with zero slice-2 rows, the
@@ -93,17 +93,17 @@ async def _column_exists(db_url: str, table: str, column: str) -> bool:
 @needs_docker
 @pytest.mark.integration
 def test_upgrade_and_clean_downgrade_round_trip(postgres: object) -> None:
-    """With zero slice-2 rows, 0085 upgrades and downgrades cleanly: the audit
+    """With zero slice-2 rows, 0086 upgrades and downgrades cleanly: the audit
     table and the env column appear at head and vanish on downgrade."""
     db_url = _alembic_url(postgres)
 
-    up = _run_alembic(["upgrade", "0085"], db_url)
-    assert up.returncode == 0, f"upgrade to 0085 failed:\n{up.stderr}\n{up.stdout}"
+    up = _run_alembic(["upgrade", "0086"], db_url)
+    assert up.returncode == 0, f"upgrade to 0086 failed:\n{up.stderr}\n{up.stdout}"
     assert asyncio.run(_table_exists(db_url, "trigger_runs"))
     assert asyncio.run(_column_exists(db_url, "triggers", "environment_id"))
 
-    down = _run_alembic(["downgrade", "0084"], db_url)
-    assert down.returncode == 0, f"downgrade to 0084 failed:\n{down.stderr}\n{down.stdout}"
+    down = _run_alembic(["downgrade", "0085"], db_url)
+    assert down.returncode == 0, f"downgrade to 0085 failed:\n{down.stderr}\n{down.stdout}"
     assert not asyncio.run(_table_exists(db_url, "trigger_runs"))
     assert not asyncio.run(_column_exists(db_url, "triggers", "environment_id"))
 
@@ -115,12 +115,12 @@ def test_downgrade_refuses_slice2_rows(postgres: object) -> None:
     the downgrade fails hard and rolls back (the 0083 wake_owner stance)."""
     db_url = _alembic_url(postgres)
 
-    up = _run_alembic(["upgrade", "0085"], db_url)
-    assert up.returncode == 0, f"upgrade to 0085 failed:\n{up.stderr}\n{up.stdout}"
+    up = _run_alembic(["upgrade", "0086"], db_url)
+    assert up.returncode == 0, f"upgrade to 0086 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _RUN_COMPLETION_ROW_SQL))
 
-    down = _run_alembic(["downgrade", "0084"], db_url)
+    down = _run_alembic(["downgrade", "0085"], db_url)
     assert down.returncode != 0, f"downgrade should have failed loud:\n{down.stdout}"
     assert "cannot downgrade" in down.stderr
 
@@ -137,8 +137,8 @@ def test_run_completion_rows_reject_next_fire(postgres: object) -> None:
     merely by service-layer discipline."""
     db_url = _alembic_url(postgres)
 
-    up = _run_alembic(["upgrade", "0085"], db_url)
-    assert up.returncode == 0, f"upgrade to 0085 failed:\n{up.stderr}\n{up.stdout}"
+    up = _run_alembic(["upgrade", "0086"], db_url)
+    assert up.returncode == 0, f"upgrade to 0086 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _RUN_COMPLETION_ROW_SQL))
 

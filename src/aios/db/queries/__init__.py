@@ -7820,7 +7820,7 @@ async def hard_delete_account(conn: asyncpg.Connection[Any], account_id: str) ->
     tables use RESTRICT, so the caller must already have ensured zero
     archived AND zero non-archived rows reference this account before
     invoking — but NOT all FKs do: ``oauth_flows`` (0061), the workflows
-    tables (0064), ``wf_run_vaults`` (0073), and ``trigger_runs`` (0085)
+    tables (0064), ``wf_run_vaults`` (0073), and ``trigger_runs`` (0086)
     CASCADE, so their rows vanish silently with the account (desired for
     transient/audit data).
 

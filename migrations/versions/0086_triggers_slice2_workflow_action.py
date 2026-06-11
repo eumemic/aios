@@ -49,8 +49,8 @@ NOT rewritten: its UPDATE gate compares ``source``/``source_spec``/``enabled``/
 the running_since-clear edge value-generically, so the new kinds flow through;
 a ``run_completion`` INSERT costs one harmless scheduler MIN recompute.
 
-Revision ID: 0085
-Revises: 0084
+Revision ID: 0086
+Revises: 0085
 """
 
 from __future__ import annotations
@@ -60,8 +60,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0085"
-down_revision: str = "0084"
+revision: str = "0086"
+down_revision: str = "0085"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -9,8 +9,9 @@ both directions, jsonb numeric-expansion round-trip, byte-identity of predicate 
 bare-DROP-COLUMN auto-drop behavior). The §11 sign-offs are RESOLVED (see the table there); rev-2
 deltas from rev 1, all build-time:
 
-- **The migration is 0085** (`down_revision="0084"` — master took 0084 for the session snapshot
-  pointer while this was in design). Every "0084" in the body reads as 0085.
+- **The migration is 0086** (`down_revision="0085"` — master took 0084 for the session snapshot
+  pointer while this was in design, then 0085 for the wf_run_events annotation type while it was
+  in build). Every "0084" in the body reads as 0086.
 - **Resolution #2 (IN):** the migration carries `triggers_run_completion_no_next_fire CHECK
   (source <> 'run_completion' OR next_fire IS NULL)` — the §6 residual promoted to a constraint.
 - **The 0083-style diagnostic validating SELECT is INCLUDED** in the migration (shares the
@@ -366,7 +367,7 @@ status column, success == `status = 'ok'`; `timeout`/`skipped` keep their existi
 `TriggerFireStatus` vocabulary; `error_summary` carries the detail (no separate error jsonb — the
 status IS the kind).
 
-### Concrete shape (migration 0085, same file as §6)
+### Concrete shape (migration 0086, same file as §6)
 
 ```sql
 CREATE TABLE trigger_runs (
@@ -706,7 +707,7 @@ slots and can 5-strike a healthy trigger; recovery is `cancel_run`.
 
 ---
 
-## 6. Additive CHECK extension + migration 0085 (Q6)
+## 6. Additive CHECK extension + migration 0086 (Q6)
 
 ### Recommendation
 
@@ -719,7 +720,7 @@ validating SELECT — there is no backfill; old rows pass the superset CASE by c
 `ADD CONSTRAINT` itself hard-fails with the constraint name if the impossible happens.
 
 ```python
-# migrations/versions/0085_triggers_slice2_workflow_action.py — module constants.
+# migrations/versions/0086_triggers_slice2_workflow_action.py — module constants.
 # The *_0083 constants are the verbatim previous predicates, embedded for
 # downgrade() (synthetic-module loading forbids cross-migration imports; the
 # 0083 _OLD_NOTIFY_FN pattern). No @dataclass anywhere.
@@ -784,7 +785,7 @@ than the launch path it reuses) and `jsonb_typeof` never returns SQL NULL for a 
 `NOT (action ? 'environment_id')` is hygiene (single storage location — the column). `vault_ids`
 must be an array (materialized `[]`). Existing branches deliberately do NOT gain
 `NOT (action ? 'workflow_id')` etc. — byte-identical mandate + contractually open key set;
-`extra="forbid"` write models make stray keys unreachable (deliberate asymmetry, noted in the 0085
+`extra="forbid"` write models make stray keys unreachable (deliberate asymmetry, noted in the 0086
 docstring). `statuses` joins the run_completion CHECK because it ships in the kind's FIRST shape
 (the retro-add rule bars only post-first-ship fields).
 
@@ -1058,7 +1059,7 @@ precedent — third member is the same path).
    (`workflows/service.py:107-113`) + `list_wf_runs`/`WfRun.parent_run_id` docstrings (children
    now include trigger-reaction runs); `hard_delete_account`'s stale "FKs all use RESTRICT"
    docstring (false since 0061/0064/0073; trigger_runs adds another CASCADE table) — broken
-   window, fix in the same PR; the 0085 docstring anchors the iff constraint to contract §1.1
+   window, fix in the same PR; the 0086 docstring anchors the iff constraint to contract §1.1
    (without it the relocation reads as a dropped obligation); §1.1's version-pin reservation is
    hereby read as binding **action kinds** (executed references), not source watches; slice-4
    obligations extended per §4.
@@ -1105,7 +1106,7 @@ copies; clone succeeds) and a run_completion trigger. (f) Event-skip finalizatio
 archived/disabled/deleted-trigger event fires finalize the claim row `skipped` and the sweep
 terminates. (g) Duplicate-job no-op via the `pending→running` claim. (h) `update_trigger` kind
 conversions flip the `environment_id` column both directions in one UPDATE; same-kind
-workflow→workflow updates re-resolve it. (i) 0085 downgrade refusal probe. (j) Session-create
+workflow→workflow updates re-resolve it. (i) 0086 downgrade refusal probe. (j) Session-create
 trigger attachment validates identically to POST /triggers (bad watch 404s; pin drift 409s).
 (k) Mid-flight source replacement: an in-flight event fire of a trigger converted to one_shot does
 NOT delete the row (origin-derived lifecycle arm). (l) Pin drift: edit the workflow, pinned
@@ -1118,7 +1119,7 @@ trigger's next fire records `error` with the ConflictError summary.
 | # | Question | Resolution | As built |
 |---|---|---|---|
 | 1 | Write-time vault-subset check | **OUT** | fire-time `create_run` is the single authority point; the §7 helper does no vault reads |
-| 2 | `next_fire IS NULL` guard CHECK | **IN** | `triggers_run_completion_no_next_fire` in migration 0085 — DB-enforces the §3 invariant; the bug it guards is a tick-speed hot re-claim runaway |
+| 2 | `next_fire IS NULL` guard CHECK | **IN** | `triggers_run_completion_no_next_fire` in migration 0086 — DB-enforces the §3 invariant; the bug it guards is a tick-speed hot re-claim runaway |
 | 3 | `trigger_runs.event` shape CHECK | **OUT** | the writer is unit/e2e-tested instead (the coalescing regression asserts the exact event keys) |
 | 4 | Lazy finalizer for stuck `running` rows | **OUT** | the sweep ships the warning log only (`trigger.fires_stuck_running`); deliberately never retried |
 | 5 | Retention | **30 days**, time-based | `Settings.trigger_runs_retention_days` / `AIOS_TRIGGER_RUNS_RETENTION_DAYS`; never count-capped |

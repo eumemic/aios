@@ -54,7 +54,7 @@ SCHEDULED_TASK: Final = "sched"
 TRIGGER: Final = "trig"
 # Per-fire audit row for a trigger (#819). References triggers by PLAIN id —
 # one-shot rows are deleted before firing, so the audit must outlive the
-# trigger row (no FK; see migration 0085).
+# trigger row (no FK; see migration 0086).
 TRIGGER_RUN: Final = "trun"
 # Short-lived server-side state for an in-progress interactive OAuth
 # authorization-code flow (vault credential "Connect"). Rows are pruned on
