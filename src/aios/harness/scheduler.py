@@ -9,10 +9,12 @@ on a fixed interval, it sleeps until either:
   ``aios_scheduled_tasks_due`` (any insert/delete or scheduling-relevant
   UPDATE on ``triggers`` — see the ``notify_scheduled_tasks_due`` trigger,
   whose channel/function name stay byte-identical across the #818 rename), OR
-- The cold-path heartbeat cap (``_HEARTBEAT_SECONDS``) elapses — bounds how
-  long the LISTEN connection can sit idle before we cycle through a
-  recompute, which is the only thing that detects a silently-dropped
-  listener.
+- The cold-path heartbeat cap (``_HEARTBEAT_SECONDS``) elapses — a short
+  safety-net cap that bounds how long the LISTEN connection can sit idle
+  before we cycle through a recompute, which is the only thing that detects
+  a silently-dropped listener. It is NOT the primary bound: the NOTIFY
+  trigger now fires on ``next_fire`` changes too (#940), so the common path
+  wakes promptly; the heartbeat just caps the worst-case cold path.
 
 On wake, claims due triggers and defers ``harness.run_trigger`` jobs; the
 actual fire happens in :mod:`aios.harness.trigger_runner`.
@@ -40,15 +42,21 @@ from aios.logging import get_logger
 
 log = get_logger("aios.harness.scheduler")
 
-# Cap on how long the scheduler will sleep without re-querying. Two
-# guarantees:
+# Cap on how long the scheduler will sleep without re-querying — a pure
+# safety net, now 5 minutes. Lowered from 1h (#940): the NOTIFY trigger
+# function ``notify_scheduled_tasks_due`` now also fires on ``next_fire``
+# changes (migration 0086), so any path that reschedules a row wakes the
+# sleeping scheduler immediately. The heartbeat is therefore no longer the
+# primary bound on fire latency; it only backstops the two edges NOTIFY
+# can't cover, and 5 minutes keeps worst-case cold-path latency low without
+# hot-looping. Two guarantees:
 #  1. A silently-dropped LISTEN connection (TCP RST, NAT timeout, etc.)
-#     can't strand pending fires for more than this — we recompute MIN
+#     can't strand pending fires for more than 5 minutes — we recompute MIN
 #     and notice.
 #  2. Edge cases that shouldn't NOTIFY but could theoretically affect
 #     the next-due (e.g. ``sessions.archived_at`` flipped) get picked up
-#     within this cap without needing trigger logic on that table.
-_HEARTBEAT_SECONDS = 3600.0
+#     within 5 minutes without needing trigger logic on that table.
+_HEARTBEAT_SECONDS = 300.0
 
 # Backoff between LISTEN-connection reconnect attempts when
 # ``listen_for_triggers_due`` raises (network blip, Postgres failover,
