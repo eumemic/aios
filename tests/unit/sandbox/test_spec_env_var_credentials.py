@@ -206,6 +206,50 @@ async def test_provision_time_fold_lands_cred_on_mount_snapshot() -> None:
     ) in plan.spec.mount_snapshot
 
 
+async def test_failure_after_proxy_starts_stops_both_proxies() -> None:
+    """A raise in the post-proxy-start span (here the reserved-image gate)
+    must tear down BOTH the git proxy and the secret-egress proxy.
+
+    Both proxies and the broker secret are allocated BEFORE the spec is
+    assembled; a single cleanup envelope must cover all of them so a
+    failed provision can't leak a live proxy for the worker's lifetime.
+    """
+    git_proxy = MagicMock()
+    git_proxy.stop = AsyncMock()
+    secret_proxy = MagicMock()
+    secret_proxy.start = AsyncMock()
+    secret_proxy.stop = AsyncMock()
+    broker = MagicMock()
+    broker.port = 54321
+    broker.register_session = MagicMock()
+    broker.unregister_session = MagicMock()
+    # A reserved-prefix image trips the cross-tenant snapshot gate's
+    # ValueError after both proxies have started and the broker secret is
+    # registered. ``MagicMock`` env_config bypasses the pydantic ``image``
+    # validator so the gate (not construction) is what raises.
+    env_config = MagicMock()
+    env_config.image = "aios-sbx-victim"
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_config=env_config,
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+            github_clones=AsyncMock(return_value=([], git_proxy)),
+            tool_broker=broker,
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(
+            patch("aios.sandbox.spec.SecretEgressProxy", MagicMock(return_value=secret_proxy))
+        )
+        with pytest.raises(ValueError, match="reserved"):
+            await build_spec_from_session("sess_01TEST")
+
+    # Everything allocated before the failure is torn down: both proxies
+    # stopped and the broker secret unregistered.
+    git_proxy.stop.assert_awaited_once()
+    secret_proxy.stop.assert_awaited_once()
+    broker.unregister_session.assert_called_once_with("sess_01TEST")
+
+
 def test_placeholder_is_stable_across_recycle() -> None:
     """The placeholder is a pure function of ``(subkey, session_id,
     credential_id)`` — two mints with the same ids are equal.

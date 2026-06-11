@@ -347,6 +347,7 @@ def patch_build_spec_deps(
     # symbol AFTER entering the bundle, so their mock wins (last patch binds).
     secret_proxy_instance = MagicMock()
     secret_proxy_instance.start = AsyncMock()
+    secret_proxy_instance.stop = AsyncMock()
 
     return (
         patch("aios.sandbox.spec.get_settings", return_value=settings),

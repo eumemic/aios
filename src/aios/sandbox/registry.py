@@ -446,10 +446,10 @@ class SandboxRegistry:
             # Drop all so their ports + token/secret maps don't leak.
             self._git_proxies.pop(session_id, None)
             if plan.git_proxy is not None:
-                await self._stop_proxy_silently(plan.git_proxy, session_id)
+                await self._stop_proxy_silently(plan.git_proxy, session_id, kind="git_proxy")
             self._secret_proxies.pop(session_id, None)
             if plan.secret_proxy is not None:
-                await self._stop_proxy_silently(plan.secret_proxy, session_id)
+                await self._stop_proxy_silently(plan.secret_proxy, session_id, kind="secret_proxy")
             self._release_tool_broker_secret(session_id)
             raise
 
@@ -504,19 +504,21 @@ class SandboxRegistry:
         )
 
     async def _stop_proxy_silently(
-        self, proxy: GitProxy | SecretEgressProxy, session_id: str
+        self, proxy: GitProxy | SecretEgressProxy, session_id: str, *, kind: str
     ) -> None:
         """Stop ``proxy``, log + swallow any error.
 
         Used by every cleanup path; a stuck proxy must never block
         sandbox teardown or propagate a secondary exception over a
-        primary one.
+        primary one. ``kind`` (``"git_proxy"`` / ``"secret_proxy"``)
+        names the proxy type in the failure log so a secret-egress stop
+        failure isn't mis-attributed to the git proxy in logs/alerts.
         """
         try:
             await proxy.stop()
         except Exception as err:
             log.warning(
-                "sandbox.git_proxy_stop_failed",
+                f"sandbox.{kind}_stop_failed",
                 session_id=session_id,
                 error=str(err),
             )
@@ -570,10 +572,10 @@ class SandboxRegistry:
             )
         proxy = self._git_proxies.pop(session_id, None)
         if proxy is not None:
-            await self._stop_proxy_silently(proxy, session_id)
+            await self._stop_proxy_silently(proxy, session_id, kind="git_proxy")
         secret_proxy = self._secret_proxies.pop(session_id, None)
         if secret_proxy is not None:
-            await self._stop_proxy_silently(secret_proxy, session_id)
+            await self._stop_proxy_silently(secret_proxy, session_id, kind="secret_proxy")
         self._release_tool_broker_secret(session_id)
 
     # ── durable-session-sandbox lifecycle helpers (§5.2-§5.4) ───────────────
@@ -880,9 +882,9 @@ class SandboxRegistry:
         secret_proxy = self._secret_proxies.pop(session_id, None)
 
         if proxy is not None:
-            await self._stop_proxy_silently(proxy, session_id)
+            await self._stop_proxy_silently(proxy, session_id, kind="git_proxy")
         if secret_proxy is not None:
-            await self._stop_proxy_silently(secret_proxy, session_id)
+            await self._stop_proxy_silently(secret_proxy, session_id, kind="secret_proxy")
         self._release_tool_broker_secret(session_id)
         runtime.clear_session_memory_mounts(session_id)
         runtime.clear_session_read_shas(session_id)
@@ -984,7 +986,7 @@ class SandboxRegistry:
         proxy = self._git_proxies.pop(session_id, None)
         if proxy is not None:
             task = asyncio.create_task(
-                self._stop_proxy_silently(proxy, session_id),
+                self._stop_proxy_silently(proxy, session_id, kind="git_proxy"),
                 name=f"sandbox-evict-proxy-stop:{session_id}",
             )
             self._evict_proxy_stop_tasks.add(task)
@@ -992,7 +994,7 @@ class SandboxRegistry:
         secret_proxy = self._secret_proxies.pop(session_id, None)
         if secret_proxy is not None:
             secret_task = asyncio.create_task(
-                self._stop_proxy_silently(secret_proxy, session_id),
+                self._stop_proxy_silently(secret_proxy, session_id, kind="secret_proxy"),
                 name=f"sandbox-evict-secret-proxy-stop:{session_id}",
             )
             self._evict_proxy_stop_tasks.add(secret_task)
@@ -1044,6 +1046,18 @@ class SandboxRegistry:
             for _p, result in zip(all_proxies, proxy_results, strict=True):
                 if isinstance(result, BaseException):
                     log.warning("sandbox.stop_all_proxy_error", error=str(result))
+
+        # Drain any evict-triggered fire-and-forget proxy-stop tasks still in
+        # flight: evict() pops the proxy out of ``_git_proxies`` /
+        # ``_secret_proxies`` (so the gather above can't see it) and stops it in
+        # the background. Without awaiting them here, shutdown would abandon an
+        # in-progress teardown, leaking the proxy's server/port past worker
+        # exit. Snapshot first — each task removes itself from the set via its
+        # done-callback. These tasks already log+swallow internally, so
+        # ``return_exceptions=True`` is belt-and-suspenders.
+        evict_tasks = list(self._evict_proxy_stop_tasks)
+        if evict_tasks:
+            await asyncio.gather(*evict_tasks, return_exceptions=True)
 
         if not handles:
             return

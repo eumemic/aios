@@ -4224,6 +4224,27 @@ class EnvVarCredentialEcho(NamedTuple):
     updated_at: datetime
 
 
+# Shared FROM/WHERE/ORDER-BY body for the two session env-var credential
+# queries below. The account-scoping (``sv.account_id``/``vc.account_id =
+# $2``), archival (``archived_at IS NULL``), DISTINCT-ON-rank predicate and
+# first-vault-wins ordering live here ONCE so the provision-set
+# (:func:`list_session_env_var_credentials`) and the per-step drift echo-set
+# (:func:`list_session_env_var_credential_echoes`) can NEVER silently diverge:
+# a future account-scoping or security fix to this body applies to both. The
+# two queries differ ONLY in their SELECT columns (and return type). ``$1`` is
+# the session id, ``$2`` the account id.
+_SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE = """
+          FROM session_vaults sv
+          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
+         WHERE sv.session_id = $1
+           AND vc.auth_type = 'environment_variable'
+           AND vc.archived_at IS NULL
+           AND sv.account_id = $2
+           AND vc.account_id = $2
+         ORDER BY vc.secret_name, sv.rank
+""".strip()
+
+
 async def list_session_env_var_credentials(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -4240,20 +4261,17 @@ async def list_session_env_var_credentials(
     Rank uniqueness per session is an ``enumerate()`` artifact of
     ``set_session_vaults``, the same invariant ``resolve_session_credential``
     already leans on.
+
+    Shares its account-scoped FROM/WHERE/ORDER-BY body with
+    :func:`list_session_env_var_credential_echoes` via
+    ``_SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE`` so the two sets can't diverge.
     """
     rows = await conn.fetch(
-        """
+        f"""
         SELECT DISTINCT ON (vc.secret_name)
                vc.id, vc.secret_name, vc.allowed_hosts,
                vc.ciphertext, vc.nonce, vc.updated_at
-          FROM session_vaults sv
-          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
-         WHERE sv.session_id = $1
-           AND vc.auth_type = 'environment_variable'
-           AND vc.archived_at IS NULL
-           AND sv.account_id = $2
-           AND vc.account_id = $2
-         ORDER BY vc.secret_name, sv.rank
+        {_SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE}
         """,
         session_id,
         account_id,
@@ -4281,20 +4299,16 @@ async def list_session_env_var_credential_echoes(
     Selects ONLY ``(id, updated_at)`` — never the ciphertext — under the SAME
     ``DISTINCT ON (secret_name)`` / ``archived_at IS NULL`` / rank-order filter
     as :func:`list_session_env_var_credentials`, so the resolved set (provision)
-    and the echo set (step) have IDENTICAL membership. Mirrors
+    and the echo set (step) have IDENTICAL membership. That parity is enforced
+    structurally: both queries embed the SAME
+    ``_SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE`` body, so an account-scoping or
+    archival change touches both at once. Mirrors
     :func:`list_session_github_repo_echoes`.
     """
     rows = await conn.fetch(
-        """
+        f"""
         SELECT DISTINCT ON (vc.secret_name) vc.id, vc.updated_at
-          FROM session_vaults sv
-          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
-         WHERE sv.session_id = $1
-           AND vc.auth_type = 'environment_variable'
-           AND vc.archived_at IS NULL
-           AND sv.account_id = $2
-           AND vc.account_id = $2
-         ORDER BY vc.secret_name, sv.rank
+        {_SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE}
         """,
         session_id,
         account_id,

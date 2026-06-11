@@ -453,10 +453,14 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     repos are attached), mints a per-session MCP-broker secret, then
     assembles the :class:`SandboxSpec` and related artifacts.
 
-    On any failure after the GitProxy is started or the broker secret
-    is registered, both are cleaned up before the exception propagates
-    so the port, token map, and secret map don't leak for the worker's
-    lifetime.
+    On any failure after the first host resource is allocated — the
+    GitProxy started by the clones step, the secret-egress proxy, or the
+    broker secret — every allocation made so far is cleaned up before the
+    exception propagates so the ports, token map, and secret map don't
+    leak for the worker's lifetime. A single ``try`` envelope spans from
+    the clones step through plan assembly so no allocation sits in an
+    unguarded window (the reserved-image gate and broker registration
+    both raise inside it).
     """
     from aios.harness import runtime
     from aios.sandbox.volumes import ensure_workspace_path, validate_workspace_path
@@ -481,61 +485,72 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     workspace_path = ensure_workspace_path(raw_path)
     env_config = await _load_environment_config(session_id, account_id=account_id)
     memory_echoes = await _materialize_memory_mounts(session_id, account_id=account_id)
+    # Resolve + decrypt env-var credentials BEFORE any host resource is
+    # allocated (#873): a corrupt blob fails hard here with nothing to
+    # clean up, so this step stays OUTSIDE the cleanup envelope below.
     env_var_credentials = await _materialize_env_var_credentials(session_id, account_id=account_id)
-    github_echoes, git_proxy = await _materialize_github_clones(session_id, account_id=account_id)
-    # Start the per-session secret-egress proxy when the session has env-var
-    # credentials (#877). Inert until #878 routes egress through it; the
-    # registry owns its lifecycle from the returned plan, mirroring git_proxy.
-    # Started AFTER the clones step so its failure-exposure window matches
-    # git_proxy's: a raise from here on is caught by the try/except below
-    # (which stops both proxies); a clones failure unwinds itself before this.
-    secret_proxy: SecretEgressProxy | None = None
-    if env_var_credentials:
-        secret_proxy = SecretEgressProxy(env_var_credentials)
-        await secret_proxy.start()
 
     tool_broker = runtime.require_tool_broker()
-    tool_broker_secret = secrets.token_urlsafe(32)
-    tool_broker.register_session(session_id, tool_broker_secret)
-    # Prefer the UDS transport when the operator configured one: it
-    # works in deployments where the worker's TCP port isn't reachable
-    # from the sandbox network (e.g. Coolify production). Otherwise
-    # fall back to the ephemeral TCP URL.
     tool_socket_host_path = settings.tool_broker_socket_path
-    if tool_socket_host_path is not None:
-        tool_broker_url = f"unix://{TOOL_BROKER_SOCKET_SANDBOX_PATH}"
-    else:
-        tool_broker_url = f"http://{WORKER_NETWORK_ALIAS}:{tool_broker.port}"
-
-    # Per-environment image override (#724): a session bound to an
-    # environment with ``image`` set provisions from that image; unset
-    # falls back to the worker-global ``settings.docker_image``. This is
-    # the only resolution point — everything downstream (backend create,
-    # the --pull decision) consumes ``spec.image`` blindly.
-    image = env_config.image if (env_config and env_config.image) else settings.docker_image
-    # Cross-tenant snapshot gate (durable session sandboxes, §5.8): this is
-    # the spec-build choke point ALL writers traverse, including direct SQL —
-    # the boundary layer of the two-layer gate (the other being the pydantic
-    # ``image`` validator). Reject any image in the reserved snapshot
-    # namespace so a tenant can't point ``env_config.image`` at another
-    # session's snapshot tag (``aios-sbx-<victim>``) and mount its root FS +
-    # baked secrets. Case-insensitive (Docker lowercases refs).
-    if image.lower().startswith(RESERVED_SANDBOX_IMAGE_PREFIX):
-        raise ValueError(
-            f"environment image {image!r} uses the reserved "
-            f"{RESERVED_SANDBOX_IMAGE_PREFIX!r} prefix (reserved for per-session "
-            "snapshot images); refusing to provision"
-        )
-    # Per-session snapshot budget (durable session sandboxes, §5.7):
-    # environment override wins; otherwise the worker-global default
-    # (4 GiB unless the operator set AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES).
-    snapshot_budget_bytes = (
-        env_config.snapshot_budget_bytes
-        if (env_config and env_config.snapshot_budget_bytes is not None)
-        else settings.sandbox_snapshot_budget_bytes
-    )
-
+    # Initialized to None before the cleanup envelope so the ``except``
+    # can reference them whether or not they were allocated when a raise
+    # fired. ``git_proxy`` is assigned by the clones step (first host
+    # allocation), ``secret_proxy`` shortly after.
+    git_proxy: GitProxy | None = None
+    secret_proxy: SecretEgressProxy | None = None
+    broker_registered = False
     try:
+        github_echoes, git_proxy = await _materialize_github_clones(
+            session_id, account_id=account_id
+        )
+        # Start the per-session secret-egress proxy when the session has
+        # env-var credentials (#877). Inert until #878 routes egress through
+        # it; the registry owns its lifecycle from the returned plan,
+        # mirroring git_proxy.
+        if env_var_credentials:
+            secret_proxy = SecretEgressProxy(env_var_credentials)
+            await secret_proxy.start()
+
+        tool_broker_secret = secrets.token_urlsafe(32)
+        tool_broker.register_session(session_id, tool_broker_secret)
+        broker_registered = True
+        # Prefer the UDS transport when the operator configured one: it
+        # works in deployments where the worker's TCP port isn't reachable
+        # from the sandbox network (e.g. Coolify production). Otherwise
+        # fall back to the ephemeral TCP URL.
+        if tool_socket_host_path is not None:
+            tool_broker_url = f"unix://{TOOL_BROKER_SOCKET_SANDBOX_PATH}"
+        else:
+            tool_broker_url = f"http://{WORKER_NETWORK_ALIAS}:{tool_broker.port}"
+
+        # Per-environment image override (#724): a session bound to an
+        # environment with ``image`` set provisions from that image; unset
+        # falls back to the worker-global ``settings.docker_image``. This is
+        # the only resolution point — everything downstream (backend create,
+        # the --pull decision) consumes ``spec.image`` blindly.
+        image = env_config.image if (env_config and env_config.image) else settings.docker_image
+        # Cross-tenant snapshot gate (durable session sandboxes, §5.8): this is
+        # the spec-build choke point ALL writers traverse, including direct SQL —
+        # the boundary layer of the two-layer gate (the other being the pydantic
+        # ``image`` validator). Reject any image in the reserved snapshot
+        # namespace so a tenant can't point ``env_config.image`` at another
+        # session's snapshot tag (``aios-sbx-<victim>``) and mount its root FS +
+        # baked secrets. Case-insensitive (Docker lowercases refs).
+        if image.lower().startswith(RESERVED_SANDBOX_IMAGE_PREFIX):
+            raise ValueError(
+                f"environment image {image!r} uses the reserved "
+                f"{RESERVED_SANDBOX_IMAGE_PREFIX!r} prefix (reserved for per-session "
+                "snapshot images); refusing to provision"
+            )
+        # Per-session snapshot budget (durable session sandboxes, §5.7):
+        # environment override wins; otherwise the worker-global default
+        # (4 GiB unless the operator set AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES).
+        snapshot_budget_bytes = (
+            env_config.snapshot_budget_bytes
+            if (env_config and env_config.snapshot_budget_bytes is not None)
+            else settings.sandbox_snapshot_budget_bytes
+        )
+
         return _assemble_plan(
             session_id=session_id,
             instance_id=settings.instance_id,
@@ -556,12 +571,14 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             secret_proxy=secret_proxy,
         )
     except BaseException:
-        # All proxies hold worker-process state (ports, token maps,
-        # secret-to-session bindings). Anything that raises before we
-        # hand back a plan must clean up everything on the way out,
-        # otherwise state leaks for the worker's lifetime.
-        tool_broker.unregister_session(session_id)
-        cleanup_session_secret_file(session_id, tool_socket_host_path)
+        # Every host resource allocated above holds worker-process state
+        # (ports, token maps, secret-to-session bindings). Anything that
+        # raises before we hand back a plan must clean up everything
+        # allocated so far on the way out, otherwise state leaks for the
+        # worker's lifetime.
+        if broker_registered:
+            tool_broker.unregister_session(session_id)
+            cleanup_session_secret_file(session_id, tool_socket_host_path)
         if git_proxy is not None:
             try:
                 await git_proxy.stop()
