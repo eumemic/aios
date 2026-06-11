@@ -18,7 +18,11 @@ from __future__ import annotations
 
 import asyncio
 
-from aios.sandbox.volumes import ensure_session_attachments_dir, safe_filename
+from aios.sandbox.volumes import (
+    ensure_owned_dir,
+    ensure_session_attachments_dir,
+    safe_filename,
+)
 
 _SPILL_SUBDIR = "tool_results"
 
@@ -43,7 +47,7 @@ async def cap_tool_result_content(
 
 def _write_spill(session_id: str, fname: str, content: str) -> None:
     spill_dir = ensure_session_attachments_dir(session_id) / _SPILL_SUBDIR
-    spill_dir.mkdir(parents=True, exist_ok=True)
+    ensure_owned_dir(spill_dir)
     target = spill_dir / fname
     tmp = target.with_name(target.name + ".part")
     tmp.write_text(content, encoding="utf-8")
