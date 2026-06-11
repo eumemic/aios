@@ -495,10 +495,18 @@ in the worker; each row carries `account_id` denormalized). Do not "fix" it with
 **Slice-4 obligations (recorded now so slice 4 stays additive; no slice-1 code):** when
 `owner_session_id` goes nullable: (1) NULL-owner name addressing needs a partial unique index
 `(account_id, name) WHERE owner_session_id IS NULL` — never `NULLS NOT DISTINCT` on the existing
-UNIQUE (cross-tenant name collision); (2) the three `JOIN sessions` hot queries become LEFT JOINs
-with the archived-at predicate guarded on owner presence; (3) `triggers_action_shape` gains
-`owner_session_id IS NOT NULL` conjuncts for `sandbox_command` and `wake_owner` in the same
-constraint swap (zero rewrites).
+UNIQUE (cross-tenant name collision); (2) the `JOIN sessions` hot queries become LEFT JOINs with
+the archived-at predicate guarded on owner presence — **four** of them since slice 2: the claim,
+the MIN, the unscoped getter, and the run_completion completion matcher
+(`insert_run_completion_fires`); (3) `triggers_action_shape` gains `owner_session_id IS NOT NULL`
+conjuncts for `sandbox_command` and `wake_owner` in the same constraint swap (zero rewrites).
+Slice-2 additions to this list: (4) the timer fire path's
+`get_session_workflow_context(owner_session_id)` lineage read needs an owner-present guard; (5)
+`triggers_environment_id_iff_workflow` swaps to the `IN ('workflow','spawn_session')` form if
+`spawn_session` also binds an environment; (6) owner-NULL `workflow` fires degrade to
+`launcher_session_id=None` = UNATTENUATED operator authority via `create_run`'s existing operator
+path — semantically right for operator-owned triggers, but the slice-4 review must make that an
+explicit decision, not an accident of the threading.
 
 ---
 

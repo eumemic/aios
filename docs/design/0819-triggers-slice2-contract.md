@@ -1,12 +1,28 @@
-# Design-of-record — `triggers` slice 2 (#819)
+# Design contract — `triggers` slice 2 (#819)
 
-**Status: RECOMMENDED (rev 1).** Design-of-record for the `workflow` action kind, the
-`run_completion` source kind, and the `trigger_runs` audit table. Produced by a research pass over
-the live code (every load-bearing claim grounded `file:line`), adversarially verified per question,
-and cross-checked for coherence; empirical probes were executed against a throwaway Postgres 16
-(hostile-row CHECK execution in both directions, jsonb numeric-expansion round-trip, byte-identity
-of predicate constants, bare-DROP-COLUMN auto-drop behavior). Open sign-offs are collected in §11;
-everything else is transcribe-ready.
+**Status: FROZEN (rev 2).** Contract for the `workflow` action kind, the `run_completion` source
+kind, and the `trigger_runs` audit table — built as specified; the implementation landed on
+`feat/triggers-slice2`. Produced by a research pass over the live code (every load-bearing claim
+grounded `file:line`), adversarially verified per question, and cross-checked for coherence;
+empirical probes were executed against a throwaway Postgres 16 (hostile-row CHECK execution in
+both directions, jsonb numeric-expansion round-trip, byte-identity of predicate constants,
+bare-DROP-COLUMN auto-drop behavior). The §11 sign-offs are RESOLVED (see the table there); rev-2
+deltas from rev 1, all build-time:
+
+- **The migration is 0085** (`down_revision="0084"` — master took 0084 for the session snapshot
+  pointer while this was in design). Every "0084" in the body reads as 0085.
+- **Resolution #2 (IN):** the migration carries `triggers_run_completion_no_next_fire CHECK
+  (source <> 'run_completion' OR next_fire IS NULL)` — the §6 residual promoted to a constraint.
+- **The 0083-style diagnostic validating SELECT is INCLUDED** in the migration (shares the
+  predicate constants; expected empty — no backfill) per the build directive's same-craft rule.
+- **Seam A:** the shared write-path validator's account-scoped session read is its FIRST,
+  UNCONDITIONAL statement (the §7 sketch's ordering understated §4's cross-tenant fix, which must
+  cover ALL action kinds incl. slice-1 `sandbox_command`); the §7 sketch below is corrected.
+- **Seam B:** `list_trigger_runs` keys off the denormalized `(account_id, owner_session_id,
+  trigger_name)` — already the §2 stance, now also the route's contract (history survives trigger
+  deletion; name reuse merges incarnations, disambiguated by `trigger_id` on the rows).
+- **Resolution #7 (tombstones):** one-shot timer skips write a `skipped` audit row (§2's sign-off
+  option (b)).
 
 Prime directive carried over from slice 1: **additive future** — zero slice-1 row rewrites; a
 future operator-owned slice (nullable `owner_session_id`) stays additive. Second directive:
@@ -350,7 +366,7 @@ status column, success == `status = 'ok'`; `timeout`/`skipped` keep their existi
 `TriggerFireStatus` vocabulary; `error_summary` carries the detail (no separate error jsonb — the
 status IS the kind).
 
-### Concrete shape (migration 0084, same file as §6)
+### Concrete shape (migration 0085, same file as §6)
 
 ```sql
 CREATE TABLE trigger_runs (
@@ -686,7 +702,7 @@ slots and can 5-strike a healthy trigger; recovery is `cancel_run`.
 
 ---
 
-## 6. Additive CHECK extension + migration 0084 (Q6)
+## 6. Additive CHECK extension + migration 0085 (Q6)
 
 ### Recommendation
 
@@ -699,7 +715,7 @@ validating SELECT — there is no backfill; old rows pass the superset CASE by c
 `ADD CONSTRAINT` itself hard-fails with the constraint name if the impossible happens.
 
 ```python
-# migrations/versions/0084_triggers_slice2_workflow_action.py — module constants.
+# migrations/versions/0085_triggers_slice2_workflow_action.py — module constants.
 # The *_0083 constants are the verbatim previous predicates, embedded for
 # downgrade() (synthetic-module loading forbids cross-migration imports; the
 # 0083 _OLD_NOTIFY_FN pattern). No @dataclass anywhere.
@@ -764,7 +780,7 @@ than the launch path it reuses) and `jsonb_typeof` never returns SQL NULL for a 
 `NOT (action ? 'environment_id')` is hygiene (single storage location — the column). `vault_ids`
 must be an array (materialized `[]`). Existing branches deliberately do NOT gain
 `NOT (action ? 'workflow_id')` etc. — byte-identical mandate + contractually open key set;
-`extra="forbid"` write models make stray keys unreachable (deliberate asymmetry, noted in the 0084
+`extra="forbid"` write models make stray keys unreachable (deliberate asymmetry, noted in the 0085
 docstring). `statuses` joins the run_completion CHECK because it ships in the kind's FIRST shape
 (the retro-add rule bars only post-first-ship fields).
 
@@ -903,26 +919,28 @@ paths: `add_trigger`, `update_trigger`, AND `create_session`'s trigger-attach lo
 skip validation or 500 on the CHECK):
 
 ```python
-async def _validate_trigger_spec(conn, spec_source, spec_action, *, session_id, account_id) -> str | None:
+async def validate_trigger_spec(conn, source, action, *, session_id, account_id) -> str | None:
     """Returns the resolved environment_id (workflow action) or None. Shared by the
     POST/PUT trigger paths and SessionCreate.triggers attachment."""
-    if isinstance(spec_source, RunCompletionSource):
-        # silent-dead-watch guard (§1): account-scoped existence; cannot go stale (no delete path)
-        await wf_queries.get_workflow(conn, spec_source.workflow_id, account_id=account_id)
-    if not isinstance(spec_action, WorkflowAction):
-        return None
-    workflow = await wf_queries.get_workflow(conn, spec_action.workflow_id, account_id=account_id)
-    if spec_action.workflow_version is not None and spec_action.workflow_version != workflow.version:
-        raise ConflictError(
-            f"workflow_version pin {spec_action.workflow_version} does not match current "
-            f"version {workflow.version}; re-read the workflow and pin the version you reviewed",
-            detail={"pinned": spec_action.workflow_version, "current": workflow.version},
-        )
+    # Seam A: FIRST and UNCONDITIONAL — the cross-tenant-attach fix (§4) must
+    # cover ALL action kinds (for slice-1 sandbox_command a foreign session is
+    # cross-tenant code execution at fire time). 404s like every scoped read.
     session = await queries.get_session_bare(conn, session_id, account_id=account_id)
+    if isinstance(source, RunCompletionSource):
+        # silent-dead-watch guard (§1): account-scoped existence; cannot go stale (no delete path)
+        await wf_queries.get_workflow(conn, source.workflow_id, account_id=account_id)
+    if not isinstance(action, WorkflowAction):
+        return None
+    workflow = await wf_queries.get_workflow(conn, action.workflow_id, account_id=account_id)
+    if action.workflow_version is not None and action.workflow_version != workflow.version:
+        raise ConflictError(
+            f"workflow_version pin {action.workflow_version} does not match current "
+            f"version {workflow.version}; re-read the workflow and pin the version you reviewed",
+            detail={"pinned": action.workflow_version, "current": workflow.version},
+        )
     return session.environment_id   # immutable ⇒ freeze == fire-time resolve
     # NO vault existence/subset check (fire-time create_run is the single authority
-    # enforcement point — sign-off §11.1); the account-scoped get_session_bare doubles
-    # as the cross-tenant-attach fix (§4) on the HTTP path.
+    # enforcement point — resolution #1).
 ```
 
 `queries.add_trigger` gains `environment_id` as a **required** kwarg (no default — mypy forces
@@ -1037,7 +1055,7 @@ precedent — third member is the same path).
    (`workflows/service.py:107-113`) + `list_wf_runs`/`WfRun.parent_run_id` docstrings (children
    now include trigger-reaction runs); `hard_delete_account`'s stale "FKs all use RESTRICT"
    docstring (false since 0061/0064/0073; trigger_runs adds another CASCADE table) — broken
-   window, fix in the same PR; the 0084 docstring anchors the iff constraint to contract §1.1
+   window, fix in the same PR; the 0085 docstring anchors the iff constraint to contract §1.1
    (without it the relocation reads as a dropped obligation); §1.1's version-pin reservation is
    hereby read as binding **action kinds** (executed references), not source watches; slice-4
    obligations extended per §4.
@@ -1084,7 +1102,7 @@ copies; clone succeeds) and a run_completion trigger. (f) Event-skip finalizatio
 archived/disabled/deleted-trigger event fires finalize the claim row `skipped` and the sweep
 terminates. (g) Duplicate-job no-op via the `pending→running` claim. (h) `update_trigger` kind
 conversions flip the `environment_id` column both directions in one UPDATE; same-kind
-workflow→workflow updates re-resolve it. (i) 0084 downgrade refusal probe. (j) Session-create
+workflow→workflow updates re-resolve it. (i) 0085 downgrade refusal probe. (j) Session-create
 trigger attachment validates identically to POST /triggers (bad watch 404s; pin drift 409s).
 (k) Mid-flight source replacement: an in-flight event fire of a trigger converted to one_shot does
 NOT delete the row (origin-derived lifecycle arm). (l) Pin drift: edit the workflow, pinned
@@ -1092,28 +1110,15 @@ trigger's next fire records `error` with the ConflictError summary.
 
 ---
 
-## 11. Open questions / sign-offs (defaults stated; nothing here blocks transcription)
+## 11. Sign-offs — RESOLVED (the build directive's final decisions)
 
-1. **Write-time vault-subset check** on the workflow action — default **OUT** (fire-time
-   `create_run` is the single authority enforcement point; write-time goes stale both directions).
-   Sign-off to include it as fail-early UX (one extra read; precedent: workflow-create surface
-   attenuation checks at create AND launch).
-2. **`CHECK (source <> 'run_completion' OR next_fire IS NULL)`** — default **OUT**
-   (belt-and-suspenders behind `compute_initial_next_fire`). The bug it guards is a hot re-claim
-   runaway (tick-speed loop), not one mis-fire — sign off with that framing.
-3. **Event-shape CHECK on `trigger_runs.event`** (run_completion rows must carry `run_id`) —
-   default **OUT** (sole writer is internal; the naive form has the §2.1 NULL-hole; if wanted, use
-   the 0083 closed-kind COALESCE idiom).
-4. **Lazy finalizer** for stuck `running` audit rows (mark `error` past the 2h stale threshold) —
-   default **OUT**; the sweep's warning log-line ships (observability without a second mechanism).
-5. **`trigger_runs_retention_days` default 30** — confirm the number (floor must stay ≫ the
-   recovery horizon; count-caps are structurally unsafe, §2).
-6. **Self-fire semantics:** a trigger CAN fire on runs its own action launched (intentional
-   bounded chaining, depth-capped at 10; a cycle re-armed by fresh roots wastes ~9 runs per root).
-   Default **allow** — sign off, since it shapes the intentional-loop idiom.
-7. **One-shot timer-skip tombstones:** today a one-shot skipped between claim and execute
-   (archive/disable race) leaves zero record anywhere. Default **(b) write a `skipped`
-   `trigger_runs` tombstone** (one line in `_skip_claimed_fire`; the audit row is already the
-   one-shot's only fire record) over (a) preserve slice-1 nothing.
-8. **`trun` id prefix** (vs `trigrun`) and the `GET …/triggers/{name}/runs` route shape — bikeshed
-   tier; defaults as written in §2.
+| # | Question | Resolution | As built |
+|---|---|---|---|
+| 1 | Write-time vault-subset check | **OUT** | fire-time `create_run` is the single authority point; the §7 helper does no vault reads |
+| 2 | `next_fire IS NULL` guard CHECK | **IN** | `triggers_run_completion_no_next_fire` in migration 0085 — DB-enforces the §3 invariant; the bug it guards is a tick-speed hot re-claim runaway |
+| 3 | `trigger_runs.event` shape CHECK | **OUT** | the writer is unit/e2e-tested instead (the coalescing regression asserts the exact event keys) |
+| 4 | Lazy finalizer for stuck `running` rows | **OUT** | the sweep ships the warning log only (`trigger.fires_stuck_running`); deliberately never retried |
+| 5 | Retention | **30 days**, time-based | `Settings.trigger_runs_retention_days` / `AIOS_TRIGGER_RUNS_RETENTION_DAYS`; never count-capped |
+| 6 | Self-fire | **ALLOW**, depth-capped | parent_run_id threading + the depth-cycle termination test (10 runs, fire #10 errors, chain dead) |
+| 7 | One-shot timer-skip | **tombstone** | `_skip_claimed_fire`'s one-shot arm writes a `skipped` audit row — the zero-record hole is closed |
+| 8 | `trun` prefix + runs route | **as written** | `GET /v1/sessions/{id}/triggers/{name}/runs`, `operation_id=list_trigger_runs` |
