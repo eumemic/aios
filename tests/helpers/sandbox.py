@@ -28,6 +28,16 @@ from aios.sandbox.backends.base import (
 )
 
 
+async def run_sandbox(backend: Any, handle: SandboxHandle, cmd: str) -> tuple[int, str]:
+    """Exec ``cmd`` in a real-daemon sandbox; return ``(exit_code, stdout+stderr)``.
+
+    Shared by the real-Docker e2e sandbox tests (persistence, provision-path),
+    whose ``daemon`` fixture lives in ``tests/e2e/conftest.py``.
+    """
+    res = await backend.exec(handle, cmd, timeout_seconds=120, max_output_bytes=200_000)
+    return res.exit_code, res.stdout + res.stderr
+
+
 def make_handle(
     *,
     session_id: str = "sess_01TEST",

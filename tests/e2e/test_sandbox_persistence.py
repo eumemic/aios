@@ -19,8 +19,6 @@ These tests run real ``docker`` and pull/run the sandbox image; they are
 from __future__ import annotations
 
 import os
-import uuid
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -38,9 +36,9 @@ from aios.sandbox.backends.base import (
     Unrestricted,
 )
 from aios.sandbox.backends.docker import DockerBackend
-from aios.sandbox.network import ensure_sandbox_network
 from aios.sandbox.spec import snapshot_tag
 from tests.conftest import needs_docker
+from tests.helpers.sandbox import run_sandbox
 
 pytestmark = [needs_docker, pytest.mark.docker]
 
@@ -79,34 +77,11 @@ def _spec(
     )
 
 
-@pytest.fixture
-async def daemon(tmp_path: Path) -> AsyncIterator[tuple[DockerBackend, str, str, Path]]:
-    """A backend + a unique (instance, session, workspace) plus image cleanup."""
-    await ensure_sandbox_network()
-    backend = DockerBackend()
-    instance_id = f"test_{uuid.uuid4().hex[:8]}"
-    session_id = f"sess_{uuid.uuid4().hex[:8]}"
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    try:
-        yield backend, instance_id, session_id, workspace
-    finally:
-        # Remove any containers + the snapshot image this test produced.
-        for ref in await backend.list_managed(instance_id=instance_id):
-            await backend.force_remove(ref.sandbox_id)
-        await backend.remove_image(snapshot_tag(instance_id, session_id))
-
-
-async def _run(backend: DockerBackend, handle: SandboxHandle, cmd: str) -> tuple[int, str]:
-    res = await backend.exec(handle, cmd, timeout_seconds=120, max_output_bytes=200_000)
-    return res.exit_code, res.stdout + res.stderr
-
-
 async def _write_substantial(backend: DockerBackend, handle: SandboxHandle) -> None:
     """Write well over the empty-floor (8 KiB) so the release commits a real
     layer — a no-write / sub-floor session is intentionally ``skipped_empty``
     (the identity short-circuit), which is covered by its own test."""
-    await _run(backend, handle, "head -c 65536 /dev/zero > /root/blob")
+    await run_sandbox(backend, handle, "head -c 65536 /dev/zero > /root/blob")
 
 
 async def test_filesystem_persists_processes_and_shm_do_not(
@@ -119,13 +94,17 @@ async def test_filesystem_persists_processes_and_shm_do_not(
     h1 = await backend.create(
         _spec(instance_id=instance_id, session_id=session_id, workspace=workspace)
     )
-    await _run(backend, h1, "echo root > /root/marker")
-    await _run(backend, h1, "echo etc > /etc/marker")
-    await _run(backend, h1, "echo tmp > /tmp/marker")
-    await _run(backend, h1, "mkdir -p /usr/local/persist && echo glob > /usr/local/persist/marker")
-    await _run(backend, h1, "echo shm > /dev/shm/marker")
-    await _run(backend, h1, "nohup sleep 1000 >/dev/null 2>&1 &")
-    await _run(backend, h1, "echo workspace-only > /workspace/in_ws")  # bind mount — excluded
+    await run_sandbox(backend, h1, "echo root > /root/marker")
+    await run_sandbox(backend, h1, "echo etc > /etc/marker")
+    await run_sandbox(backend, h1, "echo tmp > /tmp/marker")
+    await run_sandbox(
+        backend, h1, "mkdir -p /usr/local/persist && echo glob > /usr/local/persist/marker"
+    )
+    await run_sandbox(backend, h1, "echo shm > /dev/shm/marker")
+    await run_sandbox(backend, h1, "nohup sleep 1000 >/dev/null 2>&1 &")
+    await run_sandbox(
+        backend, h1, "echo workspace-only > /workspace/in_ws"
+    )  # bind mount — excluded
     await _write_substantial(backend, h1)
 
     out = await backend.snapshot(
@@ -146,16 +125,16 @@ async def test_filesystem_persists_processes_and_shm_do_not(
     try:
         # Persistent rootfs survives.
         for path in ("/root/marker", "/etc/marker", "/tmp/marker", "/usr/local/persist/marker"):
-            rc, _ = await _run(backend, h2, f"test -f {path}")
+            rc, _ = await run_sandbox(backend, h2, f"test -f {path}")
             assert rc == 0, f"{path} did not survive the snapshot/resume cycle"
         # /dev/shm (tmpfs) does NOT survive.
-        rc, _ = await _run(backend, h2, "test -f /dev/shm/marker")
+        rc, _ = await run_sandbox(backend, h2, "test -f /dev/shm/marker")
         assert rc != 0, "/dev/shm marker survived — tmpfs must not persist"
         # The process is dead (resume = fresh process tree).
-        rc, out_txt = await _run(backend, h2, "pgrep -x sleep || echo NONE")
+        rc, out_txt = await run_sandbox(backend, h2, "pgrep -x sleep || echo NONE")
         assert "NONE" in out_txt, "the background process survived — resume must be a fresh boot"
         # Bind-mounted /workspace is excluded from the snapshot (fresh dir is empty).
-        rc, _ = await _run(backend, h2, "test -f /workspace/in_ws")
+        rc, _ = await run_sandbox(backend, h2, "test -f /workspace/in_ws")
         assert rc != 0, "bind-mount content leaked into the snapshot"
 
         # Second cycle: re-snapshot → resume → first-cycle markers still survive.
@@ -172,7 +151,7 @@ async def test_filesystem_persists_processes_and_shm_do_not(
         )
     )
     try:
-        rc, _ = await _run(backend, h3, "test -f /root/marker")
+        rc, _ = await run_sandbox(backend, h3, "test -f /root/marker")
         assert rc == 0, "/root/marker lost across two snapshot cycles"
     finally:
         await backend.destroy(h3)
@@ -189,7 +168,7 @@ async def test_zero_write_release_is_skipped_empty(
     h1 = await backend.create(
         _spec(instance_id=instance_id, session_id=session_id, workspace=workspace)
     )
-    await _run(backend, h1, "true")  # no filesystem writes
+    await run_sandbox(backend, h1, "true")  # no filesystem writes
     out = await backend.snapshot(
         h1.sandbox_id, tag, empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
     )
@@ -249,7 +228,7 @@ async def test_resume_integrity_path_home_pwd(
         _spec(instance_id=instance_id, session_id=f"{session_id}base", workspace=workspace)
     )
     try:
-        _rc, base_home = await _run(backend, base_h, 'printf %s "$HOME"')
+        _rc, base_home = await run_sandbox(backend, base_h, 'printf %s "$HOME"')
         base_home = base_home.strip()
     finally:
         await backend.destroy(base_h)
@@ -257,7 +236,7 @@ async def test_resume_integrity_path_home_pwd(
     h1 = await backend.create(
         _spec(instance_id=instance_id, session_id=session_id, workspace=workspace)
     )
-    await _run(backend, h1, "echo x > /root/marker")
+    await run_sandbox(backend, h1, "echo x > /root/marker")
     await _write_substantial(backend, h1)
     # flatten_if_unique_bytes_over=0 forces the flatten path on any nonzero layer.
     await backend.snapshot(
@@ -274,17 +253,17 @@ async def test_resume_integrity_path_home_pwd(
         )
     )
     try:
-        rc, path = await _run(backend, h2, 'printf %s "$PATH"')
+        rc, path = await run_sandbox(backend, h2, 'printf %s "$PATH"')
         assert rc == 0 and path.strip(), "resumed container has an empty PATH (CMD would not exec)"
-        rc, home = await _run(backend, h2, 'printf %s "$HOME"')
+        rc, home = await run_sandbox(backend, h2, 'printf %s "$HOME"')
         expected_home = "/home/aios" if flatten else base_home
         assert home.strip() == expected_home, (
             f"HOME mismatch: got {home!r}, expected {expected_home!r} (flatten={flatten})"
         )
-        rc, pwd = await _run(backend, h2, "pwd")
+        rc, pwd = await run_sandbox(backend, h2, "pwd")
         assert pwd.strip() == "/workspace", f"pwd not /workspace: {pwd!r}"
         # The marker survived the (possibly flattened) round-trip.
-        rc, _ = await _run(backend, h2, "test -f /root/marker")
+        rc, _ = await run_sandbox(backend, h2, "test -f /root/marker")
         assert rc == 0
     finally:
         await backend.destroy(h2)
@@ -309,7 +288,7 @@ async def test_lockdown_survives_poisoned_iptables_on_resume(
     h1 = await backend.create(
         _spec(instance_id=instance_id, session_id=session_id, workspace=workspace)
     )
-    await _run(
+    await run_sandbox(
         backend,
         h1,
         "printf '#!/bin/sh\\nexit 0\\n' > /usr/sbin/iptables && chmod +x /usr/sbin/iptables",
@@ -328,7 +307,7 @@ async def test_lockdown_survives_poisoned_iptables_on_resume(
     )
     try:
         # Sanity: the sandbox's own iptables is the poisoned no-op.
-        rc, _ = await _run(backend, h2, "test -x /usr/sbin/iptables")
+        rc, _ = await run_sandbox(backend, h2, "test -x /usr/sbin/iptables")
         assert rc == 0
 
         # Apply the Limited lockdown. With the OLD in-sandbox approach this
@@ -343,7 +322,9 @@ async def test_lockdown_survives_poisoned_iptables_on_resume(
 
         # The sandbox holds no NET_ADMIN (capability bit 12) — it cannot touch
         # netfilter to flush its own lockdown.
-        rc, capeff = await _run(backend, h2, "grep CapEff /proc/self/status | awk '{print $2}'")
+        rc, capeff = await run_sandbox(
+            backend, h2, "grep CapEff /proc/self/status | awk '{print $2}'"
+        )
         caps = int(capeff.strip(), 16)
         assert not (caps >> 12) & 1, f"sandbox must not hold NET_ADMIN; CapEff={capeff.strip()}"
     finally:

@@ -21,8 +21,6 @@ They run real ``docker`` and pull/run the sandbox image; they are
 from __future__ import annotations
 
 import os
-import uuid
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -35,15 +33,14 @@ from aios.sandbox.backends.base import (
     MANAGED_LABEL_VALUE,
     SESSION_LABEL_KEY,
     Mount,
-    SandboxHandle,
     SandboxSpec,
     Unrestricted,
 )
 from aios.sandbox.backends.docker import DockerBackend
-from aios.sandbox.network import ensure_sandbox_network
 from aios.sandbox.setup import WORKSPACE_RUNTIME_ENV
 from aios.sandbox.spec import snapshot_tag
 from tests.conftest import needs_docker
+from tests.helpers.sandbox import run_sandbox
 
 pytestmark = [needs_docker, pytest.mark.docker]
 
@@ -83,28 +80,6 @@ def _spec(
     )
 
 
-@pytest.fixture
-async def daemon(tmp_path: Path) -> AsyncIterator[tuple[DockerBackend, str, str, Path]]:
-    """A backend + a unique (instance, session, workspace) plus image cleanup."""
-    await ensure_sandbox_network()
-    backend = DockerBackend()
-    instance_id = f"test_{uuid.uuid4().hex[:8]}"
-    session_id = f"sess_{uuid.uuid4().hex[:8]}"
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    try:
-        yield backend, instance_id, session_id, workspace
-    finally:
-        for ref in await backend.list_managed(instance_id=instance_id):
-            await backend.force_remove(ref.sandbox_id)
-        await backend.remove_image(snapshot_tag(instance_id, session_id))
-
-
-async def _run(backend: DockerBackend, handle: SandboxHandle, cmd: str) -> tuple[int, str]:
-    res = await backend.exec(handle, cmd, timeout_seconds=120, max_output_bytes=200_000)
-    return res.exit_code, res.stdout + res.stderr
-
-
 async def test_fresh_provision_resolves_bare_name_coreutils(
     daemon: tuple[DockerBackend, str, str, Path],
 ) -> None:
@@ -121,9 +96,9 @@ async def test_fresh_provision_resolves_bare_name_coreutils(
         _spec(instance_id=instance_id, session_id=session_id, workspace=workspace)
     )
     try:
-        rc, out = await _run(backend, handle, "tail --version")
+        rc, out = await run_sandbox(backend, handle, "tail --version")
         assert rc == 0, f"`tail` did not resolve on a fresh provision: {out}"
-        rc, out = await _run(backend, handle, "ls /tmp")
+        rc, out = await run_sandbox(backend, handle, "ls /tmp")
         assert rc == 0, f"`ls` did not resolve on a fresh provision: {out}"
     finally:
         await backend.destroy(handle)
@@ -147,8 +122,8 @@ async def test_snapshot_resumed_sandbox_resolves_bare_name_coreutils(
     h1 = await backend.create(
         _spec(instance_id=instance_id, session_id=session_id, workspace=workspace)
     )
-    await _run(backend, h1, "echo marker > /root/marker")
-    await _run(backend, h1, "head -c 65536 /dev/zero > /root/blob")
+    await run_sandbox(backend, h1, "echo marker > /root/marker")
+    await run_sandbox(backend, h1, "head -c 65536 /dev/zero > /root/blob")
     out = await backend.snapshot(
         h1.sandbox_id, tag, empty_floor_bytes=8192, flatten_if_unique_bytes_over=0
     )
@@ -162,7 +137,7 @@ async def test_snapshot_resumed_sandbox_resolves_bare_name_coreutils(
         )
     )
     try:
-        rc, out_txt = await _run(backend, h2, "tail --version")
+        rc, out_txt = await run_sandbox(backend, h2, "tail --version")
         assert rc == 0, f"`tail` did not resolve after snapshot/resume: {out_txt}"
     finally:
         await backend.destroy(h2)
