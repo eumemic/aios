@@ -22,6 +22,7 @@ from aios.models.vaults import VaultCredentialCreate
 from aios.services import vaults as vaults_service
 from aios.services.vaults import mint_secret_placeholder
 from tests.conftest import needs_docker
+from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from tests.e2e.harness import Harness, assistant, bash, first_tool_result
 
 pytestmark = pytest.mark.docker
@@ -60,7 +61,18 @@ async def test_placeholder_visible_in_container_secret_absent(docker_harness: Ha
             assistant("Done."),
         ]
     )
-    session = await docker_harness.start("test", tools=["bash"])
+    # The provision gate (#879) requires env-var credentials to ride a
+    # Limited-networking environment whose allowed_hosts cover the
+    # credential's — this fixture predates the gate and used the harness
+    # default (non-Limited) environment, which the gate now correctly
+    # rejects at provision.
+    session = await docker_harness.start(
+        "test",
+        tools=["bash"],
+        environment_config=EnvironmentConfig(
+            networking=LimitedNetworking(type="limited", allowed_hosts=["api.github.com"]),
+        ),
+    )
     # Bind the vault before the first bash call provisions the sandbox.
     async with pool.acquire() as conn:
         await queries.set_session_vaults(conn, session.id, [vault.id], account_id=_ACCOUNT_ID)
