@@ -47,6 +47,11 @@ MANAGEMENT_CALL: Final = "mgmt"
 ACCOUNT: Final = "acc"
 ACCOUNT_KEY: Final = "acckey"
 SCHEDULED_TASK: Final = "sched"
+# Triggers (#818) — the generalization of scheduled tasks (a `source` that
+# fires + an `action` that runs). New rows mint `trig_`; legacy `sched_` ids
+# from the pre-rename table remain valid (both kept in `_PREFIXES`), so
+# `split_id` works on old rows without a data migration.
+TRIGGER: Final = "trig"
 # Short-lived server-side state for an in-progress interactive OAuth
 # authorization-code flow (vault credential "Connect"). Rows are pruned on
 # expiry — see ``oauth_flows`` (migration 0061).
@@ -82,6 +87,7 @@ _PREFIXES: Final = frozenset(
         ACCOUNT,
         ACCOUNT_KEY,
         SCHEDULED_TASK,
+        TRIGGER,
         OAUTH_FLOW,
         WORKFLOW,
         WORKFLOW_RUN,

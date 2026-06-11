@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -7,6 +7,8 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
+from ...models.trigger_echo import TriggerEcho
+from ...models.trigger_update import TriggerUpdate
 from ...types import UNSET, Response, Unset
 
 
@@ -14,6 +16,7 @@ def _get_kwargs(
     session_id: str,
     name: str,
     *,
+    body: TriggerUpdate,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -21,12 +24,16 @@ def _get_kwargs(
         headers["Authorization"] = authorization
 
     _kwargs: dict[str, Any] = {
-        "method": "delete",
-        "url": "/v1/sessions/{session_id}/scheduled-tasks/{name}".format(
+        "method": "put",
+        "url": "/v1/sessions/{session_id}/triggers/{name}".format(
             session_id=quote(str(session_id), safe=""),
             name=quote(str(name), safe=""),
         ),
     }
+
+    _kwargs["json"] = body.to_dict()
+
+    headers["Content-Type"] = "application/json"
 
     _kwargs["headers"] = headers
     return _kwargs
@@ -34,10 +41,11 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Any | HTTPValidationError | None:
-    if response.status_code == 204:
-        response_204 = cast(Any, None)
-        return response_204
+) -> HTTPValidationError | TriggerEcho | None:
+    if response.status_code == 200:
+        response_200 = TriggerEcho.from_dict(response.json())
+
+        return response_200
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -52,7 +60,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | TriggerEcho]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -66,28 +74,36 @@ def sync_detailed(
     name: str,
     *,
     client: AuthenticatedClient | Client,
+    body: TriggerUpdate,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
-    """Delete Scheduled Task
+) -> Response[HTTPValidationError | TriggerEcho]:
+    """Update Trigger
 
-     Remove a scheduled task by name.
+     Replace a trigger's source/action/enabled/metadata by name. Omitted
+    fields unchanged; ``source`` / ``action`` replace wholesale.
 
     Args:
         session_id (str):
         name (str):
         authorization (None | str | Unset):
+        body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
+            provided (a cron↔one-shot or sandbox↔wake conversion is just a
+            different object). ``None`` = leave alone; there is no clear-to-null
+            (both columns are NOT NULL). The next_fire / cap / past-fire_at
+            business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[HTTPValidationError | TriggerEcho]
     """
 
     kwargs = _get_kwargs(
         session_id=session_id,
         name=name,
+        body=body,
         authorization=authorization,
     )
 
@@ -103,29 +119,37 @@ def sync(
     name: str,
     *,
     client: AuthenticatedClient | Client,
+    body: TriggerUpdate,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
-    """Delete Scheduled Task
+) -> HTTPValidationError | TriggerEcho | None:
+    """Update Trigger
 
-     Remove a scheduled task by name.
+     Replace a trigger's source/action/enabled/metadata by name. Omitted
+    fields unchanged; ``source`` / ``action`` replace wholesale.
 
     Args:
         session_id (str):
         name (str):
         authorization (None | str | Unset):
+        body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
+            provided (a cron↔one-shot or sandbox↔wake conversion is just a
+            different object). ``None`` = leave alone; there is no clear-to-null
+            (both columns are NOT NULL). The next_fire / cap / past-fire_at
+            business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        HTTPValidationError | TriggerEcho
     """
 
     return sync_detailed(
         session_id=session_id,
         name=name,
         client=client,
+        body=body,
         authorization=authorization,
     ).parsed
 
@@ -135,28 +159,36 @@ async def asyncio_detailed(
     name: str,
     *,
     client: AuthenticatedClient | Client,
+    body: TriggerUpdate,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
-    """Delete Scheduled Task
+) -> Response[HTTPValidationError | TriggerEcho]:
+    """Update Trigger
 
-     Remove a scheduled task by name.
+     Replace a trigger's source/action/enabled/metadata by name. Omitted
+    fields unchanged; ``source`` / ``action`` replace wholesale.
 
     Args:
         session_id (str):
         name (str):
         authorization (None | str | Unset):
+        body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
+            provided (a cron↔one-shot or sandbox↔wake conversion is just a
+            different object). ``None`` = leave alone; there is no clear-to-null
+            (both columns are NOT NULL). The next_fire / cap / past-fire_at
+            business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[HTTPValidationError | TriggerEcho]
     """
 
     kwargs = _get_kwargs(
         session_id=session_id,
         name=name,
+        body=body,
         authorization=authorization,
     )
 
@@ -170,23 +202,30 @@ async def asyncio(
     name: str,
     *,
     client: AuthenticatedClient | Client,
+    body: TriggerUpdate,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
-    """Delete Scheduled Task
+) -> HTTPValidationError | TriggerEcho | None:
+    """Update Trigger
 
-     Remove a scheduled task by name.
+     Replace a trigger's source/action/enabled/metadata by name. Omitted
+    fields unchanged; ``source`` / ``action`` replace wholesale.
 
     Args:
         session_id (str):
         name (str):
         authorization (None | str | Unset):
+        body (TriggerUpdate): Update body. ``source`` / ``action`` are replaced WHOLESALE when
+            provided (a cron↔one-shot or sandbox↔wake conversion is just a
+            different object). ``None`` = leave alone; there is no clear-to-null
+            (both columns are NOT NULL). The next_fire / cap / past-fire_at
+            business rules are enforced in the service layer (§2.4).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        HTTPValidationError | TriggerEcho
     """
 
     return (
@@ -194,6 +233,7 @@ async def asyncio(
             session_id=session_id,
             name=name,
             client=client,
+            body=body,
             authorization=authorization,
         )
     ).parsed

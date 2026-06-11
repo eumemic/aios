@@ -10,9 +10,9 @@ from ..types import UNSET, Unset
 if TYPE_CHECKING:
     from ..models.github_repository_resource import GithubRepositoryResource
     from ..models.memory_store_resource import MemoryStoreResource
-    from ..models.scheduled_task_create import ScheduledTaskCreate
     from ..models.session_create_env import SessionCreateEnv
     from ..models.session_create_metadata import SessionCreateMetadata
+    from ..models.trigger_create import TriggerCreate
 
 
 T = TypeVar("T", bound="SessionCreate")
@@ -44,11 +44,10 @@ class SessionCreate:
             stores (mounted under /mnt/memory/<name>/) and github repositories (cloned to a user-specified mount_path). Each
             type has its own per-session cap; duplicates within a type are rejected. Use ``PUT /v1/sessions/{id}`` with
             ``resources`` to detach or replace the set after creation.
-        scheduled_tasks (list[ScheduledTaskCreate] | Unset): Cron-fired bash tasks attached at session creation. Each
-            task fires its command in the session's sandbox at its schedule without waking the model — bash must explicitly
-            POST a user-role event back to escalate. Manage after creation via ``POST/DELETE/PUT
-            /v1/sessions/{id}/scheduled-tasks``; ``SessionUpdate`` deliberately does not accept this field (granular ops
-            only).
+        triggers (list[TriggerCreate] | Unset): Triggers attached at session creation. Each pairs a ``source`` (cron /
+            one_shot) with an ``action`` (a ``sandbox_command`` bash task that fires without waking the model, or a
+            ``wake_owner`` message that wakes it). Manage after creation via ``POST/DELETE/PUT /v1/sessions/{id}/triggers``;
+            ``SessionUpdate`` deliberately does not accept this field (granular ops only).
     """
 
     agent_id: str
@@ -62,7 +61,7 @@ class SessionCreate:
     env: SessionCreateEnv | Unset = UNSET
     initial_message: None | str | Unset = UNSET
     resources: list[GithubRepositoryResource | MemoryStoreResource] | Unset = UNSET
-    scheduled_tasks: list[ScheduledTaskCreate] | Unset = UNSET
+    triggers: list[TriggerCreate] | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.memory_store_resource import MemoryStoreResource
@@ -121,12 +120,12 @@ class SessionCreate:
 
                 resources.append(resources_item)
 
-        scheduled_tasks: list[dict[str, Any]] | Unset = UNSET
-        if not isinstance(self.scheduled_tasks, Unset):
-            scheduled_tasks = []
-            for scheduled_tasks_item_data in self.scheduled_tasks:
-                scheduled_tasks_item = scheduled_tasks_item_data.to_dict()
-                scheduled_tasks.append(scheduled_tasks_item)
+        triggers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.triggers, Unset):
+            triggers = []
+            for triggers_item_data in self.triggers:
+                triggers_item = triggers_item_data.to_dict()
+                triggers.append(triggers_item)
 
         field_dict: dict[str, Any] = {}
 
@@ -154,8 +153,8 @@ class SessionCreate:
             field_dict["initial_message"] = initial_message
         if resources is not UNSET:
             field_dict["resources"] = resources
-        if scheduled_tasks is not UNSET:
-            field_dict["scheduled_tasks"] = scheduled_tasks
+        if triggers is not UNSET:
+            field_dict["triggers"] = triggers
 
         return field_dict
 
@@ -163,9 +162,9 @@ class SessionCreate:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.github_repository_resource import GithubRepositoryResource
         from ..models.memory_store_resource import MemoryStoreResource
-        from ..models.scheduled_task_create import ScheduledTaskCreate
         from ..models.session_create_env import SessionCreateEnv
         from ..models.session_create_metadata import SessionCreateMetadata
+        from ..models.trigger_create import TriggerCreate
 
         d = dict(src_dict)
         agent_id = d.pop("agent_id")
@@ -253,16 +252,14 @@ class SessionCreate:
 
                 resources.append(resources_item)
 
-        _scheduled_tasks = d.pop("scheduled_tasks", UNSET)
-        scheduled_tasks: list[ScheduledTaskCreate] | Unset = UNSET
-        if _scheduled_tasks is not UNSET:
-            scheduled_tasks = []
-            for scheduled_tasks_item_data in _scheduled_tasks:
-                scheduled_tasks_item = ScheduledTaskCreate.from_dict(
-                    scheduled_tasks_item_data
-                )
+        _triggers = d.pop("triggers", UNSET)
+        triggers: list[TriggerCreate] | Unset = UNSET
+        if _triggers is not UNSET:
+            triggers = []
+            for triggers_item_data in _triggers:
+                triggers_item = TriggerCreate.from_dict(triggers_item_data)
 
-                scheduled_tasks.append(scheduled_tasks_item)
+                triggers.append(triggers_item)
 
         session_create = cls(
             agent_id=agent_id,
@@ -276,7 +273,7 @@ class SessionCreate:
             env=env,
             initial_message=initial_message,
             resources=resources,
-            scheduled_tasks=scheduled_tasks,
+            triggers=triggers,
         )
 
         return session_create

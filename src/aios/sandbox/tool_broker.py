@@ -250,7 +250,7 @@ class ToolBroker:
     async def _post_session_message(self, request: Request) -> Response:
         """Append a user-role message to the owning session and wake it.
 
-        Escalation primitive used by scheduled_tasks (#636): a cron-fired
+        Escalation primitive used by a trigger's ``sandbox_command``: a
         bash script POSTs here to deliver a user-role event back into
         its session, which causes the next step to run with the model
         seeing the new message. The per-session secret in the URL path

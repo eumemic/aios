@@ -522,73 +522,111 @@ def tool_confirm(
     run_or_die(_run)
 
 
-# ─── scheduled tasks sub-app ───────────────────────────────────────────────
+# ─── triggers sub-app ──────────────────────────────────────────────────────
 
 
-scheduled_tasks_app = typer.Typer(
-    name="scheduled-tasks",
-    help="Manage a session's cron-fired scheduled tasks (#636).",
+triggers_app = typer.Typer(
+    name="triggers",
+    help="Manage a session's triggers (a source that fires + an action that runs).",
     no_args_is_help=True,
 )
-app.add_typer(scheduled_tasks_app)
+app.add_typer(triggers_app)
 
-_SCHED_COLS = ("id", "name", "trigger", "enabled", "next_fire", "last_fire_status")
+_TRIGGER_COLS = ("id", "name", "source", "action", "enabled", "next_fire", "last_fire_status")
 
 
-def _trigger_summary(row: dict[str, Any]) -> str:
-    """Synthesize the ``trigger`` cell for a scheduled-task row.
+def _source_summary(row: dict[str, Any]) -> str:
+    """Synthesize the ``source`` cell for a trigger row.
 
-    Three shapes:
-      - ``wake: <reason>`` for one-shot rows tagged ``metadata.kind == "wake"``
-        (created by the ``schedule_wake`` tool); reason is more useful than
-        the underlying curl.
-      - ``cron: <expr>`` for recurring rows.
-      - ``once @ <fire_at>`` for raw one-shot bash rows.
+    ``wake: <reason>`` for one-shot rows tagged ``metadata.kind == "wake"``
+    (created by ``schedule_wake``); otherwise ``cron: <expr>`` or
+    ``once @ <fire_at>`` from the source object.
     """
     metadata = row.get("metadata") or {}
     if isinstance(metadata, dict) and metadata.get("kind") == "wake":
         reason = metadata.get("reason") or ""
         return f"wake: {reason}" if reason else "wake"
-    schedule = row.get("schedule")
-    if schedule:
-        return f"cron: {schedule}"
-    fire_at = row.get("fire_at")
-    if fire_at:
-        return f"once @ {fire_at}"
+    source = row.get("source") or {}
+    if isinstance(source, dict):
+        if source.get("kind") == "cron":
+            return f"cron: {source.get('schedule')}"
+        if source.get("kind") == "one_shot":
+            return f"once @ {source.get('fire_at')}"
     return ""
 
 
-@scheduled_tasks_app.command("list", help="List scheduled tasks for a session.")
-@covers("list_scheduled_tasks")
-def scheduled_tasks_list(ctx: typer.Context, session_id: str) -> None:
+def _action_summary(row: dict[str, Any]) -> str:
+    """Synthesize the ``action`` cell: kind + a short command/content preview."""
+    action = row.get("action") or {}
+    if not isinstance(action, dict):
+        return ""
+    kind = action.get("kind")
+    if kind == "sandbox_command":
+        return f"sandbox: {_preview(action.get('command') or '')}"
+    if kind == "wake_owner":
+        return f"wake_owner: {_preview(action.get('content') or '')}"
+    return str(kind or "")
+
+
+def _preview(text: str, limit: int = 40) -> str:
+    # Collapse newlines (a literal newline breaks the table cell) then defer
+    # to the shared truncator so we don't grow a fourth ellipsis helper.
+    return _compact(text.replace("\n", " "), limit)
+
+
+def _build_source(cron: str | None, at: str | None) -> dict[str, Any] | None:
+    """One of ``--cron`` / ``--at`` → a source object; None if not exactly one."""
+    if (cron is None) == (at is None):
+        return None
+    if cron is not None:
+        return {"kind": "cron", "schedule": cron}
+    return {"kind": "one_shot", "fire_at": at}
+
+
+def _build_action(command: str | None, wake_content: str | None) -> dict[str, Any] | None:
+    """One of ``--command`` / ``--wake-content`` → an action object."""
+    if (command is None) == (wake_content is None):
+        return None
+    if command is not None:
+        return {"kind": "sandbox_command", "command": command}
+    return {"kind": "wake_owner", "content": wake_content}
+
+
+@triggers_app.command("list", help="List triggers for a session.")
+@covers("list_triggers")
+def triggers_list(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
         state, client = with_client(ctx)
         with client:
-            envelope = client.request("GET", f"/v1/sessions/{session_id}/scheduled-tasks")
-        # Annotate each row with the synthesized ``trigger`` cell before
-        # the renderer reads its columns. JSON output keeps the raw shape
-        # — only the table view collapses ``schedule`` / ``fire_at`` /
-        # metadata into one human-friendly line.
+            envelope = client.request("GET", f"/v1/sessions/{session_id}/triggers")
+        # Annotate each row with the synthesized source/action cells before
+        # the renderer reads its columns. JSON output keeps the raw shape.
         if state.output_format != "json":
             data = envelope.get("data") or []
             for row in data:
                 if isinstance(row, dict):
-                    row["trigger"] = _trigger_summary(row)
-        render_list(state.output_format, envelope, columns=_SCHED_COLS)
+                    row["source"] = _source_summary(row)
+                    row["action"] = _action_summary(row)
+        render_list(state.output_format, envelope, columns=_TRIGGER_COLS)
 
     run_or_die(_run)
 
 
-@scheduled_tasks_app.command("add", help="Add a scheduled task to a session.")
-@covers("create_scheduled_task")
-def scheduled_tasks_add(
+@triggers_app.command("add", help="Add a trigger to a session.")
+@covers("create_trigger")
+def triggers_add(
     ctx: typer.Context,
     session_id: str,
     name: Annotated[str | None, typer.Option("--name")] = None,
-    schedule: Annotated[str | None, typer.Option("--schedule", help="Cron expression.")] = None,
-    command: Annotated[str | None, typer.Option("--command", help="Bash command.")] = None,
+    cron: Annotated[str | None, typer.Option("--cron", help="Cron expression (source).")] = None,
+    at: Annotated[
+        str | None, typer.Option("--at", help="One-shot ISO 8601 fire time (source).")
+    ] = None,
+    command: Annotated[str | None, typer.Option("--command", help="Bash command (action).")] = None,
+    wake_content: Annotated[
+        str | None, typer.Option("--wake-content", help="wake_owner message (action).")
+    ] = None,
     enabled: Annotated[bool, typer.Option("--enabled/--disabled")] = True,
-    timeout_seconds: Annotated[int | None, typer.Option("--timeout-seconds")] = None,
     file: Annotated[Path | None, typer.Option("--file")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
     data: Annotated[str | None, typer.Option("--data")] = None,
@@ -597,55 +635,54 @@ def scheduled_tasks_add(
         if any([file, stdin, data]):
             payload = load_payload(file, stdin, data)
         else:
-            if not (name and schedule and command):
+            if not name:
                 print_error(
-                    "either provide --name + --schedule + --command, or supply a full "
-                    "payload via --file/--stdin/--data."
+                    "provide --name plus a source (--cron or --at) and an action "
+                    "(--command or --wake-content), or a full payload via "
+                    "--file/--stdin/--data."
                 )
                 return 64
-            payload = {
-                "name": name,
-                "schedule": schedule,
-                "command": command,
-                "enabled": enabled,
-            }
-            if timeout_seconds is not None:
-                payload["timeout_seconds"] = timeout_seconds
+            source = _build_source(cron, at)
+            if source is None:
+                print_error("provide exactly one source: --cron <expr> or --at <iso>.")
+                return 64
+            action = _build_action(command, wake_content)
+            if action is None:
+                print_error(
+                    "provide exactly one action: --command <bash> or --wake-content <text>."
+                )
+                return 64
+            payload = {"name": name, "source": source, "action": action, "enabled": enabled}
         client = just_client(ctx)
         with client:
-            obj = client.request(
-                "POST", f"/v1/sessions/{session_id}/scheduled-tasks", json_body=payload
-            )
+            obj = client.request("POST", f"/v1/sessions/{session_id}/triggers", json_body=payload)
         render_single(obj)
         return None
 
     run_or_die(_run)
 
 
-@scheduled_tasks_app.command("remove", help="Remove a scheduled task by name.")
-@covers("delete_scheduled_task")
-def scheduled_tasks_remove(ctx: typer.Context, session_id: str, name: str) -> None:
+@triggers_app.command("remove", help="Remove a trigger by name.")
+@covers("delete_trigger")
+def triggers_remove(ctx: typer.Context, session_id: str, name: str) -> None:
     def _run() -> None:
         client = just_client(ctx)
         with client:
-            client.request("DELETE", f"/v1/sessions/{session_id}/scheduled-tasks/{name}")
+            client.request("DELETE", f"/v1/sessions/{session_id}/triggers/{name}")
         print_success("removed", name)
 
     run_or_die(_run)
 
 
-@scheduled_tasks_app.command("update", help="Update a scheduled task by name.")
-@covers("update_scheduled_task")
-def scheduled_tasks_update(
+@triggers_app.command("update", help="Update a trigger by name.")
+@covers("update_trigger")
+def triggers_update(
     ctx: typer.Context,
     session_id: str,
     name: str,
-    schedule: Annotated[str | None, typer.Option("--schedule")] = None,
-    command: Annotated[str | None, typer.Option("--command")] = None,
     enabled: Annotated[
         bool | None, typer.Option("--enabled/--disabled", show_default=False)
     ] = None,
-    timeout_seconds: Annotated[int | None, typer.Option("--timeout-seconds")] = None,
     file: Annotated[Path | None, typer.Option("--file")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
     data: Annotated[str | None, typer.Option("--data")] = None,
@@ -655,22 +692,20 @@ def scheduled_tasks_update(
             payload = load_payload(file, stdin, data)
         else:
             payload = {}
-            if schedule is not None:
-                payload["schedule"] = schedule
-            if command is not None:
-                payload["command"] = command
             if enabled is not None:
                 payload["enabled"] = enabled
-            if timeout_seconds is not None:
-                payload["timeout_seconds"] = timeout_seconds
             if not payload:
-                print_error("provide at least one field to update")
+                print_error(
+                    "provide --enabled/--disabled, or a full payload via "
+                    "--file/--stdin/--data (source/action replace the stored object "
+                    "wholesale — fetch current values via `triggers list`)."
+                )
                 return 64
         client = just_client(ctx)
         with client:
             obj = client.request(
                 "PUT",
-                f"/v1/sessions/{session_id}/scheduled-tasks/{name}",
+                f"/v1/sessions/{session_id}/triggers/{name}",
                 json_body=payload,
             )
         render_single(obj)

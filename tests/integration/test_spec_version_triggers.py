@@ -8,10 +8,12 @@ mutation of those tables bumps the owning session's ``spec_version`` so
 the worker's :class:`aios.sandbox.registry.SandboxRegistry` can detect
 drift on a warm hit and recycle the cached sandbox.
 
-Tables that do NOT feed the sandbox spec
-(``session_scheduled_tasks``, ``session_vaults``) deliberately have no
-bump trigger; two negative tests pin that exclusion and prove no
-conflict with migration 0059's NOTIFY trigger on scheduled tasks.
+``triggers`` (renamed from ``session_scheduled_tasks`` in #818) does NOT feed
+the sandbox spec and deliberately has no bump trigger — a negative test pins
+that and proves no conflict with the NOTIFY trigger on ``triggers``
+(migration 0083, formerly 0059's ``session_scheduled_tasks`` trigger).
+``session_vaults`` DOES now feed the plan (#873 env-var credentials), so it
+gets a bump trigger (migration 0082).
 
 The tests poke the resource tables with raw SQL so each OLD/NEW path of
 the trigger is exercised directly, independent of service-layer logic.
@@ -208,23 +210,27 @@ async def test_github_repo_update_bumps_spec_version(
 # ── exclusions: tables that don't feed build_spec_from_session ──────────────
 
 
-async def test_scheduled_task_insert_does_not_bump_spec_version(
+async def test_trigger_insert_does_not_bump_spec_version(
     pool_and_session: tuple[asyncpg.Pool[Any], str],
 ) -> None:
-    """Scheduled tasks are read per-turn by the runner, not via
-    build_spec_from_session — no bump trigger. Also proves migration
-    0077 didn't collide with 0059's NOTIFY trigger on the same table."""
+    """Triggers are read per-fire by the runner, not via
+    build_spec_from_session — no bump trigger. Also proves migration 0077
+    doesn't collide with the NOTIFY trigger on the renamed ``triggers``
+    table (#818)."""
     pool, session_id = pool_and_session
     before = await _spec_version(pool, session_id)
 
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO session_scheduled_tasks
-                (id, session_id, account_id, name, schedule, command, enabled,
-                 timeout_seconds, max_output_bytes, metadata)
-            VALUES ('sched_spec_version_01', $1, $2, 'noop', '* * * * *', 'echo hi',
-                    TRUE, 60, 65536, '{}'::jsonb)
+            INSERT INTO triggers
+                (id, owner_session_id, account_id, name, source, source_spec,
+                 action, enabled, metadata)
+            VALUES ('trig_spec_version_01', $1, $2, 'noop', 'cron',
+                    '{"schedule": "* * * * *"}'::jsonb,
+                    '{"kind": "sandbox_command", "command": "echo hi", '
+                    '"timeout_seconds": 60, "max_output_bytes": 65536}'::jsonb,
+                    TRUE, '{}'::jsonb)
             """,
             session_id,
             _ACCOUNT_ID,

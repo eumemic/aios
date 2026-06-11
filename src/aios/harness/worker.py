@@ -226,9 +226,9 @@ async def worker_main() -> None:
         # Start event-driven scheduler. Sleeps until the next due
         # ``next_fire``, woken early by NOTIFY on
         # ``aios_scheduled_tasks_due`` (insert/delete or
-        # scheduling-relevant UPDATE via the trigger from migration
-        # 0058). On wake, claims due rows and defers
-        # ``run_scheduled_task`` jobs.
+        # scheduling-relevant UPDATE on ``triggers`` via the trigger from
+        # migration 0080; channel name kept byte-identical). On wake, claims
+        # due rows and defers ``run_trigger`` jobs.
         scheduler_task = asyncio.create_task(
             event_driven_scheduler(pool, settings.db_url),
             name="scheduler",

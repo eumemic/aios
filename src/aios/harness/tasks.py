@@ -55,22 +55,27 @@ async def wake_session(
 
 
 @app.task(
-    name="harness.run_scheduled_task",
+    name="harness.run_trigger",
     queue="sessions",
     retry=False,
     pass_context=False,
 )
-async def run_scheduled_task(task_id: str) -> None:
-    """Fire one scheduled-task entry — runs bash in the session's sandbox.
+async def run_trigger(trigger_id: str) -> None:
+    """Fire one trigger — runs its action (sandbox_command or wake_owner).
 
-    Per-task ``queueing_lock`` (set by the scheduler tick at defer time)
-    deduplicates pending fires. No decorator-level ``lock`` — cron fires
-    must not block concurrent session inference; overlap-prevention is
-    enforced upstream via the ``running_since`` column on the row.
+    Per-trigger ``queueing_lock`` (set by the scheduler tick at defer time)
+    deduplicates pending fires. No decorator-level ``lock`` — fires must not
+    block concurrent session inference; overlap-prevention is enforced
+    upstream via the ``running_since`` column on the row.
+
+    Renamed from ``harness.run_scheduled_task`` (#818, delete-don't-deprecate).
+    Deploy-window caveat: a job enqueued pre-restart under the old name
+    fails task-lookup; the claimed row recovers via stale-recovery (~2h
+    worst case, sub-second on a lockstep drain-and-restart).
     """
-    from aios.harness.scheduled_task_runner import run_scheduled_task_step
+    from aios.harness.trigger_runner import run_trigger_step
 
-    await run_scheduled_task_step(task_id)
+    await run_trigger_step(trigger_id)
 
 
 @app.task(

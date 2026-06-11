@@ -9,22 +9,22 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
-    from ..models.scheduled_task_echo import ScheduledTaskEcho
+    from ..models.trigger_echo import TriggerEcho
 
 
-T = TypeVar("T", bound="ListResponseScheduledTaskEcho")
+T = TypeVar("T", bound="ListResponseTriggerEcho")
 
 
 @_attrs_define
-class ListResponseScheduledTaskEcho:
+class ListResponseTriggerEcho:
     """
     Attributes:
-        data (list[ScheduledTaskEcho]):
+        data (list[TriggerEcho]):
         has_more (bool | Unset):  Default: False.
         next_cursor (None | str | Unset):
     """
 
-    data: list[ScheduledTaskEcho]
+    data: list[TriggerEcho]
     has_more: bool | Unset = False
     next_cursor: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -59,13 +59,13 @@ class ListResponseScheduledTaskEcho:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.scheduled_task_echo import ScheduledTaskEcho
+        from ..models.trigger_echo import TriggerEcho
 
         d = dict(src_dict)
         data = []
         _data = d.pop("data")
         for data_item_data in _data:
-            data_item = ScheduledTaskEcho.from_dict(data_item_data)
+            data_item = TriggerEcho.from_dict(data_item_data)
 
             data.append(data_item)
 
@@ -80,14 +80,14 @@ class ListResponseScheduledTaskEcho:
 
         next_cursor = _parse_next_cursor(d.pop("next_cursor", UNSET))
 
-        list_response_scheduled_task_echo = cls(
+        list_response_trigger_echo = cls(
             data=data,
             has_more=has_more,
             next_cursor=next_cursor,
         )
 
-        list_response_scheduled_task_echo.additional_properties = d
-        return list_response_scheduled_task_echo
+        list_response_trigger_echo.additional_properties = d
+        return list_response_trigger_echo
 
     @property
     def additional_keys(self) -> list[str]:

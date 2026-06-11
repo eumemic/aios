@@ -27,13 +27,13 @@ from aios.tools import grep as _grep  # noqa: F401
 from aios.tools import http_request as _http_request  # noqa: F401
 from aios.tools import list_related_sessions as _list_related_sessions  # noqa: F401
 from aios.tools import read as _read  # noqa: F401
-from aios.tools import schedule_task_add as _schedule_task_add  # noqa: F401
-from aios.tools import schedule_task_list as _schedule_task_list  # noqa: F401
-from aios.tools import schedule_task_remove as _schedule_task_remove  # noqa: F401
-from aios.tools import schedule_task_update as _schedule_task_update  # noqa: F401
 from aios.tools import schedule_wake as _schedule_wake  # noqa: F401
 from aios.tools import search_events as _search_events  # noqa: F401
 from aios.tools import switch_channel as _switch_channel  # noqa: F401
+from aios.tools import trigger_create as _trigger_create  # noqa: F401
+from aios.tools import trigger_list as _trigger_list  # noqa: F401
+from aios.tools import trigger_remove as _trigger_remove  # noqa: F401
+from aios.tools import trigger_update as _trigger_update  # noqa: F401
 from aios.tools import wake_self as _wake_self  # noqa: F401
 from aios.tools import wake_session as _wake_session  # noqa: F401
 from aios.tools import web_fetch as _web_fetch  # noqa: F401

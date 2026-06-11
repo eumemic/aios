@@ -8,83 +8,78 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
-from ..models.scheduled_task_echo_last_fire_status_type_0 import (
-    ScheduledTaskEchoLastFireStatusType0,
-)
+from ..models.trigger_echo_last_fire_status_type_0 import TriggerEchoLastFireStatusType0
 
 if TYPE_CHECKING:
-    from ..models.scheduled_task_echo_metadata import ScheduledTaskEchoMetadata
+    from ..models.cron_source import CronSource
+    from ..models.one_shot_source import OneShotSource
+    from ..models.sandbox_command_action import SandboxCommandAction
+    from ..models.trigger_echo_metadata import TriggerEchoMetadata
+    from ..models.wake_owner_action import WakeOwnerAction
 
 
-T = TypeVar("T", bound="ScheduledTaskEcho")
+T = TypeVar("T", bound="TriggerEcho")
 
 
 @_attrs_define
-class ScheduledTaskEcho:
-    """Read view of a scheduled task as echoed on ``Session.scheduled_tasks``.
+class TriggerEcho:
+    """Read view of a trigger as echoed on ``Session.triggers``.
 
-    Exactly one of ``schedule`` (cron) or ``fire_at`` (one-shot) is set.
     Runtime fields (``last_fire_at`` / ``last_fire_status`` /
     ``consecutive_failures``) reflect the most recent fire outcome.
-    ``running_since`` is internal scheduler bookkeeping and is not
-    exposed here.
+    ``running_since`` is internal scheduler bookkeeping and is not exposed
+    here.
 
         Attributes:
             id (str):
             name (str):
-            schedule (None | str):
-            fire_at (datetime.datetime | None):
-            command (str):
+            source (CronSource | OneShotSource):
+            action (SandboxCommandAction | WakeOwnerAction):
             enabled (bool):
-            timeout_seconds (int):
-            max_output_bytes (int):
             next_fire (datetime.datetime | None):
             last_fire_at (datetime.datetime | None):
-            last_fire_status (None | ScheduledTaskEchoLastFireStatusType0):
+            last_fire_status (None | TriggerEchoLastFireStatusType0):
             consecutive_failures (int):
-            metadata (ScheduledTaskEchoMetadata):
+            metadata (TriggerEchoMetadata):
             created_at (datetime.datetime):
             updated_at (datetime.datetime):
     """
 
     id: str
     name: str
-    schedule: None | str
-    fire_at: datetime.datetime | None
-    command: str
+    source: CronSource | OneShotSource
+    action: SandboxCommandAction | WakeOwnerAction
     enabled: bool
-    timeout_seconds: int
-    max_output_bytes: int
     next_fire: datetime.datetime | None
     last_fire_at: datetime.datetime | None
-    last_fire_status: None | ScheduledTaskEchoLastFireStatusType0
+    last_fire_status: None | TriggerEchoLastFireStatusType0
     consecutive_failures: int
-    metadata: ScheduledTaskEchoMetadata
+    metadata: TriggerEchoMetadata
     created_at: datetime.datetime
     updated_at: datetime.datetime
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.cron_source import CronSource
+        from ..models.sandbox_command_action import SandboxCommandAction
+
         id = self.id
 
         name = self.name
 
-        schedule: None | str
-        schedule = self.schedule
-
-        fire_at: None | str
-        if isinstance(self.fire_at, datetime.datetime):
-            fire_at = self.fire_at.isoformat()
+        source: dict[str, Any]
+        if isinstance(self.source, CronSource):
+            source = self.source.to_dict()
         else:
-            fire_at = self.fire_at
+            source = self.source.to_dict()
 
-        command = self.command
+        action: dict[str, Any]
+        if isinstance(self.action, SandboxCommandAction):
+            action = self.action.to_dict()
+        else:
+            action = self.action.to_dict()
 
         enabled = self.enabled
-
-        timeout_seconds = self.timeout_seconds
-
-        max_output_bytes = self.max_output_bytes
 
         next_fire: None | str
         if isinstance(self.next_fire, datetime.datetime):
@@ -99,7 +94,7 @@ class ScheduledTaskEcho:
             last_fire_at = self.last_fire_at
 
         last_fire_status: None | str
-        if isinstance(self.last_fire_status, ScheduledTaskEchoLastFireStatusType0):
+        if isinstance(self.last_fire_status, TriggerEchoLastFireStatusType0):
             last_fire_status = self.last_fire_status.value
         else:
             last_fire_status = self.last_fire_status
@@ -118,12 +113,9 @@ class ScheduledTaskEcho:
             {
                 "id": id,
                 "name": name,
-                "schedule": schedule,
-                "fire_at": fire_at,
-                "command": command,
+                "source": source,
+                "action": action,
                 "enabled": enabled,
-                "timeout_seconds": timeout_seconds,
-                "max_output_bytes": max_output_bytes,
                 "next_fire": next_fire,
                 "last_fire_at": last_fire_at,
                 "last_fire_status": last_fire_status,
@@ -138,42 +130,52 @@ class ScheduledTaskEcho:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.scheduled_task_echo_metadata import ScheduledTaskEchoMetadata
+        from ..models.cron_source import CronSource
+        from ..models.one_shot_source import OneShotSource
+        from ..models.sandbox_command_action import SandboxCommandAction
+        from ..models.trigger_echo_metadata import TriggerEchoMetadata
+        from ..models.wake_owner_action import WakeOwnerAction
 
         d = dict(src_dict)
         id = d.pop("id")
 
         name = d.pop("name")
 
-        def _parse_schedule(data: object) -> None | str:
-            if data is None:
-                return data
-            return cast(None | str, data)
-
-        schedule = _parse_schedule(d.pop("schedule"))
-
-        def _parse_fire_at(data: object) -> datetime.datetime | None:
-            if data is None:
-                return data
+        def _parse_source(data: object) -> CronSource | OneShotSource:
             try:
-                if not isinstance(data, str):
+                if not isinstance(data, dict):
                     raise TypeError()
-                fire_at_type_0 = isoparse(data)
+                source_type_0 = CronSource.from_dict(data)
 
-                return fire_at_type_0
+                return source_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(datetime.datetime | None, data)
+            if not isinstance(data, dict):
+                raise TypeError()
+            source_type_1 = OneShotSource.from_dict(data)
 
-        fire_at = _parse_fire_at(d.pop("fire_at"))
+            return source_type_1
 
-        command = d.pop("command")
+        source = _parse_source(d.pop("source"))
+
+        def _parse_action(data: object) -> SandboxCommandAction | WakeOwnerAction:
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                action_type_0 = SandboxCommandAction.from_dict(data)
+
+                return action_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            if not isinstance(data, dict):
+                raise TypeError()
+            action_type_1 = WakeOwnerAction.from_dict(data)
+
+            return action_type_1
+
+        action = _parse_action(d.pop("action"))
 
         enabled = d.pop("enabled")
-
-        timeout_seconds = d.pop("timeout_seconds")
-
-        max_output_bytes = d.pop("max_output_bytes")
 
         def _parse_next_fire(data: object) -> datetime.datetime | None:
             if data is None:
@@ -207,38 +209,35 @@ class ScheduledTaskEcho:
 
         def _parse_last_fire_status(
             data: object,
-        ) -> None | ScheduledTaskEchoLastFireStatusType0:
+        ) -> None | TriggerEchoLastFireStatusType0:
             if data is None:
                 return data
             try:
                 if not isinstance(data, str):
                     raise TypeError()
-                last_fire_status_type_0 = ScheduledTaskEchoLastFireStatusType0(data)
+                last_fire_status_type_0 = TriggerEchoLastFireStatusType0(data)
 
                 return last_fire_status_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(None | ScheduledTaskEchoLastFireStatusType0, data)
+            return cast(None | TriggerEchoLastFireStatusType0, data)
 
         last_fire_status = _parse_last_fire_status(d.pop("last_fire_status"))
 
         consecutive_failures = d.pop("consecutive_failures")
 
-        metadata = ScheduledTaskEchoMetadata.from_dict(d.pop("metadata"))
+        metadata = TriggerEchoMetadata.from_dict(d.pop("metadata"))
 
         created_at = isoparse(d.pop("created_at"))
 
         updated_at = isoparse(d.pop("updated_at"))
 
-        scheduled_task_echo = cls(
+        trigger_echo = cls(
             id=id,
             name=name,
-            schedule=schedule,
-            fire_at=fire_at,
-            command=command,
+            source=source,
+            action=action,
             enabled=enabled,
-            timeout_seconds=timeout_seconds,
-            max_output_bytes=max_output_bytes,
             next_fire=next_fire,
             last_fire_at=last_fire_at,
             last_fire_status=last_fire_status,
@@ -248,8 +247,8 @@ class ScheduledTaskEcho:
             updated_at=updated_at,
         )
 
-        scheduled_task_echo.additional_properties = d
-        return scheduled_task_echo
+        trigger_echo.additional_properties = d
+        return trigger_echo
 
     @property
     def additional_keys(self) -> list[str]:

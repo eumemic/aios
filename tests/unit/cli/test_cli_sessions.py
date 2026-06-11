@@ -17,57 +17,75 @@ from aios.cli.app import app
 runner = CliRunner()
 
 
-class TestTriggerSummary:
-    """The ``_trigger_summary`` helper that synthesizes the ``trigger`` cell
-    on ``aios scheduled-tasks list``."""
+class TestSourceSummary:
+    """The ``_source_summary`` helper synthesizing the ``source`` cell on
+    ``aios sessions triggers list``."""
 
     def test_wake_metadata_shapes_to_wake_reason(self) -> None:
-        from aios.cli.commands.sessions import _trigger_summary
+        from aios.cli.commands.sessions import _source_summary
 
         row = {
-            "schedule": None,
-            "fire_at": "2026-05-23T15:00:00Z",
+            "source": {"kind": "one_shot", "fire_at": "2026-05-23T15:00:00Z"},
             "metadata": {"kind": "wake", "reason": "check tesla"},
         }
-        assert _trigger_summary(row) == "wake: check tesla"
+        assert _source_summary(row) == "wake: check tesla"
 
     def test_wake_metadata_without_reason(self) -> None:
-        from aios.cli.commands.sessions import _trigger_summary
+        from aios.cli.commands.sessions import _source_summary
 
         row = {
-            "schedule": None,
-            "fire_at": "2026-05-23T15:00:00Z",
+            "source": {"kind": "one_shot", "fire_at": "2026-05-23T15:00:00Z"},
             "metadata": {"kind": "wake"},
         }
-        assert _trigger_summary(row) == "wake"
+        assert _source_summary(row) == "wake"
 
     def test_cron_row(self) -> None:
-        from aios.cli.commands.sessions import _trigger_summary
+        from aios.cli.commands.sessions import _source_summary
 
         row: dict[str, Any] = {
-            "schedule": "*/5 * * * *",
-            "fire_at": None,
+            "source": {"kind": "cron", "schedule": "*/5 * * * *"},
             "metadata": {},
         }
-        assert _trigger_summary(row) == "cron: */5 * * * *"
+        assert _source_summary(row) == "cron: */5 * * * *"
 
     def test_raw_one_shot(self) -> None:
-        from aios.cli.commands.sessions import _trigger_summary
+        from aios.cli.commands.sessions import _source_summary
 
         row: dict[str, Any] = {
-            "schedule": None,
-            "fire_at": "2026-05-23T15:00:00Z",
+            "source": {"kind": "one_shot", "fire_at": "2026-05-23T15:00:00Z"},
             "metadata": {},
         }
-        assert _trigger_summary(row) == "once @ 2026-05-23T15:00:00Z"
+        assert _source_summary(row) == "once @ 2026-05-23T15:00:00Z"
 
     def test_missing_metadata_dict(self) -> None:
-        from aios.cli.commands.sessions import _trigger_summary
+        from aios.cli.commands.sessions import _source_summary
 
-        # ``metadata`` may be ``None`` or absent on legacy rows; handle without
-        # raising.
-        row = {"schedule": "0 9 * * *", "fire_at": None}
-        assert _trigger_summary(row) == "cron: 0 9 * * *"
+        # ``metadata`` may be ``None`` or absent; handle without raising.
+        row = {"source": {"kind": "cron", "schedule": "0 9 * * *"}}
+        assert _source_summary(row) == "cron: 0 9 * * *"
+
+
+class TestActionSummary:
+    """The ``_action_summary`` helper synthesizing the ``action`` cell."""
+
+    def test_sandbox_command(self) -> None:
+        from aios.cli.commands.sessions import _action_summary
+
+        row: dict[str, Any] = {"action": {"kind": "sandbox_command", "command": "echo hi"}}
+        assert _action_summary(row) == "sandbox: echo hi"
+
+    def test_wake_owner(self) -> None:
+        from aios.cli.commands.sessions import _action_summary
+
+        row: dict[str, Any] = {"action": {"kind": "wake_owner", "content": "wake up"}}
+        assert _action_summary(row) == "wake_owner: wake up"
+
+    def test_long_command_truncated(self) -> None:
+        from aios.cli.commands.sessions import _action_summary
+
+        row: dict[str, Any] = {"action": {"kind": "sandbox_command", "command": "x" * 100}}
+        assert _action_summary(row).startswith("sandbox: ")
+        assert _action_summary(row).endswith("…")
 
 
 def test_delete_refuses_without_yes_and_makes_no_request(mocked_cli):

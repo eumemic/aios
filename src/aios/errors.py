@@ -102,7 +102,7 @@ class ForbiddenError(AiosError):
 class RateLimitedError(AiosError):
     """A resource-cap ceiling was reached.
 
-    Raised for the scheduled-tasks caps (``Settings.scheduled_tasks_per_account_max``
+    Raised for the triggers caps (``Settings.triggers_per_account_max``
     + the per-session cap) and the workflow-run fan-out caps
     (``Settings.workflow_runs_per_launcher_max`` / ``workflow_runs_per_account_max``).
     Intentionally general so future caps (active sessions, MCP connections, etc.)

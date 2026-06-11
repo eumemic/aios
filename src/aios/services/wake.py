@@ -50,8 +50,8 @@ async def defer_wake(
     path (``cause="reschedule"``) and the connector-inbound debounce path
     (``cause="inbound"``, gated by the ``inbound_debounce_seconds`` setting);
     the user-visible scheduled-wake feature now goes through
-    :mod:`aios.tools.schedule_wake` and creates one-shot scheduled_tasks
-    rows instead.
+    :mod:`aios.tools.schedule_wake` and creates one-shot triggers
+    instead.
 
     Appends a ``wake_deferred`` span event before enqueuing — emitted
     regardless of whether procrastinate coalesces this deferral with
