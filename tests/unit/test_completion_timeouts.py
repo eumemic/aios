@@ -20,27 +20,6 @@ import pytest
 from aios.harness import completion
 
 
-class _StallingResponse:
-    """Async iterator that yields one chunk then awaits forever.
-
-    Mimics a streaming model response that produced an initial token
-    burst and then stalled — the failure mode our timeout fixes.
-    """
-
-    def __init__(self) -> None:
-        self._first_yielded = False
-
-    def __aiter__(self) -> _StallingResponse:
-        return self
-
-    async def __anext__(self) -> object:
-        if not self._first_yielded:
-            self._first_yielded = True
-            return _make_chunk("hello")
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-
 class _RecordingResponse:
     """Async iterator that records whether ``aclose()`` was called.
 
@@ -134,11 +113,18 @@ async def test_stream_litellm_raises_timeout_on_stalled_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A streaming response that hangs after the first chunk must raise
-    ``TimeoutError`` once the per-chunk inactivity bound elapses."""
+    ``TimeoutError`` once the per-chunk inactivity bound elapses.
+
+    Also verifies that when the inter-chunk guard fires, the litellm stream
+    wrapper is closed (``aclose`` called) before ``TimeoutError`` propagates,
+    so the underlying httpx socket is released rather than leaked until GC
+    (issue #855)."""
     monkeypatch.setattr(completion, "_STREAM_INTER_CHUNK_TIMEOUT_S", 0.1)
 
-    async def fake_acompletion(**kwargs: object) -> _StallingResponse:
-        return _StallingResponse()
+    resp = _RecordingResponse([_make_chunk("hello")], stall=True)
+
+    async def fake_acompletion(**kwargs: object) -> _RecordingResponse:
+        return resp
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
@@ -149,6 +135,8 @@ async def test_stream_litellm_raises_timeout_on_stalled_stream(
             pool=_StubPool(),
             session_id="sess_test",
         )
+
+    assert resp.aclose_count == 1
 
 
 @pytest.mark.asyncio
@@ -373,33 +361,6 @@ async def test_stream_litellm_raises_typed_error_on_zero_chunks(
         f"error message must name the failure mode (empty/no-chunks/zero); "
         f"got {type(excinfo.value).__name__}: {msg!r}"
     )
-
-
-@pytest.mark.asyncio
-async def test_stream_litellm_closes_stream_on_inter_chunk_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the inter-chunk guard fires, the litellm stream wrapper must be
-    closed (``aclose`` called) before ``TimeoutError`` propagates — otherwise
-    the underlying httpx socket leaks until GC (issue #855)."""
-    monkeypatch.setattr(completion, "_STREAM_INTER_CHUNK_TIMEOUT_S", 0.1)
-
-    resp = _RecordingResponse([_make_chunk("hello")], stall=True)
-
-    async def fake_acompletion(**kwargs: object) -> _RecordingResponse:
-        return resp
-
-    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
-
-    with pytest.raises(TimeoutError):
-        await completion.stream_litellm(
-            model="anthropic/claude-sonnet-4-6",
-            messages=[{"role": "user", "content": "ping"}],
-            pool=_StubPool(),
-            session_id="sess_test",
-        )
-
-    assert resp.aclose_count == 1
 
 
 @pytest.mark.asyncio
