@@ -23,6 +23,52 @@ import pytest
 from aios.harness import worker as worker_mod
 
 
+class TestResolveHeartbeatPath:
+    """``_resolve_heartbeat_path`` must keep the container HEALTHCHECK
+    contract while never handing back a path the host user can't write.
+
+    In a container (``/.dockerenv`` present) the Dockerfile HEALTHCHECK
+    stats ``/var/run/aios-worker-alive``, so that exact path must be
+    returned. On the host the path must fall back to a user-writable
+    temp directory so the periodic touch doesn't EACCES-spam the log
+    every 15 s and so anything consuming the file actually finds it.
+    """
+
+    def test_uses_container_path_when_in_container(self) -> None:
+        with patch.object(worker_mod, "is_running_in_container", return_value=True):
+            assert worker_mod._resolve_heartbeat_path() == Path("/var/run/aios-worker-alive")
+
+    def test_falls_back_to_tmpdir_on_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tempfile
+
+        monkeypatch.delenv("TMPDIR", raising=False)
+        with patch.object(worker_mod, "is_running_in_container", return_value=False):
+            resolved = worker_mod._resolve_heartbeat_path()
+
+        # Never the unwritable container path on the host.
+        assert resolved != Path("/var/run/aios-worker-alive")
+        assert resolved == Path(tempfile.gettempdir()) / "aios-worker-alive"
+
+    def test_host_path_honors_tmpdir_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        with patch.object(worker_mod, "is_running_in_container", return_value=False):
+            resolved = worker_mod._resolve_heartbeat_path()
+
+        assert resolved == tmp_path / "aios-worker-alive"
+
+    def test_host_path_is_writable(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        with patch.object(worker_mod, "is_running_in_container", return_value=False):
+            resolved = worker_mod._resolve_heartbeat_path()
+
+        # The whole point of the fallback: the host user can actually
+        # create the file without EACCES.
+        resolved.touch()
+        assert resolved.exists()
+
+
 class TestPeriodicHeartbeat:
     async def test_touches_file_on_first_iteration(self, tmp_path: Path) -> None:
         target = tmp_path / "alive"
