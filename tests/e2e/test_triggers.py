@@ -1669,6 +1669,37 @@ class TestNotifyTrigger:
             with pytest.raises(TimeoutError):
                 await _asyncio.wait_for(event.wait(), timeout=0.5)
 
+    async def test_next_fire_only_update_emits_notify(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """A pure ``next_fire`` edit (rescheduling a row without touching
+        source/source_spec/enabled/running_since) MUST NOTIFY — migration 0086
+        (#940) added the ``next_fire`` clause so a sleeping scheduler wakes
+        immediately instead of waiting out the heartbeat."""
+        import asyncio as _asyncio
+
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_triggers_due
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        echo = await trig_service.add_trigger(
+            pool, sid, _spec("next_fire_edit"), account_id="acc_test_stub"
+        )
+
+        async with listen_for_triggers_due(get_settings().db_url) as event:
+            event.clear()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE triggers SET next_fire = next_fire + interval '7 minutes' "
+                    "WHERE id = $1",
+                    echo.id,
+                )
+            try:
+                await _asyncio.wait_for(event.wait(), timeout=2.0)
+            except TimeoutError:
+                pytest.fail("next_fire-only update did not produce a NOTIFY within 2s")
+
 
 class TestAdvisoryLockSerializesCapCheck:
     async def test_concurrent_add_at_cap_serialized(
