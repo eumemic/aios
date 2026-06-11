@@ -183,6 +183,49 @@ class TestServerSurvival:
         assert out.http_servers == []
 
 
+class TestSurfaceDiffHttpIdentity:
+    """#939: ``surface_diff``'s http section is keyed on identity ``(name, base_url)``,
+    not full-spec equality — so a route/field divergence on an identically-identified
+    server is NOT flagged (the authoring gate inherits the launcher's frozen routes).
+    Contrast tools/mcp, which stay full-equality keyed checks.
+    """
+
+    def test_surface_diff_http_ignores_route_divergence_when_identity_matches(self) -> None:
+        expected = canon(
+            Surface(
+                [],
+                [],
+                [
+                    HttpServerSpec(
+                        name="api",
+                        base_url="https://api",
+                        routes=[
+                            HttpRouteSpec(
+                                path_pattern="/v1/**",
+                                permission_policy=HttpPermissionPolicy(type="always_ask"),
+                            )
+                        ],
+                    )
+                ],
+            )
+        )
+        # Same (name, base_url) identity, but routes diverge (here: empty).
+        actual = canon(
+            Surface([], [], [HttpServerSpec(name="api", base_url="https://api", routes=[])])
+        )
+        assert surface_diff(expected, actual) == {}
+
+    def test_surface_diff_http_flags_absent_base_url(self) -> None:
+        expected = canon(Surface([], [], [HttpServerSpec(name="api", base_url="https://api")]))
+        actual = canon(Surface([], [], []))
+        assert surface_diff(expected, actual) == {"http_servers": ["api"]}
+
+    def test_surface_diff_http_flags_renamed_server_same_base_url(self) -> None:
+        expected = canon(Surface([], [], [HttpServerSpec(name="api", base_url="https://api")]))
+        actual = canon(Surface([], [], [HttpServerSpec(name="api2", base_url="https://api")]))
+        assert surface_diff(expected, actual) == {"http_servers": ["api"]}
+
+
 # ── MCP toolset normal form ───────────────────────────────────────────────────
 
 
