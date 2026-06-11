@@ -84,6 +84,13 @@ _FS_UNAFFECTED = (
     "github working trees) are unaffected."
 )
 
+# Fresh-base advisory shared by the reset/expired notices (the discard/reset
+# preamble differs; this tail is identical).
+_FS_FRESH_BASE = (
+    "The next command runs on a fresh base filesystem; previously installed "
+    f"packages and tools are gone, reinstall as needed.{_FS_UNAFFECTED}"
+)
+
 
 def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
     """Render an FS-loss lifecycle event as a bracketed user-role notice.
@@ -109,7 +116,7 @@ def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
         )
         return (
             f"[The persisted sandbox filesystem for this session was discarded {cause}. "
-            f"The next command runs on a fresh base filesystem;{_FS_UNAFFECTED}]"
+            f"{_FS_FRESH_BASE}]"
         )
     # sandbox_fs_reset (or any other allowlisted reset-shaped event).
     if reason == "environment_image_changed":
@@ -118,10 +125,7 @@ def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
         detail = "the persisted filesystem could no longer be found"
     else:
         detail = "the persisted filesystem was reset"
-    return (
-        f"[The sandbox filesystem for this session was reset because {detail}. "
-        f"The next command runs on a fresh base filesystem;{_FS_UNAFFECTED}]"
-    )
+    return f"[The sandbox filesystem for this session was reset because {detail}. {_FS_FRESH_BASE}]"
 
 
 # Notification markers truncate the source content to this many chars

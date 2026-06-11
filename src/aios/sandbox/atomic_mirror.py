@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
+from aios.sandbox.volumes import ensure_owned_dir
+
 
 def atomic_write(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` atomically via temp + ``os.replace``.
@@ -21,7 +23,7 @@ def atomic_write(path: Path, content: str) -> None:
     replaced; concurrent readers either see the old or the new content,
     never a partial write.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_owned_dir(path.parent)
     tmp = path.parent / f".tmp.{uuid4().hex}"
     try:
         tmp.write_text(content)
