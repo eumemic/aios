@@ -25,9 +25,10 @@ from telegram import InputFile
 from aios_telegram.connector import (
     TelegramConnector,
     _build_media_group,
+    _chat_type_from_chat_id,
     _classify,
 )
-from tests.conftest import CONNECTION_ID
+from tests.conftest import BOT_ID, CONNECTION_ID
 
 
 def test_classify_extensions() -> None:
@@ -110,8 +111,32 @@ def bot() -> Any:
 
 async def test_telegram_send_text_only(connector: TelegramConnector, bot: Any) -> None:
     result = await connector.telegram_send(text="hello", chat_id="123", connection_id=CONNECTION_ID)
-    assert result == {"message_id": 42}
+    # Result stamps the resolved focal channel + chat_type.  chat_id
+    # "123" is positive → dm per Telegram's sign convention.
+    assert result == {
+        "message_id": 42,
+        "channel": f"telegram/{BOT_ID}/123",
+        "chat_type": "dm",
+    }
     bot.send_message.assert_awaited_once_with(chat_id=123, text="hello", parse_mode=None)
+
+
+def test_chat_type_from_chat_id() -> None:
+    assert _chat_type_from_chat_id(123) == "dm"
+    assert _chat_type_from_chat_id(0) == "dm"
+    assert _chat_type_from_chat_id(-987654321) == "group"
+    # Supergroups/channels use the -100... prefix — still negative → group.
+    assert _chat_type_from_chat_id(-1001234567890) == "group"
+
+
+async def test_telegram_send_group_result_chat_type_group(
+    connector: TelegramConnector, bot: Any
+) -> None:
+    result = await connector.telegram_send(
+        text="hello group", chat_id="-987654321", connection_id=CONNECTION_ID
+    )
+    assert result["channel"] == f"telegram/{BOT_ID}/-987654321"
+    assert result["chat_type"] == "group"
 
 
 async def test_telegram_send_reply_to_message_id_threads_through(
@@ -153,7 +178,11 @@ async def test_telegram_send_single_photo_routes_to_send_photo(
         text="look", attachments=[photo], chat_id="123", connection_id=CONNECTION_ID
     )
 
-    assert result == {"message_id": 43}
+    assert result == {
+        "message_id": 43,
+        "channel": f"telegram/{BOT_ID}/123",
+        "chat_type": "dm",
+    }
     bot.send_photo.assert_awaited_once()
     kwargs = bot.send_photo.call_args.kwargs
     assert kwargs["chat_id"] == 123
@@ -251,7 +280,11 @@ async def test_telegram_send_multi_media_uses_send_media_group(
         connection_id=CONNECTION_ID,
     )
 
-    assert result == {"message_ids": [100, 101]}
+    assert result == {
+        "message_ids": [100, 101],
+        "channel": f"telegram/{BOT_ID}/123",
+        "chat_type": "dm",
+    }
     bot.send_media_group.assert_awaited_once()
     bot.send_photo.assert_not_awaited()
     media = bot.send_media_group.call_args.kwargs["media"]

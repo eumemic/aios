@@ -438,6 +438,14 @@ class TelegramConnector(HttpConnector):
         """
         state = self.state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
+        # Stamp the resolved focal channel + chat_type onto the result so
+        # external observers read the send target directly off the
+        # tool_result event.  Build the channel from the ORIGINAL chat_id
+        # string so the segment is byte-identical to inbound/focal form.
+        base = {
+            "channel": self.focal_channel(str(state.bot_id), chat_id),
+            "chat_type": _chat_type_from_chat_id(chat_id_int),
+        }
 
         body, ptb_parse_mode = _prepare_text(text, parse_mode)
         host_paths: list[Path] = list(attachments or [])
@@ -454,7 +462,7 @@ class TelegramConnector(HttpConnector):
                 parse_mode=ptb_parse_mode,
                 **reply_kwargs,
             )
-            return {"message_id": sent.message_id}
+            return {"message_id": sent.message_id, **base}
 
         if len(host_paths) == 1:
             single = await _send_single_media(
@@ -465,14 +473,14 @@ class TelegramConnector(HttpConnector):
                 parse_mode=ptb_parse_mode,
                 reply_to_message_id=reply_to_message_id,
             )
-            return {"message_id": single.message_id}
+            return {"message_id": single.message_id, **base}
 
         sent_group = await bot.send_media_group(
             chat_id=chat_id_int,
             media=_build_media_group(host_paths, caption=body or None, parse_mode=ptb_parse_mode),
             **reply_kwargs,
         )
-        return {"message_ids": [m.message_id for m in sent_group]}
+        return {"message_ids": [m.message_id for m in sent_group], **base}
 
     @tool()
     async def telegram_typing(
@@ -635,6 +643,13 @@ def _coerce_chat_id(chat_id: str) -> int:
         return int(chat_id)
     except ValueError as e:
         raise ValueError(f"telegram chat_id must be an integer; got {chat_id!r}") from e
+
+
+def _chat_type_from_chat_id(chat_id_int: int) -> Literal["dm", "group"]:
+    # Telegram's chat-id sign convention: positive ids are private chats
+    # (dm); negative ids are groups/supergroups/channels (the -100...
+    # prefix marks supergroups/channels, still negative → group).
+    return "dm" if chat_id_int >= 0 else "group"
 
 
 def _prepare_text(text: str, parse_mode: str) -> tuple[str, str | None]:
