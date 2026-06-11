@@ -69,6 +69,7 @@ from .parse import (
     Attachment,
     InboundMessage,
     InboundReaction,
+    _chat_kind,
     parse_message,
     parse_reaction,
 )
@@ -438,6 +439,17 @@ class TelegramConnector(HttpConnector):
         """
         state = self.state[connection_id]
         chat_id_int = _coerce_chat_id(chat_id)
+        # Stamp the resolved focal channel onto the result so external
+        # observers read the send target directly off the tool_result
+        # event.  Build the channel from the ORIGINAL chat_id string so
+        # the segment is byte-identical to inbound/focal form.  ``chat_type``
+        # is derived below from the chat object the send API returns,
+        # through the SAME ``_chat_kind`` helper inbound uses — so a
+        # supergroup reads ``"supergroup"`` outbound exactly as it does
+        # inbound, instead of being flattened to ``"group"`` by guessing
+        # from the chat_id sign (which can't tell group from supergroup
+        # from channel).
+        channel = self.focal_channel(str(state.bot_id), chat_id)
 
         body, ptb_parse_mode = _prepare_text(text, parse_mode)
         host_paths: list[Path] = list(attachments or [])
@@ -454,7 +466,11 @@ class TelegramConnector(HttpConnector):
                 parse_mode=ptb_parse_mode,
                 **reply_kwargs,
             )
-            return {"message_id": sent.message_id}
+            return {
+                "message_id": sent.message_id,
+                "channel": channel,
+                "chat_type": _chat_kind(sent.chat.type),
+            }
 
         if len(host_paths) == 1:
             single = await _send_single_media(
@@ -465,14 +481,22 @@ class TelegramConnector(HttpConnector):
                 parse_mode=ptb_parse_mode,
                 reply_to_message_id=reply_to_message_id,
             )
-            return {"message_id": single.message_id}
+            return {
+                "message_id": single.message_id,
+                "channel": channel,
+                "chat_type": _chat_kind(single.chat.type),
+            }
 
         sent_group = await bot.send_media_group(
             chat_id=chat_id_int,
             media=_build_media_group(host_paths, caption=body or None, parse_mode=ptb_parse_mode),
             **reply_kwargs,
         )
-        return {"message_ids": [m.message_id for m in sent_group]}
+        return {
+            "message_ids": [m.message_id for m in sent_group],
+            "channel": channel,
+            "chat_type": _chat_kind(sent_group[0].chat.type),
+        }
 
     @tool()
     async def telegram_typing(

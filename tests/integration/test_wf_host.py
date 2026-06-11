@@ -489,6 +489,62 @@ async def test_pipeline_runs_each_item_through_stages() -> None:
     assert out.value == ["a", "b"]
 
 
+async def test_pipeline_stage_receives_item_and_index() -> None:
+    """A three-arg stage gets ``(prev, item, index)``: for the FIRST stage ``prev``
+    equals the item itself, and ``index`` is the element's position in ``items``."""
+    out = await _run(
+        "async def main(input):\n"
+        "    return await pipeline([10, 20], lambda p, it, ix: {'p': p, 'it': it, 'ix': ix})"
+    )
+    assert out.kind == "returned"
+    assert out.value == [
+        {"p": 10, "it": 10, "ix": 0},
+        {"p": 20, "it": 20, "ix": 1},
+    ]
+
+
+async def test_pipeline_two_arg_stage_gets_prev_and_item() -> None:
+    """A two-arg stage gets ``(prev, item)``; for the first stage prev == item, so
+    ``p + it`` is ``5 + 5``."""
+    out = await _run("async def main(input):\n    return await pipeline([5], lambda p, it: p + it)")
+    assert out.kind == "returned"
+    assert out.value == [10]
+
+
+async def test_pipeline_var_positional_stage_gets_all_three() -> None:
+    """A ``*args`` stage opts into all three positional values ``(prev, item, index)``."""
+    out = await _run("async def main(input):\n    return await pipeline([7], lambda *a: list(a))")
+    assert out.kind == "returned"
+    assert out.value == [[7, 7, 0]]
+
+
+async def test_pipeline_non_inspectable_stage_defaults_to_one_arg() -> None:
+    """A callable whose ``inspect.signature`` raises (``str`` is one such builtin in
+    CPython 3.13) falls back to the legacy 1-arg (prev-only) call — so ``str`` is a
+    valid single-argument transform."""
+    out = await _run("async def main(input):\n    return await pipeline([42], str)")
+    assert out.kind == "returned"
+    assert out.value == ["42"]
+
+
+async def test_pipeline_none_short_circuit_on_agent_error() -> None:
+    """An item whose chain raises AgentError at an early stage skips the remaining
+    stages and lands None in its slot — the downstream multi-arg stage never runs.
+    (PIN: this already works via the parallel barrier; the arity rewrite must not
+    regress it.)"""
+    src = (
+        "async def main(input):\n"
+        "    return await pipeline([1, 2], lambda x: agent('s', x),"
+        " lambda prev, item, index: prev + 1)"
+    )
+    first = await _run(src)
+    assert first.kind == "suspended"
+    k0, k1 = (e.call_key for e in first.emitted)
+    out = await _run(src, memo={k0: {"ok": 10}, k1: {"error": {"kind": "child_errored"}}})
+    assert out.kind == "returned"
+    assert out.value == [11, None]  # item 1: 10 -> +1 -> 11; item 2: chain raised -> None
+
+
 async def test_parallel_call_keys_are_replay_stable() -> None:
     """The scheduler's fixed creation-order sweep makes the per-branch call_keys
     identical across drives — the basis of replay-with-memo for parallel."""

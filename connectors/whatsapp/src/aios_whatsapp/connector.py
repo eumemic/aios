@@ -12,7 +12,7 @@ import mimetypes
 import socket
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from aios_connector_http import HttpConnector, SandboxPath, iso_from_ms, tool
@@ -283,7 +283,14 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
         result = await state.daemon.rpc.call("sendMessage", params)
         if not isinstance(result, dict):
             raise RuntimeError(f"sendMessage returned non-dict: {result!r}")
-        return result
+        # Stamp the resolved focal channel + chat_type onto the result so
+        # external observers read the send target directly off the
+        # tool_result event instead of reconstructing focal heuristically.
+        return {
+            **result,
+            "channel": self.focal_channel(state.phone, chat_id),
+            "chat_type": _chat_type_from_jid(chat_id),
+        }
 
     @tool()
     async def whatsapp_react(
@@ -512,6 +519,12 @@ def _phone_from_jid(jid: str) -> str:
     if not sep or host != "s.whatsapp.net" or not local.isdigit():
         return jid
     return "+" + local
+
+
+def _chat_type_from_jid(jid: str) -> Literal["dm", "group"]:
+    # WhatsApp group JIDs carry the ``@g.us`` suffix; 1:1 chats use
+    # ``@s.whatsapp.net`` (or a ``@lid`` privacy alias) → dm.
+    return "group" if jid.endswith("@g.us") else "dm"
 
 
 def _attachment_params(host_path: Path) -> dict[str, str]:
