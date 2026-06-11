@@ -41,6 +41,50 @@ class _StallingResponse:
         raise AssertionError("unreachable")
 
 
+class _RecordingResponse:
+    """Async iterator that records whether ``aclose()`` was called.
+
+    Drives the same manual ``__anext__`` path ``stream_litellm`` uses, so
+    the production ``finally`` can be asserted against. ``stall`` makes the
+    iterator hang forever after the scripted chunks (to exercise the
+    inter-chunk timeout); ``raise_after`` makes ``__anext__`` raise the
+    given exception after the scripted chunks (to exercise a mid-stream
+    error). With neither, the iterator drains normally via
+    ``StopAsyncIteration``.
+    """
+
+    def __init__(
+        self,
+        chunks: list[object],
+        *,
+        stall: bool = False,
+        raise_after: BaseException | None = None,
+    ) -> None:
+        self._chunks = list(chunks)
+        self._stall = stall
+        self._raise_after = raise_after
+        self._i = 0
+        self.aclose_count = 0
+
+    def __aiter__(self) -> _RecordingResponse:
+        return self
+
+    async def __anext__(self) -> object:
+        if self._i < len(self._chunks):
+            chunk = self._chunks[self._i]
+            self._i += 1
+            return chunk
+        if self._stall:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+        if self._raise_after is not None:
+            raise self._raise_after
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.aclose_count += 1
+
+
 async def _slow_first_chunk_response(ttft_delay_s: float) -> AsyncIterator[object]:
     """Delay the first chunk by ``ttft_delay_s``, yield it, then exit.
 
@@ -329,3 +373,89 @@ async def test_stream_litellm_raises_typed_error_on_zero_chunks(
         f"error message must name the failure mode (empty/no-chunks/zero); "
         f"got {type(excinfo.value).__name__}: {msg!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_litellm_closes_stream_on_inter_chunk_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the inter-chunk guard fires, the litellm stream wrapper must be
+    closed (``aclose`` called) before ``TimeoutError`` propagates — otherwise
+    the underlying httpx socket leaks until GC (issue #855)."""
+    monkeypatch.setattr(completion, "_STREAM_INTER_CHUNK_TIMEOUT_S", 0.1)
+
+    resp = _RecordingResponse([_make_chunk("hello")], stall=True)
+
+    async def fake_acompletion(**kwargs: object) -> _RecordingResponse:
+        return resp
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    with pytest.raises(TimeoutError):
+        await completion.stream_litellm(
+            model="anthropic/claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "ping"}],
+            pool=_StubPool(),
+            session_id="sess_test",
+        )
+
+    assert resp.aclose_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_litellm_closes_stream_on_mid_stream_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any non-StopAsyncIteration exit from the chunk loop must still close
+    the stream. A provider/adapter error mid-stream must propagate, but only
+    after ``aclose`` releases the connection (issue #855)."""
+    boom = RuntimeError("adapter exploded mid-stream")
+    resp = _RecordingResponse([_make_chunk("hello")], raise_after=boom)
+
+    async def fake_acompletion(**kwargs: object) -> _RecordingResponse:
+        return resp
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    with pytest.raises(RuntimeError, match="adapter exploded mid-stream"):
+        await completion.stream_litellm(
+            model="anthropic/claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "ping"}],
+            pool=_StubPool(),
+            session_id="sess_test",
+        )
+
+    assert resp.aclose_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_litellm_closes_stream_on_normal_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normally-drained stream is also closed — the ``finally`` is
+    unconditional and closing after a full drain is a harmless no-op
+    (issue #855)."""
+    resp = _RecordingResponse([_make_chunk("hel"), _make_chunk("lo")])
+
+    async def fake_acompletion(**kwargs: object) -> _RecordingResponse:
+        return resp
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        litellm,
+        "stream_chunk_builder",
+        lambda chunks: {
+            "usage": {},
+            "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+        },
+    )
+
+    message, _, _, _ = await completion.stream_litellm(
+        model="anthropic/claude-sonnet-4-6",
+        messages=[{"role": "user", "content": "ping"}],
+        pool=_StubPool(),
+        session_id="sess_test",
+    )
+
+    assert message["content"] == "hello"
+    assert resp.aclose_count == 1

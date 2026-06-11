@@ -17,6 +17,7 @@ prefix.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from functools import cache
 from typing import TYPE_CHECKING, Any
@@ -577,27 +578,38 @@ async def stream_litellm(
     # defeating ``loop.REFUSAL_FINISH_REASON`` gating on the streaming path.
     # Make it sticky: once seen on the wire, override the assembled value.
     saw_content_filter = False
-    while True:
-        timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S
-        try:
-            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
-        except StopAsyncIteration:
-            break
-        first = False
-        chunks.append(chunk)
-        # Some providers (OpenRouter, Grok, vLLM, OpenAI with stream_options.
-        # include_usage) emit a terminal usage-summary chunk with empty choices.
-        if not chunk.choices:
-            continue
-        # ``"content_filter"`` == ``loop.REFUSAL_FINISH_REASON`` (literal here
-        # to avoid a loop<->completion import cycle). ``getattr`` guard: real
-        # litellm chunks always carry ``finish_reason`` (defaults None/""), but
-        # a partial/edge chunk that omits it must not crash the stream loop.
-        if getattr(chunk.choices[0], "finish_reason", None) == "content_filter":
-            saw_content_filter = True
-        content = chunk.choices[0].delta.content
-        if content:
-            await _notify_delta(pool, session_id, content)
+    try:
+        while True:
+            timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S
+            try:
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+            except StopAsyncIteration:
+                break
+            first = False
+            chunks.append(chunk)
+            # Some providers (OpenRouter, Grok, vLLM, OpenAI with stream_options.
+            # include_usage) emit a terminal usage-summary chunk with empty choices.
+            if not chunk.choices:
+                continue
+            # ``"content_filter"`` == ``loop.REFUSAL_FINISH_REASON`` (literal here
+            # to avoid a loop<->completion import cycle). ``getattr`` guard: real
+            # litellm chunks always carry ``finish_reason`` (defaults None/""), but
+            # a partial/edge chunk that omits it must not crash the stream loop.
+            if getattr(chunk.choices[0], "finish_reason", None) == "content_filter":
+                saw_content_filter = True
+            content = chunk.choices[0].delta.content
+            if content:
+                await _notify_delta(pool, session_id, content)
+    finally:
+        # Close the litellm CustomStreamWrapper on every exit path — normal
+        # full drain (no-op), TTFT/inter-chunk TimeoutError, or any in-loop
+        # exception — so the underlying httpx streaming response and its
+        # socket are released immediately rather than leaking until GC.
+        # ``aclose()`` nulls ``completion_stream``, so a post-drain call is a
+        # safe no-op; suppress everything because cleanup must not mask the
+        # original error propagating out of the loop. (Issue #855.)
+        with contextlib.suppress(Exception):
+            await response.aclose()
 
     assembled: Any = litellm.stream_chunk_builder(chunks=chunks)
     # ``litellm.stream_chunk_builder(chunks=[])`` returns ``None`` rather
