@@ -11,7 +11,11 @@ T = TypeVar("T", bound="SessionCreateEnv")
 
 @_attrs_define
 class SessionCreateEnv:
-    """Environment variables injected into the sandbox container."""
+    """Environment variables injected into the sandbox container. A vaulted environment_variable credential whose
+    secret_name matches a key here takes precedence: that key resolves to the credential's opaque placeholder, not the
+    value set here.
+
+    """
 
     additional_properties: dict[str, str] = _attrs_field(init=False, factory=dict)
 

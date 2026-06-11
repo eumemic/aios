@@ -36,7 +36,9 @@ class SessionCreate:
         workspace_path (None | str | Unset): Absolute host path to use as the session workspace. If omitted, defaults to
             workspace_root/<account_id>/<session_id>. Must resolve within the account's workspace subdirectory. The
             directory must exist; aios will not create it.
-        env (SessionCreateEnv | Unset): Environment variables injected into the sandbox container.
+        env (SessionCreateEnv | Unset): Environment variables injected into the sandbox container. A vaulted
+            environment_variable credential whose secret_name matches a key here takes precedence: that key resolves to the
+            credential's opaque placeholder, not the value set here.
         initial_message (None | str | Unset): Convenience: when set, the server appends a user.message event with this
             content immediately after creating the session and enqueues a wake job. Equivalent to a follow-up POST
             /messages.

@@ -168,7 +168,12 @@ class SessionCreate(BaseModel):
     )
     env: dict[str, str] = Field(
         default_factory=dict,
-        description="Environment variables injected into the sandbox container.",
+        description=(
+            "Environment variables injected into the sandbox container. A "
+            "vaulted environment_variable credential whose secret_name "
+            "matches a key here takes precedence: that key resolves to the "
+            "credential's opaque placeholder, not the value set here."
+        ),
     )
     initial_message: str | None = Field(
         default=None,

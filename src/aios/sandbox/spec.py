@@ -511,15 +511,41 @@ def _assemble_plan(
         session_repo_working_tree_dir,
     )
 
-    merged_env: dict[str, str] = {
-        **WORKSPACE_RUNTIME_ENV,
-        # Trust-store defaults precede env_config.env/session_env so a
-        # custom image (#724) with a non-Debian CA layout can override
-        # them; vault credential secret_names can't claim them either
-        # way (RESERVED_SANDBOX_ENV_KEYS).
-        **TRUST_STORE_ENV,
+    # Operator-supplied env as one layer (environment config + per-session
+    # overrides, session winning) so the vault placeholders below can be
+    # checked against it for shadowing.
+    operator_env = {
         **(env_config.env if env_config and env_config.env else {}),
         **session_env,
+    }
+    # Vault env-var credential placeholders (#874): the session's
+    # ``environment_variable`` secrets surface in the container as
+    # ``secret_name=<opaque placeholder>``. ONLY the placeholder enters
+    # the container — the decrypted secret stays on
+    # ``plan.env_var_credentials`` in worker memory for the egress swap
+    # (#876) and never touches ``merged_env``, the spec, or any log.
+    # A vaulted secret outranks an operator/session var of the same name:
+    # a deliberate credential beats a loose env var, and it keeps a
+    # plaintext value an operator mistakenly set under that name out of
+    # the container. The clash is logged so the override is never silent.
+    placeholder_env = {cred.secret_name: cred.placeholder for cred in env_var_credentials}
+    shadowed = sorted(operator_env.keys() & placeholder_env.keys())
+    if shadowed:
+        log.warning(
+            "sandbox.vault_placeholder_shadows_env",
+            session_id=session_id,
+            secret_names=shadowed,
+        )
+
+    merged_env: dict[str, str] = {
+        **WORKSPACE_RUNTIME_ENV,
+        # Trust-store defaults precede operator env so a custom image
+        # (#724) with a non-Debian CA layout can override them.
+        **TRUST_STORE_ENV,
+        **operator_env,
+        **placeholder_env,
+        # Trailers last so nothing shadows them — a placeholder can't reach
+        # them anyway (secret_name can't be a reserved key, models/vaults.py).
         "TOOL_BROKER_URL": tool_broker_url,
         "TOOL_BROKER_SECRET": tool_broker_secret,
         # Scheduled-tasks escalation (#636): bash inside a cron sandbox
