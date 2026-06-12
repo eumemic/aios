@@ -57,6 +57,7 @@ class Workflow(BaseModel):
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
 
 
 class WfRun(BaseModel):

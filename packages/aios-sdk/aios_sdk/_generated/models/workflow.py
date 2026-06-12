@@ -39,6 +39,7 @@ class Workflow:
         tools (list[ToolSpec] | Unset):
         mcp_servers (list[McpServerSpec] | Unset):
         http_servers (list[HttpServerSpec] | Unset):
+        archived_at (datetime.datetime | None | Unset):
     """
 
     id: str
@@ -54,6 +55,7 @@ class Workflow:
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
+    archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,6 +119,14 @@ class Workflow:
                 http_servers_item = http_servers_item_data.to_dict()
                 http_servers.append(http_servers_item)
 
+        archived_at: None | str | Unset
+        if isinstance(self.archived_at, Unset):
+            archived_at = UNSET
+        elif isinstance(self.archived_at, datetime.datetime):
+            archived_at = self.archived_at.isoformat()
+        else:
+            archived_at = self.archived_at
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -142,6 +152,8 @@ class Workflow:
             field_dict["mcp_servers"] = mcp_servers
         if http_servers is not UNSET:
             field_dict["http_servers"] = http_servers
+        if archived_at is not UNSET:
+            field_dict["archived_at"] = archived_at
 
         return field_dict
 
@@ -242,6 +254,23 @@ class Workflow:
 
                 http_servers.append(http_servers_item)
 
+        def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                archived_at_type_0 = isoparse(data)
+
+                return archived_at_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(datetime.datetime | None | Unset, data)
+
+        archived_at = _parse_archived_at(d.pop("archived_at", UNSET))
+
         workflow = cls(
             id=id,
             account_id=account_id,
@@ -256,6 +285,7 @@ class Workflow:
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_servers,
+            archived_at=archived_at,
         )
 
         workflow.additional_properties = d

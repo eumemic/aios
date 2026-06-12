@@ -96,6 +96,8 @@ async def create_run(
     async with pool.acquire() as conn, conn.transaction():
         await get_environment(conn, environment_id, account_id=account_id)  # 404s foreign/absent
         workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
+        if workflow.archived_at is not None:
+            raise ConflictError(f"workflow {workflow_id} is archived", detail={"id": workflow_id})
         if expected_version is not None and workflow.version != expected_version:
             raise ConflictError(
                 f"workflow version drift: pinned {expected_version}, current {workflow.version}",

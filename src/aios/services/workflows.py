@@ -37,6 +37,7 @@ from aios.services.wake import defer_run_wake
 from aios.workflows.service import create_run, resume_gate
 
 __all__ = [
+    "archive_workflow",
     "await_run",
     "cancel_run",
     "create_run",
@@ -48,6 +49,7 @@ __all__ = [
     "list_workflows",
     "resume_gate",
     "resume_gate_by_nonce",
+    "unarchive_workflow",
     "update_workflow",
 ]
 
@@ -241,6 +243,16 @@ async def update_workflow(
 async def get_workflow(pool: asyncpg.Pool[Any], workflow_id: str, *, account_id: str) -> Workflow:
     async with pool.acquire() as conn:
         return await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
+
+
+async def archive_workflow(pool: asyncpg.Pool[Any], workflow_id: str, *, account_id: str) -> Workflow:
+    async with pool.acquire() as conn:
+        return await wf_queries.archive_workflow(conn, workflow_id, account_id=account_id)
+
+
+async def unarchive_workflow(pool: asyncpg.Pool[Any], workflow_id: str, *, account_id: str) -> Workflow:
+    async with pool.acquire() as conn:
+        return await wf_queries.unarchive_workflow(conn, workflow_id, account_id=account_id)
 
 
 async def list_workflows(

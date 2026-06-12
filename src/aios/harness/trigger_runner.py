@@ -515,9 +515,10 @@ async def _run_workflow(
     (outstanding caps; deliberately an error, never ``skipped`` — a
     cap-saturated trigger must trip auto-disable, not drop fires silently),
     ``WorkflowRunDepthExceededError`` (a reactive cascade or self-fire loop
-    hit the depth cap — the loop's structural bound), and ``NotFoundError``
+    hit the depth cap — the loop's structural bound), ``ConflictError``
+    (workflow version drift or an archived target workflow), and ``NotFoundError``
     (a vault in ``action.vault_ids`` was deleted, or the owner session was
-    deleted mid-fire; workflows and environments have no delete path).
+    deleted mid-fire; workflows and environments have no hard-delete path).
     """
     # Lazy: aios.workflows.service transitively imports the tools package,
     # which imports services.workflows, which imports back into

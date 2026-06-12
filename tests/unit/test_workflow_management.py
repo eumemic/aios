@@ -125,6 +125,20 @@ class TestSchemaRejectsInjectedTrustedIds:
                 "ses_1", "cancel_run", {"run_id": "wfr_1", "canceller_session_id": "ses_victim"}
             )
 
+    async def test_archive_workflow_account_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin(
+                "ses_1", "archive_workflow", {"workflow_id": "wf_1", "account_id": "acc_victim"}
+            )
+
+    async def test_unarchive_workflow_account_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin(
+                "ses_1",
+                "unarchive_workflow",
+                {"workflow_id": "wf_1", "account_id": "acc_victim"},
+            )
+
     async def test_get_run_account_id_rejected(self) -> None:
         with pytest.raises(ToolBail):
             await invoke_builtin(
@@ -211,6 +225,26 @@ class TestReturnShape:
         out = await wm.create_workflow_handler("ses_1", {"name": "w", "script": "SECRET"})
         assert out["name"] == "w" and out["version"] == 1
         assert "script" not in out  # heavy snapshot field trimmed
+
+    async def test_archive_workflow_calls_service_and_returns_archived_at(self, monkeypatch: Any) -> None:
+        archived = datetime(2026, 1, 2, tzinfo=UTC)
+        mock_archive = AsyncMock(return_value=_workflow(archived_at=archived))
+        monkeypatch.setattr("aios.services.workflows.archive_workflow", mock_archive)
+        out = await wm.archive_workflow_handler("ses_1", {"workflow_id": "wf_1"})
+        assert out["id"] == "wf_1"
+        assert out["archived_at"] == archived.isoformat().replace("+00:00", "Z")
+        assert "script" not in out
+        assert mock_archive.call_args.args[1] == "wf_1"
+        assert mock_archive.call_args.kwargs["account_id"] == "acc_x"
+
+    async def test_unarchive_workflow_calls_service_and_returns_live_row(self, monkeypatch: Any) -> None:
+        mock_unarchive = AsyncMock(return_value=_workflow(archived_at=None))
+        monkeypatch.setattr("aios.services.workflows.unarchive_workflow", mock_unarchive)
+        out = await wm.unarchive_workflow_handler("ses_1", {"workflow_id": "wf_1"})
+        assert out["id"] == "wf_1"
+        assert out["archived_at"] is None
+        assert mock_unarchive.call_args.args[1] == "wf_1"
+        assert mock_unarchive.call_args.kwargs["account_id"] == "acc_x"
 
     async def test_await_run_passes_settings_db_url(self, monkeypatch: Any) -> None:
         mock_await = AsyncMock(
