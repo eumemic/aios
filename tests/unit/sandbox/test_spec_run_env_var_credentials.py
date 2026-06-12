@@ -84,6 +84,19 @@ def _patch_run_spec_deps(
             "aios.sandbox.volumes.ensure_run_workspace_dir",
             return_value=__import__("pathlib").Path("/tmp/run-w"),
         ),
+        # ``_assemble_plan`` binds the per-session attachments/uploads dirs by
+        # calling these (function-locally imported from ``aios.sandbox.volumes``),
+        # and they ``mkdir`` under the production workspace root. Redirect both to
+        # tmp so the run-spec build never touches ``/var/lib/aios`` — mirrors the
+        # session-twin's ``patch_build_spec_deps`` helper.
+        patch(
+            "aios.sandbox.volumes.ensure_session_attachments_dir",
+            return_value=__import__("pathlib").Path("/tmp/run-a"),
+        ),
+        patch(
+            "aios.sandbox.volumes.ensure_session_uploads_dir",
+            return_value=__import__("pathlib").Path("/tmp/run-u"),
+        ),
         patch(
             "aios.sandbox.spec._materialize_run_env_var_credentials",
             env_var_credentials or AsyncMock(return_value=()),
