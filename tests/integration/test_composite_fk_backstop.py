@@ -30,9 +30,18 @@ async def _seed_two_tenant_secret_chains(conn: asyncpg.Connection[Any]) -> None:
         INSERT INTO workflows (id, account_id, name, script)
         VALUES ('wf_a', 'acc_a', 'wf-a', 'async def main(i):\n    return i\n'),
                ('wf_b', 'acc_b', 'wf-b', 'async def main(i):\n    return i\n');
-        INSERT INTO wf_runs (id, workflow_id, account_id, script, script_sha, status, host_semantics_epoch)
-        VALUES ('run_a', 'wf_a', 'acc_a', 'async def main(i):\n    return i\n', 'sha-a', 'pending', 1),
-               ('run_b', 'wf_b', 'acc_b', 'async def main(i):\n    return i\n', 'sha-b', 'pending', 1);
+        INSERT INTO wf_runs (
+            id, workflow_id, account_id, environment_id,
+            script, script_sha, status, host_semantics_epoch
+        )
+        VALUES (
+            'run_a', 'wf_a', 'acc_a', 'env_a',
+            'async def main(i):\n    return i\n', 'sha-a', 'pending', 1
+        ),
+        (
+            'run_b', 'wf_b', 'acc_b', 'env_b',
+            'async def main(i):\n    return i\n', 'sha-b', 'pending', 1
+        );
         INSERT INTO vaults (id, display_name, account_id)
         VALUES ('vault_a', 'vault-a', 'acc_a'),
                ('vault_b', 'vault-b', 'acc_b');
