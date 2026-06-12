@@ -24,13 +24,74 @@ Create Date: 2026-05-14
 from __future__ import annotations
 
 import base64
+import json
 import os
 from collections.abc import Callable, Sequence
+from typing import Any
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from nacl.exceptions import CryptoError
+from nacl.secret import SecretBox
+from nacl.utils import random as nacl_random
 import sqlalchemy as sa
 from alembic import op
 
-from aios.crypto.vault import CryptoBox, EncryptedBlob
+
+KEY_BYTES = SecretBox.KEY_SIZE
+NONCE_BYTES = SecretBox.NONCE_SIZE
+BLOB_VERSION = b"\x01"
+
+
+class EncryptedBlob:
+    def __init__(self, *, ciphertext: bytes, nonce: bytes) -> None:
+        self.ciphertext = ciphertext
+        self.nonce = nonce
+
+
+class CryptoBox:
+    def __init__(self, master_key: bytes) -> None:
+        if len(master_key) != KEY_BYTES:
+            raise ValueError(f"master key must be {KEY_BYTES} bytes, got {len(master_key)}")
+        self._key = master_key
+        self._box = SecretBox(master_key)
+
+    def derive_subkey_bytes(self, info: str) -> bytes:
+        return HKDF(
+            algorithm=hashes.SHA256(),
+            length=KEY_BYTES,
+            salt=b"aios-vault-hkdf-v1",
+            info=info.encode(),
+        ).derive(self._key)
+
+    def derive_account_subkey(self, account_id: str) -> "CryptoBox":
+        if not account_id:
+            raise ValueError("account_id must be non-empty")
+        return CryptoBox(self.derive_subkey_bytes(f"aios-account-{account_id}"))
+
+    def encrypt(self, plaintext: str) -> EncryptedBlob:
+        nonce = nacl_random(NONCE_BYTES)
+        ciphertext = self._box.encrypt(plaintext.encode("utf-8"), nonce).ciphertext
+        return EncryptedBlob(ciphertext=BLOB_VERSION + ciphertext, nonce=nonce)
+
+    def decrypt(self, blob: EncryptedBlob) -> str:
+        ciphertext = blob.ciphertext
+        if ciphertext[:1] == BLOB_VERSION:
+            ciphertext = ciphertext[1:]
+        try:
+            plaintext_bytes = self._box.decrypt(ciphertext, blob.nonce)
+        except CryptoError as exc:
+            raise RuntimeError("could not decrypt — wrong key or corrupted ciphertext") from exc
+        return plaintext_bytes.decode("utf-8")
+
+    def encrypt_dict(self, payload: dict[str, Any]) -> EncryptedBlob:
+        return self.encrypt(json.dumps(payload))
+
+    def decrypt_dict(self, blob: EncryptedBlob) -> dict[str, Any]:
+        decoded = json.loads(self.decrypt(blob))
+        if not isinstance(decoded, dict):
+            raise ValueError("decrypted blob did not decode to a dict")
+        return decoded
 
 revision: str = "0047"
 down_revision: str = "0046"

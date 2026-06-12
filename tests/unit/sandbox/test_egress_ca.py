@@ -3,7 +3,7 @@
 What matters here, in order of load-bearingness:
 
 - The keypair is a pure function of the seed — that's the whole
-  zero-state design: every worker sharing ``AIOS_VAULT_KEY`` must derive
+  zero-state design: every worker sharing ``AIOS_EGRESS_CA_KEY`` must derive
   the SAME CA, or leaf certs minted by one worker won't verify inside a
   sandbox whose trust store was installed by another.
 - A leaf signed by one ``EgressCA`` instance chains against a *fresh*
@@ -15,6 +15,7 @@ What matters here, in order of load-bearingness:
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -167,12 +168,21 @@ def crypto_box_runtime() -> Iterator[CryptoBox]:
 
 
 class TestGetEgressCA:
-    def test_follows_the_current_vault_key(self, crypto_box_runtime: CryptoBox) -> None:
+    def test_uses_egress_ca_key_not_vault_key(
+        self, crypto_box_runtime: CryptoBox, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aios.config import get_settings
+
+        monkeypatch.setenv("AIOS_EGRESS_CA_KEY", base64.b64encode(SEED_A).decode("ascii"))
+        get_settings.cache_clear()
         ca_a = get_egress_ca()
         assert get_egress_ca() is ca_a  # cached per seed
         runtime.crypto_box = CryptoBox(SEED_B)
+        assert get_egress_ca().private_key.private_numbers() == ca_a.private_key.private_numbers()
+
+        monkeypatch.setenv("AIOS_EGRESS_CA_KEY", base64.b64encode(SEED_B).decode("ascii"))
+        get_settings.cache_clear()
         ca_b = get_egress_ca()
-        assert ca_b is not ca_a
         assert ca_b.private_key.private_numbers() != ca_a.private_key.private_numbers()
 
 

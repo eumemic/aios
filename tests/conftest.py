@@ -49,6 +49,10 @@ os.environ.setdefault(
     "AIOS_VAULT_KEY",
     base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
 )
+os.environ.setdefault(
+    "AIOS_EGRESS_CA_KEY",
+    base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+)
 os.environ.setdefault("AIOS_DB_URL", "postgresql://x:x@localhost:5432/x")
 
 # Scope ``AIOS_INSTANCE_ID`` per pytest-xdist worker so that

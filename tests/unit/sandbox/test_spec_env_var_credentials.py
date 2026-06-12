@@ -24,7 +24,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from aios.crypto.vault import CryptoBox
 from aios.errors import CryptoDecryptError
 from aios.ids import VAULT_CREDENTIAL
 from aios.models.environments import (
@@ -407,7 +406,7 @@ async def test_secret_proxy_start_failure_does_not_double_stop() -> None:
 
 
 def test_placeholder_is_stable_across_recycle() -> None:
-    """The placeholder is a pure function of ``(subkey, session_id,
+    """The placeholder is a pure function of ``(account_salt, session_id,
     credential_id)`` — two mints with the same ids are equal.
 
     This locks the piece-4 reconstruction invariant: a recycled sandbox
@@ -415,8 +414,7 @@ def test_placeholder_is_stable_across_recycle() -> None:
     /workspace keeps resolving through the fresh proxy. Already deterministic
     — no production change; this test documents/guards it.
     """
-    box = CryptoBox(bytes(range(32)))
-    subkey = box.derive_account_subkey("acct_x")
-    first = mint_secret_placeholder(subkey, "sess_01TEST", "vcr_01")
-    second = mint_secret_placeholder(subkey, "sess_01TEST", "vcr_01")
+    salt = bytes(range(32))
+    first = mint_secret_placeholder(salt, "sess_01TEST", "vcr_01")
+    second = mint_secret_placeholder(salt, "sess_01TEST", "vcr_01")
     assert first == second

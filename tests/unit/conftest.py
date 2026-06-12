@@ -26,6 +26,7 @@ def _unit_env() -> Iterator[None]:
     env = {
         "AIOS_API_KEY": secrets.token_urlsafe(16),
         "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode(),
+        "AIOS_EGRESS_CA_KEY": base64.b64encode(secrets.token_bytes(32)).decode(),
         "AIOS_DB_URL": "postgresql://test:test@localhost:5432/test",
     }
     with mock.patch.dict(os.environ, env):

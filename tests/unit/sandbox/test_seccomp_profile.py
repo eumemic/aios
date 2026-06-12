@@ -173,7 +173,7 @@ def test_settings_default_path_points_at_repo_profile(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_SANDBOX_SECCOMP_PROFILE", raising=False)
 
     s = Settings(_env_file=(str(secrets),))

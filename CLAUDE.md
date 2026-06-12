@@ -174,7 +174,9 @@ The durable workflow runtime runs deterministic, replayable scripts as an **appe
 All aios settings use the `AIOS_` prefix (Pydantic settings with `env_prefix="AIOS_"`):
 - `AIOS_API_KEY` — bearer auth key. Must hash to a row in `account_keys`; auth is no longer an env-var direct compare. On a fresh DB, mint one by POSTing to `/v1/accounts/bootstrap` (gated by `AIOS_BOOTSTRAP_TOKEN`) and store the returned `plaintext_key` as `AIOS_API_KEY` for both the API service and clients. A placeholder value (e.g. `test-aios-key-do-not-deploy`) will silently 401 against every request.
 - `AIOS_BOOTSTRAP_TOKEN` — bearer token that gates `POST /v1/accounts/bootstrap`; required to mint the root account's first API key on a fresh DB.
-- `AIOS_VAULT_KEY` — base64-encoded 32-byte libsodium key (do NOT regenerate if Postgres has encrypted data). Also seeds the sandbox egress CA (`sandbox/egress_ca.py`): a holder of this key can mint TLS certs every sandbox trusts, not just decrypt rows.
+- `AIOS_VAULT_KEY` — base64-encoded 32-byte libsodium key for encrypted database rows. Rotate with `AIOS_VAULT_KEY_PREVIOUS` plus `aios rekey`; do NOT regenerate without the rekey run if Postgres has encrypted data.
+- `AIOS_VAULT_KEY_PREVIOUS` — optional decrypt-only previous vault key used during `aios rekey`; unset after rotation completes.
+- `AIOS_EGRESS_CA_KEY` — required base64-encoded 32-byte key for the sandbox egress CA (`sandbox/egress_ca.py`). Separate from `AIOS_VAULT_KEY` so vault-key holders cannot mint sandbox-trusted TLS certificates.
 - `AIOS_DB_URL` — Postgres connection string
 - `AIOS_API_PORT` — default 8080
 - `AIOS_TAVILY_API_KEY` — for web_fetch/web_search tools

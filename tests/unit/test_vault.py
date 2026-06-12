@@ -1022,24 +1022,27 @@ class TestMintSecretPlaceholder:
     recycles and re-derive identically on any worker sharing the vault
     key, while staying unique per session and unlinkable to the secret."""
 
-    def _subkey(self) -> CryptoBox:
-        return CryptoBox(b"\xcd" * 32).derive_account_subkey("acc_alpha")
+    def _salt(self) -> bytes:
+        return b"\xcd" * 32
 
     def test_format(self) -> None:
-        placeholder = mint_secret_placeholder(self._subkey(), "sess_A", "vcred_1")
+        placeholder = mint_secret_placeholder(self._salt(), "sess_A", "vcred_1")
         assert placeholder.startswith(SECRET_PLACEHOLDER_PREFIX)
         suffix = placeholder.removeprefix(SECRET_PLACEHOLDER_PREFIX)
         assert len(suffix) == 32
         assert all(c in "0123456789abcdef" for c in suffix)
 
     def test_deterministic_and_distinct_per_input(self) -> None:
-        subkey = self._subkey()
+        subkey = self._salt()
         base = mint_secret_placeholder(subkey, "sess_A", "vcred_1")
         assert mint_secret_placeholder(subkey, "sess_A", "vcred_1") == base
         assert mint_secret_placeholder(subkey, "sess_B", "vcred_1") != base
         assert mint_secret_placeholder(subkey, "sess_A", "vcred_2") != base
-        other_subkey = CryptoBox(b"\xee" * 32).derive_account_subkey("acc_alpha")
-        assert mint_secret_placeholder(other_subkey, "sess_A", "vcred_1") != base
+        other_salt = b"\xee" * 32
+        assert mint_secret_placeholder(other_salt, "sess_A", "vcred_1") != base
+        assert mint_secret_placeholder(other_salt, "sess_A", "vcred_1") == mint_secret_placeholder(
+            other_salt, "sess_A", "vcred_1"
+        )
 
 
 class TestServiceWiringIsAccountScoped:

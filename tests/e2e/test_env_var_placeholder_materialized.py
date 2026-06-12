@@ -77,9 +77,9 @@ async def test_placeholder_visible_in_container_secret_absent(docker_harness: Ha
     async with pool.acquire() as conn:
         await queries.set_session_vaults(conn, session.id, [vault.id], account_id=_ACCOUNT_ID)
 
-    expected = mint_secret_placeholder(
-        crypto_box.derive_account_subkey(_ACCOUNT_ID), session.id, cred.id
-    )
+    async with pool.acquire() as conn:
+        salt = await queries.get_or_create_account_placeholder_salt(conn, crypto_box, _ACCOUNT_ID)
+    expected = mint_secret_placeholder(salt, session.id, cred.id)
 
     await docker_harness.run_until_idle(session.id)
 

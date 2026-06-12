@@ -25,7 +25,7 @@ def test_workspace_root_must_be_absolute(tmp_path: Path, monkeypatch: pytest.Mon
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "./workspaces")
 
     with pytest.raises(ValidationError, match="must be an absolute path"):
@@ -47,7 +47,7 @@ def test_workspace_root_error_mentions_tilde(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "~/aios/workspaces")
 
     with pytest.raises(ValidationError, match=r"does not expand '~'"):
@@ -59,7 +59,7 @@ def test_workspace_root_accepts_absolute(tmp_path: Path, monkeypatch: pytest.Mon
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_WORKSPACE_ROOT", "/var/lib/test")
 
     s = Settings(_env_file=(str(secrets),))
@@ -73,7 +73,7 @@ def test_workspace_root_default_is_absolute(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_WORKSPACE_ROOT", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
@@ -91,7 +91,7 @@ def test_github_clone_session_timeout_default(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
@@ -107,7 +107,7 @@ def test_github_clone_cache_timeout_default(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_GITHUB_CLONE_CACHE_TIMEOUT_SECONDS", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
@@ -118,7 +118,7 @@ def test_model_call_deadline_default(tmp_path: Path, monkeypatch: pytest.MonkeyP
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_MODEL_CALL_DEADLINE_S", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
@@ -134,7 +134,7 @@ def test_model_call_deadline_rejects_step_budget_or_above(
     from aios.harness.loop import _JOB_TIMEOUT_S
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_MODEL_CALL_DEADLINE_S", str(_JOB_TIMEOUT_S))
 
     with pytest.raises(ValidationError, match="AIOS_MODEL_CALL_DEADLINE_S"):
@@ -152,7 +152,7 @@ def test_github_clone_session_timeout_below_step_budget(
     from aios.harness.loop import _JOB_TIMEOUT_S
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
@@ -166,7 +166,7 @@ def test_github_clone_session_timeout_env_override(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", "7")
 
     s = Settings(_env_file=(str(secrets),))
@@ -186,7 +186,7 @@ def test_github_clone_session_timeout_rejects_above_step_budget(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", "960")
 
     with pytest.raises(ValidationError, match="must be strictly less than"):
@@ -214,7 +214,7 @@ def test_sandbox_snapshot_budget_bytes_default(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
@@ -228,7 +228,7 @@ def test_sandbox_snapshot_budget_bytes_env_override(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES", str(8 * 1024 * 1024 * 1024))
 
     s = Settings(_env_file=(str(secrets),))
@@ -245,7 +245,7 @@ def test_sandbox_snapshot_budget_bytes_rejects_below_floor(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES", "1024")
 
     with pytest.raises(ValidationError):
@@ -260,7 +260,7 @@ def test_container_idle_timeout_default_raised(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_CONTAINER_IDLE_TIMEOUT_SECONDS", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
@@ -275,7 +275,7 @@ def test_workflow_max_inflight_children_per_run_default(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_WORKFLOW_MAX_INFLIGHT_CHILDREN_PER_RUN", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
@@ -289,7 +289,7 @@ def test_workflow_max_inflight_children_per_run_env_override(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_WORKFLOW_MAX_INFLIGHT_CHILDREN_PER_RUN", "3")
 
     s = Settings(_env_file=(str(secrets),))
@@ -306,7 +306,7 @@ def test_workflow_max_inflight_children_per_run_rejects_below_one(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.setenv("AIOS_WORKFLOW_MAX_INFLIGHT_CHILDREN_PER_RUN", "0")
 
     with pytest.raises(ValidationError):

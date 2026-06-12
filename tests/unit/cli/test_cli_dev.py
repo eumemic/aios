@@ -247,7 +247,9 @@ def test_settings_instance_id_defaults_to_default(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_API_KEY=k\nAIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text(
+        "AIOS_API_KEY=k\nAIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n"
+    )
     monkeypatch.delenv("AIOS_INSTANCE_ID", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
@@ -263,7 +265,9 @@ def test_settings_instance_id_rejects_unsafe_value(
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
-    secrets.write_text("AIOS_API_KEY=k\nAIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    secrets.write_text(
+        "AIOS_API_KEY=k\nAIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n"
+    )
     monkeypatch.setenv("AIOS_INSTANCE_ID", "bad-dash")
 
     with pytest.raises(ValidationError):

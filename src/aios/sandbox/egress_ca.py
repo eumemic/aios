@@ -1,31 +1,24 @@
-"""Deterministic egress-proxy CA, derived from the vault master key.
+"""Deterministic egress-proxy CA, derived from ``AIOS_EGRESS_CA_KEY``.
 
 The secret-egress proxy (the ``git_proxy.py`` generalization that swaps
 credential placeholders for real values at the worker boundary) must
 terminate TLS for arbitrary allowlisted hosts, which means every sandbox
 has to trust an aios-controlled CA. This module is that CA.
 
-**Zero stored state.** The CA private key is an HKDF subkey of
-``AIOS_VAULT_KEY`` (domain context :data:`EGRESS_CA_HKDF_INFO`), so every
-worker sharing the vault key derives the *same* keypair — no table, no
-bootstrap race, no key file. The self-signed cert is regenerated per
-process: its serial and validity window vary, but the subject DN and
-keypair are deterministic, and trust anchors match on subject + public
-key, so a leaf minted by one worker process chains against the cert copy
-any other process installed.
+**Zero stored state.** The CA private key is an HKDF subkey of the required
+``AIOS_EGRESS_CA_KEY`` secret (domain context :data:`EGRESS_CA_HKDF_INFO`),
+so every worker sharing that key derives the *same* keypair — no table, no
+bootstrap race, no key file. The self-signed cert is regenerated per process:
+its serial and validity window vary, but the subject DN and keypair are
+deterministic, and trust anchors match on subject + public key, so a leaf
+minted by one worker process chains against the cert copy any other process
+installed.
 
 Consequences operators should know:
 
-* **Blast radius**: anyone holding ``AIOS_VAULT_KEY`` can re-derive this
-  CA offline and mint leaf certs every aios sandbox trusts — a vault-key
-  compromise grants active TLS interception of sandbox egress, not just
-  at-rest decryption.
-* **Rotation rides the vault key** (#858): the CA cannot rotate
-  independently, and a rotation takes effect only after a worker
-  restart (the per-seed cache below). No overlap window exists yet —
-  the install step writes exactly one cert; #858 can add one by
-  deriving from the previous key too (``update-ca-certificates`` and
-  ``NODE_EXTRA_CA_CERTS`` both accept multi-PEM files).
+* **Blast radius**: ``AIOS_VAULT_KEY`` holders can decrypt at-rest rows but
+  cannot mint sandbox-trusted TLS certificates. The egress CA has its own
+  separately-rotated secret and runbook.
 * **The CA is unconstrained** (no x509 name constraints — allowlists are
   per-credential and dynamic, a static constraint can't express them).
   Host scoping is enforced *solely* at leaf-mint time in the egress
@@ -46,9 +39,11 @@ from datetime import UTC, datetime, timedelta
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from aios.harness import runtime
+from aios.config import get_settings
+from aios.crypto.vault import KEY_BYTES, CryptoBox
 
 # HKDF domain-separation context for the CA seed; bump the suffix if the
 # derivation scheme ever changes incompatibly.
@@ -142,15 +137,19 @@ def _egress_ca_from_seed(seed: bytes) -> EgressCA:
 
 
 def get_egress_ca() -> EgressCA:
-    """The worker's egress CA, derived from the current vault master key.
+    """The worker's egress CA, derived from ``AIOS_EGRESS_CA_KEY``.
 
-    Cached per seed (not per process), so a test or future rotation path
-    that swaps ``runtime.crypto_box`` gets a matching CA without any
-    cache-clearing choreography.
+    Cached per seed (not per process), so tests or a rare CA rotation path
+    that swaps the env secret get a matching CA without process-global state.
     """
-    return _egress_ca_from_seed(
-        runtime.require_crypto_box().derive_subkey_bytes(EGRESS_CA_HKDF_INFO)
-    )
+    key = get_settings().egress_ca_key.get_secret_value()
+    seed = HKDF(
+        algorithm=hashes.SHA256(),
+        length=KEY_BYTES,
+        salt=b"aios-vault-hkdf-v1",
+        info=EGRESS_CA_HKDF_INFO.encode(),
+    ).derive(CryptoBox.from_base64(key, env_name="AIOS_EGRESS_CA_KEY").key_bytes)
+    return _egress_ca_from_seed(seed)
 
 
 def mint_server_leaf(
