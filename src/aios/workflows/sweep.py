@@ -41,31 +41,49 @@ log = get_logger("aios.workflows.sweep")
 # already documents).
 TOOL_REDISPATCH_STALE_SECONDS = 180.0
 
-# How long an inflight ``sandbox`` call may sit without a result signal before the
-# sweep re-wakes its run for re-dispatch (the worker crashed after journaling
-# ``call_started`` but before writing ``sandbox_result``). A sandbox exec's
-# wall-clock is BOUNDED, unlike a trickling http_request: it is capped by the bash
-# exec ceiling (``settings.bash_default_timeout_seconds``, default 120s — the same
-# ceiling ``run_sandbox._execute`` passes to ``registry.exec``) plus the one-shot
-# provisioning of an ephemeral scratch container. We size the horizon at the 120s
-# default ceiling + generous provisioning/slack so a slow-but-alive exec is never
-# prematurely re-driven, while a genuinely crashed task recovers within a few
-# ticks. Re-driving a still-running exec same-worker is cheap and harmless anyway:
-# the harvest's ``has_inflight`` guard suppresses a double-launch, and sandbox is
-# worker-pinned in M1 (cross-worker double-exec — #796 — is out of scope). A run
-# sandbox is ephemeral scratch, so even a legitimate re-exec never corrupts durable
-# state (the #784/#795 dimension). 300s clears 120s exec + provisioning with margin.
-SANDBOX_REDISPATCH_STALE_SECONDS = 300.0
+# Slack added on top of the bash exec ceiling to cover the one-shot provisioning
+# of an ephemeral scratch container (image pull / create / egress-CA / package
+# install) before the exec's own wall-clock starts.
+SANDBOX_PROVISIONING_SLACK_SECONDS = 180.0
+
+
+def _sandbox_redispatch_horizon(bash_ceiling_seconds: int) -> float:
+    """How long an inflight ``sandbox`` call may sit without a result signal before
+    the sweep re-wakes its run for re-dispatch (the worker crashed after journaling
+    ``call_started`` but before writing ``sandbox_result``).
+
+    **Correct-by-construction invariant**: the horizon MUST exceed the maximum
+    wall-clock a live exec can occupy — the bash exec ceiling
+    (``settings.bash_default_timeout_seconds``, the SAME ceiling
+    ``run_sandbox._execute`` clamps ``timeout_s`` to) PLUS provisioning slack — so
+    the sweep never re-drives a still-running exec. Deriving the horizon from the
+    ceiling rather than hardcoding it keeps the two from drifting apart: an operator
+    who raises ``bash_default_timeout_seconds`` (e.g. to 600 for heavy dev runs)
+    automatically widens the horizon to match. The 300s floor preserves the original
+    value for the 120s default (120 + 180 = 300), so the common-case behaviour is
+    unchanged.
+
+    Re-driving a still-running exec same-worker is cheap and harmless anyway: the
+    harvest's ``has_inflight`` guard suppresses a double-launch, sandbox is
+    worker-pinned in M1 (cross-worker double-exec — #796 — is out of scope), and a
+    run sandbox is ephemeral scratch so even a legitimate re-exec never corrupts
+    durable state (the #784/#795 dimension). The derivation makes the sweep's
+    same-worker idempotency guard a backstop, not the primary defence.
+    """
+    return max(300.0, bash_ceiling_seconds + SANDBOX_PROVISIONING_SLACK_SECONDS)
 
 
 async def wake_runs_needing_step(pool: asyncpg.Pool[Any]) -> int:
     """Defer a wake for every run needing a step. Returns the number swept."""
+    settings = get_settings()
     async with pool.acquire() as conn:
         run_ids = await wf_queries.list_run_ids_needing_step(
             conn,
-            agent_deadline_seconds=get_settings().workflow_agent_deadline_seconds,
+            agent_deadline_seconds=settings.workflow_agent_deadline_seconds,
             tool_stale_seconds=TOOL_REDISPATCH_STALE_SECONDS,
-            sandbox_stale_seconds=SANDBOX_REDISPATCH_STALE_SECONDS,
+            sandbox_stale_seconds=_sandbox_redispatch_horizon(
+                settings.bash_default_timeout_seconds
+            ),
         )
     for run_id in run_ids:
         try:

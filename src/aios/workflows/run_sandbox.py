@@ -169,9 +169,20 @@ async def _execute(
         log.warning("run_sandbox.provision_failed", run_id=run.id, error=str(exc))
         return {"error": {"capability": "sandbox", "code": "provision_failed", "message": str(exc)}}
 
-    timeout_seconds = (
-        int(timeout_s) if timeout_s is not None else settings.bash_default_timeout_seconds
-    )
+    # Resolve the int container deadline the SAME way the bash tool does (#988
+    # secs. 6 & 9 — "timeout enforcement reuses the bash tool's in-container
+    # mechanism"): floor a positive request to 1, then clamp to the bash ceiling.
+    # The floor is load-bearing: the in-container ``timeout`` is GNU coreutils,
+    # which treats a DURATION of 0 as "no limit". A bare ``int(timeout_s)`` turns
+    # a sub-second positive request (e.g. 0.5) into ``timeout 0`` → an UNBOUNDED
+    # exec, the exact opposite of the author's intent. ``max(1, int(...))`` keeps
+    # truncation (2.7 → 2) while guaranteeing a positive request never disables the
+    # timeout. The ``min`` with ``bash_default_timeout_seconds`` is the same ceiling
+    # the bash tool clamps to (the dispatch in ``step.py`` has already rejected a
+    # non-positive / non-finite / non-numeric ``timeout_s`` as a terminal author
+    # bug, so ``int()`` here only ever sees a valid positive number).
+    ceiling = settings.bash_default_timeout_seconds
+    timeout_seconds = min(ceiling, max(1, int(timeout_s))) if timeout_s is not None else ceiling
     preamble = f"export AIOS_RUN_ID={shlex.quote(run.id)} AIOS_CALL_KEY={shlex.quote(call_key)}\n"
     try:
         result = await registry.exec(

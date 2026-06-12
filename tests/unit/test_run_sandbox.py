@@ -228,6 +228,43 @@ async def test_sandbox_task_default_timeout_and_max_output() -> None:
     assert registry2.exec_calls[0]["timeout_seconds"] == 2
 
 
+async def test_sandbox_subsecond_timeout_floors_to_one() -> None:
+    """A positive sub-second ``timeout_s`` must NEVER resolve to 0 (#988 issue 1).
+
+    The in-container ``timeout`` is GNU coreutils, which treats a DURATION of 0 as
+    "no limit" — so a bare ``int(0.5) == 0`` would run the command UNBOUNDED, the
+    exact opposite of the author's intent. ``max(1, int(timeout_s))`` floors any
+    positive request to 1s, guaranteeing the timeout is never disabled.
+
+    This is the mutation guard for the fix: reverting ``_execute`` to a bare
+    ``int(timeout_s)`` makes this assertion fail (resolved seconds would be 0)."""
+    for sub_second in (0.5, 0.001, 0.999):
+        registry = _FakeRegistry()
+        captured: dict[str, Any] = {}
+        p1, p2, p3, p4 = _patches(registry, captured)
+        with p1, p2, p3, p4:
+            await run_sandbox._run_sandbox_task(
+                _Pool(), _run(), call_key="k0", command="x", timeout_s=sub_second
+            )
+        assert registry.exec_calls[0]["timeout_seconds"] >= 1, sub_second
+        assert registry.exec_calls[0]["timeout_seconds"] == 1, sub_second
+
+
+async def test_sandbox_timeout_clamped_to_bash_ceiling() -> None:
+    """A ``timeout_s`` above the bash exec ceiling is clamped down to it (#988
+    secs. 6 & 9 — sandbox reuses the bash tool's validate-and-clamp). The ceiling
+    is ``settings.bash_default_timeout_seconds``."""
+    ceiling = get_settings().bash_default_timeout_seconds
+    registry = _FakeRegistry()
+    captured: dict[str, Any] = {}
+    p1, p2, p3, p4 = _patches(registry, captured)
+    with p1, p2, p3, p4:
+        await run_sandbox._run_sandbox_task(
+            _Pool(), _run(), call_key="k0", command="x", timeout_s=float(ceiling + 500)
+        )
+    assert registry.exec_calls[0]["timeout_seconds"] == ceiling
+
+
 async def test_sandbox_task_prepends_idempotency_preamble() -> None:
     """The command handed to ``backend.exec`` is prefixed with a shlex-quoted
     ``export AIOS_RUN_ID=… AIOS_CALL_KEY=…`` line, followed by the verbatim author

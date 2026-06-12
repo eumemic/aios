@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
@@ -598,6 +599,34 @@ async def _run_workflow_step_body(
                         error_kind="bad_sandbox_call",
                     )
                     return
+                timeout_s = spec.get("timeout_s")
+                # Validate ``timeout_s`` HERE — at dispatch, under the lock, on the
+                # deterministic replay path — so a bad value is the terminal author
+                # bug it is (``bad_sandbox_call``, replay-identical), not an INFRA
+                # error. Without this the worker's ``int(timeout_s)`` would raise
+                # ValueError on a non-numeric value and be caught as the infra code
+                # ``provision_failed`` — mislabelling an author mistake as a sandbox
+                # outage. ``bool`` is excluded explicitly (it is an ``int`` subclass,
+                # so ``True``/``False`` would otherwise pass the numeric check);
+                # NaN/inf are rejected via ``math.isfinite``. Passing this gate means
+                # the worker only ever sees ``None`` or a finite positive number.
+                if timeout_s is not None and (
+                    isinstance(timeout_s, bool)
+                    or not isinstance(timeout_s, (int, float))
+                    or not math.isfinite(timeout_s)
+                    or timeout_s <= 0
+                ):
+                    await _complete_run(
+                        conn,
+                        run,
+                        output=(
+                            "sandbox() timeout_s must be None or a finite positive "
+                            f"number, got {timeout_s!r}"
+                        ),
+                        is_error=True,
+                        error_kind="bad_sandbox_call",
+                    )
+                    return
                 await wf_queries.append_run_event(
                     conn,
                     account_id=account_id,
@@ -607,10 +636,10 @@ async def _run_workflow_step_body(
                     payload={
                         "capability": "sandbox",
                         "command": command,
-                        "timeout_s": spec.get("timeout_s"),
+                        "timeout_s": timeout_s,
                     },
                 )
-                sandboxes_to_launch.append((cap.call_key, command, spec.get("timeout_s")))
+                sandboxes_to_launch.append((cap.call_key, command, timeout_s))
             else:
                 # parallel/pipeline reach the step as their `agent` leaves (B2.G);
                 # any other capability id is unknown.

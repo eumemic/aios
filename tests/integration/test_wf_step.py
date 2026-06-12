@@ -3520,9 +3520,8 @@ async def test_sandbox_memo_law_redrive_while_inflight_execs_once(
 async def test_sandbox_crash_path_at_least_once(
     wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
 ) -> None:
-    """The #784/#795 dimension, both halves: a call_started with NO signal and NO
-    live task (crash signature) re-launches on harvest; a call_started WITH a
-    call_result already present does NOT re-exec."""
+    """The #784/#795 dimension: a call_started with NO signal and NO live task
+    (crash signature) re-launches on harvest, without a second call_started."""
     pool, backend = wf_sandbox_runtime
     block = asyncio.Event()  # never set — the first task blocks in exec until cancelled
     entered = asyncio.Event()
@@ -3563,10 +3562,82 @@ async def test_sandbox_crash_path_at_least_once(
     run = await _get_run(pool, run_id)
     assert run is not None and run.status == "completed"
 
-    # Half 2: a sandbox call WITH a call_result present does NOT re-exec on re-drive.
-    exec_before = _backend_exec_count(backend)
-    await run_workflow_step(run_id)  # terminal/no-op re-wake
-    assert _backend_exec_count(backend) == exec_before
+
+async def test_sandbox_completed_call_not_reexeced_on_nonterminal_redrive(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """The harvest's memo-skip on a NON-terminal run: a sandbox call that already has
+    a ``call_result`` (folded into the memo) is NEVER re-execed when its run is
+    re-driven while still running — only the genuinely-inflight call is.
+
+    This exercises the harvest path itself (the run is ``suspended``, not terminal, so
+    the ``TERMINAL_RUN_STATUSES`` short-circuit in ``run_workflow_step`` does NOT fire
+    and the harvest loop actually runs). A two-call script: the FIRST call completes
+    (its result is in the memo), the SECOND blocks in exec (keeping the run
+    non-terminal). Re-driving must NOT re-exec the first ``echo one`` — if the harvest
+    re-examined resolved calls, ``echo one`` would run a second time and this fails."""
+    pool, backend = wf_sandbox_runtime
+    script = (
+        "async def main(input):\n"
+        "    a = await sandbox('echo one')\n"
+        "    b = await sandbox('echo two')\n"
+        "    return [a, b]\n"
+    )
+    second_entered = asyncio.Event()
+    second_block = asyncio.Event()  # never set — the SECOND task blocks, keeping the run live
+    # mock.patch.object REPLACES FakeBackend.exec, so backend.calls is NOT populated
+    # while patched — record the execed commands ourselves.
+    execed: list[str] = []
+
+    async def _exec(_handle: Any, command: str, **_k: Any) -> CommandResult:
+        execed.append(command)
+        if "echo two" in command:
+            second_entered.set()
+            await second_block.wait()  # park here so the run stays suspended/non-terminal
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+    run_id = await _make_run(pool, script)
+    with mock.patch.object(backend, "exec", new=_exec):
+        await run_workflow_step(run_id)  # park at call 1; launch task 1 (echo one)
+        await _drain_sandbox_tasks()  # task 1 writes its signal
+        await run_workflow_step(run_id)  # harvest call 1 → memo; advance to call 2; launch task 2
+        await asyncio.wait_for(second_entered.wait(), timeout=5)  # task 2 blocks IN exec
+
+        run = await _get_run(pool, run_id)
+        assert run is not None and run.status == "suspended"  # NON-terminal: harvest will run
+        started = await _call_starteds(pool, run_id)
+        assert len(started) == 2  # both calls opened; call 1 resolved, call 2 inflight
+        echo_one_before = sum(1 for c in execed if "echo one" in c)
+        assert echo_one_before == 1  # call 1 ran exactly once
+
+        # Drop call 1's signal so its ONLY remaining record is the journaled
+        # call_result — the realistic state once a signal is GC'd. This is what makes
+        # the memo-skip load-bearing: if the harvest re-examined a resolved call, it
+        # would now find no signal + no live task (the crash signature) and RE-EXEC
+        # `echo one`. The ``call_key not in memo`` filter is the only thing keeping a
+        # completed call out of the harvest's inflight set.
+        call_1_key = started[0].call_key
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM wf_run_signals WHERE run_id = $1 AND call_key = $2",
+                run_id,
+                call_1_key,
+            )
+
+        # Re-drive while non-terminal: the harvest sees call 2 inflight (has_inflight
+        # True → no relaunch) and call 1 ALREADY in the memo (resolved → not in
+        # `inflight` → never re-examined). Neither re-execs.
+        await run_workflow_step(run_id)
+        echo_one_after = sum(1 for c in execed if "echo one" in c)
+        assert echo_one_after == 1  # the COMPLETED call 1 was NOT re-execed
+        assert len(await _call_starteds(pool, run_id)) == 2  # no double-open of either call
+
+        # Let call 2 finish so the test leaves no blocked task behind.
+        second_block.set()
+        await _drain_sandbox_tasks()
+    await run_workflow_step(run_id)  # harvest call 2 → complete
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
 
 
 def _execed_commands(backend: FakeBackend) -> list[str]:
@@ -3677,6 +3748,95 @@ async def test_sandbox_provision_failure_one_error_result(
     assert cr.payload["is_error"] is True
     assert cr.payload["error"]["capability"] == "sandbox"
     assert cr.payload["error"]["code"] == "provision_failed"
+
+
+@pytest.mark.parametrize(
+    "timeout_literal",
+    [
+        "0",  # non-positive int
+        "-1",  # negative
+        "0.0",  # zero float
+        "-2.5",  # negative float
+        "'30'",  # non-numeric (str)
+        "True",  # bool — an int subclass, must still be rejected
+    ],
+)
+async def test_sandbox_invalid_timeout_is_terminal_bad_sandbox_call(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+    timeout_literal: str,
+) -> None:
+    """An invalid (but JSON-marshallable) ``timeout_s`` is a deterministic AUTHOR
+    bug, terminally erroring the run with ``error_kind='bad_sandbox_call'`` AT
+    DISPATCH (#988 issue 3) — never launching the task, so the worker's
+    ``int(timeout_s)`` never sees a bad value and the failure is never mislabelled
+    as the infra code ``provision_failed``.
+
+    (Non-finite ``timeout_s`` — NaN/Inf — is caught one layer EARLIER, by the
+    determinism layer's ``call_key`` derivation in the script host, and surfaces as
+    ``author_exception``; see ``test_sandbox_nonfinite_timeout_rejected_by_determinism``.
+    Both layers yield a terminal, replay-identical author error — the two-layer
+    defense leaves no path for a bad ``timeout_s`` to reach the worker's ``int()``.)"""
+    pool, backend = wf_sandbox_runtime
+    script = f"async def main(input):\n    return await sandbox('echo hi', timeout_s={timeout_literal})\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "errored"
+    # Terminal at DISPATCH: no call_started journaled, no exec, no task launched.
+    assert await _call_starteds(pool, run_id) == []
+    assert _backend_exec_count(backend) == 0
+    assert len(run_sandbox._INFLIGHT) == 0
+    async with pool.acquire() as conn:
+        rows = await wf_queries.list_run_events(conn, run_id)
+    completed = next(e for e in rows if e.type == "run_completed")
+    assert completed.payload["is_error"] is True
+    assert completed.payload["error"] == {"kind": "bad_sandbox_call"}
+
+
+@pytest.mark.parametrize("timeout_literal", ["float('nan')", "float('inf')", "float('-inf')"])
+async def test_sandbox_nonfinite_timeout_rejected_by_determinism(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+    timeout_literal: str,
+) -> None:
+    """A non-finite ``timeout_s`` (NaN/Inf) can't even cross the host→worker boundary:
+    the script host's ``call_key`` derivation runs ``canonical_json`` over the spec,
+    which rejects non-finite floats (no canonical form). The run errors terminally as
+    ``author_exception`` — still a deterministic, replay-identical author bug (no exec,
+    no infra mislabel), just caught one layer before the dispatch validation."""
+    pool, backend = wf_sandbox_runtime
+    script = f"async def main(input):\n    return await sandbox('echo hi', timeout_s={timeout_literal})\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "errored"
+    assert await _call_starteds(pool, run_id) == []  # never journaled
+    assert _backend_exec_count(backend) == 0
+    async with pool.acquire() as conn:
+        rows = await wf_queries.list_run_events(conn, run_id)
+    completed = next(e for e in rows if e.type == "run_completed")
+    assert completed.payload["is_error"] is True
+    assert completed.payload["error"] == {"kind": "author_exception"}
+
+
+async def test_sandbox_valid_float_timeout_dispatches(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """A valid finite positive ``timeout_s`` passes dispatch and reaches exec, clamped
+    to an int container deadline (the bash-tool validate-and-clamp the executor reuses).
+    The 2.5s request floors-and-truncates to 2 (``max(1, int(2.5))``)."""
+    pool, backend = wf_sandbox_runtime
+    backend.next_result = CommandResult(
+        exit_code=0, stdout="ok\n", stderr="", timed_out=False, truncated=False
+    )
+    script = "async def main(input):\n    return await sandbox('echo hi', timeout_s=2.5)\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # park at the sandbox frontier; launch the task
+    await _drain_sandbox_tasks()
+    await run_workflow_step(run_id)  # harvest → complete
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    exec_kwargs = [kw for verb, kw in backend.calls if verb == "exec"]
+    assert exec_kwargs[0]["timeout_seconds"] == 2
 
 
 async def test_sandbox_lazy_no_provision_until_called(
