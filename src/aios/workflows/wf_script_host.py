@@ -101,6 +101,11 @@ class SandboxError(Exception):
     up), ``"exec_failed"`` (the command couldn't be dispatched into a live
     sandbox), or ``"timeout"`` (the infra layer itself timed out — distinct from a
     command that ran to its own ``timeout_s`` and returned ``timed_out=True``).
+
+    ``"timeout"`` is RESERVED forward-documentation: the executor does not yet
+    emit it. ``backend.exec`` surfaces a wall-clock cap as a SUCCESSFUL result with
+    ``timed_out=True`` (not a raise), so today only ``provision_failed`` /
+    ``exec_failed`` are produced (see ``run_sandbox._execute``).
     """
 
     def __init__(self, message: str, *, code: str | None = None) -> None:

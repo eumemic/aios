@@ -622,6 +622,7 @@ async def list_run_ids_needing_step(
     *,
     agent_deadline_seconds: float,
     tool_stale_seconds: float,
+    sandbox_stale_seconds: float,
 ) -> list[str]:
     """``id`` for every live run with something for a step to DO — the sweep
     predicate (#780). A parked run with nothing new is deliberately NOT matched
@@ -637,9 +638,10 @@ async def list_run_ids_needing_step(
       and child completion commits one atomically with its payload, so a lost
       ``defer_run_wake`` is always visible here.
     - a stale inflight call: an ``agent`` past the wall-clock deadline (the step
-      must force-resolve its timeout — this clause DRIVES that backstop) or a
-      ``tool`` past the re-dispatch horizon (its task crashed without a signal).
-      A ``gate`` maps to NULL — resume-driven only, never stale. Operator
+      must force-resolve its timeout — this clause DRIVES that backstop), or a
+      ``tool``/``sandbox`` past its re-dispatch horizon (its task crashed without
+      writing a signal). A ``gate`` maps to NULL — resume-driven only, never
+      stale. Operator
       archive/delete of a child BEFORE it answers now COMPLETES the open request
       EAGERLY (the service layer fails it ``child_gone`` and writes a ``child_done``
       signal atomically with the archive/delete, like every other completion), so
@@ -670,6 +672,7 @@ async def list_run_ids_needing_step(
                       CASE cs.payload->>'capability'
                         WHEN 'agent' THEN $1::float8
                         WHEN 'tool' THEN $2::float8
+                        WHEN 'sandbox' THEN $3::float8
                       END)
                 AND NOT EXISTS (
                   SELECT 1 FROM wf_run_events e
@@ -679,6 +682,7 @@ async def list_run_ids_needing_step(
         """,
         agent_deadline_seconds,
         tool_stale_seconds,
+        sandbox_stale_seconds,
     )
     return [r["id"] for r in rows]
 

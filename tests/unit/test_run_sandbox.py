@@ -42,17 +42,23 @@ class _FakeRegistry:
         result: CommandResult | None = None,
         provision_raises: bool = False,
         exec_raises: bool = False,
+        provision_exc: BaseException | None = None,
     ) -> None:
         self.result = result or CommandResult(
             exit_code=0, stdout="hi\n", stderr="", timed_out=False, truncated=False
         )
         self.provision_raises = provision_raises
         self.exec_raises = exec_raises
+        # A non-SandboxBackendError to raise from provision (run-not-found ValueError,
+        # asyncpg error, …) — the path the broad backstop must still turn into a signal.
+        self.provision_exc = provision_exc
         self.exec_calls: list[dict[str, Any]] = []
         self.provision_count = 0
 
     async def get_or_provision_run(self, run_id: str, *, pool: Any = None) -> SandboxHandle:
         self.provision_count += 1
+        if self.provision_exc is not None:
+            raise self.provision_exc
         if self.provision_raises:
             raise SandboxBackendError("provision boom")
         return _handle()
@@ -171,6 +177,28 @@ async def test_sandbox_task_provision_failure_is_provision_failed() -> None:
         )
     assert captured["result"]["error"]["code"] == "provision_failed"
     assert registry.exec_calls == []  # never reached exec
+
+
+async def test_sandbox_task_non_backend_exception_still_signals() -> None:
+    """A non-SandboxBackendError escaping provisioning (e.g. a ValueError from
+    build_spec_from_run for a run-not-found / reserved-image-prefix) must NOT skip
+    the signal — every path writes exactly one error signal (code provision_failed)
+    and pops _INFLIGHT, upholding the always-signals invariant. Without this the
+    stale-sandbox sweep horizon would park the run forever."""
+    registry = _FakeRegistry(provision_exc=ValueError("run wfr_1 not found"))
+    captured: dict[str, Any] = {}
+    p1, p2, p3, p4 = _patches(registry, captured)
+    with p1, p2, p3, p4 as wake:
+        await run_sandbox._run_sandbox_task(
+            _Pool(), _run(), call_key="k0", command="x", timeout_s=None
+        )
+    assert captured["kind"] == "sandbox_result"
+    assert captured["result"]["error"]["capability"] == "sandbox"
+    assert captured["result"]["error"]["code"] == "provision_failed"
+    assert "run wfr_1 not found" in captured["result"]["error"]["message"]
+    assert registry.exec_calls == []  # never reached exec
+    wake.assert_awaited_once()
+    assert ("wfr_1", "k0") not in run_sandbox._INFLIGHT
 
 
 async def test_sandbox_task_default_timeout_and_max_output() -> None:

@@ -26,6 +26,7 @@ pytestmark = pytest.mark.integration
 
 AGENT_DEADLINE = 3600.0
 TOOL_STALE = 60.0
+SANDBOX_STALE = 300.0
 
 
 @pytest.fixture
@@ -120,7 +121,10 @@ async def _signal(
 async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
     async with pool.acquire() as conn:
         ids = await wf_queries.list_run_ids_needing_step(
-            conn, agent_deadline_seconds=AGENT_DEADLINE, tool_stale_seconds=TOOL_STALE
+            conn,
+            agent_deadline_seconds=AGENT_DEADLINE,
+            tool_stale_seconds=TOOL_STALE,
+            sandbox_stale_seconds=SANDBOX_STALE,
         )
     return set(ids)
 
@@ -174,6 +178,24 @@ async def test_inflight_tool_wakes_past_redispatch_horizon(
     assert run_id in await _needing(pool)
     # Resolved → quiet again.
     await _call_result(pool, run_id, "sha:t#1")
+    assert run_id not in await _needing(pool)
+
+
+async def test_inflight_sandbox_wakes_past_redispatch_horizon(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """A sandbox task that crashed without a signal leaves only its call_started;
+    the stale-sandbox clause re-wakes the run so the harvest re-dispatches against a
+    fresh ephemeral scratch container. A still-running exec WITHIN the horizon is left
+    alone (waking it would prematurely re-drive a slow-but-alive command)."""
+    pool = sweep_pool
+    run_id = await _make_run(pool)
+    await _call_started(pool, run_id, "sha:s#0", "sandbox")
+    assert run_id not in await _needing(pool)
+    await _call_started(pool, run_id, "sha:s#1", "sandbox", age_seconds=SANDBOX_STALE * 2)
+    assert run_id in await _needing(pool)
+    # Resolved → quiet again.
+    await _call_result(pool, run_id, "sha:s#1")
     assert run_id not in await _needing(pool)
 
 

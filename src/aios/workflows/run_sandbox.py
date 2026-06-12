@@ -37,7 +37,6 @@ from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.workflows import WfRun
-from aios.sandbox.backends.base import SandboxBackendError
 from aios.services.wake import defer_run_wake
 
 log = get_logger("aios.workflows.run_sandbox")
@@ -88,7 +87,23 @@ async def _run_sandbox_task(
     """Run one command in the run's sandbox, write its ``sandbox_result`` signal, and
     wake the run (always-signals)."""
     try:
-        result = await _execute(run, command=command, timeout_s=timeout_s)
+        try:
+            result = await _execute(run, command=command, timeout_s=timeout_s)
+        except Exception as exc:
+            # Backstop — _execute maps the provision and exec phases to their own
+            # error envelopes, but its pre-phase setup (require_sandbox_registry /
+            # require_pool / get_settings) raises BEFORE either guarded block. An
+            # uncaught escape here would skip the signal write and, with the
+            # stale-sandbox sweep horizon, park the run forever. A setup failure is
+            # logically a provisioning failure (the sandbox was never brought up).
+            log.exception("run_sandbox.unexpected", run_id=run.id, call_key=call_key)
+            result = {
+                "error": {
+                    "capability": "sandbox",
+                    "code": "provision_failed",
+                    "message": f"{type(exc).__name__}: {exc}",
+                }
+            }
         try:
             async with pool.acquire() as conn:
                 await wf_queries.insert_run_signal(
@@ -120,6 +135,13 @@ async def _execute(run: WfRun, *, command: str, timeout_s: float | None) -> dict
     a command that couldn't be dispatched into a live sandbox (``exec_failed``). A
     command that *ran* and hit its ``timeout_s`` returns a normal ``{"ok": …}``
     result carrying ``timed_out=True`` — only an infra-layer raise is an error.
+
+    Each phase catches ``Exception`` broadly, not just ``SandboxBackendError``:
+    ``get_or_provision_run`` reaches ``build_spec_from_run``/``_resolve_image``,
+    which raise plain ``ValueError`` (run-not-found, reserved image prefix) and
+    asyncpg errors that are NOT ``SandboxBackendError``. Letting those escape would
+    skip the signal write and violate the always-signals invariant — combined with
+    the stale-sandbox sweep horizon, an uncaught escape would park the run forever.
     """
     settings = get_settings()
     registry = runtime.require_sandbox_registry()
@@ -127,7 +149,7 @@ async def _execute(run: WfRun, *, command: str, timeout_s: float | None) -> dict
 
     try:
         handle = await registry.get_or_provision_run(run.id, pool=pool)
-    except SandboxBackendError as exc:
+    except Exception as exc:
         log.warning("run_sandbox.provision_failed", run_id=run.id, error=str(exc))
         return {"error": {"capability": "sandbox", "code": "provision_failed", "message": str(exc)}}
 
@@ -142,7 +164,7 @@ async def _execute(run: WfRun, *, command: str, timeout_s: float | None) -> dict
             max_output_bytes=settings.bash_max_output_bytes,
             cwd="/workspace",
         )
-    except SandboxBackendError as exc:
+    except Exception as exc:
         log.warning("run_sandbox.exec_failed", run_id=run.id, error=str(exc))
         return {"error": {"capability": "sandbox", "code": "exec_failed", "message": str(exc)}}
 

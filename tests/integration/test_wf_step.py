@@ -99,7 +99,10 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
     async with pool.acquire() as conn:
         return set(
             await wf_queries.list_run_ids_needing_step(
-                conn, agent_deadline_seconds=3600, tool_stale_seconds=60
+                conn,
+                agent_deadline_seconds=3600,
+                tool_stale_seconds=60,
+                sandbox_stale_seconds=300,
             )
         )
 

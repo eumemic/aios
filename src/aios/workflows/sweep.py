@@ -41,6 +41,22 @@ log = get_logger("aios.workflows.sweep")
 # already documents).
 TOOL_REDISPATCH_STALE_SECONDS = 180.0
 
+# How long an inflight ``sandbox`` call may sit without a result signal before the
+# sweep re-wakes its run for re-dispatch (the worker crashed after journaling
+# ``call_started`` but before writing ``sandbox_result``). A sandbox exec's
+# wall-clock is BOUNDED, unlike a trickling http_request: it is capped by the bash
+# exec ceiling (``settings.bash_default_timeout_seconds``, default 120s — the same
+# ceiling ``run_sandbox._execute`` passes to ``registry.exec``) plus the one-shot
+# provisioning of an ephemeral scratch container. We size the horizon at the 120s
+# default ceiling + generous provisioning/slack so a slow-but-alive exec is never
+# prematurely re-driven, while a genuinely crashed task recovers within a few
+# ticks. Re-driving a still-running exec same-worker is cheap and harmless anyway:
+# the harvest's ``has_inflight`` guard suppresses a double-launch, and sandbox is
+# worker-pinned in M1 (cross-worker double-exec — #796 — is out of scope). A run
+# sandbox is ephemeral scratch, so even a legitimate re-exec never corrupts durable
+# state (the #784/#795 dimension). 300s clears 120s exec + provisioning with margin.
+SANDBOX_REDISPATCH_STALE_SECONDS = 300.0
+
 
 async def wake_runs_needing_step(pool: asyncpg.Pool[Any]) -> int:
     """Defer a wake for every run needing a step. Returns the number swept."""
@@ -49,6 +65,7 @@ async def wake_runs_needing_step(pool: asyncpg.Pool[Any]) -> int:
             conn,
             agent_deadline_seconds=get_settings().workflow_agent_deadline_seconds,
             tool_stale_seconds=TOOL_REDISPATCH_STALE_SECONDS,
+            sandbox_stale_seconds=SANDBOX_REDISPATCH_STALE_SECONDS,
         )
     for run_id in run_ids:
         try:

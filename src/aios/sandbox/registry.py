@@ -1215,7 +1215,7 @@ class SandboxRegistry:
             if isinstance(result, BaseException):
                 log.warning(
                     "sandbox.stop_all_error",
-                    session_id=h.owner_id,
+                    owner_id=h.owner_id,
                     container_id=h.sandbox_id[:12],
                     error=str(result),
                 )
