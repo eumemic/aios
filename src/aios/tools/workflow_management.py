@@ -100,6 +100,9 @@ class _CreateRunArgs(BaseModel):
     workflow_id: str
     input: Any = None
     vault_ids: list[str] = Field(default_factory=list)
+    budget_usd: float | None = Field(
+        default=None, gt=0, description="Optional shared USD spend ceiling for the run."
+    )
 
 
 class _AwaitRunArgs(BaseModel):
@@ -253,6 +256,7 @@ async def create_run_handler(session_id: str, arguments: dict[str, Any]) -> dict
         vault_ids=args.vault_ids,
         launcher_session_id=session_id,
         parent_run_id=session.parent_run_id,  # lineage + depth cap
+        budget_usd=args.budget_usd,
     )
     return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
 
@@ -379,7 +383,8 @@ CREATE_RUN_DESCRIPTION = (
     "subset of the vaults bound to you. It runs in your own environment. Returns the run "
     "id and status; use await_run to block for its result. The number of runs you may "
     "have outstanding at once is capped — check your outstanding runs with list_runs, and "
-    "finish (await_run) or cancel (cancel_run) them to free slots."
+    "finish (await_run) or cancel (cancel_run) them to free slots. Optionally pass "
+    "budget_usd to set a shared USD spend ceiling for direct agent() children."
 )
 AWAIT_RUN_DESCRIPTION = (
     "Block until a run reaches a terminal state (completed/errored/cancelled), or until "

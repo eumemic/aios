@@ -482,3 +482,40 @@ async def test_list_wf_runs_filters_by_launcher_session(wf_conn: asyncpg.Connect
         )
         == []
     )
+
+
+async def test_run_children_usage_sums_direct_children_and_includes_archived(
+    wf_conn: asyncpg.Connection[Any],
+) -> None:
+    await wf_conn.execute(
+        "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+        "VALUES ('acc_other', 'acc_root', FALSE, 'other')"
+    )
+    run_id = await _seed_run(wf_conn)
+    await wf_conn.execute(
+        "INSERT INTO agents (id, name, model, system, account_id) VALUES ('agent_usage', 'usage-agent', 'm', 's', 'acc_root')"
+    )
+    await wf_conn.execute(
+        """
+        INSERT INTO sessions (
+            id, agent_id, environment_id, agent_version, title, metadata,
+            workspace_volume_path, account_id, parent_run_id, input_tokens, output_tokens,
+            cache_read_input_tokens, cache_creation_input_tokens, cost_microusd, archived_at
+        ) VALUES
+            ('ses_child_a', 'agent_usage', 'env_root', NULL, NULL, '{}'::jsonb, '/tmp/a', 'acc_root', $1, 10, 20, 3, 4, 123456, NULL),
+            ('ses_child_b', 'agent_usage', 'env_root', NULL, NULL, '{}'::jsonb, '/tmp/b', 'acc_root', $1, 1, 2, 5, 6, 654321, now())
+        """,
+        run_id,
+    )
+    usage = await wf_queries.run_children_usage(wf_conn, run_id, account_id="acc_root")
+    assert usage.input_tokens == 11
+    assert usage.output_tokens == 22
+    assert usage.cache_read_input_tokens == 8
+    assert usage.cache_creation_input_tokens == 10
+    assert usage.cost_microusd == 777777
+
+
+async def test_run_children_usage_zero_and_account_scoped(wf_conn: asyncpg.Connection[Any]) -> None:
+    run_id = await _seed_run(wf_conn)
+    usage = await wf_queries.run_children_usage(wf_conn, run_id, account_id="acc_root")
+    assert usage == wf_queries.RunChildrenUsage(0, 0, 0, 0, 0)

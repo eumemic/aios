@@ -96,6 +96,45 @@ def _unresolvable_ref(schema: dict[str, Any]) -> str | None:
     return None
 
 
+def _usage_payload(usage: wf_queries.RunChildrenUsage) -> dict[str, Any]:
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_input_tokens": usage.cache_read_input_tokens,
+        "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+        "cost_usd": usage.cost_microusd / 1_000_000,
+    }
+
+
+def _budget_view(run: WfRun, usage: wf_queries.RunChildrenUsage) -> dict[str, float] | None:
+    if run.budget_usd is None:
+        return None
+    spent = usage.cost_microusd / 1_000_000
+    return {
+        "total_usd": run.budget_usd,
+        "spent_usd": spent,
+        "remaining_usd": max(run.budget_usd - spent, 0.0),
+    }
+
+
+async def _journal_agent_rejection(
+    conn: asyncpg.Connection[Any],
+    *,
+    run: WfRun,
+    call_key: str,
+    kind: str,
+    message: str,
+) -> None:
+    await wf_queries.append_run_event(
+        conn,
+        account_id=run.account_id,
+        run_id=run.id,
+        type="call_result",
+        call_key=call_key,
+        payload={"result": None, "is_error": True, "error": {"kind": kind, "message": message}},
+    )
+
+
 def _memo_outcome(call_result_payload: dict[str, Any]) -> dict[str, Any]:
     """Map a ``call_result`` payload to the host memo's tagged outcome: a value the
     driver fast-forwards into the await (``{"ok": value}``), or an error it throws
@@ -152,6 +191,56 @@ async def _resolve_agent_call(
     )
     assert resolved is not None  # a response now exists (timeout/child) or child_gone
     return resolved
+
+
+async def _enrich_agent_result(
+    conn: asyncpg.Connection[Any],
+    payload: dict[str, Any],
+    *,
+    account_id: str,
+    child_id: str,
+    started_at: datetime,
+    now: datetime,
+) -> dict[str, Any]:
+    row = await conn.fetchrow(
+        """
+        SELECT input_tokens, output_tokens, cache_read_input_tokens,
+               cache_creation_input_tokens, cost_microusd
+          FROM sessions
+         WHERE id = $1 AND account_id = $2
+        """,
+        child_id,
+        account_id,
+    )
+    if row is None:
+        return {
+            **payload,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cost_usd": 0.0,
+            },
+            "duration_ms": max(0, int((now - started_at).total_seconds() * 1000)),
+            "tool_calls": 0,
+        }
+    tool_calls = await conn.fetchval(
+        "SELECT count(*) FROM events WHERE session_id = $1 AND kind = 'message' AND data->>'role' = 'tool'",
+        child_id,
+    )
+    return {
+        **payload,
+        "usage": {
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "cache_read_input_tokens": row["cache_read_input_tokens"],
+            "cache_creation_input_tokens": row["cache_creation_input_tokens"],
+            "cost_usd": row["cost_microusd"] / 1_000_000,
+        },
+        "duration_ms": max(0, int((now - started_at).total_seconds() * 1000)),
+        "tool_calls": int(tool_calls or 0),
+    }
 
 
 async def run_workflow_step(run_id: str) -> None:
@@ -251,6 +340,14 @@ async def _run_workflow_step_body(
                 )
                 if result_payload is None:
                     continue  # still pending, within deadline — stay suspended
+                result_payload = await _enrich_agent_result(
+                    conn,
+                    result_payload,
+                    account_id=account_id,
+                    child_id=cap_payload["child_session_id"],
+                    started_at=cap_event.created_at,
+                    now=now,
+                )
             elif cap_payload.get("capability") == "tool":
                 sig = signals.get(call_key)
                 if sig is None and not run_tools.has_inflight(run_id, call_key):
@@ -324,13 +421,13 @@ async def _run_workflow_step_body(
     outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
 
     needs_rewake = False
-    # A spawn rejection journaled this wake (a catchable agent() error). The run owes one
+    # A same-wake call_result journaled this wake (budget read or catchable agent error). The run owes one
     # more drive so the replay throws the AgentError at the await — so we DON'T settle into
     # a quiet 'suspended' (which the next wake's quiet-wake guard would early-exit), we hand
     # the lease back as 'running' and let the guaranteed self-wake (needs_rewake) drive it.
     # One-shot by construction: a rejected call lands in memo, so its capability is skipped
     # on replay (never re-journaled), and the driven wake re-suspends/completes normally.
-    rejected_any = False
+    owed_drive = False
     # (call_key, tool_name, input) for tool frontiers opened this wake — launched AFTER
     # the txn commits (below), so call_started is visible before a task can signal+wake.
     tools_to_launch: list[tuple[str, str, Any]] = []
@@ -448,6 +545,19 @@ async def _run_workflow_step_body(
             1 for e in inflight.values() if e.payload.get("capability") == "agent"
         )
         slots = max(0, get_settings().workflow_max_inflight_children_per_run - inflight_agents)
+        budget_usage = (
+            await wf_queries.run_children_usage(conn, run_id, account_id=account_id)
+            if run.budget_usd is not None
+            else None
+        )
+        budget_total_microusd = (
+            round(run.budget_usd * 1_000_000) if run.budget_usd is not None else None
+        )
+        over_budget = (
+            budget_usage is not None
+            and budget_total_microusd is not None
+            and budget_usage.cost_microusd >= budget_total_microusd
+        )
 
         # Suspended: open any *new* frontier capability, then park.
         for cap in outcome.emitted:
@@ -470,6 +580,21 @@ async def _run_workflow_step_body(
                 if cap.call_key in signals:
                     needs_rewake = True
             elif cap.capability_id == "agent":
+                if over_budget:
+                    assert budget_usage is not None and run.budget_usd is not None
+                    await _journal_agent_rejection(
+                        conn,
+                        run=run,
+                        call_key=cap.call_key,
+                        kind="budget_exceeded",
+                        message=(
+                            f"run budget exhausted: spent ${budget_usage.cost_microusd / 1_000_000:.2f} "
+                            f"of ${run.budget_usd:.2f} — new agent() calls are refused"
+                        ),
+                    )
+                    owed_drive = True
+                    needs_rewake = True
+                    continue
                 if slots > 0:
                     spawn = await _open_agent_capability(
                         conn,
@@ -503,7 +628,7 @@ async def _run_workflow_step_body(
                     if spawn.rejected or spawn.needs_rewake:
                         needs_rewake = True
                     if spawn.rejected:
-                        rejected_any = True
+                        owed_drive = True
                     else:
                         # A real child was created (or re-attached): it counts toward the
                         # lifetime tally AND occupies a wave slot. A REJECTED cap consumes
@@ -532,6 +657,22 @@ async def _run_workflow_step_body(
                         call_key=cap.call_key,
                         payload={"capability": "agent"},
                     )
+            elif cap.capability_id == "budget":
+                usage = (
+                    await wf_queries.run_children_usage(conn, run_id, account_id=account_id)
+                    if run.budget_usd is not None
+                    else wf_queries.RunChildrenUsage(0, 0, 0, 0, 0)
+                )
+                await wf_queries.append_run_event(
+                    conn,
+                    account_id=account_id,
+                    run_id=run_id,
+                    type="call_result",
+                    call_key=cap.call_key,
+                    payload={"result": _budget_view(run, usage), "is_error": False},
+                )
+                owed_drive = True
+                needs_rewake = True
             elif cap.capability_id == "tool":
                 spec = cap.spec if isinstance(cap.spec, dict) else {}
                 tool_name = spec.get("tool_name")
@@ -582,7 +723,7 @@ async def _run_workflow_step_body(
         # drive is owed: the self-wake replays and throws the catchable AgentError);
         # otherwise park as a settled 'suspended'.
         await wf_queries.set_run_status(
-            conn, run_id, "running" if rejected_any else "suspended", account_id=account_id
+            conn, run_id, "running" if owed_drive else "suspended", account_id=account_id
         )
 
     # Outside the txn (after the suspend commits): launch this wake's tool tasks — now
@@ -650,19 +791,9 @@ async def _open_agent_capability(
     account_id = run.account_id
 
     async def _reject(kind: str, message: str) -> _SpawnResult:
-        # Journal the rejection as a CATCHABLE call_result error for this call_key —
-        # the same channel every other agent failure uses — instead of terminally
-        # erroring the run. The descriptive ``message`` is the author's only source
-        # (``_AGENT_ERROR_DEFAULT_MESSAGES`` has no entry for these kinds), so it is
-        # preserved verbatim. The caller self-wakes; the next step's replay throws
-        # ``_agent_error_from`` at the ``await``, where the author can try/except it.
-        await wf_queries.append_run_event(
-            conn,
-            account_id=account_id,
-            run_id=run.id,
-            type="call_result",
-            call_key=cap.call_key,
-            payload={"result": None, "is_error": True, "error": {"kind": kind, "message": message}},
+        # Journal the rejection as a CATCHABLE call_result error for this call_key.
+        await _journal_agent_rejection(
+            conn, run=run, call_key=cap.call_key, kind=kind, message=message
         )
         return _SpawnResult(rejected=True, needs_rewake=False)
 
@@ -802,7 +933,13 @@ async def _complete_run(
     used). The run's correctness never depended on reclaim. The
     ``run_session_step`` archived-guard makes that future reclaim crash-free.
     """
-    payload: dict[str, Any] = {"output": output, "is_error": is_error}
+    usage = await wf_queries.run_children_usage(conn, run.id, account_id=run.account_id)
+    payload: dict[str, Any] = {
+        "output": output,
+        "is_error": is_error,
+        "usage": _usage_payload(usage),
+        "duration_ms": max(0, int((datetime.now(UTC) - run.created_at).total_seconds() * 1000)),
+    }
     if error_kind is not None:
         payload["error"] = {"kind": error_kind}
     await _commit_terminal_and_dispatch(

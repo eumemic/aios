@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from aios.models.workflows import GateResume, WfRunCreate, WorkflowCreate, WorkflowUpdate
+from aios.models.workflows import GateResume, WfRun, WfRunCreate, WorkflowCreate, WorkflowUpdate
 
 
 def _http_server(name: str, base_url: str) -> dict[str, str]:
@@ -143,6 +143,21 @@ class TestWfRunCreate:
         assert run.workflow_id == "wf_1" and run.environment_id == "env_1"
         assert run.input is None
         assert run.vault_ids == []
+        assert run.budget_usd is None
+
+    def test_budget_usd_validation(self) -> None:
+        run = WfRunCreate.model_validate(
+            {"workflow_id": "wf_1", "environment_id": "env_1", "budget_usd": 1.25}
+        )
+        assert run.budget_usd == 1.25
+        with pytest.raises(ValidationError):
+            WfRunCreate.model_validate(
+                {"workflow_id": "wf_1", "environment_id": "env_1", "budget_usd": 0}
+            )
+        with pytest.raises(ValidationError):
+            WfRunCreate.model_validate(
+                {"workflow_id": "wf_1", "environment_id": "env_1", "budget_usd": -1}
+            )
 
     def test_vault_ids_round_trip(self) -> None:
         run = WfRunCreate.model_validate(
@@ -165,3 +180,20 @@ class TestGateResume:
     def test_requires_nonce(self) -> None:
         with pytest.raises(ValidationError):
             GateResume.model_validate({"result": 1})
+
+
+def test_wf_run_budget_usd_round_trip() -> None:
+    run = WfRun(
+        id="wfr_1",
+        workflow_id="wf_1",
+        account_id="acc_1",
+        environment_id="env_1",
+        script="async def main(input): return None",
+        script_sha="sha",
+        status="pending",
+        last_event_seq=0,
+        created_at=__import__("datetime").datetime.now(__import__("datetime").UTC),
+        updated_at=__import__("datetime").datetime.now(__import__("datetime").UTC),
+        budget_usd=2.5,
+    )
+    assert run.budget_usd == 2.5

@@ -49,6 +49,24 @@ async def test_gate_suspends_with_one_frontier() -> None:
     assert out.emitted[0].call_key.startswith("sha:")
 
 
+async def test_budget_emits_frontier_and_memo_fast_forwards() -> None:
+    src = "async def main(input):\n    return await budget()"
+    first = await _run(src)
+    assert first.kind == "suspended"
+    assert len(first.emitted) == 1
+    assert first.emitted[0].capability_id == "budget"
+    key = first.emitted[0].call_key
+
+    view = {"total_usd": 2.0, "spent_usd": 0.5, "remaining_usd": 1.5}
+    second = await _run(src, memo={key: {"ok": view}})
+    assert second.kind == "returned"
+    assert second.value == view
+
+    third = await _run(src, memo={key: {"ok": None}})
+    assert third.kind == "returned"
+    assert third.value is None
+
+
 async def test_memoized_result_fast_forwards() -> None:
     src = "async def main(input):\n    r = await gate({'q': 'ok?'})\n    return {'answer': r}"
     first = await _run(src)

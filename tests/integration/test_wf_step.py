@@ -4146,3 +4146,92 @@ async def test_update_workflow_does_not_disturb_inflight_runs(
         fresh = await wf_queries.get_wf_run(conn, new_run.id, account_id="acc_wf")
     assert fresh.status == "completed" and fresh.output == "NEW"
     assert fresh.tools == []
+
+
+async def test_budget_primitive_round_trip_and_no_ceiling(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    script = "async def main(input):\n    return [await budget(), await budget()]\n"
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_wf", name="budgeted", script=script
+        )
+    run = await service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=1.25
+    )
+    await run_workflow_step(run.id)
+    async with pool.acquire() as conn:
+        r1 = await wf_queries.get_run_for_step(conn, run.id)
+        events1 = await wf_queries.list_run_events(conn, run.id)
+    assert r1 is not None and r1.status == "running"
+    budget_results = [e for e in events1 if e.type == "call_result"]
+    assert len(budget_results) == 1
+    assert budget_results[0].payload == {
+        "result": {"total_usd": 1.25, "spent_usd": 0.0, "remaining_usd": 1.25},
+        "is_error": False,
+    }
+    assert budget_results[0].call_key not in {
+        e.call_key for e in events1 if e.type == "call_started"
+    }
+
+    await run_workflow_step(run.id)
+    await run_workflow_step(run.id)
+    async with pool.acquire() as conn:
+        r2 = await wf_queries.get_run_for_step(conn, run.id)
+        events2 = await wf_queries.list_run_events(conn, run.id)
+    assert r2 is not None and r2.status == "completed"
+    assert r2.output == [
+        {"total_usd": 1.25, "spent_usd": 0.0, "remaining_usd": 1.25},
+        {"total_usd": 1.25, "spent_usd": 0.0, "remaining_usd": 1.25},
+    ]
+    assert len([e for e in events2 if e.type == "call_result"]) == 2
+
+    no_budget = await _make_run(pool, "async def main(input):\n    return await budget()\n")
+    await run_workflow_step(no_budget)
+    await run_workflow_step(no_budget)
+    async with pool.acquire() as conn:
+        r3 = await wf_queries.get_run_for_step(conn, no_budget)
+    assert r3 is not None and r3.output is None
+
+
+async def test_over_budget_agent_refusal_is_catchable(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent({wf_agent_id!r}, 'x')\n"
+        "    except AgentError as e:\n"
+        "        return {'kind': e.kind, 'msg': str(e)}\n"
+    )
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_wf", name="over-budget", script=script
+        )
+    run = await service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=1.0
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agents (id, name, model, system, account_id) VALUES ('agent_cost_seed', 'cost-seed', 'm', 's', 'acc_wf')"
+        )
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, workspace_volume_path, account_id, parent_run_id, cost_microusd) "
+            "VALUES ('ses_cost_seed', 'agent_cost_seed', 'env_wf', NULL, NULL, '{}'::jsonb, '/tmp/cost', 'acc_wf', $1, 1000000)",
+            run.id,
+        )
+    await run_workflow_step(run.id)
+    await run_workflow_step(run.id)
+    async with pool.acquire() as conn:
+        r = await wf_queries.get_run_for_step(conn, run.id)
+        events = await wf_queries.list_run_events(conn, run.id)
+        child_count = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1 AND id != 'ses_cost_seed'",
+            run.id,
+        )
+    assert r is not None and r.status == "completed"
+    assert r.output["kind"] == "budget_exceeded"
+    assert "run budget exhausted" in r.output["msg"]
+    cr = next(e for e in events if e.type == "call_result" and e.payload.get("is_error"))
+    assert cr.payload["error"]["kind"] == "budget_exceeded"
+    assert child_count == 0

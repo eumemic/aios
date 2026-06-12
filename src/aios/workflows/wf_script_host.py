@@ -170,6 +170,11 @@ def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
     )
 
 
+def budget() -> _Capability:
+    """Read this run's shared direct-child spend budget, or None when unset."""
+    return _Capability("budget", None)
+
+
 def tool(name: str, input: Any) -> _Capability:
     """Invoke one of the workflow's declared tools and await its result.
 
@@ -477,6 +482,7 @@ def _build_coroutine(source: str, input_value: Any) -> Any:
             "gate": gate,
             "agent": agent,
             "tool": tool,
+            "budget": budget,
             "parallel": parallel,
             "pipeline": pipeline,
             "log": log,

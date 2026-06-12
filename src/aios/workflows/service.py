@@ -46,6 +46,7 @@ async def create_run(
     launcher_session_id: str | None = None,
     parent_run_id: str | None = None,
     expected_version: int | None = None,
+    budget_usd: float | None = None,
 ) -> WfRun:
     """Create a run that snapshots the workflow's current script, then wake it.
 
@@ -193,6 +194,7 @@ async def create_run(
             tools=effective.tools,
             mcp_servers=effective.mcp_servers,
             http_servers=effective.http_servers,
+            budget_usd=budget_usd,
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)
