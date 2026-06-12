@@ -202,12 +202,16 @@ def build_iptables_script(
     alias is resolved to ``$PROXY_IP`` exactly ONCE at sidecar runtime
     (iptables ``--to-destination`` needs an IP, not a DNS name) and the
     whole nat block is guarded by ``if [ -n "$PROXY_IP" ]`` so a
-    proxy-alias DNS miss emits no malformed rule — fail-closed: with no
-    DNAT, the credential host's :443 still falls through to the filter
-    table, which does NOT ACCEPT it unless the host is also in
-    ``allowed_hosts``, so a proxy-resolution miss drops the egress rather
-    than leaking the placeholder un-proxied. ``dnat_target`` of ``None``
-    (the default) emits NO nat rules, preserving every existing caller.
+    proxy-alias DNS miss emits no malformed rule. On such a miss the
+    behavior is fail-open-to-placeholder, NOT fail-closed: dnat_hosts ⊆
+    networking.allowed_hosts (enforced by the #879 provision gate), so the
+    credential host's :443 is still filter-ACCEPTed and traffic reaches
+    the real upstream carrying the opaque placeholder — an authentication
+    failure, never a secret leak (the real secret never enters the
+    container). A non-functional credentialed sandbox is acceptable here;
+    a WORKER_NETWORK_ALIAS miss already implies the proxy infrastructure
+    is broken. ``dnat_target`` of ``None`` (the default) emits NO nat
+    rules, preserving every existing caller.
 
     Hostnames are validated at the model layer (alphanumerics, dots, hyphens
     only) so embedding them in the script is safe; ``proxy_port`` is an int.
@@ -255,14 +259,14 @@ def build_iptables_script(
         # Resolve the proxy alias to an IP ONCE — iptables --to-destination
         # needs an IP, not a DNS name. The block is guarded on a non-empty
         # $PROXY_IP, so a proxy-alias DNS miss emits no malformed ":<port>"
-        # rule; the credential host's :443 then falls through to the filter
-        # table. If the host is not independently allow-listed on :443 it hits
-        # the DROP policy — fail-closed, no un-proxied placeholder leak. Under
-        # #879's `cred ⊆ env` the host is also in allowed_hosts (filter-
-        # ACCEPTed), so keeping that overlap closed on a proxy miss is #879's
-        # job, not this loop's. (In practice the alias is the load-bearing
-        # WORKER_NETWORK_ALIAS, so a miss already means a non-functional
-        # sandbox.)
+        # rule. NOTE the resulting behavior: under #879's `cred ⊆ env` gate
+        # the credential host IS always in allowed_hosts and therefore
+        # filter-ACCEPTed on :443 — so on a proxy miss, traffic flows
+        # DIRECTLY to the real upstream carrying the opaque placeholder.
+        # That is fail-open-to-placeholder (auth failures), never a secret
+        # leak: the real secret never enters the container. (In practice the
+        # alias is the load-bearing WORKER_NETWORK_ALIAS, so a miss already
+        # means a non-functional sandbox.)
         lines.append(
             f"PROXY_IP=$(getent ahosts {proxy_alias} 2>/dev/null "
             "| awk '{print $1}' | sort -u | head -n1)"
