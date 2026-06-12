@@ -2,6 +2,7 @@ from enum import Enum
 
 
 class ToolSpecTypeType0(str, Enum):
+    ARCHIVE_WORKFLOW = "archive_workflow"
     AWAIT_RUN = "await_run"
     BASH = "bash"
     CANCEL = "cancel"
@@ -25,6 +26,7 @@ class ToolSpecTypeType0(str, Enum):
     TRIGGER_LIST = "trigger_list"
     TRIGGER_REMOVE = "trigger_remove"
     TRIGGER_UPDATE = "trigger_update"
+    UNARCHIVE_WORKFLOW = "unarchive_workflow"
     UPDATE_WORKFLOW = "update_workflow"
     WAKE_SELF = "wake_self"
     WAKE_SESSION = "wake_session"

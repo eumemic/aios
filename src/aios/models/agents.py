@@ -39,6 +39,8 @@ BuiltinToolType = Literal[
     "trigger_list",
     "create_workflow",
     "update_workflow",
+    "archive_workflow",
+    "unarchive_workflow",
     "create_run",
     "await_run",
     "cancel_run",

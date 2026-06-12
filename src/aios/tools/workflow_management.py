@@ -80,6 +80,12 @@ class _UpdateWorkflowArgs(WorkflowUpdate):
     workflow_id: str
 
 
+class _WorkflowIdArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+
+
 class _CreateRunArgs(BaseModel):
     """``create_run`` arguments. No ``environment_id`` — the run always inherits the
     caller session's env (a caller-chosen env id would be a cross-tenant attack surface)."""
@@ -110,10 +116,8 @@ class _CancelRunArgs(BaseModel):
     run_id: str
 
 
-class _GetWorkflowArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    workflow_id: str
+class _GetWorkflowArgs(_WorkflowIdArgs):
+    pass
 
 
 class _ListWorkflowsArgs(BaseModel):
@@ -211,6 +215,22 @@ async def update_workflow_handler(session_id: str, arguments: dict[str, Any]) ->
         http_servers=args.http_servers,
         actor_session_id=session_id,
     )
+    return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
+
+
+async def archive_workflow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = _parse(_WorkflowIdArgs, arguments)
+    wf = await wf_service.archive_workflow(pool, args.workflow_id, account_id=account_id)
+    return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
+
+
+async def unarchive_workflow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = _parse(_WorkflowIdArgs, arguments)
+    wf = await wf_service.unarchive_workflow(pool, args.workflow_id, account_id=account_id)
     return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
 
 
@@ -332,8 +352,19 @@ UPDATE_WORKFLOW_DESCRIPTION = (
     "Update one of your workflows in place, bumping its version. Pass the current "
     "'version' as an optimistic-concurrency token (a stale token is rejected — re-read "
     "with get_workflow and retry). Omitted fields are preserved. The resulting tool/server "
-    "surface must still be a subset of your own. In-flight runs are unaffected (a run pins "
-    "its workflow's script + surface at launch)."
+    "surface must still be a subset of your own. Archived workflows cannot be updated; "
+    "unarchive first. In-flight runs are unaffected (a run pins its workflow's script + "
+    "surface at launch)."
+)
+ARCHIVE_WORKFLOW_DESCRIPTION = (
+    "Archive one of your workflows. Archived workflows disappear from list_workflows and "
+    "refuse new create_run launches, but remain fetchable by id and keep their run/journal "
+    "history. Archiving releases the workflow name for a fresh create_workflow."
+)
+UNARCHIVE_WORKFLOW_DESCRIPTION = (
+    "Restore an archived workflow so it appears in list_workflows and can launch new runs "
+    "again. If another live workflow has reclaimed the same name, unarchive is rejected; "
+    "rename or archive the conflicting live workflow first."
 )
 CREATE_RUN_DESCRIPTION = (
     "Launch a run of a workflow you can access. The run executes with the workflow's "
@@ -400,6 +431,20 @@ def _register() -> None:
         description=UPDATE_WORKFLOW_DESCRIPTION,
         parameters_schema=_UpdateWorkflowArgs.model_json_schema(),
         handler=update_workflow_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="archive_workflow",
+        description=ARCHIVE_WORKFLOW_DESCRIPTION,
+        parameters_schema=_WorkflowIdArgs.model_json_schema(),
+        handler=archive_workflow_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="unarchive_workflow",
+        description=UNARCHIVE_WORKFLOW_DESCRIPTION,
+        parameters_schema=_WorkflowIdArgs.model_json_schema(),
+        handler=unarchive_workflow_handler,
         transport="agent_tool",
     )
     registry.register(

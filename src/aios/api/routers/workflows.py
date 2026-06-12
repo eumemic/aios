@@ -120,6 +120,20 @@ async def get_workflow(workflow_id: str, pool: PoolDep, account_id: AccountIdDep
     return await service.get_workflow(pool, workflow_id, account_id=account_id)
 
 
+@router.post(
+    "/{workflow_id}/archive",
+    operation_id="archive_workflow",
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
+async def archive_workflow(workflow_id: str, pool: PoolDep, account_id: AccountIdDep) -> Workflow:
+    return await service.archive_workflow(pool, workflow_id, account_id=account_id)
+
+
+@router.post("/{workflow_id}/unarchive", operation_id="unarchive_workflow")
+async def unarchive_workflow(workflow_id: str, pool: PoolDep, account_id: AccountIdDep) -> Workflow:
+    return await service.unarchive_workflow(pool, workflow_id, account_id=account_id)
+
+
 # ─── /v1/runs (execution instances) ──────────────────────────────────────────
 
 

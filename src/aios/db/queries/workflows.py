@@ -21,7 +21,7 @@ from typing import Any
 
 import asyncpg
 
-from aios.db.queries import _get_scoped, _list_scoped, parse_jsonb
+from aios.db.queries import _archive_scoped, _get_scoped, _list_scoped, parse_jsonb
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
@@ -56,6 +56,7 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        archived_at=row["archived_at"],
     )
 
 
@@ -177,6 +178,8 @@ async def update_workflow(
     exactly one of two racing writers matches, the other gets a clean 409.
     """
     current = await get_workflow(conn, workflow_id, account_id=account_id)
+    if current.archived_at is not None:
+        raise ConflictError(f"workflow {workflow_id} is archived", detail={"id": workflow_id})
     if expected_version != current.version:
         # Validate the token up front so the contract is uniform — without this, the
         # write-free no-op path below would return 200 for a stale token + identical
@@ -222,7 +225,7 @@ async def update_workflow(
                    input_schema = $5::jsonb, output_schema = $6::jsonb, description = $7,
                    tools = $8::jsonb, mcp_servers = $9::jsonb, http_servers = $10::jsonb,
                    updated_at = now()
-             WHERE id = $1 AND account_id = $2 AND version = $11
+             WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND version = $11
             RETURNING *
             """,
             workflow_id,
@@ -280,23 +283,55 @@ async def list_workflows(
     after: str | None = None,
     name: str | None = None,
 ) -> list[Workflow]:
-    """Keyset-paginated list of an account's workflows, newest first.
+    return await _list_scoped(
+        conn,
+        table="workflows",
+        account_id=account_id,
+        row=_row_to_workflow,
+        limit=limit,
+        after=after,
+        filters=[("name", name)],
+    )
 
-    Hand-written (not ``_list_scoped``) because the ``workflows`` table has no
-    ``archived_at`` column — workflows are never archived. One row per name
-    (``UNIQUE(account_id, name)``); ``version`` bumps in place on update.
-    """
-    args: list[Any] = [account_id]
-    where = ["account_id = $1"]
-    if name is not None:
-        args.append(name)
-        where.append(f"name = ${len(args)}")
-    if after is not None:
-        args.append(after)
-        where.append(f"id < ${len(args)}")
-    args.append(limit)
-    sql = f"SELECT * FROM workflows WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ${len(args)}"
-    return [_row_to_workflow(r) for r in await conn.fetch(sql, *args)]
+
+async def archive_workflow(
+    conn: asyncpg.Connection[Any], workflow_id: str, *, account_id: str
+) -> Workflow:
+    row = await _archive_scoped(
+        conn,
+        table="workflows",
+        id_=workflow_id,
+        account_id=account_id,
+        noun="workflow",
+    )
+    return _row_to_workflow(row)
+
+
+async def unarchive_workflow(
+    conn: asyncpg.Connection[Any], workflow_id: str, *, account_id: str
+) -> Workflow:
+    try:
+        row = await conn.fetchrow(
+            """
+            UPDATE workflows
+               SET archived_at = NULL, updated_at = now()
+             WHERE id = $1 AND account_id = $2 AND archived_at IS NOT NULL
+            RETURNING *
+            """,
+            workflow_id,
+            account_id,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        current = await get_workflow(conn, workflow_id, account_id=account_id)
+        raise ConflictError(
+            f"workflow {current.name!r} already exists",
+            detail={"name": current.name},
+        ) from exc
+    if row is None:
+        raise NotFoundError(
+            f"workflow {workflow_id} not found or not archived", detail={"id": workflow_id}
+        )
+    return _row_to_workflow(row)
 
 
 # ─── wf_runs (execution instances) ───────────────────────────────────────────
