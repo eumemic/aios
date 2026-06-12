@@ -131,6 +131,25 @@ def test_callkeyer_per_hash_ordinals() -> None:
     assert keyer.next("gate", {"q": "ok?"}) == f"sha:{h}#3"
 
 
+def test_sandbox_capability_keys_distinctly() -> None:
+    # The capability_id is part of the content hash, so the SAME spec keys
+    # differently under "sandbox" than under "tool"/"agent" — a sandbox call can
+    # never collide with a tool/agent call in the memo.
+    spec = {"command": "echo hi", "timeout_s": None}
+    sandbox_hash = content_hash("sandbox", spec)
+    assert sandbox_hash != content_hash("tool", spec)
+    assert sandbox_hash != content_hash("agent", spec)
+
+
+def test_callkeyer_orders_sandbox_calls_per_hash() -> None:
+    keyer = CallKeyer()
+    spec = {"command": "echo hi", "timeout_s": None}
+    h = content_hash("sandbox", spec)
+    # Two byte-identical sandbox calls disambiguate as #0 / #1.
+    assert keyer.next("sandbox", spec) == f"sha:{h}#0"
+    assert keyer.next("sandbox", spec) == f"sha:{h}#1"
+
+
 def test_content_hash_stable_across_pythonhashseed() -> None:
     """The same nested input hashes identically under different hash seeds.
 

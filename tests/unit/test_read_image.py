@@ -48,7 +48,7 @@ def stub_handle(temp_workspace_root: Path, **kwargs: Any) -> SandboxHandle:
     # handle. Depends on temp_workspace_root so that the settings.workspace_root
     # monkeypatch is already in place when workspace_dir_for() is called.
     handle = SandboxHandle(
-        session_id="sess_01TEST",
+        owner_id="sess_01TEST",
         sandbox_id="container_abc",
         workspace_path=workspace_dir_for("sess_01TEST"),
     )
@@ -222,7 +222,7 @@ class TestImageBranch:
         (nested / "img.png").write_bytes(payload)
 
         handle = SandboxHandle(
-            session_id="sess_01TEST",
+            owner_id="sess_01TEST",
             sandbox_id="container_abc",
             workspace_path=nested,
         )

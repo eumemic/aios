@@ -146,6 +146,13 @@ class SandboxSpec:
 class SandboxHandle:
     """Opaque handle to a running sandbox. Backend-agnostic.
 
+    ``owner_id`` is the opaque label of whatever the sandbox belongs to — a
+    session ULID (``sess_…``) for a session sandbox, a workflow-run ULID
+    (``wfr_…``) for a run sandbox (#988). The registry keys its handle map on
+    it; the backend copies it from ``SandboxSpec.session_id`` (which stays the
+    opaque owner-label field) at create time. Logs/error messages stamp it so a
+    failure is attributable regardless of which owner kind it is.
+
     ``sandbox_id`` is a backend-internal identifier — a Docker container
     id today, a fabricated uuid for a host-subprocess backend tomorrow.
     The registry treats it as opaque; only the backend that issued it
@@ -164,7 +171,7 @@ class SandboxHandle:
     can't see.
     """
 
-    session_id: str
+    owner_id: str
     sandbox_id: str
     workspace_path: Path
     mount_snapshot: frozenset[tuple[str, ...]] = frozenset()

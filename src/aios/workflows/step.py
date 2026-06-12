@@ -50,7 +50,7 @@ from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
 from aios.services import attenuation as attenuation_service
 from aios.services.sessions import create_child_session
 from aios.services.wake import defer_run_wake, defer_trigger_fire, defer_wake
-from aios.workflows import run_tools
+from aios.workflows import run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.host_launcher import EmittedCapability, run_script_host
 
@@ -272,6 +272,40 @@ async def _run_workflow_step_body(
                 if sig is None:
                     continue  # a live task is still running — stay suspended, it will signal
                 result_payload = {"result": sig.result, "is_error": False}
+            elif cap_payload.get("capability") == "sandbox":
+                # Structural twin of the tool branch, but the signal envelope is
+                # one level deeper (Q5): a sandbox_result is {"ok": bash_dict} on a
+                # command that RAN (even nonzero / timed_out) or {"error": err} when
+                # the sandbox infra failed. Unwrap that wrap into the call_result so
+                # the host's fast-forward throws SandboxError only on the latter.
+                sig = signals.get(call_key)
+                if sig is None and not run_sandbox.has_inflight(run_id, call_key):
+                    # No signal in the snapshot AND no live task — the snapshot can
+                    # be stale (a task commits its signal before leaving the
+                    # registry, outside the run lock). A fresh point-read tells
+                    # "just finished" from "crashed"; only the latter re-dispatches
+                    # (at-least-once — sound for the ephemeral run sandbox).
+                    sig = await wf_queries.read_run_signal(conn, run_id, call_key)
+                    if sig is None:
+                        run_sandbox.launch_sandbox_task(
+                            pool,
+                            run,
+                            call_key=call_key,
+                            command=cap_payload["command"],
+                            timeout_s=cap_payload.get("timeout_s"),
+                        )
+                        continue
+                if sig is None:
+                    continue  # a live task is still running — stay suspended
+                envelope = sig.result if isinstance(sig.result, dict) else {}
+                if "error" in envelope:
+                    result_payload = {
+                        "result": None,
+                        "is_error": True,
+                        "error": envelope["error"],
+                    }
+                else:
+                    result_payload = {"result": envelope.get("ok"), "is_error": False}
             else:  # gate: the resume value lives in the signal
                 sig = signals.get(call_key)
                 if sig is None:
@@ -319,6 +353,9 @@ async def _run_workflow_step_body(
     # (call_key, tool_name, input) for tool frontiers opened this wake — launched AFTER
     # the txn commits (below), so call_started is visible before a task can signal+wake.
     tools_to_launch: list[tuple[str, str, Any]] = []
+    # (call_key, command, timeout_s) for sandbox frontiers opened this wake — same
+    # post-commit launch discipline as tools.
+    sandboxes_to_launch: list[tuple[str, str, float | None]] = []
     async with pool.acquire() as conn:
         # Journal this wake's progress annotations (log()/phase()) FIRST — before the
         # raised/returned/suspended dispatch — so a line emitted just before a crash or
@@ -542,6 +579,38 @@ async def _run_workflow_step_body(
                     },
                 )
                 tools_to_launch.append((cap.call_key, tool_name, spec.get("input")))
+            elif cap.capability_id == "sandbox":
+                # UNTHROTTLED, exactly like tool — outside the slots/wave-admission
+                # agent gate. A run's sandbox() commands aren't capped by the
+                # per-run in-flight CHILDREN limit (that bounds spawned agent
+                # sessions, not the run's own scratch compute).
+                spec = cap.spec if isinstance(cap.spec, dict) else {}
+                command = spec.get("command")
+                if not isinstance(command, str) or not command:
+                    # A malformed spec is a deterministic author bug (replay-
+                    # identical), so it terminally errors the run — unlike an infra
+                    # failure, which resolves as a catchable SandboxError value.
+                    await _complete_run(
+                        conn,
+                        run,
+                        output=f"sandbox() requires a non-empty string command, got {command!r}",
+                        is_error=True,
+                        error_kind="bad_sandbox_call",
+                    )
+                    return
+                await wf_queries.append_run_event(
+                    conn,
+                    account_id=account_id,
+                    run_id=run_id,
+                    type="call_started",
+                    call_key=cap.call_key,
+                    payload={
+                        "capability": "sandbox",
+                        "command": command,
+                        "timeout_s": spec.get("timeout_s"),
+                    },
+                )
+                sandboxes_to_launch.append((cap.call_key, command, spec.get("timeout_s")))
             else:
                 # parallel/pipeline reach the step as their `agent` leaves (B2.G);
                 # any other capability id is unknown.
@@ -567,6 +636,10 @@ async def _run_workflow_step_body(
     for launch_key, launch_name, launch_input in tools_to_launch:
         run_tools.launch_tool_task(
             pool, run, call_key=launch_key, tool_name=launch_name, tool_input=launch_input
+        )
+    for launch_key, launch_command, launch_timeout in sandboxes_to_launch:
+        run_sandbox.launch_sandbox_task(
+            pool, run, call_key=launch_key, command=launch_command, timeout_s=launch_timeout
         )
     if needs_rewake:
         await defer_run_wake(run_id)
@@ -844,3 +917,10 @@ async def _commit_terminal_and_dispatch(
             await defer_trigger_fire(fire.trigger_id, fire.trigger_run_id)
         except Exception:
             log.exception("trigger.fire_defer_failed", trigger_run_id=fire.trigger_run_id)
+    # Release the run's ephemeral sandbox now the run is terminal (#988, Q8).
+    # Fires on EVERY terminal state — completed / errored / cancelled all route
+    # through here — and is best-effort: ``teardown_run_sandbox`` schedules a
+    # fire-and-forget ``release_run`` and NEVER raises, so a teardown hiccup can't
+    # corrupt the just-committed terminal transition. If a sandbox was never
+    # provisioned (the common no-sandbox() run), ``release_run`` is a no-op.
+    run_sandbox.teardown_run_sandbox(run.id)

@@ -42,7 +42,7 @@ def _err(exit_code: int, stderr: str) -> CommandResult:
 @pytest.fixture
 def stub_handle(**kwargs: Any) -> SandboxHandle:
     return SandboxHandle(
-        session_id="sess_01TEST",
+        owner_id="sess_01TEST",
         sandbox_id="container_abc",
         workspace_path=Path("/tmp/aios-test"),
     )

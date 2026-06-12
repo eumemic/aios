@@ -857,3 +857,70 @@ def test_storable_neutralizes_nul_and_surrogates_losslessly() -> None:
     assert storable_text("ordinary text — é 🎉") == "ordinary text — é 🎉"
     assert "\x00" not in storable_text("a\x00b")
     storable_text("x" + chr(0xD800)).encode("utf-8")  # no raise → storable
+
+
+# ─── sandbox() capability (#988) ─────────────────────────────────────────────
+
+
+async def test_sandbox_emits_one_frontier() -> None:
+    out = await _run("async def main(input):\n    return await sandbox('echo hi')")
+    assert out.kind == "suspended"
+    assert len(out.emitted) == 1
+    assert out.emitted[0].capability_id == "sandbox"
+    assert out.emitted[0].call_key.startswith("sha:")
+    assert out.emitted[0].spec == {"command": "echo hi", "timeout_s": None}
+
+
+async def test_sandbox_result_fast_forwards() -> None:
+    # An {"ok": bash_dict} memo outcome resumes the await with the bash dict.
+    src = "async def main(input):\n    r = await sandbox('echo hi')\n    return r"
+    first = await _run(src)
+    key = first.emitted[0].call_key
+    bash = {
+        "exit_code": 0,
+        "stdout": "hi\n",
+        "stderr": "",
+        "timed_out": False,
+        "truncated": False,
+    }
+    second = await _run(src, memo={key: {"ok": bash}})
+    assert second.kind == "returned"
+    assert second.value == bash
+    assert second.emitted == []
+
+
+async def test_sandbox_error_outcome_throws_sandbox_error() -> None:
+    """An {"error", capability:"sandbox"} memo outcome throws SandboxError at the
+    await; uncaught, it propagates out of main and terminates the run."""
+    src = "async def main(input):\n    return await sandbox('boom')"
+    first = await _run(src)
+    key = first.emitted[0].call_key
+    out = await _run(
+        src,
+        memo={key: {"error": {"capability": "sandbox", "code": "exec_failed", "message": "boom"}}},
+    )
+    assert out.kind == "raised"
+    assert "SandboxError" in (out.error_repr or "")
+    assert "boom" in (out.error_repr or "")
+
+
+async def test_sandbox_error_is_catchable() -> None:
+    """The author can try/except SandboxError and carry on; e.code surfaces."""
+    src = (
+        "async def main(input):\n"
+        "    try:\n"
+        "        await sandbox('boom')\n"
+        "    except SandboxError as e:\n"
+        "        return {'caught': True, 'code': e.code}\n"
+        "    return {'caught': False}"
+    )
+    first = await _run(src)
+    key = first.emitted[0].call_key
+    out = await _run(
+        src,
+        memo={
+            key: {"error": {"capability": "sandbox", "code": "provision_failed", "message": "x"}}
+        },
+    )
+    assert out.kind == "returned"
+    assert out.value == {"caught": True, "code": "provision_failed"}

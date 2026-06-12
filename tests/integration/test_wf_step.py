@@ -3357,6 +3357,283 @@ async def _drain_tool_tasks() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+# ─── sandbox() capability (#988) ─────────────────────────────────────────────
+
+from aios.sandbox.backends.base import CommandResult, SandboxBackendError  # noqa: E402
+from aios.sandbox.registry import SandboxRegistry  # noqa: E402
+from aios.sandbox.spec import ProvisioningPlan  # noqa: E402
+from aios.workflows import run_sandbox  # noqa: E402
+from tests.helpers.sandbox import FakeBackend  # noqa: E402
+
+
+def _fake_run_plan(run_id: str) -> ProvisioningPlan:
+    """A minimal ProvisioningPlan for a run sandbox — no real Docker/CA/broker."""
+    from pathlib import Path
+
+    from aios.models.environments import EnvironmentConfig
+    from aios.sandbox.backends.base import Mount, SandboxSpec, Unrestricted
+
+    spec = SandboxSpec(
+        session_id=run_id,
+        instance_id="inst_test",
+        workspace=Mount(host_path=Path("/tmp/wfr-ws"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=Unrestricted(),
+        host_gateway_alias=None,
+        image="img:test",
+    )
+    return ProvisioningPlan(
+        spec=spec,
+        env_config=EnvironmentConfig(),
+        memory_echoes=[],
+        github_echoes=[],
+        git_proxy=None,
+        env_var_credentials=(),
+        secret_proxy=None,
+    )
+
+
+@pytest.fixture
+async def wf_sandbox_runtime(wf_runtime: asyncpg.Pool[Any]) -> AsyncIterator[Any]:
+    """``wf_runtime`` + a :class:`SandboxRegistry` over a :class:`FakeBackend` on
+    ``runtime.sandbox_registry``, with the heavy provision path (build_spec_from_run,
+    egress CA / package install) patched out so ``get_or_provision_run`` exercises
+    only the backend.create + cache logic. Yields ``(pool, backend)``."""
+    pool = wf_runtime
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend)
+    prev = runtime.sandbox_registry
+    runtime.sandbox_registry = registry
+    run_sandbox._INFLIGHT.clear()
+    with (
+        mock.patch(
+            "aios.sandbox.registry.build_spec_from_run",
+            new=AsyncMock(side_effect=lambda run_id: _fake_run_plan(run_id)),
+        ),
+        mock.patch("aios.sandbox.registry.install_egress_ca", new=AsyncMock()),
+        mock.patch("aios.sandbox.registry.install_packages", new=AsyncMock()),
+        mock.patch("aios.workflows.run_sandbox.defer_run_wake", new=AsyncMock()),
+    ):
+        try:
+            yield pool, backend
+        finally:
+            run_sandbox._INFLIGHT.clear()
+            runtime.sandbox_registry = prev
+
+
+async def _drain_sandbox_tasks() -> None:
+    """Await any fire-and-forget sandbox tasks (``defer_run_wake`` is patched)."""
+    tasks = list(run_sandbox._INFLIGHT.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _backend_exec_count(backend: FakeBackend) -> int:
+    return sum(1 for verb, _ in backend.calls if verb == "exec")
+
+
+def _backend_create_count(backend: FakeBackend) -> int:
+    return sum(1 for verb, _ in backend.calls if verb == "create")
+
+
+_SANDBOX_SCRIPT = "async def main(input):\n    r = await sandbox('echo hi')\n    return r\n"
+
+
+async def test_sandbox_dispatch_signal_one_call_result(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    pool, backend = wf_sandbox_runtime
+    backend.next_result = CommandResult(
+        exit_code=0, stdout="hi\n", stderr="", timed_out=False, truncated=False
+    )
+    run_id = await _make_run(pool, _SANDBOX_SCRIPT)
+
+    # Wake 1: drive to the sandbox frontier and park; the task launches after commit.
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "suspended"
+    cs = (await _call_starteds(pool, run_id))[0]
+    assert cs.payload["capability"] == "sandbox" and cs.payload["command"] == "echo hi"
+
+    await _drain_sandbox_tasks()  # the task writes its sandbox_result signal
+
+    # Wake 2: harvest the signal → fast-forward → complete with the bash dict.
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {
+        "exit_code": 0,
+        "stdout": "hi\n",
+        "stderr": "",
+        "timed_out": False,
+        "truncated": False,
+    }
+    # Exactly ONE call_result; clean journal; exec ran exactly once.
+    assert [t for _s, t, _k in await _events(pool, run_id)] == [
+        "run_started",
+        "call_started",
+        "call_result",
+        "run_completed",
+    ]
+    assert _backend_exec_count(backend) == 1
+
+
+async def test_sandbox_memo_law_redrive_while_inflight_execs_once(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    pool, backend = wf_sandbox_runtime
+    block = asyncio.Event()  # released only once the test is ready to let exec finish
+    entered = asyncio.Event()  # set when the task is blocking IN exec
+    exec_count = 0  # the patched exec replaces FakeBackend.calls recording, so count here
+
+    async def _blocked(*_a: Any, **_k: Any) -> CommandResult:
+        nonlocal exec_count
+        exec_count += 1
+        entered.set()
+        await block.wait()
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+    run_id = await _make_run(pool, _SANDBOX_SCRIPT)
+    with mock.patch.object(backend, "exec", new=_blocked):
+        await run_workflow_step(run_id)  # parks; launches the task
+        await asyncio.wait_for(entered.wait(), timeout=5)  # task is now blocked IN exec
+        assert exec_count == 1  # exec entered exactly once
+        assert run_sandbox.has_inflight(run_id, (await _call_starteds(pool, run_id))[0].call_key)
+        # Re-drive while the task is in-flight: the harvest sees has_inflight True
+        # and does NOT relaunch — no second exec.
+        await run_workflow_step(run_id)
+        assert exec_count == 1  # still just the one in-flight exec
+        block.set()
+        await _drain_sandbox_tasks()
+        await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    assert exec_count == 1
+
+
+async def test_sandbox_crash_path_at_least_once(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """The #784/#795 dimension, both halves: a call_started with NO signal and NO
+    live task (crash signature) re-launches on harvest; a call_started WITH a
+    call_result already present does NOT re-exec."""
+    pool, backend = wf_sandbox_runtime
+    block = asyncio.Event()  # never set — the first task blocks in exec until cancelled
+    entered = asyncio.Event()
+    first_exec_count = 0  # the patched exec replaces FakeBackend.calls recording
+
+    async def _blocked(*_a: Any, **_k: Any) -> CommandResult:
+        nonlocal first_exec_count
+        first_exec_count += 1
+        entered.set()
+        await block.wait()
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+    run_id = await _make_run(pool, _SANDBOX_SCRIPT)
+    with mock.patch.object(backend, "exec", new=_blocked):
+        await run_workflow_step(run_id)  # parks; launches the task
+        await asyncio.wait_for(entered.wait(), timeout=5)  # task reached (and blocks in) exec
+        assert first_exec_count == 1
+        # Simulate a hard worker crash: cancel the in-flight task + drop the registry map.
+        for task in list(run_sandbox._INFLIGHT.values()):
+            task.cancel()
+        await asyncio.gather(*list(run_sandbox._INFLIGHT.values()), return_exceptions=True)
+        run_sandbox._INFLIGHT.clear()
+
+    # No signal exists. Wake 2 (sweep re-wake): harvest finds no signal + no live
+    # task → re-dispatch — without journaling a second call_started. The re-dispatched
+    # task uses the REAL (un-patched) FakeBackend.exec, recorded in backend.calls.
+    backend.next_result = CommandResult(
+        exit_code=0, stdout="2nd\n", stderr="", timed_out=False, truncated=False
+    )
+    await run_workflow_step(run_id)
+    assert len(await _call_starteds(pool, run_id)) == 1  # exactly one — no double-open
+    # Total executions across the crash + re-dispatch = 2 (the cancelled first + the
+    # real re-dispatched exec). The re-dispatch ran exactly once.
+    assert first_exec_count + _backend_exec_count(backend) == 2
+    assert _backend_exec_count(backend) == 1
+    await _drain_sandbox_tasks()
+    await run_workflow_step(run_id)  # harvest the re-dispatch → complete
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+
+    # Half 2: a sandbox call WITH a call_result present does NOT re-exec on re-drive.
+    exec_before = _backend_exec_count(backend)
+    await run_workflow_step(run_id)  # terminal/no-op re-wake
+    assert _backend_exec_count(backend) == exec_before
+
+
+async def test_sandbox_provision_failure_one_error_result(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    pool, backend = wf_sandbox_runtime
+
+    async def _boom(_spec: Any) -> Any:
+        raise SandboxBackendError("create boom")
+
+    run_id = await _make_run(pool, _SANDBOX_SCRIPT)
+    with mock.patch.object(backend, "create", new=_boom):
+        await run_workflow_step(run_id)  # park at the sandbox frontier
+        await _drain_sandbox_tasks()  # task: provision fails → {"error", provision_failed}
+        await run_workflow_step(run_id)  # harvest → throws SandboxError → run errors
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "errored"
+    events = await _events(pool, run_id)
+    # Exactly one error call_result.
+    call_results = [e for e in events if e[1] == "call_result"]
+    assert len(call_results) == 1
+    async with pool.acquire() as conn:
+        rows = await wf_queries.list_run_events(conn, run_id)
+    cr = next(e for e in rows if e.type == "call_result")
+    assert cr.payload["is_error"] is True
+    assert cr.payload["error"]["capability"] == "sandbox"
+    assert cr.payload["error"]["code"] == "provision_failed"
+
+
+async def test_sandbox_lazy_no_provision_until_called(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    pool, backend = wf_sandbox_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 'no sandbox here'\n")
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    assert _backend_create_count(backend) == 0  # never provisioned
+
+
+async def test_sandbox_dispatches_while_agent_frontier_deferred(
+    monkeypatch: pytest.MonkeyPatch,
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+    wf_agent_id: str,
+) -> None:
+    """UNTHROTTLED proof: with the per-run wave cap at 1 and a
+    parallel([agent(...), sandbox(...)]) frontier, the over-cap agent is
+    frontier_deferred while the sandbox gets its call_started + launch in the SAME
+    wake."""
+    _wave_cap(monkeypatch, workflow_max_inflight_children_per_run=1)
+    pool, backend = wf_sandbox_runtime
+    script = (
+        "async def main(input):\n"
+        "    return await parallel([\n"
+        f"        lambda: agent({wf_agent_id!r}, 'a'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'b'),\n"
+        "        lambda: sandbox('echo hi'),\n"
+        "    ])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    # One agent admitted, one agent deferred, AND the sandbox dispatched this wake.
+    cs = await _call_starteds(pool, run_id)
+    caps = sorted(e.payload["capability"] for e in cs)
+    assert caps == ["agent", "sandbox"]  # one agent + the sandbox both opened
+    assert len(await _deferred_keys(pool, run_id)) == 1  # the over-cap agent
+    assert _backend_exec_count(backend) >= 0  # task launched (exec may be pending)
+    assert len(run_sandbox._INFLIGHT) == 1  # the sandbox task was launched this wake
+    await _drain_sandbox_tasks()
+
+
 def _capturing_client(captured: dict[str, Any]) -> type:
     """A stand-in for ``httpx.AsyncClient`` that records the outbound request + returns 200."""
 

@@ -33,7 +33,7 @@ class _StubRegistry:
 @pytest.fixture
 def stub_handle(**kwargs: Any) -> SandboxHandle:
     handle = SandboxHandle(
-        session_id="sess_01TEST",
+        owner_id="sess_01TEST",
         sandbox_id="container_abc",
         workspace_path=Path("/tmp/aios-test"),
     )

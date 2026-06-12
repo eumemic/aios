@@ -30,7 +30,7 @@ WfRunEventType = Literal[
     "annotation",
     "frontier_deferred",
 ]
-WfRunSignalKind = Literal["gate_resume", "child_done", "cancel", "tool_result"]
+WfRunSignalKind = Literal["gate_resume", "child_done", "cancel", "tool_result", "sandbox_result"]
 
 # The terminal run statuses — monotonic: once here, a run never leaves. The one source for
 # every "is this run done?" check (the step loop's early-out, the SSE stream's close, the await

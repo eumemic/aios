@@ -228,7 +228,7 @@ class DockerBackend:
             raise SandboxBackendError("docker run returned an empty container id")
 
         return SandboxHandle(
-            session_id=spec.session_id,
+            owner_id=spec.session_id,
             sandbox_id=container_id,
             workspace_path=spec.workspace.host_path,
             mount_snapshot=spec.mount_snapshot,
@@ -302,7 +302,7 @@ class DockerBackend:
         except SandboxBackendError as err:
             log.warning(
                 "sandbox.destroy_launch_failed",
-                session_id=handle.session_id,
+                owner_id=handle.owner_id,
                 container_id=handle.sandbox_id[:12],
                 error=str(err),
             )
@@ -310,7 +310,7 @@ class DockerBackend:
         if rc != 0:
             log.warning(
                 "sandbox.destroy_nonzero",
-                session_id=handle.session_id,
+                owner_id=handle.owner_id,
                 container_id=handle.sandbox_id[:12],
                 exit_code=rc,
                 stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
@@ -318,7 +318,7 @@ class DockerBackend:
             return
         log.info(
             "sandbox.destroyed",
-            session_id=handle.session_id,
+            owner_id=handle.owner_id,
             container_id=handle.sandbox_id[:12],
         )
 
@@ -421,7 +421,7 @@ class DockerBackend:
             # so worker shutdown / job-timeout cancellation still propagates.
             log.warning(
                 "sandbox.is_alive_probe_failed",
-                session_id=handle.session_id,
+                owner_id=handle.owner_id,
                 container_id=handle.sandbox_id[:12],
                 error=str(err),
             )
@@ -431,7 +431,7 @@ class DockerBackend:
             # or an operator rm) reports nonzero + "No such container".
             log.info(
                 "sandbox.is_alive_inspect_nonzero",
-                session_id=handle.session_id,
+                owner_id=handle.owner_id,
                 container_id=handle.sandbox_id[:12],
                 exit_code=rc,
             )

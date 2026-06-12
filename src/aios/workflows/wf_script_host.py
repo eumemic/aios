@@ -84,6 +84,30 @@ class AgentNoReturnError(AgentError):
     catches it too; catch it explicitly to treat "no response" differently."""
 
 
+class SandboxError(Exception):
+    """A ``sandbox()`` command could not run because the run sandbox failed.
+
+    Raised at the ``await sandbox(...)`` site in the author script — the driver
+    ``coro.throw``s it when the call's journaled outcome is an *infrastructure*
+    error. So an author can ``try/except SandboxError`` and continue, or let it
+    propagate to fail the run (the bubble). The sibling of :class:`AgentError`
+    for the sandbox capability.
+
+    A command that *ran* and exited nonzero is NOT an error — it resolves as the
+    bash-result value (``{"exit_code": …, "stdout": …, …}``) the script branches
+    on, exactly as the bash tool's nonzero exit does. Only the sandbox failing to
+    provision or execute the command at all raises here. ``code`` distinguishes
+    the failure mode: ``"provision_failed"`` (the run sandbox couldn't be brought
+    up), ``"exec_failed"`` (the command couldn't be dispatched into a live
+    sandbox), or ``"timeout"`` (the infra layer itself timed out — distinct from a
+    command that ran to its own ``timeout_s`` and returned ``timed_out=True``).
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 # ─── the capability awaitables (author-facing API) ───────────────────────────
 
 
@@ -178,6 +202,27 @@ def tool(name: str, input: Any) -> _Capability:
     only emits the request.
     """
     return _Capability("tool", {"tool_name": name, "input": input})
+
+
+def sandbox(command: str, timeout_s: float | None = None) -> _Capability:
+    """Run a shell command in the run's own ephemeral sandbox and await its result.
+
+    ``command`` is interpreted by ``bash -c`` inside a run-scoped container at
+    ``cwd="/workspace"`` — scratch space that lives only for the run (it is torn
+    down when the run completes; an idle reclaim cold-reprovisions on the next
+    call). ``timeout_s`` caps the command's wall-clock; ``None`` uses the
+    worker-global bash default. The result is the bash-tool dict the script
+    branches on — ``{"exit_code", "stdout", "stderr", "timed_out", "truncated"}``
+    — so a nonzero exit (or a command that hit its own ``timeout_s``, surfacing
+    ``timed_out=True``) is a VALUE, not a raise. Only the sandbox failing to
+    provision or dispatch the command raises a catchable :class:`SandboxError` at
+    the ``await``; ``try/except`` it like any other failure, or let it propagate
+    to fail the run.
+
+    The command runs in the worker against the run's own sandbox; the script
+    subprocess only emits the request.
+    """
+    return _Capability("sandbox", {"command": command, "timeout_s": timeout_s})
 
 
 async def _branch(thunk: Any) -> Any:
@@ -455,6 +500,7 @@ def _build_coroutine(source: str, input_value: Any) -> Any:
             "gate": gate,
             "agent": agent,
             "tool": tool,
+            "sandbox": sandbox,
             "parallel": parallel,
             "pipeline": pipeline,
             "log": log,
@@ -463,6 +509,9 @@ def _build_coroutine(source: str, input_value: Any) -> Any:
             # (not SAFE_BUILTINS), so `try/except AgentError` resolves it as a global.
             "AgentError": AgentError,
             "AgentNoReturnError": AgentNoReturnError,
+            # The sandbox() infra-failure type, exposed the same way so
+            # `try/except SandboxError` resolves it as a global.
+            "SandboxError": SandboxError,
         }
     )
     # dont_inherit: without it the script inherits THIS module's ``from __future__
@@ -515,6 +564,20 @@ def _agent_error_from(error_info: Any) -> AgentError:
     if kind == "no_return":
         return AgentNoReturnError(message, kind=kind)
     return AgentError(message, kind=kind)
+
+
+def _sandbox_error_from(error_info: Any) -> SandboxError:
+    """Build the :class:`SandboxError` to throw at an ``await sandbox(...)`` from a
+    memo outcome's ``error`` payload (``{code?|kind?, message?, capability?}``).
+
+    The sandbox capability writes ``code`` (``provision_failed`` / ``exec_failed`` /
+    ``timeout``); ``kind`` is accepted as a fallback for symmetry with the agent
+    path. The ``message`` is the worker's raw infra error, surfaced verbatim so the
+    author sees what failed."""
+    info = error_info if isinstance(error_info, dict) else {}
+    code = info.get("code") or info.get("kind")
+    message = info.get("message") or "the sandbox command failed to run"
+    return SandboxError(message, code=code)
 
 
 # ─── the manual .send() driver (a deterministic cooperative scheduler) ────────
@@ -716,10 +779,18 @@ def _drive(root_coro: Any, memo: dict[str, Any], emit: Any) -> None:
                 return
             if call_key in memo:
                 # FAST-FORWARD a journaled outcome: `{ok}` resumes with the value,
-                # `{error}` throws AgentError at the await (catchable by the author).
+                # `{error}` throws at the await (catchable by the author). The throw
+                # type is discriminated by the failing capability: a sandbox() error
+                # throws SandboxError, every other capability throws AgentError. The
+                # error payload carries `capability` (written by the harvest) so the
+                # driver picks the right type even though the keyer is generic.
                 outcome = memo[call_key]
                 if isinstance(outcome, dict) and "error" in outcome:
-                    branch.throw = _agent_error_from(outcome["error"])
+                    error = outcome["error"]
+                    if isinstance(error, dict) and error.get("capability") == "sandbox":
+                        branch.throw = _sandbox_error_from(error)
+                    else:
+                        branch.throw = _agent_error_from(error)
                 else:
                     branch.send = outcome["ok"]
             else:

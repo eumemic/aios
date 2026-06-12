@@ -39,7 +39,7 @@ def _install_exec_capture(
 
 def _handle() -> SandboxHandle:
     return SandboxHandle(
-        session_id="sess_exec",
+        owner_id="sess_exec",
         sandbox_id="container_abc123",
         workspace_path=Path("/tmp/ws"),
     )
