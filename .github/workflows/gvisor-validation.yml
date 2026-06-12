@@ -1,0 +1,160 @@
+name: gVisor Validation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 9 * * 2'
+
+jobs:
+  gvisor-validation:
+    runs-on: ubuntu-latest
+
+    env:
+      # Parse-only: ``get_settings()`` must see a valid Postgres DSN at
+      # import time.  Nothing dials this URL — the tests run against a
+      # per-worker testcontainer Postgres (tests/conftest.py), which is
+      # why this job declares no ``services:`` block.
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+
+    steps:
+      - name: Install runsc
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg
+          curl -fsSL https://storage.googleapis.com/gvisor/releases/release.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          arch="$(dpkg --print-architecture)"
+          echo "deb [arch=${arch} signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+            | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y runsc
+
+      - name: Register runsc Docker runtime
+        run: |
+          set -euo pipefail
+          sudo python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          daemon_json = Path("/etc/docker/daemon.json")
+          if daemon_json.exists():
+              config = json.loads(daemon_json.read_text())
+          else:
+              config = {}
+          config.setdefault("runtimes", {})["runsc"] = {"path": "/usr/bin/runsc"}
+          daemon_json.write_text(json.dumps(config, separators=(",", ":")))
+          # Expected runtime stanza: {"runtimes":{"runsc":{"path":"/usr/bin/runsc"}}}
+          PY
+          sudo systemctl restart docker
+          docker run --runtime=runsc --rm alpine echo ok
+
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Build sandbox image
+        # CI-local tag (no registry prefix) — pairs with the
+        # ``AIOS_DOCKER_IMAGE`` env on the E2E step. The
+        # ``test_sandbox_image_contract`` fixture falls through to
+        # ``docker pull`` if a local lookup fails for any reason; with
+        # the previous ``ghcr.io/eumemic/aios-sandbox:latest`` tag that
+        # silently masked a missed local build by using the stale
+        # registry image instead (PR #670 hit exactly that). A
+        # non-GHCR tag makes the fallback pull fail loudly.
+        #
+        # Post-build sanity probes the daemon's image store and the
+        # one binary the build added; if either is missing the step
+        # fails here rather than letting a silent fallback misroute
+        # later. ``set -euo pipefail`` is the workflow default but
+        # the explicit ``|| exit 1`` after the ``docker run`` makes
+        # the failure mode obvious in the log.
+        run: |
+          docker build -t aios-sandbox:ci -f docker/Dockerfile.sandbox .
+          docker image inspect aios-sandbox:ci --format 'image registered: {{.Id}}'
+          docker run --rm aios-sandbox:ci which tool || {
+            echo "::error::bin/tool not found in built image — build step did not produce expected artifacts"
+            exit 1
+          }
+
+      - name: E2E tests (docker shard under runsc)
+        # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
+        # xdist workers, one whole-file at a time.  ``loadfile`` is load-
+        # bearing: ``test_memory_cross_session_sync.py`` uses a module-
+        # scoped ``shared_docker_harness`` fixture which would be torn
+        # down + rebuilt per test under the default ``load`` dist.  Four
+        # workers matches public-repo ubuntu-latest runners (4 vCPU /
+        # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
+        # Each worker amortizes its own testcontainer-Postgres + Docker
+        # setup over ~55 tests.
+        env:
+          AIOS_DOCKER_IMAGE: aios-sandbox:ci
+        run: |
+          AIOS_SANDBOX_RUNTIME=runsc uv run pytest tests/e2e -q -m docker -n 4 --dist=loadfile --junitxml=e2e-results.xml
+
+      - name: Summarize failed risk group
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import xml.etree.ElementTree as ET
+          from collections import defaultdict
+          from pathlib import Path
+
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          junit_path = Path("e2e-results.xml")
+
+          def group_for(test_id: str) -> str:
+              lowered = test_id.lower()
+              if any(token in lowered for token in ("network", "egress", "lockdown", "limited")):
+                  return "networking"
+              if any(token in lowered for token in ("snapshot", "commit")):
+                  return "snapshot"
+              return "other"
+
+          grouped: dict[str, list[str]] = defaultdict(list)
+          if junit_path.exists():
+              root = ET.parse(junit_path).getroot()
+              for case in root.iter("testcase"):
+                  failures = list(case.findall("failure")) + list(case.findall("error"))
+                  if not failures:
+                      continue
+                  test_id = "::".join(
+                      part
+                      for part in (
+                          case.attrib.get("file") or case.attrib.get("classname", "").replace(".", "/"),
+                          case.attrib.get("name", "<unknown>"),
+                      )
+                      if part
+                  )
+                  grouped[group_for(test_id)].append(test_id)
+
+          with open(summary_path, "a", encoding="utf-8") as summary:
+              summary.write("## gVisor validation failures by risk\n\n")
+              if not junit_path.exists():
+                  summary.write("JUnit report `e2e-results.xml` was not produced; inspect the pytest log.\n")
+              # Emits headings: ### networking, ### snapshot, ### other.
+              for group in ("networking", "snapshot", "other"):
+                  summary.write(f"### {group}\n")
+                  tests = grouped.get(group, [])
+                  if tests:
+                      for test in tests:
+                          summary.write(f"- `{test}`\n")
+                  else:
+                      summary.write("- none\n")
+                  summary.write("\n")
+          PY
