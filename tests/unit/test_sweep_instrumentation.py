@@ -302,14 +302,7 @@ class TestPeriodicSweepEmitsNoSpan:
             patch("aios.services.sessions.append_event", append_event),
             pytest.raises(StopAsyncIteration),
         ):
-            # MagicMock for the procrastinate app — `_periodic_sweep` calls
-            # `reap_stalled_jobs` first, which the test's patch list doesn't
-            # cover; an `AsyncMock`-backed `MagicMock().job_manager.get_stalled_jobs`
-            # returns a coroutine yielding the mock itself, which iterates
-            # empty. That's enough to make the call a no-op for this test.
-            app_mock = MagicMock()
-            app_mock.job_manager.get_stalled_jobs = AsyncMock(return_value=[])
-            await _periodic_sweep(MagicMock(), MagicMock(), app_mock, interval=30)
+            await _periodic_sweep(MagicMock(), MagicMock(), interval=30)
 
         # The periodic sweep must not emit any sweep_start/sweep_end spans.
         for call in append_event.await_args_list:

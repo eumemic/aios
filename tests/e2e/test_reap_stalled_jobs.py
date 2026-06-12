@@ -1,14 +1,12 @@
-"""E2E tests for the stalled-procrastinate-job reaper.
+"""E2E tests for the boot-time procrastinate-job reaper.
 
-A worker process can die mid-job (laptop sleep, OOM, ungraceful shutdown)
-leaving the row at ``status='doing'``. Procrastinate's heartbeat lease
-(``procrastinate_workers.last_heartbeat``) is what we lean on to detect
-this — :meth:`procrastinate.manager.JobManager.get_stalled_jobs` returns
-``doing`` jobs whose worker has been silent for longer than the
-threshold (we use 60s).
+After the singleton worker lock hands off and before the new worker consumes
+jobs, every ``doing`` procrastinate row belongs to the dead predecessor. The
+boot reaper therefore fails all ``doing`` jobs unconditionally so their locks
+are released before the startup wake sweep.
 
-These tests pin the lease semantics end-to-end against a real
-procrastinate schema so a refactor can't quietly break recovery.
+These tests pin that contract end-to-end against a real procrastinate schema
+so a refactor can't quietly break recovery.
 """
 
 from __future__ import annotations
@@ -59,8 +57,8 @@ async def job_manager(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[Any]
 async def _insert_worker(conn: Any, *, stale_seconds: int = 0) -> int:
     """Insert a procrastinate_workers row.
 
-    ``stale_seconds`` controls the heartbeat age — 0 means fresh,
-    >60 means past our reap threshold.
+    ``stale_seconds`` controls the heartbeat age; the boot reaper treats
+    fresh and stale heartbeats the same.
     """
     return int(
         await conn.fetchval(
@@ -146,21 +144,23 @@ class TestReapStalledJobs:
                 await conn.execute("DELETE FROM procrastinate_jobs WHERE id=$1", jid)
                 await conn.execute("DELETE FROM procrastinate_workers WHERE id=$1", wid)
 
-    async def test_leaves_doing_with_live_worker_alone(self, pool: Any, job_manager: Any) -> None:
-        """A live worker's in-flight job MUST NOT be reaped.
+    async def test_reaps_doing_with_fresh_worker_heartbeat(
+        self, pool: Any, job_manager: Any
+    ) -> None:
+        """A fresh heartbeat still belongs to the dead predecessor at boot.
 
-        The safety case — under normal load, jobs sit at
-        ``status='doing'`` while their worker is processing. The
-        lease check on ``last_heartbeat`` distinguishes legitimate
-        live work from genuinely abandoned jobs.
+        Startup recovery runs after singleton lock handoff and before this
+        process consumes jobs, so every ``doing`` row is orphaned even when
+        its recorded heartbeat is recent.
         """
         async with pool.acquire() as conn:
             wid = await _insert_worker(conn, stale_seconds=0)
             jid = await _insert_job(conn, status="doing", worker_id=wid)
             try:
-                await reap_stalled_jobs(job_manager)
+                reaped = await reap_stalled_jobs(job_manager)
                 row = await conn.fetchrow("SELECT status FROM procrastinate_jobs WHERE id=$1", jid)
-                assert row["status"] == "doing"
+                assert reaped >= 1
+                assert row["status"] == "failed"
             finally:
                 await conn.execute("DELETE FROM procrastinate_jobs WHERE id=$1", jid)
                 await conn.execute("DELETE FROM procrastinate_workers WHERE id=$1", wid)

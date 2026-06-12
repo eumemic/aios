@@ -36,7 +36,7 @@ import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db.listen import listen_for_session_interrupts
-from aios.db.pool import create_pool, normalize_dsn
+from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, create_pool, normalize_dsn
 from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
@@ -137,6 +137,30 @@ def _supervise(
     task.add_done_callback(_done)
 
 
+def _make_advisory_lock_termination_listener(
+    *,
+    latch: asyncio.Event,
+    fatal: _SupervisedTaskFailure,
+) -> Any:
+    """Return a fail-stop callback for singleton lock connection termination."""
+
+    def _terminated(_conn: asyncpg.Connection[Any]) -> None:
+        if latch.is_set():
+            return
+        exc = RuntimeError("singleton advisory lock connection lost")
+        log = get_logger("aios.worker")
+        log.error(
+            "worker.advisory_lock_lost",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        with contextlib.suppress(OSError):
+            _HEARTBEAT_FILE.unlink(missing_ok=True)
+        fatal["exception"] = exc
+        latch.set()
+
+    return _terminated
+
+
 async def _cancel_and_drain(task: asyncio.Task[Any]) -> None:
     """Cancel a background task and suppress prior task exceptions after logging."""
     task.cancel()
@@ -191,6 +215,12 @@ async def worker_main() -> None:
     scheduler_task: asyncio.Task[None] | None = None
     supervised_latch = asyncio.Event()
     supervised_failure: _SupervisedTaskFailure = {"exception": None}
+    lock_conn.add_termination_listener(
+        _make_advisory_lock_termination_listener(
+            latch=supervised_latch,
+            fatal=supervised_failure,
+        )
+    )
 
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
@@ -247,10 +277,11 @@ async def worker_main() -> None:
         )
 
         # Startup sweep:
-        #   1. Reap stalled procrastinate jobs (workers that died without
-        #      releasing their session lock — laptop sleep, OOM, crash).
-        #      Must run BEFORE the wake sweep so freshly-unblocked sessions
-        #      get re-enqueued in the same pass.
+        #   1. Reap every in-flight procrastinate job left by a predecessor.
+        #      The singleton lock has handed off, so the previous worker is
+        #      gone, and this process has not consumed any job yet. Must run
+        #      BEFORE the wake sweep so freshly-unblocked sessions get
+        #      re-enqueued in the same pass.
         #   2. Repair tool-call ghosts and wake sessions needing inference.
         await reap_stalled_jobs(procrastinate_app.job_manager)
         sweep = await wake_sessions_needing_inference(pool, task_registry)
@@ -288,7 +319,7 @@ async def worker_main() -> None:
 
         # Start periodic sweep (every 30s).
         sweep_task = asyncio.create_task(
-            _periodic_sweep(pool, task_registry, procrastinate_app.job_manager, interval=30),
+            _periodic_sweep(pool, task_registry, interval=30),
             name="periodic_sweep",
         )
         _supervise(sweep_task, latch=supervised_latch, fatal=supervised_failure)
@@ -427,7 +458,7 @@ async def _acquire_worker_lock(
     locks and silently drops the guarantee.
     """
     dsn = normalize_dsn(db_url)
-    conn = await asyncpg.connect(dsn)
+    conn = await asyncpg.connect(dsn, server_settings=LISTENER_TCP_KEEPALIVE_SETTINGS)
     deadline = time.monotonic() + timeout_seconds
     waiting_logged = False
     try:
@@ -486,7 +517,6 @@ async def _periodic_heartbeat(*, interval: int = _HEARTBEAT_INTERVAL_SECONDS) ->
 async def _periodic_sweep(
     pool: asyncpg.Pool[Any],
     task_registry: TaskRegistry,
-    job_manager: Any,
     *,
     interval: int = 30,
 ) -> None:
@@ -495,9 +525,6 @@ async def _periodic_sweep(
     while True:
         await asyncio.sleep(interval)
         try:
-            # Reap stalled jobs first so any unblocked sessions get re-enqueued
-            # in the same tick (mirrors worker_main's startup sequence).
-            await reap_stalled_jobs(job_manager)
             sweep = await wake_sessions_needing_inference(pool, task_registry)
             if sweep.woken_sessions or sweep.repaired_ghosts:
                 log.info(

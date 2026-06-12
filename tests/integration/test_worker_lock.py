@@ -19,7 +19,12 @@ from typing import Any
 import asyncpg
 import pytest
 
-from aios.harness.worker import _acquire_worker_lock
+from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS
+from aios.harness.worker import (
+    _acquire_worker_lock,
+    _make_advisory_lock_termination_listener,
+    _SupervisedTaskFailure,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -91,3 +96,36 @@ class TestAcquireWorkerLock:
             assert "worker.duplicate_instance_refused" in event_names
         finally:
             await holder.close()
+
+    async def test_lock_connection_uses_tcp_keepalive_settings(
+        self, db_url: str, log: _FakeLog
+    ) -> None:
+        conn = await _acquire_worker_lock(db_url, log, timeout_seconds=2.0)
+        assert conn is not None
+        try:
+            for key, expected in LISTENER_TCP_KEEPALIVE_SETTINGS.items():
+                assert await conn.fetchval(f"SHOW {key}") == expected
+        finally:
+            await conn.close()
+
+    async def test_backend_termination_trips_lock_listener(
+        self, db_url: str, log: _FakeLog
+    ) -> None:
+        conn = await _acquire_worker_lock(db_url, log, timeout_seconds=2.0)
+        assert conn is not None
+        latch = asyncio.Event()
+        fatal: _SupervisedTaskFailure = {"exception": None}
+        conn.add_termination_listener(
+            _make_advisory_lock_termination_listener(latch=latch, fatal=fatal)
+        )
+        terminator = await asyncpg.connect(db_url)
+        try:
+            pid = conn.get_server_pid()
+            terminated = await terminator.fetchval("SELECT pg_terminate_backend($1)", pid)
+            assert terminated is True
+            await asyncio.wait_for(latch.wait(), timeout=5.0)
+            assert isinstance(fatal["exception"], RuntimeError)
+        finally:
+            await terminator.close()
+            if not conn.is_closed():
+                await conn.close()
