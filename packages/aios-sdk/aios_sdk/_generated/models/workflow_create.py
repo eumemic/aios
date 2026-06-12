@@ -55,9 +55,13 @@ class WorkflowCreate:
               the service drops a re-fired duplicate, or knowingly accept at-least-once.
             - Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose
               uncertain completion needs judgment to resolve inside `agent(...)`.
-            - Environment: deterministic, credential-free, isolated child process. Imports are
-              restricted to a curated stdlib allowlist. No network or filesystem side channels are
-              available beyond the capability API.
+            - Environment: the SCRIPT runs in a deterministic, credential-free, isolated child
+              process — imports restricted to a curated stdlib allowlist, no network or filesystem
+              access from script code itself; all effects go through the capability API. The
+              `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and
+              network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to
+              the environment's allowed hosts) — commands can curl, clone, and install within that
+              policy.
 
             Minimal example:
             ```python
