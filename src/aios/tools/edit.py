@@ -309,6 +309,7 @@ def _register() -> None:
         parameters_schema=EDIT_PARAMETERS_SCHEMA,
         handler=edit_handler,
         transport="agent_tool",
+        executes="sandbox",
     )
 
 

@@ -441,6 +441,30 @@ def _network_policy_from_config(env_config: EnvironmentConfig | None) -> Network
     return Unrestricted()
 
 
+def _resolve_image(env_config: EnvironmentConfig | None, default_image: str) -> str:
+    """Resolve the sandbox image from the environment config (#724) and enforce the
+    cross-tenant snapshot gate (durable session sandboxes, §5.8).
+
+    A bound environment with ``image`` set provisions from that image; unset falls
+    back to the worker-global default. This is the one resolution point —
+    everything downstream (backend create, the ``--pull`` decision) consumes the
+    returned string blindly. Shared by the session and run provision paths so the
+    reserved-prefix gate (the spec-build choke point ALL writers traverse,
+    including direct SQL) lives in exactly one place: reject any image in the
+    reserved snapshot namespace so a tenant can't point ``env_config.image`` at
+    another owner's snapshot tag (``aios-sbx-<victim>``) and mount its root FS +
+    baked secrets. Case-insensitive (Docker lowercases refs).
+    """
+    image = env_config.image if (env_config and env_config.image) else default_image
+    if image.lower().startswith(RESERVED_SANDBOX_IMAGE_PREFIX):
+        raise ValueError(
+            f"environment image {image!r} uses the reserved "
+            f"{RESERVED_SANDBOX_IMAGE_PREFIX!r} prefix (reserved for per-session "
+            "snapshot images); refusing to provision"
+        )
+    return image
+
+
 async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     """Assemble a :class:`ProvisioningPlan` for ``session_id``.
 
@@ -545,25 +569,10 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
         else:
             tool_broker_url = f"http://{WORKER_NETWORK_ALIAS}:{tool_broker.port}"
 
-        # Per-environment image override (#724): a session bound to an
-        # environment with ``image`` set provisions from that image; unset
-        # falls back to the worker-global ``settings.docker_image``. This is
-        # the only resolution point — everything downstream (backend create,
-        # the --pull decision) consumes ``spec.image`` blindly.
-        image = env_config.image if (env_config and env_config.image) else settings.docker_image
-        # Cross-tenant snapshot gate (durable session sandboxes, §5.8): this is
-        # the spec-build choke point ALL writers traverse, including direct SQL —
-        # the boundary layer of the two-layer gate (the other being the pydantic
-        # ``image`` validator). Reject any image in the reserved snapshot
-        # namespace so a tenant can't point ``env_config.image`` at another
-        # session's snapshot tag (``aios-sbx-<victim>``) and mount its root FS +
-        # baked secrets. Case-insensitive (Docker lowercases refs).
-        if image.lower().startswith(RESERVED_SANDBOX_IMAGE_PREFIX):
-            raise ValueError(
-                f"environment image {image!r} uses the reserved "
-                f"{RESERVED_SANDBOX_IMAGE_PREFIX!r} prefix (reserved for per-session "
-                "snapshot images); refusing to provision"
-            )
+        # Per-environment image override (#724) + cross-tenant snapshot gate
+        # (§5.8) — see :func:`_resolve_image` (shared with the run provision
+        # path so the reserved-prefix choke point lives in one place).
+        image = _resolve_image(env_config, settings.docker_image)
         # Per-session snapshot budget (durable session sandboxes, §5.7):
         # environment override wins; otherwise the worker-global default
         # (4 GiB unless the operator set AIOS_SANDBOX_SNAPSHOT_BUDGET_BYTES).
@@ -619,6 +628,87 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
                     session_id=session_id,
                     error=str(cleanup_err),
                 )
+        raise
+
+
+async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
+    """Assemble a :class:`ProvisioningPlan` for a workflow run's ephemeral sandbox (#988).
+
+    The run analog of :func:`build_spec_from_session`, sharing its
+    environment-derived core (image resolution + reserved-prefix gate, network
+    policy, tool-broker secret, plan assembly) but stripped of everything
+    session-specific:
+
+    - **No memory stores / github clones / env-var credentials** — a run's bash
+      sandbox is scratch compute, not a session's attached-resource surface. So
+      ``git_proxy``/``secret_proxy`` are ``None``, the echo lists are empty, and
+      there is nothing to clean up on a partial failure (only the broker secret is
+      registered, and ``backend.create`` failures are handled by the registry's
+      ``_provision_run``).
+    - **No snapshot resume** — the run sandbox is ephemeral, so ``snapshot_ref`` is
+      ``None`` (cold start every provision) and ``spec_version`` is ``0`` (a run has
+      no ``sessions.spec_version`` row to drift against; the registry's run warm-hit
+      does a liveness check only).
+    - **Run-scoped workspace** — a fresh host dir under ``<workspace_root>/_runs/
+      <run_id>`` bind-mounted at ``/workspace`` so ``backend.exec(cwd="/workspace")``
+      resolves.
+
+    The owner label passed to ``_assemble_plan`` is ``session_id=run_id``
+    (``SandboxSpec.session_id`` stays the opaque owner-label field carrying a
+    session-OR-run ULID); the backend stamps it onto the handle's ``owner_id``.
+    """
+    from aios.db.queries import workflows as wf_queries
+    from aios.sandbox.volumes import ensure_run_workspace_dir
+
+    settings = get_settings()
+    pool = runtime.require_pool()
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        if run is None:
+            raise ValueError(f"workflow run {run_id!r} not found; cannot provision its sandbox")
+        # environment_id is NOT NULL on wf_runs; load the env config by id, scoped to
+        # the run's account (the run-side analog of the session-join env read).
+        env_config = await queries.get_environment_config_for_id(
+            conn, run.environment_id, account_id=run.account_id
+        )
+
+    image = _resolve_image(env_config, settings.docker_image)
+    workspace_path = ensure_run_workspace_dir(run_id)
+
+    tool_broker = runtime.require_tool_broker()
+    tool_socket_host_path = settings.tool_broker_socket_path
+    tool_broker_secret = secrets.token_urlsafe(32)
+    tool_broker.register_session(run_id, tool_broker_secret)
+    try:
+        if tool_socket_host_path is not None:
+            tool_broker_url = f"unix://{TOOL_BROKER_SOCKET_SANDBOX_PATH}"
+        else:
+            tool_broker_url = f"http://{WORKER_NETWORK_ALIAS}:{tool_broker.port}"
+        return _assemble_plan(
+            session_id=run_id,
+            instance_id=settings.instance_id,
+            image=image,
+            workspace_path=workspace_path,
+            snapshot_ref=None,  # ephemeral scratch — never resume from a snapshot
+            snapshot_budget_bytes=None,
+            env_config=env_config,
+            session_env={},
+            memory_echoes=[],
+            github_echoes=[],
+            git_proxy=None,
+            tool_broker_url=tool_broker_url,
+            tool_broker_secret=tool_broker_secret,
+            tool_socket_host_path=tool_socket_host_path,
+            spec_version=0,
+            env_var_credentials=(),
+            secret_proxy=None,
+        )
+    except BaseException:
+        # The broker secret is the only host-side resource registered above; drop
+        # it (and its on-disk .secret file) so a failure in plan assembly doesn't
+        # leak it for the worker's lifetime. Mirrors the session path's envelope.
+        tool_broker.unregister_session(run_id)
+        cleanup_session_secret_file(run_id, tool_socket_host_path)
         raise
 
 

@@ -168,14 +168,33 @@ def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
 
 
 def tool(name: str, input: Any) -> _Capability:
-    """Invoke one of the workflow's declared network/credential tools (``http_request``,
-    ``web_search``, ``web_fetch``) and await its result.
+    """Invoke one of the workflow's declared tools and await its result.
 
-    ``input`` is the tool's arguments (a JSON-serialisable dict). The result is the tool's
-    own return value — a plain dict the script branches on (e.g. ``{"status": 200, …}`` or
-    ``{"error": "…"}``); a tool error resolves as a value, it does **not** raise. The tool runs
-    in the worker against the run's bound vaults and declared surface; the script subprocess
-    only emits the request.
+    The network/credential tools (``http_request``, ``web_search``, ``web_fetch``)
+    run in the worker against the run's bound vaults and declared surface.
+    ``'bash'`` — when declared in the workflow's tool surface — runs a shell command
+    in the run's own ephemeral sandbox (``cwd="/workspace"``, scratch space that
+    lives only for the run); its ``input`` is ``{"command": str, "timeout_s":
+    float|None}`` and its result is the bash dict the script branches on:
+    ``{"exit_code", "stdout", "stderr", "timed_out", "truncated"}``. A nonzero exit
+    (or a command that hit its own ``timeout_s``, surfacing ``timed_out=True``) is a
+    VALUE, not a raise.
+
+    ``input`` is the tool's arguments (a JSON-serialisable dict). The result is the
+    tool's own return value — a plain dict the script branches on (e.g. ``{"status":
+    200, …}`` or ``{"error": "…"}``); a tool error resolves as a value, it does
+    **not** raise. The script subprocess only emits the request; the tool runs on
+    the worker (or, for ``'bash'``, against the run's provisioned sandbox).
+
+    **bash re-run tolerance (at-least-once).** The run sandbox is ephemeral scratch,
+    and a hard worker crash mid-command re-drives the call — so a ``'bash'`` command
+    may run more than once. Write filesystem-side commands to be re-run-tolerant
+    (e.g. ``rm -rf <dir>; git clone …``); the scratch container absorbs a re-run
+    with no durable damage. An irreversible *external* effect (an HTTP POST, a
+    payment) WILL re-fire on a crash re-drive — pass ``$AIOS_IDEMPOTENCY_KEY``
+    (exported into the command's environment, alongside ``$AIOS_RUN_ID``) to the
+    external service as an idempotency key so it dedupes the re-fired effect. The key
+    is stable across re-drives of the same call and distinct across calls.
     """
     return _Capability("tool", {"tool_name": name, "input": input})
 

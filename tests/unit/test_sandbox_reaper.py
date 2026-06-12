@@ -39,7 +39,7 @@ from aios.sandbox.registry import SandboxRegistry
 def _handle(session_id: str) -> SandboxHandle:
     return SandboxHandle(
         sandbox_id=f"sb_{session_id}",
-        session_id=session_id,
+        owner_id=session_id,
         workspace_path=Path(f"/tmp/{session_id}"),
     )
 
@@ -119,10 +119,10 @@ async def test_reaper_processes_sandboxes_added_after_initial_failure() -> None:
 
     async def destroy(handle: SandboxHandle) -> None:
         destroy_calls.append(handle)
-        if handle.session_id == "sess_initial":
+        if handle.owner_id == "sess_initial":
             initial_attempted.set()
             raise SandboxBackendError("simulated transient")
-        if handle.session_id == "sess_later":
+        if handle.owner_id == "sess_later":
             later_attempted.set()
 
     registry = SandboxRegistry(_backend_with_destroy(AsyncMock(side_effect=destroy)))
@@ -168,7 +168,7 @@ async def test_idle_release_evicts_cache_before_destroy() -> None:
 
     async def destroy(handle: SandboxHandle) -> None:
         # Record whether the session is still in _handles at this point.
-        handles_at_destroy[handle.session_id] = handle.session_id in registry._handles
+        handles_at_destroy[handle.owner_id] = handle.owner_id in registry._handles
         destroy_done.set()
 
     registry = SandboxRegistry(_backend_with_destroy(AsyncMock(side_effect=destroy)))
@@ -263,10 +263,10 @@ async def test_reaper_skips_session_freshened_during_destroy_of_another() -> Non
     destroy_b_calls: list[SandboxHandle] = []
 
     async def destroy(handle: SandboxHandle) -> None:
-        if handle.session_id == "sess_a":
+        if handle.owner_id == "sess_a":
             destroy_a_started.set()
             await destroy_a_continue.wait()
-        elif handle.session_id == "sess_b":
+        elif handle.owner_id == "sess_b":
             destroy_b_calls.append(handle)
 
     registry = SandboxRegistry(_backend_with_destroy(AsyncMock(side_effect=destroy)))

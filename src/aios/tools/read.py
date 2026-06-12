@@ -345,6 +345,7 @@ def _register() -> None:
         parameters_schema=READ_PARAMETERS_SCHEMA,
         handler=read_handler,
         transport="agent_tool",
+        executes="sandbox",
     )
 
 

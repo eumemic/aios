@@ -177,6 +177,44 @@ async def test_inflight_tool_wakes_past_redispatch_horizon(
     assert run_id not in await _needing(pool)
 
 
+async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """bash rides the ``tool`` capability (#988, Option 1), so the SAME ``tool``
+    stale-clause is its crash backstop — but widened to the sandbox horizon
+    (``_sandbox_redispatch_horizon(bash_default_timeout_seconds)``), which must exceed
+    the longest a live bash exec can occupy (the bash ceiling + provisioning slack) so
+    the sweep never re-drives a still-running command.
+
+    An inflight bash call (capability='tool') aged BELOW the widened horizon is left
+    alone; aged ABOVE it, the stale-tool clause re-wakes the run for re-dispatch."""
+    from aios.config import get_settings
+    from aios.workflows.sweep import _sandbox_redispatch_horizon
+
+    horizon = _sandbox_redispatch_horizon(get_settings().bash_default_timeout_seconds)
+
+    async def _needing_at_horizon() -> set[str]:
+        async with sweep_pool.acquire() as conn:
+            ids = await wf_queries.list_run_ids_needing_step(
+                conn, agent_deadline_seconds=AGENT_DEADLINE, tool_stale_seconds=horizon
+            )
+        return set(ids)
+
+    pool = sweep_pool
+    run_id = await _make_run(pool)
+    # A bash call within the horizon (the default 60s TOOL_STALE would wrongly wake it,
+    # but the widened sandbox horizon — ≥300s — leaves a slow-but-alive exec alone).
+    await _call_started(pool, run_id, "sha:b#0", "tool", age_seconds=horizon - 30)
+    assert run_id not in await _needing_at_horizon()
+    # Past the widened horizon: the crashed-exec backstop fires.
+    await _call_started(pool, run_id, "sha:b#1", "tool", age_seconds=horizon + 60)
+    assert run_id in await _needing_at_horizon()
+    # Resolved → quiet again.
+    await _call_result(pool, run_id, "sha:b#1")
+    # The still-young "sha:b#0" remains under the horizon, so the run is quiet.
+    assert run_id not in await _needing_at_horizon()
+
+
 async def test_signal_clause_correlates_by_call_key(sweep_pool: asyncpg.Pool[Any]) -> None:
     """A harvested call must not quiet an UNRELATED unharvested signal — the
     anti-join correlates on call_key, and dropping that correlation would zombie

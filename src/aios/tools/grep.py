@@ -188,6 +188,7 @@ def _register() -> None:
         parameters_schema=GREP_PARAMETERS_SCHEMA,
         handler=grep_handler,
         transport="agent_tool",
+        executes="sandbox",
     )
 
 

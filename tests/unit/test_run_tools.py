@@ -34,10 +34,30 @@ async def test_undeclared_tool_is_recoverable_error() -> None:
 
 
 async def test_non_run_tool_rejected() -> None:
-    # bash is a sandbox tool — not callable from a run, even if (somehow) declared.
-    run = _run(tools=[ToolSpec(type="bash")])
-    out = await invoke_run_tool(run=run, account_id="acc_t", tool_name="bash", tool_input={})
+    # read is an out-of-scope sandbox tool — not callable from a run, even if
+    # (somehow) declared. (bash IS run-callable now; it routes to the run sandbox.)
+    run = _run(tools=[ToolSpec(type="read")])
+    out = await invoke_run_tool(run=run, account_id="acc_t", tool_name="read", tool_input={})
     assert "error" in out and "workflow run" in out["error"]
+
+
+def test_gate_run_tool_strings() -> None:
+    # The shared gate — its two byte-exact error strings are the contract both the
+    # worker and sandbox executors depend on.
+    from aios.workflows.run_tools import gate_run_tool
+
+    run = _run(tools=[ToolSpec(type="bash")])
+    # read is not run-callable at all.
+    assert gate_run_tool(run, "read") == {
+        "error": "tool 'read' is not callable from a workflow run"
+    }
+    # bash is run-callable but only if declared — undeclared here.
+    undeclared = _run(tools=[])
+    assert gate_run_tool(undeclared, "bash") == {
+        "error": "tool 'bash' is not in the workflow's declared tools"
+    }
+    # bash declared + enabled → admitted (None).
+    assert gate_run_tool(run, "bash") is None
 
 
 async def test_web_search_routed_when_declared() -> None:

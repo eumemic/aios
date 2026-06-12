@@ -35,7 +35,7 @@ from aios.sandbox.registry import SandboxRegistry
 def _handle(session_id: str) -> SandboxHandle:
     return SandboxHandle(
         sandbox_id=f"sb_{session_id}",
-        session_id=session_id,
+        owner_id=session_id,
         workspace_path=Path(f"/tmp/{session_id}"),
     )
 

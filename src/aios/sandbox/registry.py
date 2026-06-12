@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from aios.config import get_settings
 from aios.db import queries
+from aios.ids import WORKFLOW_RUN
 from aios.logging import get_logger
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
@@ -62,6 +63,7 @@ from aios.sandbox.setup import (
 from aios.sandbox.snapshot_store import LocalDaemonStore, SnapshotStore
 from aios.sandbox.spec import (
     ProvisioningPlan,
+    build_spec_from_run,
     build_spec_from_session,
     cleanup_session_secret_file,
     mount_snapshot_from_echoes,
@@ -481,6 +483,128 @@ class SandboxRegistry:
             resumed_from_snapshot=handle.snapshot_image is not None,
         )
         return handle
+
+    # ── workflow-run sandboxes (#988) ────────────────────────────────────────
+
+    async def get_or_provision_run(
+        self, run_id: str, *, pool: asyncpg.Pool[Any] | None = None
+    ) -> SandboxHandle:
+        """Return the cached run sandbox handle, or provision a fresh one.
+
+        The run-side analog of :meth:`get_or_provision`, owner-keyed on ``run_id``
+        against the SAME ``_handles``/``_last_used``/``_lock_for`` maps (a run id is
+        ``wfr_…``, a session id ``sess_…`` — disjoint namespaces, so one map holds
+        both without collision). It is deliberately leaner than the session path:
+
+        - **Warm hit = liveness probe ONLY.** No ``_spec_version_changed`` and no
+          mount-drift check — both read ``sessions.*``, which a run has no row in.
+          A run's surface is pinned at launch and its sandbox is ephemeral scratch,
+          so there is nothing to drift against between calls.
+        - **Cold path is snapshot-free.** :meth:`_provision_run` cold-starts from
+          the env image every time (no salvage preamble, no snapshot resume) — the
+          run sandbox carries no durable rootfs.
+
+        ``pool`` is accepted for signature parity with the session path but is
+        currently unused (the run path emits no provision span).
+        """
+        handle = self._handles.get(run_id)
+        if handle is not None and await self._backend.is_alive(handle):
+            self._last_used[run_id] = time.monotonic()
+            return handle
+
+        # Dead or cold: recycle under the per-owner lock. Capture the probed handle
+        # so a concurrent caller that already reprovisioned (different cached
+        # handle) is trusted without a second probe — same TOCTOU discipline as the
+        # session path.
+        stale = handle
+        async with self._lock_for(run_id):
+            current = self._handles.get(run_id)
+            if current is not None and current is not stale:
+                self._last_used[run_id] = time.monotonic()
+                return current
+            if current is not None:
+                # The cached container is dead — drop it from the cache (no
+                # snapshot: a run sandbox has no durable rootfs to preserve) and
+                # cold-reprovision.
+                await self._destroy_run_quietly(run_id, current)
+            handle = await self._provision_run(run_id)
+            self._handles[run_id] = handle
+            self._last_used[run_id] = time.monotonic()
+            return handle
+
+    async def _provision_run(self, run_id: str) -> SandboxHandle:
+        """Cold-start a run's ephemeral sandbox: build the plan, create, run the
+        non-session-specific setup (egress CA, packages, network lockdown).
+
+        No salvage preamble, no snapshot resolution — the run sandbox is scratch
+        with no durable rootfs. The run plan carries ``git_proxy=None``, so the
+        lockdown (if the env is Limited) opens only the tool-broker port. Setup
+        failure tears the sandbox down (so no empty container leaks) and drops the
+        broker secret, then re-raises.
+        """
+        plan = await build_spec_from_run(run_id)
+        try:
+            handle = await self._backend.create(plan.spec)
+        except BaseException:
+            # Spec was built (broker secret registered) but create failed before a
+            # sandbox exists — drop the secret so it doesn't leak. No backend
+            # destroy: there is no sandbox yet.
+            self._release_tool_broker_secret(run_id)
+            raise
+
+        try:
+            await install_egress_ca(self._backend, handle)
+            await install_packages(self._backend, handle, plan.env_config)
+            await self._maybe_apply_lockdown(handle, plan)
+        except BaseException:
+            await self._destroy_run_quietly(run_id, handle)
+            raise
+
+        log.info(
+            "sandbox.run_provisioned",
+            run_id=run_id,
+            container_id=handle.sandbox_id[:12],
+            workspace_path=str(handle.workspace_path),
+            backend=self._backend.name,
+            networking=type(plan.spec.network_policy).__name__,
+        )
+        return handle
+
+    async def _destroy_run_quietly(self, run_id: str, handle: SandboxHandle) -> None:
+        """Best-effort destroy of a run sandbox + drop its broker secret.
+
+        Used by the partial-failure cleanup and the dead-handle recycle. A run
+        sandbox has no proxies; only the container and the broker secret need
+        releasing. Destroy errors are warnings (a teardown hiccup must never mask a
+        primary error or block a recycle)."""
+        try:
+            await self._backend.destroy(handle)
+        except Exception as err:
+            log.warning(
+                "sandbox.run_destroy_failed",
+                run_id=run_id,
+                container_id=handle.sandbox_id[:12],
+                error=str(err),
+            )
+        self._release_tool_broker_secret(run_id)
+
+    async def release_run(self, run_id: str) -> None:
+        """Tear down one run's ephemeral sandbox. No-op if not cached.
+
+        The run-side analog of :meth:`release`, snapshot-free: a run sandbox has no
+        durable rootfs, no proxies, and no pointer — so this is a bare
+        ``backend.destroy`` + cache eviction + broker-secret drop, none of the
+        session snapshot/pointer/proxy machinery. Pops ``_handles``/``_last_used``
+        but (like ``release``) NOT ``_locks`` — a concurrent
+        :meth:`get_or_provision_run` holding the per-owner lock must keep finding it
+        in the dict; the bounded one-lock-per-owner leak clears on worker restart.
+        """
+        handle = self._handles.pop(run_id, None)
+        self._last_used.pop(run_id, None)
+        if handle is None:
+            self._release_tool_broker_secret(run_id)
+            return
+        await self._destroy_run_quietly(run_id, handle)
 
     async def _maybe_apply_lockdown(self, handle: SandboxHandle, plan: ProvisioningPlan) -> None:
         """Apply network lockdown if the plan calls for it."""
@@ -1042,7 +1166,7 @@ class SandboxRegistry:
         # file when UDS transport is in use) for every active session, matching
         # the cleanup path in ``release()``/``evict()``.
         for h in handles:
-            self._release_tool_broker_secret(h.session_id)
+            self._release_tool_broker_secret(h.owner_id)
         self._handles.clear()
         self._last_used.clear()
         self._locks.clear()
@@ -1091,19 +1215,36 @@ class SandboxRegistry:
             if isinstance(result, BaseException):
                 log.warning(
                     "sandbox.stop_all_error",
-                    session_id=h.session_id,
+                    owner_id=h.owner_id,
                     container_id=h.sandbox_id[:12],
                     error=str(result),
                 )
 
     # ── idle-TTL reaper ──────────────────────────────────────────────────
 
+    async def _release_owner(self, owner_id: str) -> None:
+        """Route an idle release to the right teardown by owner-id prefix (#988).
+
+        The ``_handles`` map holds both session (``sess_…``) and workflow-run
+        (``wfr_…``) sandboxes; their teardowns differ (a session snapshots its
+        rootfs + stops proxies, a run is a bare ephemeral destroy). The prefix is
+        the discriminator — the same id the owner was provisioned under. An
+        unrecognized prefix falls through to the session path (the historical
+        default; a malformed owner id is a bug worth surfacing via that path's
+        logging rather than silently skipping the teardown).
+        """
+        if owner_id.startswith(f"{WORKFLOW_RUN}_"):
+            await self.release_run(owner_id)
+        else:
+            await self.release(owner_id)
+
     async def _reap_idle_once(self, idle_timeout: float) -> None:
-        """One reap pass: release every session idle past ``idle_timeout``.
+        """One reap pass: release every owner idle past ``idle_timeout``.
 
         Extracted from :meth:`_reap_idle_loop` for deterministic testing.
         Driven once per tick by the loop; never called directly in
-        production.
+        production. Routes by owner-id prefix (:meth:`_release_owner`) so a run
+        sandbox and a session sandbox each get their correct teardown.
         """
         now = time.monotonic()
         to_release: list[str] = []
@@ -1123,8 +1264,8 @@ class SandboxRegistry:
                 # pop _last_used out from under us, so absence means skip.
                 current = self._last_used.get(sid)
                 if current is not None and time.monotonic() - current > idle_timeout:
-                    log.info("sandbox.idle_release", session_id=sid)
-                    await self.release(sid)
+                    log.info("sandbox.idle_release", owner_id=sid)
+                    await self._release_owner(sid)
 
     async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
         """Background loop: release sandboxes idle > idle_timeout seconds.

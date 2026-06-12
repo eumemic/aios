@@ -35,7 +35,7 @@ class _StubRegistry:
 def stub_handle(**kwargs: Any) -> SandboxHandle:
     """A SandboxHandle with run_command mocked out."""
     handle = SandboxHandle(
-        session_id="sess_01TEST",
+        owner_id="sess_01TEST",
         sandbox_id="container_abc123",
         workspace_path=Path("/tmp/aios-test-workspace"),
     )

@@ -3562,6 +3562,535 @@ async def test_tool_http_request_credential_e2e(wf_runtime: asyncpg.Pool[Any]) -
         runtime.crypto_box = prev_box
 
 
+# ─── tool('bash', …) — the run-side sandbox executor (#988) ───────────────────
+#
+# bash rides the EXISTING ``tool`` capability (capability="tool", tool_name="bash")
+# but its handler needs a provisioned container, so the step routes it by execution
+# class to ``run_sandbox`` instead of the worker tool path. These tests drive the
+# real ``run_workflow_step`` against a real Postgres with a ``FakeBackend`` standing
+# in for Docker — the integration wiring (routing by ``tool_executes_class``,
+# shared ``run_tools._INFLIGHT``, the bare-bash-dict / flat-``{"error"}`` value, the
+# park/harvest/replay loop) is the surface under test. The pure-executor assertions
+# (preamble byte-shape, timeout clamp, etc.) live in ``tests/unit/test_run_sandbox``.
+
+import hashlib  # noqa: E402
+import shlex  # noqa: E402
+
+from aios.sandbox.backends.base import (  # noqa: E402
+    CommandResult,
+    Mount,
+    SandboxBackendError,
+    SandboxSpec,
+    Unrestricted,
+)
+from aios.sandbox.registry import SandboxRegistry  # noqa: E402
+from aios.sandbox.spec import ProvisioningPlan  # noqa: E402
+from tests.helpers.sandbox import FakeBackend  # noqa: E402
+
+_BASH_SCRIPT = (
+    "async def main(input):\n    r = await tool('bash', {'command': 'echo hi'})\n    return r\n"
+)
+
+
+def _fake_run_plan(run_id: str) -> ProvisioningPlan:
+    """A minimal :class:`ProvisioningPlan` for a run sandbox — no real Docker/CA/broker.
+
+    ``build_spec_from_run`` is patched to return this, so ``get_or_provision_run``
+    exercises only ``backend.create`` + the cache logic against the FakeBackend.
+    """
+    from pathlib import Path
+
+    from aios.models.environments import EnvironmentConfig
+
+    spec = SandboxSpec(
+        session_id=run_id,
+        instance_id="inst_test",
+        workspace=Mount(host_path=Path("/tmp/wfr-ws"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=Unrestricted(),
+        host_gateway_alias=None,
+        image="img:test",
+    )
+    return ProvisioningPlan(
+        spec=spec,
+        env_config=EnvironmentConfig(),
+        memory_echoes=[],
+        github_echoes=[],
+        git_proxy=None,
+        env_var_credentials=(),
+        secret_proxy=None,
+    )
+
+
+@pytest.fixture
+async def wf_sandbox_runtime(wf_runtime: asyncpg.Pool[Any]) -> AsyncIterator[Any]:
+    """``wf_runtime`` + a :class:`SandboxRegistry` over a :class:`FakeBackend` on
+    ``runtime.sandbox_registry``, with the heavy provision path (build_spec_from_run,
+    egress CA / package install) patched out so ``get_or_provision_run`` exercises
+    only the backend.create + cache logic. The bash task's own ``defer_run_wake`` is
+    patched (the harvest is driven manually), and the SHARED ``run_tools._INFLIGHT``
+    is cleared both sides. Yields ``(pool, backend)``."""
+    pool = wf_runtime
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend)
+    prev = runtime.sandbox_registry
+    runtime.sandbox_registry = registry
+    run_tools._INFLIGHT.clear()  # bash shares run_tools._INFLIGHT (class-agnostic)
+    with (
+        mock.patch(
+            "aios.sandbox.registry.build_spec_from_run",
+            new=AsyncMock(side_effect=lambda run_id: _fake_run_plan(run_id)),
+        ),
+        mock.patch("aios.sandbox.registry.install_egress_ca", new=AsyncMock()),
+        mock.patch("aios.sandbox.registry.install_packages", new=AsyncMock()),
+        mock.patch("aios.workflows.run_sandbox.defer_run_wake", new=AsyncMock()),
+    ):
+        try:
+            yield pool, backend
+        finally:
+            run_tools._INFLIGHT.clear()
+            runtime.sandbox_registry = prev
+
+
+async def _drain_sandbox_tasks() -> None:
+    """Await any fire-and-forget bash tasks (they live in the SHARED
+    ``run_tools._INFLIGHT``; ``defer_run_wake`` is patched, so they don't self-wake)."""
+    tasks = list(run_tools._INFLIGHT.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _backend_exec_count(backend: FakeBackend) -> int:
+    return sum(1 for verb, _ in backend.calls if verb == "exec")
+
+
+def _backend_create_count(backend: FakeBackend) -> int:
+    return sum(1 for verb, _ in backend.calls if verb == "create")
+
+
+def _execed_commands(backend: FakeBackend) -> list[str]:
+    """The ``command`` string handed to ``backend.exec`` for each exec call, in order."""
+    return [kw["command"] for verb, kw in backend.calls if verb == "exec"]
+
+
+# (a) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_dispatch_signal_one_call_result(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """The headline park/harvest/replay round-trip for bash: wake 1 journals ONE
+    ``call_started{capability:"tool",tool_name:"bash"}`` and parks; the task writes
+    one ``tool_result`` signal; wake 2's harvest folds one ``call_result`` carrying
+    the BARE bash dict; the run completes; exec ran exactly once."""
+    pool, backend = wf_sandbox_runtime
+    backend.next_result = CommandResult(
+        exit_code=0, stdout="hi\n", stderr="", timed_out=False, truncated=False
+    )
+    run_id = await _make_tool_run(
+        pool, _BASH_SCRIPT, tools=[ToolSpec(type="bash")], name="wt-bash-a"
+    )
+
+    # Wake 1: drive to the bash frontier and park; the task launches after commit.
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "suspended"
+    started = await _call_starteds(pool, run_id)
+    assert len(started) == 1
+    cs = started[0]
+    assert cs.payload["capability"] == "tool" and cs.payload["tool_name"] == "bash"
+    # The journaled command is the verbatim author command (no preamble).
+    assert cs.payload["input"] == {"command": "echo hi"}
+
+    await _drain_sandbox_tasks()  # the task writes its tool_result signal
+
+    # Wake 2: harvest the signal → fast-forward → complete with the BARE bash dict.
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    assert run.output == {
+        "exit_code": 0,
+        "stdout": "hi\n",
+        "stderr": "",
+        "timed_out": False,
+        "truncated": False,
+    }
+    # Exactly ONE call_result; clean journal; exec ran exactly once.
+    assert [t for _s, t, _k in await _events(pool, run_id)] == [
+        "run_started",
+        "call_started",
+        "call_result",
+        "run_completed",
+    ]
+    assert _backend_exec_count(backend) == 1
+
+
+# (b) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_memo_law_redrive_while_inflight_execs_once(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """Re-driving a run while its bash task is still in-flight must NOT relaunch: the
+    harvest's class-agnostic ``has_inflight`` guard suppresses the double-dispatch, so
+    exec is entered exactly once."""
+    pool, backend = wf_sandbox_runtime
+    block = asyncio.Event()  # released only once the test lets exec finish
+    entered = asyncio.Event()  # set when the task is blocking IN exec
+    exec_count = 0  # patched exec doesn't populate backend.calls — count here
+
+    async def _blocked(*_a: Any, **_k: Any) -> CommandResult:
+        nonlocal exec_count
+        exec_count += 1
+        entered.set()
+        await block.wait()
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+    run_id = await _make_tool_run(
+        pool, _BASH_SCRIPT, tools=[ToolSpec(type="bash")], name="wt-bash-b"
+    )
+    with mock.patch.object(backend, "exec", new=_blocked):
+        await run_workflow_step(run_id)  # parks; launches the task
+        await asyncio.wait_for(entered.wait(), timeout=5)  # task now blocked IN exec
+        assert exec_count == 1
+        call_key = (await _call_starteds(pool, run_id))[0].call_key
+        assert run_tools.has_inflight(run_id, call_key)
+        # Re-drive while in-flight: the harvest sees has_inflight True → no relaunch.
+        await run_workflow_step(run_id)
+        assert exec_count == 1  # still just the one in-flight exec
+        block.set()
+        await _drain_sandbox_tasks()
+        await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    assert exec_count == 1
+
+
+# (c) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_crash_path_at_least_once(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """A ``call_started`` with NO signal and NO live task (the crash signature)
+    re-launches on harvest — without journaling a second ``call_started`` — so the
+    command runs at-least-once. Total execs across crash + re-dispatch == 2."""
+    pool, backend = wf_sandbox_runtime
+    block = asyncio.Event()  # never set — the first task blocks until cancelled
+    entered = asyncio.Event()
+    first_exec_count = 0
+
+    async def _blocked(*_a: Any, **_k: Any) -> CommandResult:
+        nonlocal first_exec_count
+        first_exec_count += 1
+        entered.set()
+        await block.wait()
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+    run_id = await _make_tool_run(
+        pool, _BASH_SCRIPT, tools=[ToolSpec(type="bash")], name="wt-bash-c"
+    )
+    with mock.patch.object(backend, "exec", new=_blocked):
+        await run_workflow_step(run_id)  # parks; launches the task
+        await asyncio.wait_for(entered.wait(), timeout=5)  # task blocks IN exec
+        assert first_exec_count == 1
+        # Simulate a hard worker crash: cancel the in-flight task + drop the registry map.
+        for task in list(run_tools._INFLIGHT.values()):
+            task.cancel()
+        await asyncio.gather(*list(run_tools._INFLIGHT.values()), return_exceptions=True)
+        run_tools._INFLIGHT.clear()
+
+    # No signal exists. Wake 2 (sweep re-wake): harvest finds no signal + no live task
+    # → re-dispatch — without a second call_started. The re-dispatched task uses the
+    # REAL (un-patched) FakeBackend.exec, recorded in backend.calls.
+    backend.next_result = CommandResult(
+        exit_code=0, stdout="2nd\n", stderr="", timed_out=False, truncated=False
+    )
+    await run_workflow_step(run_id)
+    assert len(await _call_starteds(pool, run_id)) == 1  # exactly one — no double-open
+    assert first_exec_count + _backend_exec_count(backend) == 2
+    assert _backend_exec_count(backend) == 1  # the re-dispatch ran exactly once
+    await _drain_sandbox_tasks()
+    await run_workflow_step(run_id)  # harvest the re-dispatch → complete
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+
+
+# (c-prime) ─────────────────────────────────────────────────────────────────────
+async def test_bash_completed_call_not_reexeced_on_nonterminal_redrive(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """The harvest's memo-skip on a NON-terminal run: a bash call already folded into
+    the memo is NEVER re-execed when its run is re-driven while still running — only
+    the genuinely-inflight call is. A two-call script: the FIRST completes (in the
+    memo), the SECOND blocks in exec (keeping the run non-terminal). Dropping call 1's
+    signal makes the memo-skip load-bearing — without ``call_key not in memo`` the
+    harvest would see the crash signature (no signal + no live task) and re-exec it."""
+    pool, backend = wf_sandbox_runtime
+    script = (
+        "async def main(input):\n"
+        "    a = await tool('bash', {'command': 'echo one'})\n"
+        "    b = await tool('bash', {'command': 'echo two'})\n"
+        "    return [a, b]\n"
+    )
+    second_entered = asyncio.Event()
+    second_block = asyncio.Event()  # never set — the SECOND task blocks, keeping run live
+    execed: list[str] = []  # patched exec doesn't populate backend.calls — record here
+
+    async def _exec(_handle: Any, command: str, **_k: Any) -> CommandResult:
+        execed.append(command)
+        if "echo two" in command:
+            second_entered.set()
+            await second_block.wait()  # park here so the run stays non-terminal
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+    run_id = await _make_tool_run(
+        pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-cprime"
+    )
+    with mock.patch.object(backend, "exec", new=_exec):
+        await run_workflow_step(run_id)  # park at call 1; launch task 1 (echo one)
+        await _drain_sandbox_tasks()  # task 1 writes its signal
+        await run_workflow_step(run_id)  # harvest call 1 → memo; advance to call 2; launch task 2
+        await asyncio.wait_for(second_entered.wait(), timeout=5)  # task 2 blocks IN exec
+
+        run = await _get_run(pool, run_id)
+        assert run is not None and run.status == "suspended"  # NON-terminal: harvest runs
+        started = await _call_starteds(pool, run_id)
+        assert len(started) == 2  # both opened; call 1 resolved, call 2 inflight
+        assert sum(1 for c in execed if "echo one" in c) == 1  # call 1 ran exactly once
+
+        # Drop call 1's signal so its ONLY remaining record is the journaled call_result
+        # — the realistic state once a signal is GC'd. The ``call_key not in memo`` filter
+        # is now the only thing keeping the completed call out of the harvest's inflight set.
+        call_1_key = started[0].call_key
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM wf_run_signals WHERE run_id = $1 AND call_key = $2",
+                run_id,
+                call_1_key,
+            )
+
+        # Re-drive while non-terminal: call 2 inflight (has_inflight True → no relaunch),
+        # call 1 already in the memo (resolved → never re-examined). Neither re-execs.
+        await run_workflow_step(run_id)
+        assert sum(1 for c in execed if "echo one" in c) == 1  # COMPLETED call 1 NOT re-execed
+        assert len(await _call_starteds(pool, run_id)) == 2  # no double-open of either call
+
+        second_block.set()  # let call 2 finish so no blocked task lingers
+        await _drain_sandbox_tasks()
+    await run_workflow_step(run_id)  # harvest call 2 → complete
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+
+
+# (d) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_provision_failure_one_error_value(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """A provision failure is a RECOVERABLE value, not a terminal error: the task
+    writes one ``tool_result`` carrying a flat ``{"error": …}``; the harvest folds it
+    as a call_result VALUE (``is_error`` False — bash is a tool, so ``tool()`` never
+    raises); the run CONTINUES and COMPLETES with that error value."""
+    pool, backend = wf_sandbox_runtime
+
+    async def _boom(_spec: Any) -> Any:
+        raise SandboxBackendError("create boom")
+
+    run_id = await _make_tool_run(
+        pool, _BASH_SCRIPT, tools=[ToolSpec(type="bash")], name="wt-bash-d"
+    )
+    with mock.patch.object(backend, "create", new=_boom):
+        await run_workflow_step(run_id)  # park at the bash frontier
+        await _drain_sandbox_tasks()  # task: provision fails → {"error": …}
+        await run_workflow_step(run_id)  # harvest the error value → complete
+    run = await _get_run(pool, run_id)
+    # RECOVERABLE: the run COMPLETES (not errored) carrying the error value.
+    assert run is not None and run.status == "completed"
+    assert isinstance(run.output, dict) and "error" in run.output
+    assert "provisioning failed" in run.output["error"]
+    assert "create boom" in run.output["error"]
+    # Exactly one call_result; folded as a value (is_error False), not a thrown error.
+    async with pool.acquire() as conn:
+        rows = await wf_queries.list_run_events(conn, run_id)
+    call_results = [e for e in rows if e.type == "call_result"]
+    assert len(call_results) == 1
+    assert call_results[0].payload["is_error"] is False
+    assert "error" in call_results[0].payload["result"]
+    assert _backend_exec_count(backend) == 0  # never reached exec
+
+
+# (e) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_lazy_no_provision_until_called(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """A run that never calls ``tool('bash')`` provisions NO container — the run
+    sandbox is lazy, created only on first bash exec."""
+    pool, backend = wf_sandbox_runtime
+    run_id = await _make_tool_run(
+        pool,
+        "async def main(input):\n    return 'no bash here'\n",
+        tools=[ToolSpec(type="bash")],
+        name="wt-bash-e",
+    )
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+    assert _backend_create_count(backend) == 0  # never provisioned
+
+
+# (f) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_dispatches_while_agent_frontier_deferred(
+    monkeypatch: pytest.MonkeyPatch,
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+    wf_agent_id: str,
+) -> None:
+    """UNTHROTTLED proof: with the per-run wave cap at 1 and a
+    ``parallel([agent, agent, tool('bash', …)])`` frontier, one agent is admitted,
+    one is ``frontier_deferred``, and the bash tool gets its ``call_started`` + launch
+    in the SAME wake — bash is NOT gated by the agent wave slot (gate/tool frontiers
+    are unthrottled)."""
+    _wave_cap(monkeypatch, workflow_max_inflight_children_per_run=1)
+    pool, _backend = wf_sandbox_runtime
+    script = (
+        "async def main(input):\n"
+        "    return await parallel([\n"
+        f"        lambda: agent({wf_agent_id!r}, 'a'),\n"
+        f"        lambda: agent({wf_agent_id!r}, 'b'),\n"
+        "        lambda: tool('bash', {'command': 'echo hi'}),\n"
+        "    ])\n"
+    )
+    run_id = await _make_tool_run(pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-f")
+    await run_workflow_step(run_id)
+    cs = await _call_starteds(pool, run_id)
+    caps = sorted(e.payload["capability"] for e in cs)
+    assert caps == ["agent", "tool"]  # one agent + the bash tool both opened
+    assert len(await _deferred_keys(pool, run_id)) == 1  # the over-cap agent
+    assert len(run_tools._INFLIGHT) == 1  # the bash task was launched this wake
+    await _drain_sandbox_tasks()
+
+
+# (g) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_idempotency_token_stable_across_redrive(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """Idempotency-token stability + distinctness (#988 test strategy (g)).
+
+    The command execed for a bash call is prefixed with a shlex-quoted
+    ``export AIOS_RUN_ID=<run.id> AIOS_IDEMPOTENCY_KEY=sha256(run_id‖call_key)`` line
+    ahead of the verbatim author command. A crash re-drive re-launches with the SAME
+    run.id + call_key, so the second exec carries a byte-identical token; two distinct
+    bash calls carry distinct call_keys, hence distinct tokens; the journaled
+    ``call_started.input.command`` is the verbatim UN-prefixed author command."""
+    pool, backend = wf_sandbox_runtime
+    script = (
+        "async def main(input):\n"
+        "    a = await tool('bash', {'command': 'echo one'})\n"
+        "    b = await tool('bash', {'command': 'echo two'})\n"
+        "    return [a, b]\n"
+    )
+    block = asyncio.Event()  # never set — the first task blocks until cancelled
+    entered = asyncio.Event()
+    first_command: str | None = None  # the command the crashed first exec received
+
+    async def _blocked(_handle: Any, command: str, **_k: Any) -> CommandResult:
+        nonlocal first_command
+        first_command = command
+        entered.set()
+        await block.wait()
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+    run_id = await _make_tool_run(pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-g")
+    with mock.patch.object(backend, "exec", new=_blocked):
+        await run_workflow_step(run_id)  # park at the first bash frontier; launch task
+        await asyncio.wait_for(entered.wait(), timeout=5)  # task blocks IN exec
+        started = await _call_starteds(pool, run_id)
+        first_call_key = started[0].call_key
+        # The journaled command is the verbatim UN-prefixed author command.
+        assert started[0].payload["input"] == {"command": "echo one"}
+        idem = hashlib.sha256(f"{run_id}\0{first_call_key}".encode()).hexdigest()
+        expected_preamble = (
+            f"export AIOS_RUN_ID={shlex.quote(run_id)} AIOS_IDEMPOTENCY_KEY={shlex.quote(idem)}\n"
+        )
+        # The execed command is the shlex-quoted preamble + the author command.
+        assert first_command == expected_preamble + "echo one"
+        # Simulate a hard worker crash: cancel the in-flight task + drop the registry map.
+        for task in list(run_tools._INFLIGHT.values()):
+            task.cancel()
+        await asyncio.gather(*list(run_tools._INFLIGHT.values()), return_exceptions=True)
+        run_tools._INFLIGHT.clear()
+
+    # Re-drive: no signal + no live task → re-dispatch with the REAL FakeBackend.exec.
+    backend.next_result = CommandResult(
+        exit_code=0, stdout="", stderr="", timed_out=False, truncated=False
+    )
+    await run_workflow_step(run_id)
+    assert len(await _call_starteds(pool, run_id)) == 1  # no double-open
+    redriven = _execed_commands(backend)
+    assert len(redriven) == 1
+    # Token STABILITY: the re-driven exec carries the IDENTICAL idempotency token.
+    assert redriven[0] == expected_preamble + "echo one"
+    assert first_command is not None and redriven[0] == first_command
+    await _drain_sandbox_tasks()
+
+    # Harvest the first call; the script advances to the SECOND bash call.
+    await run_workflow_step(run_id)
+    await _drain_sandbox_tasks()
+    started = await _call_starteds(pool, run_id)
+    assert len(started) == 2  # the second bash call opened
+    second_call_key = started[1].call_key
+    # DISTINCTNESS: distinct bash calls ⇒ distinct call_keys ⇒ distinct tokens.
+    assert second_call_key != first_call_key
+    second_idem = hashlib.sha256(f"{run_id}\0{second_call_key}".encode()).hexdigest()
+    second_command = _execed_commands(backend)[1]
+    assert f"AIOS_IDEMPOTENCY_KEY={shlex.quote(second_idem)}" in second_command
+    assert second_idem != idem
+    # Run drives to completion.
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+
+
+# (h) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_runtime_lattice_drops_undeclared(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """**MUST-HAVE** — the #794 authority lattice: a run whose frozen ``tools`` does
+    NOT declare bash resolves ``tool('bash', …)`` to the recoverable not-declared
+    value, never provisioning a container; the run CONTINUES and COMPLETES."""
+    pool, backend = wf_sandbox_runtime
+    # The workflow declares NO tools → the run snapshots an empty tools list, so bash
+    # is run-callable (in RUN_TOOLS) but NOT declared → the not-declared gate value.
+    run_id = await _make_tool_run(pool, _BASH_SCRIPT, tools=[], name="wt-bash-h")
+    await run_workflow_step(run_id)  # park at the bash frontier (routes to the sandbox executor)
+    await _drain_sandbox_tasks()  # task: gate_run_tool → not-declared {"error": …}
+    await run_workflow_step(run_id)  # harvest the error value → complete
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"  # recoverable, NOT errored
+    assert run.output == {"error": "tool 'bash' is not in the workflow's declared tools"}
+    assert _backend_create_count(backend) == 0  # never provisioned
+    assert _backend_exec_count(backend) == 0
+
+
+# (i) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_class_other_tool_not_callable(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """Another sandbox-class builtin (``read``) routes to the sandbox executor by
+    execution class but is NOT in the run-callable set, so it resolves to the
+    not-callable value; the run CONTINUES and COMPLETES, never provisioning."""
+    pool, backend = wf_sandbox_runtime
+    script = (
+        "async def main(input):\n    return await tool('read', {'file_path': '/workspace/x'})\n"
+    )
+    # Declare read so the gate's FIRST clause (not-in-RUN_TOOLS) is what rejects it —
+    # not the declared-tools clause — pinning the not-callable string.
+    run_id = await _make_tool_run(pool, script, tools=[ToolSpec(type="read")], name="wt-bash-i")
+    await run_workflow_step(run_id)  # park at the read frontier (routes to the sandbox executor)
+    await _drain_sandbox_tasks()  # task: gate_run_tool → not-callable {"error": …}
+    await run_workflow_step(run_id)  # harvest the error value → complete
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"  # recoverable, NOT errored
+    assert run.output == {"error": "tool 'read' is not callable from a workflow run"}
+    assert _backend_create_count(backend) == 0  # never provisioned
+    assert _backend_exec_count(backend) == 0
+
+
 # ─── update_workflow — in-flight runs are immune (snapshot pinning) ───────────
 
 
