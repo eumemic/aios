@@ -36,6 +36,12 @@ import json
 import math
 from typing import Any
 
+# Epoch of the host-side workflow replay semantics. A run pins this at creation;
+# workers fail honest at wake time instead of replaying an in-flight journal under
+# silently changed keying/interpreter/capability semantics. Bump only for knowingly
+# replay-breaking changes; replay-additive changes should keep the epoch.
+HOST_SEMANTICS_EPOCH = 1
+
 
 class WorkflowInputTypeError(TypeError):
     """A capability input contains a type not permitted in a workflow.

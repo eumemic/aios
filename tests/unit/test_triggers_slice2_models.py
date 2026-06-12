@@ -51,6 +51,7 @@ def _wf_run(**overrides: Any) -> WfRun:
         "environment_id": "env_t",
         "script": "async def main(input): ...",
         "script_sha": "x" * 64,
+        "host_semantics_epoch": 1,
         "status": "completed",
         "output": {"rows": 3},
         "last_event_seq": 2,

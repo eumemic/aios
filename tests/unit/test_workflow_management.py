@@ -79,6 +79,7 @@ def _run(**over: Any) -> WfRun:
         environment_id="env_x",
         script="SECRET",
         script_sha="sha",
+        host_semantics_epoch=1,
         status="running",
         last_event_seq=0,
         budget_usd=None,

@@ -38,7 +38,7 @@ from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
 from aios.workflows import run_tools, service
 from aios.workflows.child_id import child_session_id
-from aios.workflows.determinism import CallKeyer
+from aios.workflows.determinism import HOST_SEMANTICS_EPOCH, CallKeyer
 from aios.workflows.host_launcher import HostOutcome
 from aios.workflows.step import run_workflow_step
 
@@ -530,6 +530,7 @@ async def test_children_listable_by_parent_run_id(
             environment_id="env_wf",
             script="async def main(i):\n    return 1",
             script_sha="sha",
+            host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             parent_run_id=parent_id,
         )
         child_runs = await wf_queries.list_wf_runs(
@@ -2588,6 +2589,124 @@ async def test_divergent_replay_is_caught(wf_runtime: asyncpg.Pool[Any]) -> None
     assert run is not None and run.status == "errored"
     assert events[-1].type == "run_completed"
     assert events[-1].payload["error"]["kind"] == "nondeterministic_replay"
+
+
+async def test_create_run_stamps_host_semantics_epoch(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None
+    assert run.host_semantics_epoch == HOST_SEMANTICS_EPOCH
+
+
+async def test_epoch_mismatch_errors_before_replay(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_runs SET host_semantics_epoch = $1 WHERE id = $2",
+            HOST_SEMANTICS_EPOCH - 1,
+            run_id,
+        )
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "errored"
+    assert run.output is None
+    assert [event.type for event in events] == ["run_completed"]
+    assert events[-1].payload["is_error"] is True
+    assert events[-1].payload["error"]["kind"] == "engine_semantics_changed"
+    assert "engine semantics changed" in events[-1].payload["output"]
+
+
+async def test_epoch_mismatch_fails_child_open_requests(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'hi')\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    children = await _children_of(pool, run_id)
+    assert len(children) == 1
+    child_id = children[0]
+    request_id = (await _events(pool, run_id))[1][2]
+    assert request_id is not None
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_runs SET host_semantics_epoch = $1 WHERE id = $2",
+            HOST_SEMANTICS_EPOCH - 1,
+            run_id,
+        )
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        response = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=request_id
+        )
+        signals = await wf_queries.list_run_signals(conn, run_id)
+    assert response is not None
+    assert response["is_error"] is True
+    assert response["error"] == {"kind": "engine_semantics_changed"}
+    assert any(s.call_key == request_id and s.kind == "child_done" for s in signals)
+
+
+async def test_nondeterministic_replay_fails_child_open_requests(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'hi')\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    children = await _children_of(pool, run_id)
+    assert len(children) == 1
+    child_id = children[0]
+    request_id = (await _events(pool, run_id))[1][2]
+    assert request_id is not None
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_runs SET script = $1, status = 'running' WHERE id = $2",
+            "async def main(input):\n    return 1",
+            run_id,
+        )
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        response = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=request_id
+        )
+    assert run is not None and run.status == "errored"
+    assert response is not None
+    assert response["is_error"] is True
+    assert response["error"] == {"kind": "nondeterministic_replay"}
+
+
+async def test_gate_parked_run_detects_epoch_mismatch_on_next_wake(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        suspended = await wf_queries.get_run_for_step(conn, run_id)
+        await conn.execute(
+            "UPDATE wf_runs SET host_semantics_epoch = $1 WHERE id = $2",
+            HOST_SEMANTICS_EPOCH - 1,
+            run_id,
+        )
+    assert suspended is not None and suspended.status == "suspended"
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        completed = await wf_queries.get_run_completed_event(conn, run_id)
+    assert run is not None and run.status == "errored"
+    assert completed is not None
+    assert completed.payload["error"]["kind"] == "engine_semantics_changed"
 
 
 async def test_host_crash_on_suspended_gate_is_not_divergence(

@@ -190,6 +190,7 @@ def test_wf_run_budget_usd_round_trip() -> None:
         environment_id="env_1",
         script="async def main(input): return None",
         script_sha="sha",
+        host_semantics_epoch=1,
         status="pending",
         last_event_seq=0,
         created_at=__import__("datetime").datetime.now(__import__("datetime").UTC),

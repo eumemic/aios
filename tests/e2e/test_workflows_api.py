@@ -237,6 +237,7 @@ async def test_runs_parent_run_id_filter(http_client: httpx.AsyncClient, pool: A
     spawned internally (a nested ``workflow()``), so seed one via the query layer and
     assert only it comes back for the parent."""
     from aios.db.queries import workflows as wf_queries
+    from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
     env_id = await _create_env(http_client)
     wf = (
@@ -253,6 +254,7 @@ async def test_runs_parent_run_id_filter(http_client: httpx.AsyncClient, pool: A
             environment_id=env_id,
             script=_SCRIPT,
             script_sha="sha",
+            host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             parent_run_id=parent["id"],
         )
     # An unrelated (parentless) run that must be excluded.
