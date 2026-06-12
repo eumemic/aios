@@ -363,8 +363,8 @@ GET_WORKFLOW_DESCRIPTION = (
 LIST_WORKFLOWS_DESCRIPTION = (
     "List your account's workflows, newest first, as lean summaries (id, name, "
     "description, version, timestamps) — no script bodies. Optional 'name' filter; "
-    "page with 'limit' and 'after' (the last id seen). To read a workflow's script, "
-    "fetch it with get_workflow."
+    "page with 'limit' and 'after' (the last id seen); a full page means there may "
+    "be more — call again. To read a workflow's script, fetch it with get_workflow."
 )
 GET_RUN_DESCRIPTION = (
     "Fetch one workflow run in full by id — including the immutable 'script' the run "
@@ -374,14 +374,16 @@ GET_RUN_DESCRIPTION = (
 LIST_RUNS_DESCRIPTION = (
     "List workflow runs, newest first. By default returns only the runs YOU launched; "
     "set 'account_wide' true to list every run in the account. Optional 'workflow_id' / "
-    "'status' / 'parent_run_id' filters; page with 'limit' and 'after'. Rows are lean (no "
+    "'status' / 'parent_run_id' filters; page with 'limit' and 'after' (the last id seen); "
+    "a full page means there may be more — call again. Rows are lean (no "
     "script or tool surface) — fetch a single run with get_run for its full body."
 )
 LIST_RUN_EVENTS_DESCRIPTION = (
-    "Page a run's journal in sequence order (oldest first), surfacing a mid-flight run's "
-    "annotation events (the log/phase progress markers a workflow emits) as they land. "
-    "Page forward with 'after_seq' (the last seq seen); a full page means call again. "
-    "Event payloads are returned in full — the journal text is never clipped."
+    "Page a run's journal in sequence order (oldest first): every event — run_started, "
+    "call_started, call_result, run_completed, and the annotation log/phase progress "
+    "markers a workflow emits — so you can watch a mid-flight run advance. Page forward "
+    "with 'after_seq' (the last seq seen); a full page means call again. Event payloads "
+    "are returned in full — the journal text is never clipped."
 )
 
 
