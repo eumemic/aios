@@ -14,6 +14,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 AIOS_API_KEY=x \
 AIOS_VAULT_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= \
+AIOS_EGRESS_CA_KEY=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE= \
 AIOS_DB_URL=postgresql://x@localhost/x \
 uv run python -c "
 import json

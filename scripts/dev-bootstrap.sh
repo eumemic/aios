@@ -18,8 +18,9 @@
 #       --connector to bootstrap multiple at once.
 #
 #   ./scripts/dev-bootstrap.sh --reset
-#       Wipe AIOS_BOOTSTRAP_TOKEN, AIOS_API_KEY, AIOS_VAULT_KEY, and all
-#       *_CONNECTOR_TOKEN values in .env, then run a fresh bootstrap.
+#       Wipe AIOS_BOOTSTRAP_TOKEN, AIOS_API_KEY, AIOS_VAULT_KEY,
+#       AIOS_EGRESS_CA_KEY, and all *_CONNECTOR_TOKEN values in .env,
+#       then run a fresh bootstrap.
 
 set -euo pipefail
 
@@ -142,6 +143,7 @@ if $RESET; then
   # Wipe the stale minted root key too — it's re-minted from a fresh DB below.
   env_set AIOS_API_KEY ""
   env_set AIOS_VAULT_KEY ""
+  env_set AIOS_EGRESS_CA_KEY ""
   env_set ECHO_HTTP_CONNECTOR_TOKEN ""
   env_set TELEGRAM_CONNECTOR_TOKEN ""
   env_set SIGNAL_CONNECTOR_TOKEN ""
@@ -163,6 +165,10 @@ fi
 if needs_gen "$(env_get AIOS_VAULT_KEY)"; then
   say "generating AIOS_VAULT_KEY (openssl rand -base64 32)"
   env_set AIOS_VAULT_KEY "$(openssl rand -base64 32)"
+fi
+if needs_gen "$(env_get AIOS_EGRESS_CA_KEY)"; then
+  say "generating AIOS_EGRESS_CA_KEY (openssl rand -base64 32)"
+  env_set AIOS_EGRESS_CA_KEY "$(openssl rand -base64 32)"
 fi
 
 # Workspace dir must exist before docker bind-mount sees it (Docker would
