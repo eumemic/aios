@@ -111,7 +111,7 @@ Reusable, versioned knowledge resources with progressive disclosure. Loaded into
 
 ### Vaults
 
-Encrypted credential storage (libsodium secretbox) for MCP server auth. Sessions bind vaults at creation time. OAuth and static bearer token types.
+Encrypted credential storage (libsodium secretbox) for MCP server auth. Sessions bind vaults at creation time. OAuth and static bearer token types. See [vault credential accepted boundaries](docs/reference/vault-credential-boundaries.md) for what the HTTPS egress swap protects and what needs a worker-side path instead.
 
 ### Streaming
 
