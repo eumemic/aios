@@ -1293,8 +1293,8 @@ class SandboxRegistry:
                     log.info("sandbox.idle_release", owner_id=sid)
                     try:
                         await self._release_owner(sid)
-                    except Exception:
-                        log.exception("sandbox.idle_release_failed", owner_id=sid)
+                    except Exception as err:
+                        log.warning("sandbox.idle_release_failed", owner_id=sid, error=str(err))
 
     async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
         """Background loop: release sandboxes idle > idle_timeout seconds.
