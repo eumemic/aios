@@ -240,6 +240,20 @@ class HttpServerSpec(BaseModel):
     routes: list[HttpRouteSpec] = Field(default_factory=list)
 
 
+def validate_http_servers(servers: list[HttpServerSpec]) -> None:
+    """Cross-item invariants for ingress ``http_servers`` lists.
+
+    ``base_url`` is the credential-resolution key and the attenuation key, so
+    each authored surface must contain it at most once.  Equality is exact
+    string equality, matching run-time resolution and attenuation semantics.
+    """
+    seen: set[str] = set()
+    for server in servers:
+        if server.base_url in seen:
+            raise ValueError(f"duplicate base_url {server.base_url!r}")
+        seen.add(server.base_url)
+
+
 # ── Tool declaration ──────────────────────────────────────────────────────────
 
 
@@ -332,6 +346,11 @@ class AgentCreate(BaseModel):
     window_min: int = Field(default=50_000, ge=1)
     window_max: int = Field(default=150_000, ge=1)
 
+    @model_validator(mode="after")
+    def _validate_http_servers(self) -> AgentCreate:
+        validate_http_servers(self.http_servers)
+        return self
+
 
 class AgentUpdate(BaseModel):
     """Request body for ``PUT /v1/agents/{id}``.
@@ -357,6 +376,12 @@ class AgentUpdate(BaseModel):
     litellm_extra: dict[str, Any] | None = None
     window_min: int | None = Field(default=None, ge=1)
     window_max: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_http_servers(self) -> AgentUpdate:
+        if self.http_servers is not None:
+            validate_http_servers(self.http_servers)
+        return self
 
 
 class Agent(BaseModel):

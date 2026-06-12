@@ -17,9 +17,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, validate_http_servers
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal[
@@ -168,6 +168,11 @@ class WorkflowCreate(BaseModel):
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _validate_http_servers(self) -> WorkflowCreate:
+        validate_http_servers(self.http_servers)
+        return self
+
 
 class WorkflowUpdate(BaseModel):
     """Request body for ``PUT /v1/workflows/{id}`` — update in place, bumping ``version``.
@@ -192,6 +197,12 @@ class WorkflowUpdate(BaseModel):
     tools: list[ToolSpec] | None = None
     mcp_servers: list[McpServerSpec] | None = None
     http_servers: list[HttpServerSpec] | None = None
+
+    @model_validator(mode="after")
+    def _validate_http_servers(self) -> WorkflowUpdate:
+        if self.http_servers is not None:
+            validate_http_servers(self.http_servers)
+        return self
 
 
 class WfRunCreate(BaseModel):

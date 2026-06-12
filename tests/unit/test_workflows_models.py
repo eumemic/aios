@@ -11,6 +11,10 @@ from pydantic import ValidationError
 from aios.models.workflows import GateResume, WfRunCreate, WorkflowCreate, WorkflowUpdate
 
 
+def _http_server(name: str, base_url: str) -> dict[str, str]:
+    return {"name": name, "base_url": base_url}
+
+
 class TestWorkflowCreate:
     def test_minimal(self) -> None:
         wf = WorkflowCreate.model_validate(
@@ -55,6 +59,38 @@ class TestWorkflowCreate:
         with pytest.raises(ValidationError):
             WorkflowCreate.model_validate({"script": "x"})
 
+    def test_rejects_duplicate_http_server_base_url_with_different_names(self) -> None:
+        with pytest.raises(
+            ValidationError, match=r"duplicate base_url 'https://api\.example\.com'"
+        ):
+            WorkflowCreate.model_validate(
+                {
+                    "name": "w",
+                    "script": "async def main(i): return 1",
+                    "http_servers": [
+                        _http_server("primary", "https://api.example.com"),
+                        _http_server("secondary", "https://api.example.com"),
+                    ],
+                }
+            )
+
+    def test_accepts_duplicate_http_server_names_with_distinct_base_urls(self) -> None:
+        workflow = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "http_servers": [
+                    _http_server("api", "https://one.example.com"),
+                    _http_server("api", "https://two.example.com"),
+                ],
+            }
+        )
+
+        assert [server.base_url for server in workflow.http_servers] == [
+            "https://one.example.com",
+            "https://two.example.com",
+        ]
+
 
 class TestWorkflowUpdate:
     def test_version_required_fields_optional(self) -> None:
@@ -63,6 +99,42 @@ class TestWorkflowUpdate:
         assert upd.name is None and upd.tools is None  # omitted = preserved
         with pytest.raises(ValidationError):
             WorkflowUpdate.model_validate({"script": "x"})  # version is mandatory
+
+    def test_rejects_duplicate_http_server_base_url_with_different_names(self) -> None:
+        with pytest.raises(
+            ValidationError, match=r"duplicate base_url 'https://api\.example\.com'"
+        ):
+            WorkflowUpdate.model_validate(
+                {
+                    "version": 3,
+                    "http_servers": [
+                        _http_server("primary", "https://api.example.com"),
+                        _http_server("secondary", "https://api.example.com"),
+                    ],
+                }
+            )
+
+    def test_accepts_duplicate_http_server_names_with_distinct_base_urls(self) -> None:
+        update = WorkflowUpdate.model_validate(
+            {
+                "version": 3,
+                "http_servers": [
+                    _http_server("api", "https://one.example.com"),
+                    _http_server("api", "https://two.example.com"),
+                ],
+            }
+        )
+
+        assert update.http_servers is not None
+        assert [server.base_url for server in update.http_servers] == [
+            "https://one.example.com",
+            "https://two.example.com",
+        ]
+
+    def test_accepts_omitted_http_servers(self) -> None:
+        update = WorkflowUpdate.model_validate({"version": 3})
+
+        assert update.http_servers is None
 
 
 class TestWfRunCreate:
