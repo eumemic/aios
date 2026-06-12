@@ -1189,16 +1189,18 @@ async def increment_usage(
     output_tokens: int,
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
-) -> None:
-    """Atomically add token counts to a session's cumulative usage."""
+    cost_microusd: int = 0,
+) -> int:
+    """Atomically add token and spend counts; return the account spend total."""
     async with pool.acquire() as conn:
-        await queries.increment_session_usage(
+        return await queries.increment_session_usage(
             conn,
             session_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
+            cost_microusd=cost_microusd,
             account_id=account_id,
         )
 

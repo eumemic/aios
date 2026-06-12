@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.db import queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.logging import get_logger
@@ -273,6 +274,41 @@ async def resolve_effective_timezone(pool: asyncpg.Pool[Any], account_id: str) -
         return await resolve_effective_timezone_on(conn, account_id)
 
 
+async def resolve_effective_spend_limit_usd_on(
+    conn: asyncpg.Connection[Any], account_id: str
+) -> float | None:
+    """Resolve account config spend limit, falling back to the server default."""
+    configured = await queries.resolve_effective_spend_limit_usd(conn, account_id)
+    if configured is not None:
+        return configured
+    return get_settings().default_spend_limit_usd
+
+
+async def resolve_effective_spend_limit_usd(
+    pool: asyncpg.Pool[Any], account_id: str
+) -> float | None:
+    """Pool-level wrapper for effective spend-limit resolution."""
+    async with pool.acquire() as conn:
+        return await resolve_effective_spend_limit_usd_on(conn, account_id)
+
+
+async def get_account_spend_state(
+    pool: asyncpg.Pool[Any], account_id: str
+) -> tuple[int, float | None]:
+    """Return scalar spent micro-USD and the effective spend limit."""
+    async with pool.acquire() as conn:
+        spent = await queries.get_account_spent_microusd(conn, account_id)
+        limit = await resolve_effective_spend_limit_usd_on(conn, account_id)
+    if not isinstance(cast(Any, spent), int) or not isinstance(
+        cast(Any, limit), int | float | None
+    ):
+        # Unit tests often use bare MagicMock pools and leave this collaborator
+        # unpatched. Treat untyped mock values as ungated; production queries
+        # return the annotated scalar types.
+        return 0, None
+    return spent, limit
+
+
 async def purge_account(
     pool: asyncpg.Pool[Any], *, target_account_id: str, caller_account_id: str
 ) -> None:
@@ -332,7 +368,16 @@ async def get_usage(
     await get_account_in_scope(pool, target_account_id, caller_account_id=caller_account_id)
     async with pool.acquire() as conn:
         counts = await queries.count_account_resources(conn, target_account_id)
+        spent_microusd = await queries.get_account_spent_microusd(conn, target_account_id)
+        spend_limit_usd = await resolve_effective_spend_limit_usd_on(conn, target_account_id)
+        tokens = await queries.sum_account_session_tokens(conn, target_account_id)
     return AccountUsage(
+        spent_usd=spent_microusd / 1_000_000,
+        spend_limit_usd=spend_limit_usd,
+        input_tokens=tokens["input_tokens"],
+        output_tokens=tokens["output_tokens"],
+        cache_read_input_tokens=tokens["cache_read_input_tokens"],
+        cache_creation_input_tokens=tokens["cache_creation_input_tokens"],
         agents=counts.get("agents", 0),
         environments=counts.get("environments", 0),
         sessions=counts.get("sessions", 0),

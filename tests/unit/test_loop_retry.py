@@ -189,6 +189,10 @@ def mock_step_dependencies() -> Any:
             AsyncMock(return_value=[]),
         ),
         patch(
+            "aios.harness.loop.accounts_service.get_account_spend_state",
+            AsyncMock(return_value=(0, None)),
+        ),
+        patch(
             "aios.harness.loop.compose_step_context",
             AsyncMock(
                 return_value=SimpleNamespace(
@@ -321,6 +325,7 @@ class TestRunSessionStepOnModelError:
             output_tokens=22,
             cache_read_input_tokens=3,
             cache_creation_input_tokens=4,
+            cost_microusd=1_250_000,
             account_id=ANY,
         )
         mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(

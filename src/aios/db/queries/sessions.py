@@ -839,22 +839,33 @@ async def increment_session_usage(
     output_tokens: int,
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
-) -> None:
-    """Atomically add token counts to a session's cumulative usage."""
-    await conn.execute(
-        "UPDATE sessions SET "
-        "input_tokens = input_tokens + $2, "
-        "output_tokens = output_tokens + $3, "
-        "cache_read_input_tokens = cache_read_input_tokens + $4, "
-        "cache_creation_input_tokens = cache_creation_input_tokens + $5 "
-        "WHERE id = $1 AND account_id = $6",
-        session_id,
-        input_tokens,
-        output_tokens,
-        cache_read_input_tokens,
-        cache_creation_input_tokens,
-        account_id,
-    )
+    cost_microusd: int = 0,
+) -> int:
+    """Atomically add token and spend counts; return the account spend total."""
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE sessions SET "
+            "input_tokens = input_tokens + $2, "
+            "output_tokens = output_tokens + $3, "
+            "cache_read_input_tokens = cache_read_input_tokens + $4, "
+            "cache_creation_input_tokens = cache_creation_input_tokens + $5, "
+            "cost_microusd = cost_microusd + $6 "
+            "WHERE id = $1 AND account_id = $7",
+            session_id,
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            cost_microusd,
+            account_id,
+        )
+        spent = await conn.fetchval(
+            "UPDATE accounts SET spent_microusd = spent_microusd + $1 "
+            "WHERE id = $2 RETURNING spent_microusd",
+            cost_microusd,
+            account_id,
+        )
+    return int(spent or 0)
 
 
 async def get_session_model(
