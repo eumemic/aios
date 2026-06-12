@@ -181,6 +181,9 @@ async def install_packages(
 def build_iptables_script(
     allowed_hosts: set[str],
     extra_host_ports: Sequence[tuple[str, int]] = (),
+    *,
+    dnat_hosts: Sequence[str] = (),
+    dnat_target: tuple[str, int] | None = None,
 ) -> str:
     """Build a shell script that restricts outbound traffic via iptables.
 
@@ -193,8 +196,25 @@ def build_iptables_script(
     binds to a non-standard ephemeral port; without it, in-sandbox
     git traffic to the proxy would be dropped by the default policy.
 
+    When ``dnat_target`` is supplied alongside a non-empty ``dnat_hosts``,
+    a nat-table OUTPUT section rewrites each credential host's resolved
+    IPs on **dport 443 only** to the proxy endpoint (#878). The proxy
+    alias is resolved to ``$PROXY_IP`` exactly ONCE at sidecar runtime
+    (iptables ``--to-destination`` needs an IP, not a DNS name) and the
+    whole nat block is guarded by ``if [ -n "$PROXY_IP" ]`` so a
+    proxy-alias DNS miss emits no malformed rule. On such a miss the
+    behavior is fail-open-to-placeholder, NOT fail-closed: dnat_hosts ⊆
+    networking.allowed_hosts (enforced by the #879 provision gate), so the
+    credential host's :443 is still filter-ACCEPTed and traffic reaches
+    the real upstream carrying the opaque placeholder — an authentication
+    failure, never a secret leak (the real secret never enters the
+    container). A non-functional credentialed sandbox is acceptable here;
+    a WORKER_NETWORK_ALIAS miss already implies the proxy infrastructure
+    is broken. ``dnat_target`` of ``None`` (the default) emits NO nat
+    rules, preserving every existing caller.
+
     Hostnames are validated at the model layer (alphanumerics, dots, hyphens
-    only) so embedding them in the script is safe.
+    only) so embedding them in the script is safe; ``proxy_port`` is an int.
     """
     lines = [
         "set -e",
@@ -232,6 +252,38 @@ def build_iptables_script(
         lines.append(f'  iptables -A OUTPUT -d "$ip" -p tcp --dport {port} -j ACCEPT')
         lines.append("done")
 
+    if dnat_target is not None and dnat_hosts:
+        proxy_alias, proxy_port = dnat_target
+        lines.append("")
+        lines.append("# Route credential-host HTTPS through the secret-egress proxy (#878)")
+        # Resolve the proxy alias to an IP ONCE — iptables --to-destination
+        # needs an IP, not a DNS name. The block is guarded on a non-empty
+        # $PROXY_IP, so a proxy-alias DNS miss emits no malformed ":<port>"
+        # rule. NOTE the resulting behavior: under #879's `cred ⊆ env` gate
+        # the credential host IS always in allowed_hosts and therefore
+        # filter-ACCEPTed on :443 — so on a proxy miss, traffic flows
+        # DIRECTLY to the real upstream carrying the opaque placeholder.
+        # That is fail-open-to-placeholder (auth failures), never a secret
+        # leak: the real secret never enters the container. (In practice the
+        # alias is the load-bearing WORKER_NETWORK_ALIAS, so a miss already
+        # means a non-functional sandbox.)
+        lines.append(
+            f"PROXY_IP=$(getent ahosts {proxy_alias} 2>/dev/null "
+            "| awk '{print $1}' | sort -u | head -n1)"
+        )
+        lines.append('if [ -n "$PROXY_IP" ]; then')
+        for host in sorted(dnat_hosts):
+            lines.append(
+                f"  for ip in $(getent ahosts {host} 2>/dev/null "
+                "| awk '{print $1}' | sort -u); do"
+            )
+            lines.append(
+                '    iptables -t nat -A OUTPUT -d "$ip" -p tcp --dport 443 '
+                f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"'
+            )
+            lines.append("  done")
+        lines.append("fi")
+
     lines.append("")
     lines.append("# Drop everything else")
     lines.append("iptables -P OUTPUT DROP")
@@ -260,11 +312,19 @@ async def apply_network_lockdown(
     networking: LimitedNetworking,
     *,
     extra_host_ports: Sequence[tuple[str, int]] = (),
+    dnat_hosts: Sequence[str] = (),
+    dnat_target: tuple[str, int] | None = None,
 ) -> None:
     """Apply + verify iptables egress rules via an ephemeral operator-image sidecar.
 
     Called after package installation so ``pip install`` etc. can reach
     registries before the lockdown takes effect.
+
+    ``dnat_hosts`` + ``dnat_target`` are threaded into
+    :func:`build_iptables_script` to DNAT credential-host :443 egress through
+    the secret-egress proxy (#878). The read-back verify reads the **filter**
+    table (``iptables -S OUTPUT``) only, so the added nat-table OUTPUT rules
+    don't affect it.
 
     **Off the tenant-writable filesystem (§5.8).** Under durable persistence,
     running the lockdown *inside* the sandbox (its own ``iptables``/``getent``)
@@ -288,7 +348,12 @@ async def apply_network_lockdown(
     if networking.allow_package_managers:
         allowed |= PACKAGE_REGISTRY_HOSTS
 
-    iptables_script = build_iptables_script(allowed, extra_host_ports=extra_host_ports)
+    iptables_script = build_iptables_script(
+        allowed,
+        extra_host_ports=extra_host_ports,
+        dnat_hosts=dnat_hosts,
+        dnat_target=dnat_target,
+    )
     # Point the sidecar at the netns's embedded resolver before getent runs.
     apply_script = (
         f"printf 'nameserver {_EMBEDDED_DNS_ADDRESS}\\n' > /etc/resolv.conf 2>/dev/null || true\n"
@@ -352,4 +417,5 @@ async def apply_network_lockdown(
         session_id=handle.session_id,
         allowed_host_count=len(allowed),
         extra_host_port_count=len(extra_host_ports),
+        dnat_host_count=len(dnat_hosts),
     )
