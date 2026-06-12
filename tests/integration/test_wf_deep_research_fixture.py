@@ -145,8 +145,10 @@ async def test_deep_research_fixture_survives_replay_and_completes(
     await run_workflow_step(run_id)  # Phase 1: two scouts + one catchable missing scout
     events_after_spawn = await _events(pool, run_id)
     assert [
-        e.payload for e in events_after_spawn if e.type == "annotation" and e.call_key == "phase"
-    ] == [{"message": "Phase 1: sweep"}]
+        e.payload["text"]
+        for e in events_after_spawn
+        if e.type == "annotation" and e.payload["kind"] == "phase"
+    ] == ["Phase 1: sweep"]
     assert len([e for e in events_after_spawn if e.type == "call_started"]) == 2
     assert len([e for e in events_after_spawn if e.type == "frontier_deferred"]) == 0
     assert (
@@ -187,8 +189,8 @@ async def test_deep_research_fixture_survives_replay_and_completes(
                 e
                 for e in replay_events
                 if e.type == "annotation"
-                and e.call_key == "log"
-                and "scout failed (expected)" in e.payload["message"]
+                and e.payload["kind"] == "log"
+                and "scout failed (expected)" in e.payload["text"]
             ]
         )
         == 1
@@ -208,7 +210,7 @@ async def test_deep_research_fixture_survives_replay_and_completes(
             "findings": [
                 {
                     "claim": "AIOS has a durable workflow runtime.",
-                    "source_url": "https://www.example.com/a?a=1&b=2/",
+                    "source_url": "https://www.example.com/a/?a=1&b=2",
                     "source_title": "Duplicate AIOS A",
                     "confidence": 0.7,
                 },
@@ -225,9 +227,9 @@ async def test_deep_research_fixture_survives_replay_and_completes(
     await run_workflow_step(run_id)  # Phase 2 reader pipeline spawns two readers
     phase2_events = await _events(pool, run_id)
     assert [
-        e.payload["message"]
+        e.payload["text"]
         for e in phase2_events
-        if e.type == "annotation" and e.call_key == "phase"
+        if e.type == "annotation" and e.payload["kind"] == "phase"
     ] == [
         "Phase 1: sweep",
         "Phase 2: deep read",
@@ -296,9 +298,9 @@ async def test_deep_research_fixture_survives_replay_and_completes(
 
     final_events = await _events(pool, run_id)
     assert [
-        e.payload["message"]
+        e.payload["text"]
         for e in final_events
-        if e.type == "annotation" and e.call_key == "phase"
+        if e.type == "annotation" and e.payload["kind"] == "phase"
     ] == [
         "Phase 1: sweep",
         "Phase 2: deep read",
