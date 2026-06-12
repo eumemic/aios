@@ -466,6 +466,31 @@ class TestApplyNetworkLockdown:
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
         assert "getent ahosts api.secret.com" in script
 
+    @pytest.mark.asyncio
+    async def test_runtime_threaded_to_both_sidecar_calls(self) -> None:
+        """The sandbox's container runtime (#1014) reaches BOTH sidecar
+        invocations (apply and read-back verify) so the lockdown runs under
+        the same runtime as the sandbox it locks down."""
+        backend = FakeBackend()
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
+
+        await apply_network_lockdown(backend, handle, networking, runtime="runsc")
+
+        runtimes = [c[1]["runtime"] for c in backend.calls if c[0] == "run_netns_sidecar"]
+        assert runtimes == ["runsc", "runsc"]
+
+    @pytest.mark.asyncio
+    async def test_runtime_defaults_to_none(self) -> None:
+        backend = FakeBackend()
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
+
+        await apply_network_lockdown(backend, handle, networking)
+
+        runtimes = [c[1]["runtime"] for c in backend.calls if c[0] == "run_netns_sidecar"]
+        assert runtimes == [None, None]
+
 
 # ── lockdown fails closed (security gate, not best-effort) ─────────────────────
 

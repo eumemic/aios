@@ -72,7 +72,7 @@ async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) 
     assert _runtime_values(calls[0]) == ["runsc"]
 
 
-async def test_netns_sidecar_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_netns_sidecar_emits_runtime_when_passed(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
     async def fake_run(argv: list[str], *, timeout_s: float) -> tuple[int, bytes, bytes, bool]:
@@ -80,11 +80,7 @@ async def test_netns_sidecar_emits_configured_runtime(monkeypatch: pytest.Monkey
         calls.append(list(argv))
         return 0, b"", b"", False
 
-    class Settings:
-        sandbox_runtime = "runsc"
-
     monkeypatch.setattr(docker_backend, "run_subprocess_with_timeout", fake_run)
-    monkeypatch.setattr(docker_backend, "get_settings", lambda: Settings())
 
     await DockerBackend().run_netns_sidecar(
         "sandbox123",
@@ -92,16 +88,16 @@ async def test_netns_sidecar_emits_configured_runtime(monkeypatch: pytest.Monkey
         script="true",
         timeout_seconds=5,
         max_output_bytes=1024,
+        runtime="runsc",
     )
 
     assert _runtime_values(calls[0]) == ["runsc"]
-    assert calls[0][calls[0].index("--runtime") : calls[0].index("--runtime") + 2] == [
-        "--runtime",
-        "runsc",
-    ]
+    # The flag lands before the image (i.e. on the docker run options, not
+    # inside the in-container command).
+    assert calls[0].index("--runtime") < calls[0].index("aios-sandbox:test")
 
 
-async def test_netns_sidecar_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_netns_sidecar_omits_runtime_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
     async def fake_run(argv: list[str], *, timeout_s: float) -> tuple[int, bytes, bytes, bool]:
@@ -109,11 +105,7 @@ async def test_netns_sidecar_omits_runtime_by_default(monkeypatch: pytest.Monkey
         calls.append(list(argv))
         return 0, b"", b"", False
 
-    class Settings:
-        sandbox_runtime = None
-
     monkeypatch.setattr(docker_backend, "run_subprocess_with_timeout", fake_run)
-    monkeypatch.setattr(docker_backend, "get_settings", lambda: Settings())
 
     await DockerBackend().run_netns_sidecar(
         "sandbox123",

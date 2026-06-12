@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 
-from aios.config import get_settings
 from aios.logging import get_logger
 from aios.sandbox._subprocess import (
     run_docker_cli,
@@ -705,6 +704,7 @@ class DockerBackend:
         script: str,
         timeout_seconds: int,
         max_output_bytes: int,
+        runtime: str | None = None,
     ) -> CommandResult:
         """Apply/verify the network lockdown from an ephemeral operator-image sidecar.
 
@@ -713,7 +713,9 @@ class DockerBackend:
         ``--rm`` removes it on exit (the rules persist in the netns, held by
         the sandbox). No restrictive seccomp is applied — this is an
         operator-trusted, short-lived container, and iptables needs the
-        syscalls the default profile permits.
+        syscalls the default profile permits. ``runtime`` (#1014) selects the
+        container runtime (e.g. ``runsc``) — passed by the caller, pinned to
+        the target sandbox's spec; the backend never reads ambient config.
         """
         argv = [
             "docker",
@@ -724,7 +726,6 @@ class DockerBackend:
             "--cap-add",
             "NET_ADMIN",
         ]
-        runtime = get_settings().sandbox_runtime
         if runtime:
             argv.extend(["--runtime", runtime])
         argv.extend(

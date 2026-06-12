@@ -235,6 +235,7 @@ class FakeBackend:
         script: str,
         timeout_seconds: int,
         max_output_bytes: int,
+        runtime: str | None = None,
     ) -> CommandResult:
         self.calls.append(
             (
@@ -244,6 +245,7 @@ class FakeBackend:
                     "image": image,
                     "script": script,
                     "timeout_seconds": timeout_seconds,
+                    "runtime": runtime,
                 },
             )
         )
