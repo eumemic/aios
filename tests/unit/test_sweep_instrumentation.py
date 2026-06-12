@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aios.harness.window import WindowedEvents
+from aios.services.sessions import AssistantAppendResult
 
 
 def _span_events(append_event: AsyncMock) -> list[dict[str, object]]:
@@ -214,7 +215,7 @@ class TestEntrySweepSpan:
             ) as append_event,
             patch(
                 "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
-                AsyncMock(return_value=(False, None)),
+                AsyncMock(return_value=AssistantAppendResult(False, None, None)),
             ),
             patch(
                 "aios.harness.loop.call_litellm",

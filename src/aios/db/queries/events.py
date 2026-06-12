@@ -11,6 +11,7 @@ import json
 import math
 import time
 from datetime import UTC, datetime
+from types import EllipsisType
 from typing import Any
 
 import asyncpg
@@ -264,23 +265,63 @@ def _derive_is_error(kind: str, data: dict[str, Any]) -> bool | None:
     return bool(flag)
 
 
-async def _derive_event_channel(
+async def _lookup_tool_parent_channel(
     conn: asyncpg.Connection[Any],
     session_id: str,
+    tool_call_id: Any,
+    *,
+    account_id: str,
+) -> str | None:
+    """Look up the ``focal_channel_at_arrival`` of the assistant event that
+    requested ``tool_call_id`` — the channel a tool-role result belongs to.
+
+    Matches ``tool_call_id`` against prior assistant rows'
+    ``data->'tool_calls'``. Returns NULL if no parent is found (shouldn't
+    happen in practice — tool results only arrive for assistant-requested
+    tool calls — but the recap filter tolerates NULL). A non-str or empty
+    ``tool_call_id`` also yields NULL.
+
+    Pulled out of the old ``_derive_event_channel`` so ``append_event`` can
+    run it BEFORE the row lock (issue #862), keeping the transaction free of
+    this JSONB ``@>`` scan.
+    """
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return None
+    # Predicates match ``events_assistant_tool_calls_idx`` (partial
+    # index on (session_id, seq) for role=assistant rows that have
+    # tool_calls — migration 0011) so the planner can walk it in
+    # reverse-seq order and stop at the first matching parent.
+    parent_focal: str | None = await conn.fetchval(
+        "SELECT focal_channel_at_arrival FROM events "
+        "WHERE session_id = $1 "
+        "  AND account_id = $3 "
+        "  AND kind = 'message' "
+        "  AND data->>'role' = 'assistant' "
+        "  AND data ? 'tool_calls' "
+        "  AND data->'tool_calls' @> jsonb_build_array("
+        "    jsonb_build_object('id', $2::text)) "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+        tool_call_id,
+        account_id,
+    )
+    return parent_focal
+
+
+def _resolve_event_channel(
     kind: str,
     data: dict[str, Any],
     orig_channel: str | None,
     focal_at_arrival: str | None,
+    tool_parent_channel: str | None,
 ) -> str | None:
-    """Compute the derived ``channel`` for a new event, pre-insert.
+    """Pure role dispatch for the derived ``channel`` column — no I/O.
 
     User events → ``orig_channel``.
     Assistant events → ``focal_at_arrival`` (the live focal at stamp time).
-    Tool events → the parent assistant's ``focal_channel_at_arrival``,
-    looked up by matching ``tool_call_id`` against prior assistant rows'
-    ``data->'tool_calls'``. Returns NULL if no parent is found (shouldn't
-    happen in practice — tool results only arrive for assistant-requested
-    tool calls — but the recap filter tolerates NULL).
+    Tool events → ``tool_parent_channel`` (the parent assistant's
+    ``focal_channel_at_arrival``, resolved by the caller via
+    :func:`_lookup_tool_parent_channel` or supplied by the live dispatch path).
 
     Non-message events and message events with no identifiable role
     return NULL.
@@ -293,27 +334,45 @@ async def _derive_event_channel(
     if role == "assistant":
         return focal_at_arrival
     if role == "tool":
-        tool_call_id = data.get("tool_call_id")
-        if not isinstance(tool_call_id, str) or not tool_call_id:
-            return None
-        # Predicates match ``events_assistant_tool_calls_idx`` (partial
-        # index on (session_id, seq) for role=assistant rows that have
-        # tool_calls — migration 0011) so the planner can walk it in
-        # reverse-seq order and stop at the first matching parent.
-        parent_focal: str | None = await conn.fetchval(
-            "SELECT focal_channel_at_arrival FROM events "
-            "WHERE session_id = $1 "
-            "  AND kind = 'message' "
-            "  AND data->>'role' = 'assistant' "
-            "  AND data ? 'tool_calls' "
-            "  AND data->'tool_calls' @> jsonb_build_array("
-            "    jsonb_build_object('id', $2::text)) "
-            "ORDER BY seq DESC LIMIT 1",
-            session_id,
-            tool_call_id,
-        )
-        return parent_focal
+        return tool_parent_channel
     return None
+
+
+def _event_token_delta(
+    kind: str,
+    data: dict[str, Any],
+    orig_channel: str | None,
+    focal_at_arrival: str | None,
+) -> int:
+    """Approximate per-event token contribution, computed pre-transaction.
+
+    Mirrors the as-rendered form the windowing budget expects so the
+    ``cumulative_tokens`` column stays honest for non-focal notification
+    markers (which occupy far fewer tokens than their full-content
+    counterparts):
+
+    * non-message → 0 (only message events carry ``cumulative_tokens``);
+    * user message → ``render_user_event(...)`` paired with an assistant
+      separator (pre-paying for ``merge_adjacent_user_messages``), counted
+      together;
+    * any other message → ``approx_tokens([data])``.
+
+    ``render_user_event``/``approx_tokens`` are imported lazily to preserve
+    the litellm-bootstrap deferral of the original in-lock code.
+    """
+    if kind != "message":
+        return 0
+    from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, render_user_event
+    from aios.harness.tokens import approx_tokens
+
+    if data.get("role") == "user":
+        # ``created_at`` isn't assigned until the INSERT (DB DEFAULT now()),
+        # so render with a now() stand-in in the default UTC zone — same
+        # bounded drift the in-lock code accepted (see ``append_event``).
+        rendered = render_user_event(data, orig_channel, focal_at_arrival, datetime.now(UTC))
+        separator = {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}
+        return approx_tokens([rendered, separator])
+    return approx_tokens([data])
 
 
 async def find_tool_result_event(
@@ -395,7 +454,7 @@ async def lookup_tool_name_by_call_id(
     Used by the custom tool-result handler to stamp a ``name`` field on
     the tool-role event it appends, so ``_derive_tool_name`` populates
     the ``tool_name`` column (issue #133, migration 0022).  Mirrors the
-    parent-assistant lookup in ``_derive_event_channel`` — same ``@>``
+    parent-assistant lookup in ``_lookup_tool_parent_channel`` — same ``@>``
     predicate, same partial index (``events_assistant_tool_calls_idx``).
     """
     raw = await conn.fetchval(
@@ -535,18 +594,24 @@ async def append_event(
     kind: EventKind,
     data: dict[str, Any],
     orig_channel: str | None = None,
+    tool_parent_channel: str | None | EllipsisType = ...,
 ) -> Event:
     """Append an event to ``session_id`` with gapless seq allocation.
 
-    Wraps the increment + insert in a single transaction with a row lock on
-    the parent session, so concurrent appenders (the API server adding a
+    Wraps the seq increment + insert in a single transaction with a row lock
+    on the parent session, so concurrent appenders (the API server adding a
     user message while the harness is mid-turn) serialize correctly. Issues
     ``pg_notify`` after the insert so SSE subscribers receive the new event.
 
     For message events, computes and stores ``cumulative_tokens`` — the
     running total of approximate token counts through this event.  The
     previous cumulative value is fetched inside the same transaction (under
-    the session row lock), so there is no race with concurrent appenders.
+    the session row lock), so the running sum has no race with concurrent
+    appenders.  The per-event token DELTA, however, is computed BEFORE the
+    lock (issue #862): the LiteLLM tokenizer pass — the slowest part of an
+    append — no longer serializes concurrent appenders behind itself.  Only
+    the cheap ``_latest_cumulative_tokens`` fetch and the INSERT run under
+    the lock.
 
     Focal-channel stamping (issue #29 redesign): the session's current
     ``focal_channel`` is read from the same UPDATE that allocates the seq
@@ -556,18 +621,25 @@ async def append_event(
     lets the context builder render each event deterministically at arrival
     time without ever needing to re-project past events.
 
-    Derived-channel stamping (issue #52): in the same transaction, the
-    new event's ``channel`` column is computed as — for user events,
-    ``orig_channel``; for assistant events, ``focal_at_arrival``; for
-    tool events, the parent assistant's ``focal_channel_at_arrival``
-    (looked up by matching the tool_call_id against prior assistant
-    rows' ``data->'tool_calls'``).  This answers "which channel does
-    this event belong to?" once and for all; downstream filters become
-    a single column read.
-    """
-    from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, render_user_event
-    from aios.harness.tokens import approx_tokens
+    Derived-channel stamping (issue #52): the new event's ``channel`` column
+    is — for user events, ``orig_channel``; for assistant events,
+    ``focal_at_arrival``; for tool events, the parent assistant's
+    ``focal_channel_at_arrival``.  The tool-parent lookup (a JSONB ``@>``
+    scan) is also hoisted out of the transaction (issue #862): the live
+    builtin/MCP dispatch path supplies the parent stamp via
+    ``tool_parent_channel`` directly (it has the assistant event in hand);
+    every other tool-role appender leaves the default ``...`` sentinel and
+    the parent is resolved by the pre-transaction
+    :func:`_lookup_tool_parent_channel`.
 
+    Drift note (issue #862): a USER message's ``cumulative_tokens`` is
+    counted against the focal read BEFORE the lock, so if a ``switch_channel``
+    commits between that pre-read and the lock, the token count MAY reflect
+    the pre-switch focal — an acceptable, bounded drift in the same class as
+    the documented vision/tz drifts below (absorbed by ``model_token_ratio``
+    calibration).  The STORED ``focal_channel_at_arrival`` is always the
+    locked RETURNING value, never the pre-read.
+    """
     new_id = make_id(EVENT)
     data_json = json.dumps(data)
 
@@ -610,6 +682,43 @@ async def append_event(
     # assistant ``reacting_to``, never by turn boundaries.
     reacting_to_seq = int(data.get("reacting_to") or 0) if is_assistant_message else 0
 
+    # ── Pre-transaction compute (issue #862) ──────────────────────────────
+    # The LiteLLM tokenizer pass and the tool-parent JSONB lookup are the two
+    # slowest operations in an append.  Running them BEFORE the row lock keeps
+    # concurrent appenders from serializing behind the slowest tokenization.
+    #
+    # ``sessions`` queries import lazily to avoid a module-load cycle —
+    # events.py and sessions.py are sibling modules both imported by
+    # ``db/queries/__init__.py``.
+    from aios.db.queries import sessions as _sessions_q
+
+    delta = 0
+    if kind == "message":
+        if is_user_message:
+            # USER token count needs the focal channel to render the as-sent
+            # form.  This pre-read is OUTSIDE any transaction; a concurrent
+            # ``switch_channel`` committing before the lock can make it stale
+            # (bounded drift — see the docstring).  The STORED stamp below is
+            # always the locked RETURNING value, unaffected by this read.
+            pre_focal = await _sessions_q.get_session_focal_channel(
+                conn, session_id, account_id=account_id
+            )
+            delta = _event_token_delta(kind, data, orig_channel, pre_focal)
+        else:
+            delta = _event_token_delta(kind, data, orig_channel, None)
+
+    # Resolve the tool-parent channel pre-lock too.  The live builtin/MCP
+    # dispatch path supplies it directly (default ``...`` → look it up).
+    resolved_tool_channel: str | None = None
+    if kind == "message" and data.get("role") == "tool":
+        resolved_tool_channel = (
+            await _lookup_tool_parent_channel(
+                conn, session_id, data.get("tool_call_id"), account_id=account_id
+            )
+            if tool_parent_channel is ...
+            else tool_parent_channel
+        )
+
     async with conn.transaction():
         seq_row = await conn.fetchrow(
             "UPDATE sessions "
@@ -649,51 +758,27 @@ async def append_event(
         seq = seq_row["last_event_seq"]
         focal_at_arrival: str | None = seq_row["focal_channel"]
 
-        # Compute cumulative_tokens for message events against the
-        # as-rendered form so the column stays honest for non-focal
-        # notification markers (which occupy far fewer tokens than their
-        # full-content counterparts).
+        # cumulative_tokens = prev running sum + the pre-computed per-event
+        # delta.  ``prev`` is the ONLY query between the seq-allocating UPDATE
+        # and the INSERT (issue #862): the tokenizer pass that produced
+        # ``delta`` already ran pre-lock, so concurrent appenders no longer
+        # serialize behind it.  The running sum stays race-free because
+        # ``prev`` is read under the session row lock.
+        #
+        # NOTE(vision/tz): the USER ``delta`` was rendered without
+        # ``model``/``session_id`` and in the default UTC zone, so inlined
+        # images undercount by ~55 LiteLLM tokens each and a non-UTC account's
+        # envelope is a few tokens narrower than build time.  Both drifts are
+        # bounded and absorbed by ``model_token_ratio`` calibration in
+        # :func:`read_windowed_events` (see PR #218); exact matching is
+        # impossible anyway, since a later tz/vision change re-renders history.
         cum_tokens: int | None = None
         if kind == "message":
             prev = await _latest_cumulative_tokens(conn, session_id)
-            if is_user_message:
-                # TODO(vision): plumb ``agent.model`` through here so
-                # :func:`render_user_event` matches build-time output for
-                # image-bearing events.  Today this call site renders without
-                # ``model``/``session_id``, so attachments degrade to text
-                # markers and the per-event ``cumulative_tokens`` undercounts
-                # inlined images by ~55 LiteLLM tokens each (text marker ~30
-                # vs. ``image_url`` part ~85).  The undercount is bounded by
-                # ``model_token_ratio`` calibration in
-                # :func:`read_windowed_events`; see PR #218 for the
-                # follow-up plan to make append-time vision-aware.
-                #
-                # ``created_at`` isn't assigned until the INSERT below (DB
-                # DEFAULT now()), so pass a now() stand-in and render in the
-                # default UTC zone. For a non-UTC account the build-time
-                # envelope is a few tokens wider (variable-length IANA name);
-                # like the vision undercount above, the drift is absorbed by
-                # ``model_token_ratio`` calibration — and exact matching is
-                # impossible anyway, since a later tz config change re-renders
-                # history regardless of what was counted here.
-                #
-                # The count also pre-pays for adjacent-user handling: at
-                # compose time ``merge_adjacent_user_messages`` concatenates
-                # consecutive user inbounds (the old code inserted a ``.``
-                # separator instead). Reserving an assistant-separator's worth
-                # of tokens per user event keeps the windowing budget a
-                # conservative upper bound — the merge delimiter is smaller, so
-                # the post-window payload never exceeds ``window_max``.
-                rendered = render_user_event(
-                    data, orig_channel, focal_at_arrival, datetime.now(UTC)
-                )
-                separator = {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}
-                cum_tokens = (prev or 0) + approx_tokens([rendered, separator])
-            else:
-                cum_tokens = (prev or 0) + approx_tokens([data])
+            cum_tokens = (prev or 0) + delta
 
-        channel = await _derive_event_channel(
-            conn, session_id, kind, data, orig_channel, focal_at_arrival
+        channel = _resolve_event_channel(
+            kind, data, orig_channel, focal_at_arrival, resolved_tool_channel
         )
         tool_name = _derive_tool_name(kind, data)
         is_error = _derive_is_error(kind, data)
@@ -1281,7 +1366,7 @@ async def list_session_channels(
     """Distinct channel addresses the session has interacted with, sorted.
 
     Derived from the event log's ``channel`` column (stamped at append
-    time per :func:`_derive_event_channel`).
+    time per :func:`_resolve_event_channel`).
     """
     rows = await conn.fetch(
         """

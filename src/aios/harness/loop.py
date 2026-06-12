@@ -604,13 +604,19 @@ async def _run_session_step_body(
     # caller run) are deferred by run_session_step AFTER step_end via _StepResult,
     # so their wake_deferred spans land in the next step's window (see the §wakes
     # block in run_session_step).
-    nudged, autoerror_caller_run_id = await sessions_service.append_assistant_and_guard_quiescence(
+    guard_result = await sessions_service.append_assistant_and_guard_quiescence(
         pool,
         session_id,
         assistant_msg,
         account_id=account_id,
         parent_run_id=session.parent_run_id,
     )
+    nudged = guard_result.nudged
+    autoerror_caller_run_id = guard_result.autoerror_caller_run_id
+    # The appended assistant event's locked focal stamp — threaded into the
+    # live tool dispatch so ``append_event`` skips the in-lock tool-parent
+    # lookup for the results these calls produce (issue #862).
+    parent_focal = guard_result.assistant_focal_at_arrival
 
     # Partition tool calls into dispatch buckets. Immediate builtin/MCP
     # launch now; ``needs_confirm`` and ``custom`` sit unresolved in the
@@ -640,7 +646,13 @@ async def _run_session_step_body(
                 unknown_mcp.append(tc)
 
         if immediate:
-            launch_tool_calls(pool, session_id, immediate, account_id=account_id)
+            launch_tool_calls(
+                pool,
+                session_id,
+                immediate,
+                account_id=account_id,
+                parent_focal_at_arrival=parent_focal,
+            )
             log.info(
                 "step.tools_launched",
                 session_id=session_id,
@@ -662,6 +674,7 @@ async def _run_session_step_body(
                 mcp_server_map,
                 focal_channel=session.focal_channel,
                 account_id=account_id,
+                parent_focal_at_arrival=parent_focal,
             )
             log.info(
                 "step.mcp_tools_launched",

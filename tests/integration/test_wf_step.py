@@ -1326,7 +1326,7 @@ async def test_idle_with_open_request_is_nudged(
     _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:n#0")
 
     assistant = await _idle_assistant_turn(pool, cid)
-    nudged, caller = await sessions_service.append_assistant_and_guard_quiescence(
+    nudged, caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
         pool, cid, assistant, account_id="acc_wf", parent_run_id=_run_id
     )
     assert nudged and caller is None
@@ -1358,7 +1358,7 @@ async def test_quiescence_guard_is_noop_for_non_child(
         metadata={},
     )
     assistant = await _idle_assistant_turn(pool, fg.id)
-    nudged, caller = await sessions_service.append_assistant_and_guard_quiescence(
+    nudged, caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
         pool, fg.id, assistant, account_id="acc_wf", parent_run_id=None
     )
     assert not nudged and caller is None
@@ -1384,7 +1384,7 @@ async def test_open_request_is_auto_errored_after_nudge_budget(
     run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:nr#0")
 
     for _ in range(sessions_service.REQUEST_NUDGE_BUDGET):
-        nudged, _caller = await sessions_service.append_assistant_and_guard_quiescence(
+        nudged, _caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
             pool,
             cid,
             await _idle_assistant_turn(pool, cid),
@@ -1394,7 +1394,7 @@ async def test_open_request_is_auto_errored_after_nudge_budget(
         assert nudged  # still under budget — keep nudging
 
     # Budget spent: the next pure-text turn auto-errors the request instead.
-    nudged, caller = await sessions_service.append_assistant_and_guard_quiescence(
+    nudged, caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
         pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
     )
     assert not nudged
@@ -1570,7 +1570,7 @@ async def test_child_reclaimed_on_quiescence_and_parent_still_harvests(
             result={"answer": 42},
             error=None,
         )
-    nudged, caller = await sessions_service.append_assistant_and_guard_quiescence(
+    nudged, caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
         pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
     )
     assert not nudged and caller is None

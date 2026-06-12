@@ -182,3 +182,134 @@ class TestToolLifecycleEviction:
         evicted, append_result = await self._drive(monkeypatch, ValueError("oops"))
         assert evicted == ["ses_1"]
         assert append_result.await_args.kwargs["error"] == "ValueError: oops"
+
+
+class TestParentChannelThreading:
+    """The hot builtin dispatch path threads the parent assistant's focal
+    stamp (``parent_focal_at_arrival``) into the tool-result append, so
+    ``append_event`` never re-derives the channel under the row lock (#862).
+    The error/cancel path omits it (default ``...`` sentinel → pre-tx lookup).
+    """
+
+    @staticmethod
+    def _stub_lifecycle_deps(monkeypatch: Any) -> None:
+        monkeypatch.setattr(
+            sessions_service,
+            "append_event",
+            AsyncMock(return_value=MagicMock(id="span_1")),
+        )
+        monkeypatch.setattr(tool_dispatch, "_trigger_sweep", AsyncMock())
+
+    async def test_execute_tool_async_threads_parent_channel(self, monkeypatch: Any) -> None:
+        from aios.tools.registry import ToolResult
+
+        self._stub_lifecycle_deps(monkeypatch)
+        monkeypatch.setattr(
+            tool_dispatch,
+            "invoke_builtin",
+            AsyncMock(return_value=ToolResult(content="ok")),
+        )
+        append_event_ev: Any = AsyncMock()
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result_event", append_event_ev)
+
+        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+        await tool_dispatch._execute_tool_async(
+            MagicMock(),
+            "ses_1",
+            call,
+            account_id="acc_1",
+            parent_focal_at_arrival="tg:42",
+        )
+        assert append_event_ev.await_count == 1
+        assert append_event_ev.await_args.kwargs["tool_parent_channel"] == "tg:42"
+
+    async def test_execute_tool_async_threads_none_stamp(self, monkeypatch: Any) -> None:
+        from aios.tools.registry import ToolResult
+
+        self._stub_lifecycle_deps(monkeypatch)
+        monkeypatch.setattr(
+            tool_dispatch,
+            "invoke_builtin",
+            AsyncMock(return_value=ToolResult(content="ok")),
+        )
+        append_event_ev: Any = AsyncMock()
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result_event", append_event_ev)
+
+        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+        # A non-connector parent stamps focal None — the hot path must still
+        # PASS it (None), not fall through to the lookup default.
+        await tool_dispatch._execute_tool_async(
+            MagicMock(),
+            "ses_1",
+            call,
+            account_id="acc_1",
+            parent_focal_at_arrival=None,
+        )
+        assert append_event_ev.await_args.kwargs["tool_parent_channel"] is None
+
+    async def test_error_path_omits_parent_channel(self, monkeypatch: Any) -> None:
+        """A handler raising routes through ``_append_tool_result`` (the
+        error/cancel append), which does NOT pass ``tool_parent_channel`` —
+        so ``_append_tool_result_event`` keeps the default ``...`` and
+        ``append_event`` falls back to the pre-tx parent lookup."""
+        self._stub_lifecycle_deps(monkeypatch)
+        monkeypatch.setattr(
+            tool_dispatch,
+            "invoke_builtin",
+            AsyncMock(side_effect=ValueError("boom")),
+        )
+        append_event_ev: Any = AsyncMock()
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result_event", append_event_ev)
+        monkeypatch.setattr(tool_dispatch, "_evict_session_container", lambda _s: None)
+
+        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+        await tool_dispatch._execute_tool_async(
+            MagicMock(),
+            "ses_1",
+            call,
+            account_id="acc_1",
+            parent_focal_at_arrival="tg:42",
+        )
+        assert append_event_ev.await_count == 1
+        assert "tool_parent_channel" not in append_event_ev.await_args.kwargs
+
+    async def test_append_tool_result_event_forwards_to_queries(self, monkeypatch: Any) -> None:
+        """``_append_tool_result_event`` forwards its ``tool_parent_channel``
+        kwarg into ``queries.append_event``; the default ``...`` is forwarded
+        verbatim (→ pre-tx lookup)."""
+        from aios.db import queries
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_append_event(conn: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(queries, "append_event", _fake_append_event)
+        monkeypatch.setattr(
+            queries,
+            "find_tool_result_event",
+            AsyncMock(return_value=None),
+        )
+
+        conn = MagicMock()
+        conn.execute = AsyncMock()
+        tx = MagicMock()
+        tx.__aenter__ = AsyncMock(return_value=None)
+        tx.__aexit__ = AsyncMock(return_value=None)
+        conn.transaction = MagicMock(return_value=tx)
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=conn)
+        acquire.__aexit__ = AsyncMock(return_value=None)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=acquire)
+
+        await tool_dispatch._append_tool_result_event(
+            pool,
+            "ses_1",
+            "tc_1",
+            {"role": "tool", "tool_call_id": "tc_1", "content": "ok"},
+            account_id="acc_1",
+            tool_parent_channel="tg:42",
+        )
+        assert captured["tool_parent_channel"] == "tg:42"
