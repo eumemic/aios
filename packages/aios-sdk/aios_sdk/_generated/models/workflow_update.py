@@ -37,7 +37,26 @@ class WorkflowUpdate:
         Attributes:
             version (int):
             name (None | str | Unset):
-            script (None | str | Unset):
+            script (None | str | Unset): Workflow script contract:
+                - Entry point: define `async def main(input)`. A run's output is the value returned by main.
+                - Injected capability API (available without imports): `agent(agent_id, input, output_schema=None)`; `tool(name,
+                input)` (tool errors return as values, they do not raise); `gate()`; `parallel(thunks)` where thunks are zero-
+                arg callables such as `lambda: agent(...)` (a failed agent branch yields `None` at the barrier instead of
+                raising; fan-out width is capped by `MAX_PARALLEL_FANOUT`, currently 1000); `pipeline(items, *stages)`;
+                `log(msg)`.
+                - Environment: deterministic, credential-free, isolated child process. Imports are restricted to a curated
+                stdlib allowlist. No network or filesystem side channels are available beyond the capability API.
+
+                Minimal runnable example:
+                ```python
+                async def main(input):
+                    result = await agent(
+                        "agent_id_here",
+                        {"task": input},
+                        output_schema=None,
+                    )
+                    return result
+                ```
             input_schema (None | Unset | WorkflowUpdateInputSchemaType0):
             output_schema (None | Unset | WorkflowUpdateOutputSchemaType0):
             description (None | str | Unset):

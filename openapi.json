@@ -16474,7 +16474,8 @@
           },
           "script": {
             "type": "string",
-            "title": "Script"
+            "title": "Script",
+            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by main.\n- Injected capability API (available without imports): `agent(agent_id, input, output_schema=None)`; `tool(name, input)` (tool errors return as values, they do not raise); `gate()`; `parallel(thunks)` where thunks are zero-arg callables such as `lambda: agent(...)` (a failed agent branch yields `None` at the barrier instead of raising; fan-out width is capped by `MAX_PARALLEL_FANOUT`, currently 1000); `pipeline(items, *stages)`; `log(msg)`.\n- Environment: deterministic, credential-free, isolated child process. Imports are restricted to a curated stdlib allowlist. No network or filesystem side channels are available beyond the capability API.\n\nMinimal runnable example:\n```python\nasync def main(input):\n    result = await agent(\n        \"agent_id_here\",\n        {\"task\": input},\n        output_schema=None,\n    )\n    return result\n```\n"
           },
           "input_schema": {
             "anyOf": [
@@ -16570,7 +16571,8 @@
                 "type": "null"
               }
             ],
-            "title": "Script"
+            "title": "Script",
+            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by main.\n- Injected capability API (available without imports): `agent(agent_id, input, output_schema=None)`; `tool(name, input)` (tool errors return as values, they do not raise); `gate()`; `parallel(thunks)` where thunks are zero-arg callables such as `lambda: agent(...)` (a failed agent branch yields `None` at the barrier instead of raising; fan-out width is capped by `MAX_PARALLEL_FANOUT`, currently 1000); `pipeline(items, *stages)`; `log(msg)`.\n- Environment: deterministic, credential-free, isolated child process. Imports are restricted to a curated stdlib allowlist. No network or filesystem side channels are available beyond the capability API.\n\nMinimal runnable example:\n```python\nasync def main(input):\n    result = await agent(\n        \"agent_id_here\",\n        {\"task\": input},\n        output_schema=None,\n    )\n    return result\n```\n"
           },
           "input_schema": {
             "anyOf": [
