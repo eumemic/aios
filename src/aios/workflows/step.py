@@ -213,7 +213,18 @@ async def _enrich_agent_result(
         account_id,
     )
     if row is None:
-        raise NotFoundError(f"session {child_id} not found", detail={"id": child_id})
+        return {
+            **payload,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cost_usd": 0.0,
+            },
+            "duration_ms": max(0, int((now - started_at).total_seconds() * 1000)),
+            "tool_calls": 0,
+        }
     tool_calls = await conn.fetchval(
         "SELECT count(*) FROM events WHERE session_id = $1 AND kind = 'message' AND data->>'role' = 'tool'",
         child_id,
