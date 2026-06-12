@@ -13,12 +13,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
+from aios.db.queries import events as events_mod
 from aios.db.queries import sessions as session_queries
 from aios.db.queries.events import _lookup_tool_parent_channel
 from tests.integration.conftest import seed_agent_env_session
@@ -145,7 +147,9 @@ async def test_passed_stamp_equals_lookup(
             conn, session_id, "signal:abc", account_id=account_id
         )
         parent_stamp = await _append_parent_assistant(conn, account_id, session_id, "tc_3")
-        looked_up = await _lookup_tool_parent_channel(conn, session_id, "tc_3")
+        looked_up = await _lookup_tool_parent_channel(
+            conn, session_id, "tc_3", account_id=account_id
+        )
         assert parent_stamp == looked_up == "signal:abc"
 
 
@@ -224,3 +228,35 @@ async def test_user_append_stamp_from_lock_despite_focal_switch(
         )
     # Stored stamp is the locked RETURNING value B, not the pre-read A.
     assert ev.focal_channel_at_arrival == "chan_B"
+
+
+async def test_non_message_tool_role_skips_parent_lookup(
+    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX 4 guard (#862): the pre-lock tool-channel resolution must gate on
+    ``kind == "message"`` before inspecting ``role``. A NON-message event that
+    happens to carry ``data["role"] == "tool"`` (e.g. a span) must NOT trigger
+    the parent-assistant JSONB lookup — that would be a spurious DB round-trip
+    and a behavior change from the old ``_derive_event_channel`` (which
+    early-returned for ``kind != "message"`` before ever reading ``role``).
+    """
+    pool, account_id, session_id = pool_and_session
+
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr(events_mod, "_lookup_tool_parent_channel", spy)
+
+    async with pool.acquire() as conn:
+        ev = await queries.append_event(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind="span",
+            data={"role": "tool", "tool_call_id": "tc_span"},
+            orig_channel=None,
+        )
+
+    # The lookup is never awaited for a non-message kind, and the derived
+    # channel is NULL (non-message events carry no channel).
+    spy.assert_not_awaited()
+    assert ev.channel is None

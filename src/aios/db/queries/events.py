@@ -269,6 +269,8 @@ async def _lookup_tool_parent_channel(
     conn: asyncpg.Connection[Any],
     session_id: str,
     tool_call_id: Any,
+    *,
+    account_id: str,
 ) -> str | None:
     """Look up the ``focal_channel_at_arrival`` of the assistant event that
     requested ``tool_call_id`` — the channel a tool-role result belongs to.
@@ -292,6 +294,7 @@ async def _lookup_tool_parent_channel(
     parent_focal: str | None = await conn.fetchval(
         "SELECT focal_channel_at_arrival FROM events "
         "WHERE session_id = $1 "
+        "  AND account_id = $3 "
         "  AND kind = 'message' "
         "  AND data->>'role' = 'assistant' "
         "  AND data ? 'tool_calls' "
@@ -300,6 +303,7 @@ async def _lookup_tool_parent_channel(
         "ORDER BY seq DESC LIMIT 1",
         session_id,
         tool_call_id,
+        account_id,
     )
     return parent_focal
 
@@ -706,9 +710,11 @@ async def append_event(
     # Resolve the tool-parent channel pre-lock too.  The live builtin/MCP
     # dispatch path supplies it directly (default ``...`` → look it up).
     resolved_tool_channel: str | None = None
-    if data.get("role") == "tool":
+    if kind == "message" and data.get("role") == "tool":
         resolved_tool_channel = (
-            await _lookup_tool_parent_channel(conn, session_id, data.get("tool_call_id"))
+            await _lookup_tool_parent_channel(
+                conn, session_id, data.get("tool_call_id"), account_id=account_id
+            )
             if tool_parent_channel is ...
             else tool_parent_channel
         )
