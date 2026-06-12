@@ -34,6 +34,15 @@ async def create_session_template(
         # image / env-vars / networking into spawned sessions — mirrors
         # create_session / create_run (issue #755).
         await queries.get_environment(conn, environment_id, account_id=account_id)
+        # Validate every referenced resource is account-owned before binding.
+        # agent_id/environment_id have existence-only FKs (no ownership);
+        # vault_ids/memory_store_ids are plain text[] with NO FK at all, so a
+        # foreign id would silently bind. Mirror the #755 env guard (issue #851).
+        await queries.get_agent(conn, agent_id, account_id=account_id)
+        for vault_id in vault_ids:
+            await queries.get_vault(conn, vault_id, account_id=account_id)
+        for store_id in memory_store_ids:
+            await queries.get_memory_store(conn, store_id, account_id=account_id)
         return await queries.insert_session_template(
             conn,
             name=name,

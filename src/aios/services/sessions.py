@@ -250,6 +250,11 @@ async def create_session(
         # it. A bare FK would accept another tenant's env id and leak its image /
         # env-vars / networking into this session — mirrors create_run (issue #755).
         await queries.get_environment(conn, environment_id, account_id=account_id)
+        # Validate the agent is account-owned before binding the session to it.
+        # The bare FK on agent_id checks existence, not ownership — a foreign
+        # agent id would silently bind another tenant's model/surface into the
+        # session. Mirrors the environment guard above (issue #755 / #851).
+        await queries.get_agent(conn, agent_id, account_id=account_id)
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,
