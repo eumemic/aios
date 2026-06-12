@@ -28,6 +28,7 @@ scratch container, never corrupting durable state (the #784/#795 dimension).
 from __future__ import annotations
 
 import asyncio
+import shlex
 from typing import Any
 
 import asyncpg
@@ -88,7 +89,7 @@ async def _run_sandbox_task(
     wake the run (always-signals)."""
     try:
         try:
-            result = await _execute(run, command=command, timeout_s=timeout_s)
+            result = await _execute(run, call_key=call_key, command=command, timeout_s=timeout_s)
         except Exception as exc:
             # Backstop — _execute maps the provision and exec phases to their own
             # error envelopes, but its pre-phase setup (require_sandbox_registry /
@@ -125,7 +126,9 @@ async def _run_sandbox_task(
         _INFLIGHT.pop((run.id, call_key), None)
 
 
-async def _execute(run: WfRun, *, command: str, timeout_s: float | None) -> dict[str, Any]:
+async def _execute(
+    run: WfRun, *, call_key: str, command: str, timeout_s: float | None
+) -> dict[str, Any]:
     """Provision (or reuse) the run's sandbox and run ``command``, returning the
     signal envelope: ``{"ok": bash_dict}`` on success, ``{"error": …}`` on infra
     failure.
@@ -142,6 +145,19 @@ async def _execute(run: WfRun, *, command: str, timeout_s: float | None) -> dict
     asyncpg errors that are NOT ``SandboxBackendError``. Letting those escape would
     skip the signal write and violate the always-signals invariant — combined with
     the stale-sandbox sweep horizon, an uncaught escape would park the run forever.
+
+    **Idempotency preamble (#988 amendment).** The run's ``id`` and the call's
+    deterministic ``call_key`` are exported into the command's environment as
+    ``$AIOS_RUN_ID`` / ``$AIOS_CALL_KEY`` so an author can pass ``$AIOS_CALL_KEY`` to
+    an external service as an idempotency key (Stripe-style), letting the service
+    dedupe an effect re-fired by a crash re-drive. The preamble is prepended ONLY to
+    the string handed to ``backend.exec`` here — the journaled ``call_started``
+    command stays the verbatim author command, so replay/``call_key`` derivation are
+    unaffected. ``shlex.quote`` keeps both values shell-safe (a ``call_key`` carries
+    ``/ . : #``); the ``\\n`` separator runs the export as its own line under
+    ``bash -c``, ahead of an author command that may itself start with a comment or
+    redirection. A re-drive carries the SAME ``run.id`` + ``call_key`` → a
+    byte-identical preamble → a stable ``$AIOS_CALL_KEY``; distinct calls differ.
     """
     settings = get_settings()
     registry = runtime.require_sandbox_registry()
@@ -156,10 +172,11 @@ async def _execute(run: WfRun, *, command: str, timeout_s: float | None) -> dict
     timeout_seconds = (
         int(timeout_s) if timeout_s is not None else settings.bash_default_timeout_seconds
     )
+    preamble = f"export AIOS_RUN_ID={shlex.quote(run.id)} AIOS_CALL_KEY={shlex.quote(call_key)}\n"
     try:
         result = await registry.exec(
             handle,
-            command,
+            preamble + command,
             timeout_seconds=timeout_seconds,
             max_output_bytes=settings.bash_max_output_bytes,
             cwd="/workspace",

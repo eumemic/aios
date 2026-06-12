@@ -7,6 +7,7 @@ timeout/output resolution, _INFLIGHT cleanup) is the surface under test.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -225,3 +226,32 @@ async def test_sandbox_task_default_timeout_and_max_output() -> None:
             _Pool(), _run(), call_key="k1", command="x", timeout_s=2.7
         )
     assert registry2.exec_calls[0]["timeout_seconds"] == 2
+
+
+async def test_sandbox_task_prepends_idempotency_preamble() -> None:
+    """The command handed to ``backend.exec`` is prefixed with a shlex-quoted
+    ``export AIOS_RUN_ID=… AIOS_CALL_KEY=…`` line, followed by the verbatim author
+    command (#988 amendment). The run.id / call_key are exposed so an author can pass
+    ``$AIOS_CALL_KEY`` to an external service as an idempotency key. The preamble is
+    applied ONLY to the execed string — the journaled command is the author's."""
+    registry = _FakeRegistry()
+    captured: dict[str, Any] = {}
+    # A call_key carrying the structural punctuation the deterministic keyer emits
+    # (``/ . : #``) — shlex.quote must keep it shell-safe.
+    call_key = "main/0.1/sha:deadbeef#2"
+    p1, p2, p3, p4 = _patches(registry, captured)
+    with p1, p2, p3, p4:
+        await run_sandbox._run_sandbox_task(
+            _Pool(),
+            _run(),
+            call_key=call_key,
+            command="curl -X POST https://api/charge",
+            timeout_s=None,
+        )
+    execed = registry.exec_calls[0]["command"]
+    expected_preamble = (
+        f"export AIOS_RUN_ID={shlex.quote('wfr_1')} AIOS_CALL_KEY={shlex.quote(call_key)}\n"
+    )
+    assert execed == expected_preamble + "curl -X POST https://api/charge"
+    # The original author command is unchanged inside the preamble-prefixed string.
+    assert execed.endswith("curl -X POST https://api/charge")

@@ -226,6 +226,21 @@ def sandbox(command: str, timeout_s: float | None = None) -> _Capability:
 
     The command runs in the worker against the run's own sandbox; the script
     subprocess only emits the request.
+
+    **Re-run tolerance (at-least-once).** The run sandbox is ephemeral scratch, and
+    a hard worker crash mid-command re-drives the call — so the command may run more
+    than once. Two halves of the author contract follow:
+
+    - *Filesystem:* write filesystem-side commands to be re-run-tolerant (e.g.
+      ``rm -rf <dir>; git clone …`` rather than a bare ``git clone`` that fails on a
+      half-populated dir). The scratch container absorbs a re-run with no durable
+      damage.
+    - *External effects:* an irreversible *external* effect (an HTTP POST, a payment)
+      WILL re-fire on a crash re-drive — two-generals, unavoidable. The call's
+      deterministic key is exposed in the command's environment as ``$AIOS_CALL_KEY``
+      (alongside ``$AIOS_RUN_ID``); pass ``$AIOS_CALL_KEY`` to the external service as
+      an idempotency key (Stripe-style) so it dedupes the re-fired effect. The key is
+      stable across re-drives of the same call and distinct across calls.
     """
     return _Capability("sandbox", {"command": command, "timeout_s": timeout_s})
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest import mock
@@ -3566,6 +3567,89 @@ async def test_sandbox_crash_path_at_least_once(
     exec_before = _backend_exec_count(backend)
     await run_workflow_step(run_id)  # terminal/no-op re-wake
     assert _backend_exec_count(backend) == exec_before
+
+
+def _execed_commands(backend: FakeBackend) -> list[str]:
+    """The ``command`` string handed to ``backend.exec`` for each exec call, in order."""
+    return [kw["command"] for verb, kw in backend.calls if verb == "exec"]
+
+
+async def test_sandbox_idempotency_token_stable_across_redrive(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """Token stability + distinctness (#988 amendment, test strategy (g)).
+
+    The command execed for a ``sandbox()`` call is prefixed with a shlex-quoted
+    ``export AIOS_RUN_ID=<run.id> AIOS_CALL_KEY=<call_key>`` line ahead of the
+    verbatim author command — so an author can pass ``$AIOS_CALL_KEY`` to an external
+    service as an idempotency key. A crash re-drive re-launches with the SAME run.id +
+    call_key, so the second exec carries a byte-identical ``AIOS_CALL_KEY``; two
+    distinct ``sandbox()`` calls carry distinct ``call_key``s, hence distinct tokens.
+    """
+    pool, backend = wf_sandbox_runtime
+    # Two distinct sandbox() calls in one script — distinct commands ⇒ distinct call_keys.
+    script = (
+        "async def main(input):\n"
+        "    a = await sandbox('echo one')\n"
+        "    b = await sandbox('echo two')\n"
+        "    return [a, b]\n"
+    )
+    block = asyncio.Event()  # never set — the first task blocks in exec until cancelled
+    entered = asyncio.Event()
+    first_command: str | None = None  # the command the crashed first exec received
+
+    async def _blocked(_handle: Any, command: str, **_k: Any) -> CommandResult:
+        nonlocal first_command
+        first_command = command
+        entered.set()
+        await block.wait()
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+    run_id = await _make_run(pool, script)
+    with mock.patch.object(backend, "exec", new=_blocked):
+        await run_workflow_step(run_id)  # park at the first sandbox frontier; launch task
+        await asyncio.wait_for(entered.wait(), timeout=5)  # task reached (and blocks in) exec
+        first_call_key = (await _call_starteds(pool, run_id))[0].call_key
+        # The execed command is the shlex-quoted preamble + the author command.
+        expected_preamble = (
+            f"export AIOS_RUN_ID={shlex.quote(run_id)} "
+            f"AIOS_CALL_KEY={shlex.quote(first_call_key)}\n"
+        )
+        assert first_command == expected_preamble + "echo one"
+        # Simulate a hard worker crash: cancel the in-flight task + drop the registry map.
+        for task in list(run_sandbox._INFLIGHT.values()):
+            task.cancel()
+        await asyncio.gather(*list(run_sandbox._INFLIGHT.values()), return_exceptions=True)
+        run_sandbox._INFLIGHT.clear()
+
+    # Re-drive: no signal + no live task → re-dispatch with the REAL FakeBackend.exec.
+    backend.next_result = CommandResult(
+        exit_code=0, stdout="", stderr="", timed_out=False, truncated=False
+    )
+    await run_workflow_step(run_id)
+    assert len(await _call_starteds(pool, run_id)) == 1  # no double-open
+    redriven = _execed_commands(backend)
+    assert len(redriven) == 1
+    # Token stability: the re-driven exec carries the IDENTICAL AIOS_CALL_KEY token.
+    assert redriven[0] == expected_preamble + "echo one"
+    assert first_command is not None and redriven[0] == first_command
+    await _drain_sandbox_tasks()
+
+    # Harvest the first call; the script advances to the SECOND sandbox() call.
+    await run_workflow_step(run_id)
+    await _drain_sandbox_tasks()
+    started = await _call_starteds(pool, run_id)
+    assert len(started) == 2  # the second sandbox() call opened
+    second_call_key = started[1].call_key
+    # Distinctness: distinct sandbox() calls ⇒ distinct call_keys ⇒ distinct tokens.
+    assert second_call_key != first_call_key
+    second_command = _execed_commands(backend)[1]
+    assert f"AIOS_CALL_KEY={shlex.quote(second_call_key)}" in second_command
+    assert shlex.quote(second_call_key) != shlex.quote(first_call_key)
+    # Run drives to completion.
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
 
 
 async def test_sandbox_provision_failure_one_error_result(
