@@ -86,8 +86,9 @@ def _render_script(
     supplementary_limit: int,
     failing_agent_id: str,
 ) -> str:
-    return dedent(
-        f'''
+    return (
+        dedent(
+            f"""
         import hashlib
         import json
         import urllib.parse
@@ -327,5 +328,7 @@ def _render_script(
                 "critic_verdict": verdict,
                 "stats": stats,
             }}
-        '''
-    ).strip() + "\n"
+        """
+        ).strip()
+        + "\n"
+    )

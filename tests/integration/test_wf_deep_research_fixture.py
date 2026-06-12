@@ -17,6 +17,7 @@ import pytest
 
 from aios.db import queries as db_queries
 from aios.db.queries import workflows as wf_queries
+from aios.models.workflows import WfRunEvent
 from aios.services import agents as agents_service
 from aios.tools import workflow_completion
 from aios.workflows.deep_research import build_deep_research_fixture_script
@@ -47,7 +48,7 @@ async def deep_research_agents(wf_runtime: asyncpg.Pool[Any]) -> dict[str, str]:
     return ids
 
 
-async def _events(pool: asyncpg.Pool[Any], run_id: str):
+async def _events(pool: asyncpg.Pool[Any], run_id: str) -> list[WfRunEvent]:
     async with pool.acquire() as conn:
         return await wf_queries.list_run_events(conn, run_id)
 
@@ -93,17 +94,24 @@ async def test_deep_research_fixture_survives_replay_and_completes(
 
     await run_workflow_step(run_id)  # Phase 1: two scouts + one catchable missing scout
     events_after_spawn = await _events(pool, run_id)
-    assert [e.payload for e in events_after_spawn if e.type == "annotation" and e.call_key == "phase"] == [
-        {"message": "Phase 1: sweep"}
-    ]
+    assert [
+        e.payload for e in events_after_spawn if e.type == "annotation" and e.call_key == "phase"
+    ] == [{"message": "Phase 1: sweep"}]
     assert len([e for e in events_after_spawn if e.type == "call_started"]) == 2
     assert len([e for e in events_after_spawn if e.type == "frontier_deferred"]) == 0
-    assert len([e for e in events_after_spawn if e.type == "call_result" and e.payload.get("is_error")]) == 1
+    assert (
+        len(
+            [e for e in events_after_spawn if e.type == "call_result" and e.payload.get("is_error")]
+        )
+        == 1
+    )
 
     # Simulated restart/replay before all Phase-1 children return: no duplicate starts
     # and the expected AgentError catch log is emitted exactly once.
     children = await _children_by_payload(pool, run_id)
-    first_scout = next(cid for content, cid in children.items() if '"angle": "direct-factual"' in content)
+    first_scout = next(
+        cid for content, cid in children.items() if '"angle": "direct-factual"' in content
+    )
     await _return_child(
         pool,
         first_scout,
@@ -123,19 +131,24 @@ async def test_deep_research_fixture_survives_replay_and_completes(
     await run_workflow_step(run_id)
     replay_events = await _events(pool, run_id)
     assert len([e for e in replay_events if e.type == "call_started"]) == 2
-    assert len(
-        [
-            e
-            for e in replay_events
-            if e.type == "annotation"
-            and e.call_key == "log"
-            and "scout failed (expected)" in e.payload["message"]
-        ]
-    ) == 1
+    assert (
+        len(
+            [
+                e
+                for e in replay_events
+                if e.type == "annotation"
+                and e.call_key == "log"
+                and "scout failed (expected)" in e.payload["message"]
+            ]
+        )
+        == 1
+    )
 
     children = await _children_by_payload(pool, run_id)
     second_scout = next(
-        cid for content, cid in children.items() if '"angle": "contrarian-counter-evidence"' in content
+        cid
+        for content, cid in children.items()
+        if '"angle": "contrarian-counter-evidence"' in content
     )
     await _return_child(
         pool,
@@ -161,7 +174,11 @@ async def test_deep_research_fixture_survives_replay_and_completes(
     )
     await run_workflow_step(run_id)  # Phase 2 reader pipeline spawns two readers
     phase2_events = await _events(pool, run_id)
-    assert [e.payload["message"] for e in phase2_events if e.type == "annotation" and e.call_key == "phase"] == [
+    assert [
+        e.payload["message"]
+        for e in phase2_events
+        if e.type == "annotation" and e.call_key == "phase"
+    ] == [
         "Phase 1: sweep",
         "Phase 2: deep read",
     ]
@@ -216,17 +233,32 @@ async def test_deep_research_fixture_survives_replay_and_completes(
         run = await wf_queries.get_run_for_step(conn, run_id)
     assert run is not None and run.status == "completed"
     assert run.output["report"].startswith("# Report")
-    assert run.output["citations"] == [{"n": 1, "url": "https://example.com/a?a=1&b=2", "title": "AIOS A"}]
+    assert run.output["citations"] == [
+        {"n": 1, "url": "https://example.com/a?a=1&b=2", "title": "AIOS A"}
+    ]
     assert run.output["critic_verdict"] == {"verdict": "complete", "gaps": []}
-    assert run.output["stats"] == {"scouts": 2, "sources": 2, "readers": 2, "supplementary_scouts": 0}
+    assert run.output["stats"] == {
+        "scouts": 2,
+        "sources": 2,
+        "readers": 2,
+        "supplementary_scouts": 0,
+    }
 
     final_events = await _events(pool, run_id)
-    assert [e.payload["message"] for e in final_events if e.type == "annotation" and e.call_key == "phase"] == [
+    assert [
+        e.payload["message"]
+        for e in final_events
+        if e.type == "annotation" and e.call_key == "phase"
+    ] == [
         "Phase 1: sweep",
         "Phase 2: deep read",
         "Phase 3: synthesis",
     ]
     call_keys = [e.call_key for e in final_events if e.type == "call_started"]
     assert len(call_keys) == len(set(call_keys)) == 6
-    result_keys = [e.call_key for e in final_events if e.type == "call_result" and not e.payload.get("is_error")]
+    result_keys = [
+        e.call_key
+        for e in final_events
+        if e.type == "call_result" and not e.payload.get("is_error")
+    ]
     assert len(result_keys) == len(set(result_keys)) == 6
