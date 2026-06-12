@@ -12,7 +12,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import EllipsisType
-from typing import Any
+from typing import Any, NamedTuple
 
 import asyncpg
 
@@ -863,6 +863,20 @@ async def fail_open_child_requests_conn(
     return parent_run_id if wrote_any else None
 
 
+class AssistantAppendResult(NamedTuple):
+    """Outcome of :func:`append_assistant_and_guard_quiescence`.
+
+    ``assistant_focal_at_arrival`` is the appended assistant event's
+    ``focal_channel_at_arrival`` (the locked focal stamp) — the harness loop
+    threads it into the live tool-result append so ``append_event`` never has
+    to re-derive the tool-parent channel under the row lock (issue #862).
+    """
+
+    nudged: bool
+    autoerror_caller_run_id: str | None
+    assistant_focal_at_arrival: str | None
+
+
 async def append_assistant_and_guard_quiescence(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -870,7 +884,7 @@ async def append_assistant_and_guard_quiescence(
     *,
     account_id: str,
     parent_run_id: str | None,
-) -> tuple[bool, str | None]:
+) -> AssistantAppendResult:
     """Append the model's assistant message and, **atomically**, enforce the
     request-totality invariant: a session may not go idle while it owes a response.
 
@@ -888,18 +902,22 @@ async def append_assistant_and_guard_quiescence(
     can ever observe the session idle while a request is open — the invariant holds
     at write time, with no sweep backstop.
 
-    Returns ``(nudged, autoerror_caller_run_id)``; the caller (the harness loop) does
-    the post-commit wakes — ``defer_wake(session)`` if nudged,
-    ``defer_run_wake(run_id)`` if a run id is returned (a request was auto-errored
-    and its caller run must harvest the no_return). The run id is the child's
-    ``parent_run_id`` — the single caller of every request in v1.
+    Returns an :class:`AssistantAppendResult` ``(nudged, autoerror_caller_run_id,
+    assistant_focal_at_arrival)``; the caller (the harness loop) does the
+    post-commit wakes — ``defer_wake(session)`` if nudged, ``defer_run_wake(run_id)``
+    if a run id is returned (a request was auto-errored and its caller run must
+    harvest the no_return). The run id is the child's ``parent_run_id`` — the single
+    caller of every request in v1. ``assistant_focal_at_arrival`` is the appended
+    assistant event's locked focal stamp, threaded into the live tool-result append
+    so ``append_event`` skips the in-lock tool-parent lookup (issue #862).
     """
     nudged = False
     autoerror_caller_run_id: str | None = None
     async with pool.acquire() as conn, conn.transaction():
-        await queries.append_event(
+        assistant_event = await queries.append_event(
             conn, session_id=session_id, kind="message", data=assistant_msg, account_id=account_id
         )
+        focal = assistant_event.focal_channel_at_arrival
         # Gates, cheapest first (this runs on EVERY end-of-turn append):
         #   1. not a workflow child → cannot owe a request → plain append, done.
         #   2. tool calls present → unresolved tool_call → active by construction
@@ -909,12 +927,12 @@ async def append_assistant_and_guard_quiescence(
         #      _SESSION_STATUS_EXPR every external reader uses) — it could still be
         #      active via a user message that arrived during inference.
         if parent_run_id is None or assistant_msg.get("tool_calls"):
-            return (False, None)
+            return AssistantAppendResult(False, None, focal)
         open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
         if not open_ids:
-            return (False, None)  # every request answered
+            return AssistantAppendResult(False, None, focal)  # every request answered
         if await queries.derive_session_status(conn, session_id, account_id=account_id) != "idle":
-            return (False, None)
+            return AssistantAppendResult(False, None, focal)
         to_nudge: list[str] = []
         for request_id in open_ids:
             nudges = await queries.count_request_nudges(
@@ -947,7 +965,7 @@ async def append_assistant_and_guard_quiescence(
                 account_id=account_id,
             )
             nudged = True
-    return (nudged, autoerror_caller_run_id)
+    return AssistantAppendResult(nudged, autoerror_caller_run_id, focal)
 
 
 async def append_tool_result(

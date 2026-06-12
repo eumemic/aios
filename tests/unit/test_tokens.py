@@ -126,3 +126,68 @@ class TestApproxTokensWithTools:
 
     def test_tools_empty_list_identical_to_omitted(self) -> None:
         assert approx_tokens(self._MSGS, tools=[]) == approx_tokens(self._MSGS)
+
+
+class TestEventTokenDelta:
+    """``_event_token_delta`` is the pure per-event token contribution that
+    ``append_event`` now computes BEFORE the row lock (issue #862).
+
+    Each case asserts the helper EQUALS the inline old-form computation that
+    used to live inside the transaction — equality of the two forms, not an
+    absolute magnitude (tokenizer counts are tokenizer-version dependent).
+    The user branch reproduces ``render_user_event(...) + separator`` exactly;
+    every other branch is ``approx_tokens([data])``.
+    """
+
+    @staticmethod
+    def _old_form_user(data: dict[str, Any], orig_channel: str | None, focal: str | None) -> int:
+        from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
+
+        rendered = render_user_event(data, orig_channel, focal, _CREATED_AT)
+        separator = {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}
+        return approx_tokens([rendered, separator])
+
+    def _delta(
+        self,
+        kind: str,
+        data: dict[str, Any],
+        orig_channel: str | None = None,
+        focal: str | None = None,
+    ) -> int:
+        from aios.db.queries.events import _event_token_delta
+
+        return _event_token_delta(kind, data, orig_channel, focal)
+
+    def test_delta_user_channel_none(self) -> None:
+        data = {"role": "user", "content": "hello there"}
+        assert self._delta("message", data) == self._old_form_user(data, None, None)
+
+    def test_delta_user_on_channel(self) -> None:
+        # orig_channel == focal: full-content render
+        data = {"role": "user", "content": "what files are here", "metadata": {"from": "+1"}}
+        assert self._delta("message", data, "tg:42", "tg:42") == self._old_form_user(
+            data, "tg:42", "tg:42"
+        )
+
+    def test_delta_user_off_channel(self) -> None:
+        # orig_channel != focal: off-channel notification marker (far fewer tokens)
+        data = {"role": "user", "content": "ping from another chat", "metadata": {"from": "+1"}}
+        assert self._delta("message", data, "tg:7", "tg:42") == self._old_form_user(
+            data, "tg:7", "tg:42"
+        )
+
+    def test_delta_assistant(self) -> None:
+        data = {"role": "assistant", "content": "sure, on it"}
+        assert self._delta("message", data) == approx_tokens([data])
+
+    def test_delta_tool(self) -> None:
+        data = {"role": "tool", "tool_call_id": "tc_1", "name": "bash", "content": "ok"}
+        assert self._delta("message", data) == approx_tokens([data])
+
+    def test_delta_oversized(self) -> None:
+        data = {"role": "assistant", "content": "x" * 100_000}
+        assert self._delta("message", data) == approx_tokens([data])
+
+    def test_delta_non_message_is_zero(self) -> None:
+        assert self._delta("span", {"event": "sweep_start"}) == 0
+        assert self._delta("lifecycle", {"event": "turn_ended"}) == 0

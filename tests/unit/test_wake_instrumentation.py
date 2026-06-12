@@ -20,6 +20,7 @@ from procrastinate import App
 from procrastinate.testing import InMemoryConnector
 
 from aios.harness.window import WindowedEvents
+from aios.services.sessions import AssistantAppendResult
 
 
 class TestE2EConftestMockSignatures:
@@ -369,7 +370,7 @@ class TestStepStartEndSpans:
             ) as append_event,
             patch(
                 "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
-                AsyncMock(return_value=(False, None)),
+                AsyncMock(return_value=AssistantAppendResult(False, None, None)),
             ),
             patch(
                 "aios.harness.loop.call_litellm",
@@ -472,7 +473,7 @@ class TestStepStartEndSpans:
             patch("aios.harness.loop.sessions_service.append_event", append_event),
             patch(
                 "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
-                AsyncMock(return_value=(False, None)),
+                AsyncMock(return_value=AssistantAppendResult(False, None, None)),
             ),
             patch("aios.harness.loop.sessions_service.reclaim_session_if_idle", reclaim),
             patch(
@@ -573,7 +574,7 @@ class TestStepStartEndSpans:
             ),
             patch(
                 "aios.harness.loop.sessions_service.append_assistant_and_guard_quiescence",
-                AsyncMock(return_value=(True, None)),  # guard nudged
+                AsyncMock(return_value=AssistantAppendResult(True, None, None)),  # guard nudged
             ),
             patch("aios.harness.loop.sessions_service.reclaim_session_if_idle", reclaim),
             patch("aios.harness.loop.defer_wake", defer_wake_mock),
@@ -693,7 +694,7 @@ class TestStepStartEndSpans:
 
 @contextlib.asynccontextmanager
 async def _harness_with_guard(
-    guard_result: tuple[bool, str | None],
+    guard_result: AssistantAppendResult,
 ) -> AsyncIterator[tuple[AsyncMock, AsyncMock, MagicMock]]:
     """Drive ``run_session_step`` past a clean (tool-call-free) model turn with the
     quiescence guard mocked to ``guard_result``. Yields ``(defer_wake,
@@ -780,7 +781,7 @@ class TestRequestTotalityWiring:
         next step's window (#132), and does NOT wake a caller run."""
         from aios.harness.loop import run_session_step
 
-        async with _harness_with_guard((True, None)) as (
+        async with _harness_with_guard(AssistantAppendResult(True, None, None)) as (
             defer_wake,
             defer_run_wake,
             manager,
@@ -803,7 +804,7 @@ class TestRequestTotalityWiring:
         no_return response, and does NOT inject a session (nudge) wake."""
         from aios.harness.loop import run_session_step
 
-        async with _harness_with_guard((False, "run_x")) as (
+        async with _harness_with_guard(AssistantAppendResult(False, "run_x", None)) as (
             defer_wake,
             defer_run_wake,
             _mgr,

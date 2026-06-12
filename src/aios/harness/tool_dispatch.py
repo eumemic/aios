@@ -29,6 +29,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import EllipsisType
 from typing import Any
 
 import asyncpg
@@ -189,12 +190,26 @@ def launch_tool_calls(
     tool_calls: list[dict[str, Any]],
     *,
     account_id: str,
+    parent_focal_at_arrival: str | None | EllipsisType = ...,
 ) -> None:
-    """Launch each tool call as an asyncio task. Returns immediately."""
+    """Launch each tool call as an asyncio task. Returns immediately.
+
+    ``parent_focal_at_arrival`` is the requesting assistant event's locked
+    focal stamp; threaded into the success-path result append so
+    ``append_event`` skips the in-lock tool-parent lookup (issue #862). The
+    live harness dispatch passes it; cold callers (confirmed re-dispatch)
+    leave the default ``...`` so the append falls back to the pre-tx lookup.
+    """
     _launch_tasks(
         session_id,
         tool_calls,
-        lambda call: _execute_tool_async(pool, session_id, call, account_id=account_id),
+        lambda call: _execute_tool_async(
+            pool,
+            session_id,
+            call,
+            account_id=account_id,
+            parent_focal_at_arrival=parent_focal_at_arrival,
+        ),
         prefix="tool",
     )
 
@@ -205,6 +220,7 @@ async def _execute_tool_async(
     call: dict[str, Any],
     *,
     account_id: str,
+    parent_focal_at_arrival: str | None | EllipsisType = ...,
 ) -> None:
     """Execute one built-in tool call via the shared invoke core, then
     append the tool-role result event.
@@ -247,6 +263,7 @@ async def _execute_tool_async(
             tc.call_id,
             event_data,
             account_id=account_id,
+            tool_parent_channel=parent_focal_at_arrival,
         )
 
 
@@ -257,6 +274,7 @@ async def _append_tool_result_event(
     event_data: dict[str, Any],
     *,
     account_id: str,
+    tool_parent_channel: str | None | EllipsisType = ...,
 ) -> None:
     """Append a ``role:"tool"`` event, dedup-guarded on ``tool_call_id``.
 
@@ -318,6 +336,7 @@ async def _append_tool_result_event(
             kind="message",
             data=event_data,
             account_id=account_id,
+            tool_parent_channel=tool_parent_channel,
         )
 
 
@@ -404,6 +423,7 @@ def launch_mcp_tool_calls(
     *,
     account_id: str,
     focal_channel: str | None = None,
+    parent_focal_at_arrival: str | None | EllipsisType = ...,
 ) -> None:
     """Launch MCP tool calls as asyncio tasks. Returns immediately.
 
@@ -412,6 +432,12 @@ def launch_mcp_tool_calls(
     concurrent ``switch_channel`` in the same batch cannot race the
     ``chat_id`` injection).  Passed through to each task so
     connection-provided tools can stamp ``_meta`` with the suffix.
+
+    ``parent_focal_at_arrival`` is DISTINCT: the requesting assistant
+    event's locked focal stamp, threaded into the result append so
+    ``append_event`` skips the in-lock tool-parent lookup (issue #862).
+    Cold callers (confirmed re-dispatch) leave the default ``...`` →
+    pre-tx lookup.
     """
     _launch_tasks(
         session_id,
@@ -423,6 +449,7 @@ def launch_mcp_tool_calls(
             mcp_server_map,
             focal_channel=focal_channel,
             account_id=account_id,
+            parent_focal_at_arrival=parent_focal_at_arrival,
         ),
         prefix="mcp_tool",
     )
@@ -447,6 +474,7 @@ async def _execute_mcp_tool_async(
     *,
     account_id: str,
     focal_channel: str | None = None,
+    parent_focal_at_arrival: str | None | EllipsisType = ...,
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result.
 
@@ -512,5 +540,10 @@ async def _execute_mcp_tool_async(
 
         tc.bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
         await _append_tool_result_event(
-            pool, session_id, tc.call_id, event_data, account_id=account_id
+            pool,
+            session_id,
+            tc.call_id,
+            event_data,
+            account_id=account_id,
+            tool_parent_channel=parent_focal_at_arrival,
         )
