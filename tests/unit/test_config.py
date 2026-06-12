@@ -114,12 +114,39 @@ def test_github_clone_cache_timeout_default(
     assert s.github_clone_cache_timeout_seconds == 300.0
 
 
+def test_model_call_deadline_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.delenv("AIOS_MODEL_CALL_DEADLINE_S", raising=False)
+
+    s = Settings(_env_file=(str(secrets),))
+    assert s.model_call_deadline_s == 900.0
+
+
+def test_model_call_deadline_rejects_step_budget_or_above(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+    from aios.harness.loop import _JOB_TIMEOUT_S
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.setenv("AIOS_MODEL_CALL_DEADLINE_S", str(_JOB_TIMEOUT_S))
+
+    with pytest.raises(ValidationError, match="AIOS_MODEL_CALL_DEADLINE_S"):
+        Settings(_env_file=(str(secrets),))
+
+
 def test_github_clone_session_timeout_below_step_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The whole point of issue #697: the per-session clone budget must
     fit strictly inside the harness step budget so a hung clone doesn't
-    burn the full 5-minute turn.
+    burn the full harness turn.
     """
     from aios.config import Settings
     from aios.harness.loop import _JOB_TIMEOUT_S
@@ -160,7 +187,7 @@ def test_github_clone_session_timeout_rejects_above_step_budget(
 
     secrets = tmp_path / "secrets.env"
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
-    monkeypatch.setenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", "400")
+    monkeypatch.setenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", "960")
 
     with pytest.raises(ValidationError, match="must be strictly less than"):
         Settings(_env_file=(str(secrets),))

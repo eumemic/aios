@@ -27,9 +27,10 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
+from aios.config import get_settings
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
-from aios.harness.completion import call_litellm, stream_litellm
+from aios.harness.completion import ModelCallDeadlineError, call_litellm, stream_litellm
 from aios.harness.step_context import (
     compose_step_context,
     compute_step_prelude,
@@ -64,11 +65,10 @@ _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
 # Wall-clock cap on a single ``run_session_step`` invocation. The harness's
 # zero-hang guarantee: per-call timeouts (LiteLLM, MCP, tool dispatch, etc.)
 # are the precise instruments, but if any future code path bypasses them
-# this cap fires and forces a clean rescheduling. Sized to fit the longest
-# legitimate single-turn use (300s = matches the ``_REQUEST_TIMEOUT_S`` in
-# ``completion.py`` so the model call alone can occupy almost the whole
-# budget).
-_JOB_TIMEOUT_S = 300.0
+# this cap fires and forces a clean rescheduling. Sized as the default 900s
+# model-call deadline plus 60s of headroom for prologue, context-build, and
+# epilogue work that no longer compete with the model budget.
+_JOB_TIMEOUT_S = 960.0
 
 # litellm's standardized ``finish_reason`` for a safety refusal. Anthropic's
 # ``stop_reason: "refusal"`` maps here; OpenAI/Azure ``content_filter`` lands
@@ -503,20 +503,30 @@ async def _run_session_step_body(
                 extra=agent.litellm_extra or None,
                 session_id=session_id,
             )
+    except ModelCallDeadlineError as exc:
+        log.exception(
+            "step.model_call_deadline", session_id=session_id, chunks_seen=exc.chunks_seen
+        )
+        if exc.chunks_seen > 0:
+            await _handle_streaming_model_deadline(
+                pool,
+                session_id,
+                start_event_id=start_event.id,
+                usage=exc.usage,
+                cost_usd=exc.cost_usd,
+                account_id=account_id,
+            )
+            return _StepResult()
+        await _append_model_request_error_span(
+            pool, session_id, start_event_id=start_event.id, account_id=account_id
+        )
+        return _StepResult(
+            retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+        )
     except Exception:
         log.exception("step.litellm_failed", session_id=session_id)
-        await sessions_service.append_event(
-            pool,
-            session_id,
-            "span",
-            {
-                "event": "model_request_end",
-                "model_request_start_id": start_event.id,
-                "is_error": True,
-                "model_usage": {},
-                "cost_usd": None,
-            },
-            account_id=account_id,
+        await _append_model_request_error_span(
+            pool, session_id, start_event_id=start_event.id, account_id=account_id
         )
         return _StepResult(
             retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
@@ -964,6 +974,77 @@ async def _dispatch_confirmed_tools(
         return []
     in_flight = task_registry.in_flight_tool_call_ids(session_id)
     return [tc for tc in dispatchable if tc.get("id") not in in_flight]
+
+
+async def _append_model_request_error_span(
+    pool: Any,
+    session_id: str,
+    *,
+    start_event_id: str,
+    account_id: str,
+) -> None:
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "model_request_end",
+            "model_request_start_id": start_event_id,
+            "is_error": True,
+            "model_usage": {},
+            "cost_usd": None,
+        },
+        account_id=account_id,
+    )
+
+
+async def _handle_streaming_model_deadline(
+    pool: Any,
+    session_id: str,
+    *,
+    start_event_id: str,
+    usage: dict[str, int],
+    cost_usd: float | None,
+    account_id: str,
+) -> None:
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "model_request_end",
+            "model_request_start_id": start_event_id,
+            "is_error": True,
+            "model_usage": usage,
+            "cost_usd": cost_usd,
+        },
+        account_id=account_id,
+    )
+    await sessions_service.increment_usage(
+        pool,
+        session_id,
+        input_tokens=usage.get("input_tokens", 0),
+        output_tokens=usage.get("output_tokens", 0),
+        cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+        cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+        account_id=account_id,
+    )
+    deadline_s = get_settings().model_call_deadline_s
+    await fail_all_open_requests(
+        pool, session_id, account_id=account_id, error={"kind": "model_call_deadline"}
+    )
+    await sessions_service.set_session_stop_reason(
+        pool,
+        session_id,
+        {
+            "type": "error",
+            "message": f"model call exceeded its {deadline_s:.0f}s total deadline while still streaming; partial token usage was recorded",
+        },
+        account_id=account_id,
+    )
+    await _append_lifecycle(
+        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
+    )
 
 
 async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str) -> float | None:

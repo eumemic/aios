@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import litellm
 
+from aios.config import get_settings
 from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
 
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
@@ -79,6 +80,24 @@ except (ImportError, AttributeError):  # pragma: no cover - litellm layout drift
 _REQUEST_TIMEOUT_S = 300.0
 _STREAM_TTFT_TIMEOUT_S = 300.0
 _STREAM_INTER_CHUNK_TIMEOUT_S = 60.0
+
+
+class ModelCallDeadlineError(Exception):
+    """The model call exceeded the configured total-duration deadline."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: dict[str, int],
+        cost_usd: float | None,
+        chunks_seen: int,
+    ) -> None:
+        super().__init__(message)
+        self.usage = usage
+        self.cost_usd = cost_usd
+        self.chunks_seen = chunks_seen
+
 
 if TYPE_CHECKING:
     import asyncpg
@@ -516,7 +535,16 @@ async def call_litellm(
         session_id=session_id,
         stream=False,
     )
-    response = await litellm.acompletion(**kwargs)
+    deadline_s = get_settings().model_call_deadline_s
+    try:
+        response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=deadline_s)
+    except TimeoutError as exc:
+        raise ModelCallDeadlineError(
+            f"model call exceeded its {deadline_s:.0f}s total deadline before returning",
+            usage={},
+            cost_usd=None,
+            chunks_seen=0,
+        ) from exc
     return _unpack_litellm_response(response, source="litellm.acompletion")
 
 
@@ -552,6 +580,9 @@ async def stream_litellm(
         session_id=session_id,
         stream=True,
     )
+    deadline_s = get_settings().model_call_deadline_s
+    loop = asyncio.get_running_loop()
+    deadline_at = loop.time() + deadline_s
     response = await litellm.acompletion(**kwargs)
 
     # Per-chunk inactivity guard. The ``stream_timeout`` kwarg above is
@@ -580,9 +611,28 @@ async def stream_litellm(
     saw_content_filter = False
     try:
         while True:
-            timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S
+            guard_timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S
+            remaining_deadline_s = deadline_at - loop.time()
+            timeout = min(guard_timeout, remaining_deadline_s)
             try:
                 chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+            except TimeoutError as exc:
+                if loop.time() >= deadline_at:
+                    usage: dict[str, int] = {}
+                    cost: float | None = None
+                    if chunks:
+                        partial_assembled: Any = litellm.stream_chunk_builder(chunks=chunks)
+                        if partial_assembled is not None:
+                            _, usage, cost, _ = _unpack_litellm_response(
+                                partial_assembled, source="stream_chunk_builder"
+                            )
+                    raise ModelCallDeadlineError(
+                        f"model call exceeded its {deadline_s:.0f}s total deadline while still streaming",
+                        usage=usage,
+                        cost_usd=cost,
+                        chunks_seen=len(chunks),
+                    ) from exc
+                raise
             except StopAsyncIteration:
                 break
             first = False
