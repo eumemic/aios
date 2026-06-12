@@ -245,12 +245,16 @@ async def get_workflow(pool: asyncpg.Pool[Any], workflow_id: str, *, account_id:
         return await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
 
 
-async def archive_workflow(pool: asyncpg.Pool[Any], workflow_id: str, *, account_id: str) -> Workflow:
+async def archive_workflow(
+    pool: asyncpg.Pool[Any], workflow_id: str, *, account_id: str
+) -> Workflow:
     async with pool.acquire() as conn:
         return await wf_queries.archive_workflow(conn, workflow_id, account_id=account_id)
 
 
-async def unarchive_workflow(pool: asyncpg.Pool[Any], workflow_id: str, *, account_id: str) -> Workflow:
+async def unarchive_workflow(
+    pool: asyncpg.Pool[Any], workflow_id: str, *, account_id: str
+) -> Workflow:
     async with pool.acquire() as conn:
         return await wf_queries.unarchive_workflow(conn, workflow_id, account_id=account_id)
 

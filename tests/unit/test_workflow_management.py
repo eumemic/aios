@@ -226,7 +226,9 @@ class TestReturnShape:
         assert out["name"] == "w" and out["version"] == 1
         assert "script" not in out  # heavy snapshot field trimmed
 
-    async def test_archive_workflow_calls_service_and_returns_archived_at(self, monkeypatch: Any) -> None:
+    async def test_archive_workflow_calls_service_and_returns_archived_at(
+        self, monkeypatch: Any
+    ) -> None:
         archived = datetime(2026, 1, 2, tzinfo=UTC)
         mock_archive = AsyncMock(return_value=_workflow(archived_at=archived))
         monkeypatch.setattr("aios.services.workflows.archive_workflow", mock_archive)
@@ -237,7 +239,9 @@ class TestReturnShape:
         assert mock_archive.call_args.args[1] == "wf_1"
         assert mock_archive.call_args.kwargs["account_id"] == "acc_x"
 
-    async def test_unarchive_workflow_calls_service_and_returns_live_row(self, monkeypatch: Any) -> None:
+    async def test_unarchive_workflow_calls_service_and_returns_live_row(
+        self, monkeypatch: Any
+    ) -> None:
         mock_unarchive = AsyncMock(return_value=_workflow(archived_at=None))
         monkeypatch.setattr("aios.services.workflows.unarchive_workflow", mock_unarchive)
         out = await wm.unarchive_workflow_handler("ses_1", {"workflow_id": "wf_1"})

@@ -30,9 +30,11 @@ from aios_sdk._generated.api.runs import (
     resume_gate,
 )
 from aios_sdk._generated.api.workflows import (
+    archive_workflow,
     create_workflow,
     get_workflow,
     list_workflows,
+    unarchive_workflow,
     update_workflow,
 )
 from aios_sdk._generated.models.gate_resume import GateResume
@@ -122,6 +124,24 @@ def update_workflow_(
         body = WorkflowUpdate.from_dict(payload)
         call_single(ctx, update_workflow.sync_detailed, workflow_id=workflow_id, body=body)
         return None
+
+    run_or_die(_run)
+
+
+@app.command("archive", help="Archive a workflow (hidden from lists; updates/new runs 409).")
+@covers("archive_workflow")
+def archive_workflow_(ctx: typer.Context, workflow_id: str) -> None:
+    def _run() -> None:
+        call_single(ctx, archive_workflow.sync_detailed, workflow_id=workflow_id)
+
+    run_or_die(_run)
+
+
+@app.command("unarchive", help="Restore an archived workflow.")
+@covers("unarchive_workflow")
+def unarchive_workflow_(ctx: typer.Context, workflow_id: str) -> None:
+    def _run() -> None:
+        call_single(ctx, unarchive_workflow.sync_detailed, workflow_id=workflow_id)
 
     run_or_die(_run)
 
