@@ -16068,7 +16068,8 @@
               "call_started",
               "call_result",
               "run_completed",
-              "annotation"
+              "annotation",
+              "frontier_deferred"
             ],
             "title": "Type"
           },

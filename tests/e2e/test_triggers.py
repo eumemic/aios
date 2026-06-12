@@ -1744,6 +1744,205 @@ class TestNotifyTrigger:
                 pytest.fail("next_fire-only update did not produce a NOTIFY within 2s")
 
 
+class TestReEnableNextFireInvariant:
+    """The invariant "an enabled schedulable trigger has non-NULL next_fire"
+    across re-enable. Groups two cohesive cases:
+
+    - The clean-path re-enable baseline (ground truth, green PRE-fix): the
+      service auto-disable→re-enable (false→true) path already re-arms
+      next_fire and NOTIFYs — pre-existing behavior, not the #957 fix.
+    - The #957 heal cases: cron rows that reach enabled+next_fire=NULL out of
+      band (the #925 incident-recovery anti-pattern's manual
+      `UPDATE … SET enabled=true`) are re-armed on ANY update whose final state
+      is enabled, and the NULL→non-NULL re-arm NOTIFYs so the scheduler
+      relearns its sleep — while run_completion and one-shot rows are left
+      NULL by design.
+    """
+
+    async def test_reenable_after_service_auto_disable_rearms_next_fire(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Clean path (ground truth): the service auto-disable flips enabled
+        false and clears next_fire; a plain re-enable (false→true) re-arms
+        next_fire and NOTIFYs. Passes even before the #957 fix."""
+        import asyncio as _asyncio
+
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_triggers_due
+        from aios.harness import runtime, trigger_runner
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+
+        echo = await trig_service.add_trigger(pool, sid, _spec("ultron"), account_id=account_id)
+
+        # Drive auto-disable through the SERVICE fire path: a failing run on the
+        # 5th consecutive failure trips the breaker (MAX_CONSECUTIVE_FAILURES).
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE triggers SET consecutive_failures = 4, running_since = $1 WHERE id = $2",
+                datetime.now(UTC),
+                echo.id,
+            )
+
+        async def _fail_run(_self: object, _handle: object, _cmd: str, **_kw: Any) -> Any:
+            return mock.MagicMock(exit_code=2, timed_out=False, stderr="boom: cron failed")
+
+        registry = _make_fake_sandbox_registry(_fail_run)
+        prev_pool = runtime.pool
+        prev_registry = runtime.sandbox_registry
+        runtime.pool = pool
+        runtime.sandbox_registry = registry
+        with mock.patch("aios.harness.trigger_runner.defer_wake", new_callable=mock.AsyncMock):
+            try:
+                await trigger_runner.run_trigger_step(echo.id)
+            finally:
+                runtime.pool = prev_pool
+                runtime.sandbox_registry = prev_registry
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT enabled, consecutive_failures, next_fire FROM triggers WHERE id = $1",
+                echo.id,
+            )
+        assert row is not None
+        assert row["enabled"] is False
+        assert row["consecutive_failures"] == 5
+        assert row["next_fire"] is None
+
+        # Re-enable (false→true): re-arms next_fire AND NOTIFYs (enabled flip).
+        async with listen_for_triggers_due(get_settings().db_url) as event:
+            event.clear()
+            re_enabled = await trig_service.update_trigger(
+                pool,
+                sid,
+                "ultron",
+                TriggerUpdate.model_validate({"enabled": True}),
+                account_id=account_id,
+            )
+            assert re_enabled.enabled is True
+            assert re_enabled.next_fire is not None
+            try:
+                await _asyncio.wait_for(event.wait(), timeout=2.0)
+            except TimeoutError:
+                pytest.fail("re-enable did not produce a NOTIFY within 2s")
+
+    async def test_reenable_already_enabled_null_next_fire_heals(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Contaminated path (#957 RED before fix): a row that is ALREADY
+        enabled but has next_fire NULL is healed on a no-source enabled update —
+        next_fire is recomputed and the NULL→non-NULL re-arm NOTIFYs."""
+        import asyncio as _asyncio
+
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_triggers_due
+
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+
+        echo = await trig_service.add_trigger(pool, sid, _spec("ultron"), account_id=account_id)
+        # Reproduces the #957/#925 incident state: the manual `UPDATE … enabled=
+        # true` left next_fire NULL and suppressed the false→true transition the
+        # service keys recompute on.
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id)
+
+        async with listen_for_triggers_due(get_settings().db_url) as event:
+            event.clear()
+            healed = await trig_service.update_trigger(
+                pool,
+                sid,
+                "ultron",
+                TriggerUpdate.model_validate({"enabled": True}),
+                account_id=account_id,
+            )
+            assert healed.enabled is True
+            assert healed.next_fire is not None  # heal recomputed next_fire
+            try:
+                await _asyncio.wait_for(event.wait(), timeout=2.0)
+            except TimeoutError:
+                pytest.fail("heal (NULL→non-NULL next_fire) did not produce a NOTIFY within 2s")
+
+    async def test_heal_leaves_run_completion_next_fire_null(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Invariant guard: healing a run_completion-source row (correctly at
+        enabled=true, next_fire=NULL) must keep next_fire NULL —
+        compute_initial_next_fire returns None for RunCompletionSource, so the
+        heal is a no-op and the triggers_run_completion_no_next_fire DB guard is
+        never violated."""
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+        wf_id = await _make_workflow_e2e(pool)
+
+        echo = await trig_service.add_trigger(
+            pool, sid, _watch_spec("watcher", wf_id), account_id=account_id
+        )
+        assert echo.next_fire is None  # reactive row: NULL by design
+
+        healed = await trig_service.update_trigger(
+            pool,
+            sid,
+            "watcher",
+            TriggerUpdate.model_validate({"enabled": True}),
+            account_id=account_id,
+        )
+        assert healed.enabled is True
+        assert healed.next_fire is None  # heal is a no-op for run_completion
+
+        # The DB guard held (the row would not have UPDATEd otherwise).
+        async with pool.acquire() as conn:
+            col = await conn.fetchval("SELECT next_fire FROM triggers WHERE id = $1", echo.id)
+        assert col is None
+
+    async def test_heal_skips_one_shot_source(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """#957 regression: the heal is scoped to CRON sources, so an enabled
+        one-shot row contaminated to next_fire=NULL is NOT healed on a no-source
+        enabled=true PATCH — and (the actual bug) the recompute branch is never
+        entered, so the one-shot past-fire_at guard does NOT raise a spurious 422.
+        One-shots are fire-and-delete; their re-arm contract is owned by an
+        explicit source replacement, not the heal."""
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+
+        # Enabled one-shot with a fire_at in the PAST relative to the heal call:
+        # add_trigger accepts any fire_at, so seed it in the past directly. The
+        # 422 bug needed a past fire_at to trip the one-shot guard once the broad
+        # heal wrongly entered the recompute branch.
+        past_fire = datetime.now(UTC) - timedelta(days=1)
+        echo = await trig_service.add_trigger(
+            pool, sid, _one_shot_spec("stale_oneshot", past_fire), account_id=account_id
+        )
+        assert echo.next_fire is not None  # enabled one-shot armed to fire_at
+        # Reproduce the contaminated state (enabled=true, next_fire=NULL) the #925
+        # manual edit left, but on a one-shot row this time.
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id)
+
+        # No raise (the pre-fix broad heal would have hit the one-shot past-fire_at
+        # guard and 422'd here), and next_fire stays NULL — only crons are healed.
+        healed = await trig_service.update_trigger(
+            pool,
+            sid,
+            "stale_oneshot",
+            TriggerUpdate.model_validate({"enabled": True}),
+            account_id=account_id,
+        )
+        assert healed.enabled is True
+        assert healed.next_fire is None  # one-shot is not healed
+
+        async with pool.acquire() as conn:
+            col = await conn.fetchval("SELECT next_fire FROM triggers WHERE id = $1", echo.id)
+        assert col is None
+
+
 class TestAdvisoryLockSerializesCapCheck:
     async def test_concurrent_add_at_cap_serialized(
         self, pool: Any, env_and_agent: tuple[str, str], monkeypatch: Any

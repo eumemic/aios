@@ -356,7 +356,30 @@ async def _run_workflow_step_body(
         # Gated on a non-crash outcome: a crashed/killed host emits nothing, and
         # that emptiness is a crash (handled above), never divergence.
         emitted_keys = {cap.call_key for cap in outcome.emitted}
-        diverged = sorted(k for k in inflight if k not in emitted_keys)
+        # A call_key with a `frontier_deferred` marker but no `call_started` (and not
+        # yet resolved into memo) is a WAITING-to-be-admitted agent frontier. On a
+        # completed replay the script MUST re-emit it (it has neither started nor
+        # resolved); if it didn't, the run diverged just as surely as a vanished
+        # inflight call — fail closed rather than strand a frontier that will never
+        # be admitted. A key that later gets a `call_started` (admitted) is tracked
+        # by `inflight` instead, and one that resolved is in `memo` — both excluded.
+        # A key is no longer waiting iff it is open (`inflight`: has a `call_started`
+        # without a `call_result`) or resolved (`memo`: has a `call_result` — either
+        # a completed call, or a spawn REJECTION journaled directly as a catchable
+        # error result with no `call_started` at all). Both sets together are exactly
+        # the not-pending keys — no separate scan of `events` needed.
+        started_keys = set(inflight) | set(memo)
+        deferred_pending = {
+            e.call_key
+            for e in events
+            if e.type == "frontier_deferred"
+            and e.call_key is not None
+            and e.call_key not in started_keys
+        }
+        diverged = sorted(
+            {k for k in inflight if k not in emitted_keys}
+            | {k for k in deferred_pending if k not in emitted_keys}
+        )
         if diverged:
             await _complete_run(
                 conn,
@@ -392,6 +415,22 @@ async def _run_workflow_step_body(
         # The running tally of real agent children: prior journaled spawns + this step's.
         agent_spawns = prior_agent_calls
 
+        # Per-run wave admission (#784): bound the number of concurrently in-flight
+        # agent() children. Count this run's currently in-flight agents (harvested
+        # `inflight` map), and admit at most `slots` NEW agent frontiers this wake;
+        # journal the rest as `frontier_deferred` (no spawn, no call_started). Freed
+        # slots admit deferred frontiers on the next wake — the existing child-
+        # completion re-wake re-runs this step, no new machinery. Gate and tool
+        # frontiers are UNTHROTTLED. Orthogonal to H1: the lifetime cap is enforced
+        # per-spawn at the gate (above), and only ADMITTED frontiers reach the gate —
+        # a deferred frontier consumes no lifetime quota until admitted (no spawn, no
+        # call_started), and when admitted on a later wake it is counted exactly once,
+        # so the wave gate neither masks nor double-counts the lifetime cap.
+        inflight_agents = sum(
+            1 for e in inflight.values() if e.payload.get("capability") == "agent"
+        )
+        slots = max(0, get_settings().workflow_max_inflight_children_per_run - inflight_agents)
+
         # Suspended: open any *new* frontier capability, then park.
         for cap in outcome.emitted:
             if cap.call_key in memo or cap.call_key in inflight:
@@ -413,36 +452,68 @@ async def _run_workflow_step_body(
                 if cap.call_key in signals:
                     needs_rewake = True
             elif cap.capability_id == "agent":
-                spawn = await _open_agent_capability(
-                    conn, pool, run, cap, agent_spawns=agent_spawns, max_agent_calls=max_agent_calls
-                )
-                # Lifetime cap hit (H1): this cap passed every rejection gate and WOULD
-                # create a real child, but that child would exceed the cap — terminate the
-                # run (terminal, not catchable). Checked at the spawn point, before the
-                # child exists, so no orphan is created; any good children already spawned
-                # earlier in this frontier share the run's terminal outcome.
-                if spawn.quota_exceeded:
-                    await _complete_run(
+                if slots > 0:
+                    spawn = await _open_agent_capability(
                         conn,
+                        pool,
                         run,
-                        output=(
-                            f"workflow exceeded the {max_agent_calls}-agent call cap "
-                            f"({agent_spawns + 1} total agent calls attempted)"
-                        ),
-                        is_error=True,
-                        error_kind="too_many_agents",
+                        cap,
+                        agent_spawns=agent_spawns,
+                        max_agent_calls=max_agent_calls,
                     )
-                    return
-                # rejected: this call's catchable error was journaled — self-wake so the
-                # run replays and throws the AgentError at the await. A spawn error on ONE
-                # capability must NOT abort spawning the others, so continue the loop.
-                # needs_rewake (C1'/C4): a re-attached child already has its marker.
-                if spawn.rejected or spawn.needs_rewake:
-                    needs_rewake = True
-                if spawn.rejected:
-                    rejected_any = True
+                    # Lifetime cap hit (H1): this cap passed every rejection gate and WOULD
+                    # create a real child, but that child would exceed the cap — terminate the
+                    # run (terminal, not catchable). Checked at the spawn point, before the
+                    # child exists, so no orphan is created; any good children already spawned
+                    # earlier in this frontier share the run's terminal outcome.
+                    if spawn.quota_exceeded:
+                        await _complete_run(
+                            conn,
+                            run,
+                            output=(
+                                f"workflow exceeded the {max_agent_calls}-agent call cap "
+                                f"({agent_spawns + 1} total agent calls attempted)"
+                            ),
+                            is_error=True,
+                            error_kind="too_many_agents",
+                        )
+                        return
+                    # rejected: this call's catchable error was journaled — self-wake so the
+                    # run replays and throws the AgentError at the await. A spawn error on ONE
+                    # capability must NOT abort spawning the others, so continue the loop.
+                    # needs_rewake (C1'/C4): a re-attached child already has its marker.
+                    if spawn.rejected or spawn.needs_rewake:
+                        needs_rewake = True
+                    if spawn.rejected:
+                        rejected_any = True
+                    else:
+                        # A real child was created (or re-attached): it counts toward the
+                        # lifetime tally AND occupies a wave slot. A REJECTED cap consumes
+                        # neither — no child exists, so it neither tips the lifetime quota
+                        # nor blocks admission of the remaining frontier.
+                        agent_spawns += 1
+                        slots -= 1
                 else:
-                    agent_spawns += 1  # a real child was created (or re-attached) — it counts
+                    # Over the per-run wave cap: defer this frontier. Journal a
+                    # `frontier_deferred` marker (idempotent on (run_id, call_key,
+                    # type)) so the divergence guard sees a waiting agent. Do NOT
+                    # spawn and do NOT journal call_started. A later wake re-emits this
+                    # same frontier (no call_started ⇒ still "new"); when a child
+                    # resolves and frees a slot, it is admitted then. Deferral is a
+                    # WAIT, never an error — it must never reach _open_agent_capability,
+                    # so it can never route through the catchable spawn-failure path
+                    # (#779): rejection means an ATTEMPTED spawn failed; deferral means
+                    # the spawn was POSTPONED, invisible to the script. No stall: slots
+                    # can only be exhausted while ≥1 real child is in flight, and that
+                    # child's completion re-wake re-drives admission.
+                    await wf_queries.append_run_event(
+                        conn,
+                        account_id=account_id,
+                        run_id=run_id,
+                        type="frontier_deferred",
+                        call_key=cap.call_key,
+                        payload={"capability": "agent"},
+                    )
             elif cap.capability_id == "tool":
                 spec = cap.spec if isinstance(cap.spec, dict) else {}
                 tool_name = spec.get("tool_name")

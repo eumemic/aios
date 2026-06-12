@@ -2034,6 +2034,313 @@ async def test_real_overquota_fanout_still_errors_too_many_agents(
     assert events[-1].payload["error"]["kind"] == "too_many_agents"
 
 
+# ─── #784 — per-run wave admission (bound concurrently in-flight agent children) ─
+
+
+async def _started_agents(pool: asyncpg.Pool[Any], run_id: str) -> list[str]:
+    """call_keys of every agent ``call_started`` (admitted children), in order."""
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    return [
+        e.call_key
+        for e in events
+        if e.type == "call_started"
+        and e.payload.get("capability") == "agent"
+        and e.call_key is not None
+    ]
+
+
+async def _deferred_keys(pool: asyncpg.Pool[Any], run_id: str) -> list[str]:
+    """call_keys of every ``frontier_deferred`` marker (un-admitted agent frontiers)."""
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    return [e.call_key for e in events if e.type == "frontier_deferred" and e.call_key is not None]
+
+
+async def _resolve_one_admitted(pool: asyncpg.Pool[Any], run_id: str, value: Any) -> None:
+    """Return-resolve the FIRST still-open admitted child of the run (frees one slot)."""
+    from aios.tools import workflow_completion
+
+    for cid in await _started_agents(pool, run_id):
+        child = child_session_id(run_id, cid)
+        async with pool.acquire() as conn:
+            open_ids = await db_queries.get_open_request_ids(conn, child, account_id="acc_wf")
+        if open_ids:
+            with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+                await workflow_completion.return_handler(
+                    child, {"request_id": open_ids[0], "value": value}
+                )
+            return
+    raise AssertionError("no open admitted child to resolve")
+
+
+def _wave_cap(monkeypatch: pytest.MonkeyPatch, **overrides: int) -> None:
+    """Patch ``aios.workflows.step.get_settings`` to a model_copy with ``overrides``."""
+    from aios.config import get_settings
+
+    capped = get_settings().model_copy(update=overrides)
+    monkeypatch.setattr("aios.workflows.step.get_settings", lambda: capped)
+
+
+async def test_wave_admits_in_waves_as_children_resolve(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """AC1: with the per-run wave cap at 2, a parallel(5) fan-out admits exactly 2
+    children per wake and journals the other 3 as ``frontier_deferred`` — then admits
+    the rest in later waves as children resolve and free slots, completing with all 5
+    values in branch order."""
+    from aios.tools import workflow_completion
+
+    _wave_cap(monkeypatch, workflow_max_inflight_children_per_run=2)
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(5)])\n"
+    )
+    run_id = await _make_run(pool, script)
+    # Each admitted child returns a value derived from ITS call_key, so the final
+    # output pins resume→branch routing (each branch got exactly its own child's value).
+    values: dict[str, str] = {}
+
+    async def _resolve_open(value_for: Any) -> bool:
+        resolved_any = False
+        for key in await _started_agents(pool, run_id):
+            child = child_session_id(run_id, key)
+            async with pool.acquire() as conn:
+                open_ids = await db_queries.get_open_request_ids(conn, child, account_id="acc_wf")
+            if open_ids:
+                values[key] = value_for(key)
+                with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+                    await workflow_completion.return_handler(
+                        child, {"request_id": open_ids[0], "value": values[key]}
+                    )
+                resolved_any = True
+        return resolved_any
+
+    # Wake 1: 2 admitted, 3 deferred, still suspended.
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "suspended"
+    first_wave = await _started_agents(pool, run_id)
+    assert len(first_wave) == 2
+    assert len(await _deferred_keys(pool, run_id)) == 3
+
+    # Resolve ONE admitted child + wake: a freed slot admits one deferred frontier
+    # (3 admitted total); the deferred-marker count is unchanged (re-emitted deferred
+    # frontiers ON CONFLICT no-op, and one fewer remains over-cap — net same rows).
+    one_key = first_wave[0]
+    one_child = child_session_id(run_id, one_key)
+    async with pool.acquire() as conn:
+        one_rid = (await db_queries.get_open_request_ids(conn, one_child, account_id="acc_wf"))[0]
+    values[one_key] = f"r{one_key}"
+    with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+        await workflow_completion.return_handler(
+            one_child, {"request_id": one_rid, "value": values[one_key]}
+        )
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "suspended"
+    assert len(await _started_agents(pool, run_id)) == 3
+    assert len(await _deferred_keys(pool, run_id)) == 3  # idempotent: no new marker rows
+
+    # Drain: keep resolving every open admitted child + re-waking until complete.
+    for _ in range(20):
+        async with pool.acquire() as conn:
+            run = await wf_queries.get_run_for_step(conn, run_id)
+        assert run is not None
+        if run.status == "completed":
+            break
+        assert await _resolve_open(lambda k: f"r{k}")  # progress possible each iteration
+        await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "completed"
+    started = await _started_agents(pool, run_id)
+    assert len(started) == 5  # all 5 eventually admitted
+    # Output is the 5 child values in branch order — each branch routed to its child.
+    assert run.output == [values[k] for k in started]
+
+
+async def test_harvest_only_resuspend_with_deferred_outstanding_no_error(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """AC3: a wake that drives while deferred frontiers are still outstanding must NOT
+    error and must NOT double-journal a ``frontier_deferred`` marker (the divergence
+    guard sees a waiting agent, not a vanished one)."""
+    _wave_cap(monkeypatch, workflow_max_inflight_children_per_run=2)
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(3)])\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # 2 admitted, 1 deferred
+    assert len(await _started_agents(pool, run_id)) == 2
+    assert await _deferred_keys(pool, run_id) != []
+
+    # Resolve one admitted child so the next wake genuinely DRIVES (a quiet wake would
+    # skip the host), with the deferred frontier still outstanding.
+    deferred_before = sorted(await _deferred_keys(pool, run_id))
+    await _resolve_one_admitted(pool, run_id, "v")
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    # Not errored — a deferred-but-not-re-emitted-as-vanished frontier is a WAIT.
+    assert run is not None and run.status == "suspended"
+    assert not any(e.type == "run_completed" and e.payload.get("is_error") for e in events)
+    # The freed slot admitted the deferred frontier; its marker did not duplicate.
+    deferred_after = await _deferred_keys(pool, run_id)
+    assert len(deferred_after) == len(set(deferred_after))  # no duplicate markers
+    assert set(deferred_after) <= set(deferred_before)  # never grew
+
+
+async def test_wave_gate_does_not_mask_or_false_trip_lifetime_cap(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """AC3/H1: the wave gate neither masks nor false-trips the lifetime cap. H1 is
+    enforced per-spawn at the gate (#779: rejected caps must not count) and only
+    ADMITTED frontiers reach it, so with the wave cap at 2 and the LIFETIME cap at 3 a
+    parallel(5) admits children in waves until the 4th real spawn attempt — then errors
+    ``too_many_agents`` BEFORE that child is created: exactly 3 children ever exist,
+    never the 4th (the cap is not MASKED by admission). And a deferred frontier consumes
+    no lifetime quota while it waits — wake 1 defers 3 frontiers without erroring, and a
+    later admission counts each exactly once (the cap is not FALSE-TRIPPED, no
+    double-count across wakes)."""
+    _wave_cap(
+        monkeypatch,
+        workflow_max_inflight_children_per_run=2,
+        workflow_max_agent_calls=3,
+    )
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(5)])\n"
+    )
+    run_id = await _make_run(pool, script)
+
+    # Wake 1: 2 admitted (within both caps), 3 deferred. NOT errored — deferral alone
+    # never trips the lifetime cap (only real spawns count toward it).
+    await run_workflow_step(run_id)
+    assert len(await _started_agents(pool, run_id)) == 2
+    assert len(await _deferred_keys(pool, run_id)) == 3
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None and run.status == "suspended"
+
+    # Drive admission waves: each freed slot admits one deferred frontier through the
+    # per-spawn H1 gate, which fires at the 4th real spawn attempt.
+    for _ in range(10):
+        async with pool.acquire() as conn:
+            run = await wf_queries.get_run_for_step(conn, run_id)
+        assert run is not None
+        if run.status == "errored":
+            break
+        await _resolve_one_admitted(pool, run_id, "v")
+        await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "errored"
+    assert events[-1].type == "run_completed"
+    assert events[-1].payload["error"]["kind"] == "too_many_agents"
+    # The cap was not masked by admission: exactly max_agent_calls children were ever
+    # created — the over-cap 4th child never existed.
+    assert len(await _started_agents(pool, run_id)) == 3
+    assert children == 3
+
+
+async def test_deferred_frontier_never_re_emitted_errors_nondeterministic(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """AC4: a ``frontier_deferred`` marker whose call_key the script can never re-emit
+    is divergence — it is a waiting agent that vanished from the script, so the run
+    errors ``nondeterministic_replay`` rather than stranding the frontier forever."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)  # the script emits a REAL gate key
+    # Inject a journal whose only "open" key is a deferred frontier the script can't emit.
+    async with pool.acquire() as conn:
+        await wf_queries.append_run_event(
+            conn, account_id="acc_wf", run_id=run_id, type="run_started", payload={"input": None}
+        )
+        await wf_queries.append_run_event(
+            conn,
+            account_id="acc_wf",
+            run_id=run_id,
+            type="frontier_deferred",
+            call_key="sha:neveremitted#0",
+            payload={"capability": "agent"},
+        )
+
+    await run_workflow_step(run_id)  # host emits the REAL gate key, not the deferred one
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None and run.status == "errored"
+    assert events[-1].type == "run_completed"
+    assert events[-1].payload["error"]["kind"] == "nondeterministic_replay"
+
+
+async def test_frontier_deferred_marker_is_idempotent_and_seq_gapless(
+    monkeypatch: pytest.MonkeyPatch, wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A deferred frontier journals exactly ONE ``frontier_deferred`` row across the
+    waves it waits through (the memo dedups on (run_id, call_key, type)), and the
+    journal's seqs stay contiguous 1..N (the gapless-seq invariant)."""
+    from aios.tools import workflow_completion
+
+    _wave_cap(monkeypatch, workflow_max_inflight_children_per_run=2)
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(4)])\n"
+    )
+    run_id = await _make_run(pool, script)
+
+    await run_workflow_step(run_id)  # 2 admitted, 2 deferred
+    deferred = await _deferred_keys(pool, run_id)
+    assert len(deferred) == 2
+    # The deferred frontier that will be admitted LAST waits across multiple waves.
+    last_deferred = deferred[-1]
+
+    # Drive several admission waves: resolve one open child per wake.
+    for _ in range(20):
+        async with pool.acquire() as conn:
+            run = await wf_queries.get_run_for_step(conn, run_id)
+        assert run is not None
+        if run.status == "completed":
+            break
+        for cid in await _started_agents(pool, run_id):
+            child = child_session_id(run_id, cid)
+            async with pool.acquire() as conn:
+                open_ids = await db_queries.get_open_request_ids(conn, child, account_id="acc_wf")
+            if open_ids:
+                with mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()):
+                    await workflow_completion.return_handler(
+                        child, {"request_id": open_ids[0], "value": "v"}
+                    )
+        await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    # Exactly one frontier_deferred row for the long-waiting key (idempotent re-emit).
+    fd_for_key = [
+        e for e in events if e.type == "frontier_deferred" and e.call_key == last_deferred
+    ]
+    assert len(fd_for_key) == 1
+    # Gapless seq across the whole journal.
+    seqs = [e.seq for e in events]
+    assert seqs == list(range(1, len(seqs) + 1))
+
+
 async def test_agent_call_times_out_when_child_never_responds(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:

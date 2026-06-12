@@ -238,3 +238,49 @@ def test_container_idle_timeout_default_raised(
 
     s = Settings(_env_file=(str(secrets),))
     assert s.container_idle_timeout_seconds == 1800
+
+
+def test_workflow_max_inflight_children_per_run_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-run wave admission cap (#784) defaults to 8: a single run admits at most
+    8 concurrently in-flight ``agent()`` children per step, journaling the rest."""
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.delenv("AIOS_WORKFLOW_MAX_INFLIGHT_CHILDREN_PER_RUN", raising=False)
+
+    s = Settings(_env_file=(str(secrets),))
+    assert s.workflow_max_inflight_children_per_run == 8
+
+
+def test_workflow_max_inflight_children_per_run_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``AIOS_WORKFLOW_MAX_INFLIGHT_CHILDREN_PER_RUN`` overrides the default."""
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.setenv("AIOS_WORKFLOW_MAX_INFLIGHT_CHILDREN_PER_RUN", "3")
+
+    s = Settings(_env_file=(str(secrets),))
+    assert s.workflow_max_inflight_children_per_run == 3
+
+
+def test_workflow_max_inflight_children_per_run_rejects_below_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-run wave cap below 1 would admit nothing and strand every frontier;
+    Settings construction rejects it loudly (``ge=1``)."""
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.setenv("AIOS_WORKFLOW_MAX_INFLIGHT_CHILDREN_PER_RUN", "0")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=(str(secrets),))

@@ -64,7 +64,11 @@ from aios.sandbox.github_clone import (
 from aios.sandbox.network import WORKER_NETWORK_ALIAS, is_running_in_container
 from aios.sandbox.setup import WORKSPACE_RUNTIME_ENV
 from aios.services import sessions as sessions_service
-from aios.services.vaults import ResolvedEnvVarCredential, resolve_session_env_var_credentials
+from aios.services.vaults import (
+    ResolvedEnvVarCredential,
+    env_var_credential_containment_error,
+    resolve_session_env_var_credentials,
+)
 
 if TYPE_CHECKING:
     # Type-only: the step-time drift probe folds these through
@@ -481,6 +485,22 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     # allocated (#873): a corrupt blob fails hard here with nothing to
     # clean up, so this step stays OUTSIDE the cleanup envelope below.
     env_var_credentials = await _materialize_env_var_credentials(session_id, account_id=account_id)
+    # Two-layer env-var credential gate (#879): a session carrying
+    # environment_variable credentials requires a Limited environment whose
+    # allowed_hosts cover every credential host. The egress swap proxy only
+    # sees traffic via the Limited lockdown DNAT, so under Unrestricted the
+    # credential leaks/non-functions; the host-subset check prevents egress
+    # escalation. Provision is authoritative — both the env config and the
+    # credential set are independently mutable after attach, and only here do
+    # we see the current pair together. Skipped entirely when the session has
+    # no env-var credentials (zero behavior change for the common path).
+    # Raises before any host resource is allocated, so it too stays OUTSIDE
+    # the cleanup envelope.
+    containment_error = env_var_credential_containment_error(
+        env_config, [c.allowed_hosts for c in env_var_credentials]
+    )
+    if containment_error is not None:
+        raise ValueError(containment_error)
 
     tool_broker = runtime.require_tool_broker()
     tool_socket_host_path = settings.tool_broker_socket_path

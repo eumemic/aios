@@ -389,6 +389,19 @@ class Settings(BaseSettings):
         "single-``parallel()`` fan-out width is bounded separately, in the "
         "host (``wf_script_host.MAX_PARALLEL_FANOUT``).",
     )
+    workflow_max_inflight_children_per_run: int = Field(
+        default=8,
+        ge=1,
+        description="Per-run cap on concurrently in-flight ``agent()`` children. A "
+        "single workflow wake opens its emitted frontier in waves: at most this many "
+        "new agent() children are spawned per step while that many are already "
+        "in-flight; the rest are journaled as ``frontier_deferred`` markers (not "
+        "spawned) and admitted on later wakes as earlier children resolve and free "
+        "slots. Orthogonal to ``workflow_max_agent_calls`` (the lifetime ceiling) and "
+        "to ``worker_concurrency`` (cross-run worker parallelism): this bounds a "
+        "single run's standing agent() fan-out. The re-drive uses the existing "
+        "child-completion re-wake — no new machinery.",
+    )
     workflow_agent_deadline_seconds: float = Field(
         default=60 * 60,  # 1 hour
         gt=0,
