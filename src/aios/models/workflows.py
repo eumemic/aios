@@ -86,6 +86,7 @@ class WfRun(BaseModel):
     launcher_session_id: str | None = None
     script: str
     script_sha: str
+    host_semantics_epoch: int
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)

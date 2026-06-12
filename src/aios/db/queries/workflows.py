@@ -70,6 +70,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         launcher_session_id=row["launcher_session_id"],
         script=row["script"],
         script_sha=row["script_sha"],
+        host_semantics_epoch=row["host_semantics_epoch"],
         tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
         mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
         http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
@@ -406,6 +407,7 @@ async def insert_wf_run(
     environment_id: str,
     script: str,
     script_sha: str,
+    host_semantics_epoch: int,
     input: Any = None,
     parent_run_id: str | None = None,
     launcher_session_id: str | None = None,
@@ -423,10 +425,10 @@ async def insert_wf_run(
             """
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
-                 launcher_session_id, script, script_sha, status, input,
+                 launcher_session_id, script, script_sha, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9::jsonb,
-                    $10::jsonb, $11::jsonb, $12::jsonb, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10::jsonb,
+                    $11::jsonb, $12::jsonb, $13::jsonb, $14)
             RETURNING *
             """,
             new_id,
@@ -437,6 +439,7 @@ async def insert_wf_run(
             launcher_session_id,
             script,
             script_sha,
+            host_semantics_epoch,
             json.dumps(input) if input is not None else None,
             json.dumps([t.model_dump() for t in (tools or [])]),
             json.dumps([s.model_dump() for s in (mcp_servers or [])]),

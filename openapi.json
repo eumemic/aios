@@ -16113,6 +16113,10 @@
             "type": "string",
             "title": "Script Sha"
           },
+          "host_semantics_epoch": {
+            "type": "integer",
+            "title": "Host Semantics Epoch"
+          },
           "tools": {
             "items": {
               "$ref": "#/components/schemas/ToolSpec"
@@ -16198,6 +16202,7 @@
           "environment_id",
           "script",
           "script_sha",
+          "host_semantics_epoch",
           "status",
           "last_event_seq",
           "created_at",

@@ -48,11 +48,12 @@ from aios.logging import get_logger
 from aios.models.attenuation import surface_of
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
 from aios.services import attenuation as attenuation_service
-from aios.services.sessions import create_child_session
+from aios.services.sessions import create_child_session, fail_open_child_requests_conn
 from aios.services.wake import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.tools.registry import tool_executes_class
 from aios.workflows import run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
+from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from aios.workflows.host_launcher import EmittedCapability, run_script_host
 
 log = get_logger("aios.workflows.step")
@@ -292,6 +293,21 @@ async def _run_workflow_step_body(
         # natural terminal already returned at the ``TERMINAL_RUN_STATUSES`` guard above.
         if (cancel_sig := signals.get(wf_queries.CANCEL_SIGNAL_CALL_KEY)) is not None:
             await _cancel_run(conn, run, reason=cancel_sig.result)
+            return
+
+        if run.host_semantics_epoch != HOST_SEMANTICS_EPOCH:
+            await _complete_run(
+                conn,
+                run,
+                output=(
+                    "engine semantics changed: this run was created under "
+                    f"host-semantics epoch {run.host_semantics_epoch} but the worker now "
+                    f"runs epoch {HOST_SEMANTICS_EPOCH}; relaunch the workflow to run it "
+                    "under the current engine"
+                ),
+                is_error=True,
+                error_kind="engine_semantics_changed",
+            )
             return
 
         memo: dict[str, Any] = {
@@ -968,6 +984,24 @@ async def _cancel_run(conn: asyncpg.Connection[Any], run: WfRun, *, reason: Any 
     await _commit_terminal_and_dispatch(conn, run, status="cancelled", payload=payload, output=None)
 
 
+async def _fail_child_requests_for_terminal_error(
+    conn: asyncpg.Connection[Any], run: WfRun, *, error_kind: str
+) -> None:
+    rows = await conn.fetch(
+        "SELECT id FROM sessions "
+        "WHERE parent_run_id = $1 AND account_id = $2 AND archived_at IS NULL",
+        run.id,
+        run.account_id,
+    )
+    for row in rows:
+        await fail_open_child_requests_conn(
+            conn,
+            row["id"],
+            account_id=run.account_id,
+            error={"kind": error_kind},
+        )
+
+
 async def _commit_terminal_and_dispatch(
     conn: asyncpg.Connection[Any],
     run: WfRun,
@@ -994,6 +1028,10 @@ async def _commit_terminal_and_dispatch(
         inserted = await wf_queries.append_run_event(
             conn, account_id=run.account_id, run_id=run.id, type="run_completed", payload=payload
         )
+        if status == "errored" and (error := payload.get("error")) is not None:
+            kind = error.get("kind")
+            if kind in {"engine_semantics_changed", "nondeterministic_replay"}:
+                await _fail_child_requests_for_terminal_error(conn, run, error_kind=kind)
         await wf_queries.set_run_terminal(
             conn, run.id, status=status, output=output, account_id=run.account_id
         )

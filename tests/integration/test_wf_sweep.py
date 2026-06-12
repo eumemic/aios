@@ -20,6 +20,7 @@ import pytest
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.models.workflows import WfRunSignalKind
+from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from aios.workflows.sweep import wake_runs_needing_step
 
 pytestmark = pytest.mark.integration
@@ -69,6 +70,7 @@ async def _make_run(pool: asyncpg.Pool[Any], *, status: str = "suspended") -> st
             workflow_id=wf.id,
             environment_id="env_sw",
             script="x",
+            host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             script_sha="x",
         )
         if status != "pending":

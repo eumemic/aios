@@ -24,6 +24,7 @@ from aios.services.vaults import (
     resolve_run_env_var_credentials,
     resolve_session_env_var_credentials,
 )
+from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
 pytestmark = pytest.mark.integration
 
@@ -117,6 +118,7 @@ async def _make_run(pool: asyncpg.Pool[Any], *, vault_ids: list[str] | None = No
             workflow_id=wf.id,
             environment_id=ENV,
             script=wf.script,
+            host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             script_sha=hashlib.sha256(wf.script.encode("utf-8")).hexdigest(),
         )
         if vault_ids:

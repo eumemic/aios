@@ -1,0 +1,133 @@
+{
+  "call_keys": {
+    "base": [
+      "sha:0aca7f5613d6d7c341368af9a870ba8738d96dc241b4c10834c3172367747c59#0",
+      "sha:c3b7c0a87f3a4c93055e63f6465942d700d53cc78532cb76082935cc503479ec#0",
+      "sha:eaa50e7f02c439677e4194c4c6ee929bf60adc5109a443284ce47d1f38122066#0",
+      "sha:eaa50e7f02c439677e4194c4c6ee929bf60adc5109a443284ce47d1f38122066#1",
+      "sha:9665b5e91aec5f3f4b2a36bda3ea7dc513aa30511cbeefbfd0b3982357f7d81b#0"
+    ],
+    "parallel_branch": [
+      "0.1/sha:744f2ac661468c49fb80aad7fd56b5fd12463fc650533aafece435eb37a7795d#0",
+      "0.1/sha:f58823ec8c5a90ca9badad8eed3d250ff67410ed77d833d0ae5a64a002ab4307#0"
+    ]
+  },
+  "canonical_json": {
+    "int_float_tuple_order": "{\"a\":{\"a\":true,\"b\":2},\"z\":[1,1.5]}",
+    "sanitized_text": "nul\ufffdsurrogate?",
+    "unicode": "{\"text\":\"snowman \\u2603 and slash /\"}"
+  },
+  "canonical_schema_json": "{\"description\":\"float literals stay verbatim\",\"minimum\":1.0,\"multipleOf\":0.25,\"type\":\"number\"}",
+  "child_session_ids": [
+    {
+      "call_key": "sha:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#0",
+      "run_id": "run_01J00000000000000000000000",
+      "session_id": "sess_5HGH3KAY8P7P65FQ614DAHWM3H"
+    },
+    {
+      "call_key": "0.1/sha:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb#2",
+      "run_id": "run_01J00000000000000000000000",
+      "session_id": "sess_6NB6RKY6R8JZWHWAJDAGB7GR87"
+    }
+  ],
+  "epoch": 1,
+  "surface": {
+    "importable_modules": [
+      "base64",
+      "collections",
+      "dataclasses",
+      "functools",
+      "hashlib",
+      "itertools",
+      "json",
+      "math",
+      "re",
+      "statistics",
+      "string",
+      "textwrap",
+      "urllib.parse"
+    ],
+    "namespace": [
+      "AgentError",
+      "AgentNoReturnError",
+      "agent",
+      "budget",
+      "gate",
+      "log",
+      "parallel",
+      "phase",
+      "pipeline",
+      "tool"
+    ],
+    "safe_builtins": [
+      "ArithmeticError",
+      "AssertionError",
+      "AttributeError",
+      "BaseException",
+      "Ellipsis",
+      "Exception",
+      "ImportError",
+      "IndexError",
+      "KeyError",
+      "LookupError",
+      "NotImplemented",
+      "NotImplementedError",
+      "RuntimeError",
+      "StopIteration",
+      "TypeError",
+      "ValueError",
+      "ZeroDivisionError",
+      "abs",
+      "all",
+      "any",
+      "ascii",
+      "bin",
+      "bool",
+      "bytes",
+      "callable",
+      "chr",
+      "classmethod",
+      "dict",
+      "divmod",
+      "enumerate",
+      "filter",
+      "float",
+      "format",
+      "frozenset",
+      "getattr",
+      "hasattr",
+      "hash",
+      "hex",
+      "int",
+      "isinstance",
+      "issubclass",
+      "iter",
+      "len",
+      "list",
+      "map",
+      "max",
+      "min",
+      "next",
+      "object",
+      "oct",
+      "ord",
+      "pow",
+      "property",
+      "range",
+      "repr",
+      "reversed",
+      "round",
+      "set",
+      "setattr",
+      "slice",
+      "sorted",
+      "staticmethod",
+      "str",
+      "sum",
+      "super",
+      "tuple",
+      "type",
+      "zip"
+    ]
+  }
+}

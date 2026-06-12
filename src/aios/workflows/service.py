@@ -20,6 +20,7 @@ from aios.models.workflows import WfRun
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
 from aios.services.wake import defer_run_wake
+from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
 # Vertical recursion bound: how deep a chain of runs (a run whose agent() child
 # launches a sub-run, and so on) may nest. Mirrors WAKE_SESSION_MAX_DEPTH — bounds
@@ -188,6 +189,7 @@ async def create_run(
             launcher_session_id=launcher_session_id,
             script=workflow.script,
             script_sha=script_sha,
+            host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             input=input,
             # Snapshot the launch-clamped surface (like script), so a later
             # update_workflow never shifts this run's tool-authority.

@@ -20,6 +20,7 @@ from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, NotFoundError
 from aios.models.agents import ToolSpec
+from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
 
 @pytest.fixture
@@ -52,6 +53,7 @@ async def _seed_run(conn: asyncpg.Connection[Any]) -> str:
         workflow_id=wf.id,
         environment_id="env_root",
         script=wf.script,
+        host_semantics_epoch=HOST_SEMANTICS_EPOCH,
         script_sha="deadbeef",
     )
     return run.id
@@ -88,6 +90,7 @@ async def test_insert_run_snapshots_script(wf_conn: asyncpg.Connection[Any]) -> 
         workflow_id=wf.id,
         environment_id="env_root",
         script=wf.script,
+        host_semantics_epoch=HOST_SEMANTICS_EPOCH,
         script_sha="sha-v1",
     )
     assert run.id.startswith("wfr_")
@@ -451,6 +454,7 @@ async def test_list_wf_runs_filters_by_launcher_session(wf_conn: asyncpg.Connect
             environment_id="env_root",
             script=wf.script,
             script_sha="sha",
+            host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             launcher_session_id=launcher,
         )
         return run.id

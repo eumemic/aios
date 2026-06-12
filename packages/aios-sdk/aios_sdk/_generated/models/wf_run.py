@@ -39,6 +39,7 @@ class WfRun:
             environment_id (str):
             script (str):
             script_sha (str):
+            host_semantics_epoch (int):
             status (WfRunStatus):
             last_event_seq (int):
             created_at (datetime.datetime):
@@ -60,6 +61,7 @@ class WfRun:
     environment_id: str
     script: str
     script_sha: str
+    host_semantics_epoch: int
     status: WfRunStatus
     last_event_seq: int
     created_at: datetime.datetime
@@ -87,6 +89,8 @@ class WfRun:
         script = self.script
 
         script_sha = self.script_sha
+
+        host_semantics_epoch = self.host_semantics_epoch
 
         status = self.status.value
 
@@ -157,6 +161,7 @@ class WfRun:
                 "environment_id": environment_id,
                 "script": script,
                 "script_sha": script_sha,
+                "host_semantics_epoch": host_semantics_epoch,
                 "status": status,
                 "last_event_seq": last_event_seq,
                 "created_at": created_at,
@@ -202,6 +207,8 @@ class WfRun:
         script = d.pop("script")
 
         script_sha = d.pop("script_sha")
+
+        host_semantics_epoch = d.pop("host_semantics_epoch")
 
         status = WfRunStatus(d.pop("status"))
 
@@ -295,6 +302,7 @@ class WfRun:
             environment_id=environment_id,
             script=script,
             script_sha=script_sha,
+            host_semantics_epoch=host_semantics_epoch,
             status=status,
             last_event_seq=last_event_seq,
             created_at=created_at,
