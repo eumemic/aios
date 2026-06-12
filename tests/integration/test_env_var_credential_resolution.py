@@ -241,17 +241,34 @@ async def test_other_tenants_credentials_invisible(
     vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
 ) -> None:
     """The query's ``vc.account_id`` filter is load-bearing, so construct
-    the state where ONLY it excludes the foreign row: bind the other
-    tenant's vault directly into this session (``set_session_vaults``
-    FK-checks vault existence, not ownership, so the binding goes
-    through) and assert the foreign credential still never resolves."""
+    the state where ONLY it excludes the foreign row: force a cross-tenant
+    ``session_vaults`` binding and assert the foreign credential still
+    never resolves.
+
+    ``set_session_vaults`` now validates vault ownership (issue #851), so a
+    foreign bind can no longer be created through it — the row below is
+    injected via direct SQL INSERT to model a pre-validation legacy/forced
+    bad row that the read-side ``vc.account_id`` filter must still exclude.
+    Mirrors the direct-INSERT idiom in
+    ``test_session_cross_tenant_isolation.py``."""
     pool = vault_pool
     theirs = await _make_vault(pool, "their-vault", account_id=ACC_OTHER)
     await _make_env_cred(pool, crypto_box, theirs, "API_KEY", "their-secret", account_id=ACC_OTHER)
     mine = await _make_vault(pool, "my-vault")
     await _make_env_cred(pool, crypto_box, mine, "OTHER_KEY", "my-secret")
 
-    session_id = await _make_session(pool, vault_ids=[theirs, mine])
+    # Bind only the owned vault through the (now-validating) helper; force the
+    # foreign vault in directly. Column list matches set_session_vaults' INSERT.
+    session_id = await _make_session(pool, vault_ids=[mine])
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO session_vaults (session_id, vault_id, rank, account_id) "
+            "VALUES ($1, $2, $3, $4)",
+            session_id,
+            theirs,
+            1,
+            ACC,
+        )
     resolved = await _resolve(pool, crypto_box, session_id)
 
     assert [(r.secret_name, r.secret_value) for r in resolved] == [("OTHER_KEY", "my-secret")]

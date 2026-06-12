@@ -445,6 +445,240 @@ class TestTwoTenantIsolation:
         )
         assert name_only.status_code == 200, name_only.text
 
+    async def test_session_create_cross_tenant_agent_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """POST /v1/sessions binding tenant B's agent_id as tenant A must 404.
+
+        ``services.sessions.create_session`` validated only the environment as
+        account-owned; ``agent_id`` was FK-only (existence, not ownership), so
+        tenant A could bind tenant B's agent (its model / surface) into a
+        session. Match the env guard's posture (issue #851). NotFound, not a
+        cross-tenant binding.
+        """
+        ka = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-sessag-a")
+        kb = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-sessag-b")
+
+        # Tenant B owns agent_b.
+        agent_b = await http_client.post(
+            "/v1/agents",
+            headers=_bearer(kb),
+            json={"name": "sessag-agent-b", "model": "openrouter/test"},
+        )
+        assert agent_b.status_code == 201, agent_b.text
+        agent_b_id = agent_b.json()["id"]
+
+        # Tenant A owns the environment.
+        env_a = await http_client.post(
+            "/v1/environments", headers=_bearer(ka), json={"name": "sessag-env-a"}
+        )
+        assert env_a.status_code == 201, env_a.text
+        env_a_id = env_a.json()["id"]
+
+        # Tenant A targets tenant B's agent_id; expected 404, not a bound session.
+        cross = await http_client.post(
+            "/v1/sessions",
+            headers=_bearer(ka),
+            json={"agent_id": agent_b_id, "environment_id": env_a_id},
+        )
+        assert cross.status_code == 404, cross.text
+
+        # Same-tenant control: tenant A's own agent still binds a session (201).
+        agent_a = await http_client.post(
+            "/v1/agents",
+            headers=_bearer(ka),
+            json={"name": "sessag-agent-a", "model": "openrouter/test"},
+        )
+        assert agent_a.status_code == 201, agent_a.text
+        ok = await http_client.post(
+            "/v1/sessions",
+            headers=_bearer(ka),
+            json={"agent_id": agent_a.json()["id"], "environment_id": env_a_id},
+        )
+        assert ok.status_code == 201, ok.text
+
+    async def test_session_template_create_cross_tenant_agent_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """POST /v1/session-templates binding tenant B's agent as tenant A must 404.
+
+        ``create_session_template`` validated only the environment; ``agent_id``
+        was FK-only. Tenant A could bind tenant B's agent into a template. Match
+        the env guard's posture (issue #851).
+        """
+        ka = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-tmplag-a")
+        kb = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-tmplag-b")
+
+        # Tenant B owns agent_b.
+        agent_b = await http_client.post(
+            "/v1/agents",
+            headers=_bearer(kb),
+            json={"name": "tmplag-agent-b", "model": "openrouter/test"},
+        )
+        assert agent_b.status_code == 201, agent_b.text
+        agent_b_id = agent_b.json()["id"]
+
+        # Tenant A owns the environment.
+        env_a = await http_client.post(
+            "/v1/environments", headers=_bearer(ka), json={"name": "tmplag-env-a"}
+        )
+        assert env_a.status_code == 201, env_a.text
+        env_a_id = env_a.json()["id"]
+
+        # Tenant A targets tenant B's agent_id; expected 404, not a bound template.
+        cross = await http_client.post(
+            "/v1/session-templates",
+            headers=_bearer(ka),
+            json={
+                "name": "tmplag-cross",
+                "agent_id": agent_b_id,
+                "environment_id": env_a_id,
+            },
+        )
+        assert cross.status_code == 404, cross.text
+
+        # Same-tenant control: tenant A's own agent still binds a template (201).
+        agent_a = await http_client.post(
+            "/v1/agents",
+            headers=_bearer(ka),
+            json={"name": "tmplag-agent-a", "model": "openrouter/test"},
+        )
+        assert agent_a.status_code == 201, agent_a.text
+        ok = await http_client.post(
+            "/v1/session-templates",
+            headers=_bearer(ka),
+            json={
+                "name": "tmplag-own",
+                "agent_id": agent_a.json()["id"],
+                "environment_id": env_a_id,
+            },
+        )
+        assert ok.status_code == 201, ok.text
+
+    async def test_session_template_create_cross_tenant_vault_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """POST /v1/session-templates with tenant B's vault_id as tenant A must 404.
+
+        ``vault_ids`` is a plain ``text[]`` column with NO FK — a foreign id
+        would silently bind. The ownership guard rejects it (issue #851).
+        """
+        ka = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-tmplvt-a")
+        kb = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-tmplvt-b")
+
+        # Tenant A owns its agent + env.
+        agent_a = await http_client.post(
+            "/v1/agents",
+            headers=_bearer(ka),
+            json={"name": "tmplvt-agent-a", "model": "openrouter/test"},
+        )
+        assert agent_a.status_code == 201, agent_a.text
+        agent_a_id = agent_a.json()["id"]
+        env_a = await http_client.post(
+            "/v1/environments", headers=_bearer(ka), json={"name": "tmplvt-env-a"}
+        )
+        assert env_a.status_code == 201, env_a.text
+        env_a_id = env_a.json()["id"]
+
+        # Tenant B owns vault_b.
+        vault_b = await http_client.post(
+            "/v1/vaults", headers=_bearer(kb), json={"display_name": "tmplvt-vault-b"}
+        )
+        assert vault_b.status_code == 201, vault_b.text
+        vault_b_id = vault_b.json()["id"]
+
+        # Tenant A targets tenant B's vault_id; expected 404.
+        cross = await http_client.post(
+            "/v1/session-templates",
+            headers=_bearer(ka),
+            json={
+                "name": "tmplvt-cross",
+                "agent_id": agent_a_id,
+                "environment_id": env_a_id,
+                "vault_ids": [vault_b_id],
+            },
+        )
+        assert cross.status_code == 404, cross.text
+
+        # Same-tenant control: tenant A's own vault binds a template (201).
+        vault_a = await http_client.post(
+            "/v1/vaults", headers=_bearer(ka), json={"display_name": "tmplvt-vault-a"}
+        )
+        assert vault_a.status_code == 201, vault_a.text
+        ok = await http_client.post(
+            "/v1/session-templates",
+            headers=_bearer(ka),
+            json={
+                "name": "tmplvt-own",
+                "agent_id": agent_a_id,
+                "environment_id": env_a_id,
+                "vault_ids": [vault_a.json()["id"]],
+            },
+        )
+        assert ok.status_code == 201, ok.text
+
+    async def test_session_template_create_cross_tenant_memory_store_404(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """POST /v1/session-templates with tenant B's memory_store_id as tenant A must 404.
+
+        ``memory_store_ids`` is a plain ``text[]`` column with NO FK — a foreign
+        id would silently bind. The ownership guard rejects it (issue #851).
+        """
+        ka = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-tmplms-a")
+        kb = await _mint_tenant(http_client, aios_env["AIOS_API_KEY"], "iso-tmplms-b")
+
+        # Tenant A owns its agent + env.
+        agent_a = await http_client.post(
+            "/v1/agents",
+            headers=_bearer(ka),
+            json={"name": "tmplms-agent-a", "model": "openrouter/test"},
+        )
+        assert agent_a.status_code == 201, agent_a.text
+        agent_a_id = agent_a.json()["id"]
+        env_a = await http_client.post(
+            "/v1/environments", headers=_bearer(ka), json={"name": "tmplms-env-a"}
+        )
+        assert env_a.status_code == 201, env_a.text
+        env_a_id = env_a.json()["id"]
+
+        # Tenant B owns store_b.
+        store_b = await http_client.post(
+            "/v1/memory-stores", headers=_bearer(kb), json={"name": "tmplms-store-b"}
+        )
+        assert store_b.status_code == 201, store_b.text
+        store_b_id = store_b.json()["id"]
+
+        # Tenant A targets tenant B's memory_store_id; expected 404.
+        cross = await http_client.post(
+            "/v1/session-templates",
+            headers=_bearer(ka),
+            json={
+                "name": "tmplms-cross",
+                "agent_id": agent_a_id,
+                "environment_id": env_a_id,
+                "memory_store_ids": [store_b_id],
+            },
+        )
+        assert cross.status_code == 404, cross.text
+
+        # Same-tenant control: tenant A's own store binds a template (201).
+        store_a = await http_client.post(
+            "/v1/memory-stores", headers=_bearer(ka), json={"name": "tmplms-store-a"}
+        )
+        assert store_a.status_code == 201, store_a.text
+        ok = await http_client.post(
+            "/v1/session-templates",
+            headers=_bearer(ka),
+            json={
+                "name": "tmplms-own",
+                "agent_id": agent_a_id,
+                "environment_id": env_a_id,
+                "memory_store_ids": [store_a.json()["id"]],
+            },
+        )
+        assert ok.status_code == 201, ok.text
+
     async def test_keys_isolated(
         self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
     ) -> None:

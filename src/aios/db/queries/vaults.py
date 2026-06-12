@@ -603,27 +603,45 @@ async def set_session_vaults(
     *,
     account_id: str,
 ) -> None:
-    """Replace the session's vault bindings. Order is preserved via rank."""
+    """Replace the session's vault bindings, rank-ordered (first-match
+    credential resolution). Each vault must exist AND belong to ``account_id``
+    — a foreign or unknown id raises ``NotFoundError`` before any insert, so a
+    session can never bind another account's vault. The ``vault_id`` FK alone
+    checks existence, not ownership; mirrors ``set_run_vaults``. Duplicate ids
+    are de-duplicated. Order is preserved via rank.
+    """
+    deduped = list(dict.fromkeys(vault_ids))
     async with conn.transaction():
         await conn.execute(
             "DELETE FROM session_vaults WHERE session_id = $1 AND account_id = $2",
             session_id,
             account_id,
         )
-        for rank, vault_id in enumerate(vault_ids):
-            try:
-                await conn.execute(
-                    "INSERT INTO session_vaults (session_id, vault_id, rank, account_id) VALUES ($1, $2, $3, $4)",
-                    session_id,
-                    vault_id,
-                    rank,
-                    account_id,
-                )
-            except asyncpg.ForeignKeyViolationError as exc:
-                raise NotFoundError(
-                    f"vault {vault_id} not found",
-                    detail={"vault_id": vault_id},
-                ) from exc
+        if not deduped:
+            return
+        owned = {
+            str(r["id"])
+            for r in await conn.fetch(
+                "SELECT id FROM vaults WHERE id = ANY($1) AND account_id = $2",
+                deduped,
+                account_id,
+            )
+        }
+        missing = [v for v in deduped if v not in owned]
+        if missing:
+            raise NotFoundError(
+                f"vault(s) not found in this account: {missing}",
+                detail={"vault_ids": missing},
+            )
+        for rank, vault_id in enumerate(deduped):
+            await conn.execute(
+                "INSERT INTO session_vaults (session_id, vault_id, rank, account_id) "
+                "VALUES ($1, $2, $3, $4)",
+                session_id,
+                vault_id,
+                rank,
+                account_id,
+            )
 
 
 async def get_session_vault_ids(
