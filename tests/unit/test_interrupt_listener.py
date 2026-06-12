@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock
 
@@ -95,3 +95,63 @@ async def test_listener_survives_dispatch_exception(
         listener_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await listener_task
+
+
+async def test_listener_reconnects_after_context_acquisition_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_enter_attempted = asyncio.Event()
+    second_entered = asyncio.Event()
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    attempts = 0
+
+    @asynccontextmanager
+    async def fake_listen(_db_url: str) -> AsyncIterator[asyncio.Queue[str]]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            first_enter_attempted.set()
+            raise RuntimeError("listener connect failed")
+        second_entered.set()
+        yield queue
+
+    monkeypatch.setattr(
+        "aios.harness.worker.listen_for_session_interrupts",
+        fake_listen,
+    )
+    monkeypatch.setattr("aios.harness.worker._LISTEN_RECONNECT_BACKOFF_SECONDS", 0)
+
+    registry = MagicMock(spec=TaskRegistry)
+    listener_task = asyncio.create_task(_run_interrupt_listener("postgresql://stub", registry))
+    try:
+        await asyncio.wait_for(first_enter_attempted.wait(), timeout=1.0)
+        await asyncio.wait_for(second_entered.wait(), timeout=1.0)
+        assert attempts == 2
+    finally:
+        listener_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await listener_task
+
+
+async def test_listener_cancelled_error_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def fake_listen(_db_url: str) -> AsyncIterator[asyncio.Queue[str]]:
+        class CancelOnEnter:
+            def __await__(self) -> Generator[None]:
+                yield
+                raise asyncio.CancelledError
+
+        await CancelOnEnter()
+        yield asyncio.Queue()
+
+    monkeypatch.setattr(
+        "aios.harness.worker.listen_for_session_interrupts",
+        fake_listen,
+    )
+    monkeypatch.setattr("aios.harness.worker._LISTEN_RECONNECT_BACKOFF_SECONDS", 0)
+
+    registry = MagicMock(spec=TaskRegistry)
+    with pytest.raises(asyncio.CancelledError):
+        await _run_interrupt_listener("postgresql://stub", registry)

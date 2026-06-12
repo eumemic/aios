@@ -364,6 +364,15 @@ class ToolBroker:
             await self.stop()
             raise
 
+    def serve_tasks(self) -> tuple[asyncio.Task[object], ...]:
+        """Return uvicorn serve task handles created by :meth:`start`."""
+        tasks: list[asyncio.Task[object]] = []
+        if self._serve_task is not None:
+            tasks.append(self._serve_task)
+        if self._uds_serve_task is not None:
+            tasks.append(self._uds_serve_task)
+        return tuple(tasks)
+
     async def stop(self) -> None:
         try:
             # Graceful drain only matters once the server actually

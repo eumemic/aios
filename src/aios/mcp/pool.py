@@ -406,14 +406,15 @@ class McpSessionPool:
             except Exception:
                 log.exception("mcp_pool.reap_idle_loop_failed")
 
-    def start_reaper(self, idle_timeout: float) -> None:
-        """Start the idle-TTL reaper background task."""
+    def start_reaper(self, idle_timeout: float) -> asyncio.Task[None]:
+        """Start the idle-TTL reaper background task and return its handle."""
         if self._reaper_task is not None:
-            return
+            return self._reaper_task
         self._reaper_task = asyncio.create_task(
             self._reap_idle_loop(idle_timeout),
             name="mcp-pool-idle-reaper",
         )
+        return self._reaper_task
 
     def stop_reaper(self) -> None:
         """Cancel the idle-TTL reaper."""

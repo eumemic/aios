@@ -28,7 +28,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import asyncpg
 
@@ -41,7 +41,7 @@ from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.procrastinate_app import app as procrastinate_app
-from aios.harness.scheduler import event_driven_scheduler
+from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
 from aios.harness.sweep import (
     reap_stalled_jobs,
     wake_sessions_needing_inference,
@@ -101,6 +101,56 @@ def _resolve_heartbeat_path() -> Path:
 _HEARTBEAT_FILE = _resolve_heartbeat_path()
 
 
+class _SupervisedTaskFailure(TypedDict):
+    exception: BaseException | None
+
+
+def _supervise(
+    task: asyncio.Task[Any],
+    *,
+    latch: asyncio.Event,
+    fatal: _SupervisedTaskFailure,
+) -> None:
+    """Attach fail-stop supervision to one long-lived worker task."""
+
+    def _done(done: asyncio.Task[Any]) -> None:
+        if latch.is_set() or done.cancelled():
+            return
+        task_name = done.get_name()
+        try:
+            exc = done.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is None:
+            exc = RuntimeError(f"supervised task {task_name!r} returned cleanly")
+        log = get_logger("aios.worker")
+        log.error(
+            "worker.supervised_task_died",
+            task_name=task_name,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        with contextlib.suppress(OSError):
+            _HEARTBEAT_FILE.unlink(missing_ok=True)
+        fatal["exception"] = exc
+        latch.set()
+
+    task.add_done_callback(_done)
+
+
+async def _cancel_and_drain(task: asyncio.Task[Any]) -> None:
+    """Cancel a background task and suppress prior task exceptions after logging."""
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        get_logger("aios.worker").exception(
+            "worker.teardown_task_error",
+            task_name=task.get_name(),
+        )
+
+
 def _make_worker_id() -> str:
     from ulid import ULID
 
@@ -139,6 +189,8 @@ async def worker_main() -> None:
     interrupt_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
     scheduler_task: asyncio.Task[None] | None = None
+    supervised_latch = asyncio.Event()
+    supervised_failure: _SupervisedTaskFailure = {"exception": None}
 
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
@@ -149,6 +201,8 @@ async def worker_main() -> None:
         await ensure_sandbox_network()
         tool_broker = ToolBroker(socket_path=settings.tool_broker_socket_path)
         await tool_broker.start()
+        for broker_task in tool_broker.serve_tasks():
+            _supervise(broker_task, latch=supervised_latch, fatal=supervised_failure)
 
         # Register the connector subsystem's ToolProvider impl against the
         # Protocol slot from PR 3 (#328). The harness reaches the
@@ -219,22 +273,31 @@ async def worker_main() -> None:
         # pointers against store truth, then repeats hourly. Boot is not
         # blocked — a session waking mid-reconcile salvages its own corpse
         # inline under its own lock.
-        sandbox_registry.start_gc(pool)
+        sandbox_gc_task = sandbox_registry.start_gc(pool)
+        _supervise(sandbox_gc_task, latch=supervised_latch, fatal=supervised_failure)
 
         # Start container + MCP-pool idle-TTL reapers.
-        sandbox_registry.start_reaper(idle_timeout=settings.container_idle_timeout_seconds)
-        mcp_session_pool.start_reaper(idle_timeout=settings.mcp_pool_idle_timeout_seconds)
+        sandbox_reaper_task = sandbox_registry.start_reaper(
+            idle_timeout=settings.container_idle_timeout_seconds
+        )
+        _supervise(sandbox_reaper_task, latch=supervised_latch, fatal=supervised_failure)
+        mcp_reaper_task = mcp_session_pool.start_reaper(
+            idle_timeout=settings.mcp_pool_idle_timeout_seconds
+        )
+        _supervise(mcp_reaper_task, latch=supervised_latch, fatal=supervised_failure)
 
         # Start periodic sweep (every 30s).
         sweep_task = asyncio.create_task(
             _periodic_sweep(pool, task_registry, procrastinate_app.job_manager, interval=30),
             name="periodic_sweep",
         )
+        _supervise(sweep_task, latch=supervised_latch, fatal=supervised_failure)
 
         interrupt_task = asyncio.create_task(
             _run_interrupt_listener(settings.db_url, task_registry),
             name="interrupt_listener",
         )
+        _supervise(interrupt_task, latch=supervised_latch, fatal=supervised_failure)
 
         # Start event-driven scheduler. Sleeps until the next due
         # ``next_fire``, woken early by NOTIFY on
@@ -246,6 +309,7 @@ async def worker_main() -> None:
             event_driven_scheduler(pool, settings.db_url),
             name="scheduler",
         )
+        _supervise(scheduler_task, latch=supervised_latch, fatal=supervised_failure)
 
         # Start liveness heartbeat AFTER all critical resources are up,
         # so the healthcheck can't go green until the worker is fully
@@ -257,18 +321,42 @@ async def worker_main() -> None:
             _periodic_heartbeat(interval=_HEARTBEAT_INTERVAL_SECONDS),
             name="heartbeat",
         )
+        _supervise(heartbeat_task, latch=supervised_latch, fatal=supervised_failure)
 
-        await procrastinate_app.run_worker_async(
-            queues=["sessions", "connectors", "workflows"],
-            concurrency=settings.worker_concurrency,
-            wait=True,
-            install_signal_handlers=True,
-            # procrastinate defaults to NEVER deleting finished jobs, so
-            # ``procrastinate_jobs`` would grow one row per wake forever.
-            # Reap successful jobs; keep failures around for triage.
-            delete_jobs="successful",
+        worker_task = asyncio.create_task(
+            procrastinate_app.run_worker_async(
+                queues=["sessions", "connectors", "workflows"],
+                concurrency=settings.worker_concurrency,
+                wait=True,
+                install_signal_handlers=True,
+                # procrastinate defaults to NEVER deleting finished jobs, so
+                # ``procrastinate_jobs`` would grow one row per wake forever.
+                # Reap successful jobs; keep failures around for triage.
+                delete_jobs="successful",
+            ),
+            name="procrastinate-worker",
         )
+        latch_task = asyncio.create_task(supervised_latch.wait(), name="worker-supervision-latch")
+        try:
+            done, _pending = await asyncio.wait(
+                {worker_task, latch_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if latch_task in done:
+                worker_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await worker_task
+            else:
+                latch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await latch_task
+                await worker_task
+        finally:
+            latch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await latch_task
     finally:
+        supervised_latch.set()
         log.info("worker.shutdown")
         # Drop the heartbeat file BEFORE other teardown so the healthcheck
         # flips to unhealthy as soon as shutdown begins — orchestrators
@@ -277,21 +365,13 @@ async def worker_main() -> None:
         with contextlib.suppress(OSError):
             _HEARTBEAT_FILE.unlink(missing_ok=True)
         if heartbeat_task is not None:
-            heartbeat_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await heartbeat_task
+            await _cancel_and_drain(heartbeat_task)
         if sweep_task is not None:
-            sweep_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sweep_task
+            await _cancel_and_drain(sweep_task)
         if interrupt_task is not None:
-            interrupt_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await interrupt_task
+            await _cancel_and_drain(interrupt_task)
         if scheduler_task is not None:
-            scheduler_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await scheduler_task
+            await _cancel_and_drain(scheduler_task)
         if sandbox_registry is not None:
             sandbox_registry.stop_reaper()
             sandbox_registry.stop_gc()
@@ -316,6 +396,8 @@ async def worker_main() -> None:
         # would still get refused while we tear down).
         with contextlib.suppress(asyncpg.PostgresError, OSError):
             await lock_conn.close()
+        if supervised_failure["exception"] is not None:
+            raise supervised_failure["exception"]
 
 
 async def _acquire_worker_lock(
@@ -440,24 +522,34 @@ async def _run_interrupt_listener(
 ) -> None:
     """Drain pg_notify on the session-interrupt channel and cancel matching steps.
 
-    The try/except is nested INSIDE ``while True`` (mirroring
-    :func:`_periodic_sweep`): a transient failure dispatching one
-    interrupt must not silently disable the listener for the worker's
-    lifetime. ``CancelledError`` is not an :class:`Exception` subclass
-    and propagates through, so worker shutdown still exits cleanly.
+    Dispatch exceptions are isolated per payload. LISTEN connection failures
+    or termination escape to the outer reconnect loop, which mirrors the
+    scheduler: log, wait one backoff, and re-enter LISTEN indefinitely.
+    ``CancelledError`` propagates so worker shutdown remains clean.
     """
     log = get_logger("aios.worker.interrupt_listener")
-    async with listen_for_session_interrupts(db_url) as queue:
-        while True:
-            try:
-                session_id = await queue.get()
-                step_cancelled = task_registry.cancel_step(session_id)
-                tools_cancelled = task_registry.cancel_session(session_id)
-                log.info(
-                    "interrupt_listener.dispatch",
-                    session_id=session_id,
-                    step_cancelled=step_cancelled,
-                    tools_cancelled=tools_cancelled,
-                )
-            except Exception:
-                log.exception("interrupt_listener.dispatch_failed")
+    while True:
+        try:
+            async with listen_for_session_interrupts(db_url) as queue:
+                while True:
+                    try:
+                        session_id = await queue.get()
+                        if session_id == "":
+                            raise ConnectionError("session interrupt LISTEN connection terminated")
+                        step_cancelled = task_registry.cancel_step(session_id)
+                        tools_cancelled = task_registry.cancel_session(session_id)
+                        log.info(
+                            "interrupt_listener.dispatch",
+                            session_id=session_id,
+                            step_cancelled=step_cancelled,
+                            tools_cancelled=tools_cancelled,
+                        )
+                    except ConnectionError:
+                        raise
+                    except Exception:
+                        log.exception("interrupt_listener.dispatch_failed")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("interrupt_listener.listen_failed_will_retry")
+            await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_SECONDS)
