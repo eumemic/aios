@@ -92,6 +92,7 @@ class WfRun(BaseModel):
     status: WfRunStatus
     input: Any = None  # arbitrary JSON: a workflow's input need not be an object
     output: Any = None  # arbitrary JSON: the script's return value
+    budget_usd: float | None = None
     last_event_seq: int
     created_at: datetime
     updated_at: datetime
@@ -158,6 +159,7 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
   - `agent(agent_id, input, output_schema=None)`: invoke an agent and await its result.
   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
   - `gate()`: suspend until an external resume delivers a value.
+  - `budget()`: read this run's shared child-spend budget, or None when unset.
   - `parallel(thunks)`: run zero-argument callables concurrently (for example,
     `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead
     of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).
@@ -274,6 +276,11 @@ class WfRunCreate(BaseModel):
             "launches the run, these must be a subset of the launcher's own vaults; "
             "the HTTP path is unattenuated operator authority."
         ),
+    )
+    budget_usd: float | None = Field(
+        default=None,
+        gt=0,
+        description="Optional shared USD spend ceiling for this run's direct agent() children.",
     )
 
 

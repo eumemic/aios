@@ -81,6 +81,7 @@ def _run(**over: Any) -> WfRun:
         script_sha="sha",
         status="running",
         last_event_seq=0,
+        budget_usd=None,
         created_at=_DT,
         updated_at=_DT,
     )
@@ -280,6 +281,17 @@ class TestReturnShape:
         assert out["archived_at"] is None
         assert mock_unarchive.call_args.args[1] == "wf_1"
         assert mock_unarchive.call_args.kwargs["account_id"] == "acc_x"
+
+    async def test_create_run_threads_budget_usd(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(
+            "aios.services.sessions.get_session_basic",
+            AsyncMock(return_value=SimpleNamespace(environment_id="env_x", parent_run_id=None)),
+        )
+        mock_create = AsyncMock(return_value=_run(budget_usd=1.5))
+        monkeypatch.setattr("aios.services.workflows.create_run", mock_create)
+        out = await wm.create_run_handler("ses_1", {"workflow_id": "wf_1", "budget_usd": 1.5})
+        assert out["budget_usd"] == 1.5
+        assert mock_create.call_args.kwargs["budget_usd"] == 1.5
 
     async def test_await_run_passes_settings_db_url(self, monkeypatch: Any) -> None:
         mock_await = AsyncMock(

@@ -17,7 +17,7 @@ a terminal/archived run consumes no seq and leaves no gap.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, NamedTuple
 
 import asyncpg
 
@@ -76,6 +76,11 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         status=row["status"],
         input=parse_jsonb(row["input"]),
         output=parse_jsonb(row["output"]),
+        budget_usd=(
+            row["budget_total_microusd"] / 1_000_000
+            if row.get("budget_total_microusd") is not None
+            else None
+        ),
         last_event_seq=row["last_event_seq"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -407,6 +412,7 @@ async def insert_wf_run(
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
+    budget_usd: float | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
@@ -418,9 +424,9 @@ async def insert_wf_run(
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
                  launcher_session_id, script, script_sha, status, input,
-                 tools, mcp_servers, http_servers)
+                 tools, mcp_servers, http_servers, budget_total_microusd)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9::jsonb,
-                    $10::jsonb, $11::jsonb, $12::jsonb)
+                    $10::jsonb, $11::jsonb, $12::jsonb, $13)
             RETURNING *
             """,
             new_id,
@@ -435,6 +441,7 @@ async def insert_wf_run(
             json.dumps([t.model_dump() for t in (tools or [])]),
             json.dumps([s.model_dump() for s in (mcp_servers or [])]),
             json.dumps([s.model_dump() for s in (http_servers or [])]),
+            round(budget_usd * 1_000_000) if budget_usd is not None else None,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -448,6 +455,41 @@ async def insert_wf_run(
         ) from exc
     assert row is not None
     return _row_to_wf_run(row)
+
+
+class RunChildrenUsage(NamedTuple):
+    input_tokens: int
+    output_tokens: int
+    cache_read_input_tokens: int
+    cache_creation_input_tokens: int
+    cost_microusd: int
+
+
+async def run_children_usage(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
+) -> RunChildrenUsage:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            COALESCE(SUM(input_tokens), 0)::bigint AS input_tokens,
+            COALESCE(SUM(output_tokens), 0)::bigint AS output_tokens,
+            COALESCE(SUM(cache_read_input_tokens), 0)::bigint AS cache_read_input_tokens,
+            COALESCE(SUM(cache_creation_input_tokens), 0)::bigint AS cache_creation_input_tokens,
+            COALESCE(SUM(cost_microusd), 0)::bigint AS cost_microusd
+          FROM sessions
+         WHERE parent_run_id = $1 AND account_id = $2
+        """,
+        run_id,
+        account_id,
+    )
+    assert row is not None
+    return RunChildrenUsage(
+        input_tokens=row["input_tokens"],
+        output_tokens=row["output_tokens"],
+        cache_read_input_tokens=row["cache_read_input_tokens"],
+        cache_creation_input_tokens=row["cache_creation_input_tokens"],
+        cost_microusd=row["cost_microusd"],
+    )
 
 
 async def run_ancestor_depth(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> int:

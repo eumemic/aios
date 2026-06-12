@@ -25,12 +25,14 @@ class WfRunCreate:
             input_ (Any | Unset):
             vault_ids (list[str] | Unset): Vault ids to bind to the run for credential resolution. When an agent launches
                 the run, these must be a subset of the launcher's own vaults; the HTTP path is unattenuated operator authority.
+            budget_usd (float | None | Unset): Optional shared USD spend ceiling for this run's direct agent() children.
     """
 
     workflow_id: str
     environment_id: str
     input_: Any | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
+    budget_usd: float | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         workflow_id = self.workflow_id
@@ -42,6 +44,12 @@ class WfRunCreate:
         vault_ids: list[str] | Unset = UNSET
         if not isinstance(self.vault_ids, Unset):
             vault_ids = self.vault_ids
+
+        budget_usd: float | None | Unset
+        if isinstance(self.budget_usd, Unset):
+            budget_usd = UNSET
+        else:
+            budget_usd = self.budget_usd
 
         field_dict: dict[str, Any] = {}
 
@@ -55,6 +63,8 @@ class WfRunCreate:
             field_dict["input"] = input_
         if vault_ids is not UNSET:
             field_dict["vault_ids"] = vault_ids
+        if budget_usd is not UNSET:
+            field_dict["budget_usd"] = budget_usd
 
         return field_dict
 
@@ -69,11 +79,21 @@ class WfRunCreate:
 
         vault_ids = cast(list[str], d.pop("vault_ids", UNSET))
 
+        def _parse_budget_usd(data: object) -> float | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(float | None | Unset, data)
+
+        budget_usd = _parse_budget_usd(d.pop("budget_usd", UNSET))
+
         wf_run_create = cls(
             workflow_id=workflow_id,
             environment_id=environment_id,
             input_=input_,
             vault_ids=vault_ids,
+            budget_usd=budget_usd,
         )
 
         return wf_run_create

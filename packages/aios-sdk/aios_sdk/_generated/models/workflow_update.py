@@ -44,6 +44,7 @@ class WorkflowUpdate:
                   - `agent(agent_id, input, output_schema=None)`: invoke an agent and await its result.
                   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
                   - `gate()`: suspend until an external resume delivers a value.
+                  - `budget()`: read this run's shared child-spend budget, or None when unset.
                   - `parallel(thunks)`: run zero-argument callables concurrently (for example,
                     `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead
                     of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).

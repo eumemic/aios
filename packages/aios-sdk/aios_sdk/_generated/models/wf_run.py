@@ -50,6 +50,7 @@ class WfRun:
             http_servers (list[HttpServerSpec] | Unset):
             input_ (Any | Unset):
             output (Any | Unset):
+            budget_usd (float | None | Unset):
             archived_at (datetime.datetime | None | Unset):
     """
 
@@ -70,6 +71,7 @@ class WfRun:
     http_servers: list[HttpServerSpec] | Unset = UNSET
     input_: Any | Unset = UNSET
     output: Any | Unset = UNSET
+    budget_usd: float | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -131,6 +133,12 @@ class WfRun:
 
         output = self.output
 
+        budget_usd: float | None | Unset
+        if isinstance(self.budget_usd, Unset):
+            budget_usd = UNSET
+        else:
+            budget_usd = self.budget_usd
+
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
             archived_at = UNSET
@@ -169,6 +177,8 @@ class WfRun:
             field_dict["input"] = input_
         if output is not UNSET:
             field_dict["output"] = output
+        if budget_usd is not UNSET:
+            field_dict["budget_usd"] = budget_usd
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -252,6 +262,15 @@ class WfRun:
 
         output = d.pop("output", UNSET)
 
+        def _parse_budget_usd(data: object) -> float | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(float | None | Unset, data)
+
+        budget_usd = _parse_budget_usd(d.pop("budget_usd", UNSET))
+
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -287,6 +306,7 @@ class WfRun:
             http_servers=http_servers,
             input_=input_,
             output=output,
+            budget_usd=budget_usd,
             archived_at=archived_at,
         )
 
