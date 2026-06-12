@@ -35,7 +35,12 @@ TRIGGER_UPDATE_DESCRIPTION = (
     "`source` and `action`, when provided, REPLACE the stored object "
     "wholesale — send the complete object (fetch the current values via "
     "`trigger_list`). Toggling `enabled` true→false pauses the trigger "
-    "(clears next_fire); false→true resumes it (recomputes next_fire)."
+    "(clears next_fire); false→true resumes it (recomputes next_fire). "
+    "Any update whose resulting state is an enabled cron trigger always "
+    "yields a recomputed (non-NULL) next_fire, so a cron trigger that "
+    "somehow became enabled with a cleared schedule is automatically "
+    "re-armed by any update (e.g. just re-enabling it) without re-sending "
+    "`source`; one-shot and run_completion triggers are not re-armed this way."
 )
 
 _SOURCE_SCHEMA: dict[str, Any] = {
