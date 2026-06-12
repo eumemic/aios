@@ -33,6 +33,9 @@ jobs:
       - name: Check migration-number claims across open PRs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GH_REPO gives `gh pr list` its repo context — there is no checkout
+          # step, so without it gh cannot infer the repo and the listing fails.
+          GH_REPO: ${{ github.repository }}
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -40,10 +43,16 @@ jobs:
 
           migration_numbers_for_pr() {
             local pr_number="$1"
+            local files
 
-            gh api "repos/${REPOSITORY}/pulls/${pr_number}/files" \
+            # The API call must hard-fail (set -e) — only grep's no-match exit
+            # is tolerated below. A swallowed API failure would read as "no
+            # migrations claimed" and pass a real collision silently.
+            files=$(gh api "repos/${REPOSITORY}/pulls/${pr_number}/files" \
               --paginate \
-              --jq '.[].filename' \
+              --jq '.[].filename')
+
+            printf '%s\n' "${files}" \
               | grep '^migrations/versions/[0-9][0-9][0-9][0-9]_.*\.py$' \
               | sed 's|migrations/versions/||; s|_.*||' \
               | sort -u \
@@ -56,6 +65,12 @@ jobs:
           fi
 
           collision_found=0
+
+          # Capture the listing BEFORE the loop: `done < <(gh ...)` loses the
+          # substitution's exit status under set -e, so a failed listing would
+          # feed the loop nothing and the check would pass silently. Assigning
+          # to a variable makes a gh failure fail the step.
+          open_prs=$(gh pr list --state open --limit 100 --json number --jq '.[].number')
 
           while IFS= read -r other_pr; do
             if [ "${other_pr}" = "${PR_NUMBER}" ]; then
@@ -73,6 +88,6 @@ jobs:
                 collision_found=1
               fi
             done <<< "${own_numbers}"
-          done < <(gh pr list --state open --json number --jq '.[].number')
+          done <<< "${open_prs}"
 
           exit "${collision_found}"
