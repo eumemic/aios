@@ -3946,7 +3946,7 @@ async def test_bash_dispatches_while_agent_frontier_deferred(
     in the SAME wake — bash is NOT gated by the agent wave slot (gate/tool frontiers
     are unthrottled)."""
     _wave_cap(monkeypatch, workflow_max_inflight_children_per_run=1)
-    pool, _backend = wf_sandbox_runtime
+    pool, backend = wf_sandbox_runtime
     script = (
         "async def main(input):\n"
         "    return await parallel([\n"
@@ -3961,8 +3961,12 @@ async def test_bash_dispatches_while_agent_frontier_deferred(
     caps = sorted(e.payload["capability"] for e in cs)
     assert caps == ["agent", "tool"]  # one agent + the bash tool both opened
     assert len(await _deferred_keys(pool, run_id)) == 1  # the over-cap agent
-    assert len(run_tools._INFLIGHT) == 1  # the bash task was launched this wake
+    # Launch proof via the DURABLE consequence, not the transient registry: the
+    # fire-and-forget task pops itself from _INFLIGHT on completion, so peeking at
+    # the registry races a fast worker (flaked on CI 2026-06-12, run 27392429151's
+    # merge wave). Drain, then assert the backend saw exactly one exec this wake.
     await _drain_sandbox_tasks()
+    assert _backend_exec_count(backend) == 1  # the bash task launched this wake
 
 
 # (g) ──────────────────────────────────────────────────────────────────────────
