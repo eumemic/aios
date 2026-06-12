@@ -54,7 +54,7 @@ _COMPOSITE_FKS: Sequence[tuple[str, str, str]] = (
     (
         "vault_credentials",
         "vault_credentials_vault_account_id_fkey",
-        "FOREIGN KEY (vault_id, account_id) REFERENCES vaults(id, account_id)",
+        "FOREIGN KEY (vault_id, account_id) REFERENCES vaults(id, account_id) ON DELETE CASCADE",
     ),
     (
         "oauth_flows",
