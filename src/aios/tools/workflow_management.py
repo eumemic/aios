@@ -43,7 +43,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.harness import runtime
-from aios.models.workflows import WorkflowCreate, WorkflowUpdate
+from aios.models.workflows import WfRunStatus, WorkflowCreate, WorkflowUpdate
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail
@@ -140,7 +140,8 @@ class _ListRunsArgs(BaseModel):
 
     account_wide: bool = False
     workflow_id: str | None = None
-    status: str | None = None
+    status: WfRunStatus | None = None
+    parent_run_id: str | None = None
     limit: int = Field(default=50, ge=1, le=200)
     after: str | None = None
 
@@ -297,6 +298,7 @@ async def list_runs_handler(session_id: str, arguments: dict[str, Any]) -> dict[
         after=args.after,
         workflow_id=args.workflow_id,
         status=args.status,
+        parent_run_id=args.parent_run_id,
         # Default: only this session's own runs. account_wide widens to the whole account.
         launcher_session_id=None if args.account_wide else session_id,
     )
@@ -307,10 +309,15 @@ async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) ->
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_ListRunEventsArgs, arguments)
+    # Scope check (mirrors the HTTP /runs/{id}/events route): raise NotFoundError on a
+    # missing/cross-account run, so the model sees a real error instead of an empty page
+    # indistinguishable from "no events past after_seq".
+    await wf_service.get_run(pool, args.run_id, account_id=account_id)
     events = await wf_service.list_run_events(
         pool, args.run_id, account_id=account_id, after_seq=args.after_seq, limit=args.limit
     )
-    return {"events": [e.model_dump(mode="json") for e in events]}  # no truncation
+    # payloads returned in full; paging is via after_seq/limit
+    return {"events": [e.model_dump(mode="json") for e in events]}
 
 
 # ─── descriptions + registration ─────────────────────────────────────────────
@@ -367,14 +374,14 @@ GET_RUN_DESCRIPTION = (
 LIST_RUNS_DESCRIPTION = (
     "List workflow runs, newest first. By default returns only the runs YOU launched; "
     "set 'account_wide' true to list every run in the account. Optional 'workflow_id' / "
-    "'status' filters; page with 'limit' and 'after'. Rows are lean (no script or tool "
-    "surface) — fetch a single run with get_run for its full body."
+    "'status' / 'parent_run_id' filters; page with 'limit' and 'after'. Rows are lean (no "
+    "script or tool surface) — fetch a single run with get_run for its full body."
 )
 LIST_RUN_EVENTS_DESCRIPTION = (
     "Page a run's journal in sequence order (oldest first), surfacing a mid-flight run's "
     "annotation events (the log/phase progress markers a workflow emits) as they land. "
-    "Page forward with 'after_seq' (the last seq seen) and 'limit'; events are returned "
-    "untruncated."
+    "Page forward with 'after_seq' (the last seq seen); a full page means call again. "
+    "Event payloads are returned in full — the journal text is never clipped."
 )
 
 

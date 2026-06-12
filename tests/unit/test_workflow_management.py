@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import aios.tools  # noqa: F401 — registers the builtins
-from aios.errors import CryptoDecryptError, ForbiddenError
+from aios.errors import CryptoDecryptError, ForbiddenError, NotFoundError
 from aios.models.workflows import WfRun, WfRunEvent, WfRunWaitResponse, Workflow
 from aios.tools import workflow_management as wm
 from aios.tools.invoke import ToolBail, invoke_builtin
@@ -150,6 +150,12 @@ class TestSchemaRejectsInjectedTrustedIds:
             await invoke_builtin(
                 "ses_1", "get_workflow", {"workflow_id": "wf_1", "account_id": "acc_victim"}
             )
+
+    async def test_list_runs_rejects_invalid_status(self) -> None:
+        # status is a WfRunStatus enum, not free-form str: 'in_progress' is not a valid
+        # run status, so it bails at validation (rather than silently matching zero rows).
+        with pytest.raises(ToolBail):
+            await invoke_builtin("ses_1", "list_runs", {"status": "in_progress"})
 
     async def test_list_runs_account_wide_as_id_rejected(self) -> None:
         # The widen control is a bool; smuggling the sibling launcher_session_id key
@@ -287,6 +293,12 @@ class TestReadHandlers:
         assert mock_list.call_args.kwargs["workflow_id"] == "wf_9"
         assert mock_list.call_args.kwargs["status"] == "completed"
 
+    async def test_list_runs_passes_through_parent_run_id(self, monkeypatch: Any) -> None:
+        mock_list = AsyncMock(return_value=[_run()])
+        monkeypatch.setattr("aios.services.workflows.list_runs", mock_list)
+        await wm.list_runs_handler("ses_1", {"parent_run_id": "wfr_parent"})
+        assert mock_list.call_args.kwargs["parent_run_id"] == "wfr_parent"
+
     async def test_get_run_returns_full_including_script(self, monkeypatch: Any) -> None:
         monkeypatch.setattr(
             "aios.services.workflows.get_run",
@@ -300,6 +312,8 @@ class TestReadHandlers:
     async def test_list_run_events_pages_and_preserves_annotation_order(
         self, monkeypatch: Any
     ) -> None:
+        # Pre-flight get_run must resolve (a real run exists) so the journal read proceeds.
+        monkeypatch.setattr("aios.services.workflows.get_run", AsyncMock(return_value=_run()))
         mock_ev = AsyncMock(
             return_value=[
                 _event(seq=2, payload={"kind": "phase", "text": "a"}),
@@ -314,3 +328,13 @@ class TestReadHandlers:
         assert out["events"][0]["payload"]["kind"] == "phase"
         assert mock_ev.call_args.kwargs["after_seq"] == 1
         assert mock_ev.call_args.kwargs["limit"] == 50
+
+    async def test_list_run_events_raises_for_unknown_run(self, monkeypatch: Any) -> None:
+        # A nonexistent / cross-account run_id must surface as a real NotFoundError the
+        # model can act on — not an empty event list indistinguishable from "no new events".
+        monkeypatch.setattr(
+            "aios.services.workflows.get_run",
+            AsyncMock(side_effect=NotFoundError("workflow run not found")),
+        )
+        with pytest.raises(NotFoundError):
+            await wm.list_run_events_handler("ses_1", {"run_id": "wfr_missing"})
