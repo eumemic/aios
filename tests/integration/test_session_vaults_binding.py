@@ -131,3 +131,29 @@ async def test_create_session_rejects_foreign_agent(
             metadata={},
         )
     assert await _acc_a_session_count() == before
+
+
+async def test_update_session_rejects_foreign_agent(
+    pool_three_accounts: asyncpg.Pool[Any],
+) -> None:
+    """``update_session`` rebinding acc_a's session to acc_b's agent raises
+    NotFoundError — the agent FK proves existence, not ownership — and the
+    session keeps its original agent (the create-clean-then-update-dirty
+    bypass this guard closes)."""
+    pool = pool_three_accounts
+    agent_a, _env_a, session = await seed_agent_env_session(pool, account_id="acc_a", prefix="sv")
+    agent_b, _env_b, _session_b = await seed_agent_env_session(
+        pool, account_id="acc_b", prefix="svb"
+    )
+
+    with pytest.raises(NotFoundError):
+        await sessions_service.update_session(
+            pool,
+            session.id,
+            account_id="acc_a",
+            agent_id=agent_b.id,
+        )
+
+    async with pool.acquire() as conn:
+        current = await queries.get_session(conn, session.id, account_id="acc_a")
+    assert current.agent_id == agent_a.id

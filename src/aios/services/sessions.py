@@ -1276,6 +1276,13 @@ async def update_session(
     # One transaction so a 4xx from resource attach (e.g. name collision)
     # rolls back the earlier title/agent/vault writes.
     async with pool.acquire() as conn, conn.transaction():
+        # Validate agent ownership before rebinding — only when a new agent_id
+        # is supplied (omitting it preserves the current binding). The bare FK
+        # on agent_id checks existence, not ownership, so a foreign agent id
+        # would silently rebind another tenant's model/surface. Mirrors the
+        # create_session guard (issue #851).
+        if agent_id is not None:
+            await queries.get_agent(conn, agent_id, account_id=account_id)
         session = await queries.update_session(
             conn,
             session_id,

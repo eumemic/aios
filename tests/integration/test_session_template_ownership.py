@@ -140,3 +140,76 @@ async def test_create_template_with_own_resources_succeeds(
     )
     assert tmpl.vault_ids == [own_vault.id]
     assert tmpl.memory_store_ids == [own_store.id]
+
+
+async def _own_template(pool: asyncpg.Pool[Any]) -> str:
+    """Create a clean acc_a-owned template and return its id (the clean half
+    of the create-clean-then-update-dirty bypass these tests pin shut)."""
+    agent_a, env_a, _s = await seed_agent_env_session(pool, account_id="acc_a", prefix="stu")
+    tmpl = await session_templates_service.create_session_template(
+        pool,
+        account_id="acc_a",
+        name="tmpl-update-base",
+        agent_id=agent_a.id,
+        environment_id=env_a.id,
+        agent_version=None,
+        vault_ids=[],
+        memory_store_ids=[],
+        metadata={},
+    )
+    return tmpl.id
+
+
+async def test_update_template_rejects_foreign_agent(
+    pool_three_accounts: asyncpg.Pool[Any],
+) -> None:
+    """Updating a clean acc_a template to bind acc_b's agent → NotFoundError."""
+    pool = pool_three_accounts
+    template_id = await _own_template(pool)
+    agent_b, _env_b, _sb = await seed_agent_env_session(pool, account_id="acc_b", prefix="stub")
+
+    with pytest.raises(NotFoundError):
+        await session_templates_service.update_session_template(
+            pool,
+            template_id,
+            account_id="acc_a",
+            agent_id=agent_b.id,
+        )
+
+
+async def test_update_template_rejects_foreign_vault(
+    pool_three_accounts: asyncpg.Pool[Any],
+) -> None:
+    """Updating a clean acc_a template to bind acc_b's vault → NotFoundError."""
+    pool = pool_three_accounts
+    template_id = await _own_template(pool)
+    vault_b = await vaults_service.create_vault(
+        pool, account_id="acc_b", display_name="b-vault", metadata={}
+    )
+
+    with pytest.raises(NotFoundError):
+        await session_templates_service.update_session_template(
+            pool,
+            template_id,
+            account_id="acc_a",
+            vault_ids=[vault_b.id],
+        )
+
+
+async def test_update_template_rejects_foreign_memory_store(
+    pool_three_accounts: asyncpg.Pool[Any],
+) -> None:
+    """Updating a clean acc_a template to bind acc_b's store → NotFoundError."""
+    pool = pool_three_accounts
+    template_id = await _own_template(pool)
+    store_b = await memory_stores_service.create_store(
+        pool, account_id="acc_b", name="b-store", description="", metadata={}
+    )
+
+    with pytest.raises(NotFoundError):
+        await session_templates_service.update_session_template(
+            pool,
+            template_id,
+            account_id="acc_a",
+            memory_store_ids=[store_b.id],
+        )
