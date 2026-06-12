@@ -150,6 +150,31 @@ async def update_environment(
     return _row_to_environment(row)
 
 
+async def get_environment_config_for_id(
+    conn: asyncpg.Connection[Any],
+    env_id: str,
+    *,
+    account_id: str,
+) -> EnvironmentConfig | None:
+    """Return the :class:`EnvironmentConfig` for ``env_id``, or ``None`` if absent.
+
+    The by-id analog of :func:`get_environment_config_for_session` (which joins
+    through ``sessions``). Used by the workflow-run sandbox provision path (#988),
+    whose owner is a ``wf_runs`` row carrying a NOT-NULL ``environment_id`` — there
+    is no session to join through. Account-scoped, so a run can never read another
+    tenant's environment config.
+    """
+    row = await conn.fetchrow(
+        "SELECT config FROM environments WHERE id = $1 AND account_id = $2",
+        env_id,
+        account_id,
+    )
+    if row is None:
+        return None
+    config_data = parse_jsonb(row["config"])
+    return EnvironmentConfig.model_validate(config_data)
+
+
 async def get_environment_config_for_session(
     conn: asyncpg.Connection[Any],
     session_id: str,

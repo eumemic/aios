@@ -129,7 +129,7 @@ async def install_egress_ca(backend: SandboxBackend, handle: SandboxHandle) -> N
     if result.exit_code != 0:
         log.warning(
             "sandbox.egress_ca_install_failed",
-            session_id=handle.session_id,
+            owner_id=handle.owner_id,
             exit_code=result.exit_code,
             stderr=result.stderr[:500],
         )
@@ -171,7 +171,7 @@ async def install_packages(
         if result.exit_code != 0:
             log.warning(
                 "sandbox.package_install_failed",
-                session_id=handle.session_id,
+                owner_id=handle.owner_id,
                 manager=manager,
                 exit_code=result.exit_code,
                 stderr=result.stderr[:500],
@@ -372,19 +372,19 @@ async def apply_network_lockdown(
     except SandboxBackendError:
         # Don't swallow an infra failure into a wide-open sandbox: a Limited
         # policy whose lockdown couldn't even run must fail the provision.
-        log.warning("sandbox.network_lockdown_sidecar_error", session_id=handle.session_id)
+        log.warning("sandbox.network_lockdown_sidecar_error", owner_id=handle.owner_id)
         raise
 
     if result.exit_code != 0:
         log.warning(
             "sandbox.network_lockdown_failed",
-            session_id=handle.session_id,
+            owner_id=handle.owner_id,
             exit_code=result.exit_code,
             stderr=result.stderr[:500],
         )
         raise SandboxBackendError(
             f"network lockdown failed (exit {result.exit_code}) for session "
-            f"{handle.session_id}; refusing to run a Limited sandbox with "
+            f"{handle.owner_id}; refusing to run a Limited sandbox with "
             f"unrestricted networking"
         )
 
@@ -398,23 +398,23 @@ async def apply_network_lockdown(
             max_output_bytes=settings.bash_max_output_bytes,
         )
     except SandboxBackendError:
-        log.warning("sandbox.network_lockdown_verify_error", session_id=handle.session_id)
+        log.warning("sandbox.network_lockdown_verify_error", owner_id=handle.owner_id)
         raise
     if verify.exit_code != 0:
         log.warning(
             "sandbox.network_lockdown_verify_failed",
-            session_id=handle.session_id,
+            owner_id=handle.owner_id,
             exit_code=verify.exit_code,
         )
         raise SandboxBackendError(
-            f"network lockdown verification failed for session {handle.session_id}: "
+            f"network lockdown verification failed for session {handle.owner_id}: "
             "OUTPUT policy is not DROP after apply; refusing to run a Limited "
             "sandbox with unverified networking"
         )
 
     log.info(
         "sandbox.network_lockdown_applied",
-        session_id=handle.session_id,
+        owner_id=handle.owner_id,
         allowed_host_count=len(allowed),
         extra_host_port_count=len(extra_host_ports),
         dnat_host_count=len(dnat_hosts),

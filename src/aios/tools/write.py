@@ -221,6 +221,7 @@ def _register() -> None:
         parameters_schema=WRITE_PARAMETERS_SCHEMA,
         handler=write_handler,
         transport="agent_tool",
+        executes="sandbox",
     )
 
 

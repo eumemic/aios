@@ -186,6 +186,7 @@ def _register() -> None:
         parameters_schema=BASH_PARAMETERS_SCHEMA,
         handler=bash_handler,
         transport="agent_tool",
+        executes="sandbox",
     )
 
 

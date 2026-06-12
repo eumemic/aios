@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from aios.errors import AiosError
 from aios.models.agents import PermissionPolicy, ToolTransport
@@ -101,6 +101,13 @@ class ToolDefinition:
     ship as ``"agent_tool"`` so the model stays the bottleneck for
     irreversible effects; an operator can override per-agent via
     ``ToolSpec.transport``.
+
+    ``executes`` is the execution-class of the handler — ``"worker"`` (the
+    default: owner-agnostic network/credential tools the worker runs in-process)
+    or ``"sandbox"`` (the filesystem tools that need a provisioned container).
+    The workflow-run step reads it to route a ``tool('bash')`` call to the
+    run-sandbox executor; the session path doesn't consult it (every built-in
+    already runs against the session's own sandbox there).
     """
 
     name: str
@@ -108,6 +115,7 @@ class ToolDefinition:
     parameters_schema: dict[str, Any]
     handler: ToolHandler
     transport: ToolTransport = "both"
+    executes: Literal["worker", "sandbox"] = "worker"
     classify_permission: ClassifyPermission | None = None
 
 
@@ -125,6 +133,7 @@ class ToolRegistry:
         parameters_schema: dict[str, Any],
         handler: ToolHandler,
         transport: ToolTransport = "both",
+        executes: Literal["worker", "sandbox"] = "worker",
         classify_permission: ClassifyPermission | None = None,
     ) -> None:
         """Register a tool. Raises :class:`DuplicateToolError` on name clash.
@@ -143,6 +152,7 @@ class ToolRegistry:
             parameters_schema=parameters_schema,
             handler=handler,
             transport=transport,
+            executes=executes,
             classify_permission=classify_permission,
         )
 
@@ -155,6 +165,13 @@ class ToolRegistry:
                 detail={"name": name},
             )
         return tool
+
+    def tool_executes_class(self, name: str) -> str:
+        """Execution-class of ``name`` — ``"sandbox"`` for the filesystem built-ins,
+        ``"worker"`` otherwise (including an unregistered name, so the run-step
+        router never crashes on a tool its gate will reject as a value)."""
+        tool = self._tools.get(name)
+        return tool.executes if tool is not None else "worker"
 
     def has(self, name: str) -> bool:
         return name in self._tools
@@ -251,6 +268,15 @@ def transport_defaults() -> dict[str, ToolTransport]:
     worker startup). Read once by the caller and passed in.
     """
     return {name: registry.get(name).transport for name in registry.names()}
+
+
+def tool_executes_class(name: str) -> str:
+    """Module-level accessor for a built-in's execution-class (``worker``/``sandbox``).
+
+    Mirrors the other module-level registry helpers so callers can patch the
+    function on the module. Defaults unregistered names to ``"worker"``.
+    """
+    return registry.tool_executes_class(name)
 
 
 def effective_transport(name: str, agent_tools: list[AgentToolSpec]) -> ToolTransport:

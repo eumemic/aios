@@ -50,7 +50,8 @@ from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
 from aios.services import attenuation as attenuation_service
 from aios.services.sessions import create_child_session
 from aios.services.wake import defer_run_wake, defer_trigger_fire, defer_wake
-from aios.workflows import run_tools
+from aios.tools.registry import tool_executes_class
+from aios.workflows import run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.host_launcher import EmittedCapability, run_script_host
 
@@ -261,13 +262,27 @@ async def _run_workflow_step_body(
                     # non-idempotent http_request).
                     sig = await wf_queries.read_run_signal(conn, run_id, call_key)
                     if sig is None:
-                        run_tools.launch_tool_task(
-                            pool,
-                            run,
-                            call_key=call_key,
-                            tool_name=cap_payload["tool_name"],
-                            tool_input=cap_payload.get("input"),
-                        )
+                        # Cold re-dispatch routes by the tool's execution class:
+                        # a sandbox tool (bash) re-launches against the run's
+                        # provisioned container, everything else on the worker.
+                        # Both register in the SHARED run_tools._INFLIGHT, so the
+                        # has_inflight guard above is class-agnostic.
+                        if tool_executes_class(cap_payload["tool_name"]) == "sandbox":
+                            run_sandbox.launch_sandbox_task(
+                                pool,
+                                run,
+                                call_key=call_key,
+                                tool_name=cap_payload["tool_name"],
+                                tool_input=cap_payload.get("input"),
+                            )
+                        else:
+                            run_tools.launch_tool_task(
+                                pool,
+                                run,
+                                call_key=call_key,
+                                tool_name=cap_payload["tool_name"],
+                                tool_input=cap_payload.get("input"),
+                            )
                         continue
                 if sig is None:
                     continue  # a live task is still running — stay suspended, it will signal
@@ -319,6 +334,9 @@ async def _run_workflow_step_body(
     # (call_key, tool_name, input) for tool frontiers opened this wake — launched AFTER
     # the txn commits (below), so call_started is visible before a task can signal+wake.
     tools_to_launch: list[tuple[str, str, Any]] = []
+    # Same shape + same post-commit launch discipline, for tool frontiers whose tool
+    # runs in the run's sandbox (bash) rather than on the worker.
+    sandboxes_to_launch: list[tuple[str, str, Any]] = []
     async with pool.acquire() as conn:
         # Journal this wake's progress annotations (log()/phase()) FIRST — before the
         # raised/returned/suspended dispatch — so a line emitted just before a crash or
@@ -541,7 +559,14 @@ async def _run_workflow_step_body(
                         "input": spec.get("input"),
                     },
                 )
-                tools_to_launch.append((cap.call_key, tool_name, spec.get("input")))
+                # Route by execution class: a sandbox tool (bash) launches against
+                # the run's provisioned container, everything else on the worker.
+                # The journaled payload is identical (bash rides the `tool`
+                # capability); only the launcher differs.
+                if tool_executes_class(tool_name) == "sandbox":
+                    sandboxes_to_launch.append((cap.call_key, tool_name, spec.get("input")))
+                else:
+                    tools_to_launch.append((cap.call_key, tool_name, spec.get("input")))
             else:
                 # parallel/pipeline reach the step as their `agent` leaves (B2.G);
                 # any other capability id is unknown.
@@ -566,6 +591,10 @@ async def _run_workflow_step_body(
     # already-delivered gate resume opened this wake.
     for launch_key, launch_name, launch_input in tools_to_launch:
         run_tools.launch_tool_task(
+            pool, run, call_key=launch_key, tool_name=launch_name, tool_input=launch_input
+        )
+    for launch_key, launch_name, launch_input in sandboxes_to_launch:
+        run_sandbox.launch_sandbox_task(
             pool, run, call_key=launch_key, tool_name=launch_name, tool_input=launch_input
         )
     if needs_rewake:
@@ -844,3 +873,10 @@ async def _commit_terminal_and_dispatch(
             await defer_trigger_fire(fire.trigger_id, fire.trigger_run_id)
         except Exception:
             log.exception("trigger.fire_defer_failed", trigger_run_id=fire.trigger_run_id)
+    # Release the run's ephemeral sandbox now the run is terminal (#988). Fires on
+    # EVERY terminal state — completed / errored / cancelled all route through here
+    # — and is best-effort: ``teardown_run_sandbox`` schedules a fire-and-forget
+    # ``release_run`` and NEVER raises, so a teardown hiccup can't corrupt the
+    # just-committed terminal transition. If a sandbox was never provisioned (the
+    # common no-bash run), ``release_run`` is a no-op.
+    run_sandbox.teardown_run_sandbox(run.id)

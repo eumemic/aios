@@ -44,10 +44,13 @@ from aios.tools.web_search import web_search_handler
 
 log = get_logger("aios.workflows.run_tools")
 
-# The network/credential builtins a run may call directly (slice 2). Sandbox tools
-# (bash/read/…) and authed-MCP / search_events are out of scope (filesystem horizon /
-# later slices).
-RUN_TOOLS: frozenset[str] = frozenset({"web_search", "web_fetch", "http_request"})
+# The builtins a run may call directly. The network/credential trio run on the
+# worker (:func:`invoke_run_tool`); ``bash`` runs in the run's provisioned sandbox
+# (:mod:`aios.workflows.run_sandbox`) — the step routes by the tool's execution
+# class. The other sandbox builtins (read/write/edit/glob/grep) and authed-MCP /
+# search_events stay out of scope (later slices), so a ``tool('read')`` is a
+# recoverable not-callable value at the run frontier.
+RUN_TOOLS: frozenset[str] = frozenset({"web_search", "web_fetch", "http_request", "bash"})
 
 # Per-worker in-flight tool tasks, keyed (run_id, call_key). Gates *launching* (so a
 # sibling-triggered re-wake — e.g. parallel([tool(), agent()]) — doesn't double-dispatch a
@@ -118,15 +121,31 @@ async def _run_tool_task(
         _INFLIGHT.pop((run.id, call_key), None)
 
 
+def gate_run_tool(run: WfRun, tool_name: str) -> dict[str, Any] | None:
+    """The run-tool surface gate, shared by the worker (:func:`invoke_run_tool`) and
+    sandbox (:func:`aios.workflows.run_sandbox._execute`) executors so the exact
+    error strings live in ONE place.
+
+    A tool is callable from a run only if it is in the run-callable set
+    (:data:`RUN_TOOLS`) AND declared+enabled in the run's snapshotted ``tools``.
+    Returns the recoverable ``{"error": …}`` value to surface to the script when
+    either check fails (the script branches on it — gating is never run-terminal),
+    or ``None`` when the call is admitted.
+    """
+    if tool_name not in RUN_TOOLS:
+        return {"error": f"tool {tool_name!r} is not callable from a workflow run"}
+    if tool_name not in {t.type for t in run.tools if t.enabled}:
+        return {"error": f"tool {tool_name!r} is not in the workflow's declared tools"}
+    return None
+
+
 async def invoke_run_tool(
     *, run: WfRun, account_id: str, tool_name: str, tool_input: Any
 ) -> dict[str, Any]:
     """Dispatch one declared tool for a run. Always returns a dict (success or ``{"error": …}``);
     never raises — gating, validation, and handler errors all surface as recoverable values."""
-    if tool_name not in RUN_TOOLS:
-        return {"error": f"tool {tool_name!r} is not callable from a workflow run"}
-    if tool_name not in {t.type for t in run.tools if t.enabled}:
-        return {"error": f"tool {tool_name!r} is not in the workflow's declared tools"}
+    if (err := gate_run_tool(run, tool_name)) is not None:
+        return err
 
     args = tool_input if isinstance(tool_input, dict) else {}
     schema_error = validate_arguments(args, registry.get(tool_name).parameters_schema)

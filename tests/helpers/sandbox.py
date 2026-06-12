@@ -56,7 +56,7 @@ def make_handle(
 ) -> SandboxHandle:
     """Construct a :class:`SandboxHandle` with sensible defaults for tests."""
     return SandboxHandle(
-        session_id=session_id,
+        owner_id=session_id,
         sandbox_id=sandbox_id,
         workspace_path=workspace_path or Path("/tmp/aios-test-workspace"),
         mount_snapshot=mount_snapshot,
@@ -110,7 +110,7 @@ class FakeBackend:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         self.calls.append(("create", {"session_id": spec.session_id}))
         return SandboxHandle(
-            session_id=spec.session_id,
+            owner_id=spec.session_id,
             sandbox_id=self.next_handle_id,
             workspace_path=spec.workspace.host_path,
             mount_snapshot=spec.mount_snapshot,
@@ -121,7 +121,7 @@ class FakeBackend:
 
     async def is_alive(self, handle: SandboxHandle) -> bool:
         self.calls.append(
-            ("is_alive", {"session_id": handle.session_id, "sandbox_id": handle.sandbox_id})
+            ("is_alive", {"session_id": handle.owner_id, "sandbox_id": handle.sandbox_id})
         )
         return handle.sandbox_id not in self.dead_sandbox_ids
 
@@ -138,7 +138,7 @@ class FakeBackend:
             (
                 "exec",
                 {
-                    "session_id": handle.session_id,
+                    "session_id": handle.owner_id,
                     "sandbox_id": handle.sandbox_id,
                     "command": command,
                     "timeout_seconds": timeout_seconds,
@@ -159,7 +159,7 @@ class FakeBackend:
 
     async def destroy(self, handle: SandboxHandle) -> None:
         self.calls.append(
-            ("destroy", {"session_id": handle.session_id, "sandbox_id": handle.sandbox_id})
+            ("destroy", {"session_id": handle.owner_id, "sandbox_id": handle.sandbox_id})
         )
 
     async def list_managed(
