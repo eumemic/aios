@@ -393,6 +393,31 @@ async def resolve_effective_timezone(conn: asyncpg.Connection[Any], account_id: 
     return tz
 
 
+async def resolve_effective_spend_limit_usd(
+    conn: asyncpg.Connection[Any], account_id: str
+) -> float | None:
+    """Resolve the nearest configured lifetime spend limit up the parent chain."""
+    limit: float | None = await conn.fetchval(
+        "WITH RECURSIVE chain AS ("
+        "  SELECT parent_account_id, (config->>'spend_limit_usd')::float8 AS spend_limit, 0 AS depth "
+        "    FROM accounts WHERE id = $1 AND archived_at IS NULL "
+        "  UNION ALL "
+        "  SELECT a.parent_account_id, (a.config->>'spend_limit_usd')::float8, c.depth + 1 "
+        "    FROM accounts a JOIN chain c ON a.id = c.parent_account_id "
+        "    WHERE a.archived_at IS NULL"
+        ") "
+        "SELECT spend_limit FROM chain WHERE spend_limit IS NOT NULL ORDER BY depth ASC LIMIT 1",
+        account_id,
+    )
+    return limit
+
+
+async def get_account_spent_microusd(conn: asyncpg.Connection[Any], account_id: str) -> int:
+    """Return the scalar lifetime spend meter for ``account_id``."""
+    value = await conn.fetchval("SELECT spent_microusd FROM accounts WHERE id = $1", account_id)
+    return int(value or 0)
+
+
 async def resolve_account_by_path(
     conn: asyncpg.Connection[Any],
     *,
@@ -668,6 +693,30 @@ async def hard_delete_account(conn: asyncpg.Connection[Any], account_id: str) ->
         account_id,
     )
     return bool(result.endswith(" 1"))
+
+
+async def sum_account_session_tokens(
+    conn: asyncpg.Connection[Any], account_id: str
+) -> dict[str, int]:
+    """Return cumulative token counters across this account's session rows."""
+    row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
+               COALESCE(SUM(output_tokens), 0) AS output_tokens,
+               COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
+               COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens
+          FROM sessions
+         WHERE account_id = $1
+        """,
+        account_id,
+    )
+    assert row is not None
+    return {
+        "input_tokens": int(row["input_tokens"]),
+        "output_tokens": int(row["output_tokens"]),
+        "cache_read_input_tokens": int(row["cache_read_input_tokens"]),
+        "cache_creation_input_tokens": int(row["cache_creation_input_tokens"]),
+    }
 
 
 async def count_account_resources(conn: asyncpg.Connection[Any], account_id: str) -> dict[str, int]:

@@ -74,6 +74,15 @@ class Settings(BaseSettings):
         "``openssl rand -base64 32``.",
     )
 
+    default_spend_limit_usd: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Default lifetime USD spend limit for accounts that do not set or "
+            "inherit account config spend_limit_usd. Unset means ungated."
+        ),
+    )
+
     # ── interactive OAuth (vault credential "Connect") ─────────────────────
     oauth_provider_apps: list[OAuthProviderApp] = Field(
         default_factory=list,

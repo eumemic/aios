@@ -9410,6 +9410,19 @@
             ],
             "title": "Timezone",
             "description": "IANA timezone name (e.g. 'America/Los_Angeles') used to render the per-message received-at timestamp for this account's agents. Unset inherits the parent account's timezone; the root falls back to UTC."
+          },
+          "spend_limit_usd": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend Limit Usd",
+            "description": "Lifetime USD spend limit for this account. Unset inherits the parent account's limit; the root falls back to the server default. The spend meter never resets \u2014 raise the limit to grant more spend."
           }
         },
         "additionalProperties": false,
@@ -9456,6 +9469,37 @@
       },
       "AccountUsage": {
         "properties": {
+          "spent_usd": {
+            "type": "number",
+            "title": "Spent Usd"
+          },
+          "spend_limit_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend Limit Usd"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens"
+          },
+          "cache_read_input_tokens": {
+            "type": "integer",
+            "title": "Cache Read Input Tokens"
+          },
+          "cache_creation_input_tokens": {
+            "type": "integer",
+            "title": "Cache Creation Input Tokens"
+          },
           "agents": {
             "type": "integer",
             "title": "Agents"
@@ -9491,6 +9535,12 @@
         },
         "type": "object",
         "required": [
+          "spent_usd",
+          "spend_limit_usd",
+          "input_tokens",
+          "output_tokens",
+          "cache_read_input_tokens",
+          "cache_creation_input_tokens",
           "agents",
           "environments",
           "sessions",

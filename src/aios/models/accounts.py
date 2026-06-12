@@ -27,6 +27,15 @@ class AccountConfig(BaseModel):
             "inherits the parent account's timezone; the root falls back to UTC."
         ),
     )
+    spend_limit_usd: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Lifetime USD spend limit for this account. Unset inherits the parent "
+            "account's limit; the root falls back to the server default. The spend "
+            "meter never resets — raise the limit to grant more spend."
+        ),
+    )
 
     @field_validator("timezone")
     @classmethod
@@ -95,6 +104,12 @@ class MintKeyResponse(BaseModel):
 class AccountUsage(BaseModel):
     """Per-account resource counts as returned by ``GET /v1/accounts/{id}/usage``."""
 
+    spent_usd: float
+    spend_limit_usd: float | None
+    input_tokens: int
+    output_tokens: int
+    cache_read_input_tokens: int
+    cache_creation_input_tokens: int
     agents: int
     environments: int
     sessions: int

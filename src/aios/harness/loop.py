@@ -30,7 +30,12 @@ from structlog.contextvars import bind_contextvars, clear_contextvars
 from aios.config import get_settings
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
-from aios.harness.completion import ModelCallDeadlineError, call_litellm, stream_litellm
+from aios.harness.completion import (
+    ModelCallDeadlineError,
+    call_litellm,
+    estimate_cost_usd,
+    stream_litellm,
+)
 from aios.harness.step_context import (
     compose_step_context,
     compute_step_prelude,
@@ -46,6 +51,7 @@ from aios.models.agents import (
     is_mcp_tool_name,
     resolve_permission,
 )
+from aios.services import accounts as accounts_service
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services.wake import defer_run_wake, defer_wake
@@ -89,6 +95,10 @@ _REFUSAL_STOP_REASON_MESSAGE = (
     "message to the session (optionally after switching the agent's model or "
     "trimming the conversation that triggered the refusal)."
 )
+_SPEND_CAP_STOP_REASON_MESSAGE = (
+    "This account has reached its spend limit, so no model calls can be made. "
+    "The account operator can raise the limit (account config spend_limit_usd) to resume."
+)
 
 
 def _retry_delay_for_attempt(attempt: int) -> float | None:
@@ -96,6 +106,21 @@ def _retry_delay_for_attempt(attempt: int) -> float | None:
     if attempt >= len(_RETRY_BACKOFF_SECONDS):
         return None
     return _RETRY_BACKOFF_SECONDS[attempt]
+
+
+def _limit_to_microusd(limit_usd: float | None) -> int | None:
+    if limit_usd is None:
+        return None
+    return round(limit_usd * 1_000_000)
+
+
+def _crossed_spend_warning_threshold(
+    new_spent_microusd: int, cost_microusd: int, limit_microusd: int | None
+) -> bool:
+    if limit_microusd is None or cost_microusd <= 0:
+        return False
+    threshold = 0.8 * limit_microusd
+    return new_spent_microusd >= threshold > new_spent_microusd - cost_microusd
 
 
 class _StepResult(NamedTuple):
@@ -402,6 +427,21 @@ async def _run_session_step_body(
         )
         return _StepResult()
 
+    spent_microusd, spend_limit_usd = await accounts_service.get_account_spend_state(
+        pool, account_id
+    )
+    spend_limit_microusd = _limit_to_microusd(spend_limit_usd)
+    if spend_limit_microusd is not None and spent_microusd >= spend_limit_microusd:
+        assert spend_limit_usd is not None
+        await _handle_spend_cap(
+            pool,
+            session_id,
+            spent_microusd=spent_microusd,
+            spend_limit_usd=spend_limit_usd,
+            account_id=account_id,
+        )
+        return _StepResult()
+
     # Span the remainder of the prologue so "why is the step slow?"
     # can separate context-build cost from model-call cost (issue #78).
     # Bracketing starts AFTER the dispatch early-return so every start
@@ -514,6 +554,7 @@ async def _run_session_step_body(
                 start_event_id=start_event.id,
                 usage=exc.usage,
                 cost_usd=exc.cost_usd,
+                model=agent.model,
                 account_id=account_id,
             )
             return _StepResult()
@@ -538,6 +579,12 @@ async def _run_session_step_body(
     # calibration reads (the partial index and the aggregate query both
     # filter on ``is_error=false``).
     local_tokens = approx_tokens(messages, tools=tools)
+    effective_cost_usd = cost_usd if cost_usd is not None else estimate_cost_usd(agent.model, usage)
+    if effective_cost_usd is None:
+        cost_microusd = 0
+        log.warning("usage.model_cost_unmapped", model=agent.model, session_id=session_id)
+    else:
+        cost_microusd = round(effective_cost_usd * 1_000_000)
     await sessions_service.append_event(
         pool,
         session_id,
@@ -557,15 +604,23 @@ async def _run_session_step_body(
     # Increment cumulative session-level token counters. A refusal still
     # consumed tokens upstream, so this (and the model_request_end span above)
     # runs unconditionally — only the *persist + dispatch* below is suppressed.
-    await sessions_service.increment_usage(
+    new_spent_microusd = await sessions_service.increment_usage(
         pool,
         session_id,
         input_tokens=usage.get("input_tokens", 0),
         output_tokens=usage.get("output_tokens", 0),
         cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+        cost_microusd=cost_microusd,
         account_id=account_id,
     )
+    if _crossed_spend_warning_threshold(new_spent_microusd, cost_microusd, spend_limit_microusd):
+        log.warning(
+            "account.spend_limit_warning",
+            account_id=account_id,
+            spent_usd=new_spent_microusd / 1_000_000,
+            spend_limit_usd=spend_limit_usd,
+        )
 
     # A refusal bricks the turn: the assistant message is partial/empty and its
     # tool calls may be truncated. Do NOT persist it as a normal assistant turn
@@ -1005,6 +1060,7 @@ async def _handle_streaming_model_deadline(
     start_event_id: str,
     usage: dict[str, int],
     cost_usd: float | None,
+    model: str,
     account_id: str,
 ) -> None:
     await sessions_service.append_event(
@@ -1020,6 +1076,12 @@ async def _handle_streaming_model_deadline(
         },
         account_id=account_id,
     )
+    effective_cost_usd = cost_usd if cost_usd is not None else estimate_cost_usd(model, usage)
+    if effective_cost_usd is None:
+        cost_microusd = 0
+        log.warning("usage.model_cost_unmapped", model=model, session_id=session_id)
+    else:
+        cost_microusd = round(effective_cost_usd * 1_000_000)
     await sessions_service.increment_usage(
         pool,
         session_id,
@@ -1027,6 +1089,7 @@ async def _handle_streaming_model_deadline(
         output_tokens=usage.get("output_tokens", 0),
         cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+        cost_microusd=cost_microusd,
         account_id=account_id,
     )
     deadline_s = get_settings().model_call_deadline_s
@@ -1096,6 +1159,41 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
         pool, session_id, "turn_ended", "errored", "error", account_id=account_id
     )
     return None
+
+
+async def _handle_spend_cap(
+    pool: Any,
+    session_id: str,
+    *,
+    spent_microusd: int,
+    spend_limit_usd: float,
+    account_id: str,
+) -> None:
+    """Latch a session that has reached its account spend limit."""
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "spend_cap_exceeded",
+            "is_error": True,
+            "spent_microusd": spent_microusd,
+            "spend_limit_usd": spend_limit_usd,
+        },
+        account_id=account_id,
+    )
+    await fail_all_open_requests(
+        pool, session_id, account_id=account_id, error={"kind": "spend_cap_exceeded"}
+    )
+    await sessions_service.set_session_stop_reason(
+        pool,
+        session_id,
+        {"type": "error", "message": _SPEND_CAP_STOP_REASON_MESSAGE},
+        account_id=account_id,
+    )
+    await _append_lifecycle(
+        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
+    )
 
 
 async def _handle_refusal(

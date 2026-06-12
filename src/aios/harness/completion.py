@@ -407,6 +407,28 @@ def _is_separator_placeholder(msg: dict[str, Any]) -> bool:
     return msg.get("content") == _USER_MESSAGE_SEPARATOR_CONTENT
 
 
+def estimate_cost_usd(model: str, usage: dict[str, int]) -> float | None:
+    """Estimate USD cost from canonical token counters via LiteLLM's cost map."""
+    try:
+        from litellm.types.utils import Usage
+
+        usage_object = Usage(
+            prompt_tokens=usage.get("input_tokens", 0),
+            completion_tokens=usage.get("output_tokens", 0),
+            total_tokens=usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+            prompt_tokens_details={
+                "cached_tokens": usage.get("cache_read_input_tokens", 0),
+            },
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+        )
+        prompt_cost, completion_cost = litellm.cost_per_token(
+            model=model, usage_object=usage_object
+        )
+    except Exception:
+        return None
+    return float(prompt_cost) + float(completion_cost)
+
+
 def _extract_cost(response: Any) -> float | None:
     """Pull the per-request USD cost LiteLLM computes post-call.
 
