@@ -47,6 +47,8 @@ RESERVED_SANDBOX_ENV_KEYS: frozenset[str] = frozenset(
         "TOOL_BROKER_URL",
         "TOOL_BROKER_SECRET",
         "AIOS_SESSION_ID",
+        "AIOS_RUN_ID",
+        "AIOS_IDEMPOTENCY_KEY",
     }
 )
 

@@ -41,4 +41,9 @@ def test_reserved_keys_match_injected_sandbox_env() -> None:
         )
     # With no env_config / session_env, every key in the merged env is
     # harness-injected; the reserved blocklist must cover exactly that set.
-    assert set(plan.spec.environment) == RESERVED_SANDBOX_ENV_KEYS
+    # Run-only bash exec preamble keys are also reserved even though the generic
+    # assembled plan does not inject them at container create time.
+    assert (
+        set(plan.spec.environment) | {"AIOS_RUN_ID", "AIOS_IDEMPOTENCY_KEY"}
+        == RESERVED_SANDBOX_ENV_KEYS
+    )

@@ -613,6 +613,34 @@ def mint_secret_placeholder(subkey: CryptoBox, session_id: str, credential_id: s
     return SECRET_PLACEHOLDER_PREFIX + digest[:16].hex()
 
 
+async def resolve_run_env_var_credentials(
+    conn: asyncpg.Connection[Any],
+    crypto_box: CryptoBox,
+    run_id: str,
+    *,
+    account_id: str,
+) -> list[ResolvedEnvVarCredential]:
+    """Decrypt every active env-var credential bound to ``run_id``.
+
+    Run twin of :func:`resolve_session_env_var_credentials`; placeholders are
+    minted with the run id as owner, so they are deterministic across run
+    sandbox recycles and distinct from any session placeholder.
+    """
+    rows = await queries.list_run_env_var_credentials(conn, run_id, account_id=account_id)
+    subkey = crypto_box.derive_account_subkey(account_id)
+    return [
+        ResolvedEnvVarCredential(
+            credential_id=row.credential_id,
+            secret_name=row.secret_name,
+            secret_value=cast(str, subkey.decrypt_dict(row.blob)["secret_value"]),
+            allowed_hosts=row.allowed_hosts,
+            updated_at=row.updated_at,
+            placeholder=mint_secret_placeholder(subkey, run_id, row.credential_id),
+        )
+        for row in rows
+    ]
+
+
 async def resolve_session_env_var_credentials(
     conn: asyncpg.Connection[Any],
     crypto_box: CryptoBox,

@@ -67,6 +67,7 @@ from aios.services import sessions as sessions_service
 from aios.services.vaults import (
     ResolvedEnvVarCredential,
     env_var_credential_containment_error,
+    resolve_run_env_var_credentials,
     resolve_session_env_var_credentials,
 )
 
@@ -318,6 +319,21 @@ async def _materialize_env_var_credentials(
     async with pool.acquire() as conn:
         resolved = await resolve_session_env_var_credentials(
             conn, crypto_box, session_id, account_id=account_id
+        )
+    return tuple(resolved)
+
+
+async def _materialize_run_env_var_credentials(
+    run_id: str,
+    *,
+    account_id: str,
+) -> tuple[ResolvedEnvVarCredential, ...]:
+    """Resolve + decrypt a workflow run's env-var credentials (#882)."""
+    pool = runtime.require_pool()
+    crypto_box = runtime.require_crypto_box()
+    async with pool.acquire() as conn:
+        resolved = await resolve_run_env_var_credentials(
+            conn, crypto_box, run_id, account_id=account_id
         )
     return tuple(resolved)
 
@@ -639,12 +655,10 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
     policy, tool-broker secret, plan assembly) but stripped of everything
     session-specific:
 
-    - **No memory stores / github clones / env-var credentials** — a run's bash
-      sandbox is scratch compute, not a session's attached-resource surface. So
-      ``git_proxy``/``secret_proxy`` are ``None``, the echo lists are empty, and
-      there is nothing to clean up on a partial failure (only the broker secret is
-      registered, and ``backend.create`` failures are handled by the registry's
-      ``_provision_run``).
+    - **No memory stores / github clones** — a run's bash sandbox is scratch
+      compute, not a session's attached-resource surface. Env-var credentials are
+      resolved from the run's frozen ``wf_run_vaults`` and use the same
+      placeholder + secret-egress proxy mechanics as sessions.
     - **No snapshot resume** — the run sandbox is ephemeral, so ``snapshot_ref`` is
       ``None`` (cold start every provision) and ``spec_version`` is ``0`` (a run has
       no ``sessions.spec_version`` row to drift against; the registry's run warm-hit
@@ -672,18 +686,35 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
             conn, run.environment_id, account_id=run.account_id
         )
 
-    image = _resolve_image(env_config, settings.docker_image)
+    env_var_credentials = await _materialize_run_env_var_credentials(
+        run_id, account_id=run.account_id
+    )
+    containment_error = env_var_credential_containment_error(
+        env_config, [c.allowed_hosts for c in env_var_credentials]
+    )
+    if containment_error is not None:
+        raise ValueError(containment_error)
+
     workspace_path = ensure_run_workspace_dir(run_id)
 
     tool_broker = runtime.require_tool_broker()
     tool_socket_host_path = settings.tool_broker_socket_path
-    tool_broker_secret = secrets.token_urlsafe(32)
-    tool_broker.register_session(run_id, tool_broker_secret)
+    secret_proxy: SecretEgressProxy | None = None
+    broker_registered = False
     try:
+        if env_var_credentials:
+            proxy = SecretEgressProxy(env_var_credentials)
+            await proxy.start()
+            secret_proxy = proxy
+
+        tool_broker_secret = secrets.token_urlsafe(32)
+        tool_broker.register_session(run_id, tool_broker_secret)
+        broker_registered = True
         if tool_socket_host_path is not None:
             tool_broker_url = f"unix://{TOOL_BROKER_SOCKET_SANDBOX_PATH}"
         else:
             tool_broker_url = f"http://{WORKER_NETWORK_ALIAS}:{tool_broker.port}"
+        image = _resolve_image(env_config, settings.docker_image)
         return _assemble_plan(
             session_id=run_id,
             instance_id=settings.instance_id,
@@ -700,15 +731,23 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
             tool_broker_secret=tool_broker_secret,
             tool_socket_host_path=tool_socket_host_path,
             spec_version=0,
-            env_var_credentials=(),
-            secret_proxy=None,
+            env_var_credentials=env_var_credentials,
+            secret_proxy=secret_proxy,
         )
     except BaseException:
-        # The broker secret is the only host-side resource registered above; drop
-        # it (and its on-disk .secret file) so a failure in plan assembly doesn't
-        # leak it for the worker's lifetime. Mirrors the session path's envelope.
-        tool_broker.unregister_session(run_id)
-        cleanup_session_secret_file(run_id, tool_socket_host_path)
+        # Drop every worker-side allocation made before a plan is returned.
+        if broker_registered:
+            tool_broker.unregister_session(run_id)
+            cleanup_session_secret_file(run_id, tool_socket_host_path)
+        if secret_proxy is not None:
+            try:
+                await secret_proxy.stop()
+            except Exception as cleanup_err:
+                log.warning(
+                    "sandbox.secret_proxy_cleanup_after_spec_failure",
+                    session_id=run_id,
+                    error=str(cleanup_err),
+                )
         raise
 
 

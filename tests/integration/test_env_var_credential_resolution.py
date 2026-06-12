@@ -1,23 +1,8 @@
-"""Session-scoped ``environment_variable`` credential resolution (#873).
-
-Against a real Postgres: the rank-ordered ``DISTINCT ON`` list query +
-the decrypt/mint service tail. The properties that matter:
-
-* a session resolves exactly the active env-var creds across its bound
-  vaults — header-style creds and archived rows never appear;
-* duplicate ``secret_name`` across two vaults → the lower-rank vault
-  wins (and flipping the binding order flips the winner);
-* placeholders are deterministic per (session, credential) — stable
-  across repeated resolution (so a recycle re-derives the same value)
-  and distinct across sessions;
-* tenant isolation: an identically-named credential in another
-  account's vault is invisible;
-* decrypt failures propagate (fail-hard) rather than yielding a
-  partial credential set.
-"""
+"""Session/run-scoped ``environment_variable`` credential resolution."""
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -36,6 +21,7 @@ from aios.services import agents as agents_service
 from aios.services import vaults as vaults_service
 from aios.services.vaults import (
     SECRET_PLACEHOLDER_PREFIX,
+    resolve_run_env_var_credentials,
     resolve_session_env_var_credentials,
 )
 
@@ -55,15 +41,11 @@ def crypto_box() -> CryptoBox:
 async def vault_pool(
     migrated_db_url: str, _reset_db_state: None
 ) -> AsyncIterator[asyncpg.Pool[Any]]:
-    """A pool on ``runtime.pool`` + seeded accounts and an environment."""
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
-    prev = runtime.pool
+    prev_pool = runtime.pool
     runtime.pool = pool
     try:
         async with pool.acquire() as conn:
-            # Only one active root account is allowed; the second tenant
-            # is a child of the first (tenant isolation is account_id
-            # scoping, not tree position).
             await conn.execute(
                 "INSERT INTO accounts (id, parent_account_id, can_mint_children, "
                 "display_name) VALUES ($1, NULL, TRUE, 'envvar-root')",
@@ -83,14 +65,12 @@ async def vault_pool(
             )
         yield pool
     finally:
-        runtime.pool = prev
+        runtime.pool = prev_pool
         await pool.close()
 
 
-async def _make_session(
-    pool: asyncpg.Pool[Any], *, vault_ids: list[str] | None = None, account_id: str = ACC
-) -> str:
-    agent = await agents_service.create_agent(
+async def _make_agent(pool: asyncpg.Pool[Any], *, account_id: str = ACC) -> Any:
+    return await agents_service.create_agent(
         pool,
         account_id=account_id,
         name=f"envvar-agent-{os.urandom(4).hex()}",
@@ -102,6 +82,12 @@ async def _make_session(
         window_min=1000,
         window_max=100000,
     )
+
+
+async def _make_session(
+    pool: asyncpg.Pool[Any], *, vault_ids: list[str] | None = None, account_id: str = ACC
+) -> str:
+    agent = await _make_agent(pool, account_id=account_id)
     async with pool.acquire() as conn:
         session = await db_queries.insert_session(
             conn,
@@ -115,6 +101,27 @@ async def _make_session(
         if vault_ids:
             await db_queries.set_session_vaults(conn, session.id, vault_ids, account_id=account_id)
     return session.id
+
+
+async def _make_run(pool: asyncpg.Pool[Any], *, vault_ids: list[str] | None = None) -> str:
+    async with pool.acquire() as conn:
+        wf = await db_queries.workflows.insert_workflow(
+            conn,
+            account_id=ACC,
+            name=f"envvar-wf-{os.urandom(4).hex()}",
+            script="async def main(input):\n    return input\n",
+        )
+        run = await db_queries.workflows.insert_wf_run(
+            conn,
+            account_id=ACC,
+            workflow_id=wf.id,
+            environment_id=ENV,
+            script=wf.script,
+            script_sha=hashlib.sha256(wf.script.encode("utf-8")).hexdigest(),
+        )
+        if vault_ids:
+            await db_queries.workflows.set_run_vaults(conn, run.id, vault_ids, account_id=ACC)
+    return run.id
 
 
 async def _make_vault(pool: asyncpg.Pool[Any], name: str, *, account_id: str = ACC) -> str:
@@ -157,6 +164,15 @@ async def _resolve(
         )
 
 
+async def _resolve_run(
+    pool: asyncpg.Pool[Any], crypto_box: CryptoBox, run_id: str, *, account_id: str = ACC
+) -> list[vaults_service.ResolvedEnvVarCredential]:
+    async with pool.acquire() as conn:
+        return await resolve_run_env_var_credentials(
+            conn, crypto_box, run_id, account_id=account_id
+        )
+
+
 async def test_resolves_the_set_across_ranked_vaults(
     vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
 ) -> None:
@@ -165,9 +181,6 @@ async def test_resolves_the_set_across_ranked_vaults(
     await _make_env_cred(pool, crypto_box, v1, "GITHUB_TOKEN", "ghp_one")
     await _make_env_cred(pool, crypto_box, v1, "STRIPE_KEY", "sk_two")
     await _make_env_cred(pool, crypto_box, v2, "TAVILY_KEY", "tvly_three")
-    # Noise that must NOT resolve: a header credential in the same vault
-    # (the auth_type filter is the only thing excluding it) and an
-    # archived env-var credential.
     await vaults_service.create_vault_credential(
         pool,
         crypto_box,
@@ -196,9 +209,26 @@ async def test_resolves_the_set_across_ranked_vaults(
         assert r.placeholder.startswith(SECRET_PLACEHOLDER_PREFIX)
         assert len(r.placeholder) == len(SECRET_PLACEHOLDER_PREFIX) + 32
         assert r.allowed_hosts == ("api.example.com/v1", "files.example.com")
-        # The plaintext never leaks through the dataclass repr.
         assert r.secret_value not in repr(r)
     assert len({r.placeholder for r in resolved}) == 3
+
+
+async def test_run_resolves_the_set_across_ranked_vaults(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    pool = vault_pool
+    v1, v2 = await _make_vault(pool, "rv1"), await _make_vault(pool, "rv2")
+    await _make_env_cred(pool, crypto_box, v1, "GITHUB_TOKEN", "ghp_one")
+    await _make_env_cred(pool, crypto_box, v2, "TAVILY_KEY", "tvly_three")
+    run_id = await _make_run(pool, vault_ids=[v1, v2])
+
+    resolved = await _resolve_run(pool, crypto_box, run_id)
+
+    assert {(r.secret_name, r.secret_value) for r in resolved} == {
+        ("GITHUB_TOKEN", "ghp_one"),
+        ("TAVILY_KEY", "tvly_three"),
+    }
+    assert all(r.placeholder.startswith(SECRET_PLACEHOLDER_PREFIX) for r in resolved)
 
 
 async def test_duplicate_secret_name_first_vault_wins(
@@ -211,6 +241,21 @@ async def test_duplicate_secret_name_first_vault_wins(
 
     forward = await _resolve(pool, crypto_box, await _make_session(pool, vault_ids=[v1, v2]))
     reverse = await _resolve(pool, crypto_box, await _make_session(pool, vault_ids=[v2, v1]))
+
+    assert [r.secret_value for r in forward] == ["from-v1"]
+    assert [r.secret_value for r in reverse] == ["from-v2"]
+
+
+async def test_run_duplicate_secret_name_first_vault_wins(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    pool = vault_pool
+    v1, v2 = await _make_vault(pool, "rv1"), await _make_vault(pool, "rv2")
+    await _make_env_cred(pool, crypto_box, v1, "API_KEY", "from-v1")
+    await _make_env_cred(pool, crypto_box, v2, "API_KEY", "from-v2")
+
+    forward = await _resolve_run(pool, crypto_box, await _make_run(pool, vault_ids=[v1, v2]))
+    reverse = await _resolve_run(pool, crypto_box, await _make_run(pool, vault_ids=[v2, v1]))
 
     assert [r.secret_value for r in forward] == ["from-v1"]
     assert [r.secret_value for r in reverse] == ["from-v2"]
@@ -229,36 +274,38 @@ async def test_placeholders_deterministic_per_session_distinct_across(
     (again,) = await _resolve(pool, crypto_box, s1)
     (other,) = await _resolve(pool, crypto_box, s2)
 
-    # Stable across re-resolution (a container recycle re-derives the
-    # same placeholder, so anything persisted into /workspace survives)…
     assert first.placeholder == again.placeholder
-    # …but unique per session, and never the secret.
     assert first.placeholder != other.placeholder
+    assert "val" not in first.placeholder
+
+
+async def test_run_placeholders_deterministic_owner_distinct(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    pool = vault_pool
+    vault_id = await _make_vault(pool, "rv1")
+    await _make_env_cred(pool, crypto_box, vault_id, "API_KEY", "val")
+    run_id = await _make_run(pool, vault_ids=[vault_id])
+    session_id = await _make_session(pool, vault_ids=[vault_id])
+
+    (first,) = await _resolve_run(pool, crypto_box, run_id)
+    (again,) = await _resolve_run(pool, crypto_box, run_id)
+    (session,) = await _resolve(pool, crypto_box, session_id)
+
+    assert first.placeholder == again.placeholder
+    assert first.placeholder != session.placeholder
     assert "val" not in first.placeholder
 
 
 async def test_other_tenants_credentials_invisible(
     vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
 ) -> None:
-    """The query's ``vc.account_id`` filter is load-bearing, so construct
-    the state where ONLY it excludes the foreign row: force a cross-tenant
-    ``session_vaults`` binding and assert the foreign credential still
-    never resolves.
-
-    ``set_session_vaults`` now validates vault ownership (issue #851), so a
-    foreign bind can no longer be created through it — the row below is
-    injected via direct SQL INSERT to model a pre-validation legacy/forced
-    bad row that the read-side ``vc.account_id`` filter must still exclude.
-    Mirrors the direct-INSERT idiom in
-    ``test_session_cross_tenant_isolation.py``."""
     pool = vault_pool
     theirs = await _make_vault(pool, "their-vault", account_id=ACC_OTHER)
     await _make_env_cred(pool, crypto_box, theirs, "API_KEY", "their-secret", account_id=ACC_OTHER)
     mine = await _make_vault(pool, "my-vault")
     await _make_env_cred(pool, crypto_box, mine, "OTHER_KEY", "my-secret")
 
-    # Bind only the owned vault through the (now-validating) helper; force the
-    # foreign vault in directly. Column list matches set_session_vaults' INSERT.
     session_id = await _make_session(pool, vault_ids=[mine])
     async with pool.acquire() as conn:
         await conn.execute(
@@ -274,6 +321,30 @@ async def test_other_tenants_credentials_invisible(
     assert [(r.secret_name, r.secret_value) for r in resolved] == [("OTHER_KEY", "my-secret")]
 
 
+async def test_run_other_tenants_credentials_invisible(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    pool = vault_pool
+    theirs = await _make_vault(pool, "their-run-vault", account_id=ACC_OTHER)
+    await _make_env_cred(pool, crypto_box, theirs, "API_KEY", "their-secret", account_id=ACC_OTHER)
+    mine = await _make_vault(pool, "my-run-vault")
+    await _make_env_cred(pool, crypto_box, mine, "OTHER_KEY", "my-secret")
+
+    run_id = await _make_run(pool, vault_ids=[mine])
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO wf_run_vaults (run_id, vault_id, rank, account_id) "
+            "VALUES ($1, $2, $3, $4)",
+            run_id,
+            theirs,
+            1,
+            ACC,
+        )
+    resolved = await _resolve_run(pool, crypto_box, run_id)
+
+    assert [(r.secret_name, r.secret_value) for r in resolved] == [("OTHER_KEY", "my-secret")]
+
+
 async def test_vaultless_session_resolves_empty(
     vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
 ) -> None:
@@ -281,8 +352,14 @@ async def test_vaultless_session_resolves_empty(
     assert await _resolve(vault_pool, crypto_box, session_id) == []
 
 
+async def test_vaultless_run_resolves_empty(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    run_id = await _make_run(vault_pool)
+    assert await _resolve_run(vault_pool, crypto_box, run_id) == []
+
+
 async def test_wrong_key_fails_hard(vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox) -> None:
-    """One undecryptable blob aborts resolution loudly — no partial set."""
     pool = vault_pool
     vault_id = await _make_vault(pool, "v1")
     await _make_env_cred(pool, crypto_box, vault_id, "API_KEY", "val")
@@ -292,12 +369,21 @@ async def test_wrong_key_fails_hard(vault_pool: asyncpg.Pool[Any], crypto_box: C
         await _resolve(pool, CryptoBox(os.urandom(32)), session_id)
 
 
+async def test_run_wrong_key_fails_hard(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    pool = vault_pool
+    vault_id = await _make_vault(pool, "rv1")
+    await _make_env_cred(pool, crypto_box, vault_id, "API_KEY", "val")
+    run_id = await _make_run(pool, vault_ids=[vault_id])
+
+    with pytest.raises(CryptoDecryptError):
+        await _resolve_run(pool, CryptoBox(os.urandom(32)), run_id)
+
+
 async def test_materializer_resolves_through_worker_runtime(
     vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
 ) -> None:
-    """Execute the real ``_materialize_env_var_credentials`` (everything
-    else patches it out): it pulls pool + crypto box from the worker
-    runtime and returns the resolved tuple the plan carries."""
     from aios.sandbox.spec import _materialize_env_var_credentials
 
     pool = vault_pool
@@ -309,6 +395,27 @@ async def test_materializer_resolves_through_worker_runtime(
     runtime.crypto_box = crypto_box
     try:
         resolved = await _materialize_env_var_credentials(session_id, account_id=ACC)
+    finally:
+        runtime.crypto_box = prev
+
+    assert [(r.secret_name, r.secret_value) for r in resolved] == [("API_KEY", "val")]
+    assert resolved[0].placeholder.startswith(SECRET_PLACEHOLDER_PREFIX)
+
+
+async def test_run_materializer_resolves_through_worker_runtime(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    from aios.sandbox.spec import _materialize_run_env_var_credentials
+
+    pool = vault_pool
+    vault_id = await _make_vault(pool, "rv1")
+    await _make_env_cred(pool, crypto_box, vault_id, "API_KEY", "val")
+    run_id = await _make_run(pool, vault_ids=[vault_id])
+
+    prev = runtime.crypto_box
+    runtime.crypto_box = crypto_box
+    try:
+        resolved = await _materialize_run_env_var_credentials(run_id, account_id=ACC)
     finally:
         runtime.crypto_box = prev
 

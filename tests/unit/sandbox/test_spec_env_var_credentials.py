@@ -81,7 +81,8 @@ async def test_placeholder_lands_in_env_secret_never_does() -> None:
     # ...and the key set is exactly the reserved keys plus the injected
     # secret_name — nothing extra leaked into it, and the secret_name is
     # disjoint from the reserved set (blocked from claiming one at create).
-    assert set(plan.spec.environment) == {*RESERVED_SANDBOX_ENV_KEYS, "GITHUB_TOKEN"}
+    runtime_reserved = RESERVED_SANDBOX_ENV_KEYS - {"AIOS_RUN_ID", "AIOS_IDEMPOTENCY_KEY"}
+    assert set(plan.spec.environment) == {*runtime_reserved, "GITHUB_TOKEN"}
     # The decrypted secret reaches NOTHING on the spec. Membership, not
     # dataclass ``==``: secret_value is repr=False, but an equality diff
     # across differing secrets would still render the plaintext.
@@ -147,7 +148,8 @@ async def test_no_creds_leaves_env_untouched() -> None:
             stack.enter_context(ctx)
         plan = await build_spec_from_session("sess_01TEST")
 
-    assert set(plan.spec.environment) == RESERVED_SANDBOX_ENV_KEYS
+    runtime_reserved = RESERVED_SANDBOX_ENV_KEYS - {"AIOS_RUN_ID", "AIOS_IDEMPOTENCY_KEY"}
+    assert set(plan.spec.environment) == runtime_reserved
 
 
 async def test_resolve_failure_aborts_before_git_proxy_or_broker_exist() -> None:
@@ -224,7 +226,8 @@ async def test_vaults_but_no_env_var_creds_with_unrestricted_provisions() -> Non
     plan = await _build_with(
         env_config=EnvironmentConfig(networking=UnrestrictedNetworking()), creds=()
     )
-    assert set(plan.spec.environment) == RESERVED_SANDBOX_ENV_KEYS  # type: ignore[attr-defined]
+    runtime_reserved = RESERVED_SANDBOX_ENV_KEYS - {"AIOS_RUN_ID", "AIOS_IDEMPOTENCY_KEY"}
+    assert set(plan.spec.environment) == runtime_reserved  # type: ignore[attr-defined]
 
 
 async def test_env_multi_host_covers_each_cred_host_provisions() -> None:
