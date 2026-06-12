@@ -8,6 +8,7 @@ synthesis -> critic -> complete.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
@@ -16,16 +17,65 @@ import asyncpg
 import pytest
 
 from aios.db import queries as db_queries
+from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
+from aios.harness import runtime
 from aios.models.workflows import WfRunEvent
 from aios.services import agents as agents_service
 from aios.tools import workflow_completion
+from aios.workflows import run_tools, service
 from aios.workflows.deep_research import build_deep_research_fixture_script
 from aios.workflows.step import run_workflow_step
-from tests.integration.test_wf_step import _make_run, _open_request_id
 
 pytestmark = pytest.mark.integration
-pytest_plugins = ["tests.integration.test_wf_step"]
+
+
+@pytest.fixture
+async def wf_runtime(
+    migrated_db_url: str, _reset_db_state: None
+) -> AsyncIterator[asyncpg.Pool[Any]]:
+    pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
+    prev = runtime.pool
+    runtime.pool = pool
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+                "VALUES ('acc_wf', NULL, TRUE, 'wf-root')"
+            )
+            await conn.execute(
+                "INSERT INTO environments (id, name, config, account_id) "
+                "VALUES ('env_wf', 'wf-env', '{}'::jsonb, 'acc_wf')"
+            )
+        run_tools._INFLIGHT.clear()
+        with (
+            mock.patch("aios.workflows.service.defer_run_wake", new=AsyncMock()),
+            mock.patch("aios.services.workflows.defer_run_wake", new=AsyncMock()),
+            mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()),
+            mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()),
+            mock.patch("aios.workflows.run_tools.defer_run_wake", new=AsyncMock()),
+            mock.patch("aios.services.sessions.defer_run_wake", new=AsyncMock()),
+        ):
+            yield pool
+    finally:
+        run_tools._INFLIGHT.clear()
+        runtime.pool = prev
+        await pool.close()
+
+
+async def _make_run(pool: asyncpg.Pool[Any], script: str, *, input: Any = None) -> str:
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(conn, account_id="acc_wf", name="w", script=script)
+    run = await service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", input=input
+    )
+    return run.id
+
+
+async def _open_request_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
+    async with pool.acquire() as conn:
+        ids = await db_queries.get_open_request_ids(conn, session_id, account_id="acc_wf")
+    return ids[0]
 
 
 @pytest.fixture
