@@ -165,7 +165,7 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
     of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).
   - `pipeline(items, *stages)`: run each item through staged transforms concurrently.
   - `log(msg)`: record progress on the run journal.
-- Shell execution: `tool('bash', {"command": str, "timeout_s": float | None})` runs the
+- Shell execution: `tool('bash', {"command": str, "timeout_seconds": float | None})` runs the
   command in a per-run sandbox (provisioned lazily on first use, in the run's
   environment). `bash` must be a member of the workflow's declared tools or the call
   resolves to a `{"error": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,

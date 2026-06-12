@@ -182,10 +182,10 @@ def tool(name: str, input: Any) -> _Capability:
     run in the worker against the run's bound vaults and declared surface.
     ``'bash'`` — when declared in the workflow's tool surface — runs a shell command
     in the run's own ephemeral sandbox (``cwd="/workspace"``, scratch space that
-    lives only for the run); its ``input`` is ``{"command": str, "timeout_s":
+    lives only for the run); its ``input`` is ``{"command": str, "timeout_seconds":
     float|None}`` and its result is the bash dict the script branches on:
     ``{"exit_code", "stdout", "stderr", "timed_out", "truncated"}``. A nonzero exit
-    (or a command that hit its own ``timeout_s``, surfacing ``timed_out=True``) is a
+    (or a command that hit its own ``timeout_seconds``, surfacing ``timed_out=True``) is a
     VALUE, not a raise.
 
     ``input`` is the tool's arguments (a JSON-serialisable dict). The result is the
