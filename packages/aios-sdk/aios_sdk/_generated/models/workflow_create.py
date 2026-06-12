@@ -28,7 +28,47 @@ class WorkflowCreate:
 
     Attributes:
         name (str):
-        script (str):
+        script (str): Workflow script contract:
+            - Entry point: define `async def main(input)`. A run's output is the value returned by
+              `main`.
+            - Injected capability API, available without imports:
+              - `agent(agent_id, input, output_schema=None)`: invoke an agent and await its result.
+              - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
+              - `gate()`: suspend until an external resume delivers a value.
+              - `parallel(thunks)`: run zero-argument callables concurrently (for example,
+                `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead
+                of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).
+              - `pipeline(items, *stages)`: run each item through staged transforms concurrently.
+              - `log(msg)`: record progress on the run journal.
+            - Shell execution: `tool('bash', {"command": str, "timeout_s": float | None})` runs the
+              command in a per-run sandbox (provisioned lazily on first use, in the run's
+              environment). `bash` must be a member of the workflow's declared tools or the call
+              resolves to a `{"error": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,
+              truncated}` — a nonzero exit or in-command timeout is a successful result to branch
+              on, not an error.
+            - Crash semantics: at-least-once at the call boundary. A capability call interrupted by
+              a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is
+              ephemeral scratch — write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).
+            - Irreversible external effects (a POST that charges, sends, or publishes): the bash
+              environment exposes `$AIOS_IDEMPOTENCY_KEY` (stable across crash re-runs of the same
+              call, distinct per call) — pass it to the external service as an idempotency key so
+              the service drops a re-fired duplicate, or knowingly accept at-least-once.
+            - Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose
+              uncertain completion needs judgment to resolve inside `agent(...)`.
+            - Environment: deterministic, credential-free, isolated child process. Imports are
+              restricted to a curated stdlib allowlist. No network or filesystem side channels are
+              available beyond the capability API.
+
+            Minimal example:
+            ```python
+            async def main(input):
+                result = await agent(
+                    input["agent_id"],
+                    {"task": input["task"]},
+                    None,
+                )
+                return result
+            ```
         input_schema (None | Unset | WorkflowCreateInputSchemaType0):
         output_schema (None | Unset | WorkflowCreateOutputSchemaType0):
         description (None | str | Unset):
