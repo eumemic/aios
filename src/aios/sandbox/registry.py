@@ -653,6 +653,10 @@ class SandboxRegistry:
             extra_host_ports=extra_host_ports,
             dnat_hosts=dnat_hosts,
             dnat_target=dnat_target,
+            # Pin the lockdown sidecar to the same container runtime as the
+            # sandbox it locks down (#1014) — sourced from the sandbox's own
+            # provisioning spec, never ambient config.
+            runtime=plan.spec.runtime,
         )
 
     async def _stop_proxy_silently(

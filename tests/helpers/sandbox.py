@@ -235,6 +235,7 @@ class FakeBackend:
         script: str,
         timeout_seconds: int,
         max_output_bytes: int,
+        runtime: str | None = None,
     ) -> CommandResult:
         self.calls.append(
             (
@@ -244,6 +245,7 @@ class FakeBackend:
                     "image": image,
                     "script": script,
                     "timeout_seconds": timeout_seconds,
+                    "runtime": runtime,
                 },
             )
         )
@@ -351,6 +353,7 @@ def patch_build_spec_deps(
     settings.sandbox_memory_bytes = None
     settings.sandbox_pids_limit = None
     settings.sandbox_seccomp_profile = "/app/docker/seccomp-sandbox.json"
+    settings.sandbox_runtime = None
     settings.tool_broker_socket_path = None
 
     if tool_broker is None:

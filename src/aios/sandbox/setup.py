@@ -314,11 +314,18 @@ async def apply_network_lockdown(
     extra_host_ports: Sequence[tuple[str, int]] = (),
     dnat_hosts: Sequence[str] = (),
     dnat_target: tuple[str, int] | None = None,
+    runtime: str | None = None,
 ) -> None:
     """Apply + verify iptables egress rules via an ephemeral operator-image sidecar.
 
     Called after package installation so ``pip install`` etc. can reach
     registries before the lockdown takes effect.
+
+    ``runtime`` (#1014) is the container runtime for the sidecar (e.g.
+    ``runsc``), threaded by the registry from the sandbox's own provisioning
+    spec so the sidecar always runs under the same runtime as the sandbox it
+    locks down. The backend layer takes it as an explicit parameter — it never
+    reads ambient config.
 
     ``dnat_hosts`` + ``dnat_target`` are threaded into
     :func:`build_iptables_script` to DNAT credential-host :443 egress through
@@ -368,6 +375,7 @@ async def apply_network_lockdown(
             script=apply_script,
             timeout_seconds=30,
             max_output_bytes=settings.bash_max_output_bytes,
+            runtime=runtime,
         )
     except SandboxBackendError:
         # Don't swallow an infra failure into a wide-open sandbox: a Limited
@@ -396,6 +404,7 @@ async def apply_network_lockdown(
             script=_LOCKDOWN_VERIFY_SCRIPT,
             timeout_seconds=15,
             max_output_bytes=settings.bash_max_output_bytes,
+            runtime=runtime,
         )
     except SandboxBackendError:
         log.warning("sandbox.network_lockdown_verify_error", owner_id=handle.owner_id)

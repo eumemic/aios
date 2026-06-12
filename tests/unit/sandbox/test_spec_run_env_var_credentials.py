@@ -61,6 +61,7 @@ def _patch_run_spec_deps(
     settings.sandbox_memory_bytes = None
     settings.sandbox_pids_limit = None
     settings.sandbox_seccomp_profile = "/app/docker/seccomp-sandbox.json"
+    settings.sandbox_runtime = None
     settings.tool_broker_socket_path = None
     if broker is None:
         broker = MagicMock()
@@ -118,6 +119,7 @@ async def test_run_placeholder_lands_in_env_secret_never_does() -> None:
         plan = await build_spec_from_run(_RUN_ID)
 
     assert plan.spec.environment["PW_DEV_GATE_PASSWORD"] == _CRED.placeholder
+    assert plan.spec.runtime is None
     assert _SENTINEL_SECRET not in str(plan.spec)
     assert _SENTINEL_SECRET not in " ".join(plan.spec.environment.values())
     assert plan.env_var_credentials == (_CRED,)

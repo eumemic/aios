@@ -197,6 +197,9 @@ class DockerBackend:
         # (emergency rollback via AIOS_SANDBOX_SECCOMP_PROFILE only).
         argv.extend(["--security-opt", f"seccomp={spec.seccomp_profile}"])
 
+        if spec.runtime:
+            argv.extend(["--runtime", spec.runtime])
+
         # Keep stdin open so the container doesn't exit on empty stdin.
         argv.append("--interactive")
 
@@ -701,6 +704,7 @@ class DockerBackend:
         script: str,
         timeout_seconds: int,
         max_output_bytes: int,
+        runtime: str | None = None,
     ) -> CommandResult:
         """Apply/verify the network lockdown from an ephemeral operator-image sidecar.
 
@@ -709,7 +713,9 @@ class DockerBackend:
         ``--rm`` removes it on exit (the rules persist in the netns, held by
         the sandbox). No restrictive seccomp is applied — this is an
         operator-trusted, short-lived container, and iptables needs the
-        syscalls the default profile permits.
+        syscalls the default profile permits. ``runtime`` (#1014) selects the
+        container runtime (e.g. ``runsc``) — passed by the caller, pinned to
+        the target sandbox's spec; the backend never reads ambient config.
         """
         argv = [
             "docker",
@@ -719,11 +725,17 @@ class DockerBackend:
             f"container:{target_sandbox_id}",
             "--cap-add",
             "NET_ADMIN",
-            image,
-            "bash",
-            "-c",
-            script,
         ]
+        if runtime:
+            argv.extend(["--runtime", runtime])
+        argv.extend(
+            [
+                image,
+                "bash",
+                "-c",
+                script,
+            ]
+        )
         rc, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
             argv, timeout_s=float(timeout_seconds)
         )

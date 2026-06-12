@@ -140,6 +140,10 @@ class SandboxSpec:
     # profile is never silently shipped. The default below is a fallback for
     # bare test construction only; production always sets it from settings.
     seccomp_profile: str = "unconfined"
+    # Optional backend-specific container runtime (#1014). ``None`` leaves Docker's
+    # default runtime in place (local/CI no-op); DockerBackend translates a value
+    # such as ``runsc`` into ``docker run --runtime runsc``.
+    runtime: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,6 +463,7 @@ class SandboxBackend(Protocol):
         script: str,
         timeout_seconds: int,
         max_output_bytes: int,
+        runtime: str | None = None,
     ) -> CommandResult:
         """Run ``script`` in an ephemeral sidecar joined to a sandbox's netns.
 
@@ -468,7 +473,11 @@ class SandboxBackend(Protocol):
         its iptables edits apply to the sandbox's traffic, and is removed on
         exit. The sandbox itself holds no ``NET_ADMIN``, so root-in-sandbox
         can neither flush its own lockdown nor poison the binaries that apply
-        it. Returns the script's :class:`CommandResult`; raises
+        it. ``runtime`` (#1014) selects the backend-specific container runtime
+        for the sidecar (e.g. ``runsc``); ``None`` leaves the backend default.
+        Callers pass it explicitly — pinned to the target sandbox's spec —
+        because the backend layer never reads ambient config. Returns the
+        script's :class:`CommandResult`; raises
         :class:`SandboxBackendError` on infra failure / timeout.
         """
         ...

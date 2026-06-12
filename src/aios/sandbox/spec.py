@@ -963,6 +963,9 @@ def _assemble_plan(
         # the deny-list profile by default; the literal "unconfined" only
         # appears via the AIOS_SANDBOX_SECCOMP_PROFILE emergency override.
         seccomp_profile=settings.sandbox_seccomp_profile,
+        # Optional sandbox runtime (#1014). ``None`` leaves Docker's default in
+        # place; operators can select gVisor with AIOS_SANDBOX_RUNTIME=runsc.
+        runtime=settings.sandbox_runtime,
     )
 
     return ProvisioningPlan(
