@@ -31,6 +31,7 @@ BuiltinToolType = Literal[
     "schedule_wake",
     "wake_session",
     "wake_self",
+    "list_related_sessions",
     "http_request",
     "trigger_create",
     "trigger_remove",
@@ -41,6 +42,11 @@ BuiltinToolType = Literal[
     "create_run",
     "await_run",
     "cancel_run",
+    "get_workflow",
+    "list_workflows",
+    "get_run",
+    "list_runs",
+    "list_run_events",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled
