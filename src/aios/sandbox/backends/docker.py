@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 
+from aios.config import get_settings
 from aios.logging import get_logger
 from aios.sandbox._subprocess import (
     run_docker_cli,
@@ -196,6 +197,9 @@ class DockerBackend:
         # The value is a host path the docker CLI reads, or the literal "unconfined"
         # (emergency rollback via AIOS_SANDBOX_SECCOMP_PROFILE only).
         argv.extend(["--security-opt", f"seccomp={spec.seccomp_profile}"])
+
+        if spec.runtime:
+            argv.extend(["--runtime", spec.runtime])
 
         # Keep stdin open so the container doesn't exit on empty stdin.
         argv.append("--interactive")
@@ -719,11 +723,18 @@ class DockerBackend:
             f"container:{target_sandbox_id}",
             "--cap-add",
             "NET_ADMIN",
-            image,
-            "bash",
-            "-c",
-            script,
         ]
+        runtime = get_settings().sandbox_runtime
+        if runtime:
+            argv.extend(["--runtime", runtime])
+        argv.extend(
+            [
+                image,
+                "bash",
+                "-c",
+                script,
+            ]
+        )
         rc, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
             argv, timeout_s=float(timeout_seconds)
         )

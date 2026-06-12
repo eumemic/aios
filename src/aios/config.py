@@ -225,6 +225,13 @@ class Settings(BaseSettings):
         "Emergency rollback ONLY: set AIOS_SANDBOX_SECCOMP_PROFILE=unconfined to "
         "disable seccomp filtering. Never defaults to unconfined; the flag is always emitted.",
     )
+    sandbox_runtime: str | None = Field(
+        default=None,
+        description="Optional Docker container runtime for sandboxes and their "
+        "network-lockdown sidecars. Unset (or Docker's configured default, normally "
+        "runc) preserves local/CI behavior; set AIOS_SANDBOX_RUNTIME=runsc to run "
+        "containers under gVisor where the host has runsc installed.",
+    )
     bash_default_timeout_seconds: int = Field(
         default=120,
         ge=1,

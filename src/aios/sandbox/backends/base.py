@@ -140,6 +140,10 @@ class SandboxSpec:
     # profile is never silently shipped. The default below is a fallback for
     # bare test construction only; production always sets it from settings.
     seccomp_profile: str = "unconfined"
+    # Optional backend-specific container runtime (#1014). ``None`` leaves Docker's
+    # default runtime in place (local/CI no-op); DockerBackend translates a value
+    # such as ``runsc`` into ``docker run --runtime runsc``.
+    runtime: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

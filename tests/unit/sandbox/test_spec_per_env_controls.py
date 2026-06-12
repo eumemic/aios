@@ -117,12 +117,24 @@ class TestAssemblePlanImageAndBudget:
         sandbox-cap attributes the constructor reads."""
         settings = MagicMock()
         settings.sandbox_seccomp_profile = "/x/seccomp.json"
+        settings.sandbox_runtime = None
         settings.sandbox_cpu_quota = None
         settings.sandbox_memory_bytes = None
         settings.sandbox_pids_limit = None
         with patch("aios.sandbox.spec.get_settings", return_value=settings):
             plan = _call_assemble()
         assert plan.spec.seccomp_profile == "/x/seccomp.json"
+
+    def test_runtime_from_settings_lands_on_spec(self) -> None:
+        settings = MagicMock()
+        settings.sandbox_seccomp_profile = "/x/seccomp.json"
+        settings.sandbox_runtime = "runsc"
+        settings.sandbox_cpu_quota = None
+        settings.sandbox_memory_bytes = None
+        settings.sandbox_pids_limit = None
+        with patch("aios.sandbox.spec.get_settings", return_value=settings):
+            plan = _call_assemble()
+        assert plan.spec.runtime == "runsc"
 
 
 # ── build_spec_from_session resolution (#724 image, snapshot budget) ─────────
