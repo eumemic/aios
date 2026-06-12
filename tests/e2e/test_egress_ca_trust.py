@@ -17,12 +17,11 @@ from __future__ import annotations
 import pytest
 from cryptography.hazmat.primitives import serialization
 
-from aios.harness import runtime
 from aios.sandbox.egress_ca import (
     CA_CERT_SANDBOX_PATH,
-    EGRESS_CA_HKDF_INFO,
     SYSTEM_CA_BUNDLE_PATH,
     EgressCA,
+    derive_egress_ca_seed,
 )
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, bash, first_tool_result
@@ -106,7 +105,7 @@ class TestEgressCATrust:
         leaf for an allowlisted-host-shaped name, signed by a fresh
         EgressCA instance from the worker's seed; curl verifies it
         against the system trust store."""
-        seed = runtime.require_crypto_box().derive_subkey_bytes(EGRESS_CA_HKDF_INFO)
+        seed = derive_egress_ca_seed()
         leaf, key = mint_leaf(EgressCA(seed), TLS_HOST)
         leaf_pem = leaf.public_bytes(serialization.Encoding.PEM).decode("ascii")
         key_pem = key.private_bytes(

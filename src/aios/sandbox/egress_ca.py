@@ -136,20 +136,29 @@ def _egress_ca_from_seed(seed: bytes) -> EgressCA:
     return EgressCA(seed)
 
 
+def derive_egress_ca_seed() -> bytes:
+    """The 32-byte CA seed: an HKDF subkey of ``AIOS_EGRESS_CA_KEY``.
+
+    The single authoritative derivation — :func:`get_egress_ca` and tests
+    that mint a leaf from a *fresh* :class:`EgressCA` (the cross-process
+    contract) both call it, so the scheme can never silently fork.
+    """
+    key = get_settings().egress_ca_key.get_secret_value()
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=KEY_BYTES,
+        salt=b"aios-vault-hkdf-v1",
+        info=EGRESS_CA_HKDF_INFO.encode(),
+    ).derive(CryptoBox.from_base64(key, env_name="AIOS_EGRESS_CA_KEY").key_bytes)
+
+
 def get_egress_ca() -> EgressCA:
     """The worker's egress CA, derived from ``AIOS_EGRESS_CA_KEY``.
 
     Cached per seed (not per process), so tests or a rare CA rotation path
     that swaps the env secret get a matching CA without process-global state.
     """
-    key = get_settings().egress_ca_key.get_secret_value()
-    seed = HKDF(
-        algorithm=hashes.SHA256(),
-        length=KEY_BYTES,
-        salt=b"aios-vault-hkdf-v1",
-        info=EGRESS_CA_HKDF_INFO.encode(),
-    ).derive(CryptoBox.from_base64(key, env_name="AIOS_EGRESS_CA_KEY").key_bytes)
-    return _egress_ca_from_seed(seed)
+    return _egress_ca_from_seed(derive_egress_ca_seed())
 
 
 def mint_server_leaf(
@@ -205,6 +214,7 @@ __all__ = [
     "SYSTEM_CA_BUNDLE_PATH",
     "TRUST_STORE_ENV",
     "EgressCA",
+    "derive_egress_ca_seed",
     "get_egress_ca",
     "mint_server_leaf",
 ]
