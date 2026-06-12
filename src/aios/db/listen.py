@@ -88,13 +88,18 @@ suite).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import asyncpg
 
-from aios.db.pool import listener_application_name, normalize_dsn
+from aios.db.pool import (
+    LISTENER_TCP_KEEPALIVE_SETTINGS,
+    listener_application_name,
+    normalize_dsn,
+)
 from aios.db.sse_lock import acquire_subscriber_lock
 from aios.logging import get_logger
 
@@ -116,7 +121,10 @@ async def _connect_listener(db_url: str) -> asyncpg.Connection[object]:
     """
     return await asyncpg.connect(
         normalize_dsn(db_url),
-        server_settings={"application_name": listener_application_name()},
+        server_settings={
+            "application_name": listener_application_name(),
+            **LISTENER_TCP_KEEPALIVE_SETTINGS,
+        },
     )
 
 
@@ -524,7 +532,16 @@ SESSION_INTERRUPT_CHANNEL = "aios_session_interrupt"
 async def listen_for_session_interrupts(
     db_url: str,
 ) -> AsyncIterator[asyncio.Queue[str]]:
-    """Yield a queue of session_id payloads from the interrupt channel."""
+    """Yield session_id payloads from the interrupt channel.
+
+    Interrupt NOTIFY delivery is fire-and-forget: an interrupt emitted while
+    this dedicated LISTEN connection is disconnected or reconnecting is lost,
+    because there is no durable interrupt row to backfill from. Silent drops
+    are made detectable by TCP keepalive settings on the listener connection
+    plus a termination listener that wakes the consumer; the worker-level
+    reconnect loop then re-enters LISTEN after its backoff, and interrupts
+    issued after reconnect dispatch normally.
+    """
     conn = await _connect_listener(db_url)
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1024)
@@ -540,6 +557,11 @@ async def listen_for_session_interrupts(
             except asyncio.QueueFull:
                 log.warning("listen.session_interrupt_queue_full")
 
+        def _termination_callback(_conn: asyncpg.Connection[object]) -> None:
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait("")
+
+        conn.add_termination_listener(_termination_callback)
         await conn.add_listener(SESSION_INTERRUPT_CHANNEL, _callback)
         yield queue
     finally:

@@ -17,6 +17,14 @@ from aios.logging import get_logger
 _KNOWN_POOL_COUNT = 2  # API pool + worker pool (production call sites)
 log = get_logger("aios.db.pool")
 
+LISTENER_TCP_KEEPALIVE_SETTINGS = {
+    "tcp_keepalives_idle": "60",
+    "tcp_keepalives_interval": "10",
+    "tcp_keepalives_count": "5",
+}
+
+_POOL_TCP_KEEPALIVE_SETTINGS = LISTENER_TCP_KEEPALIVE_SETTINGS
+
 
 def normalize_dsn(db_url: str) -> str:
     """Strip SQLAlchemy/alembic driver prefixes; asyncpg wants bare ``postgresql://``."""
@@ -56,9 +64,7 @@ async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> a
         server_settings={
             "statement_timeout": "30000",
             "idle_in_transaction_session_timeout": "60000",
-            "tcp_keepalives_idle": "60",
-            "tcp_keepalives_interval": "10",
-            "tcp_keepalives_count": "5",
+            **_POOL_TCP_KEEPALIVE_SETTINGS,
         },
     )
     if pool is None:

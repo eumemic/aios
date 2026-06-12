@@ -1319,14 +1319,15 @@ class SandboxRegistry:
             except Exception:
                 log.exception("sandbox.reap_idle_loop_failed")
 
-    def start_reaper(self, idle_timeout: float = 300.0) -> None:
-        """Start the idle-TTL reaper background task."""
+    def start_reaper(self, idle_timeout: float = 300.0) -> asyncio.Task[None]:
+        """Start the idle-TTL reaper background task and return its handle."""
         if self._reaper_task is not None:
-            return
+            return self._reaper_task
         self._reaper_task = asyncio.create_task(
             self._reap_idle_loop(idle_timeout),
             name="sandbox-idle-reaper",
         )
+        return self._reaper_task
 
     def stop_reaper(self) -> None:
         """Cancel the idle-TTL reaper."""
@@ -1336,7 +1337,7 @@ class SandboxRegistry:
 
     # ── GC: one retain-rule reconciler (§5.5) ───────────────────────────────
 
-    def start_gc(self, pool: asyncpg.Pool[Any]) -> None:
+    def start_gc(self, pool: asyncpg.Pool[Any]) -> asyncio.Task[None]:
         """Start the snapshot GC reconciler (hourly, immediate first tick).
 
         Replaces the old boot-time ``reap_orphans``: instead of removing every
@@ -1346,8 +1347,9 @@ class SandboxRegistry:
         corpse inline under its own lock.
         """
         if self._gc_task is not None:
-            return
+            return self._gc_task
         self._gc_task = asyncio.create_task(self._gc_loop(pool), name="sandbox-snapshot-gc")
+        return self._gc_task
 
     def stop_gc(self) -> None:
         """Cancel the GC reconciler."""
