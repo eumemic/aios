@@ -543,12 +543,17 @@ class SandboxRegistry:
         broker secret, then re-raises.
         """
         plan = await build_spec_from_run(run_id)
+        if plan.secret_proxy is not None:
+            self._secret_proxies[run_id] = plan.secret_proxy
         try:
             handle = await self._backend.create(plan.spec)
         except BaseException:
-            # Spec was built (broker secret registered) but create failed before a
-            # sandbox exists — drop the secret so it doesn't leak. No backend
-            # destroy: there is no sandbox yet.
+            # Spec was built (broker secret/proxy registered) but create failed before a
+            # sandbox exists — drop worker-side state. No backend destroy: there is no
+            # sandbox yet.
+            self._secret_proxies.pop(run_id, None)
+            if plan.secret_proxy is not None:
+                await self._stop_proxy_silently(plan.secret_proxy, run_id, kind="secret_proxy")
             self._release_tool_broker_secret(run_id)
             raise
 
@@ -571,12 +576,14 @@ class SandboxRegistry:
         return handle
 
     async def _destroy_run_quietly(self, run_id: str, handle: SandboxHandle) -> None:
-        """Best-effort destroy of a run sandbox + drop its broker secret.
+        """Best-effort destroy of a run sandbox + drop its broker secret/proxy.
 
-        Used by the partial-failure cleanup and the dead-handle recycle. A run
-        sandbox has no proxies; only the container and the broker secret need
-        releasing. Destroy errors are warnings (a teardown hiccup must never mask a
-        primary error or block a recycle)."""
+        Used by the partial-failure cleanup and the dead-handle recycle. Destroy
+        errors are warnings (a teardown hiccup must never mask a primary error or
+        block a recycle)."""
+        secret_proxy = self._secret_proxies.pop(run_id, None)
+        if secret_proxy is not None:
+            await self._stop_proxy_silently(secret_proxy, run_id, kind="secret_proxy")
         try:
             await self._backend.destroy(handle)
         except Exception as err:
@@ -602,6 +609,9 @@ class SandboxRegistry:
         handle = self._handles.pop(run_id, None)
         self._last_used.pop(run_id, None)
         if handle is None:
+            secret_proxy = self._secret_proxies.pop(run_id, None)
+            if secret_proxy is not None:
+                await self._stop_proxy_silently(secret_proxy, run_id, kind="secret_proxy")
             self._release_tool_broker_secret(run_id)
             return
         await self._destroy_run_quietly(run_id, handle)
@@ -1281,7 +1291,10 @@ class SandboxRegistry:
                 current = self._last_used.get(sid)
                 if current is not None and time.monotonic() - current > idle_timeout:
                     log.info("sandbox.idle_release", owner_id=sid)
-                    await self._release_owner(sid)
+                    try:
+                        await self._release_owner(sid)
+                    except Exception as err:
+                        log.warning("sandbox.idle_release_failed", owner_id=sid, error=str(err))
 
     async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
         """Background loop: release sandboxes idle > idle_timeout seconds.

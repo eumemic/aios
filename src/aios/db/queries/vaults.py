@@ -847,6 +847,49 @@ _SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE = """
 """.strip()
 
 
+async def list_run_env_var_credentials(
+    conn: asyncpg.Connection[Any],
+    run_id: str,
+    *,
+    account_id: str,
+) -> list[EnvVarCredentialRow]:
+    """All active ``environment_variable`` credentials across a workflow run's
+    bound vaults.
+
+    Run twin of :func:`list_session_env_var_credentials`: duplicate
+    ``secret_name`` resolves first-vault-wins by ``wf_run_vaults.rank``.
+    Runs have no per-step drift echo, so this is the only run env-var
+    credential membership query.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (vc.secret_name)
+               vc.id, vc.secret_name, vc.allowed_hosts,
+               vc.ciphertext, vc.nonce, vc.updated_at
+          FROM wf_run_vaults rv
+          JOIN vault_credentials vc ON vc.vault_id = rv.vault_id
+         WHERE rv.run_id = $1
+           AND vc.auth_type = 'environment_variable'
+           AND vc.archived_at IS NULL
+           AND rv.account_id = $2
+           AND vc.account_id = $2
+         ORDER BY vc.secret_name, rv.rank
+        """,
+        run_id,
+        account_id,
+    )
+    return [
+        EnvVarCredentialRow(
+            credential_id=str(row["id"]),
+            secret_name=str(row["secret_name"]),
+            allowed_hosts=tuple(row["allowed_hosts"]),
+            blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
+            updated_at=row["updated_at"],
+        )
+        for row in rows
+    ]
+
+
 async def list_session_env_var_credentials(
     conn: asyncpg.Connection[Any],
     session_id: str,

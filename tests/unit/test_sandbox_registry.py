@@ -553,6 +553,84 @@ class TestSecretProxyDnatThreading:
         assert not kwargs["dnat_hosts"]
         assert ("aios-worker", 49152) not in kwargs["extra_host_ports"]
 
+    async def test_run_secret_proxy_recorded_and_dnat_threaded(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        cred = ResolvedEnvVarCredential(
+            credential_id="cred_1",
+            secret_name="API_TOKEN",
+            secret_value="real-secret",
+            allowed_hosts=("api.secret.com",),
+            updated_at=datetime(2025, 1, 1, tzinfo=UTC),
+            placeholder="AIOS_SECRET_PLACEHOLDER_deadbeef",
+        )
+        base = _provisioning_plan_limited("run_X")
+        proxy = cast(Any, FakeSecretProxy(port=49152))
+        plan = ProvisioningPlan(
+            spec=base.spec,
+            env_config=base.env_config,
+            memory_echoes=base.memory_echoes,
+            github_echoes=base.github_echoes,
+            git_proxy=base.git_proxy,
+            env_var_credentials=(cred,),
+            secret_proxy=proxy,
+        )
+        lockdown = AsyncMock()
+        broker = MagicMock()
+        broker.port = 8765
+
+        with ExitStack() as stack:
+            for cm in (
+                patch("aios.harness.runtime.require_tool_broker", lambda: broker),
+                patch("aios.sandbox.registry.build_spec_from_run", AsyncMock(return_value=plan)),
+                patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+                patch("aios.sandbox.registry.install_packages", AsyncMock()),
+                patch("aios.sandbox.registry.apply_network_lockdown", lockdown),
+            ):
+                stack.enter_context(cm)
+            await registry.get_or_provision_run("run_X")
+
+        assert registry._secret_proxies["run_X"] is proxy
+        kwargs = lockdown.call_args.kwargs
+        assert kwargs["dnat_target"] == ("aios-worker", 49152)
+        assert kwargs["dnat_hosts"] == ["api.secret.com"]
+
+    async def test_run_create_failure_stops_secret_proxy(self) -> None:
+        backend = FakeBackend()
+        backend.create = AsyncMock(side_effect=RuntimeError("create failed"))  # type: ignore[method-assign]
+        registry = SandboxRegistry(backend=backend)
+        base = _provisioning_plan_limited("run_X")
+        proxy = cast(Any, FakeSecretProxy())
+        plan = ProvisioningPlan(
+            spec=base.spec,
+            env_config=base.env_config,
+            memory_echoes=base.memory_echoes,
+            github_echoes=base.github_echoes,
+            git_proxy=None,
+            env_var_credentials=(),
+            secret_proxy=proxy,
+        )
+
+        with (
+            patch("aios.sandbox.registry.build_spec_from_run", AsyncMock(return_value=plan)),
+            pytest.raises(RuntimeError, match="create failed"),
+        ):
+            await registry.get_or_provision_run("run_X")
+
+        proxy.stop.assert_awaited_once()
+        assert "run_X" not in registry._secret_proxies
+
+    async def test_release_run_stops_secret_proxy_without_handle(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        proxy = FakeSecretProxy()
+        registry._secret_proxies["run_X"] = cast(Any, proxy)
+
+        await registry.release_run("run_X")
+
+        proxy.stop.assert_awaited_once()
+        assert "run_X" not in registry._secret_proxies
+
 
 class TestStaleHandleDetection:
     """``get_or_provision`` validates handle liveness on every warm hit.
