@@ -1,7 +1,8 @@
 """Business logic for session templates.
 
-Thin wrapper over :mod:`aios.db.queries` — no business rules beyond
-what the schema enforces.
+Thin wrapper over :mod:`aios.db.queries` — the only business rule beyond
+the schema is account-scoped ownership validation of every referenced
+resource (agent, environment, vaults, memory stores) on create/update.
 """
 
 from __future__ import annotations
