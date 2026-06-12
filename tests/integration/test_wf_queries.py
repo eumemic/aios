@@ -498,12 +498,12 @@ async def test_run_children_usage_sums_direct_children_and_includes_archived(
     await wf_conn.execute(
         """
         INSERT INTO sessions (
-            id, agent_id, environment_id, agent_version, title, metadata, status,
+            id, agent_id, environment_id, agent_version, title, metadata,
             workspace_volume_path, account_id, parent_run_id, input_tokens, output_tokens,
             cache_read_input_tokens, cache_creation_input_tokens, cost_microusd, archived_at
         ) VALUES
-            ('ses_child_a', 'agent_usage', 'env_root', NULL, NULL, '{}'::jsonb, 'idle', '/tmp/a', 'acc_root', $1, 10, 20, 3, 4, 123456, NULL),
-            ('ses_child_b', 'agent_usage', 'env_root', NULL, NULL, '{}'::jsonb, 'idle', '/tmp/b', 'acc_root', $1, 1, 2, 5, 6, 654321, now())
+            ('ses_child_a', 'agent_usage', 'env_root', NULL, NULL, '{}'::jsonb, '/tmp/a', 'acc_root', $1, 10, 20, 3, 4, 123456, NULL),
+            ('ses_child_b', 'agent_usage', 'env_root', NULL, NULL, '{}'::jsonb, '/tmp/b', 'acc_root', $1, 1, 2, 5, 6, 654321, now())
         """,
         run_id,
     )

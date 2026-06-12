@@ -4216,8 +4216,8 @@ async def test_over_budget_agent_refusal_is_catchable(
             "INSERT INTO agents (id, name, model, system, account_id) VALUES ('agent_cost_seed', 'cost-seed', 'm', 's', 'acc_wf')"
         )
         await conn.execute(
-            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, status, workspace_volume_path, account_id, parent_run_id, cost_microusd) "
-            "VALUES ('ses_cost_seed', 'agent_cost_seed', 'env_wf', NULL, NULL, '{}'::jsonb, 'idle', '/tmp/cost', 'acc_wf', $1, 1000000)",
+            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, workspace_volume_path, account_id, parent_run_id, cost_microusd) "
+            "VALUES ('ses_cost_seed', 'agent_cost_seed', 'env_wf', NULL, NULL, '{}'::jsonb, '/tmp/cost', 'acc_wf', $1, 1000000)",
             run.id,
         )
     await run_workflow_step(run.id)
