@@ -1,0 +1,93 @@
+name: Migration collision check
+
+# PR-time guard against two open PRs claiming the same alembic migration
+# number (migrations/versions/NNNN_*.py). The migration-chain canary catches
+# duplicate revisions after they reach master; this check gives the later PR an
+# advisory red check before merge so it can renumber and re-point down_revision.
+#
+# Security note: this workflow does not interpolate any untrusted ${{ }}
+# expression (issue/PR titles, head_ref, commit messages, bodies) into run:
+# commands. Only trusted contexts (github.repository,
+# github.event.pull_request.number) and secrets.GITHUB_TOKEN via env: are
+# referenced, and those are used as quoted shell values, never eval'd.
+
+on:
+  pull_request:
+    paths:
+      - migrations/**
+
+concurrency:
+  group: migration-collision-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  collision-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check migration-number claims across open PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GH_REPO gives `gh pr list` its repo context — there is no checkout
+          # step, so without it gh cannot infer the repo and the listing fails.
+          GH_REPO: ${{ github.repository }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          migration_numbers_for_pr() {
+            local pr_number="$1"
+            local files
+
+            # The API call must hard-fail (set -e) — only grep's no-match exit
+            # is tolerated below. A swallowed API failure would read as "no
+            # migrations claimed" and pass a real collision silently.
+            files=$(gh api "repos/${REPOSITORY}/pulls/${pr_number}/files" \
+              --paginate \
+              --jq '.[].filename')
+
+            printf '%s\n' "${files}" \
+              | grep '^migrations/versions/[0-9][0-9][0-9][0-9]_.*\.py$' \
+              | sed 's|migrations/versions/||; s|_.*||' \
+              | sort -u \
+              || true
+          }
+
+          own_numbers=$(migration_numbers_for_pr "${PR_NUMBER}")
+          if [ -z "${own_numbers}" ]; then
+            exit 0
+          fi
+
+          collision_found=0
+
+          # Capture the listing BEFORE the loop: `done < <(gh ...)` loses the
+          # substitution's exit status under set -e, so a failed listing would
+          # feed the loop nothing and the check would pass silently. Assigning
+          # to a variable makes a gh failure fail the step.
+          open_prs=$(gh pr list --state open --limit 100 --json number --jq '.[].number')
+
+          while IFS= read -r other_pr; do
+            if [ "${other_pr}" = "${PR_NUMBER}" ]; then
+              continue
+            fi
+
+            other_numbers=$(migration_numbers_for_pr "${other_pr}")
+            if [ -z "${other_numbers}" ]; then
+              continue
+            fi
+
+            while IFS= read -r own_number; do
+              if printf '%s\n' "${other_numbers}" | grep -Fxq "${own_number}"; then
+                echo "MIGRATION COLLISION: ${own_number} also claimed by PR #${other_pr} — whichever merges second must renumber to the next free number and re-point down_revision"
+                collision_found=1
+              fi
+            done <<< "${own_numbers}"
+          done <<< "${open_prs}"
+
+          exit "${collision_found}"
