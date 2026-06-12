@@ -26,11 +26,26 @@ import pytest
 
 import aios.tools  # noqa: F401 — registers the builtins
 from aios.errors import CryptoDecryptError, ForbiddenError, NotFoundError
-from aios.models.workflows import WfRun, WfRunEvent, WfRunWaitResponse, Workflow
+from aios.models.workflows import (
+    WfRun,
+    WfRunEvent,
+    WfRunWaitResponse,
+    Workflow,
+    WorkflowCreate,
+    WorkflowUpdate,
+)
 from aios.tools import workflow_management as wm
 from aios.tools.invoke import ToolBail, invoke_builtin
+from aios.tools.registry import registry
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
+_SCRIPT_CONTRACT_TOKENS = ("async def main", "agent", "tool", "gate", "parallel", "pipeline", "log")
+
+
+def _assert_script_contract_present(text: str | None) -> None:
+    assert text
+    for token in _SCRIPT_CONTRACT_TOKENS:
+        assert token in text
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +100,22 @@ def _event(**over: Any) -> WfRunEvent:
     )
     base.update(over)
     return WfRunEvent(**base)
+
+
+class TestWorkflowScriptContractDiscovery:
+    def test_create_schema_script_description_contains_contract(self) -> None:
+        description = WorkflowCreate.model_json_schema()["properties"]["script"].get("description")
+        _assert_script_contract_present(description)
+
+    def test_update_schema_script_description_contains_contract(self) -> None:
+        description = WorkflowUpdate.model_json_schema()["properties"]["script"].get("description")
+        _assert_script_contract_present(description)
+
+    def test_registered_create_workflow_description_contains_contract(self) -> None:
+        _assert_script_contract_present(registry.get("create_workflow").description)
+
+    def test_registered_update_workflow_description_contains_contract(self) -> None:
+        _assert_script_contract_present(registry.get("update_workflow").description)
 
 
 class TestSchemaRejectsInjectedTrustedIds:

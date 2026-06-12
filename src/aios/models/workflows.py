@@ -151,6 +151,34 @@ class WfRunWaitResponse(BaseModel):
 
 # ─── request models (the public HTTP surface) ────────────────────────────────
 
+WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
+- Entry point: define `async def main(input)`. A run's output is the value returned by
+  `main`.
+- Injected capability API, available without imports:
+  - `agent(agent_id, input, output_schema=None)`: invoke an agent and await its result.
+  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
+  - `gate()`: suspend until an external resume delivers a value.
+  - `parallel(thunks)`: run zero-argument callables concurrently (for example,
+    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead
+    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).
+  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.
+  - `log(msg)`: record progress on the run journal.
+- Environment: deterministic, credential-free, isolated child process. Imports are
+  restricted to a curated stdlib allowlist. No network or filesystem side channels are
+  available beyond the capability API.
+
+Minimal example:
+```python
+async def main(input):
+    result = await agent(
+        input["agent_id"],
+        {"task": input["task"]},
+        None,
+    )
+    return result
+```
+"""
+
 
 class WorkflowCreate(BaseModel):
     """Request body for ``POST /v1/workflows`` — a new workflow definition at v1."""
@@ -158,7 +186,7 @@ class WorkflowCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=128)
-    script: str
+    script: str = Field(description=WORKFLOW_SCRIPT_CONTRACT)
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     description: str | None = None
@@ -191,7 +219,7 @@ class WorkflowUpdate(BaseModel):
 
     version: int
     name: str | None = Field(default=None, min_length=1, max_length=128)
-    script: str | None = None
+    script: str | None = Field(default=None, description=WORKFLOW_SCRIPT_CONTRACT)
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     description: str | None = None

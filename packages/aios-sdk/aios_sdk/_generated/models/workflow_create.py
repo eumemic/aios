@@ -28,7 +28,32 @@ class WorkflowCreate:
 
     Attributes:
         name (str):
-        script (str):
+        script (str): Workflow script contract:
+            - Entry point: define `async def main(input)`. A run's output is the value returned by
+              `main`.
+            - Injected capability API, available without imports:
+              - `agent(agent_id, input, output_schema=None)`: invoke an agent and await its result.
+              - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
+              - `gate()`: suspend until an external resume delivers a value.
+              - `parallel(thunks)`: run zero-argument callables concurrently (for example,
+                `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead
+                of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).
+              - `pipeline(items, *stages)`: run each item through staged transforms concurrently.
+              - `log(msg)`: record progress on the run journal.
+            - Environment: deterministic, credential-free, isolated child process. Imports are
+              restricted to a curated stdlib allowlist. No network or filesystem side channels are
+              available beyond the capability API.
+
+            Minimal example:
+            ```python
+            async def main(input):
+                result = await agent(
+                    input["agent_id"],
+                    {"task": input["task"]},
+                    None,
+                )
+                return result
+            ```
         input_schema (None | Unset | WorkflowCreateInputSchemaType0):
         output_schema (None | Unset | WorkflowCreateOutputSchemaType0):
         description (None | str | Unset):
