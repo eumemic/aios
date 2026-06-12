@@ -17,6 +17,7 @@ from typing import Any
 import litellm
 import pytest
 
+from aios.config import Settings
 from aios.harness import completion
 
 
@@ -137,6 +138,76 @@ async def test_stream_litellm_raises_timeout_on_stalled_stream(
         )
 
     assert resp.aclose_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_litellm_raises_deadline_with_salvaged_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(completion, "get_settings", lambda: Settings(model_call_deadline_s=1.0))
+    monkeypatch.setattr(completion, "_STREAM_TTFT_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(completion, "_STREAM_INTER_CHUNK_TIMEOUT_S", 1.0)
+
+    resp = _RecordingResponse([_make_chunk("hello")], stall=True)
+
+    async def fake_acompletion(**kwargs: object) -> _RecordingResponse:
+        return resp
+
+    def fake_builder(chunks: list[object], **kwargs: object) -> dict[str, object]:
+        assert len(chunks) == 1
+        return {
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 22,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 4,
+            },
+            "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+        }
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "stream_chunk_builder", fake_builder)
+
+    with pytest.raises(completion.ModelCallDeadlineError) as excinfo:
+        await completion.stream_litellm(
+            model="anthropic/claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "ping"}],
+            pool=_StubPool(),
+            session_id="sess_test",
+        )
+
+    assert excinfo.value.chunks_seen == 1
+    assert excinfo.value.usage == {
+        "input_tokens": 11,
+        "output_tokens": 22,
+        "cache_read_input_tokens": 3,
+        "cache_creation_input_tokens": 4,
+    }
+    assert excinfo.value.cost_usd is None
+    assert resp.aclose_count == 1
+
+
+@pytest.mark.asyncio
+async def test_call_litellm_deadline_raises_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(completion, "get_settings", lambda: Settings(model_call_deadline_s=1.0))
+
+    async def fake_acompletion(**kwargs: object) -> object:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    with pytest.raises(completion.ModelCallDeadlineError) as excinfo:
+        await completion.call_litellm(
+            model="anthropic/claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "ping"}],
+        )
+
+    assert excinfo.value.chunks_seen == 0
+    assert excinfo.value.usage == {}
+    assert excinfo.value.cost_usd is None
 
 
 @pytest.mark.asyncio

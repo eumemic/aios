@@ -24,7 +24,7 @@ from aios.models.vaults import OAuthProviderApp
 # mode is a config validator that no longer matches reality, not a
 # crash. ``test_github_clone_session_timeout_below_step_budget``
 # cross-checks the two values stay aligned.
-_HARNESS_STEP_TIMEOUT_S: float = 300.0
+_HARNESS_STEP_TIMEOUT_S: float = 960.0
 
 
 class Settings(BaseSettings):
@@ -248,13 +248,21 @@ class Settings(BaseSettings):
         "after the multipart body is drained so the client sees a clean "
         "response rather than a transport reset.",
     )
+    model_call_deadline_s: float = Field(
+        default=900.0,
+        ge=1.0,
+        description="Total-duration deadline for a single model call, in seconds. "
+        "Must stay strictly below the harness step timeout so job-level "
+        "cancellation remains a final safety net instead of the normal model "
+        "budget.",
+    )
     github_clone_session_timeout_seconds: float = Field(
         default=30.0,
         ge=1.0,
         description="Wall-clock bound on each per-session "
         "``git clone --reference --dissociate`` (and the short admin ops "
         "around it: ``remote set-url``, ``config user.*``). Must stay "
-        "well below the 300s harness step timeout — otherwise a hung "
+        "well below the 960s harness step timeout — otherwise a hung "
         "clone burns a whole user turn before the step-level cap fires. "
         "See issue #697.",
     )
@@ -549,6 +557,16 @@ class Settings(BaseSettings):
                 "API and worker processes resolve relative paths against their own CWD, "
                 "producing diverging session workspace_path values and ForbiddenError "
                 "on tool calls."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _model_call_deadline_under_step_budget(self) -> Settings:
+        if self.model_call_deadline_s >= _HARNESS_STEP_TIMEOUT_S:
+            raise ValueError(
+                f"AIOS_MODEL_CALL_DEADLINE_S={self.model_call_deadline_s} must be "
+                f"strictly less than the harness step budget "
+                f"({_HARNESS_STEP_TIMEOUT_S}s, aios.harness.loop._JOB_TIMEOUT_S)."
             )
         return self
 

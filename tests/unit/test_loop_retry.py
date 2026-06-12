@@ -17,6 +17,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.harness.completion import ModelCallDeadlineError
 from aios.harness.loop import (
     _count_consecutive_rescheduling,
     _retry_delay_for_attempt,
@@ -210,7 +211,11 @@ def mock_step_dependencies() -> Any:
         patch(
             "aios.harness.loop.stream_litellm",
             AsyncMock(side_effect=RuntimeError("provider boom")),
-        ),
+        ) as stream_litellm_mock,
+        patch(
+            "aios.harness.loop.sessions_service.increment_usage",
+            AsyncMock(),
+        ) as increment_usage_mock,
         patch(
             "aios.harness.loop.defer_wake",
             AsyncMock(),
@@ -229,6 +234,8 @@ def mock_step_dependencies() -> Any:
             append_event=append_event,
             defer_wake=defer_wake_mock,
             fail_all_open_requests=fail_all_open_requests_mock,
+            stream_litellm=stream_litellm_mock,
+            increment_usage=increment_usage_mock,
         )
 
 
@@ -287,3 +294,96 @@ class TestRunSessionStepOnModelError:
         mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
             ANY, "sess_x", account_id=ANY, error={"kind": "child_errored"}
         )
+
+    async def test_streaming_deadline_records_usage_and_parks_without_retry(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        usage = {
+            "input_tokens": 11,
+            "output_tokens": 22,
+            "cache_read_input_tokens": 3,
+            "cache_creation_input_tokens": 4,
+        }
+        mock_step_dependencies.stream_litellm.side_effect = ModelCallDeadlineError(
+            "deadline",
+            usage=usage,
+            cost_usd=1.25,
+            chunks_seen=2,
+        )
+
+        await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_not_awaited()
+        mock_step_dependencies.increment_usage.assert_awaited_once_with(
+            ANY,
+            "sess_x",
+            input_tokens=11,
+            output_tokens=22,
+            cache_read_input_tokens=3,
+            cache_creation_input_tokens=4,
+            account_id=ANY,
+        )
+        mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
+            ANY, "sess_x", account_id=ANY, error={"kind": "model_call_deadline"}
+        )
+        stop_reasons = [
+            call.args[2] for call in mock_step_dependencies.set_stop_reason.call_args_list
+        ]
+        assert any(
+            reason.get("type") == "error"
+            and "partial token usage was recorded" in reason.get("message", "")
+            for reason in stop_reasons
+        )
+        span_payloads = [
+            call.args[3]
+            for call in mock_step_dependencies.append_event.call_args_list
+            if call.args[2] == "span"
+        ]
+        assert {
+            "event": "model_request_end",
+            "model_request_start_id": "ev_start",
+            "is_error": True,
+            "model_usage": usage,
+            "cost_usd": 1.25,
+        } in span_payloads
+        lifecycle_payloads = [
+            call.args[3]
+            for call in mock_step_dependencies.append_event.call_args_list
+            if call.args[2] == "lifecycle"
+        ]
+        assert any(payload.get("stop_reason") == "error" for payload in lifecycle_payloads)
+        assert not any(
+            payload.get("stop_reason") == "rescheduling" for payload in lifecycle_payloads
+        )
+
+    async def test_zero_chunk_deadline_uses_retry_path(self, mock_step_dependencies: Any) -> None:
+        mock_step_dependencies.stream_litellm.side_effect = ModelCallDeadlineError(
+            "deadline",
+            usage={},
+            cost_usd=None,
+            chunks_seen=0,
+        )
+
+        with patch(
+            "aios.harness.loop._count_consecutive_rescheduling",
+            AsyncMock(return_value=0),
+        ):
+            await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_awaited_once_with(
+            ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
+        )
+        mock_step_dependencies.increment_usage.assert_not_awaited()
+        mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
+        span_payloads = [
+            call.args[3]
+            for call in mock_step_dependencies.append_event.call_args_list
+            if call.args[2] == "span"
+        ]
+        assert {
+            "event": "model_request_end",
+            "model_request_start_id": "ev_start",
+            "is_error": True,
+            "model_usage": {},
+            "cost_usd": None,
+        } in span_payloads
