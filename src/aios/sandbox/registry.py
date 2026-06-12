@@ -1291,7 +1291,10 @@ class SandboxRegistry:
                 current = self._last_used.get(sid)
                 if current is not None and time.monotonic() - current > idle_timeout:
                     log.info("sandbox.idle_release", owner_id=sid)
-                    await self._release_owner(sid)
+                    try:
+                        await self._release_owner(sid)
+                    except Exception:
+                        log.exception("sandbox.idle_release_failed", owner_id=sid)
 
     async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
         """Background loop: release sandboxes idle > idle_timeout seconds.
