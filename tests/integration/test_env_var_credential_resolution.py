@@ -31,6 +31,7 @@ pytestmark = pytest.mark.integration
 ACC = "acc_envvar"
 ACC_OTHER = "acc_envvar_other"
 ENV = "env_envvar"
+ENV_OTHER = "env_envvar_other"
 
 
 @pytest.fixture
@@ -60,9 +61,12 @@ async def vault_pool(
             )
             await conn.execute(
                 "INSERT INTO environments (id, name, config, account_id) "
-                "VALUES ($1, 'envvar-env', '{}'::jsonb, $2)",
+                "VALUES ($1, 'envvar-env', '{}'::jsonb, $2), "
+                "($3, 'envvar-env-other', '{}'::jsonb, $4)",
                 ENV,
                 ACC,
+                ENV_OTHER,
+                ACC_OTHER,
             )
         yield pool
     finally:
@@ -86,7 +90,11 @@ async def _make_agent(pool: asyncpg.Pool[Any], *, account_id: str = ACC) -> Any:
 
 
 async def _make_session(
-    pool: asyncpg.Pool[Any], *, vault_ids: list[str] | None = None, account_id: str = ACC
+    pool: asyncpg.Pool[Any],
+    *,
+    vault_ids: list[str] | None = None,
+    account_id: str = ACC,
+    environment_id: str = ENV,
 ) -> str:
     agent = await _make_agent(pool, account_id=account_id)
     async with pool.acquire() as conn:
@@ -94,7 +102,7 @@ async def _make_session(
             conn,
             account_id=account_id,
             agent_id=agent.id,
-            environment_id=ENV,
+            environment_id=environment_id,
             agent_version=agent.version,
             title=None,
             metadata={},
@@ -104,25 +112,33 @@ async def _make_session(
     return session.id
 
 
-async def _make_run(pool: asyncpg.Pool[Any], *, vault_ids: list[str] | None = None) -> str:
+async def _make_run(
+    pool: asyncpg.Pool[Any],
+    *,
+    vault_ids: list[str] | None = None,
+    account_id: str = ACC,
+    environment_id: str = ENV,
+) -> str:
     async with pool.acquire() as conn:
         wf = await db_queries.workflows.insert_workflow(
             conn,
-            account_id=ACC,
+            account_id=account_id,
             name=f"envvar-wf-{os.urandom(4).hex()}",
             script="async def main(input):\n    return input\n",
         )
         run = await db_queries.workflows.insert_wf_run(
             conn,
-            account_id=ACC,
+            account_id=account_id,
             workflow_id=wf.id,
-            environment_id=ENV,
+            environment_id=environment_id,
             script=wf.script,
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             script_sha=hashlib.sha256(wf.script.encode("utf-8")).hexdigest(),
         )
         if vault_ids:
-            await db_queries.workflows.set_run_vaults(conn, run.id, vault_ids, account_id=ACC)
+            await db_queries.workflows.set_run_vaults(
+                conn, run.id, vault_ids, account_id=account_id
+            )
     return run.id
 
 
@@ -302,49 +318,47 @@ async def test_run_placeholders_deterministic_owner_distinct(
 async def test_other_tenants_credentials_invisible(
     vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
 ) -> None:
+    # A cross-tenant session_vaults row is now unrepresentable — the composite FK
+    # proof lives in tests/integration/test_composite_fk_backstop.py. Here we keep
+    # the read-side guarantee on representable data: the resolver's account_id
+    # filter excludes another tenant's fully consistent chain.
     pool = vault_pool
     theirs = await _make_vault(pool, "their-vault", account_id=ACC_OTHER)
     await _make_env_cred(pool, crypto_box, theirs, "API_KEY", "their-secret", account_id=ACC_OTHER)
+    their_session_id = await _make_session(
+        pool, vault_ids=[theirs], account_id=ACC_OTHER, environment_id=ENV_OTHER
+    )
     mine = await _make_vault(pool, "my-vault")
     await _make_env_cred(pool, crypto_box, mine, "OTHER_KEY", "my-secret")
-
     session_id = await _make_session(pool, vault_ids=[mine])
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO session_vaults (session_id, vault_id, rank, account_id) "
-            "VALUES ($1, $2, $3, $4)",
-            session_id,
-            theirs,
-            1,
-            ACC,
-        )
+
     resolved = await _resolve(pool, crypto_box, session_id)
 
     assert [(r.secret_name, r.secret_value) for r in resolved] == [("OTHER_KEY", "my-secret")]
+    # Their session id under my account: the dual account_id filter yields nothing.
+    assert await _resolve(pool, crypto_box, their_session_id, account_id=ACC) == []
 
 
 async def test_run_other_tenants_credentials_invisible(
     vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
 ) -> None:
+    # Run twin of the session test above; unrepresentability of cross-tenant
+    # wf_run_vaults rows is proven in tests/integration/test_composite_fk_backstop.py.
     pool = vault_pool
     theirs = await _make_vault(pool, "their-run-vault", account_id=ACC_OTHER)
     await _make_env_cred(pool, crypto_box, theirs, "API_KEY", "their-secret", account_id=ACC_OTHER)
+    their_run_id = await _make_run(
+        pool, vault_ids=[theirs], account_id=ACC_OTHER, environment_id=ENV_OTHER
+    )
     mine = await _make_vault(pool, "my-run-vault")
     await _make_env_cred(pool, crypto_box, mine, "OTHER_KEY", "my-secret")
-
     run_id = await _make_run(pool, vault_ids=[mine])
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO wf_run_vaults (run_id, vault_id, rank, account_id) "
-            "VALUES ($1, $2, $3, $4)",
-            run_id,
-            theirs,
-            1,
-            ACC,
-        )
+
     resolved = await _resolve_run(pool, crypto_box, run_id)
 
     assert [(r.secret_name, r.secret_value) for r in resolved] == [("OTHER_KEY", "my-secret")]
+    # Their run id under my account: the dual account_id filter yields nothing.
+    assert await _resolve_run(pool, crypto_box, their_run_id, account_id=ACC) == []
 
 
 async def test_vaultless_session_resolves_empty(
