@@ -707,24 +707,22 @@ def _group_tool_call_ids(rows: list[Any]) -> dict[str, set[str]]:
 
 
 async def reap_stalled_jobs(job_manager: Any) -> int:
-    """Mark stalled procrastinate jobs as failed.
+    """Mark predecessor-owned in-flight procrastinate jobs as failed.
 
-    Procrastinate runs a heartbeat lease: workers update
-    ``procrastinate_workers.last_heartbeat`` every
-    ``update_heartbeat_interval`` (default 10s).  A dead worker
-    (laptop sleep, OOM, ungraceful shutdown) stops heartbeating; its
-    row is pruned at any other worker's startup, leaving its
-    in-flight job at ``status='doing'`` with ``worker_id`` either
-    NULL (post-prune) or pointing at the missing row.  Either way the
-    job's ``lock`` (``"{session_id}"`` for aios) stays held — every
-    subsequent wake for that session sits behind it forever.
+    This is a boot-only recovery step. It runs after the worker
+    singleton advisory lock has handed off, proving the predecessor is
+    gone, and before this process starts consuming jobs. At that point
+    every ``doing`` job in procrastinate is orphaned by construction;
+    there is no live in-process job for a heartbeat-age filter to
+    protect.
 
     :meth:`procrastinate.manager.JobManager.get_stalled_jobs` is the
-    blessed query for this state.  Its SQL covers both shapes
-    (``worker_id IS NULL`` plus the membership join on
-    ``procrastinate_workers``), and the threshold is configurable per
-    call — we use 60s, comfortably above procrastinate's 10s
-    heartbeat interval and 30s default ``stalled_worker_timeout``.
+    blessed query for this state. Calling it with a zero-second
+    heartbeat threshold returns every ``doing`` job, including rows
+    with ``worker_id IS NULL`` and rows whose worker heartbeat is merely
+    in the past. Failing those jobs releases their procrastinate locks
+    so the startup wake sweep can re-enqueue the affected sessions in
+    the same pass.
 
     Takes a ``job_manager`` rather than an ``App`` so tests can build
     a fresh manager pointed at the testcontainer DB without depending
@@ -736,7 +734,7 @@ async def reap_stalled_jobs(job_manager: Any) -> int:
     """
     from procrastinate.jobs import Status
 
-    stalled = list(await job_manager.get_stalled_jobs(seconds_since_heartbeat=60))
+    stalled = list(await job_manager.get_stalled_jobs(seconds_since_heartbeat=0))
     for job in stalled:
         if job.id is None:
             continue
