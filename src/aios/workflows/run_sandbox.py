@@ -15,7 +15,7 @@ The run never holds its lock/slot while the command runs.
 raises — every outcome is a value the script branches on. Success writes the BARE
 bash dict (``{exit_code, stdout, stderr, timed_out, truncated}``); a malformed
 argument, a gate rejection, or an infra failure (provision/exec) writes a flat
-``{"error": str}``. A command that RAN and hit its own ``timeout_s`` is a success
+``{"error": str}``. A command that RAN and hit its own ``timeout_seconds`` is a success
 carrying ``timed_out=True`` — not an error. There is no ``{"ok"}/{"error"}`` wrap
 and no ``SandboxError``; the harvest folds the value unchanged (the whole point of
 routing through the existing ``tool`` capability).
@@ -131,7 +131,7 @@ async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any
 
     Errors are values, never raises: gating reuses the SAME
     :func:`run_tools.gate_run_tool` the worker path uses (single source of the
-    error strings); timeout validation is a recoverable value (a bad ``timeout_s``
+    error strings); timeout validation is a recoverable value (a bad ``timeout_seconds``
     does NOT terminally error the run); and the provision/exec phases catch broadly
     (``build_spec_from_run``/``_resolve_image`` raise plain ``ValueError`` and
     asyncpg errors, not just ``SandboxBackendError``) so an infra failure becomes a
@@ -156,19 +156,21 @@ async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any
     if not isinstance(command, str) or not command:
         return {"error": "bash tool requires a non-empty 'command' string"}
 
-    timeout_s = args.get("timeout_s")
-    # Validate ``timeout_s`` as a recoverable value (bash is a tool — tool() never
+    timeout_seconds = args.get("timeout_seconds")
+    # Validate ``timeout_seconds`` as a recoverable value (bash is a tool — tool() never
     # raises). ``bool`` is excluded explicitly (it is an ``int`` subclass, so
     # ``True``/``False`` would otherwise pass the numeric check); NaN/inf are
     # rejected via ``math.isfinite``. Passing this gate means only ``None`` or a
     # finite positive number reaches ``int()`` below.
-    if timeout_s is not None and (
-        isinstance(timeout_s, bool)
-        or not isinstance(timeout_s, (int, float))
-        or not math.isfinite(timeout_s)
-        or timeout_s <= 0
+    if timeout_seconds is not None and (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
     ):
-        return {"error": f"timeout_s must be None or a finite positive number, got {timeout_s!r}"}
+        return {
+            "error": f"timeout_seconds must be None or a finite positive number, got {timeout_seconds!r}"
+        }
 
     settings = get_settings()
     registry = runtime.require_sandbox_registry()
@@ -192,12 +194,14 @@ async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any
     # request never disables the timeout; the ``min`` clamps to the same ceiling the
     # bash tool uses.
     ceiling = settings.bash_default_timeout_seconds
-    timeout_seconds = min(ceiling, max(1, int(timeout_s))) if timeout_s is not None else ceiling
+    resolved_timeout_seconds = (
+        min(ceiling, max(1, int(timeout_seconds))) if timeout_seconds is not None else ceiling
+    )
     try:
         result = await registry.exec(
             handle,
             preamble + command,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=resolved_timeout_seconds,
             max_output_bytes=settings.bash_max_output_bytes,
             cwd="/workspace",
         )

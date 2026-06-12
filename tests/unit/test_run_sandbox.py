@@ -15,6 +15,7 @@ a FLAT ``{"error": str}`` value — no ``{"ok"}/{"error"}`` envelope, no
 from __future__ import annotations
 
 import hashlib
+import re
 import shlex
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ import pytest
 
 from aios.config import get_settings
 from aios.models.agents import ToolSpec
+from aios.models.workflows import WORKFLOW_SCRIPT_CONTRACT
 from aios.sandbox.backends.base import CommandResult, SandboxBackendError, SandboxHandle
 from aios.workflows import run_sandbox, run_tools
 
@@ -211,32 +213,34 @@ async def test_default_timeout_and_max_output() -> None:
     settings = get_settings()
     registry = _FakeRegistry()
     captured: dict[str, Any] = {}
-    # timeout_s absent → the worker-global bash default.
+    # timeout_seconds absent → the worker-global bash default.
     await _drive(registry, captured, tool_input={"command": "x"})
     call = registry.exec_calls[0]
     assert call["timeout_seconds"] == settings.bash_default_timeout_seconds
     assert call["max_output_bytes"] == settings.bash_max_output_bytes
     assert call["cwd"] == "/workspace"
 
-    # A float timeout_s is truncated to int seconds (2.7 → 2).
+    # A float timeout_seconds is truncated to int seconds (2.7 → 2).
     registry2 = _FakeRegistry()
     captured2: dict[str, Any] = {}
-    await _drive(registry2, captured2, call_key="k1", tool_input={"command": "x", "timeout_s": 2.7})
+    await _drive(
+        registry2, captured2, call_key="k1", tool_input={"command": "x", "timeout_seconds": 2.7}
+    )
     assert registry2.exec_calls[0]["timeout_seconds"] == 2
 
 
 async def test_subsecond_timeout_floors_to_one() -> None:
-    """A positive sub-second ``timeout_s`` must NEVER resolve to 0 (#988 issue 1).
+    """A positive sub-second ``timeout_seconds`` must NEVER resolve to 0 (#988 issue 1).
 
     The in-container ``timeout`` is GNU coreutils, which treats DURATION 0 as "no
     limit" — so a bare ``int(0.5) == 0`` would run the command UNBOUNDED. The
-    ``max(1, int(timeout_s))`` floor guarantees a positive request is never
-    disabled. This is the mutation guard: reverting to a bare ``int(timeout_s)``
+    ``max(1, int(timeout_seconds))`` floor guarantees a positive request is never
+    disabled. This is the mutation guard: reverting to a bare ``int(timeout_seconds)``
     makes this fail (resolved seconds would be 0)."""
     for sub_second in (0.5, 0.001, 0.999):
         registry = _FakeRegistry()
         captured: dict[str, Any] = {}
-        await _drive(registry, captured, tool_input={"command": "x", "timeout_s": sub_second})
+        await _drive(registry, captured, tool_input={"command": "x", "timeout_seconds": sub_second})
         assert registry.exec_calls[0]["timeout_seconds"] == 1, sub_second
 
 
@@ -244,23 +248,30 @@ async def test_timeout_clamped_to_bash_ceiling() -> None:
     ceiling = get_settings().bash_default_timeout_seconds
     registry = _FakeRegistry()
     captured: dict[str, Any] = {}
-    await _drive(registry, captured, tool_input={"command": "x", "timeout_s": float(ceiling + 500)})
+    await _drive(
+        registry, captured, tool_input={"command": "x", "timeout_seconds": float(ceiling + 500)}
+    )
     assert registry.exec_calls[0]["timeout_seconds"] == ceiling
 
 
 @pytest.mark.parametrize("bad", [0, -1, 0.0, "30", True, float("nan"), float("inf")])
 async def test_invalid_timeout_is_recoverable_error_value(bad: Any) -> None:
-    """A malformed ``timeout_s`` (non-positive / non-numeric / bool / NaN / inf) is
-    a recoverable ``{"error": …}`` VALUE — bash is a tool, so tool() never raises;
+    """A malformed ``timeout_seconds`` (non-positive / non-numeric / bool / NaN / inf)
+    is a recoverable ``{"error": …}`` VALUE — bash is a tool, so tool() never raises;
     the run continues. exec is never reached."""
     registry = _FakeRegistry()
     captured: dict[str, Any] = {}
-    wake = await _drive(registry, captured, tool_input={"command": "x", "timeout_s": bad})
+    wake = await _drive(registry, captured, tool_input={"command": "x", "timeout_seconds": bad})
     assert captured["kind"] == "tool_result"
     assert "error" in captured["result"]
-    assert "timeout_s" in captured["result"]["error"]
+    assert "timeout_seconds" in captured["result"]["error"]
     assert registry.exec_calls == []  # never reached exec
     wake.assert_awaited_once()
+
+
+def test_workflow_script_contract_documents_timeout_seconds() -> None:
+    assert "timeout_seconds" in WORKFLOW_SCRIPT_CONTRACT
+    assert re.search(r"\btimeout_s\b", WORKFLOW_SCRIPT_CONTRACT) is None
 
 
 async def test_missing_command_is_recoverable_error_value() -> None:

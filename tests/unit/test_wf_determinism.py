@@ -137,7 +137,7 @@ def test_tool_bash_keys_distinctly() -> None:
     # byte-identical bash calls as #0 / #1 just like any other capability, and a
     # bash call can never collide with a non-bash tool call (the spec differs) or
     # a same-spec call under another capability id (the id is in the hash).
-    spec = {"tool_name": "bash", "input": {"command": "echo hi", "timeout_s": None}}
+    spec = {"tool_name": "bash", "input": {"command": "echo hi", "timeout_seconds": None}}
     h = content_hash("tool", spec)
     assert h != content_hash("tool", {"tool_name": "web_search", "input": {"command": "echo hi"}})
     assert h != content_hash("sandbox", spec)  # capability id is part of the hash
@@ -149,8 +149,8 @@ def test_tool_bash_keys_distinctly() -> None:
 def test_tool_bash_call_key_under_parallel() -> None:
     # A distinct bash input keys to its own ordinal stream — two different commands
     # never share a key, so parallel bash calls stay individually addressable.
-    a = {"tool_name": "bash", "input": {"command": "echo a", "timeout_s": None}}
-    b = {"tool_name": "bash", "input": {"command": "echo b", "timeout_s": None}}
+    a = {"tool_name": "bash", "input": {"command": "echo a", "timeout_seconds": None}}
+    b = {"tool_name": "bash", "input": {"command": "echo b", "timeout_seconds": None}}
     keyer = CallKeyer()
     ka = keyer.next("tool", a)
     kb = keyer.next("tool", b)

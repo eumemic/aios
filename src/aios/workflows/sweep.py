@@ -40,7 +40,7 @@ def _sandbox_redispatch_horizon(bash_ceiling_seconds: int) -> float:
     backstop that recovers a crashed bash exec. The horizon MUST exceed the maximum
     wall-clock a live bash exec can occupy — the bash exec ceiling
     (``settings.bash_default_timeout_seconds``, the SAME ceiling
-    ``run_sandbox._execute`` clamps ``timeout_s`` to) PLUS provisioning slack — so
+    ``run_sandbox._execute`` clamps ``timeout_seconds`` to) PLUS provisioning slack — so
     the sweep never re-drives a still-running exec. Deriving the horizon from the
     ceiling keeps the two from drifting: an operator who raises
     ``bash_default_timeout_seconds`` automatically widens the horizon to match. The
