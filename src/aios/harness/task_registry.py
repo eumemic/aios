@@ -48,12 +48,24 @@ class TaskRegistry:
         return True
 
     def cancel_session(self, session_id: str) -> int:
-        """Cancel all in-flight tool tasks for a session. Returns count cancelled."""
+        """Cancel all in-flight tool tasks for a session. Returns count cancelled.
+
+        Skips the caller's own task. The in-band ``cancel`` tool runs as a
+        registered task in this session's set, so cancelling indiscriminately
+        would cancel itself — inflating the count and letting a
+        ``CancelledError`` raised at its post-handler await overwrite the
+        tool's real result with a generic ``"cancelled"`` error. The
+        interrupt-listener caller (``worker.py``) runs from a non-registered
+        listener task, so the skip is a no-op there.
+        """
         session_tasks = self._tasks.get(session_id)
         if not session_tasks:
             return 0
+        current = asyncio.current_task()
         count = 0
         for _tool_call_id, task in list(session_tasks.items()):
+            if task is current:
+                continue
             if not task.done():
                 task.cancel()
                 count += 1
