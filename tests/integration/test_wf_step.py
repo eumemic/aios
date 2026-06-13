@@ -27,10 +27,11 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
-from aios.errors import NotFoundError
+from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
 from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.attenuation import Surface
+from aios.models.sessions import Session
 from aios.models.vaults import VaultCredentialCreate
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
@@ -111,6 +112,17 @@ async def _make_run(pool: asyncpg.Pool[Any], script: str, *, input: Any = None) 
         pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", input=input
     )
     return run.id
+
+
+async def _make_launcher_session(pool: asyncpg.Pool[Any], agent_id: str) -> Session:
+    return await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+    )
 
 
 @pytest.fixture
@@ -278,6 +290,123 @@ async def test_gate_suspend_resume_replay_roundtrip(wf_runtime: asyncpg.Pool[Any
         "call_result",
         "run_completed",
     ]
+
+
+async def test_launcher_receives_gate_opened_and_resume_gate_happy_path(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    launcher = await _make_launcher_session(pool, wf_agent_id)
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_wf", name="w-gate", script=_GATE_SCRIPT
+        )
+    run = await service.create_run(
+        pool,
+        account_id="acc_wf",
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        launcher_session_id=launcher.id,
+    )
+
+    await run_workflow_step(run.id)
+    async with pool.acquire() as conn:
+        gate_event = next(
+            e for e in await wf_queries.list_run_events(conn, run.id) if e.type == "call_started"
+        )
+        delivered = await db_queries.read_request_response(
+            conn, launcher.id, account_id="acc_wf", request_id=gate_event.call_key or ""
+        )
+    assert delivered is not None
+    assert delivered["is_error"] is False
+    assert delivered["result"] == {
+        "event": "gate_opened",
+        "run_id": run.id,
+        "gate_nonce": gate_event.payload["gate_nonce"],
+    }
+
+    returned = await wf_service.resume_gate_by_nonce(
+        pool,
+        run_id=run.id,
+        account_id="acc_wf",
+        gate_nonce=gate_event.payload["gate_nonce"],
+        result="yes",
+        resumer_session_id=launcher.id,
+    )
+    assert returned.id == run.id and returned.status == "suspended"
+    await run_workflow_step(run.id)
+    async with pool.acquire() as conn:
+        completed = await wf_queries.get_run_for_step(conn, run.id)
+    assert (
+        completed is not None
+        and completed.status == "completed"
+        and completed.output == {"answer": "yes"}
+    )
+
+
+async def test_gate_opened_delivery_dedupes_by_call_key_on_replay(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    launcher = await _make_launcher_session(pool, wf_agent_id)
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_wf", name="w-gate", script=_GATE_SCRIPT
+        )
+    run = await service.create_run(
+        pool,
+        account_id="acc_wf",
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        launcher_session_id=launcher.id,
+    )
+
+    await run_workflow_step(run.id)
+    await run_workflow_step(run.id)  # re-drive while still suspended at the same gate
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT data FROM events WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_response'",
+            launcher.id,
+            "acc_wf",
+        )
+    assert len(rows) == 1
+    assert db_queries.parse_jsonb(rows[0]["data"])["result"]["event"] == "gate_opened"
+
+
+async def test_non_launcher_cannot_resume_gate(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    launcher = await _make_launcher_session(pool, wf_agent_id)
+    other = await _make_launcher_session(pool, wf_agent_id)
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_wf", name="w-gate", script=_GATE_SCRIPT
+        )
+    run = await service.create_run(
+        pool,
+        account_id="acc_wf",
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        launcher_session_id=launcher.id,
+    )
+
+    await run_workflow_step(run.id)
+    async with pool.acquire() as conn:
+        gate_event = next(
+            e for e in await wf_queries.list_run_events(conn, run.id) if e.type == "call_started"
+        )
+    with pytest.raises(ForbiddenError):
+        await wf_service.resume_gate_by_nonce(
+            pool,
+            run_id=run.id,
+            account_id="acc_wf",
+            gate_nonce=gate_event.payload["gate_nonce"],
+            result="nope",
+            resumer_session_id=other.id,
+        )
 
 
 async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool[Any]) -> None:

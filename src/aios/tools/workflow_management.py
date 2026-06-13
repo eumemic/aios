@@ -18,6 +18,8 @@ session id** the harness supplies (``invoke_builtin(session_id, …)``,
 * ``cancel_run`` — cancel-time attenuation: a session may cancel only runs *it
   launched* (the self-service escape for the fan-out cap; operator-launched runs
   need the operator).
+* ``resume_gate`` — gate-resume attenuation: a session may resume only gates in
+  runs *it launched*; operator-launched runs stay on the operator HTTP plane.
 
 **Identity is load-bearing, so two invariants hold (see F1 in the review):**
 1. The trusted ids (``creator_session_id``/``actor_session_id``/``launcher_session_id``,
@@ -164,6 +166,17 @@ class _ListRunEventsArgs(BaseModel):
     run_id: str
     after_seq: int = Field(default=0, ge=0)
     limit: int = Field(default=200, ge=1, le=500)
+
+
+class _ResumeGateArgs(BaseModel):
+    """``resume_gate`` arguments. The resumer is the trusted executing session;
+    it may resume only gates in runs it launched."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    gate_nonce: str
+    result: Any = None
 
 
 # ─── handler plumbing ────────────────────────────────────────────────────────
@@ -349,6 +362,21 @@ async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) ->
     return {"events": [e.model_dump(mode="json") for e in events]}
 
 
+async def resume_gate_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = _parse(_ResumeGateArgs, arguments)
+    run = await wf_service.resume_gate_by_nonce(
+        pool,
+        run_id=args.run_id,
+        account_id=account_id,
+        gate_nonce=args.gate_nonce,
+        result=args.result,
+        resumer_session_id=session_id,  # resume only gates in runs this session launched
+    )
+    return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
+
+
 # ─── descriptions + registration ─────────────────────────────────────────────
 
 CREATE_WORKFLOW_DESCRIPTION = (
@@ -427,6 +455,11 @@ LIST_RUN_EVENTS_DESCRIPTION = (
     "markers a workflow emits — so you can watch a mid-flight run advance. Page forward "
     "with 'after_seq' (the last seq seen); a full page means call again. Event payloads "
     "are returned in full — the journal text is never clipped."
+)
+RESUME_GATE_DESCRIPTION = (
+    "Resume an open gate in a run YOU launched, using the gate_nonce delivered to you "
+    "by the gate_opened notification. You cannot resume gates in runs launched by other "
+    "sessions or by the operator. The run continues on its next wake."
 )
 
 
@@ -513,6 +546,13 @@ def _register() -> None:
         description=LIST_RUN_EVENTS_DESCRIPTION,
         parameters_schema=_ListRunEventsArgs.model_json_schema(),
         handler=list_run_events_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="resume_gate",
+        description=RESUME_GATE_DESCRIPTION,
+        parameters_schema=_ResumeGateArgs.model_json_schema(),
+        handler=resume_gate_handler,
         transport="agent_tool",
     )
 

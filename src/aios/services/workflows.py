@@ -374,7 +374,8 @@ async def resume_gate_by_nonce(
     account_id: str,
     gate_nonce: str,
     result: Any,
-) -> None:
+    resumer_session_id: str | None = None,
+) -> WfRun:
     """Deliver an external resume to the gate identified by its capability ``nonce``.
 
     The HTTP-facing gate resume: account-scope the run first (the internal
@@ -384,11 +385,18 @@ async def resume_gate_by_nonce(
     one whose payload carries that nonce. Only an OPEN gate (no ``call_result`` yet)
     matches — a nonce for an already-resolved gate (or any gate on a terminal run)
     raises ``NotFoundError`` rather than writing an orphaned signal nothing harvests.
-    ``insert_run_signal`` is idempotent, so a concurrent double-resume of a
-    still-open gate is a no-op.
+    ``resumer_session_id`` applies the agent builtin's launcher attenuation: when
+    present, only the session that launched the run may resume its gates. The HTTP
+    operator path leaves it unset and remains account-scoped. ``insert_run_signal``
+    is idempotent, so a concurrent double-resume of a still-open gate is a no-op.
     """
     async with pool.acquire() as conn:
-        await wf_queries.get_wf_run(conn, run_id, account_id=account_id)  # 404s cross-tenant
+        run = await wf_queries.get_wf_run(conn, run_id, account_id=account_id)  # 404s cross-tenant
+        if resumer_session_id is not None and run.launcher_session_id != resumer_session_id:
+            raise ForbiddenError(
+                "run was not launched by this session; only the launcher can resume its gates",
+                detail={"run_id": run_id},
+            )
         call_key = await wf_queries.find_open_gate_call_key(conn, run_id, gate_nonce=gate_nonce)
         if call_key is None:
             raise NotFoundError(
@@ -398,6 +406,7 @@ async def resume_gate_by_nonce(
             conn, run_id=run_id, call_key=call_key, kind="gate_resume", result=result
         )
     await defer_run_wake(run_id)
+    return run
 
 
 async def cancel_run(

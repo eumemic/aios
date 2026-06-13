@@ -214,6 +214,19 @@ class TestSchemaRejectsInjectedTrustedIds:
                 {"account_wide": True, "launcher_session_id": "ses_victim"},
             )
 
+    async def test_resume_gate_resumer_session_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin(
+                "ses_1",
+                "resume_gate",
+                {
+                    "run_id": "wfr_1",
+                    "gate_nonce": "nonce",
+                    "result": "ok",
+                    "resumer_session_id": "ses_victim",
+                },
+            )
+
 
 class TestErrorPropagation:
     async def test_pydantic_semantic_error_becomes_toolbail(self) -> None:
@@ -309,6 +322,24 @@ class TestReturnShape:
         pos = mock_await.call_args.args
         assert pos[1] == "postgres://test-db"
         assert mock_await.call_args.kwargs["timeout_seconds"] == 7
+
+    async def test_resume_gate_passes_launcher_session_id_and_trims_run(
+        self, monkeypatch: Any
+    ) -> None:
+        mock_resume = AsyncMock(return_value=_run(status="suspended"))
+        monkeypatch.setattr("aios.services.workflows.resume_gate_by_nonce", mock_resume)
+        out = await wm.resume_gate_handler(
+            "ses_1", {"run_id": "wfr_1", "gate_nonce": "nonce", "result": {"ok": True}}
+        )
+        assert out["id"] == "wfr_1" and out["status"] == "suspended"
+        assert "script" not in out
+        assert mock_resume.call_args.kwargs == {
+            "run_id": "wfr_1",
+            "account_id": "acc_x",
+            "gate_nonce": "nonce",
+            "result": {"ok": True},
+            "resumer_session_id": "ses_1",
+        }
 
 
 class TestReadHandlers:

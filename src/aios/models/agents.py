@@ -44,6 +44,7 @@ BuiltinToolType = Literal[
     "create_run",
     "await_run",
     "cancel_run",
+    "resume_gate",
     "get_workflow",
     "list_workflows",
     "get_run",

@@ -48,7 +48,11 @@ from aios.logging import get_logger
 from aios.models.attenuation import surface_of
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
 from aios.services import attenuation as attenuation_service
-from aios.services.sessions import create_child_session, fail_open_child_requests_conn
+from aios.services.sessions import (
+    create_child_session,
+    fail_open_child_requests_conn,
+    write_gate_opened,
+)
 from aios.services.wake import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.tools.registry import tool_executes_class
 from aios.workflows import run_sandbox, run_tools
@@ -594,6 +598,15 @@ async def _run_workflow_step_body(
                     call_key=cap.call_key,
                     payload={"capability": "gate", "gate_nonce": nonce},
                 )
+                if run.launcher_session_id is not None:
+                    await write_gate_opened(
+                        conn,
+                        run.launcher_session_id,
+                        account_id=account_id,
+                        request_id=cap.call_key,
+                        run_id=run_id,
+                        gate_nonce=nonce,
+                    )
                 # A resume signal can land before this call_started is journaled
                 # (the call_key is derivable); the pre-replay harvest only sees
                 # gates already inflight, so a self-wake harvests this freshly
