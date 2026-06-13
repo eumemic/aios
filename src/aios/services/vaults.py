@@ -8,12 +8,25 @@ fields and enforces limits.
 Sandbox eviction (#713): session-BINDING changes (which vaults a session
 can reach) flow through :func:`aios.db.queries.set_session_vaults` from
 :func:`aios.services.sessions.update_session`, which fires the post-commit
-sandbox-eviction hook as defense-in-depth. The in-place credential
-mutations here (:func:`refresh_credential`, :func:`update_vault_credential`,
-:func:`create_vault_credential`, and credential archive/delete) do NOT
-evict any sandbox: the MCP pool keys on ``(url, vault_id)`` and a rotation
-overwrites the row contents under that stable key, so the existing key
-already serves the new secret. Since #873, ``environment_variable``
+sandbox-eviction hook as defense-in-depth.
+
+MCP-pool eviction (#1030): the in-place credential mutations here overwrite
+the credential row under a pool key that is stable across token changes
+(``(url, vault_id, headers_key)`` — by design, for OAuth-refresh reuse).
+But the resolved bearer is baked into the live ``ClientSession`` at open
+time, so an operator rotation would otherwise keep serving the OLD token
+until the 900s idle reaper — which active polling defeats. So a credential
+mutation (:func:`update_vault_credential`, :func:`archive_vault_credential`,
+:func:`delete_vault_credential`) — and a vault-level archive/delete that
+retires its credentials — fires a NOTIFY on ``MCP_EVICT_VAULT_CHANNEL`` with
+the ``vault_id``. The worker (which owns the pool, in a separate process)
+LISTENs and calls :meth:`McpSessionPool.evict_by_vault`. The automated
+:func:`refresh_credential` path is deliberately NOT evicted: it is the OAuth
+case the idle reaper already covers (#459). ``create_vault_credential`` adds
+a brand-new credential (a new ``target_url`` with no pooled session yet), so
+it needs no eviction either.
+
+Since #873, ``environment_variable``
 credentials DO feed the sandbox spec builder
 (:func:`resolve_session_env_var_credentials` below): vault BINDING
 changes now bump ``spec_version`` (migration 0082) so a live sandbox
@@ -34,6 +47,7 @@ import httpx
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
+from aios.db.listen import MCP_EVICT_VAULT_CHANNEL
 from aios.errors import NotFoundError, OAuthRefreshError, ValidationError
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
@@ -59,6 +73,22 @@ REFRESH_SKEW_SECONDS = 30
 _REFRESH_HTTP_TIMEOUT_SECONDS = 30
 
 log = get_logger("aios.services.vaults")
+
+
+async def _notify_evict_vault(pool: asyncpg.Pool[Any], vault_id: str) -> None:
+    """Signal the worker's MCP session pool to evict every pooled session keyed
+    on ``vault_id`` after an operator credential mutation (#1030).
+
+    The mutation runs in the API process; the pool lives in the worker. This
+    fires a ``pg_notify`` on ``MCP_EVICT_VAULT_CHANNEL`` (function form, never
+    literal NOTIFY — our ids carry uppercase) which the worker's
+    ``_run_mcp_evict_listener`` drains and dispatches to
+    :meth:`McpSessionPool.evict_by_vault`. Fire-and-forget, like the session
+    interrupt signal: a notification lost during a listener reconnect falls
+    back to the idle reaper, and the next mutation re-fires.
+    """
+    await pool.execute("SELECT pg_notify($1, $2)", MCP_EVICT_VAULT_CHANNEL, vault_id)
+
 
 # Fields that go into the encrypted payload for each auth type. The
 # ``token_endpoint_auth`` field is a discriminated Pydantic union and gets
@@ -340,12 +370,18 @@ async def update_vault(
 
 async def archive_vault(pool: asyncpg.Pool[Any], vault_id: str, *, account_id: str) -> Vault:
     async with pool.acquire() as conn:
-        return await queries.archive_vault(conn, vault_id, account_id=account_id)
+        archived = await queries.archive_vault(conn, vault_id, account_id=account_id)
+    # Archiving a vault retires (zeroes) all its credentials' secrets, so the
+    # pooled MCP sessions keyed on this vault must be evicted too (#1030).
+    await _notify_evict_vault(pool, vault_id)
+    return archived
 
 
 async def delete_vault(pool: asyncpg.Pool[Any], vault_id: str, *, account_id: str) -> None:
     async with pool.acquire() as conn:
         await queries.delete_vault(conn, vault_id, account_id=account_id)
+    # Deleting a vault cascades to its credentials, so evict pooled sessions (#1030).
+    await _notify_evict_vault(pool, vault_id)
 
 
 # ── vault credential CRUD ──────────────────────────────────────────────────
@@ -538,7 +574,7 @@ async def update_vault_credential(
         merged = _merge_auth_payload(existing_payload, body, cred.auth_type)
         new_blob = subkey.encrypt_dict(merged)
 
-        return await queries.update_vault_credential(
+        updated = await queries.update_vault_credential(
             conn,
             vault_id,
             credential_id,
@@ -547,6 +583,10 @@ async def update_vault_credential(
             metadata=body.metadata if "metadata" in body.model_fields_set else ...,
             account_id=account_id,
         )
+    # NOTIFY after commit (invariant 6) so the worker evicts the pooled MCP
+    # session that still carries the pre-rotation secret (#1030).
+    await _notify_evict_vault(pool, vault_id)
+    return updated
 
 
 async def archive_vault_credential(
@@ -557,9 +597,12 @@ async def archive_vault_credential(
     account_id: str,
 ) -> VaultCredential:
     async with pool.acquire() as conn:
-        return await queries.archive_vault_credential(
+        archived = await queries.archive_vault_credential(
             conn, vault_id, credential_id, account_id=account_id
         )
+    # Evict the pooled MCP session: the credential's secret is now retired (#1030).
+    await _notify_evict_vault(pool, vault_id)
+    return archived
 
 
 async def delete_vault_credential(
@@ -571,6 +614,8 @@ async def delete_vault_credential(
 ) -> None:
     async with pool.acquire() as conn:
         await queries.delete_vault_credential(conn, vault_id, credential_id, account_id=account_id)
+    # Evict the pooled MCP session: the credential row is gone (#1030).
+    await _notify_evict_vault(pool, vault_id)
 
 
 # ─── environment_variable resolution (#873) ──────────────────────────────────

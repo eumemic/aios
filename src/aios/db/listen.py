@@ -568,6 +568,55 @@ async def listen_for_session_interrupts(
         conn.terminate()
 
 
+MCP_EVICT_VAULT_CHANNEL = "aios_mcp_evict_vault"
+
+
+@asynccontextmanager
+async def listen_for_mcp_evict_vault(
+    db_url: str,
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """Yield ``vault_id`` payloads from the MCP-pool eviction channel.
+
+    An operator credential mutation (PUT/archive/delete on a vault
+    credential, plus vault archive/delete) runs in the API process and
+    fires a NOTIFY on this channel; the worker — which owns the MCP session
+    pool — LISTENs here and evicts the pooled sessions keyed on that vault
+    so the rotated secret propagates immediately instead of waiting out the
+    900s idle TTL that active use defeats (#1030).
+
+    Delivery is fire-and-forget (no durable backfill row), exactly like
+    :func:`listen_for_session_interrupts`: an eviction emitted while this
+    dedicated LISTEN connection is reconnecting is lost, but the idle reaper
+    remains the safety net and a subsequent mutation re-fires. Silent drops
+    are made detectable by TCP keepalive plus a termination listener that
+    wakes the consumer into the worker-level reconnect loop.
+    """
+    conn = await _connect_listener(db_url)
+    try:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1024)
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            payload: str,
+        ) -> None:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                log.warning("listen.mcp_evict_vault_queue_full")
+
+        def _termination_callback(_conn: asyncpg.Connection[object]) -> None:
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait("")
+
+        conn.add_termination_listener(_termination_callback)
+        await conn.add_listener(MCP_EVICT_VAULT_CHANNEL, _callback)
+        yield queue
+    finally:
+        conn.terminate()
+
+
 # Channel VALUE is byte-identical across the #818 rename (the underlying
 # Postgres NOTIFY trigger function ``notify_scheduled_tasks_due`` and its
 # channel string stay put — renaming buys nothing and opens a deploy window

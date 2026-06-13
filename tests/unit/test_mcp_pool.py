@@ -414,6 +414,101 @@ class TestMcpSessionPool:
         assert a2 is a1, "A's session is reused across rotation"
         assert b1.session is not a1.session, "tenants hold distinct entries"
 
+    async def test_evict_by_vault_closes_idle_entries(self) -> None:
+        """evict_by_vault closes every IDLE entry keyed on the vault_id and
+        drops them from the idle pool, so the next acquire opens a fresh
+        session on the rotated credential (#1030)."""
+        s1, s2 = _make_mock_session(), _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s1, s2])),
+        ):
+            pool = McpSessionPool()
+            e1 = await pool.acquire(URL, "vault_a", EMPTY_KEY, {"Authorization": "Bearer old"})
+            await pool.release(URL, "vault_a", EMPTY_KEY, e1)  # → idle
+            assert pool._idle[(URL, "vault_a", EMPTY_KEY)] == [e1]
+
+            await pool.evict_by_vault("vault_a")
+
+            assert e1._owner_task.done(), "evicted idle entry's owner task must be closed"
+            assert (URL, "vault_a", EMPTY_KEY) not in pool._idle
+            # Next acquire opens a brand-new session (no stale reuse).
+            e2 = await pool.acquire(URL, "vault_a", EMPTY_KEY, {"Authorization": "Bearer new"})
+            assert e2 is not e1
+            assert e2.session is not e1.session
+
+    async def test_evict_by_vault_only_targets_matching_vault(self) -> None:
+        """evict_by_vault leaves entries for OTHER vault_ids untouched — only
+        the rotated vault's pooled sessions are discarded."""
+        s_a, s_b = _make_mock_session(), _make_mock_session()
+        url = "https://shared.example/"
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s_a, s_b])),
+        ):
+            pool = McpSessionPool()
+            a1 = await pool.acquire(url, "vault_A", EMPTY_KEY, {})
+            b1 = await pool.acquire(url, "vault_B", EMPTY_KEY, {})
+            await pool.release(url, "vault_A", EMPTY_KEY, a1)
+            await pool.release(url, "vault_B", EMPTY_KEY, b1)
+
+            await pool.evict_by_vault("vault_A")
+
+            assert a1._owner_task.done(), "vault_A's idle entry is closed"
+            assert (url, "vault_A", EMPTY_KEY) not in pool._idle
+            assert not b1._owner_task.done(), "vault_B's idle entry is untouched"
+            assert pool._idle[(url, "vault_B", EMPTY_KEY)] == [b1]
+
+    async def test_evict_by_vault_flags_in_use_then_release_discards(self) -> None:
+        """evict_by_vault flags an IN-USE entry so the subsequent release
+        DISCARDS it (closes + drops) instead of returning it to idle — the
+        old token never gets reused by a later acquire (#1030)."""
+        s1, s2 = _make_mock_session(), _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx_seq([s1, s2])),
+        ):
+            pool = McpSessionPool()
+            e1 = await pool.acquire(URL, "vault_a", EMPTY_KEY, {"Authorization": "Bearer old"})
+            # Rotation lands while the entry is checked out.
+            await pool.evict_by_vault("vault_a")
+            assert not e1._owner_task.done(), "in-use entry stays open until release"
+            assert (URL, "vault_a", EMPTY_KEY) in pool._in_use
+
+            await pool.release(URL, "vault_a", EMPTY_KEY, e1)
+            # release routes a flagged entry through discard (fire-and-forget
+            # close) — let the close task run.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            assert e1._owner_task.done(), "flagged entry must be CLOSED on release"
+            # Not returned to idle — a stale-token session must never be reused.
+            assert (URL, "vault_a", EMPTY_KEY) not in pool._idle
+            assert (URL, "vault_a", EMPTY_KEY) not in pool._in_use
+
+            e2 = await pool.acquire(URL, "vault_a", EMPTY_KEY, {"Authorization": "Bearer new"})
+            assert e2 is not e1
+            assert e2.session is not e1.session
+
+    async def test_evict_by_vault_unknown_vault_is_noop(self) -> None:
+        """Evicting a vault with no pooled entries is a harmless no-op."""
+        pool = McpSessionPool()
+        await pool.evict_by_vault("nonexistent")  # must not raise
+
+    async def test_release_without_flag_still_returns_to_idle(self) -> None:
+        """A normal release (no eviction flag) returns the entry to idle — the
+        flag path must not regress warm reuse."""
+        session = _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
+        ):
+            pool = McpSessionPool()
+            e1 = await pool.acquire(URL, "vault_a", EMPTY_KEY, {})
+            await pool.release(URL, "vault_a", EMPTY_KEY, e1)
+            assert pool._idle[(URL, "vault_a", EMPTY_KEY)] == [e1]
+            assert not e1._owner_task.done()
+
     async def test_contexts_exit_in_same_task_they_entered(self) -> None:
         """Cross-task close — regression for #425. The transport's __aenter__ and
         __aexit__ must run in the SAME task (the owner-task model guarantees it;
