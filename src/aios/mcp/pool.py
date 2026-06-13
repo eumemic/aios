@@ -224,6 +224,18 @@ class McpSessionPool:
         if not in_use:
             del self._in_use[key]
 
+    def _schedule_background_close(self, entry: _Entry, url: str) -> None:
+        """Fire-and-forget ``entry.close()`` tracked in ``_close_tasks``.
+
+        asyncio only weak-refs tasks, so the strong ref keeps the close from
+        being GC'd before it unwinds the owner task's contexts (the leak the
+        idle reaper exists to prevent). Shared by :meth:`discard` and the
+        discard path of :meth:`release`.
+        """
+        task = asyncio.create_task(entry.close(), name=f"mcp-pool-discard:{url}")
+        self._close_tasks.add(task)
+        task.add_done_callback(self._close_tasks.discard)
+
     async def _open_entry(self, url: str, headers: dict[str, str]) -> _Entry:
         """Open a fresh session inside a dedicated long-lived owner task.
 
@@ -328,22 +340,30 @@ class McpSessionPool:
         ``last_used`` (the reaper's staleness signal) and notifies one waiter
         that a slot is free.
 
-        Exception: if :meth:`evict_by_vault` flagged this entry mid-checkout
-        (an operator rotated the vault credential), the entry's live session
-        still carries the OLD bearer, so it is DISCARDED here instead of being
-        returned to idle — the next acquire then opens a fresh session on the
-        rotated secret (#1030).
+        Exception: if :meth:`evict_by_vault` flagged this entry (an operator
+        rotated the vault credential), the entry's live session still carries
+        the OLD bearer, so it is DISCARDED here instead of being returned to
+        idle — the next acquire then opens a fresh session on the rotated
+        secret (#1030). The flag is read UNDER the key Condition because
+        ``evict_by_vault`` sets it while holding that same lock; an unlocked
+        check could pass and then race a concurrent eviction into the gap
+        before the lock, returning the stale-token session to idle for reuse.
         """
-        if entry.discard_on_release:
-            await self.discard(url, vault_id, headers_key, entry)
-            return
         entry.last_used = time.monotonic()
         key: _PoolKey = (url, vault_id, headers_key)
         cond = self._condition_for(key)
         async with cond:
             self._drop_in_use(key, entry)
-            self._idle.setdefault(key, []).append(entry)
+            # Re-read under the lock: serialize evict_by_vault's flag-set with
+            # this idle-vs-discard decision so a flag flipped while release()
+            # waited on the lock is observed (closes the #1030 reuse race).
+            discard = entry.discard_on_release
+            if not discard:
+                self._idle.setdefault(key, []).append(entry)
             cond.notify()
+        if discard:
+            self._schedule_background_close(entry, url)
+            log.info("mcp_pool.discarded", url=url)
 
     async def discard(
         self, url: str, vault_id: str | None, headers_key: str, entry: _Entry
@@ -362,9 +382,7 @@ class McpSessionPool:
         async with cond:
             self._drop_in_use(key, entry)
             cond.notify()
-        task = asyncio.create_task(entry.close(), name=f"mcp-pool-discard:{url}")
-        self._close_tasks.add(task)
-        task.add_done_callback(self._close_tasks.discard)
+        self._schedule_background_close(entry, url)
         log.info("mcp_pool.discarded", url=url)
 
     async def evict_by_vault(self, vault_id: str) -> None:
