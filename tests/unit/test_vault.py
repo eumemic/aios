@@ -788,6 +788,48 @@ class TestRefreshCredential:
         assert is_expiring(new_payload) is False
 
     @pytest.mark.asyncio
+    async def test_omitted_expires_in_clears_stale_expiry(self, crypto_box: CryptoBox) -> None:
+        """A refresh whose response omits ``expires_in`` must CLEAR the prior
+        ``expires_at``, not inherit it. The prior value is within-skew by
+        construction (a refresh only fires when ``is_expiring`` was True), so
+        retaining it leaves ``is_expiring`` True and forces a fresh refresh on
+        every subsequent call — churning a rotated refresh_token and tripping
+        rate limits into a hard ``OAuthRefreshError``. Mirrors the sibling
+        ``_store_oauth_credential`` guard, which writes ``expires_at`` even when
+        absent for exactly this reason.
+        """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        payload = _expiring_oauth_payload()  # expires_at = now + 5s, within REFRESH_SKEW
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        # Fresh access_token, NO expires_in (RFC 6749 §5.1 makes it optional).
+        client = _async_client_returning(_http_response(body={"access_token": "fresh"}))
+
+        with (
+            patch.object(
+                queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                target_url="https://mcp.example.com",
+                account_id=account_id,
+            )
+
+        args = conn.execute.await_args.args
+        new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
+        new_payload = json.loads(crypto_box.derive_account_subkey(account_id).decrypt(new_blob))
+        assert new_payload["access_token"] == "fresh"
+        # The stale within-skew expires_at must be gone, so the fresh token reads
+        # as never-expiring rather than re-triggering a refresh on the next call.
+        assert is_expiring(new_payload) is False
+
+    @pytest.mark.asyncio
     async def test_persists_new_access_token_and_expires_at(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         payload = _expiring_oauth_payload()
