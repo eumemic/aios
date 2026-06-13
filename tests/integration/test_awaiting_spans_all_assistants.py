@@ -165,18 +165,57 @@ class TestAwaitingSpansAllAssistants:
 
     async def test_compute_awaiting_populates_pending_since(
         self,
-        session_with_two_assistant_turns: tuple[asyncpg.Pool[Any], str, Session],
+        migrated_db_url: str,
+        _reset_db_state: None,
     ) -> None:
         """#816: the full service path ``compute_awaiting`` → ``AwaitingToolCall``
-        yields populated, tz-aware ``pending_since`` for each awaiting entry."""
-        pool, account_id, session = session_with_two_assistant_turns
-        awaiting_by_sid = await compute_awaiting(pool, [session], account_id=account_id)
-        entries = awaiting_by_sid.get(session.id, [])
-        by_id = {e.tool_call_id: e for e in entries}
-        assert set(by_id) == {"tc_X", "tc_Z"}
-        for call in entries:
+        yields populated, tz-aware ``pending_since`` for each awaiting entry.
+
+        Uses a CUSTOM (client-executed) tool_call — its result never lands
+        server-side, so it is unconditionally ``awaiting`` (unlike a built-in
+        ``always_allow`` ``bash`` call, which ``_classify_awaiting`` filters out
+        as harness-internal)."""
+        pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
+        try:
+            account_id = "acc_awaiting_compute"
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO accounts (id, parent_account_id, can_mint_children, "
+                    "display_name) VALUES ($1, NULL, TRUE, $2)",
+                    account_id,
+                    "awaiting-compute-test",
+                )
+            _agent, _env, session = await seed_agent_env_session(
+                pool,
+                account_id=account_id,
+                prefix="awaiting-compute",
+                tools=[
+                    ToolSpec(
+                        type="custom",
+                        name="client_thing",
+                        description="a client-executed tool",
+                        input_schema={"type": "object"},
+                    )
+                ],
+            )
+            async with pool.acquire() as conn:
+                await queries.append_event(
+                    conn,
+                    account_id=account_id,
+                    session_id=session.id,
+                    kind="message",
+                    data=_assistant("tc_C", name="client_thing"),
+                )
+            awaiting_by_sid = await compute_awaiting(pool, [session], account_id=account_id)
+            entries = awaiting_by_sid.get(session.id, [])
+            by_id = {e.tool_call_id: e for e in entries}
+            assert set(by_id) == {"tc_C"}
+            call = by_id["tc_C"]
+            assert call.kind == "custom"
             assert isinstance(call.pending_since, datetime)
             assert call.pending_since.tzinfo is not None
+        finally:
+            await pool.close()
 
     async def test_two_tool_calls_in_one_event_share_pending_since(
         self,
