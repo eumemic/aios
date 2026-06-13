@@ -25,10 +25,16 @@ class AccountConfig:
             spend_limit_usd (float | None | Unset): Lifetime USD spend limit for this account. Unset inherits the parent
                 account's limit; the root falls back to the server default. The spend meter never resets — raise the limit to
                 grant more spend.
+            sandbox_snapshot_bytes (int | None | Unset): Per-account durable-sandbox snapshot cap, in unique bytes. When
+                this account's total snapshot bytes exceed the cap, the snapshot GC evicts its MOST-DORMANT sessions' snapshots
+                first (each with a model-visible sandbox_fs_expired {account_cap} notice) until the account is back under cap.
+                Unset inherits the nearest configured ancestor's cap; no cap anywhere ⇒ unbounded (the per-host pool budget
+                still applies).
     """
 
     timezone: None | str | Unset = UNSET
     spend_limit_usd: float | None | Unset = UNSET
+    sandbox_snapshot_bytes: int | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         timezone: None | str | Unset
@@ -43,6 +49,12 @@ class AccountConfig:
         else:
             spend_limit_usd = self.spend_limit_usd
 
+        sandbox_snapshot_bytes: int | None | Unset
+        if isinstance(self.sandbox_snapshot_bytes, Unset):
+            sandbox_snapshot_bytes = UNSET
+        else:
+            sandbox_snapshot_bytes = self.sandbox_snapshot_bytes
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -50,6 +62,8 @@ class AccountConfig:
             field_dict["timezone"] = timezone
         if spend_limit_usd is not UNSET:
             field_dict["spend_limit_usd"] = spend_limit_usd
+        if sandbox_snapshot_bytes is not UNSET:
+            field_dict["sandbox_snapshot_bytes"] = sandbox_snapshot_bytes
 
         return field_dict
 
@@ -75,9 +89,21 @@ class AccountConfig:
 
         spend_limit_usd = _parse_spend_limit_usd(d.pop("spend_limit_usd", UNSET))
 
+        def _parse_sandbox_snapshot_bytes(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        sandbox_snapshot_bytes = _parse_sandbox_snapshot_bytes(
+            d.pop("sandbox_snapshot_bytes", UNSET)
+        )
+
         account_config = cls(
             timezone=timezone,
             spend_limit_usd=spend_limit_usd,
+            sandbox_snapshot_bytes=sandbox_snapshot_bytes,
         )
 
         return account_config

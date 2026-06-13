@@ -473,6 +473,31 @@ async def resolve_effective_spend_limit_usd(
     return limit
 
 
+async def resolve_effective_sandbox_snapshot_bytes(
+    conn: asyncpg.Connection[Any], account_id: str
+) -> int | None:
+    """Resolve the nearest configured per-account snapshot cap up the parent chain.
+
+    Mirrors :func:`resolve_effective_spend_limit_usd`: the nearest ancestor
+    (self first) whose ``config.sandbox_snapshot_bytes`` is set wins; no cap
+    anywhere up the chain ⇒ ``None`` (unbounded — the per-host pool budget still
+    applies). Read by the snapshot GC's account-cap eviction pass (§5.7).
+    """
+    cap: int | None = await conn.fetchval(
+        "WITH RECURSIVE chain AS ("
+        "  SELECT parent_account_id, (config->>'sandbox_snapshot_bytes')::bigint AS cap, 0 AS depth "
+        "    FROM accounts WHERE id = $1 AND archived_at IS NULL "
+        "  UNION ALL "
+        "  SELECT a.parent_account_id, (a.config->>'sandbox_snapshot_bytes')::bigint, c.depth + 1 "
+        "    FROM accounts a JOIN chain c ON a.id = c.parent_account_id "
+        "    WHERE a.archived_at IS NULL"
+        ") "
+        "SELECT cap FROM chain WHERE cap IS NOT NULL ORDER BY depth ASC LIMIT 1",
+        account_id,
+    )
+    return int(cap) if cap is not None else None
+
+
 async def get_account_spent_microusd(conn: asyncpg.Connection[Any], account_id: str) -> int:
     """Return the scalar lifetime spend meter for ``account_id``."""
     value = await conn.fetchval("SELECT spent_microusd FROM accounts WHERE id = $1", account_id)

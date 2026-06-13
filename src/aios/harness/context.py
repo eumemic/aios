@@ -109,11 +109,12 @@ def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
             "belongs in /workspace, which is unaffected.]"
         )
     if event == "sandbox_fs_expired":
-        cause = (
-            "to reclaim disk space"
-            if reason == "disk_pressure"
-            else "after a period of inactivity (retention limit)"
-        )
+        if reason == "disk_pressure":
+            cause = "to reclaim disk space"
+        elif reason == "account_cap":
+            cause = "because the account exceeded its snapshot storage quota"
+        else:
+            cause = "after a period of inactivity (retention limit)"
         return (
             f"[The persisted sandbox filesystem for this session was discarded {cause}. "
             f"{_FS_FRESH_BASE}]"

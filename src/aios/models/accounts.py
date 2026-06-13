@@ -36,6 +36,18 @@ class AccountConfig(BaseModel):
             "meter never resets — raise the limit to grant more spend."
         ),
     )
+    sandbox_snapshot_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Per-account durable-sandbox snapshot cap, in unique bytes. When this "
+            "account's total snapshot bytes exceed the cap, the snapshot GC evicts "
+            "its MOST-DORMANT sessions' snapshots first (each with a model-visible "
+            "sandbox_fs_expired {account_cap} notice) until the account is back "
+            "under cap. Unset inherits the nearest configured ancestor's cap; "
+            "no cap anywhere ⇒ unbounded (the per-host pool budget still applies)."
+        ),
+    )
 
     @field_validator("timezone")
     @classmethod

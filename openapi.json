@@ -9483,6 +9483,19 @@
             ],
             "title": "Spend Limit Usd",
             "description": "Lifetime USD spend limit for this account. Unset inherits the parent account's limit; the root falls back to the server default. The spend meter never resets \u2014 raise the limit to grant more spend."
+          },
+          "sandbox_snapshot_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sandbox Snapshot Bytes",
+            "description": "Per-account durable-sandbox snapshot cap, in unique bytes. When this account's total snapshot bytes exceed the cap, the snapshot GC evicts its MOST-DORMANT sessions' snapshots first (each with a model-visible sandbox_fs_expired {account_cap} notice) until the account is back under cap. Unset inherits the nearest configured ancestor's cap; no cap anywhere \u21d2 unbounded (the per-host pool budget still applies)."
           }
         },
         "additionalProperties": false,

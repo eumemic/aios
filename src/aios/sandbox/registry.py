@@ -1431,8 +1431,14 @@ class SandboxRegistry:
         )
 
         # Pass 3 — per-host pool budget.
-        await self._gc_pool_budget_pass(
+        pool_evicted = await self._gc_pool_budget_pass(
             retained, image_states, settings.sandbox_snapshot_pool_bytes, instance_id
+        )
+
+        # Pass 3b — per-account snapshot cap (quota tiers / plan limits, §5.7).
+        # Skip artifacts the pool-budget pass already evicted this tick.
+        await self._gc_account_cap_pass(
+            retained, image_states, instance_id, already_evicted=pool_evicted
         )
 
         # Pass 4 — pointer reconciliation against local store truth.
@@ -1586,10 +1592,14 @@ class SandboxRegistry:
         states: dict[str, SessionSnapshotState],
         pool_bytes: int | None,
         instance_id: str,
-    ) -> None:
-        """Evict most-dormant sessions first while this host is over its pool budget."""
+    ) -> set[str]:
+        """Evict most-dormant sessions first while this host is over its pool budget.
+
+        Returns the session_ids it evicted, so a downstream cap pass can skip
+        artifacts already gone this tick (and not double-count their bytes).
+        """
         if pool_bytes is None:
-            return
+            return set()
         base_sizes: dict[str, int] = {}
         sized: list[tuple[GcImageVerdict, int]] = []
         total = 0
@@ -1600,7 +1610,78 @@ class SandboxRegistry:
             total += ub
             sized.append((v, ub))
         if total <= pool_bytes:
-            return
+            return set()
+        return await self._evict_most_dormant(
+            sized, states, instance_id, total=total, budget=pool_bytes, reason="disk_pressure"
+        )
+
+    async def _gc_account_cap_pass(
+        self,
+        retained: list[GcImageVerdict],
+        states: dict[str, SessionSnapshotState],
+        instance_id: str,
+        *,
+        already_evicted: set[str] | None = None,
+    ) -> None:
+        """Enforce per-account snapshot caps (``config.sandbox_snapshot_bytes``, §5.7).
+
+        Mirrors the per-host pool-budget pass, but partitioned by account: each
+        over-cap account's MOST-DORMANT snapshots are evicted first (each with a
+        model-visible ``sandbox_fs_expired {account_cap}`` event) until the
+        account is back under cap. An account with no configured cap (none up its
+        parent chain) is never enforced; under-cap accounts are untouched.
+        """
+        from aios.harness import runtime
+
+        skip = already_evicted or set()
+        base_sizes: dict[str, int] = {}  # shared across accounts (sessions share a base)
+        # Group retained canonical snapshots by owning account, summing bytes.
+        by_account: dict[str, list[tuple[GcImageVerdict, int]]] = {}
+        totals: dict[str, int] = {}
+        for v in retained:
+            sid = v.session_id
+            if not v.is_canonical or sid is None or sid in skip:
+                continue
+            st = states.get(sid)
+            if st is None:
+                continue  # deleted since tick start — collected elsewhere
+            ub = await self._unique_bytes_for_image(v.image, base_sizes)
+            by_account.setdefault(st.account_id, []).append((v, ub))
+            totals[st.account_id] = totals.get(st.account_id, 0) + ub
+
+        pool = runtime.require_pool()
+        for account_id, sized in by_account.items():
+            async with pool.acquire() as conn:
+                cap = await queries.resolve_effective_sandbox_snapshot_bytes(conn, account_id)
+            if cap is None or totals[account_id] <= cap:
+                continue
+            await self._evict_most_dormant(
+                sized,
+                states,
+                instance_id,
+                total=totals[account_id],
+                budget=cap,
+                reason="account_cap",
+            )
+
+    async def _evict_most_dormant(
+        self,
+        sized: list[tuple[GcImageVerdict, int]],
+        states: dict[str, SessionSnapshotState],
+        instance_id: str,
+        *,
+        total: int,
+        budget: int,
+        reason: str,
+    ) -> set[str]:
+        """Evict the most-dormant snapshots from ``sized`` until ``total`` ≤ ``budget``.
+
+        Shared by the per-host pool-budget and per-account cap passes (§5.5/§5.7).
+        Each removal takes the per-session lock and re-checks the cached handle
+        (a waking session is skipped, never evicted out from under itself),
+        appends a model-visible ``sandbox_fs_expired {reason}`` event, and clears
+        the ownership-gated pointer. Returns the evicted session_ids.
+        """
 
         def _dormancy_key(item: tuple[GcImageVerdict, int]) -> datetime:
             st = item[0].session_id and states.get(item[0].session_id)
@@ -1608,8 +1689,9 @@ class SandboxRegistry:
                 return st.last_event_at
             return datetime.min.replace(tzinfo=UTC)  # unknown dormancy ⇒ evict first
 
+        evicted: set[str] = set()
         for v, ub in sorted(sized, key=_dormancy_key):
-            if total <= pool_bytes:
+            if total <= budget:
                 break
             sid = v.session_id
             if sid is None:
@@ -1619,10 +1701,10 @@ class SandboxRegistry:
                     continue  # waking — skip
                 if await self._backend.remove_image(v.removal_ref):
                     total -= ub
-                    await self._append_fs_event(
-                        sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "disk_pressure"}
-                    )
+                    evicted.add(sid)
+                    await self._append_fs_event(sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": reason})
                     await self._clear_pointer_if_owned(sid, instance_id, states)
+        return evicted
 
     async def _gc_reconcile_pointers(
         self,
