@@ -94,6 +94,7 @@ class WfRun(BaseModel):
     input: Any = None  # arbitrary JSON: a workflow's input need not be an object
     output: Any = None  # arbitrary JSON: the script's return value
     budget_usd: float | None = None
+    default_child_model: str | None = None
     last_event_seq: int
     created_at: datetime
     updated_at: datetime
@@ -282,6 +283,10 @@ class WfRunCreate(BaseModel):
         default=None,
         gt=0,
         description="Optional shared USD spend ceiling for this run's direct agent() children.",
+    )
+    default_child_model: str | None = Field(
+        default=None,
+        description="Default model for generic agent() children spawned by this run.",
     )
 
 

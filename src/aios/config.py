@@ -434,6 +434,10 @@ class Settings(BaseSettings):
         "single run's standing agent() fan-out. The re-drive uses the existing "
         "child-completion re-wake — no new machinery.",
     )
+    workflow_default_child_model: str | None = Field(
+        default=None,
+        description="Default model for generic workflow agent() children on operator-launched runs.",
+    )
     workflow_agent_deadline_seconds: float = Field(
         default=60 * 60,  # 1 hour
         gt=0,

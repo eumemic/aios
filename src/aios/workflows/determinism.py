@@ -40,7 +40,7 @@ from typing import Any
 # workers fail honest at wake time instead of replaying an in-flight journal under
 # silently changed keying/interpreter/capability semantics. Bump only for knowingly
 # replay-breaking changes; replay-additive changes should keep the epoch.
-HOST_SEMANTICS_EPOCH = 1
+HOST_SEMANTICS_EPOCH = 2
 
 
 class WorkflowInputTypeError(TypeError):

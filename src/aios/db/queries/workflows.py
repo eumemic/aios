@@ -82,6 +82,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
             if row.get("budget_total_microusd") is not None
             else None
         ),
+        default_child_model=row.get("default_child_model"),
         last_event_seq=row["last_event_seq"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -415,6 +416,7 @@ async def insert_wf_run(
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
     budget_usd: float | None = None,
+    default_child_model: str | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
@@ -426,9 +428,9 @@ async def insert_wf_run(
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
                  launcher_session_id, script, script_sha, host_semantics_epoch, status, input,
-                 tools, mcp_servers, http_servers, budget_total_microusd)
+                 tools, mcp_servers, http_servers, budget_total_microusd, default_child_model)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10::jsonb,
-                    $11::jsonb, $12::jsonb, $13::jsonb, $14)
+                    $11::jsonb, $12::jsonb, $13::jsonb, $14, $15)
             RETURNING *
             """,
             new_id,
@@ -445,6 +447,7 @@ async def insert_wf_run(
             json.dumps([s.model_dump() for s in (mcp_servers or [])]),
             json.dumps([s.model_dump() for s in (http_servers or [])]),
             round(budget_usd * 1_000_000) if budget_usd is not None else None,
+            default_child_model,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(

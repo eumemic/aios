@@ -86,6 +86,7 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         agent_id=row["agent_id"],
         environment_id=row["environment_id"],
         agent_version=row["agent_version"],
+        model=row.get("model"),
         title=row["title"],
         metadata=metadata,
         # ``status`` is derived ({active, idle}) from the event log via
@@ -204,9 +205,10 @@ async def insert_child_session(
     *,
     session_id: str,
     account_id: str,
-    agent_id: str,
+    agent_id: str | None,
     environment_id: str,
-    agent_version: int,
+    agent_version: int | None,
+    model: str | None = None,
     parent_run_id: str,
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
@@ -232,14 +234,14 @@ async def insert_child_session(
         row = await conn.fetchrow(
             """
             INSERT INTO sessions (
-                id, agent_id, environment_id, agent_version, title, metadata,
+                id, agent_id, environment_id, agent_version, model, title, metadata,
                 workspace_volume_path, env, focal_channel, focal_locked,
                 account_id, parent_run_id, origin, archive_when_idle,
                 tools, mcp_servers, http_servers, surface_frozen
             )
-            VALUES ($1, $2, $3, $4, NULL, '{}'::jsonb, $5, '{}'::jsonb,
-                    NULL, FALSE, $6, $7, 'background', TRUE,
-                    $8::jsonb, $9::jsonb, $10::jsonb, TRUE)
+            VALUES ($1, $2, $3, $4, $5, NULL, '{}'::jsonb, $6, '{}'::jsonb,
+                    NULL, FALSE, $7, $8, 'background', TRUE,
+                    $9::jsonb, $10::jsonb, $11::jsonb, TRUE)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -247,6 +249,7 @@ async def insert_child_session(
             agent_id,
             environment_id,
             agent_version,
+            model,
             workspace_path,
             account_id,
             parent_run_id,
@@ -888,16 +891,17 @@ async def get_session_model(
     """
     row = await conn.fetchrow(
         """
-        SELECT COALESCE(av.model, a.model) AS model
+        SELECT COALESCE(s.model, av.model, a.model) AS model
           FROM sessions s
-          JOIN agents a ON a.id = s.agent_id
+     LEFT JOIN agents a
+            ON a.id = s.agent_id
+           AND a.account_id = $2
      LEFT JOIN agent_versions av
             ON av.agent_id = s.agent_id
            AND av.version = s.agent_version
            AND av.account_id = $2
          WHERE s.id = $1
            AND s.account_id = $2
-           AND a.account_id = $2
         """,
         session_id,
         account_id,

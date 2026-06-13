@@ -38,7 +38,7 @@ class Session:
 
         Attributes:
             id (str):
-            agent_id (str):
+            agent_id (None | str):
             environment_id (str):
             agent_version (int | None):
             title (None | str):
@@ -48,6 +48,7 @@ class Session:
             last_event_seq (int):
             created_at (datetime.datetime):
             updated_at (datetime.datetime):
+            model (None | str | Unset):
             awaiting (list[AwaitingToolCall] | Unset):
             vault_ids (list[str] | Unset):
             usage (SessionUsage | Unset): Cumulative token usage across all model calls in a session.
@@ -64,7 +65,7 @@ class Session:
     """
 
     id: str
-    agent_id: str
+    agent_id: None | str
     environment_id: str
     agent_version: int | None
     title: None | str
@@ -74,6 +75,7 @@ class Session:
     last_event_seq: int
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    model: None | str | Unset = UNSET
     awaiting: list[AwaitingToolCall] | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
     usage: SessionUsage | Unset = UNSET
@@ -97,6 +99,7 @@ class Session:
 
         id = self.id
 
+        agent_id: None | str
         agent_id = self.agent_id
 
         environment_id = self.environment_id
@@ -122,6 +125,12 @@ class Session:
         created_at = self.created_at.isoformat()
 
         updated_at = self.updated_at.isoformat()
+
+        model: None | str | Unset
+        if isinstance(self.model, Unset):
+            model = UNSET
+        else:
+            model = self.model
 
         awaiting: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.awaiting, Unset):
@@ -212,6 +221,8 @@ class Session:
                 "updated_at": updated_at,
             }
         )
+        if model is not UNSET:
+            field_dict["model"] = model
         if awaiting is not UNSET:
             field_dict["awaiting"] = awaiting
         if vault_ids is not UNSET:
@@ -256,7 +267,12 @@ class Session:
         d = dict(src_dict)
         id = d.pop("id")
 
-        agent_id = d.pop("agent_id")
+        def _parse_agent_id(data: object) -> None | str:
+            if data is None:
+                return data
+            return cast(None | str, data)
+
+        agent_id = _parse_agent_id(d.pop("agent_id"))
 
         environment_id = d.pop("environment_id")
 
@@ -298,6 +314,15 @@ class Session:
         created_at = isoparse(d.pop("created_at"))
 
         updated_at = isoparse(d.pop("updated_at"))
+
+        def _parse_model(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        model = _parse_model(d.pop("model", UNSET))
 
         _awaiting = d.pop("awaiting", UNSET)
         awaiting: list[AwaitingToolCall] | Unset = UNSET
@@ -432,6 +457,7 @@ class Session:
             last_event_seq=last_event_seq,
             created_at=created_at,
             updated_at=updated_at,
+            model=model,
             awaiting=awaiting,
             vault_ids=vault_ids,
             usage=usage,

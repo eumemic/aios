@@ -550,7 +550,7 @@ async def test_agent_spawn_creates_child_and_suspends(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
     pool = wf_runtime
-    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, {{'task': 'go'}})\n"
+    script = f"async def main(input):\n    return await agent({'task': 'go'}, agent_id={wf_agent_id!r})\n"
     run_id = await _make_run(pool, script)
     with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as child_wake:
         await run_workflow_step(run_id)
@@ -578,12 +578,72 @@ async def test_agent_spawn_creates_child_and_suspends(
     child_wake.assert_awaited_once()  # prompt wake of the child
 
 
+async def test_generic_agent_spawn_uses_run_surface_and_model(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    script = "async def main(input):\n    return await agent({'task': 'go'}, model='generic-model', label='observe')\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+        child_row = await conn.fetchrow(
+            "SELECT agent_id, agent_version, model, tools, mcp_servers, http_servers "
+            "FROM sessions WHERE parent_run_id = $1",
+            run_id,
+        )
+    assert run is not None
+    assert child_row is not None
+    assert child_row["agent_id"] is None
+    assert child_row["agent_version"] is None
+    assert child_row["model"] == "generic-model"
+    assert db_queries.parse_jsonb(child_row["tools"]) == [t.model_dump() for t in run.tools]
+    assert db_queries.parse_jsonb(child_row["mcp_servers"]) == [
+        s.model_dump() for s in run.mcp_servers
+    ]
+    assert db_queries.parse_jsonb(child_row["http_servers"]) == [
+        s.model_dump() for s in run.http_servers
+    ]
+    started = next(e for e in events if e.type == "call_started")
+    assert started.payload["child_agent_version"] is None
+    assert started.payload["label"] == "observe"
+
+
+async def test_generic_agent_without_model_is_catchable_bad_call(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        "        await agent('hi')\n"
+        "    except AgentError as e:\n"
+        "        return {'kind': e.kind, 'msg': str(e)}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert run is not None and run.status == "completed"
+    assert run.output == {
+        "kind": "bad_agent_call",
+        "msg": "generic agent() call has no model: pass model= or set the run's default child model",
+    }
+    assert children == 0
+
+
 async def test_agent_spawn_idempotent_on_replay(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
     """C1/C2/C6: a re-step (crash replay) must NOT double-spawn or re-deliver input."""
     pool = wf_runtime
-    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'hi')\n"
+    script = f"async def main(input):\n    return await agent('hi', agent_id={wf_agent_id!r})\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # wake 1: spawn
     await run_workflow_step(run_id)  # wake 2: replay — re-emits the same frontier
@@ -615,7 +675,7 @@ async def test_agent_not_found_is_catchable(wf_runtime: asyncpg.Pool[Any]) -> No
     script = (
         "async def main(input):\n"
         "    try:\n"
-        "        await agent('agent_nope', 'x')\n"
+        "        await agent('x', agent_id='agent_nope')\n"
         "    except AgentError as e:\n"
         "        return {'caught': True, 'kind': e.kind, 'msg': str(e)}\n"
         "    return {'caught': False}\n"
@@ -656,7 +716,7 @@ async def test_bad_agent_call_invalid_schema_is_catchable(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        await agent({wf_agent_id!r}, 'hi', output_schema={bad_schema!r})\n"
+        f"        await agent('hi', agent_id={wf_agent_id!r}, output_schema={bad_schema!r})\n"
         "    except AgentError as e:\n"
         "        return {'caught': True, 'kind': e.kind, 'msg': str(e)}\n"
         "    return {'caught': False}\n"
@@ -694,7 +754,7 @@ async def test_bad_agent_call_non_string_agent_id_is_catchable(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        "        await agent(123, 'hi')\n"
+        "        await agent('hi', agent_id=123)\n"
         "    except AgentError as e:\n"
         "        return {'caught': True, 'kind': e.kind, 'msg': str(e)}\n"
         "    return {'caught': False}\n"
@@ -713,12 +773,12 @@ async def test_bad_agent_call_non_string_agent_id_is_catchable(
     assert run.output == {
         "caught": True,
         "kind": "bad_agent_call",
-        "msg": "agent() requires a string agent_id, got 123",
+        "msg": "agent() requires a string agent_id or None, got 123",
     }
     cr = next(e for e in events if e.type == "call_result")
     assert cr.payload["error"] == {
         "kind": "bad_agent_call",
-        "message": "agent() requires a string agent_id, got 123",
+        "message": "agent() requires a string agent_id or None, got 123",
     }
     assert children == 0
 
@@ -737,9 +797,9 @@ async def test_one_bad_branch_in_fanout_does_not_terminate_the_run(
     script = (
         "async def main(input):\n"
         "    return await parallel([\n"
-        "        lambda: agent('agent_nope', 'x'),\n"
-        f"        lambda: agent({wf_agent_id!r}, 'a'),\n"
-        f"        lambda: agent({wf_agent_id!r}, 'b'),\n"
+        "        lambda: agent('x', agent_id='agent_nope'),\n"
+        f"        lambda: agent('a', agent_id={wf_agent_id!r}),\n"
+        f"        lambda: agent('b', agent_id={wf_agent_id!r}),\n"
         "    ])\n"
     )
     run_id = await _make_run(pool, script)
@@ -791,7 +851,7 @@ async def test_spawn_error_call_result_has_no_paired_call_started(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        "        await agent('agent_nope', 'x')\n"
+        "        await agent('x', agent_id='agent_nope')\n"
         "    except AgentError:\n"
         "        return 'caught'\n"
     )
@@ -1056,9 +1116,9 @@ async def test_reattach_skips_defer_wake_and_self_wakes_on_marker(
     _SPAWN_KW = {"agent_spawns": 0, "max_agent_calls": 1000}
 
     pool = wf_runtime
-    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    script = f"async def main(input):\n    await agent('go', agent_id={wf_agent_id!r})\n    return 'done'\n"
     run_id = await _make_run(pool, script)
-    spec = {"agent_id": wf_agent_id, "input": "go", "output_schema": None}
+    spec = {"agent_id": wf_agent_id, "input": "go", "output_schema": None, "model": None}
     call_key = CallKeyer().next("agent", spec)
     cap = EmittedCapability(capability_id="agent", call_key=call_key, spec=spec)
     cid = child_session_id(run_id, call_key)
@@ -1114,7 +1174,7 @@ async def test_agent_round_trip_harvest_completes_run(
     from aios.tools import workflow_completion
 
     pool = wf_runtime
-    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    script = f"async def main(input):\n    await agent('go', agent_id={wf_agent_id!r})\n    return 'done'\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     child_id = await _child_id_of(pool, run_id)
@@ -1150,7 +1210,7 @@ async def test_uncaught_agent_error_bubbles_and_errors_the_run(
     from aios.tools import workflow_completion
 
     pool = wf_runtime
-    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    script = f"async def main(input):\n    await agent('go', agent_id={wf_agent_id!r})\n    return 'done'\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
     child_id = await _child_id_of(pool, run_id)
@@ -1181,7 +1241,7 @@ async def test_workflow_try_except_agent_error_continues(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        await agent({wf_agent_id!r}, 'go')\n"
+        f"        await agent('go', agent_id={wf_agent_id!r})\n"
         "    except AgentError as e:\n"
         "        return {'caught': True, 'kind': e.kind}\n"
         "    return {'caught': False}\n"
@@ -1209,7 +1269,7 @@ async def test_workflow_uses_agent_return_value(
     from aios.tools import workflow_completion
 
     pool = wf_runtime
-    script = f"async def main(input):\n    r = await agent({wf_agent_id!r}, 'go')\n    return {{'got': r}}\n"
+    script = f"async def main(input):\n    r = await agent('go', agent_id={wf_agent_id!r})\n    return {{'got': r}}\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
     child_id = await _child_id_of(pool, run_id)
@@ -1235,7 +1295,7 @@ async def test_model_failure_writes_error_response_and_run_resolves(
     from aios.harness import loop
 
     pool = wf_runtime
-    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    script = f"async def main(input):\n    await agent('go', agent_id={wf_agent_id!r})\n    return 'done'\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     child_id = await _child_id_of(pool, run_id)
@@ -1427,7 +1487,7 @@ async def test_non_answering_child_resolves_run_via_agent_no_return_error(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        await agent({wf_agent_id!r}, 'go')\n"
+        f"        await agent('go', agent_id={wf_agent_id!r})\n"
         "    except AgentNoReturnError:\n"
         "        return 'gave-up'\n"
     )
@@ -1652,7 +1712,7 @@ async def test_operator_archived_child_resolves_run_as_child_gone(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        await agent({wf_agent_id!r}, 'go')\n"
+        f"        await agent('go', agent_id={wf_agent_id!r})\n"
         "    except AgentError as e:\n"
         "        return {'caught': True, 'kind': e.kind}\n"
     )
@@ -1698,7 +1758,7 @@ async def test_operator_deleted_child_resolves_run_as_child_gone(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        await agent({wf_agent_id!r}, 'go')\n"
+        f"        await agent('go', agent_id={wf_agent_id!r})\n"
         "    except AgentError as e:\n"
         "        return e.kind\n"
     )
@@ -1734,7 +1794,7 @@ async def test_archive_child_commits_response_and_child_done_atomically(
     """Acceptance #3: the child_gone response, its child_done signal, and the
     archived_at flip all commit in ONE transaction — observable together afterward."""
     pool = wf_runtime
-    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    script = f"async def main(input):\n    await agent('go', agent_id={wf_agent_id!r})\n    return 'done'\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     child_id = await _child_id_of(pool, run_id)
@@ -1782,8 +1842,8 @@ async def test_parallel_spawns_fanout_and_collects_results_in_order(
     pool = wf_runtime
     script = (
         "async def main(input):\n"
-        f"    return await parallel([lambda: agent({wf_agent_id!r}, 'a'),"
-        f" lambda: agent({wf_agent_id!r}, 'b')])\n"
+        f"    return await parallel([lambda: agent('a', agent_id={wf_agent_id!r}),"
+        f" lambda: agent('b', agent_id={wf_agent_id!r})])\n"
     )
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # drive parallel -> spawn both children + suspend
@@ -1812,8 +1872,8 @@ async def test_parallel_barrier_yields_none_for_an_errored_child(
     pool = wf_runtime
     script = (
         "async def main(input):\n"
-        f"    return await parallel([lambda: agent({wf_agent_id!r}, 'a'),"
-        f" lambda: agent({wf_agent_id!r}, 'b')])\n"
+        f"    return await parallel([lambda: agent('a', agent_id={wf_agent_id!r}),"
+        f" lambda: agent('b', agent_id={wf_agent_id!r})])\n"
     )
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
@@ -1854,7 +1914,7 @@ async def test_lifetime_agent_cap_errors_at_the_over_cap_spawn(
     pool = wf_runtime
     script = (
         "async def main(input):\n"
-        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(3)])\n"
+        f"    return await parallel([lambda: agent(str(i), agent_id={wf_agent_id!r}) for i in range(3)])\n"
     )
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # 3 > cap 2 → error AT the 3rd spawn
@@ -1888,7 +1948,7 @@ async def test_agent_cap_at_boundary_is_allowed(
     pool = wf_runtime
     script = (
         "async def main(input):\n"
-        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(3)])\n"
+        f"    return await parallel([lambda: agent(str(i), agent_id={wf_agent_id!r}) for i in range(3)])\n"
     )
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # 3 == cap 3 → allowed
@@ -1912,7 +1972,7 @@ async def test_lowering_cap_mid_flight_does_not_kill_a_harvest_only_step(
     pool = wf_runtime
     script = (
         "async def main(input):\n"
-        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(2)])\n"
+        f"    return await parallel([lambda: agent(str(i), agent_id={wf_agent_id!r}) for i in range(2)])\n"
     )
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn 2 under the default (high) cap
@@ -1954,10 +2014,10 @@ async def test_rejected_agent_cap_does_not_count_toward_quota(
     # One prior real spawn, THEN the bad+good fan-out: prior=1, one real spawn left.
     script = (
         "async def main(input):\n"
-        f"    await agent({wf_agent_id!r}, 'first')\n"
+        f"    await agent('first', agent_id={wf_agent_id!r})\n"
         "    return await parallel([\n"
-        "        lambda: agent('agent_nope', 'x'),\n"
-        f"        lambda: agent({wf_agent_id!r}, 'y'),\n"
+        "        lambda: agent('x', agent_id='agent_nope'),\n"
+        f"        lambda: agent('y', agent_id={wf_agent_id!r}),\n"
         "    ])\n"
     )
     run_id = await _make_run(pool, script)
@@ -2019,9 +2079,9 @@ async def test_real_overquota_fanout_still_errors_too_many_agents(
     script = (
         "async def main(input):\n"
         "    return await parallel([\n"
-        f"        lambda: agent({wf_agent_id!r}, 'a'),\n"
-        f"        lambda: agent({wf_agent_id!r}, 'b'),\n"
-        f"        lambda: agent({wf_agent_id!r}, 'c'),\n"
+        f"        lambda: agent('a', agent_id={wf_agent_id!r}),\n"
+        f"        lambda: agent('b', agent_id={wf_agent_id!r}),\n"
+        f"        lambda: agent('c', agent_id={wf_agent_id!r}),\n"
         "    ])\n"
     )
     run_id = await _make_run(pool, script)
@@ -2096,7 +2156,7 @@ async def test_wave_admits_in_waves_as_children_resolve(
     pool = wf_runtime
     script = (
         "async def main(input):\n"
-        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(5)])\n"
+        f"    return await parallel([lambda: agent(str(i), agent_id={wf_agent_id!r}) for i in range(5)])\n"
     )
     run_id = await _make_run(pool, script)
     # Each admitted child returns a value derived from ITS call_key, so the final
@@ -2175,7 +2235,7 @@ async def test_harvest_only_resuspend_with_deferred_outstanding_no_error(
     pool = wf_runtime
     script = (
         "async def main(input):\n"
-        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(3)])\n"
+        f"    return await parallel([lambda: agent(str(i), agent_id={wf_agent_id!r}) for i in range(3)])\n"
     )
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # 2 admitted, 1 deferred
@@ -2220,7 +2280,7 @@ async def test_wave_gate_does_not_mask_or_false_trip_lifetime_cap(
     pool = wf_runtime
     script = (
         "async def main(input):\n"
-        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(5)])\n"
+        f"    return await parallel([lambda: agent(str(i), agent_id={wf_agent_id!r}) for i in range(5)])\n"
     )
     run_id = await _make_run(pool, script)
 
@@ -2302,7 +2362,7 @@ async def test_frontier_deferred_marker_is_idempotent_and_seq_gapless(
     pool = wf_runtime
     script = (
         "async def main(input):\n"
-        f"    return await parallel([lambda: agent({wf_agent_id!r}, str(i)) for i in range(4)])\n"
+        f"    return await parallel([lambda: agent(str(i), agent_id={wf_agent_id!r}) for i in range(4)])\n"
     )
     run_id = await _make_run(pool, script)
 
@@ -2353,7 +2413,7 @@ async def test_agent_call_times_out_when_child_never_responds(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        return await agent({wf_agent_id!r}, 'go')\n"
+        f"        return await agent('go', agent_id={wf_agent_id!r})\n"
         "    except AgentError as e:\n"
         "        return {'timed_out': e.kind}\n"
     )
@@ -2397,7 +2457,7 @@ async def test_past_deadline_child_that_already_responded_keeps_its_real_respons
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        return await agent({wf_agent_id!r}, 'go')\n"
+        f"        return await agent('go', agent_id={wf_agent_id!r})\n"
         "    except AgentError as e:\n"
         "        return {'timed_out': e.kind}\n"
     )
@@ -2438,7 +2498,7 @@ async def test_past_deadline_gone_child_resolves_as_child_gone_not_timeout(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        return await agent({wf_agent_id!r}, 'go')\n"
+        f"        return await agent('go', agent_id={wf_agent_id!r})\n"
         "    except AgentError as e:\n"
         "        return {'kind': e.kind}\n"
     )
@@ -2473,7 +2533,7 @@ async def test_child_archived_in_timeout_write_window_resolves_as_child_gone(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        return await agent({wf_agent_id!r}, 'go')\n"
+        f"        return await agent('go', agent_id={wf_agent_id!r})\n"
         "    except AgentError as e:\n"
         "        return {'kind': e.kind}\n"
     )
@@ -2511,7 +2571,7 @@ async def test_agent_stays_suspended_until_marker(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
     pool = wf_runtime
-    script = f"async def main(input):\n    await agent({wf_agent_id!r}, 'go')\n    return 'done'\n"
+    script = f"async def main(input):\n    await agent('go', agent_id={wf_agent_id!r})\n    return 'done'\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
     await run_workflow_step(run_id)  # marker absent -> stays suspended, no call_result
@@ -2625,7 +2685,7 @@ async def test_epoch_mismatch_fails_child_open_requests(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
     pool = wf_runtime
-    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'hi')\n"
+    script = f"async def main(input):\n    return await agent('hi', agent_id={wf_agent_id!r})\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
     children = await _children_of(pool, run_id)
@@ -2657,7 +2717,7 @@ async def test_nondeterministic_replay_fails_child_open_requests(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
     pool = wf_runtime
-    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'hi')\n"
+    script = f"async def main(input):\n    return await agent('hi', agent_id={wf_agent_id!r})\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
     children = await _children_of(pool, run_id)
@@ -3113,7 +3173,7 @@ async def test_malformed_output_schema_errors_the_run(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        await agent({wf_agent_id!r}, 'hi', output_schema={bad_schema!r})\n"
+        f"        await agent('hi', agent_id={wf_agent_id!r}, output_schema={bad_schema!r})\n"
         "    except AgentError as e:\n"
         "        return {'kind': e.kind, 'msg': str(e)}\n"
         "    return {'caught': False}\n"
@@ -3146,7 +3206,7 @@ async def test_non_object_output_schema_errors_the_run(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        await agent({wf_agent_id!r}, 'hi', output_schema=False)\n"
+        f"        await agent('hi', agent_id={wf_agent_id!r}, output_schema=False)\n"
         "    except AgentError as e:\n"
         "        return {'kind': e.kind, 'msg': str(e)}\n"
         "    return {'caught': False}\n"
@@ -3180,7 +3240,7 @@ async def test_agent_output_schema_end_to_end(
     pool = wf_runtime
     script = (
         f"async def main(input):\n"
-        f"    return await agent({wf_agent_id!r}, 'task', output_schema={_OBJ_SCHEMA!r})\n"
+        f"    return await agent('task', agent_id={wf_agent_id!r}, output_schema={_OBJ_SCHEMA!r})\n"
     )
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)  # spawn + suspend
@@ -3230,7 +3290,7 @@ async def test_float_bearing_output_schema_spawns_and_enforces(
 
     pool = wf_runtime
     schema = {"type": "number", "minimum": 1.5, "maximum": 9.5}
-    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'pick', output_schema={schema!r})\n"
+    script = f"async def main(input):\n    return await agent('pick', agent_id={wf_agent_id!r}, output_schema={schema!r})\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
 
@@ -3273,7 +3333,7 @@ async def test_valid_local_ref_output_schema_spawns(
         "properties": {"name": {"$ref": "#/$defs/Name"}},
         "required": ["name"],
     }
-    script = f"async def main(input):\n    return await agent({wf_agent_id!r}, 'x', output_schema={schema!r})\n"
+    script = f"async def main(input):\n    return await agent('x', agent_id={wf_agent_id!r}, output_schema={schema!r})\n"
     run_id = await _make_run(pool, script)
     await run_workflow_step(run_id)
     async with pool.acquire() as conn:
@@ -3297,7 +3357,7 @@ async def test_dangling_ref_output_schema_errors_the_run(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        await agent({wf_agent_id!r}, 'x', output_schema={schema!r})\n"
+        f"        await agent('x', agent_id={wf_agent_id!r}, output_schema={schema!r})\n"
         "    except AgentError as e:\n"
         "        return {'kind': e.kind, 'msg': str(e)}\n"
         "    return {'caught': False}\n"
@@ -4069,8 +4129,8 @@ async def test_bash_dispatches_while_agent_frontier_deferred(
     script = (
         "async def main(input):\n"
         "    return await parallel([\n"
-        f"        lambda: agent({wf_agent_id!r}, 'a'),\n"
-        f"        lambda: agent({wf_agent_id!r}, 'b'),\n"
+        f"        lambda: agent('a', agent_id={wf_agent_id!r}),\n"
+        f"        lambda: agent('b', agent_id={wf_agent_id!r}),\n"
         "        lambda: tool('bash', {'command': 'echo hi'}),\n"
         "    ])\n"
     )
@@ -4319,7 +4379,7 @@ async def test_over_budget_agent_refusal_is_catchable(
     script = (
         "async def main(input):\n"
         "    try:\n"
-        f"        await agent({wf_agent_id!r}, 'x')\n"
+        f"        await agent('x', agent_id={wf_agent_id!r})\n"
         "    except AgentError as e:\n"
         "        return {'kind': e.kind, 'msg': str(e)}\n"
     )

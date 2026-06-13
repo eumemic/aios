@@ -23,6 +23,7 @@ from aios.models.agents import (
 )
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
+from aios.workflows.generic_child import GENERIC_CHILD_SYSTEM
 
 
 async def create_agent(
@@ -156,18 +157,38 @@ async def _load_for_session_conn(
                 f"workflow child {session.id} has no frozen surface snapshot "
                 "(parent_run_id set but surface_frozen is false)"
             )
-        # A workflow child always pins a concrete agent_version at spawn
-        # (insert_child_session requires the int), so this is never a "latest" read.
+        if session.agent_id is None:
+            return Agent(
+                id="generic-workflow-child",
+                account_id=account_id,
+                name="Generic workflow subagent",
+                model=session.model,
+                system=GENERIC_CHILD_SYSTEM.format(model=session.model),
+                tools=frozen.tools,
+                skills=[],
+                mcp_servers=frozen.mcp_servers,
+                http_servers=frozen.http_servers,
+                description=None,
+                metadata={},
+                litellm_extra={},
+                window_min=0,
+                window_max=0,
+                version=0,
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                archived_at=None,
+            )
         version = await queries.get_agent_version(
             conn, session.agent_id, session.agent_version, account_id=account_id
         )
-        return version.model_copy(
-            update={
-                "tools": frozen.tools,
-                "mcp_servers": frozen.mcp_servers,
-                "http_servers": frozen.http_servers,
-            }
-        )
+        update: dict[str, Any] = {
+            "tools": frozen.tools,
+            "mcp_servers": frozen.mcp_servers,
+            "http_servers": frozen.http_servers,
+        }
+        if session.model is not None:
+            update["model"] = session.model
+        return version.model_copy(update=update)
     if session.agent_version is not None:
         return await queries.get_agent_version(
             conn, session.agent_id, session.agent_version, account_id=account_id

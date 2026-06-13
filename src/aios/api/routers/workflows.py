@@ -152,6 +152,7 @@ async def create_run(body: WfRunCreate, pool: PoolDep, account_id: AccountIdDep)
         input=body.input,
         vault_ids=body.vault_ids,
         budget_usd=body.budget_usd,
+        default_child_model=body.default_child_model,
     )
 
 

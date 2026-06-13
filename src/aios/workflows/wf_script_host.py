@@ -93,22 +93,24 @@ class AgentNoReturnError(AgentError):
 class _Yield:
     """The single value every workflow ``await`` yields up to the driver."""
 
-    __slots__ = ("capability_id", "spec")
+    __slots__ = ("capability_id", "label", "spec")
 
-    def __init__(self, capability_id: str, spec: Any) -> None:
+    def __init__(self, capability_id: str, spec: Any, label: str | None = None) -> None:
         self.capability_id = capability_id
+        self.label = label
         self.spec = spec
 
 
 class _Capability:
-    __slots__ = ("_capability_id", "_spec")
+    __slots__ = ("_capability_id", "_label", "_spec")
 
-    def __init__(self, capability_id: str, spec: Any) -> None:
+    def __init__(self, capability_id: str, spec: Any, label: str | None = None) -> None:
         self._capability_id = capability_id
+        self._label = label
         self._spec = spec
 
     def __await__(self) -> Any:
-        result = yield _Yield(self._capability_id, self._spec)
+        result = yield _Yield(self._capability_id, self._spec, self._label)
         return result
 
 
@@ -139,17 +141,21 @@ def gate(spec: Any = None) -> _Capability:
     return _Capability("gate", spec)
 
 
-def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
-    """Invoke an agent: spawn a child session with ``input`` as its first user
-    message and await its ``return``/``error`` result.
+def agent(
+    input: Any,
+    *,
+    agent_id: str | None = None,
+    output_schema: Any = None,
+    model: str | None = None,
+    label: str | None = None,
+) -> _Capability:
+    """Invoke an agent: spawn a workflow child session and await its result.
 
     ``input`` is **required and must not be None** — the child needs a real first
-    message to act on (a child born with no user message would sit idle forever and
-    poison the totality backstop). Pass a ``str`` (delivered verbatim) or any
-    JSON-serialisable value (delivered as canonical JSON). A missing agent or a
-    malformed call (non-string ``agent_id`` / invalid ``output_schema``) surfaces as
-    a catchable :class:`AgentError` at the ``await`` — ``try/except`` it like any
-    other agent failure, or let it propagate to fail the run / ``None`` the branch.
+    message to act on. With ``agent_id`` omitted, the built-in generic workflow
+    subagent is used. With ``agent_id`` set, the named child keeps its agent persona.
+    ``model`` overlays the child's model for this call; ``label`` is an
+    observability annotation and does not participate in the call key.
     """
     if input is None:
         raise ValueError("agent() requires a non-None input (the child's first message)")
@@ -166,7 +172,9 @@ def agent(agent_id: str, input: Any, output_schema: Any = None) -> _Capability:
             "output_schema": None
             if output_schema is None
             else canonical_schema_json(output_schema),
+            "model": model,
         },
+        label=label,
     )
 
 
@@ -775,6 +783,7 @@ def _drive(root_coro: Any, memo: dict[str, Any], emit: Any) -> None:
                 "capability_id": yielded.capability_id,
                 "call_key": call_key,
                 "spec": yielded.spec,
+                "label": yielded.label,
             }
         )
     emit({"type": SUSPENDED})

@@ -107,6 +107,7 @@ class EmittedCapability:
     # ("0.0/sha:<hex>#<ordinal>"). Treated as an opaque, deterministic key.
     call_key: str
     spec: Any
+    label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,7 @@ def _outcome_from_frames(
             capability_id=f["capability_id"],
             call_key=f["call_key"],
             spec=f.get("spec"),
+            label=f.get("label"),
         )
         for f in frames
         if f.get("type") == EMIT

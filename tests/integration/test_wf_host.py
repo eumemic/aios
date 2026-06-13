@@ -82,7 +82,7 @@ async def test_memoized_result_fast_forwards() -> None:
 async def test_memoized_error_outcome_throws_agent_error() -> None:
     """An {"error"} memo outcome is thrown at the await as AgentError; uncaught, it
     propagates out of main and terminates the run (the bubble)."""
-    src = "async def main(input):\n    return await agent('a1', 'go')"
+    src = "async def main(input):\n    return await agent('go', agent_id='a1')"
     first = await _run(src)
     key = first.emitted[0].call_key
     out = await _run(src, memo={key: {"error": {"message": "boom"}}})
@@ -96,7 +96,7 @@ async def test_memoized_error_outcome_is_catchable() -> None:
     src = (
         "async def main(input):\n"
         "    try:\n"
-        "        await agent('a1', 'go')\n"
+        "        await agent('go', agent_id='a1')\n"
         "    except AgentError as e:\n"
         "        return {'caught': True, 'kind': e.kind}\n"
         "    return {'caught': False}"
@@ -114,7 +114,7 @@ async def test_no_return_outcome_raises_agent_no_return_subtype() -> None:
     catch_base = (
         "async def main(input):\n"
         "    try:\n"
-        "        await agent('a1', 'go')\n"
+        "        await agent('go', agent_id='a1')\n"
         "    except AgentError as e:\n"
         "        return isinstance(e, AgentNoReturnError)"
     )
@@ -152,19 +152,51 @@ async def test_author_exception_is_terminal_raised() -> None:
 
 
 async def test_agent_emits_a_frontier_for_block2() -> None:
-    out = await _run("async def main(input):\n    return await agent('a1', input={'p': 1})")
+    out = await _run("async def main(input):\n    return await agent({'p': 1}, agent_id='a1')")
     assert out.kind == "suspended"
     assert out.emitted[0].capability_id == "agent"
+
+
+async def test_old_positional_agent_form_breaks_loudly() -> None:
+    out = await _run("async def main(input):\n    return await agent('a1', {'p': 1})")
+    assert out.kind == "raised"
+    assert "TypeError" in (out.error_repr or "")
+
+
+async def test_generic_agent_spec_has_always_present_keys_and_label_off_key() -> None:
+    src = "async def main(input):\n    return await agent({'p': 1}, model='m1', label='observe')"
+    out = await _run(src)
+    assert out.kind == "suspended"
+    cap = out.emitted[0]
+    assert cap.spec == {
+        "agent_id": None,
+        "input": {"p": 1},
+        "output_schema": None,
+        "model": "m1",
+    }
+    assert cap.label == "observe"
+    assert cap.call_key == f"sha:{content_hash('agent', cap.spec)}#0"
+
+    relabeled = await _run(
+        "async def main(input):\n    return await agent({'p': 1}, model='m1', label='other')"
+    )
+    remodeled = await _run(
+        "async def main(input):\n    return await agent({'p': 1}, model='m2', label='observe')"
+    )
+    assert relabeled.emitted[0].call_key == cap.call_key
+    assert remodeled.emitted[0].call_key != cap.call_key
 
 
 async def test_agent_requires_non_none_input() -> None:
     # input is required: a child born with no first user message would sit idle
     # forever. A bad call raises in the author's script → terminal RAISED.
-    missing = await _run("async def main(input):\n    return await agent('a1')")
+    missing = await _run("async def main(input):\n    return await agent()")
     assert missing.kind == "raised"
     assert "input" in (missing.error_repr or "")  # TypeError: missing required 'input'
 
-    explicit_none = await _run("async def main(input):\n    return await agent('a1', None)")
+    explicit_none = await _run(
+        "async def main(input):\n    return await agent(None, agent_id='a1')"
+    )
     assert explicit_none.kind == "raised"
     assert "non-None input" in (explicit_none.error_repr or "")
 
@@ -363,7 +395,7 @@ async def test_non_json_return_is_an_author_error_not_a_host_crash() -> None:
 
 _PARALLEL_SRC = (
     "async def main(input):\n"
-    "    return await parallel([lambda: agent('a', '1'), lambda: agent('b', '2')])"
+    "    return await parallel([lambda: agent('1', agent_id='a'), lambda: agent('2', agent_id='b')])"
 )
 
 
@@ -406,10 +438,10 @@ async def test_parallel_branch_can_catch_agent_error() -> None:
         "async def main(input):\n"
         "    async def safe():\n"
         "        try:\n"
-        "            return await agent('a', '1')\n"
+        "            return await agent('1', agent_id='a')\n"
         "        except AgentError:\n"
         "            return 'fallback'\n"
-        "    return await parallel([safe, lambda: agent('b', '2')])"
+        "    return await parallel([safe, lambda: agent('2', agent_id='b')])"
     )
     first = await _run(src)
     k0, k1 = (e.call_key for e in first.emitted)
@@ -426,7 +458,7 @@ async def test_parallel_non_agent_error_fails_the_run() -> None:
         "async def main(input):\n"
         "    async def boom():\n"
         "        raise ValueError('author bug in a branch')\n"
-        "    return await parallel([boom, lambda: agent('b', '2')])"
+        "    return await parallel([boom, lambda: agent('2', agent_id='b')])"
     )
     out = await _run(src)
     assert out.kind == "raised"
@@ -445,7 +477,7 @@ async def test_parallel_absorbs_author_raised_agent_error() -> None:
         "async def main(input):\n"
         "    async def manual():\n"
         "        raise AgentError('treat as a failed agent')\n"
-        "    return await parallel([manual, lambda: agent('b', '2')])"
+        "    return await parallel([manual, lambda: agent('2', agent_id='b')])"
     )
     first = await _run(src)
     assert first.kind == "suspended"
@@ -468,7 +500,7 @@ async def test_parallel_fanout_over_cap_raises_before_spawning() -> None:
     n = MAX_PARALLEL_FANOUT + 1
     src = (
         "async def main(input):\n"
-        f"    return await parallel([(lambda: agent('a', 'x')) for _ in range({n})])"
+        f"    return await parallel([(lambda: agent('x', agent_id='a')) for _ in range({n})])"
     )
     out = await _run(src)
     assert out.kind == "raised"
@@ -484,7 +516,7 @@ async def test_parallel_fanout_at_cap_is_allowed() -> None:
     n = MAX_PARALLEL_FANOUT
     src = (
         "async def main(input):\n"
-        f"    return await parallel([(lambda: agent('a', str(i))) for i in range({n})])"
+        f"    return await parallel([(lambda: agent(str(i), agent_id='a')) for i in range({n})])"
     )
     out = await _run(src)
     assert out.kind == "suspended"
@@ -496,7 +528,7 @@ async def test_pipeline_runs_each_item_through_stages() -> None:
     leaf) independently; all items fan out at once."""
     src = (
         "async def main(input):\n"
-        "    return await pipeline([1, 10], lambda x: x + 1, lambda x: agent('s', x))"
+        "    return await pipeline([1, 10], lambda x: x + 1, lambda x: agent(x, agent_id='s'))"
     )
     first = await _run(src)
     assert first.kind == "suspended"
@@ -552,7 +584,7 @@ async def test_pipeline_none_short_circuit_on_agent_error() -> None:
     regress it.)"""
     src = (
         "async def main(input):\n"
-        "    return await pipeline([1, 2], lambda x: agent('s', x),"
+        "    return await pipeline([1, 2], lambda x: agent(x, agent_id='s'),"
         " lambda prev, item, index: prev + 1)"
     )
     first = await _run(src)
@@ -582,9 +614,9 @@ async def test_parallel_keys_are_branch_local_under_asymmetric_depth() -> None:
         "async def main(input):\n"
         "    async def b0():\n"
         "        await gate('g')\n"
-        "        return await agent('p', 'x')\n"
+        "        return await agent('x', agent_id='p')\n"
         "    async def b1():\n"
-        "        return await agent('p', 'x')\n"
+        "        return await agent('x', agent_id='p')\n"
         "    return await parallel([b0, b1])"
     )
     # Drive 1 (empty memo): b0 blocks on its gate; b1 emits the shared agent.

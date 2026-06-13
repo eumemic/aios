@@ -13368,7 +13368,14 @@
             "title": "Id"
           },
           "agent_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Agent Id"
           },
           "environment_id": {
@@ -13385,6 +13392,17 @@
               }
             ],
             "title": "Agent Version"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
           },
           "title": {
             "anyOf": [
@@ -16167,6 +16185,17 @@
             ],
             "title": "Budget Usd"
           },
+          "default_child_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Child Model"
+          },
           "last_event_seq": {
             "type": "integer",
             "title": "Last Event Seq"
@@ -16244,6 +16273,18 @@
             ],
             "title": "Budget Usd",
             "description": "Optional shared USD spend ceiling for this run's direct agent() children."
+          },
+          "default_child_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Child Model",
+            "description": "Default model for generic agent() children spawned by this run."
           }
         },
         "additionalProperties": false,
