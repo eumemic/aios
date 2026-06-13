@@ -6,9 +6,13 @@ Two non-obvious choices worth recording here:
   read and discarded before raising ``PayloadTooLargeError``. Without
   the drain the parser bails out and the client sees a transport reset,
   which is much harder to diagnose than a clean 413.
-* **File-then-DB ordering.** Bytes hit disk and rename atomically into
-  place before the row insert. A half-written ``.part`` is a harmless
-  orphan; a DB row pointing at missing bytes is observable corruption.
+* **File-then-DB under one cleanup scope.** Bytes hit disk and rename
+  atomically into place, then the row inserts — all inside the ``try``
+  whose ``except`` unlinks partial state. A failure anywhere up to and
+  including the insert leaves no orphan (there is no upload reconciler,
+  so a stranded file would be permanent); only the success path, which
+  returns before the ``except`` fires, leaves durable bytes. The insert
+  being last is what keeps a DB row from ever pointing at missing bytes.
 """
 
 from __future__ import annotations
@@ -99,6 +103,23 @@ async def stage_upload(
                 detail={"max_size_bytes": settings.upload_max_size_bytes},
             )
         os.rename(temp_path, final_path)
+        # Insert inside the cleanup scope (see the module docstring): success
+        # returns before the except can fire, and any failure here — an FK
+        # violation if the session was hard-deleted since get_session_bare, or
+        # a pool/timeout error — unlinks the renamed file and re-raises.
+        async with pool.acquire() as conn:
+            return await queries.insert_file(
+                conn,
+                file_id=file_id,
+                session_id=session_id,
+                filename=filename,
+                host_path=str(final_path),
+                in_sandbox_path=in_sandbox_path,
+                size=size,
+                content_type=content_type,
+                sha256=hasher.hexdigest(),
+                account_id=account_id,
+            )
     except BaseException:
         # BaseException (not Exception) so partial state still gets cleaned up
         # under task cancellation — CancelledError doesn't inherit from
@@ -108,17 +129,3 @@ async def stage_upload(
         with contextlib.suppress(OSError):
             file_dir.rmdir()
         raise
-
-    async with pool.acquire() as conn:
-        return await queries.insert_file(
-            conn,
-            file_id=file_id,
-            session_id=session_id,
-            filename=filename,
-            host_path=str(final_path),
-            in_sandbox_path=in_sandbox_path,
-            size=size,
-            content_type=content_type,
-            sha256=hasher.hexdigest(),
-            account_id=account_id,
-        )

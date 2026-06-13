@@ -200,6 +200,34 @@ class TestStageUploadOversize:
         assert list(uploads_dir.iterdir()) == []
 
 
+class TestStageUploadInsertFailure:
+    async def test_insert_failure_leaves_no_orphan_bytes(self, _workspace: Path) -> None:
+        """If the row insert fails after the bytes are renamed into place,
+        the staged file must not leak on disk.
+
+        ``stage_upload`` deliberately writes-then-inserts so a row never
+        points at missing bytes. But the renamed ``final_path`` lives
+        *outside* the ``except BaseException`` cleanup that guards the
+        write, so an ``insert_file`` failure (an FK violation when the
+        session is hard-deleted in the TOCTOU window after
+        ``get_session_bare``, or a pool/timeout error) used to strand the
+        fully-written file plus its ``<file_id>/`` dir forever — there is
+        no upload reconciler to sweep them. A failed upload must leave the
+        per-session dir as empty as a never-attempted one."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        upload = _FakeUpload(b"durable bytes", filename="ok.bin")
+        pool = cast("asyncpg.Pool[Any]", fake_pool_yielding_conn(MagicMock()))
+        insert_boom = patch(
+            "aios.services.files.queries.insert_file",
+            AsyncMock(side_effect=RuntimeError("insert failed")),
+        )
+        with _patch_session_get(), insert_boom, pytest.raises(RuntimeError):
+            await stage_upload(pool, session_id="sess_x", upload=upload, account_id=account_id)
+        uploads_dir = _workspace / "_uploads" / "sess_x"
+        assert uploads_dir.exists()
+        assert list(uploads_dir.iterdir()) == []
+
+
 class TestStageUploadSessionNotFound:
     async def test_nonexistent_session_propagates_404(self, _workspace: Path) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
