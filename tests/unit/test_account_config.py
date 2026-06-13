@@ -32,3 +32,19 @@ class TestAccountConfigTimezone:
         # extra='forbid': an unknown config item is a 422, not silently dropped.
         with pytest.raises(ValidationError):
             AccountConfig.model_validate({"timezone": "UTC", "bogus": 1})
+
+
+class TestAccountConfigSnapshotCap:
+    def test_accepts_positive_cap(self) -> None:
+        assert AccountConfig(sandbox_snapshot_bytes=10 * 1024 * 1024).sandbox_snapshot_bytes == (
+            10 * 1024 * 1024
+        )
+
+    def test_unset_cap_is_none(self) -> None:
+        # Unset (or explicit null) means "inherit from the parent account".
+        assert AccountConfig().sandbox_snapshot_bytes is None
+        assert AccountConfig(sandbox_snapshot_bytes=None).sandbox_snapshot_bytes is None
+
+    def test_rejects_negative_cap(self) -> None:
+        with pytest.raises(ValidationError):
+            AccountConfig(sandbox_snapshot_bytes=-1)

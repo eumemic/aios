@@ -174,3 +174,182 @@ async def test_image_pass_retains_ttl_removal_for_session_that_woke(
 
     assert retained == [verdict], "a woke session's snapshot must not be expired a tick early"
     assert not any(c[0] == "remove_image" for c in backend.calls)
+
+
+# ─── account-cap eviction pass (per-account snapshot quota, §5.7) ──────────────
+
+
+def _acct_state(session_id: str, *, account_id: str, days_dormant: float) -> SessionSnapshotState:
+    return SessionSnapshotState(
+        session_id=session_id,
+        account_id=account_id,
+        archived=False,
+        last_event_at=_NOW - timedelta(days=days_dormant),
+        snapshot_ref=snapshot_tag(get_settings().instance_id, session_id),
+        snapshot_host=get_settings().instance_id,
+        snapshot_bytes=1_000_000,
+    )
+
+
+def _canonical_verdict(session_id: str, *, size_bytes: int) -> GcImageVerdict:
+    """A retained canonical verdict whose image has no base/flattened labels, so
+    ``_unique_bytes_for_image`` charges the full ``size_bytes``."""
+    tag = snapshot_tag(get_settings().instance_id, session_id)
+    return GcImageVerdict(
+        image=ManagedImage(
+            image_id=f"img-{session_id}",
+            repo_tags=(tag,),
+            parent_id=None,
+            size_bytes=size_bytes,
+            labels={},
+        ),
+        session_id=session_id,
+        is_canonical=True,
+        removal_ref=tag,
+        verdict="retain",
+        reason="live",
+    )
+
+
+def _patch_caps(monkeypatch: pytest.MonkeyPatch, caps: dict[str, int | None]) -> None:
+    async def _resolve(_conn: Any, account_id: str) -> int | None:
+        return caps.get(account_id)
+
+    monkeypatch.setattr(
+        "aios.sandbox.registry.queries.resolve_effective_sandbox_snapshot_bytes",
+        AsyncMock(side_effect=_resolve),
+    )
+
+
+def _stub_event_and_pointer(registry: SandboxRegistry) -> None:
+    """Stub the DB-touching side effects of an eviction so the pass can run on
+    the FakePool (which has no real ``transaction``). The event text itself is
+    asserted in ``tests/unit/test_context_fs_lifecycle.py``."""
+    registry._append_fs_event = AsyncMock()  # type: ignore[method-assign]
+    registry._clear_pointer_if_owned = AsyncMock()  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_account_cap_pass_evicts_most_dormant_first(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An over-cap account's MOST-DORMANT snapshots are evicted first until the
+    account is back under cap, each with ``sandbox_fs_expired {account_cap}``."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    _stub_event_and_pointer(registry)
+    _patch_caps(monkeypatch, {"acct_a": 2_500_000})
+
+    # Three sessions of acct_a, 1MB each (3MB > 2.5MB cap). Evicting the single
+    # most-dormant (sess_old, 6 days) brings the account to 2MB ≤ cap.
+    fresh = _canonical_verdict("sess_new", size_bytes=1_000_000)
+    mid = _canonical_verdict("sess_mid", size_bytes=1_000_000)
+    old = _canonical_verdict("sess_old", size_bytes=1_000_000)
+    states = {
+        "sess_new": _acct_state("sess_new", account_id="acct_a", days_dormant=1),
+        "sess_mid": _acct_state("sess_mid", account_id="acct_a", days_dormant=3),
+        "sess_old": _acct_state("sess_old", account_id="acct_a", days_dormant=6),
+    }
+
+    await registry._gc_account_cap_pass([fresh, mid, old], states, get_settings().instance_id)
+
+    removed = [c[1]["ref"] for c in backend.calls if c[0] == "remove_image"]
+    assert removed == [old.removal_ref], (
+        "only the single most-dormant snapshot should be evicted to drop under cap"
+    )
+    # The eviction emits a model-visible sandbox_fs_expired {account_cap} event.
+    registry._append_fs_event.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "sess_old", "sandbox_fs_expired", {"reason": "account_cap"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_account_cap_pass_leaves_under_cap_account_untouched(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An account whose total is at/under its cap loses nothing."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    _patch_caps(monkeypatch, {"acct_a": 5_000_000})
+    verdicts = [
+        _canonical_verdict("sess_1", size_bytes=1_000_000),
+        _canonical_verdict("sess_2", size_bytes=1_000_000),
+    ]
+    states = {
+        "sess_1": _acct_state("sess_1", account_id="acct_a", days_dormant=10),
+        "sess_2": _acct_state("sess_2", account_id="acct_a", days_dormant=20),
+    }
+
+    await registry._gc_account_cap_pass(verdicts, states, get_settings().instance_id)
+
+    assert not any(c[0] == "remove_image" for c in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_account_cap_pass_skips_accounts_with_no_cap(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An account with no configured cap is never enforced, however large."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    _patch_caps(monkeypatch, {"acct_a": None})
+    verdicts = [_canonical_verdict("sess_1", size_bytes=999_000_000)]
+    states = {"sess_1": _acct_state("sess_1", account_id="acct_a", days_dormant=99)}
+
+    await registry._gc_account_cap_pass(verdicts, states, get_settings().instance_id)
+
+    assert not any(c[0] == "remove_image" for c in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_account_cap_pass_is_per_account(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each account is enforced against its own cap independently: an over-cap
+    account is trimmed while an under-cap one is left alone."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    _stub_event_and_pointer(registry)
+    _patch_caps(monkeypatch, {"acct_over": 1_500_000, "acct_under": 5_000_000})
+    over_old = _canonical_verdict("over_old", size_bytes=1_000_000)
+    over_new = _canonical_verdict("over_new", size_bytes=1_000_000)
+    under = _canonical_verdict("under_1", size_bytes=1_000_000)
+    states = {
+        "over_old": _acct_state("over_old", account_id="acct_over", days_dormant=9),
+        "over_new": _acct_state("over_new", account_id="acct_over", days_dormant=1),
+        "under_1": _acct_state("under_1", account_id="acct_under", days_dormant=99),
+    }
+
+    await registry._gc_account_cap_pass(
+        [over_old, over_new, under], states, get_settings().instance_id
+    )
+
+    removed = [c[1]["ref"] for c in backend.calls if c[0] == "remove_image"]
+    assert removed == [over_old.removal_ref]
+
+
+@pytest.mark.asyncio
+async def test_account_cap_pass_skips_waking_session(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that holds a live cached handle (waking) is never evicted out
+    from under itself, even when it is the most-dormant over-cap candidate."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    _stub_event_and_pointer(registry)
+    _patch_caps(monkeypatch, {"acct_a": 1_500_000})
+    old = _canonical_verdict("sess_old", size_bytes=1_000_000)
+    new = _canonical_verdict("sess_new", size_bytes=1_000_000)
+    states = {
+        "sess_old": _acct_state("sess_old", account_id="acct_a", days_dormant=9),
+        "sess_new": _acct_state("sess_new", account_id="acct_a", days_dormant=1),
+    }
+    # The most-dormant candidate is waking — mark it as holding a cached handle.
+    registry._handles["sess_old"] = cast(Any, object())
+
+    await registry._gc_account_cap_pass([old, new], states, get_settings().instance_id)
+
+    removed = [c[1]["ref"] for c in backend.calls if c[0] == "remove_image"]
+    # The waking session is skipped; the next-most-dormant is evicted instead.
+    assert old.removal_ref not in removed
+    assert removed == [new.removal_ref]
