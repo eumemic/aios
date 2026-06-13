@@ -41,8 +41,36 @@ from aios.tools.invoke import validate_arguments
 from aios.tools.registry import registry
 from aios.tools.web_fetch import web_fetch_handler
 from aios.tools.web_search import web_search_handler
+from aios.workflows.idempotency_key import (
+    AIOS_IDEMPOTENCY_KEY_SENTINEL,
+    idempotency_key,
+)
 
 log = get_logger("aios.workflows.run_tools")
+
+
+def _substitute_idempotency_sentinel(
+    args: dict[str, Any], run_id: str, call_key: str
+) -> dict[str, Any]:
+    """Return ``args`` with any ``Idempotency-Key`` header whose value is the opt-in
+    sentinel replaced by the real per-call token. The header key match is
+    case-insensitive (HTTP header names are); the value match is exact, so a literal
+    author-supplied key is never clobbered. Copies on substitution so the caller's
+    ``tool_input`` (journaled / replay-visible) stays verbatim; returns ``args``
+    unchanged when nothing opted in."""
+    headers = args.get("headers")
+    if not isinstance(headers, dict) or not any(
+        k.lower() == "idempotency-key" and v == AIOS_IDEMPOTENCY_KEY_SENTINEL
+        for k, v in headers.items()
+    ):
+        return args
+    token = idempotency_key(run_id, call_key)
+    new_headers = {
+        k: (token if k.lower() == "idempotency-key" and v == AIOS_IDEMPOTENCY_KEY_SENTINEL else v)
+        for k, v in headers.items()
+    }
+    return {**args, "headers": new_headers}
+
 
 # The builtins a run may call directly. The network/credential trio run on the
 # worker (:func:`invoke_run_tool`); ``bash`` runs in the run's provisioned sandbox
@@ -93,7 +121,11 @@ async def _run_tool_task(
     try:
         try:
             result = await invoke_run_tool(
-                run=run, account_id=run.account_id, tool_name=tool_name, tool_input=tool_input
+                run=run,
+                call_key=call_key,
+                account_id=run.account_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
             )
         except Exception as exc:  # backstop — invoke_run_tool returns dicts, never raises
             log.exception("run_tool.unexpected", run_id=run.id, tool=tool_name)
@@ -140,10 +172,14 @@ def gate_run_tool(run: WfRun, tool_name: str) -> dict[str, Any] | None:
 
 
 async def invoke_run_tool(
-    *, run: WfRun, account_id: str, tool_name: str, tool_input: Any
+    *, run: WfRun, call_key: str, account_id: str, tool_name: str, tool_input: Any
 ) -> dict[str, Any]:
     """Dispatch one declared tool for a run. Always returns a dict (success or ``{"error": …}``);
-    never raises — gating, validation, and handler errors all surface as recoverable values."""
+    never raises — gating, validation, and handler errors all surface as recoverable values.
+
+    ``call_key`` is the run-frontier key for this call; with ``run.id`` it derives the
+    per-call idempotency token (:func:`aios.workflows.idempotency_key.idempotency_key`)
+    the ``http_request`` branch substitutes for an author's sentinel header."""
     if (err := gate_run_tool(run, tool_name)) is not None:
         return err
 
@@ -180,6 +216,14 @@ async def invoke_run_tool(
             return await resolve_auth_for_target_url_run(
                 pool, crypto_box, run.id, base_url, account_id=account_id
             )
+
+        # Idempotency opt-in (#830): if the author wrote the sentinel as an
+        # ``Idempotency-Key`` header value, substitute the real per-call token worker-side
+        # — mirroring the bash path's ``$AIOS_IDEMPOTENCY_KEY`` env opt-in ("pass it OR
+        # knowingly accept at-least-once"). A call that doesn't ask keeps at-least-once;
+        # a literal author value is the author's own key, left intact. Substituting on a
+        # shallow copy keeps the script-visible / journaled ``tool_input`` verbatim.
+        args = _substitute_idempotency_sentinel(args, run.id, call_key)
 
         return await _do_http_request(
             servers=run.http_servers, arguments=args, resolve_auth=resolve_auth

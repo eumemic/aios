@@ -61,10 +61,13 @@ class WorkflowUpdate:
                 - Crash semantics: at-least-once at the call boundary. A capability call interrupted by
                   a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is
                   ephemeral scratch — write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).
-                - Irreversible external effects (a POST that charges, sends, or publishes): the bash
-                  environment exposes `$AIOS_IDEMPOTENCY_KEY` (stable across crash re-runs of the same
-                  call, distinct per call) — pass it to the external service as an idempotency key so
-                  the service drops a re-fired duplicate, or knowingly accept at-least-once.
+                - Irreversible external effects (a POST that charges, sends, or publishes): a per-call
+                  idempotency token (stable across crash re-runs of the same call, distinct per call) is
+                  available so you can have the external service drop a re-fired duplicate, or knowingly
+                  accept at-least-once. Both deliveries opt in the same way with the same `$AIOS_IDEMPOTENCY_KEY`
+                  ergonomic: in `tool('bash')` the environment exposes `$AIOS_IDEMPOTENCY_KEY`; in
+                  `tool('http_request')` pass the sentinel string `"$AIOS_IDEMPOTENCY_KEY"` as an
+                  `Idempotency-Key` header value and the worker substitutes the real token before dispatch.
                 - Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose
                   uncertain completion needs judgment to resolve inside `agent(...)`.
                 - Environment: the SCRIPT runs in a deterministic, credential-free, isolated child

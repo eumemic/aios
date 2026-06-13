@@ -221,6 +221,14 @@ def tool(name: str, input: Any) -> _Capability:
     (exported into the command's environment, alongside ``$AIOS_RUN_ID``) to the
     external service as an idempotency key so it dedupes the re-fired effect. The key
     is stable across re-drives of the same call and distinct across calls.
+
+    **http_request re-run tolerance (at-least-once).** The SAME exposure applies to a
+    mutating ``tool('http_request')`` (a POST/PUT/PATCH/DELETE re-fires on a crash
+    re-drive). Opt in the same way: pass the sentinel ``"$AIOS_IDEMPOTENCY_KEY"`` as an
+    ``Idempotency-Key`` header value — ``tool('http_request', {..., "headers":
+    {"Idempotency-Key": "$AIOS_IDEMPOTENCY_KEY"}})`` — and the worker substitutes the
+    real per-call token before the request leaves the worker (the script never sees it).
+    A call that omits the sentinel keeps at-least-once; a literal value is your own key.
     """
     return _Capability("tool", {"tool_name": name, "input": input})
 
