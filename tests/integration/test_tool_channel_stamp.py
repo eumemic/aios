@@ -260,3 +260,40 @@ async def test_non_message_tool_role_skips_parent_lookup(
     # channel is NULL (non-message events carry no channel).
     spy.assert_not_awaited()
     assert ev.channel is None
+
+
+async def test_supplied_channel_skips_parent_lookup(
+    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hot path (#991 criterion #5): when ``tool_parent_channel`` is supplied
+    (the live builtin/MCP dispatch path, or the ``append_tool_result`` path that
+    feeds the channel from its single name-lookup scan), the precompute must NOT
+    invoke ``_lookup_tool_parent_channel`` — at most ONE parent ``@>`` scan."""
+    pool, account_id, session_id = pool_and_session
+
+    spy = AsyncMock(return_value="should-not-be-used")
+    monkeypatch.setattr(events_mod, "_lookup_tool_parent_channel", spy)
+
+    async with pool.acquire() as conn:
+        await session_queries.set_session_focal_channel(
+            conn, session_id, "tg:supplied", account_id=account_id
+        )
+        await _append_parent_assistant(conn, account_id, session_id, "tc_supplied")
+        ev = await queries.append_event(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind="message",
+            data={
+                "role": "tool",
+                "tool_call_id": "tc_supplied",
+                "name": "bash",
+                "content": "ok",
+            },
+            orig_channel=None,
+            tool_parent_channel="tg:supplied",
+        )
+
+    spy.assert_not_awaited()
+    assert ev.channel == "tg:supplied"

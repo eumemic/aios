@@ -191,3 +191,49 @@ class TestEventTokenDelta:
     def test_delta_non_message_is_zero(self) -> None:
         assert self._delta("span", {"event": "sweep_start"}) == 0
         assert self._delta("lifecycle", {"event": "turn_ended"}) == 0
+
+
+class TestPrecomputeEventAppend:
+    """``precompute_event_append`` (issue #991) packages the pre-lock compute
+    into a ``_PrecomputedAppend`` so the two tool-result appenders can run it
+    OUTSIDE their outer ``FOR UPDATE``.  Its ``token_delta`` must EQUAL the
+    legacy inline ``_event_token_delta`` value — including the ~100 KB payload —
+    and its ``resolved_tool_channel`` must echo a supplied ``tool_parent_channel``
+    (the hot path) without touching the DB.
+    """
+
+    async def test_tool_delta_matches_event_token_delta_incl_oversized(self) -> None:
+        from aios.db.queries.events import _event_token_delta, precompute_event_append
+
+        data = {
+            "role": "tool",
+            "tool_call_id": "tc_1",
+            "name": "bash",
+            "content": "x" * 100_000,
+        }
+        # A tool event with an explicit ``tool_parent_channel`` does NO DB I/O:
+        # the delta is pure ``approx_tokens([data])`` and the channel is echoed.
+        # ``conn=None`` proves the path never touches the connection.
+        result = await precompute_event_append(
+            None,
+            account_id="acc_1",
+            session_id="ses_1",
+            kind="message",
+            data=data,
+            tool_parent_channel="tg:42",
+        )
+        assert result.token_delta == _event_token_delta("message", data, None, None)
+        assert result.resolved_tool_channel == "tg:42"
+
+    async def test_non_message_is_zero_delta_no_io(self) -> None:
+        from aios.db.queries.events import precompute_event_append
+
+        result = await precompute_event_append(
+            None,
+            account_id="acc_1",
+            session_id="ses_1",
+            kind="span",
+            data={"event": "sweep_start"},
+        )
+        assert result.token_delta == 0
+        assert result.resolved_tool_channel is None

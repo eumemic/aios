@@ -169,3 +169,90 @@ class TestAppendToolResultIdempotency:
             f"(data={second_event.data!r}); idempotent return must "
             f"preserve the first-call's truth"
         )
+
+
+async def _open_tool_call_count(pool: asyncpg.Pool[Any], session_id: str) -> int:
+    async with pool.acquire() as conn:
+        return (
+            await conn.fetchval(
+                "SELECT open_tool_call_count FROM sessions WHERE id = $1", session_id
+            )
+            or 0
+        )
+
+
+class TestAppendToolResultSingleScan:
+    """Issue #991 Part 2: ``append_tool_result`` resolves the parent name AND
+    channel in ONE ``@>`` scan (``lookup_tool_name_by_call_id`` now projects
+    both), then feeds the channel as ``tool_parent_channel`` — so the second
+    byte-identical ``_lookup_tool_parent_channel`` scan is never invoked."""
+
+    async def test_parent_channel_lookup_not_invoked(
+        self,
+        session_with_parent_tool_call: tuple[asyncpg.Pool[Any], str, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pool, account_id, session_id, tool_call_id = session_with_parent_tool_call
+
+        from aios.db.queries import events as events_mod
+
+        calls = {"n": 0}
+        real = events_mod._lookup_tool_parent_channel
+
+        async def _spy(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            return await real(*args, **kwargs)
+
+        # Patch on the facade (callers go through ``queries._lookup_tool_parent_channel``)
+        # AND the module (``precompute_event_append`` calls the module-local name).
+        monkeypatch.setattr(events_mod, "_lookup_tool_parent_channel", _spy)
+        monkeypatch.setattr(queries, "_lookup_tool_parent_channel", _spy)
+
+        async with pool.acquire() as conn:
+            ev = await sessions_service.append_tool_result(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                content="ok",
+            )
+        # The stored channel still resolves correctly (defaults NULL focal here).
+        assert ev.channel is None
+        assert calls["n"] == 0, (
+            "append_tool_result must not invoke _lookup_tool_parent_channel — "
+            "the single lookup_tool_name_by_call_id scan already projected the channel"
+        )
+
+
+class TestAppendToolResultConcurrentDedup:
+    """Issue #991 (defense-in-depth): a TRUE concurrent pair of appends for the
+    same ``tool_call_id`` — racing through the session ``FOR UPDATE`` — must
+    still produce EXACTLY ONE tool-role event and leave ``open_tool_call_count``
+    at 0.  The lock-narrowing of #991 moves only the tokenizer pre-compute off
+    the lock; the dedup ``find_tool_result_event`` stays INSIDE it."""
+
+    async def test_gather_two_appends_yields_one_event(
+        self,
+        session_with_parent_tool_call: tuple[asyncpg.Pool[Any], str, str, str],
+    ) -> None:
+        import asyncio
+
+        pool, account_id, session_id, tool_call_id = session_with_parent_tool_call
+
+        async def _append(content: str) -> None:
+            async with pool.acquire() as conn:
+                await sessions_service.append_tool_result(
+                    conn,
+                    account_id=account_id,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                    content=content,
+                )
+
+        await asyncio.gather(_append("first"), _append("second"))
+
+        count = await _count_tool_results(pool, session_id, tool_call_id)
+        assert count == 1, f"concurrent appends produced {count} tool events, expected exactly 1"
+        # The parent assistant opened one tool call; the single committed result
+        # closes it, and the deduped append decrements the id-blind +1 — net 0.
+        assert await _open_tool_call_count(pool, session_id) == 0

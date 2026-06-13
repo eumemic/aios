@@ -12,7 +12,7 @@ import math
 import time
 from datetime import UTC, datetime
 from types import EllipsisType
-from typing import Any
+from typing import Any, NamedTuple
 
 import asyncpg
 
@@ -447,18 +447,22 @@ async def lookup_tool_name_by_call_id(
     tool_call_id: str,
     *,
     account_id: str,
-) -> str | None:
-    """Return the function name of the matching ``tool_call`` on the parent
-    assistant event, or None if no parent is found.
+) -> tuple[str | None, str | None]:
+    """Return ``(name, focal_channel_at_arrival)`` for the parent assistant
+    event that requested ``tool_call_id``, or ``(None, None)`` if no parent.
 
-    Used by the custom tool-result handler to stamp a ``name`` field on
-    the tool-role event it appends, so ``_derive_tool_name`` populates
-    the ``tool_name`` column (issue #133, migration 0022).  Mirrors the
-    parent-assistant lookup in ``_lookup_tool_parent_channel`` — same ``@>``
-    predicate, same partial index (``events_assistant_tool_calls_idx``).
+    ``name`` is the function name of the matching ``tool_call`` (used by the
+    custom tool-result handler to stamp a ``name`` field so ``_derive_tool_name``
+    populates the ``tool_name`` column — issue #133, migration 0022).
+
+    ``focal_channel_at_arrival`` is the SAME value :func:`_lookup_tool_parent_channel`
+    resolves — projected here in the SAME row (identical WHERE / ORDER BY /
+    LIMIT, same ``events_assistant_tool_calls_idx`` partial index) so the
+    ``append_tool_result`` path can pass it as ``tool_parent_channel`` and skip
+    the second byte-identical ``@>`` scan (#991): one scan per append, not two.
     """
-    raw = await conn.fetchval(
-        "SELECT data->'tool_calls' FROM events "
+    row = await conn.fetchrow(
+        "SELECT data->'tool_calls' AS tool_calls, focal_channel_at_arrival FROM events "
         "WHERE session_id = $1 "
         "  AND account_id = $3 "
         "  AND kind = 'message' "
@@ -471,20 +475,21 @@ async def lookup_tool_name_by_call_id(
         tool_call_id,
         account_id,
     )
-    if raw is None:
-        return None
-    tool_calls = parse_jsonb(raw)
+    if row is None:
+        return None, None
+    focal: str | None = row["focal_channel_at_arrival"]
+    tool_calls = parse_jsonb(row["tool_calls"])
     if not isinstance(tool_calls, list):
-        return None
+        return None, focal
     for tc in tool_calls:
         if not isinstance(tc, dict) or tc.get("id") != tool_call_id:
             continue
         function = tc.get("function")
         if not isinstance(function, dict):
-            return None
+            return None, focal
         name = function.get("name")
-        return name if isinstance(name, str) else None
-    return None
+        return (name if isinstance(name, str) else None), focal
+    return None, focal
 
 
 async def list_confirmed_unresolved_tool_calls(
@@ -586,6 +591,91 @@ async def list_confirmed_unresolved_tool_calls(
     return out
 
 
+class _PrecomputedAppend(NamedTuple):
+    """The pre-transaction compute result for :func:`append_event` (issue #862,
+    #991).
+
+    Carries the two values that must be resolved BEFORE the seq-allocating row
+    lock so the LiteLLM tokenizer pass and the tool-parent JSONB ``@>`` scan
+    never run under the session lock:
+
+    * ``token_delta`` — the approximate per-event token contribution
+      (``_event_token_delta``), 0 for non-message events.
+    * ``resolved_tool_channel`` — for tool-role events, the parent assistant's
+      ``focal_channel_at_arrival`` (looked up or supplied); ``None`` otherwise.
+
+    Mirrors #986's ``AssistantAppendResult`` precompute-then-pass shape.  The
+    two tool-result appenders compute this OUTSIDE their outer ``FOR UPDATE``
+    and hand it to :func:`append_event` via ``precomputed=``; every other
+    caller leaves ``precomputed=None`` and :func:`append_event` computes it
+    inline (byte-identical behavior).
+    """
+
+    token_delta: int
+    resolved_tool_channel: str | None
+
+
+async def precompute_event_append(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    session_id: str,
+    kind: EventKind,
+    data: dict[str, Any],
+    orig_channel: str | None = None,
+    tool_parent_channel: str | None | EllipsisType = ...,
+) -> _PrecomputedAppend:
+    """Run :func:`append_event`'s pre-transaction compute and return it.
+
+    The LiteLLM tokenizer pass and the tool-parent JSONB ``@>`` scan are the
+    two slowest operations in an append (issue #862).  Resolving them here —
+    BEFORE any row lock — keeps concurrent appenders from serializing behind
+    the slowest tokenization, and lets the two tool-result appenders (#991)
+    run this compute OUTSIDE their outer ``FOR UPDATE`` dedup transaction.
+
+    For tool-role events, ``tool_parent_channel`` either supplies the parent
+    channel directly (live builtin/MCP dispatch path) or, left as the default
+    ``...`` sentinel, triggers the pre-lock :func:`_lookup_tool_parent_channel`
+    scan.  That scan is race-free pre-lock by commit-ordering: the parent
+    assistant row is committed before any tool result can arrive (never-delete
+    invariant + tool results only arrive for assistant-requested calls), so the
+    resolved channel cannot change between this pre-read and the locked INSERT.
+
+    ``sessions`` queries import lazily to avoid a module-load cycle — events.py
+    and sessions.py are sibling modules both imported by ``db/queries/__init__.py``.
+    """
+    from aios.db.queries import sessions as _sessions_q
+
+    delta = 0
+    if kind == "message":
+        if data.get("role") == "user":
+            # USER token count needs the focal channel to render the as-sent
+            # form.  This pre-read is OUTSIDE any transaction; a concurrent
+            # ``switch_channel`` committing before the lock can make it stale
+            # (bounded drift — see ``append_event``'s docstring).  The STORED
+            # stamp is always the locked RETURNING value, unaffected by this read.
+            pre_focal = await _sessions_q.get_session_focal_channel(
+                conn, session_id, account_id=account_id
+            )
+            delta = _event_token_delta(kind, data, orig_channel, pre_focal)
+        else:
+            delta = _event_token_delta(kind, data, orig_channel, None)
+
+    # Resolve the tool-parent channel pre-lock too.  The live builtin/MCP
+    # dispatch path supplies it directly (default ``...`` → look it up).
+    resolved_tool_channel: str | None = None
+    if kind == "message" and data.get("role") == "tool":
+        resolved_tool_channel = (
+            await _lookup_tool_parent_channel(
+                conn, session_id, data.get("tool_call_id"), account_id=account_id
+            )
+            if tool_parent_channel is ...
+            else tool_parent_channel
+        )
+
+    return _PrecomputedAppend(token_delta=delta, resolved_tool_channel=resolved_tool_channel)
+
+
 async def append_event(
     conn: asyncpg.Connection[Any],
     *,
@@ -595,6 +685,7 @@ async def append_event(
     data: dict[str, Any],
     orig_channel: str | None = None,
     tool_parent_channel: str | None | EllipsisType = ...,
+    precomputed: _PrecomputedAppend | None = None,
 ) -> Event:
     """Append an event to ``session_id`` with gapless seq allocation.
 
@@ -682,42 +773,29 @@ async def append_event(
     # assistant ``reacting_to``, never by turn boundaries.
     reacting_to_seq = int(data.get("reacting_to") or 0) if is_assistant_message else 0
 
-    # ── Pre-transaction compute (issue #862) ──────────────────────────────
+    # ── Pre-transaction compute (issue #862, #991) ────────────────────────
     # The LiteLLM tokenizer pass and the tool-parent JSONB lookup are the two
-    # slowest operations in an append.  Running them BEFORE the row lock keeps
-    # concurrent appenders from serializing behind the slowest tokenization.
+    # slowest operations in an append; they run BEFORE the row lock so
+    # concurrent appenders don't serialize behind the slowest tokenization.
     #
-    # ``sessions`` queries import lazily to avoid a module-load cycle —
-    # events.py and sessions.py are sibling modules both imported by
-    # ``db/queries/__init__.py``.
-    from aios.db.queries import sessions as _sessions_q
-
-    delta = 0
-    if kind == "message":
-        if is_user_message:
-            # USER token count needs the focal channel to render the as-sent
-            # form.  This pre-read is OUTSIDE any transaction; a concurrent
-            # ``switch_channel`` committing before the lock can make it stale
-            # (bounded drift — see the docstring).  The STORED stamp below is
-            # always the locked RETURNING value, unaffected by this read.
-            pre_focal = await _sessions_q.get_session_focal_channel(
-                conn, session_id, account_id=account_id
-            )
-            delta = _event_token_delta(kind, data, orig_channel, pre_focal)
-        else:
-            delta = _event_token_delta(kind, data, orig_channel, None)
-
-    # Resolve the tool-parent channel pre-lock too.  The live builtin/MCP
-    # dispatch path supplies it directly (default ``...`` → look it up).
-    resolved_tool_channel: str | None = None
-    if kind == "message" and data.get("role") == "tool":
-        resolved_tool_channel = (
-            await _lookup_tool_parent_channel(
-                conn, session_id, data.get("tool_call_id"), account_id=account_id
-            )
-            if tool_parent_channel is ...
-            else tool_parent_channel
+    # ``precomputed`` lets a caller resolve that compute OUTSIDE its own outer
+    # ``FOR UPDATE`` (the two tool-result appenders, #991) and pass it in — so
+    # the tokenizer + cold-path JSONB scan never run under the session lock on
+    # the ~100 KB tool-result path that motivated #862.  When ``None`` (the
+    # default for every non-tool-result caller), ``append_event`` computes it
+    # itself here — byte-identical behavior.
+    if precomputed is None:
+        precomputed = await precompute_event_append(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind=kind,
+            data=data,
+            orig_channel=orig_channel,
+            tool_parent_channel=tool_parent_channel,
         )
+    delta = precomputed.token_delta
+    resolved_tool_channel = precomputed.resolved_tool_channel
 
     async with conn.transaction():
         seq_row = await conn.fetchrow(

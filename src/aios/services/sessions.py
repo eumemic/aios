@@ -1057,6 +1057,37 @@ async def append_tool_result(
         content = await cap_tool_result_content(
             session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
         )
+
+    # ── Pre-lock precompute (issue #991, Parts 1 + 2) ─────────────────────
+    # Resolve the parent assistant's name AND ``focal_channel_at_arrival`` in a
+    # SINGLE ``@>`` scan (Part 2: ``lookup_tool_name_by_call_id`` now projects
+    # both — same row, identical WHERE / ORDER BY / LIMIT), then precompute the
+    # token delta + tool-parent channel — all OUTSIDE the dedup transaction
+    # (Part 1).  Feeding ``focal`` as ``tool_parent_channel`` suppresses
+    # ``_lookup_tool_parent_channel`` inside ``precompute_event_append``, so the
+    # parent row is scanned exactly ONCE per append.  This runs on the held
+    # ``conn`` BEFORE ``conn.transaction()`` opens, so the tokenizer pass never
+    # serializes behind the outer session-row lock.
+    name, focal = await queries.lookup_tool_name_by_call_id(
+        conn, session_id, tool_call_id, account_id=account_id
+    )
+    data: dict[str, Any] = {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": content,
+        "name": name,
+    }
+    if is_error:
+        data["is_error"] = True
+    precomputed = await queries.precompute_event_append(
+        conn,
+        account_id=account_id,
+        session_id=session_id,
+        kind="message",
+        data=data,
+        tool_parent_channel=focal,
+    )
+
     async with conn.transaction():
         await queries.lock_active_session_for_update(conn, session_id, account_id=account_id)
         existing = await queries.find_tool_result_event(
@@ -1072,22 +1103,11 @@ async def append_tool_result(
                 account_id=account_id,
             )
 
-        name = await queries.lookup_tool_name_by_call_id(
-            conn, session_id, tool_call_id, account_id=account_id
-        )
         if name is None:
             raise NotFoundError(
                 f"tool_call_id {tool_call_id!r} not found",
                 detail={"session_id": session_id, "tool_call_id": tool_call_id},
             )
-        data: dict[str, Any] = {
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": content,
-            "name": name,
-        }
-        if is_error:
-            data["is_error"] = True
         try:
             return await queries.append_event(
                 conn,
@@ -1095,6 +1115,7 @@ async def append_tool_result(
                 kind="message",
                 data=data,
                 account_id=account_id,
+                precomputed=precomputed,
             )
         except asyncpg.UniqueViolationError:
             # Structural floor (#1082): the partial UNIQUE index
@@ -1519,12 +1540,10 @@ async def confirm_tool_allow(
         # ``lookup_tool_name_by_call_id`` (#445) — same defense, same
         # error surface, restores the asymmetric validation gap
         # between allow and deny.
-        if (
-            await queries.lookup_tool_name_by_call_id(
-                conn, session_id, tool_call_id, account_id=account_id
-            )
-            is None
-        ):
+        name, _ = await queries.lookup_tool_name_by_call_id(
+            conn, session_id, tool_call_id, account_id=account_id
+        )
+        if name is None:
             raise NotFoundError(
                 f"tool_call_id {tool_call_id!r} not found",
                 detail={"session_id": session_id, "tool_call_id": tool_call_id},

@@ -310,6 +310,39 @@ async def _append_tool_result_event(
             session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
         )
 
+    # ── Pre-lock precompute (issue #991) ──────────────────────────────────
+    # The tokenizer pass (and, on the cold path, the parent-channel JSONB ``@>``
+    # scan) must NOT run under the outer ``FOR UPDATE`` dedup lock — that was
+    # the ~100 KB tool-result path #862 set out to free but couldn't reach
+    # while this caller held the lock across ``append_event``.  Resolve it here,
+    # OUTSIDE and BEFORE the lock.  The dedup ``find_tool_result_event`` and the
+    # INSERT stay inside the lock (idempotency guard unchanged).
+    #
+    # The hot builtin/MCP path supplies a concrete ``tool_parent_channel`` and a
+    # tool-event token delta is pure ``approx_tokens([data])`` — so it needs NO
+    # DB and the precompute runs on a throwaway value.  Only the cold path
+    # (``...`` sentinel: operator deny, sweep, ghost-repair re-dispatch) needs a
+    # conn for ``_lookup_tool_parent_channel``; it does one brief
+    # ``pool.acquire()`` released BEFORE the lock acquire (sequential, no
+    # double-hold; the pre-read is race-free by commit-ordering — the parent
+    # assistant row commits before any tool result can arrive).
+    if tool_parent_channel is ...:
+        async with pool.acquire() as precompute_conn:
+            precomputed = await queries.precompute_event_append(
+                precompute_conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data=event_data,
+                tool_parent_channel=tool_parent_channel,
+            )
+    else:
+        # Hot path: concrete channel, pure ``approx_tokens`` delta — no DB.
+        precomputed = queries._PrecomputedAppend(
+            token_delta=queries._event_token_delta("message", event_data, None, None),
+            resolved_tool_channel=tool_parent_channel,
+        )
+
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
@@ -329,7 +362,7 @@ async def _append_tool_result_event(
                 kind="message",
                 data=event_data,
                 account_id=account_id,
-                tool_parent_channel=tool_parent_channel,
+                precomputed=precomputed,
             )
         except asyncpg.UniqueViolationError:
             # Structural floor (#1082): the partial UNIQUE index

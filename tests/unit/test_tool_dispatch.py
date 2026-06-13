@@ -273,10 +273,13 @@ class TestParentChannelThreading:
         assert append_event_ev.await_count == 1
         assert "tool_parent_channel" not in append_event_ev.await_args.kwargs
 
-    async def test_append_tool_result_event_forwards_to_queries(self, monkeypatch: Any) -> None:
-        """``_append_tool_result_event`` forwards its ``tool_parent_channel``
-        kwarg into ``queries.append_event``; the default ``...`` is forwarded
-        verbatim (→ pre-tx lookup)."""
+    async def test_append_tool_result_event_forwards_precomputed_channel(
+        self, monkeypatch: Any
+    ) -> None:
+        """Hot path (#991): ``_append_tool_result_event`` resolves the precompute
+        OUTSIDE the lock and forwards it as ``precomputed=`` to
+        ``queries.append_event``.  A supplied ``tool_parent_channel`` flows
+        through as ``resolved_tool_channel`` with NO DB lookup."""
         from aios.db import queries
 
         captured: dict[str, Any] = {}
@@ -312,7 +315,10 @@ class TestParentChannelThreading:
             account_id="acc_1",
             tool_parent_channel="tg:42",
         )
-        assert captured["tool_parent_channel"] == "tg:42"
+        # The hot path passes ``precomputed=`` (not ``tool_parent_channel=``);
+        # its resolved channel echoes the supplied stamp with no DB round-trip.
+        assert "tool_parent_channel" not in captured
+        assert captured["precomputed"].resolved_tool_channel == "tg:42"
 
 
 def _mock_pool_conn() -> tuple[Any, Any]:
@@ -357,6 +363,13 @@ class TestToolResultUniqueFloor:
             "append_event",
             AsyncMock(side_effect=asyncpg.UniqueViolationError("dup")),
         )
+        # The cold path (default ``...``) precomputes off a brief pool.acquire()
+        # BEFORE the lock — stub it so the mock conn needs no real query support.
+        monkeypatch.setattr(
+            queries,
+            "precompute_event_append",
+            AsyncMock(return_value=queries._PrecomputedAppend(0, None)),
+        )
         decrement = AsyncMock()
         monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)
 
@@ -383,6 +396,11 @@ class TestToolResultUniqueFloor:
         monkeypatch.setattr(queries, "find_tool_result_event", AsyncMock(return_value=winner))
         append = AsyncMock()
         monkeypatch.setattr(queries, "append_event", append)
+        monkeypatch.setattr(
+            queries,
+            "precompute_event_append",
+            AsyncMock(return_value=queries._PrecomputedAppend(0, None)),
+        )
         decrement = AsyncMock()
         monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)
 
@@ -409,7 +427,9 @@ class TestAppendToolResultUniqueFloor:
         from aios.db import queries
 
         monkeypatch.setattr(queries, "lock_active_session_for_update", AsyncMock(return_value=None))
-        monkeypatch.setattr(queries, "lookup_tool_name_by_call_id", AsyncMock(return_value="demo"))
+        monkeypatch.setattr(
+            queries, "lookup_tool_name_by_call_id", AsyncMock(return_value=("demo", None))
+        )
         # No spill capping in unit tests.
         monkeypatch.setattr(
             "aios.sandbox.tool_result_spill.cap_tool_result_content",
