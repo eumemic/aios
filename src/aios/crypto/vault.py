@@ -95,14 +95,29 @@ class CryptoBox:
     def decrypt(self, blob: EncryptedBlob) -> str:
         """Decrypt and return the original plaintext string.
 
+        New blobs carry a one-byte ``BLOB_VERSION`` prefix; legacy blobs do
+        not. A legacy blob's leading MAC byte can coincidentally equal the
+        version byte (~1/256 of rows), so when the prefix-stripped
+        interpretation fails its MAC check we retry the blob verbatim as
+        legacy before raising (#858 R4: legacy unversioned blobs must
+        round-trip). SecretBox's Poly1305 MAC makes the retry sound: a wrong
+        interpretation always fails loudly, never yields wrong plaintext.
+
         Raises :class:`~aios.errors.CryptoDecryptError` if the key doesn't
         match or the ciphertext has been tampered with.
         """
         ciphertext = blob.ciphertext
-        if ciphertext[:1] == BLOB_VERSION:
-            ciphertext = ciphertext[1:]
+        if ciphertext[:1] != BLOB_VERSION:
+            return self._decrypt_ciphertext(ciphertext, blob.nonce)
         try:
-            plaintext_bytes = self._box.decrypt(ciphertext, blob.nonce)
+            return self._decrypt_ciphertext(ciphertext[1:], blob.nonce)
+        except CryptoDecryptError:
+            # Legacy blob whose first MAC byte happens to be the version byte.
+            return self._decrypt_ciphertext(ciphertext, blob.nonce)
+
+    def _decrypt_ciphertext(self, ciphertext: bytes, nonce: bytes) -> str:
+        try:
+            plaintext_bytes = self._box.decrypt(ciphertext, nonce)
         except CryptoError as exc:
             raise CryptoDecryptError(
                 "could not decrypt — wrong key or corrupted ciphertext",
