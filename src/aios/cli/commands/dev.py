@@ -180,8 +180,6 @@ def load_instance_env(repo_root: Path) -> dict[str, str]:
 
 # ── URL + port helpers ─────────────────────────────────────────────────────
 
-DEFAULT_ADMIN_URL = "postgresql://aios:aios@localhost:5432/postgres"
-
 
 def derive_runtime_db_url(admin_url: str, instance_id: str) -> str:
     """Return an AIOS_DB_URL for this instance by swapping the DB name only.
@@ -339,12 +337,31 @@ async def _count_db_clients(db_url: str) -> int:
     return int(result or 0)
 
 
-def _resolve_admin_url(secrets: dict[str, str]) -> str:
-    """Pick the admin DSN from process env, then parsed secrets, then default."""
-    return (
-        os.environ.get("AIOS_POSTGRES_ADMIN_URL")
-        or secrets.get("AIOS_POSTGRES_ADMIN_URL")
-        or DEFAULT_ADMIN_URL
+def _resolve_admin_url(secrets: dict[str, str]) -> str | None:
+    """Pick the admin DSN from process env, then parsed secrets — no default.
+
+    Returns ``None`` when neither source supplies ``AIOS_POSTGRES_ADMIN_URL``.
+    There is deliberately NO silent fallback (issue #824): the old default
+    ``postgresql://aios:aios@localhost:5432/postgres`` could connect bootstrap/
+    teardown to whatever owns :5432 on a multi-postgres host (e.g. a foreign
+    production server), silently CREATE/DROP ``aios_dev_*`` databases there.
+    Requiring an explicit DSN forces the operator to name the target server.
+
+    Pure: process env takes precedence over the secrets.env value. Callers
+    are responsible for turning ``None`` into a user-facing error.
+    """
+    return os.environ.get("AIOS_POSTGRES_ADMIN_URL") or secrets.get("AIOS_POSTGRES_ADMIN_URL")
+
+
+def _print_missing_admin_url_error() -> None:
+    """Explain how to supply the now-required admin DSN (issue #824)."""
+    print_error("AIOS_POSTGRES_ADMIN_URL is not set.")
+    print_note("Supply it one of two ways:")
+    print_note("  export AIOS_POSTGRES_ADMIN_URL=postgresql://aios:aios@localhost:5433/postgres")
+    print_note("  or add AIOS_POSTGRES_ADMIN_URL=... to ~/.aios/secrets.env")
+    print_note(
+        "This is required deliberately: there is no silent localhost:5432 default, "
+        "so bootstrap/teardown never targets a foreign postgres on a multi-DB host."
     )
 
 
@@ -416,6 +433,9 @@ def bootstrap() -> None:
         raise typer.Exit(1)
 
     admin_url = _resolve_admin_url(secrets)
+    if admin_url is None:
+        _print_missing_admin_url_error()
+        raise typer.Exit(1)
 
     try:
         asyncio.run(_preflight_role_can_create_db(admin_url))
@@ -546,6 +566,9 @@ def teardown(
 
     secrets = parse_env_file(Path.home() / ".aios" / "secrets.env")
     admin_url = _resolve_admin_url(secrets)
+    if admin_url is None:
+        _print_missing_admin_url_error()
+        raise typer.Exit(1)
     try:
         asyncio.run(_drop_database(admin_url, db_name))
     except asyncpg.exceptions.PostgresError as exc:

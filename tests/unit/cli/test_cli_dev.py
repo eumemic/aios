@@ -14,6 +14,7 @@ import pytest
 from aios.cli.commands.dev import (
     INSTANCE_ID_PATTERN,
     MAX_DB_NAME_BYTES,
+    _resolve_admin_url,
     derive_instance_id,
     derive_runtime_db_url,
     parse_env_file,
@@ -272,3 +273,32 @@ def test_settings_instance_id_rejects_unsafe_value(
 
     with pytest.raises(ValidationError):
         Settings(_env_file=(str(secrets),))
+
+
+# ── _resolve_admin_url (issue #824: no silent default) ─────────────────────
+
+
+def test_resolve_admin_url_returns_none_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No env var and empty secrets → None (no silent localhost:5432 default)."""
+    monkeypatch.delenv("AIOS_POSTGRES_ADMIN_URL", raising=False)
+    assert _resolve_admin_url({}) is None
+
+
+def test_resolve_admin_url_prefers_env_over_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Process env wins over the secrets.env value."""
+    monkeypatch.setenv("AIOS_POSTGRES_ADMIN_URL", "postgresql://env@localhost:5433/postgres")
+    secrets = {"AIOS_POSTGRES_ADMIN_URL": "postgresql://secrets@localhost:5433/postgres"}
+    assert _resolve_admin_url(secrets) == "postgresql://env@localhost:5433/postgres"
+
+
+def test_resolve_admin_url_uses_secrets_when_no_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no process env, the secrets.env value is returned unchanged."""
+    monkeypatch.delenv("AIOS_POSTGRES_ADMIN_URL", raising=False)
+    secrets = {"AIOS_POSTGRES_ADMIN_URL": "postgresql://secrets@localhost:5433/postgres"}
+    assert _resolve_admin_url(secrets) == "postgresql://secrets@localhost:5433/postgres"

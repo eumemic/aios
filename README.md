@@ -217,6 +217,12 @@ The bootstrap script is idempotent — re-runs are a no-op once a connector's to
 Working on aios itself? `aios dev bootstrap` creates an isolated dev instance per git worktree — separate database, free port, scoped Docker labels — so multiple branches can run concurrently without stepping on each other:
 
 ```bash
+# Required: the admin DSN bootstrap/teardown use to CREATE/DROP the per-worktree
+# aios_dev_* database. There is NO silent default — set it explicitly (here, or
+# in ~/.aios/secrets.env) so these commands never silently target a foreign
+# postgres that owns :5432 on a multi-DB host. :5433 matches the compose setup.
+export AIOS_POSTGRES_ADMIN_URL=postgresql://aios:aios@localhost:5433/postgres
+
 uv run aios dev bootstrap   # provisions <worktree>.env + DB + port
 uv run aios dev status      # show this worktree's instance
 uv run aios dev teardown    # drop the DB and prune containers
