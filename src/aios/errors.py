@@ -267,16 +267,22 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
 async def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Render pydantic/FastAPI request validation errors.
 
-    Pydantic's ``value_error`` entries include a ``ctx`` field that
-    carries a live ``ValueError`` instance — unserializable by
-    ``json.dumps``, so the handler itself would raise and Starlette
-    would fall back to a generic 500. We strip ``ctx`` from every
-    entry; it's internal pydantic bookkeeping, not load-bearing for
-    clients.
+    Each entry can carry values ``json.dumps`` chokes on: ``ctx`` holds a live
+    ``ValueError`` instance, and ``input`` echoes the offending value — which
+    on a multipart request is a non-serializable ``UploadFile``. If the handler
+    raised, Starlette would fall back to a generic 500 and the client would
+    lose the 422 and the error envelope. We drop ``ctx`` (internal pydantic
+    bookkeeping, not load-bearing for clients) and coerce every remaining value
+    to JSON-safe via a ``default=str`` round-trip, so the error list is total.
     """
     assert isinstance(exc, RequestValidationError)
     _log_handler_error("api.validation_error", request, 422, error_type="validation_error")
-    errors = [{k: v for k, v in err.items() if k != "ctx"} for err in exc.errors()]
+    errors = json.loads(
+        json.dumps(
+            [{k: v for k, v in err.items() if k != "ctx"} for err in exc.errors()],
+            default=str,
+        )
+    )
     return JSONResponse(
         status_code=422,
         content={
