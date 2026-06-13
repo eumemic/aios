@@ -35,6 +35,8 @@ import asyncpg
 
 from aios.db import queries
 from aios.models.connections import Connection
+from aios.models.memory_stores import MemoryStoreResource
+from aios.models.sessions import SessionResource
 from aios.services import sessions as sessions_service
 
 
@@ -220,6 +222,15 @@ async def _spawn_per_chat_session(
         return ResolveResult(session_id=None, drop=ResolveDrop.ARCHIVED_TEMPLATE)
 
     focal_channel = f"{connection.connector}/{connection.external_account_id}/{chat_id}"
+    # The template's attached memory stores must propagate to the spawned
+    # session — create_session only attaches them via its ``resources`` param
+    # (there is no memory_store_ids kwarg), so map them here. Forwarding
+    # vault_ids while dropping memory_store_ids silently broke every per_chat
+    # spawn (the SessionTemplate captures both).
+    memory_resources: list[SessionResource] = [
+        MemoryStoreResource(type="memory_store", memory_store_id=mid)
+        for mid in template.memory_store_ids
+    ]
     session = await sessions_service.create_session(
         pool,
         agent_id=template.agent_id,
@@ -228,6 +239,7 @@ async def _spawn_per_chat_session(
         title=None,
         metadata={},
         vault_ids=template.vault_ids or None,
+        resources=memory_resources or None,
         focal_channel=focal_channel,
         focal_locked=True,
         archive_when_idle=template.archive_when_idle,

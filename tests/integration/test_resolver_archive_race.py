@@ -39,6 +39,7 @@ from aios.db.pool import create_pool
 from aios.services import agents as agents_service
 from aios.services import connections as connections_service
 from aios.services import environments as environments_service
+from aios.services import memory_stores as memory_stores_service
 from aios.services import session_templates as session_templates_service
 from aios_connectors import resolver
 
@@ -176,3 +177,87 @@ class TestResolverArchiveRace:
             f"archived={connection.archived_at is not None} AND "
             f"chat_sessions={chat_count} — invariant violated."
         )
+
+
+async def test_per_chat_spawn_propagates_template_memory_stores(
+    migrated_db_url: str, _reset_db_state: None
+) -> None:
+    """A per_chat spawn must attach the template's memory stores to the spawned
+    session. ``_spawn_per_chat_session`` forwarded ``vault_ids`` but silently
+    dropped ``memory_store_ids`` (it never mapped them onto create_session's
+    ``resources``), so operators lost every pinned store on every spawn — even
+    though SessionTemplate promises to capture attached memory stores.
+    """
+    pool = await create_pool(migrated_db_url, min_size=2, max_size=8)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
+                VALUES ('acc_root', NULL,       TRUE,  'tenant-root'),
+                       ('acc_a',    'acc_root', FALSE, 'tenant-a')
+                """
+            )
+        agent_a = await agents_service.create_agent(
+            pool,
+            account_id="acc_a",
+            name="a-agent",
+            model="openrouter/test",
+            system="",
+            tools=[],
+            description=None,
+            metadata={},
+            window_min=50_000,
+            window_max=150_000,
+        )
+        env_a = await environments_service.create_environment(
+            pool, account_id="acc_a", name="a-env"
+        )
+        store = await memory_stores_service.create_store(
+            pool, account_id="acc_a", name="pinned", description="", metadata={}
+        )
+        template = await session_templates_service.create_session_template(
+            pool,
+            account_id="acc_a",
+            name="t",
+            agent_id=agent_a.id,
+            environment_id=env_a.id,
+            agent_version=agent_a.version,
+            vault_ids=[],
+            memory_store_ids=[store.id],
+            metadata={},
+        )
+        async with pool.acquire() as conn:
+            connection = await queries.insert_connection(
+                conn,
+                account_id="acc_a",
+                connector="signal",
+                external_account_id="+15550009",
+                metadata={},
+            )
+        await connections_service.configure_per_chat(
+            pool,
+            connection.id,
+            account_id="acc_a",
+            session_template_id=template.id,
+        )
+
+        async with pool.acquire() as conn:
+            conn_row = await queries.get_connection(conn, connection.id, account_id="acc_a")
+        result = await resolver.resolve_target_session(
+            pool,
+            account_id="acc_a",
+            connection=conn_row,
+            chat_id="chat_x",
+        )
+        assert result.session_id is not None, result
+
+        async with pool.acquire() as conn:
+            echoes = await queries.list_session_memory_store_echoes(
+                conn, result.session_id, account_id="acc_a"
+            )
+        assert [e.memory_store_id for e in echoes] == [store.id], (
+            f"spawned session must inherit the template's memory stores; got {echoes!r}"
+        )
+    finally:
+        await pool.close()
