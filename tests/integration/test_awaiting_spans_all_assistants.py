@@ -20,7 +20,7 @@ and omitted the still-pending X.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
@@ -125,11 +125,29 @@ class TestAwaitingSpansAllAssistants:
         session_with_two_assistant_turns: tuple[asyncpg.Pool[Any], str, Session],
     ) -> None:
         """#816: each unresolved entry carries ``pending_since`` = the declaring
-        assistant event's ``created_at``.  Because A1 and A2 are appended in
-        distinct transactions, their per-row ``now()`` values are monotone, so
-        ``tc_X`` (earlier turn) must be strictly older than ``tc_Z``."""
+        assistant event's OWN ``created_at`` — tc_X (earlier A1) before tc_Z
+        (later A2), proving per-row stamping, not the latest turn's timestamp.
+
+        We pin the two assistant turns' ``created_at`` to explicit, distinct
+        values (A1 one hour before A2) so the ordering is deterministic rather
+        than reliant on sub-millisecond wall-clock separation between two quick
+        appends in the fixture."""
         pool, account_id, session = session_with_two_assistant_turns
+        a1_ts = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
+        a2_ts = datetime(2026, 6, 10, 13, 0, 0, tzinfo=UTC)
         async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE events SET created_at = $1 "
+                'WHERE session_id = $2 AND data @> \'{"tool_calls":[{"id":"tc_X"}]}\'',
+                a1_ts,
+                session.id,
+            )
+            await conn.execute(
+                "UPDATE events SET created_at = $1 "
+                'WHERE session_id = $2 AND data @> \'{"tool_calls":[{"id":"tc_Z"}]}\'',
+                a2_ts,
+                session.id,
+            )
             unresolved = await queries.list_unresolved_tool_calls_batch(
                 conn, [session.id], account_id=account_id
             )
@@ -138,11 +156,12 @@ class TestAwaitingSpansAllAssistants:
         for entry in by_id.values():
             assert isinstance(entry["pending_since"], datetime)
             assert entry["pending_since"].tzinfo is not None
-        assert by_id["tc_X"]["pending_since"] < by_id["tc_Z"]["pending_since"], (
-            "pending_since must reflect each tool_call's OWN declaring assistant "
-            "turn — tc_X (earlier A1) before tc_Z (later A2) — proving per-row "
-            "stamping, not the latest turn's timestamp (#816)"
+        assert by_id["tc_X"]["pending_since"] == a1_ts, (
+            "pending_since must reflect tc_X's OWN declaring assistant turn (A1), "
+            "not the latest turn's timestamp (#816)"
         )
+        assert by_id["tc_Z"]["pending_since"] == a2_ts
+        assert by_id["tc_X"]["pending_since"] < by_id["tc_Z"]["pending_since"]
 
     async def test_compute_awaiting_populates_pending_since(
         self,
@@ -158,7 +177,6 @@ class TestAwaitingSpansAllAssistants:
         for call in entries:
             assert isinstance(call.pending_since, datetime)
             assert call.pending_since.tzinfo is not None
-        assert by_id["tc_X"].pending_since < by_id["tc_Z"].pending_since
 
     async def test_two_tool_calls_in_one_event_share_pending_since(
         self,
