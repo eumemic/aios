@@ -19,7 +19,7 @@ import asyncpg
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.db.listen import open_listen_for_events
+from aios.db.listen import EVENTS_ARCHIVED_NOTIFY, open_listen_for_events
 from aios.db.queries import workflows as wf_queries
 from aios.errors import (
     ConflictError,
@@ -1266,6 +1266,16 @@ async def archive_session(pool: asyncpg.Pool[Any], session_id: str, *, account_i
         )
         session = await queries.archive_session(conn, session_id, account_id=account_id)
         session = await _enrich_session(conn, session, account_id=account_id)
+    # Wake any consumer LISTENing on this session's events channel (#906): the
+    # await primitive, the long-poll /wait endpoint, the SSE /stream. Archival
+    # appends no event of its own (it only flips ``archived_at``, and
+    # ``append_event`` is fenced by ``archived_at IS NULL``), so without this
+    # poke a mid-flight listener sits until its own timeout. Fired AFTER the
+    # transaction commits — the NOTIFY-after-commit invariant (a subscriber
+    # must never see a payload for state that isn't yet committed); the bare
+    # ``EVENTS_ARCHIVED_NOTIFY`` sentinel is neither an ``evt_`` id nor a
+    # ``{"delta": …}`` payload, so each consumer recognizes it on its own terms.
+    await pool.execute("SELECT pg_notify($1, $2)", f"events_{session_id}", EVENTS_ARCHIVED_NOTIFY)
     if parent_run_id is not None:
         await defer_run_wake(parent_run_id, batch=True)
     return session
