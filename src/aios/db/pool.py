@@ -74,15 +74,23 @@ def _jsonb_encoder(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value)
 
 
-async def _register_jsonb_codec(conn: asyncpg.Connection[Any]) -> None:
-    """Pool ``init`` callback: make JSONB cross the seam as native Python.
+async def register_jsonb_codec(conn: asyncpg.Connection[Any]) -> None:
+    """Make JSONB cross the seam as native Python on ``conn``.
+
+    Used as the :func:`create_pool` ``init`` callback so every pooled connection
+    carries the codec. Also exported so any code path that runs the
+    ``aios.db.queries`` functions on a connection it opened directly (rather than
+    acquiring from the pool) can opt the connection in — the query layer now
+    relies on this codec for jsonb (``parse_jsonb`` is a pure passthrough), so a
+    bare ``asyncpg.connect()`` running those functions MUST register it first or
+    reads come back as raw JSON strings.
 
     Without a codec, asyncpg returns JSONB columns as raw JSON *strings* on read
     and demands pre-serialized strings on write, forcing every call site to
-    hand-roll ``json.loads``/``json.dumps``. Registering the codec once, on every
-    pooled connection, enforces the impedance boundary at the pool instead of at
-    ~140 vigilant call sites: reads return parsed Python (``json.loads`` decoder)
-    and writes accept bare dicts/lists (:func:`_jsonb_encoder`).
+    hand-roll ``json.loads``/``json.dumps``. Registering the codec once enforces
+    the impedance boundary at the connection instead of at ~140 vigilant call
+    sites: reads return parsed Python (``json.loads`` decoder) and writes accept
+    bare dicts/lists (:func:`_jsonb_encoder`).
     """
     await conn.set_type_codec(
         "jsonb",
@@ -90,6 +98,10 @@ async def _register_jsonb_codec(conn: asyncpg.Connection[Any]) -> None:
         decoder=json.loads,
         schema="pg_catalog",
     )
+
+
+# Back-compat alias: the original private name used as the pool ``init``.
+_register_jsonb_codec = register_jsonb_codec
 
 
 async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> asyncpg.Pool[Any]:
@@ -102,7 +114,7 @@ async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> a
         dsn=normalize_dsn(db_url),
         min_size=min_size,
         max_size=max_size,
-        init=_register_jsonb_codec,
+        init=register_jsonb_codec,
         server_settings={
             "statement_timeout": "30000",
             "idle_in_transaction_session_timeout": "60000",

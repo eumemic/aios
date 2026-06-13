@@ -31,14 +31,19 @@ from aios.errors import NotFoundError
 def parse_jsonb(raw: Any) -> Any:
     """Normalize a JSONB cell to its parsed Python form.
 
-    The pool now registers a ``jsonb`` codec (:func:`aios.db.pool._register_jsonb_codec`),
-    so pool-sourced reads already arrive as parsed Python and this function is a
-    passthrough — the ``isinstance(raw, str)`` branch never fires on pool rows.
-    The guard is retained so the helper stays safe over the incremental Stage 2
-    sweep that deletes its ~140 call sites; once those are gone, this helper is
-    removed too.
+    The pool registers a ``jsonb`` codec (:func:`aios.db.pool.register_jsonb_codec`),
+    so every pool-sourced read already arrives as parsed Python — this helper is
+    now a pure passthrough and simply returns ``raw`` unchanged. It is retained
+    over the incremental Stage 2 sweep that deletes its ~140 call sites; once
+    those are gone, this helper is removed too.
+
+    It must NOT re-parse: a JSONB column may legitimately hold a bare top-level
+    JSON *string* (e.g. ``wf_runs.output`` stores a script's string return value
+    or an error message), which the codec decodes to a Python ``str``. The old
+    ``json.loads(raw) if isinstance(raw, str)`` guard would then try to JSON-parse
+    that already-decoded string and blow up on the first non-JSON character.
     """
-    return json.loads(raw) if isinstance(raw, str) else raw
+    return raw
 
 
 # ─── shared scoping helpers ──────────────────────────────────────────────────

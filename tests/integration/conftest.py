@@ -13,6 +13,7 @@ import asyncpg
 import pytest
 
 from aios.db import queries
+from aios.db.pool import register_jsonb_codec
 from aios.models.agents import Agent, ToolSpec
 from aios.models.environments import Environment
 from aios.models.sessions import Session
@@ -77,6 +78,8 @@ async def conn_two_accounts(
     cross-tenant tests.
     """
     conn = await asyncpg.connect(migrated_db_url)
+    # Mirror the production pool: query functions read jsonb as native Python.
+    await register_jsonb_codec(conn)
     try:
         await conn.execute(
             """

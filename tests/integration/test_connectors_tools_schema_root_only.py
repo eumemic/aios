@@ -84,7 +84,9 @@ async def test_child_account_cannot_publish_tools_schema(
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT tools_schema FROM connectors WHERE connector = 'echo'")
     assert row is not None
-    assert row["tools_schema"] in ("[]", b"[]")  # JSONB default
+    # The pool's jsonb codec decodes JSONB to native Python, so the empty-array
+    # default reads back as ``[]`` (was the raw ``"[]"`` text before the codec).
+    assert row["tools_schema"] == []  # JSONB default
 
 
 async def test_root_account_can_publish_tools_schema(
