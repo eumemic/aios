@@ -341,6 +341,17 @@ class ToolSpec(BaseModel):
             ]
             if missing:
                 raise ValueError(f"custom tools require: {', '.join(missing)}")
+            # ``mcp__`` is the reserved MCP namespace (see is_mcp_tool_name): a
+            # custom tool with that prefix is classified as an MCP call by
+            # _classify_tool_call BEFORE the custom fallback, so it routes to
+            # the MCP dispatcher (erroring as an unknown server) and is never
+            # held for the client. Reject it here, at the operator-controlled
+            # definition layer, rather than letting it silently never work.
+            if self.name is not None and is_mcp_tool_name(self.name):
+                raise ValueError(
+                    f"custom tool name {self.name!r} must not start with the reserved "
+                    "'mcp__' prefix (it namespaces MCP-dispatched tools)"
+                )
         elif self.type == "mcp_toolset":
             if self.mcp_server_name is None:
                 raise ValueError("mcp_toolset requires mcp_server_name")
