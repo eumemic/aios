@@ -92,6 +92,54 @@ async def test_start_pairing_empty_code_raises_structured_error(
     assert "empty pairing code" in ei.value.payload["reason"]
 
 
+async def test_get_pairing_code_returns_code_and_rotation_seq(
+    connector: WhatsappConnector,
+) -> None:
+    """getPairingCode surfaces the rotated code + its rotation_seq so a
+    polling operator can re-render when the code changes mid-attempt."""
+    connector.state[CONNECTION_ID].daemon.get_pairing_code = (  # type: ignore[attr-defined]
+        _async_return({"code": "2@rotated-qr", "rotation_seq": 3})
+    )
+    result = await connector.getPairingCode(external_account_id=PHONE)
+    connector.state[CONNECTION_ID].daemon.get_pairing_code.assert_awaited_once()  # type: ignore[attr-defined]
+    assert result == {
+        "external_account_id": PHONE,
+        "code": "2@rotated-qr",
+        "rotation_seq": 3,
+    }
+
+
+async def test_get_pairing_code_defaults_rotation_seq_to_zero(
+    connector: WhatsappConnector,
+) -> None:
+    """A daemon that omits rotation_seq (first code, no rotation yet)
+    defaults to 0 rather than dropping the field."""
+    connector.state[CONNECTION_ID].daemon.get_pairing_code = (  # type: ignore[attr-defined]
+        _async_return({"code": "2@first-qr"})
+    )
+    result = await connector.getPairingCode(external_account_id=PHONE)
+    assert result == {
+        "external_account_id": PHONE,
+        "code": "2@first-qr",
+        "rotation_seq": 0,
+    }
+
+
+async def test_get_pairing_code_empty_code_raises_structured_error(
+    connector: WhatsappConnector,
+) -> None:
+    """No live attempt (or one already terminated) yields an empty code;
+    surface a structured error, not a 200 OK with a blank QR."""
+    connector.state[CONNECTION_ID].daemon.get_pairing_code = (  # type: ignore[attr-defined]
+        _async_return({"code": ""})
+    )
+    with pytest.raises(ManagementHandlerError) as ei:
+        await connector.getPairingCode(external_account_id=PHONE)
+    assert ei.value.payload["status"] == "error"
+    assert ei.value.payload["external_account_id"] == PHONE
+    assert "empty pairing code" in ei.value.payload["reason"]
+
+
 async def test_confirm_pairing_empty_status_falls_back_to_error(
     connector: WhatsappConnector,
 ) -> None:

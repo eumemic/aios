@@ -123,6 +123,18 @@ class WhatsappDaemon:
         result = await self.rpc.call("startPairing")
         return result if isinstance(result, dict) else {}
 
+    async def get_pairing_code(self) -> dict[str, Any]:
+        """Fetch the QR code currently displayed for the in-flight attempt.
+
+        Returns ``{"code": "...", "rotation_seq": N}``.  whatsmeow rotates
+        the code ~every 20 s; operators poll this and re-render when
+        ``rotation_seq`` changes.  The daemon errors (surfaced as an RPC
+        error) if no attempt is in progress or it has already terminated —
+        there is no live code to show in that case.
+        """
+        result = await self.rpc.call("getPairingCode")
+        return result if isinstance(result, dict) else {}
+
     async def confirm_pairing(self) -> dict[str, Any]:
         """Block until the in-flight pairing terminates.
 

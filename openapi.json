@@ -7828,6 +7828,66 @@
         }
       }
     },
+    "/v1/connectors/whatsapp/pairing-code": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Whatsapp Pairing Code",
+        "description": "Return the QR code currently live for the in-flight pairing\nattempt.  whatsmeow rotates the code ~every 20 s over the ~100 s\nattempt; ``/start-pairing`` surfaces only the first.  Operators poll\nthis every few seconds and re-render when ``rotation_seq`` changes so\neach rotation is scannable, not just the first window.  404s when no\nattempt is live (none started, or already terminated).",
+        "operationId": "post_connector_whatsapp_pairing_code",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatsappPairingCodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatsappPairingCodeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/whatsapp/confirm-pairing": {
       "post": {
         "tags": [
@@ -16474,6 +16534,44 @@
         ],
         "title": "WhatsappConfirmPairingResponse",
         "description": "``status`` is the terminal pairing outcome; ``jid`` / ``push_name``\nare populated on success, ``reason`` on error / timeout."
+      },
+      "WhatsappPairingCodeRequest": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "external_account_id"
+        ],
+        "title": "WhatsappPairingCodeRequest"
+      },
+      "WhatsappPairingCodeResponse": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "rotation_seq": {
+            "type": "integer",
+            "title": "Rotation Seq"
+          }
+        },
+        "type": "object",
+        "required": [
+          "external_account_id",
+          "code",
+          "rotation_seq"
+        ],
+        "title": "WhatsappPairingCodeResponse",
+        "description": "The QR code currently live for the in-flight pairing attempt.\n\n``rotation_seq`` increments each time whatsmeow rotates the code\n(~every 20 s); operators poll this endpoint every few seconds and\nre-render the QR when ``rotation_seq`` changes."
       },
       "WhatsappStartPairingRequest": {
         "properties": {

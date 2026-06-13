@@ -373,3 +373,75 @@ func TestCompleteFromQRItemSuccessLeavesPushNameEmpty(t *testing.T) {
 	}
 }
 
+func TestGetPairingCodeErrorsWhenNoAttempt(t *testing.T) {
+	c := &Client{log: discardLogger()}
+
+	_, _, err := c.GetPairingCode(context.Background())
+	if err == nil {
+		t.Fatal("expected error when no pairing has been started")
+	}
+}
+
+func TestGetPairingCodeReturnsCurrentCode(t *testing.T) {
+	c, attempt := newPairing()
+	c.recordQRCode(attempt, "2@first", 0)
+
+	code, seq, err := c.GetPairingCode(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != "2@first" {
+		t.Errorf("code = %q, want '2@first'", code)
+	}
+	if seq != 0 {
+		t.Errorf("rotationSeq = %d, want 0", seq)
+	}
+}
+
+func TestGetPairingCodeErrorsAfterTermination(t *testing.T) {
+	c, attempt := newPairing()
+	c.recordQRCode(attempt, "2@first", 0)
+	c.completePair(PairingOutcome{Status: "timeout"})
+
+	_, _, err := c.GetPairingCode(context.Background())
+	if err == nil {
+		t.Fatal("expected error after the attempt terminated (no live code)")
+	}
+}
+
+func TestDrainQRChannelRecordsRotatedCodes(t *testing.T) {
+	c, attempt := newPairing()
+	c.recordQRCode(attempt, "2@first", 0)
+
+	ch := make(chan whatsmeow.QRChannelItem, 3)
+	ch <- whatsmeow.QRChannelItem{Event: "code", Code: "2@second"}
+	ch <- whatsmeow.QRChannelItem{Event: "code", Code: "2@third"}
+	close(ch)
+
+	c.drainQRChannel(ch)
+
+	// Channel closed without a terminal event, so the attempt ends in
+	// error and GetPairingCode now refuses.  Assert on the captured
+	// state directly: the last rotated code is retained at seq 2.
+	if attempt.code != "2@third" {
+		t.Errorf("attempt.code = %q, want '2@third'", attempt.code)
+	}
+	if attempt.rotationSeq != 2 {
+		t.Errorf("attempt.rotationSeq = %d, want 2 (first=0, +2 refreshes)", attempt.rotationSeq)
+	}
+}
+
+func TestRecordQRRefreshIsNoOpAfterTermination(t *testing.T) {
+	c, attempt := newPairing()
+	c.recordQRCode(attempt, "2@first", 0)
+	c.completePair(PairingOutcome{Status: "success", JID: "alice@s.whatsapp.net"})
+
+	c.recordQRRefresh("2@late")
+
+	if attempt.code != "2@first" {
+		t.Errorf("late refresh mutated a terminated attempt: code = %q, want '2@first'", attempt.code)
+	}
+	if attempt.rotationSeq != 0 {
+		t.Errorf("late refresh bumped seq on a terminated attempt: %d, want 0", attempt.rotationSeq)
+	}
+}

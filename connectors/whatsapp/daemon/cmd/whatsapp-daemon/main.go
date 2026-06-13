@@ -117,6 +117,10 @@ func (a *clientPairAdapter) StartPairing(ctx context.Context) (string, error) {
 	return a.client.StartPairing(ctx)
 }
 
+func (a *clientPairAdapter) GetPairingCode(ctx context.Context) (string, int, error) {
+	return a.client.GetPairingCode(ctx)
+}
+
 func (a *clientPairAdapter) ConfirmPairing(ctx context.Context) (handler.PairingOutcome, error) {
 	outcome, err := a.client.ConfirmPairing(ctx)
 	if err != nil {

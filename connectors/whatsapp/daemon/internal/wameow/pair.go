@@ -34,6 +34,17 @@ type PairingOutcome struct {
 type pairAttempt struct {
 	done    chan struct{}
 	outcome PairingOutcome
+
+	// code is the QR string currently displayed to the operator;
+	// rotationSeq increments each time whatsmeow rotates it (~every
+	// 20s).  Both are written under c.pair.mu by recordQRCode — the
+	// first code at StartPairing time (seq 0) and each subsequent
+	// "code" refresh in drainQRChannel.  GetPairingCode snapshots
+	// them under the same lock so a polling operator can re-render on
+	// seq change.  done being closed means the attempt terminated and
+	// no live code remains.
+	code        string
+	rotationSeq int
 }
 
 // pairing tracks the current or most recent pairing attempt.  attempt
@@ -87,6 +98,7 @@ func (c *Client) StartPairing(ctx context.Context) (string, error) {
 			c.completeFromQRItem(item)
 			return "", fmt.Errorf("pairing failed before first code: %s", item.Event)
 		}
+		c.recordQRCode(attempt, item.Code, 0)
 		go c.drainQRChannel(qrChan)
 		return item.Code, nil
 	case <-ctx.Done():
@@ -120,6 +132,58 @@ func (c *Client) ConfirmPairing(ctx context.Context) (PairingOutcome, error) {
 	case <-ctx.Done():
 		return PairingOutcome{}, ctx.Err()
 	}
+}
+
+// GetPairingCode returns the QR code currently displayed for the
+// in-flight attempt plus its rotationSeq.  Operators poll this every
+// few seconds and re-render when rotationSeq changes — surfacing the
+// rotated codes whatsmeow emits ~every 20s rather than just the first.
+//
+// Errors if no attempt has been started, if Unpair forgot the cache,
+// or if the attempt has already terminated (done closed): a terminated
+// attempt has no live code, and returning a stale one would invite the
+// operator to scan a dead QR.  The snapshot is taken under c.pair.mu so
+// a concurrent recordQRRefresh can't tear the {code, seq} pair.
+func (c *Client) GetPairingCode(ctx context.Context) (string, int, error) {
+	c.pair.mu.Lock()
+	defer c.pair.mu.Unlock()
+	if c.pair.attempt == nil {
+		return "", 0, errors.New("no pairing in progress")
+	}
+	if !c.pair.inProgress {
+		return "", 0, errors.New("pairing attempt already terminated")
+	}
+	return c.pair.attempt.code, c.pair.attempt.rotationSeq, nil
+}
+
+// recordQRCode stores the QR code + rotationSeq for attempt under
+// c.pair.mu.  Used for the first code (seq 0) at StartPairing time;
+// recordQRRefresh handles subsequent rotations.  Guarded against a
+// concurrent terminal: if the attempt is no longer current (Unpair or
+// completePair already swapped/cleared it), the write is dropped so a
+// late code can't resurrect a finished attempt's live-code state.
+func (c *Client) recordQRCode(attempt *pairAttempt, code string, seq int) {
+	c.pair.mu.Lock()
+	defer c.pair.mu.Unlock()
+	if c.pair.attempt != attempt {
+		return
+	}
+	attempt.code = code
+	attempt.rotationSeq = seq
+}
+
+// recordQRRefresh stores a rotated QR code on the current attempt,
+// incrementing rotationSeq.  No-op if no attempt is in progress (a late
+// refresh arriving after the attempt terminated): a terminated attempt
+// has no live code to update.
+func (c *Client) recordQRRefresh(code string) {
+	c.pair.mu.Lock()
+	defer c.pair.mu.Unlock()
+	if !c.pair.inProgress || c.pair.attempt == nil {
+		return
+	}
+	c.pair.attempt.code = code
+	c.pair.attempt.rotationSeq++
 }
 
 // Unpair unlinks the device server-side, deletes the local store, and
@@ -209,7 +273,11 @@ func (c *Client) drainQRChannel(qrChan <-chan whatsmeow.QRChannelItem) {
 	for item := range qrChan {
 		switch item.Event {
 		case "code":
-			// QR refresh; a future PR may surface these.
+			// QR refresh: whatsmeow rotates the code ~every 20s.
+			// Retain it (incrementing rotationSeq) so a polling
+			// operator can re-render the live code mid-attempt
+			// instead of being stuck on the first ~20s window.
+			c.recordQRRefresh(item.Code)
 			continue
 		case "scanned-without-multidevice":
 			// Per whatsmeow this is non-terminal: the QR session

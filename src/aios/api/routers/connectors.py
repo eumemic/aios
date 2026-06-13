@@ -858,6 +858,24 @@ class WhatsappStartPairingResponse(BaseModel):
     code: str
 
 
+class WhatsappPairingCodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str
+
+
+class WhatsappPairingCodeResponse(BaseModel):
+    """The QR code currently live for the in-flight pairing attempt.
+
+    ``rotation_seq`` increments each time whatsmeow rotates the code
+    (~every 20 s); operators poll this endpoint every few seconds and
+    re-render the QR when ``rotation_seq`` changes."""
+
+    external_account_id: str
+    code: str
+    rotation_seq: int
+
+
 class WhatsappConfirmPairingRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -950,6 +968,45 @@ async def post_whatsapp_start_pairing(
     return WhatsappStartPairingResponse(
         external_account_id=body.external_account_id,
         code=str(code),
+    )
+
+
+@router.post(
+    "/whatsapp/pairing-code",
+    operation_id="post_connector_whatsapp_pairing_code",
+)
+async def post_whatsapp_pairing_code(
+    body: WhatsappPairingCodeRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> WhatsappPairingCodeResponse:
+    """Return the QR code currently live for the in-flight pairing
+    attempt.  whatsmeow rotates the code ~every 20 s over the ~100 s
+    attempt; ``/start-pairing`` surfaces only the first.  Operators poll
+    this every few seconds and re-render when ``rotation_seq`` changes so
+    each rotation is scannable, not just the first window.  404s when no
+    attempt is live (none started, or already terminated)."""
+    result = await _whatsapp_management_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="getPairingCode",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
+    )
+    code = result.get("code") if isinstance(result, dict) else None
+    if not code:
+        # Fail loud rather than 200 OK with an empty QR — see
+        # post_whatsapp_start_pairing for the rationale.
+        raise ConnectorCallFailedError(
+            "whatsapp connector getPairingCode returned no code",
+            detail={"method": "getPairingCode", "connector_result": result},
+        )
+    return WhatsappPairingCodeResponse(
+        external_account_id=body.external_account_id,
+        code=str(code),
+        rotation_seq=int(result.get("rotation_seq", 0)),
     )
 
 
