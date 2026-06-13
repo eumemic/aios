@@ -222,6 +222,126 @@ def get_git_repo_root() -> Path:
     return Path(out.strip())
 
 
+# ── shared-DB-from-worktree guard ──────────────────────────────────────────
+
+
+def is_linked_worktree() -> bool:
+    """Return True iff the cwd is inside a *linked* git worktree.
+
+    A linked worktree (created by ``git worktree add``) has its ``--git-dir``
+    point at ``<main>/.git/worktrees/<name>`` while ``--git-common-dir`` points
+    at the main checkout's ``.git``; they differ. In the main checkout both
+    resolve to the same path (``.git`` as-returned) so they are equal.
+
+    We compare both values *as returned* (NOT ``--absolute-git-dir``): in the
+    main checkout both are the relative string ``.git`` and compare equal,
+    which is exactly what we want.
+
+    Swallows ``CalledProcessError`` / ``FileNotFoundError`` → ``False`` so it
+    is prod-safe: the api image has no git binary, and the worker's ``/app``
+    has no ``.git`` because ``.dockerignore`` excludes it. Both cases must
+    never raise — they just mean "not a linked worktree."
+    """
+    try:
+        git_dir = subprocess.check_output(
+            ["git", "rev-parse", "--git-dir"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        common_dir = subprocess.check_output(
+            ["git", "rev-parse", "--git-common-dir"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return git_dir != common_dir
+
+
+def db_name_is_shared(db_url: str) -> bool:
+    """Return True iff ``db_url``'s database name is NOT a bootstrapped one.
+
+    Every database created by ``aios dev bootstrap`` is named
+    ``aios_dev_<id>`` (see :func:`derive_runtime_db_url`). Anything else —
+    the shared local dev DB (``aios``), test DBs, etc. — is "shared" for the
+    purposes of the worktree guard.
+    """
+    db_name = urlparse(db_url).path.lstrip("/")
+    return not db_name.startswith(DB_PREFIX)
+
+
+def runtime_db_url(repo_root: Path) -> str | None:
+    """Resolve ``AIOS_DB_URL`` the way pydantic will at runtime.
+
+    Process env beats the worktree ``.env`` (``config.py`` env_file tuple),
+    so honour an exported value first, then fall back to the worktree
+    ``.env``. Returns ``None`` if neither sets it. Avoids constructing the
+    full :class:`Settings` so the guard never depends on a loadable config.
+    """
+    exported = os.environ.get("AIOS_DB_URL")
+    if exported:
+        return exported
+    env = parse_env_file(repo_root / ".env")
+    return env.get("AIOS_DB_URL")
+
+
+def assert_not_shared_in_worktree() -> None:
+    """Abort startup if a linked worktree is about to use the shared dev DB.
+
+    The footgun (#349): in a git worktree you source the main checkout's
+    ``.env`` (or never ran ``aios dev bootstrap``), so the runtime
+    ``AIOS_DB_URL`` points at the shared local dev DB while you believe you're
+    isolated — silently writing real records into a shared/prod-shadow DB.
+
+    Guard condition: running from a *linked worktree* AND the resolved runtime
+    ``AIOS_DB_URL`` db-name is not ``aios_dev_*``. ``AIOS_ALLOW_SHARED_DB=1``
+    is an explicit escape hatch.
+    """
+    if os.environ.get("AIOS_ALLOW_SHARED_DB") == "1":
+        return
+    if not is_linked_worktree():
+        return
+    db_url = runtime_db_url(get_git_repo_root())
+    if db_url is None or not db_name_is_shared(db_url):
+        return
+    print_error(
+        "refusing to start: this linked git worktree is pointing at the "
+        "shared dev DB (AIOS_DB_URL does not name an aios_dev_* database). "
+        "You probably sourced the main checkout's .env. Run `aios dev "
+        "bootstrap` and source the worktree-local .env in a fresh shell, or "
+        "set AIOS_ALLOW_SHARED_DB=1 to override."
+    )
+    raise typer.Exit(1)
+
+
+def classify_instance_mode(
+    env: dict[str, str],
+    resolved_db_url: str | None,
+    in_linked_worktree: bool,
+) -> str:
+    """Classify the worktree's dev mode for ``aios dev status``.
+
+    Returns one of ``"unbootstrapped"``, ``"shared"``, ``"isolated"``:
+
+    - ``unbootstrapped`` — the worktree ``.env`` lacks the four instance keys
+      (``aios dev bootstrap`` was never run here).
+    - ``shared`` — a linked worktree whose resolved runtime DB is shared.
+    - ``isolated`` — everything else (main checkout, or a bootstrapped
+      worktree pointing at its ``aios_dev_*`` DB).
+    """
+    required = (
+        "AIOS_INSTANCE_ID",
+        "AIOS_DB_URL",
+        "AIOS_API_PORT",
+        "AIOS_WORKSPACE_ROOT",
+    )
+    if any(k not in env for k in required):
+        return "unbootstrapped"
+    if in_linked_worktree and resolved_db_url is not None and db_name_is_shared(resolved_db_url):
+        return "shared"
+    return "isolated"
+
+
 # ── stale-export guard ─────────────────────────────────────────────────────
 
 _STALE_EXPORT_VARS = (
@@ -676,26 +796,50 @@ def _pkill_pattern(pattern: str) -> bool:
 @app.command("status", help="Show this worktree's aios dev instance status.")
 def status() -> None:
     repo_root = get_git_repo_root()
-    env = load_instance_env(repo_root)
-    instance_id = env["AIOS_INSTANCE_ID"]
-    validate_instance_id_for_db(instance_id)
-    db_name = DB_PREFIX + instance_id
-    port = int(env["AIOS_API_PORT"])
-    workspace_root = Path(env["AIOS_WORKSPACE_ROOT"])
+    # Read the worktree .env directly rather than via load_instance_env, which
+    # hard-exits on missing keys — we must report the unbootstrapped case, not
+    # die on it. Resolve the runtime DB the way pydantic will (exported value
+    # beats .env) so a stale exported AIOS_DB_URL is reflected — that divergence
+    # is the exact footgun #349 is about.
+    env = parse_env_file(repo_root / ".env")
+    resolved_db_url = runtime_db_url(repo_root)
+    in_worktree = is_linked_worktree()
+    mode = classify_instance_mode(env, resolved_db_url, in_worktree)
 
-    print(f"instance_id:     {instance_id}")
-    print(f"database:        {db_name}")
-    print(f"api_port:        {port}")
-    print(f"workspace_root:  {workspace_root}")
+    print(f"mode:            {mode}")
 
-    container_ids = _list_instance_containers(instance_id)
-    print(f"containers:      {len(container_ids)}")
+    instance_id = env.get("AIOS_INSTANCE_ID")
+    print(f"instance_id:     {instance_id or '-'}")
 
-    api_up = port_is_open(port)
-    print(f"api_port_open:   {api_up}")
+    if instance_id:
+        print(f"database:        {DB_PREFIX + instance_id}")
+    else:
+        print("database:        -")
 
-    try:
-        clients = asyncio.run(_count_db_clients(env["AIOS_DB_URL"]))
-        print(f"db_attached:     {clients}  (best-effort; any long-lived connection counts)")
-    except (asyncpg.exceptions.PostgresError, OSError) as exc:
-        print(f"db_attached:     unknown ({exc})")
+    port_str = env.get("AIOS_API_PORT")
+    print(f"api_port:        {port_str or '-'}")
+
+    workspace_root = env.get("AIOS_WORKSPACE_ROOT")
+    print(f"workspace_root:  {workspace_root or '-'}")
+
+    if instance_id:
+        container_ids = _list_instance_containers(instance_id)
+        print(f"containers:      {len(container_ids)}")
+    else:
+        print("containers:      -")
+
+    if port_str:
+        api_up = port_is_open(int(port_str))
+        print(f"api_port_open:   {api_up}")
+    else:
+        print("api_port_open:   -")
+
+    db_url = env.get("AIOS_DB_URL")
+    if db_url:
+        try:
+            clients = asyncio.run(_count_db_clients(db_url))
+            print(f"db_attached:     {clients}  (best-effort; any long-lived connection counts)")
+        except (asyncpg.exceptions.PostgresError, OSError) as exc:
+            print(f"db_attached:     unknown ({exc})")
+    else:
+        print("db_attached:     -")

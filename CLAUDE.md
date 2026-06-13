@@ -29,6 +29,31 @@ uv run python -m aios api      # API server on :8090
 uv run python -m aios worker   # procrastinate worker
 ```
 
+### Worktree smoke / dev isolation
+
+Every git worktree gets its own isolated DB on the shared local Postgres via
+`aios dev bootstrap`. **The first step of any worktree smoke is to bootstrap,
+not to `source .env`.** Sourcing the main checkout's `.env` from a worktree
+silently points you at the shared dev DB (`localhost:5433/aios`) — real
+connection records and live traffic land in a shared/prod-shadow DB (#349).
+
+Sanctioned worktree-smoke sequence:
+
+```bash
+uv run aios dev bootstrap       # provisions aios_dev_<id> + writes worktree-local .env
+# open a FRESH shell (no stale AIOS_* exports)
+set -a && source .env && set +a # the WORKTREE-LOCAL .env, written by bootstrap
+uv run aios dev status          # sanity check: expect `mode: isolated`
+uv run python -m aios api       # / aios worker
+```
+
+`aios dev status` prints a `mode:` line — `isolated` (bootstrapped, on its own
+`aios_dev_*` DB), `shared` (linked worktree pointed at the shared dev DB — fix
+before proceeding), or `unbootstrapped` (run `aios dev bootstrap`). As a
+backstop, `aios api` / `aios worker` hard-fail when started from a linked
+worktree against the shared DB; override with `AIOS_ALLOW_SHARED_DB=1` only if
+you really mean it.
+
 ### Client CLI
 
 `aios` is a typer-based client CLI that talks to a running API. Config is read from env (`AIOS_URL`, `AIOS_API_KEY`) or `.env`; every command accepts `--url` / `--api-key` overrides and a global `--format {table,json}`.
