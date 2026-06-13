@@ -3,10 +3,12 @@
 The aios server holds a single 32-byte master key in the ``AIOS_VAULT_KEY`` env
 var (base64-encoded). Every *active* encrypted row stores a randomly-generated
 nonce alongside its ciphertext; encryption is authenticated, so any tampering
-or key mismatch produces a clean error rather than silent corruption. Archived
-rows have their ciphertext and nonce zeroed out so that a future DB dump or
-query cannot leak the secret — read paths filter ``WHERE archived_at IS NULL``
-to avoid attempting to decrypt the scrubbed bytes.
+or key mismatch produces a clean error rather than silent corruption. New
+ciphertexts carry a one-byte format prefix; legacy unprefixed blobs remain
+readable so operators can re-encrypt them in place with ``aios rekey``.
+Archived rows have their ciphertext and nonce zeroed out so that a future DB
+dump or query cannot leak the secret — read paths filter ``WHERE archived_at IS
+NULL`` to avoid attempting to decrypt the scrubbed bytes.
 
 Multi-tenancy (#367): the master ``CryptoBox`` can derive a per-account
 subkey via HKDF-SHA256, returning a new ``CryptoBox`` whose secrets can't
@@ -34,22 +36,19 @@ from aios.errors import CryptoDecryptError
 # SecretBox uses 24-byte nonces and 32-byte keys.
 KEY_BYTES = SecretBox.KEY_SIZE
 NONCE_BYTES = SecretBox.NONCE_SIZE
+BLOB_VERSION = b"\x01"
 
 
 @dataclass(frozen=True, slots=True)
 class EncryptedBlob:
-    """A ciphertext + nonce pair as stored in the credentials table."""
+    """A ciphertext + nonce pair as stored in encrypted row columns."""
 
     ciphertext: bytes
     nonce: bytes
 
 
 class CryptoBox:
-    """libsodium-backed encrypt/decrypt wrapper around a single master key.
-
-    Construct once at process start with the master key bytes; subsequent
-    operations are pure and stateless beyond the held key.
-    """
+    """libsodium-backed encrypt/decrypt wrapper around a single master key."""
 
     def __init__(self, master_key: bytes) -> None:
         if len(master_key) != KEY_BYTES:
@@ -57,26 +56,13 @@ class CryptoBox:
         self._key = master_key
         self._box = SecretBox(master_key)
 
+    @property
+    def key_bytes(self) -> bytes:
+        """Raw key bytes for same-package derivation consumers."""
+        return self._key
+
     def derive_subkey_bytes(self, info: str) -> bytes:
-        """Derive a 32-byte HKDF-SHA256 subkey for the domain context ``info``.
-
-        Properties:
-
-        * Deterministic — the same ``info`` always yields the same bytes.
-        * Domain-separated — two different ``info`` strings produce two
-          unrelated 32-byte subkeys; an attacker holding one subkey
-          cannot recover the master or any sibling subkey.
-        * One-way — knowing a subkey doesn't reveal the master.
-
-        Callers own the ``info`` namespace — pick a globally unique
-        domain-separation string (a collision would share key material
-        between two subsystems). A golden-vector test pins the output
-        bytes: any change here strands every encrypted row in every
-        deployment.
-        """
-        # RFC 5869 HKDF-SHA256. Salt is a fixed application-specific
-        # constant — operators rotate by reissuing keys, not by
-        # changing salt.
+        """Derive a 32-byte HKDF-SHA256 subkey for the domain context ``info``."""
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
             length=KEY_BYTES,
@@ -86,48 +72,52 @@ class CryptoBox:
         return hkdf.derive(self._key)
 
     def derive_account_subkey(self, account_id: str) -> CryptoBox:
-        """Return a new :class:`CryptoBox` keyed to ``account_id`` via HKDF.
-
-        A :meth:`derive_subkey_bytes` wrapper with the
-        ``f"aios-account-{account_id}"`` info context; the returned
-        subkey is itself a :class:`CryptoBox` and supports ``encrypt`` /
-        ``decrypt`` exactly like the master.
-        """
+        """Return a new :class:`CryptoBox` keyed to ``account_id`` via HKDF."""
         if not account_id:
             raise ValueError("account_id must be non-empty")
         return CryptoBox(self.derive_subkey_bytes(f"aios-account-{account_id}"))
 
     @classmethod
-    def from_base64(cls, encoded: str) -> CryptoBox:
-        """Load a CryptoBox from a base64-encoded master key string.
-
-        This is the form stored in ``AIOS_VAULT_KEY`` and ``.env`` files.
-        """
+    def from_base64(cls, encoded: str, *, env_name: str = "AIOS_VAULT_KEY") -> CryptoBox:
+        """Load a CryptoBox from a base64-encoded 32-byte key string."""
         try:
             key_bytes = base64.b64decode(encoded, validate=True)
         except (ValueError, binascii.Error) as exc:
-            raise ValueError(f"AIOS_VAULT_KEY is not valid base64: {exc}") from exc
+            raise ValueError(f"{env_name} is not valid base64: {exc}") from exc
         return cls(key_bytes)
 
     def encrypt(self, plaintext: str) -> EncryptedBlob:
-        """Encrypt ``plaintext`` and return the (ciphertext, nonce) pair.
-
-        A fresh random nonce is generated for every call. The plaintext is
-        UTF-8-encoded before encryption.
-        """
+        """Encrypt ``plaintext`` and return the versioned (ciphertext, nonce) pair."""
         nonce = nacl_random(NONCE_BYTES)
         ciphertext = self._box.encrypt(plaintext.encode("utf-8"), nonce).ciphertext
-        return EncryptedBlob(ciphertext=ciphertext, nonce=nonce)
+        return EncryptedBlob(ciphertext=BLOB_VERSION + ciphertext, nonce=nonce)
 
     def decrypt(self, blob: EncryptedBlob) -> str:
         """Decrypt and return the original plaintext string.
 
-        Raises :class:`~aios.errors.CryptoDecryptError` if the master key
-        doesn't match (key rotation without re-encryption) or the ciphertext
-        has been tampered with.
+        New blobs carry a one-byte ``BLOB_VERSION`` prefix; legacy blobs do
+        not. A legacy blob's leading MAC byte can coincidentally equal the
+        version byte (~1/256 of rows), so when the prefix-stripped
+        interpretation fails its MAC check we retry the blob verbatim as
+        legacy before raising (#858 R4: legacy unversioned blobs must
+        round-trip). SecretBox's Poly1305 MAC makes the retry sound: a wrong
+        interpretation always fails loudly, never yields wrong plaintext.
+
+        Raises :class:`~aios.errors.CryptoDecryptError` if the key doesn't
+        match or the ciphertext has been tampered with.
         """
+        ciphertext = blob.ciphertext
+        if ciphertext[:1] != BLOB_VERSION:
+            return self._decrypt_ciphertext(ciphertext, blob.nonce)
         try:
-            plaintext_bytes = self._box.decrypt(blob.ciphertext, blob.nonce)
+            return self._decrypt_ciphertext(ciphertext[1:], blob.nonce)
+        except CryptoDecryptError:
+            # Legacy blob whose first MAC byte happens to be the version byte.
+            return self._decrypt_ciphertext(ciphertext, blob.nonce)
+
+    def _decrypt_ciphertext(self, ciphertext: bytes, nonce: bytes) -> str:
+        try:
+            plaintext_bytes = self._box.decrypt(ciphertext, nonce)
         except CryptoError as exc:
             raise CryptoDecryptError(
                 "could not decrypt — wrong key or corrupted ciphertext",
@@ -140,8 +130,7 @@ class CryptoBox:
         return self.encrypt(json.dumps(payload))
 
     def decrypt_dict(self, blob: EncryptedBlob) -> dict[str, Any]:
-        """Decrypt and JSON-decode to a dict.  Raises ``ValueError`` if the
-        decrypted plaintext doesn't shape as a JSON object."""
+        """Decrypt and JSON-decode to a dict."""
         plaintext = self.decrypt(blob)
         decoded = json.loads(plaintext)
         if not isinstance(decoded, dict):

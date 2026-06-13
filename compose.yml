@@ -56,6 +56,7 @@ services:
       # doesn't hard-fail before the key has been minted.
       AIOS_API_KEY: ${AIOS_API_KEY:-}
       AIOS_VAULT_KEY: ${AIOS_VAULT_KEY:?AIOS_VAULT_KEY required — run scripts/dev-bootstrap.sh}
+      AIOS_EGRESS_CA_KEY: ${AIOS_EGRESS_CA_KEY:?AIOS_EGRESS_CA_KEY required — run scripts/dev-bootstrap.sh}
       AIOS_DB_URL: postgresql://aios:aios@postgres:5432/aios
 
   api:

@@ -8,10 +8,12 @@ asyncpg, same conventions as the rest of the package.
 from __future__ import annotations
 
 import json
+import secrets
 from typing import Any, cast
 
 import asyncpg
 
+from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.db.queries import (
     parse_jsonb,
 )
@@ -204,6 +206,65 @@ def _row_to_account(row: asyncpg.Record) -> Account:
         config=config,
         created_at=row["created_at"],
         archived_at=row["archived_at"],
+    )
+
+
+async def get_or_create_account_placeholder_salt(
+    conn: asyncpg.Connection[Any], crypto_box: CryptoBox, account_id: str
+) -> bytes:
+    """Return the stable secret-placeholder salt for ``account_id``, minting lazily."""
+    row = await conn.fetchrow(
+        """
+        SELECT placeholder_salt_ciphertext, placeholder_salt_nonce
+          FROM accounts
+         WHERE id = $1 AND archived_at IS NULL
+        """,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(f"account {account_id} not found", detail={"id": account_id})
+    subkey = crypto_box.derive_account_subkey(account_id)
+    ciphertext = row["placeholder_salt_ciphertext"]
+    nonce = row["placeholder_salt_nonce"]
+    if ciphertext is not None and nonce is not None:
+        return bytes.fromhex(subkey.decrypt(EncryptedBlob(ciphertext=ciphertext, nonce=nonce)))
+
+    salt = secrets.token_bytes(32)
+    blob = subkey.encrypt(salt.hex())
+    updated = await conn.fetchrow(
+        """
+        UPDATE accounts
+           SET placeholder_salt_ciphertext = $2,
+               placeholder_salt_nonce = $3
+         WHERE id = $1
+           AND archived_at IS NULL
+           AND placeholder_salt_ciphertext IS NULL
+           AND placeholder_salt_nonce IS NULL
+        RETURNING placeholder_salt_ciphertext, placeholder_salt_nonce
+        """,
+        account_id,
+        blob.ciphertext,
+        blob.nonce,
+    )
+    if updated is not None:
+        return salt
+    row = await conn.fetchrow(
+        """
+        SELECT placeholder_salt_ciphertext, placeholder_salt_nonce
+          FROM accounts
+         WHERE id = $1 AND archived_at IS NULL
+        """,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(f"account {account_id} not found", detail={"id": account_id})
+    return bytes.fromhex(
+        subkey.decrypt(
+            EncryptedBlob(
+                ciphertext=row["placeholder_salt_ciphertext"],
+                nonce=row["placeholder_salt_nonce"],
+            )
+        )
     )
 
 

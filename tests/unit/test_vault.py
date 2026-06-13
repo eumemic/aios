@@ -11,9 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from nacl.secret import SecretBox
 from pydantic import SecretStr
 
-from aios.crypto.vault import KEY_BYTES, NONCE_BYTES, CryptoBox, EncryptedBlob
+from aios.crypto.vault import BLOB_VERSION, KEY_BYTES, NONCE_BYTES, CryptoBox, EncryptedBlob
 from aios.db import queries
 from aios.db.queries import EnvVarCredentialRow
 from aios.errors import CryptoDecryptError, OAuthRefreshError, ValidationError
@@ -123,6 +124,60 @@ class TestTamperingAndKeyMismatch:
         )
         with pytest.raises(CryptoDecryptError):
             crypto_box.decrypt(bad)
+
+
+class TestLegacyVersionByteCollision:
+    """#858 R4: legacy unversioned blobs must round-trip — including the
+    ~1/256 whose leading MAC byte coincidentally equals ``BLOB_VERSION``.
+
+    Before the decrypt-retry fix, such a blob had its real first byte
+    mis-stripped as a version prefix and decryption failed permanently —
+    a silent data-loss class on otherwise-healthy rows.
+    """
+
+    _KEY = bytes(range(KEY_BYTES))
+
+    @classmethod
+    def _legacy_blob_colliding_with_version_byte(cls, plaintext: bytes) -> EncryptedBlob:
+        """Brute-force a nonce until the raw SecretBox ciphertext (MAC-first)
+        genuinely begins with the version byte. ~256 deterministic attempts."""
+        raw_box = SecretBox(cls._KEY)
+        for i in range(100_000):
+            nonce = i.to_bytes(NONCE_BYTES, "big")
+            ciphertext = raw_box.encrypt(plaintext, nonce).ciphertext
+            if ciphertext[:1] == BLOB_VERSION:
+                return EncryptedBlob(ciphertext=ciphertext, nonce=nonce)
+        raise AssertionError("no version-byte-colliding nonce found in 100k attempts")
+
+    def test_legacy_blob_with_leading_version_byte_round_trips(self) -> None:
+        blob = self._legacy_blob_colliding_with_version_byte(b"legacy-collision")
+        assert blob.ciphertext[:1] == BLOB_VERSION  # the trap: looks versioned
+        assert CryptoBox(self._KEY).decrypt(blob) == "legacy-collision"
+
+    def test_versioned_blob_still_decrypts(self) -> None:
+        box = CryptoBox(self._KEY)
+        blob = box.encrypt("versioned-payload")
+        assert blob.ciphertext[:1] == BLOB_VERSION
+        assert box.decrypt(blob) == "versioned-payload"
+
+    def test_corrupted_colliding_blob_still_raises(self) -> None:
+        blob = self._legacy_blob_colliding_with_version_byte(b"legacy-collision")
+        corrupted = EncryptedBlob(
+            ciphertext=blob.ciphertext[:-1] + bytes([blob.ciphertext[-1] ^ 0x01]),
+            nonce=blob.nonce,
+        )
+        with pytest.raises(CryptoDecryptError):
+            CryptoBox(self._KEY).decrypt(corrupted)
+
+    def test_corrupted_versioned_blob_still_raises(self) -> None:
+        box = CryptoBox(self._KEY)
+        blob = box.encrypt("versioned-payload")
+        corrupted = EncryptedBlob(
+            ciphertext=blob.ciphertext[:-1] + bytes([blob.ciphertext[-1] ^ 0x01]),
+            nonce=blob.nonce,
+        )
+        with pytest.raises(CryptoDecryptError):
+            box.decrypt(corrupted)
 
 
 # ── Service-layer helpers ────────────────────────────────────────────────────
@@ -1022,24 +1077,27 @@ class TestMintSecretPlaceholder:
     recycles and re-derive identically on any worker sharing the vault
     key, while staying unique per session and unlinkable to the secret."""
 
-    def _subkey(self) -> CryptoBox:
-        return CryptoBox(b"\xcd" * 32).derive_account_subkey("acc_alpha")
+    def _salt(self) -> bytes:
+        return b"\xcd" * 32
 
     def test_format(self) -> None:
-        placeholder = mint_secret_placeholder(self._subkey(), "sess_A", "vcred_1")
+        placeholder = mint_secret_placeholder(self._salt(), "sess_A", "vcred_1")
         assert placeholder.startswith(SECRET_PLACEHOLDER_PREFIX)
         suffix = placeholder.removeprefix(SECRET_PLACEHOLDER_PREFIX)
         assert len(suffix) == 32
         assert all(c in "0123456789abcdef" for c in suffix)
 
     def test_deterministic_and_distinct_per_input(self) -> None:
-        subkey = self._subkey()
+        subkey = self._salt()
         base = mint_secret_placeholder(subkey, "sess_A", "vcred_1")
         assert mint_secret_placeholder(subkey, "sess_A", "vcred_1") == base
         assert mint_secret_placeholder(subkey, "sess_B", "vcred_1") != base
         assert mint_secret_placeholder(subkey, "sess_A", "vcred_2") != base
-        other_subkey = CryptoBox(b"\xee" * 32).derive_account_subkey("acc_alpha")
-        assert mint_secret_placeholder(other_subkey, "sess_A", "vcred_1") != base
+        other_salt = b"\xee" * 32
+        assert mint_secret_placeholder(other_salt, "sess_A", "vcred_1") != base
+        assert mint_secret_placeholder(other_salt, "sess_A", "vcred_1") == mint_secret_placeholder(
+            other_salt, "sess_A", "vcred_1"
+        )
 
 
 class TestServiceWiringIsAccountScoped:

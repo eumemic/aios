@@ -67,6 +67,14 @@ class Settings(BaseSettings):
         ...,
         description="Base64-encoded 32-byte master key for libsodium secretbox.",
     )
+    vault_key_previous: SecretStr | None = Field(
+        default=None,
+        description="Optional previous AIOS_VAULT_KEY used only by `aios rekey` to decrypt during rotation.",
+    )
+    egress_ca_key: SecretStr = Field(
+        ...,
+        description="Base64-encoded 32-byte key for the sandbox egress CA.",
+    )
     bootstrap_token: SecretStr | None = Field(
         default=None,
         description="Unlocks ``POST /v1/accounts/bootstrap`` while the ``accounts`` table "

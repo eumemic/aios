@@ -49,6 +49,10 @@ os.environ.setdefault(
     "AIOS_VAULT_KEY",
     base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
 )
+os.environ.setdefault(
+    "AIOS_EGRESS_CA_KEY",
+    base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+)
 os.environ.setdefault("AIOS_DB_URL", "postgresql://x:x@localhost:5432/x")
 
 # Scope ``AIOS_INSTANCE_ID`` per pytest-xdist worker so that
@@ -239,6 +243,7 @@ def aios_env_minimal(
     env_vars = {
         "AIOS_API_KEY": "aios_" + secrets.token_urlsafe(32),
         "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+        "AIOS_EGRESS_CA_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
         "AIOS_DB_URL": migrated_db_url,
         "AIOS_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
         # Issue #807: point the docker_harness-driven e2e provisions at the

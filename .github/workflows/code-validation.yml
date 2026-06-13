@@ -121,6 +121,7 @@ jobs:
       AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
       AIOS_API_KEY: test-key-for-ci
       AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+      AIOS_EGRESS_CA_KEY: kBhGwxDFjaYVWHd5Xwa6HlMPwcCNf3cjhMhjd06v50I=
 
     steps:
       - uses: actions/checkout@v4
@@ -165,6 +166,7 @@ jobs:
       AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
       AIOS_API_KEY: test-key-for-ci
       AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+      AIOS_EGRESS_CA_KEY: kBhGwxDFjaYVWHd5Xwa6HlMPwcCNf3cjhMhjd06v50I=
 
     steps:
       - uses: actions/checkout@v4
@@ -234,6 +236,7 @@ jobs:
       AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
       AIOS_API_KEY: test-key-for-ci
       AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+      AIOS_EGRESS_CA_KEY: kBhGwxDFjaYVWHd5Xwa6HlMPwcCNf3cjhMhjd06v50I=
 
     steps:
       - uses: actions/checkout@v4
@@ -284,6 +287,7 @@ jobs:
       AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
       AIOS_API_KEY: test-key-for-ci
       AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+      AIOS_EGRESS_CA_KEY: kBhGwxDFjaYVWHd5Xwa6HlMPwcCNf3cjhMhjd06v50I=
 
     steps:
       # Matrix jobs whose per-shard names are required status contexts must
