@@ -29,7 +29,7 @@ from aios.ids import (
     EVENT,
     make_id,
 )
-from aios.models.events import Event, EventKind
+from aios.models.events import MODEL_VISIBLE_LIFECYCLE_EVENTS, Event, EventKind
 
 # ─── events ───────────────────────────────────────────────────────────────────
 
@@ -1384,6 +1384,71 @@ async def list_session_channels(
     return [str(r["channel"]) for r in rows]
 
 
+async def read_windowed_context_events(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    drop: int | None = None,
+) -> list[Event]:
+    """Events the context builder needs, in seq order: message events plus
+    the model-visible FS-loss notices (``kind='lifecycle'`` whose ``event``
+    is in :data:`MODEL_VISIBLE_LIFECYCLE_EVENTS`).
+
+    ``drop=None`` loads the full log. ``drop=N`` keeps messages with
+    ``cumulative_tokens > N`` plus notices past the dropped-message prefix
+    (``seq`` greater than the max seq among dropped messages). The notices
+    carry NULL ``cumulative_tokens``, so they window out by *seq* alongside
+    their surrounding messages, not by the token boundary — a notice scrolls
+    out of context exactly when the messages around its reset point do.
+
+    ``read_message_events`` stays message-only (its other callers — e.g.
+    ``confirm_tool_deny`` — must not see lifecycle rows); this is the
+    windowing-specific read that feeds :func:`build_messages`.
+    """
+    allowlist = list(MODEL_VISIBLE_LIFECYCLE_EVENTS)
+    # UNION ALL (not an OR across kinds) so each arm keeps its own index plan:
+    # the message arm stays a clean ``cumulative_tokens`` partial-index range
+    # scan. An ``OR`` spanning both kinds would defeat that index on every
+    # windowed wake, even for the common session with no FS-loss notices. The
+    # arms are disjoint by ``kind``, so ALL (no dedup) is correct and cheaper.
+    if drop is None:
+        rows = await conn.fetch(
+            "SELECT * FROM events "
+            "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
+            "UNION ALL "
+            "SELECT * FROM events "
+            "WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'lifecycle' AND data->>'event' = ANY($3) "
+            "ORDER BY seq ASC",
+            session_id,
+            account_id,
+            allowlist,
+        )
+    else:
+        # Notices are seq-bounded, not token-bounded: include those past the
+        # last dropped message (COALESCE handles "nothing dropped" → seq > 0).
+        rows = await conn.fetch(
+            "SELECT * FROM events "
+            "WHERE session_id = $1 AND account_id = $3 "
+            "AND kind = 'message' AND cumulative_tokens > $2 "
+            "UNION ALL "
+            "SELECT * FROM events "
+            "WHERE session_id = $1 AND account_id = $3 "
+            "AND kind = 'lifecycle' AND data->>'event' = ANY($4) "
+            "AND seq > COALESCE("
+            "    (SELECT max(seq) FROM events "
+            "     WHERE session_id = $1 AND account_id = $3 "
+            "     AND kind = 'message' AND cumulative_tokens <= $2), 0) "
+            "ORDER BY seq ASC",
+            session_id,
+            drop,
+            account_id,
+            allowlist,
+        )
+    return [_row_to_event(r) for r in rows]
+
+
 async def read_windowed_events(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -1449,7 +1514,9 @@ async def read_windowed_events(
     # Fallback: no cumulative data yet — load everything.
     if total is None:
         return WindowedEvents(
-            events=await queries.read_message_events(conn, session_id, account_id=account_id),
+            events=await queries.read_windowed_context_events(
+                conn, session_id, account_id=account_id
+            ),
             omission=None,
         )
 
@@ -1470,7 +1537,9 @@ async def read_windowed_events(
     total_effective = round(total * ratio)
     if total_effective <= events_window_max:
         return WindowedEvents(
-            events=await queries.read_message_events(conn, session_id, account_id=account_id),
+            events=await queries.read_windowed_context_events(
+                conn, session_id, account_id=account_id
+            ),
             omission=None,
         )
 
@@ -1486,7 +1555,9 @@ async def read_windowed_events(
     )
     if drop_effective == 0:
         return WindowedEvents(
-            events=await queries.read_message_events(conn, session_id, account_id=account_id),
+            events=await queries.read_windowed_context_events(
+                conn, session_id, account_id=account_id
+            ),
             omission=None,
         )
 
@@ -1505,16 +1576,11 @@ async def read_windowed_events(
     # retain-the-tail-even-when-oversized guarantee.
     drop = min(drop, total - 1)
 
-    # Bounded range scan: only events past the boundary.
-    rows = await conn.fetch(
-        "SELECT * FROM events "
-        "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
-        "AND cumulative_tokens > $2 "
-        "ORDER BY seq ASC",
-        session_id,
-        drop,
-        account_id,
-    )
+    # Bounded range scan: messages past the boundary, plus the FS-loss
+    # notices past the dropped-message prefix. Bare call (not via ``queries``)
+    # so the fallback stub on the package attribute does not intercept the
+    # retained-window read — keeping the unit FakeConn path exercised.
+    events = await read_windowed_context_events(conn, session_id, account_id=account_id, drop=drop)
 
     # The omitted complement: same boundary expression as the retained
     # scan (``<=`` vs ``>``), and a seq-prefix of the log — so its
@@ -1542,4 +1608,4 @@ async def read_windowed_events(
         if omission_row["began_at"] is not None
         else None
     )
-    return WindowedEvents(events=[_row_to_event(r) for r in rows], omission=omission)
+    return WindowedEvents(events=events, omission=omission)

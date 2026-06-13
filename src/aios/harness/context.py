@@ -49,7 +49,7 @@ from aios.harness.vision import (
 )
 from aios.harness.window import WindowOmission
 from aios.logging import get_logger
-from aios.models.events import Event
+from aios.models.events import MODEL_VISIBLE_LIFECYCLE_EVENTS, Event
 from aios.sandbox.volumes import resolve_to_host_path
 
 log = get_logger("aios.harness.context")
@@ -67,16 +67,6 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
 # Anthropic's contract: thinking blocks must be preserved across turns
 # for the model to use them as continuation context.
 _THINKING_FIELDS: frozenset[str] = frozenset({"thinking_blocks", "reasoning_content"})
-
-# Durable-session-sandbox FS-loss notices (§5.9): the only non-``message``
-# events ``build_messages`` renders. They are append-only (each at its seq
-# position, so monotonicity holds) and NOT stimulus-bearing — they never
-# advance ``reacting_to`` and so never, on their own, wake the session; the
-# notice is read at the next genuine wake. Event text is runtime-vocabulary
-# only (no repo/PR/issue refs — the agent can't act on those).
-_MODEL_VISIBLE_LIFECYCLE: frozenset[str] = frozenset(
-    {"sandbox_fs_reset", "sandbox_fs_expired", "sandbox_fs_over_limit"}
-)
 
 # Unaffected-resources tail shared by the reset/expired notices.
 _FS_UNAFFECTED = (
@@ -923,7 +913,7 @@ def build_messages(
         # NOT stimulus-bearing — deliberately does not touch max_stimulus_seq,
         # so a GC/reset append never advances ``reacting_to`` or wakes the
         # session; the model reads the notice at its next genuine wake.
-        if e.kind == "lifecycle" and e.data.get("event") in _MODEL_VISIBLE_LIFECYCLE:
+        if e.kind == "lifecycle" and e.data.get("event") in MODEL_VISIBLE_LIFECYCLE_EVENTS:
             messages.append({"role": "user", "content": _render_fs_lifecycle_notice(e.data)})
             continue
         if e.kind != "message":

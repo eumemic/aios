@@ -365,6 +365,7 @@ from .events import (  # noqa: E402
     model_token_ratio,
     read_events,
     read_message_events,
+    read_windowed_context_events,
     read_windowed_events,
 )
 from .files import (  # noqa: E402
@@ -771,6 +772,7 @@ __all__ = [
     "read_message_events",
     "read_request_response",
     "read_session_watermarks",
+    "read_windowed_context_events",
     "read_windowed_events",
     "reclaim_session_if_idle",
     "record_trigger_fire",

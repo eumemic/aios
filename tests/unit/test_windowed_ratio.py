@@ -67,14 +67,19 @@ class _FakeConn:
 
 
 @pytest.fixture(autouse=True)
-def _stub_read_message_events(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> None:
-    """Short-circuit ``read_message_events`` so no real DB is hit when the
-    code path falls back to 'load everything'.  We sentinel its return so
-    tests can detect the fallback."""
+def _stub_read_context_events(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> None:
+    """Short-circuit the fallback ``read_windowed_context_events`` so no real
+    DB is hit when the code path falls back to 'load everything'.  We sentinel
+    its return so tests can detect the fallback.
+
+    Only the fallback paths call it via the package attribute; the retained
+    range scan calls it bare (module-global), so this stub leaves that path
+    to hit ``_FakeConn.fetch`` — which is what the drop-boundary assertions
+    rely on."""
     queries._clear_model_token_ratio_cache()
     monkeypatch.setattr(
         queries,
-        "read_message_events",
+        "read_windowed_context_events",
         AsyncMock(return_value=_FALLBACK_SENTINEL),
     )
 

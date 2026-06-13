@@ -25,6 +25,16 @@ from pydantic import BaseModel, Field
 
 EventKind = Literal["message", "lifecycle", "span", "interrupt"]
 
+# Durable-session-sandbox FS-loss notices (§5.9): the only non-``message``
+# events the context builder renders, and so the only non-``message`` events
+# the windowing read must carry through to it. Defined here, the lowest layer,
+# so both the harness renderer (``harness/context.py``) and the db read
+# (``db/queries/events.py``: ``read_windowed_context_events``) can name the same
+# allowlist without the db layer importing the harness.
+MODEL_VISIBLE_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
+    {"sandbox_fs_reset", "sandbox_fs_expired", "sandbox_fs_over_limit"}
+)
+
 
 class Event(BaseModel):
     """Read view of a single event from the session log."""

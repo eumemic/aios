@@ -106,10 +106,12 @@ def test_internal_callers_route_patched_fns_through_package() -> None:
     assert "queries.get_session_template(" in update_template_src
 
     # ``read_windowed_events`` (events.py) internally calls two functions that
-    # tests patch at the package attribute — ``read_message_events`` (fallback
-    # load-all path) and ``model_token_ratio`` (test_windowed_ratio.py). Both
-    # live in events.py too, so the same-module calls must route through the
-    # package or the monkeypatch is bypassed.
+    # tests patch at the package attribute — ``read_windowed_context_events``
+    # (fallback load-all path) and ``model_token_ratio`` (test_windowed_ratio.py).
+    # Both live in events.py too, so the same-module calls must route through the
+    # package or the monkeypatch is bypassed. (The retained-window range scan
+    # calls ``read_windowed_context_events`` bare on purpose, so the fallback
+    # stub does not intercept it — that bare call is not asserted here.)
     windowed_src = inspect.getsource(events.read_windowed_events)
-    assert "queries.read_message_events(" in windowed_src
+    assert "queries.read_windowed_context_events(" in windowed_src
     assert "queries.model_token_ratio(" in windowed_src
