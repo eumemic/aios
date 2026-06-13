@@ -134,6 +134,47 @@ class TestListRelatedSessions:
             assert r["created_at"]
             assert "chat_name" not in r
 
+    async def test_returns_sessions_across_multiple_connections(
+        self, harness: Harness, crypto_box: CryptoBox
+    ) -> None:
+        """The no-filter branch enumerates every connection on the account
+        (via ``iter_all_connections``) and returns sessions for all of them.
+
+        End-to-end wiring proof for the multi-connection fan-out; the
+        page-boundary regression is covered cheaply by the unit test in
+        ``tests/unit/test_connections_service.py``.
+        """
+        from aios.services import connections as connections_service
+
+        account_id = "acc_test_stub"
+        caller_session_id = await _make_caller_session(harness, account_id, suffix="multi")
+
+        expected: set[tuple[str, str]] = set()
+        for i in range(4):
+            connection = await connections_service.create_connection(
+                harness._pool,
+                connector="echo",
+                external_account_id=f"echo-multi-{i}",
+                metadata={},
+                crypto_box=crypto_box,
+                account_id=account_id,
+            )
+            target = await _make_bare_session(harness, account_id, suffix=f"multi-{i}")
+            chat_id = f"chat_multi_{i}"
+            async with harness._pool.acquire() as db_conn:
+                await db_queries.insert_chat_session(
+                    db_conn,
+                    connection_id=connection.id,
+                    chat_id=chat_id,
+                    session_id=target,
+                    account_id=account_id,
+                )
+            expected.add((chat_id, target))
+
+        result = await list_related_sessions_handler(caller_session_id, {})
+        rows = result["sessions"]
+        assert {(r["chat_id"], r["session_id"]) for r in rows} == expected
+
     async def test_cross_account_session_not_visible(
         self, harness: Harness, crypto_box: CryptoBox
     ) -> None:

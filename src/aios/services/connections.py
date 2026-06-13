@@ -15,6 +15,7 @@ pre-#328-PR-7 wire shape.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 import asyncpg
@@ -161,6 +162,54 @@ async def list_connections(
             after=after,
             account_id=account_id,
         )
+
+
+# Internal keyset page size for :func:`iter_all_connections`. Not a public
+# knob — callers that want "all connections" must not think about paging at
+# all. Module-level so unit tests can monkeypatch it small to prove the
+# page-boundary advance without inserting hundreds of rows.
+_CONNECTION_PAGE_SIZE = 200
+
+
+async def iter_all_connections(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    connector: str | None = None,
+) -> AsyncIterator[Connection]:
+    """Yield **every** connection on ``account_id`` (optionally filtered to
+    one ``connector`` type), keyset-paginating internally.
+
+    Correct-by-construction enumeration: this helper exposes **no** ``limit``
+    parameter, so a caller can never silently under-count the way a bare
+    ``list_connections(..., limit=50)`` does. It is the single sanctioned way
+    to fan out over an account's full connection set; both
+    ``api/sse.py::connection_discovery_stream`` and the
+    ``list_related_sessions`` tool consume it instead of re-rolling the loop.
+
+    **Per-page-release contract (load-bearing — do not "optimize" away):**
+    each page is fetched under its own ``pool.acquire()`` block, which closes
+    *before* the page's rows are yielded. The connection is therefore not held
+    across the (potentially slow) consumer body — `sse.py`'s discovery stream
+    yields SSE events between pages and must not pin a pool connection across
+    those yields under a slow client. Collapsing this into a single held
+    ``conn`` would regress that pool discipline.
+    """
+    cursor: str | None = None
+    while True:
+        async with pool.acquire() as conn:
+            page = await queries.list_connections(
+                conn,
+                connector=connector,
+                limit=_CONNECTION_PAGE_SIZE,
+                after=cursor,
+                account_id=account_id,
+            )
+        for connection in page:
+            yield connection
+        if len(page) < _CONNECTION_PAGE_SIZE:
+            break
+        cursor = page[-1].id
 
 
 async def attach_connection(
