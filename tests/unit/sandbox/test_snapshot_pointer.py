@@ -9,12 +9,14 @@ first-commit crash heal, and the reset clear-plus-event — all without Docker.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 from aios.harness import runtime
+from aios.sandbox.backends.base import SandboxHandle, SnapshotOutcome
 from aios.sandbox.registry import SandboxRegistry
 from tests.helpers.sandbox import FakeBackend, FakePool, make_handle
 
@@ -220,3 +222,71 @@ async def test_resolve_snapshot_missing_resets(
 
     assert resolved.snapshot_image is None
     assert ("fs_event", "sandbox_fs_reset", "snapshot_missing") in timeline
+
+
+def _over_budget_handle() -> SandboxHandle:
+    """A handle whose snapshot will exceed its disk limit (drives the
+    over-limit notice path: the FakeBackend outcome reports 2000 unique
+    bytes against a 1000-byte budget)."""
+    return SandboxHandle(
+        owner_id="sess_x",
+        sandbox_id="abc123def456abc123def456",
+        workspace_path=Path("/tmp/w"),
+        disk_limit_bytes=1_000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_over_limit_notice_read_failure_does_not_propagate(
+    harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The over-limit notice is best-effort. A DB failure reading the prior
+    snapshot bytes (the edge-trigger probe) must NOT propagate: the snapshot
+    verb and pointer write already succeeded, so the corpse must still be
+    removed. Propagating skips ``backend.destroy`` and burns a harness retry,
+    violating the docstring's no-propagate contract (§5.2)."""
+    registry, backend, timeline = harness
+    backend.next_snapshot_outcome = SnapshotOutcome(
+        kind="flattened", image_id="img", unique_bytes=2_000, depth=1
+    )
+
+    async def _boom(*_a: Any, **_k: Any) -> int | None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_get_session_snapshot_bytes", _boom)
+    registry._handles["sess_x"] = _over_budget_handle()
+    registry._last_used["sess_x"] = 0.0
+
+    await registry.release("sess_x")  # must not raise
+
+    kinds = [t[0] for t in timeline]
+    assert "pointer_set" in kinds, "snapshot + pointer succeeded"
+    assert "destroy" in kinds, "corpse must still be removed despite the notice read failure"
+
+
+@pytest.mark.asyncio
+async def test_over_limit_notice_append_failure_does_not_propagate(
+    harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The over-limit fs-event append is best-effort too: a DB failure
+    emitting the model-visible notice must NOT propagate (same contract).
+    Prior bytes default to None (harness) → crossing edge → append fires."""
+    registry, backend, timeline = harness
+    backend.next_snapshot_outcome = SnapshotOutcome(
+        kind="flattened", image_id="img", unique_bytes=2_000, depth=1
+    )
+
+    async def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("aios.services.sessions.append_event", _boom)
+    registry._handles["sess_x"] = _over_budget_handle()
+    registry._last_used["sess_x"] = 0.0
+
+    await registry.release("sess_x")  # must not raise
+
+    kinds = [t[0] for t in timeline]
+    assert "pointer_set" in kinds, "snapshot + pointer succeeded"
+    assert "destroy" in kinds, "corpse must still be removed despite the notice append failure"
