@@ -69,12 +69,16 @@ async def env(
                 """,
                 _ACCOUNT_ID,
             )
+            # The OTHER tenant is a child of the root — only one active root
+            # is allowed (``accounts_one_active_root``). A sibling tenant is
+            # all the cross-tenant isolation tests need.
             await conn.execute(
                 """
                 INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
-                VALUES ($1, NULL, TRUE, 'incr-other')
+                VALUES ($1, $2, FALSE, 'incr-other')
                 """,
                 _OTHER_ACCOUNT_ID,
+                _ACCOUNT_ID,
             )
         _agent, _env, session = await seed_agent_env_session(
             pool, account_id=_ACCOUNT_ID, prefix="incr"
@@ -354,7 +358,7 @@ async def test_remove_memory_by_id_versions_untouched(
     await memory_stores_service.create_memory(
         pool,
         store_id=drop,
-        path="notes.md",
+        path="/notes.md",
         content="hello",
         actor=memory_stores_service.ApiActor(),
         account_id=_ACCOUNT_ID,

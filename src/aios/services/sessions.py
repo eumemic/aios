@@ -1476,6 +1476,10 @@ async def add_resource(
     """
     async with pool.acquire() as conn, conn.transaction():
         await queries.acquire_session_resources_lock(conn, session_id)
+        # Authorize the session under this account BEFORE touching any
+        # resource rows: a cross-tenant or unknown session id is a 404,
+        # not a silent attach onto someone else's session.
+        await queries.get_session_bare(conn, session_id, account_id=account_id)
         echo: SessionResourceEcho
         if isinstance(resource, MemoryStoreResource):
             echo = await memory_service.add_one(conn, session_id, resource, account_id=account_id)
@@ -1514,6 +1518,9 @@ async def remove_resource(
         )
     async with pool.acquire() as conn, conn.transaction():
         await queries.acquire_session_resources_lock(conn, session_id)
+        # Authorize the session under this account before dispatching the
+        # detach (cross-tenant / unknown session id is a 404).
+        await queries.get_session_bare(conn, session_id, account_id=account_id)
         if prefix == MEMORY_STORE:
             await memory_service.remove_one(conn, session_id, resource_id, account_id=account_id)
         else:
