@@ -106,6 +106,31 @@ class TestResolveFireAt:
         with pytest.raises(ScheduleWakeArgumentError, match="non-empty"):
             _resolve_fire_at({"at": ""})
 
+    def test_invalid_tz_rejected(self) -> None:
+        # An unresolvable IANA name is a model-input error: it must raise the
+        # client-class ScheduleWakeArgumentError (symmetric with the other
+        # rejections), NOT escape as a raw pytz UnknownTimeZoneError — the
+        # latter is a non-AiosError that the tool dispatcher classifies as a
+        # server fault and punishes with session-container eviction.
+        with pytest.raises(ScheduleWakeArgumentError, match="unknown timezone"):
+            _resolve_fire_at({"at": "tomorrow at 9am", "tz": "Not/AZone"})
+
+    def test_lowercase_tz_accepted(self) -> None:
+        # pytz (dateparser's backend) is case-insensitive, so 'utc' is valid.
+        # The guard must defer to dateparser, NOT pre-reject with a
+        # case-sensitive stdlib ZoneInfo check — which raises on 'utc' under a
+        # case-sensitive tzdb (e.g. the Linux deploy image), over-rejecting a
+        # plausible model input.
+        resolved = _resolve_fire_at({"at": "in 30 minutes", "tz": "utc"})
+        assert resolved > datetime.now(UTC)
+
+    def test_fixed_offset_tz_accepted(self) -> None:
+        # dateparser accepts fixed-offset zone names (e.g. 'UTC+5') via its own
+        # StaticTzInfo path before pytz; the guard must not over-reject them
+        # (a stdlib ZoneInfo check raises ZoneInfoNotFoundError on 'UTC+5').
+        resolved = _resolve_fire_at({"at": "in 30 minutes", "tz": "UTC+5"})
+        assert resolved > datetime.now(UTC)
+
     def test_delay_above_max_rejected(self) -> None:
         one_year_seconds = 60 * 60 * 24 * 365
         with pytest.raises(ScheduleWakeArgumentError, match="exceeds the max allowed"):

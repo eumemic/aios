@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import dateparser
+from pytz.exceptions import UnknownTimeZoneError
 
 from aios.config import get_settings
 from aios.errors import AiosError
@@ -137,14 +138,29 @@ def _resolve_fire_at(arguments: dict[str, Any]) -> datetime:
     if tz is not None and (not isinstance(tz, str) or not tz):
         raise ScheduleWakeArgumentError("tz must be a non-empty string when provided")
 
-    parsed: datetime | None = dateparser.parse(
-        at,
-        settings={
-            "TIMEZONE": tz or "UTC",
-            "RETURN_AS_TIMEZONE_AWARE": True,
-            "PREFER_DATES_FROM": "future",
-        },
-    )
+    try:
+        parsed: datetime | None = dateparser.parse(
+            at,
+            settings={
+                "TIMEZONE": tz or "UTC",
+                "RETURN_AS_TIMEZONE_AWARE": True,
+                "PREFER_DATES_FROM": "future",
+            },
+        )
+    except UnknownTimeZoneError:
+        # An unresolvable `tz` makes dateparser (via pytz) raise this. It is
+        # NOT an AiosError, so without this guard the tool dispatcher would
+        # classify it as a server fault and evict the session container for
+        # what is purely a bad model input. Convert it to the client-class
+        # rejection, symmetric with the other argument errors (and mirroring
+        # the OverflowError handling on the delay path). We defer to
+        # dateparser's own verdict rather than pre-validating with a stdlib
+        # ZoneInfo check — dateparser accepts names ZoneInfo rejects (the
+        # case-insensitive 'utc', fixed-offset 'UTC+5'), so pre-validation
+        # would over-reject valid inputs.
+        raise ScheduleWakeArgumentError(
+            f"unknown timezone {tz!r} — use an IANA name like 'America/New_York' or 'UTC'"
+        ) from None
     if parsed is None:
         raise ScheduleWakeArgumentError(
             f"could not parse `at` value {at!r} — use ISO 8601 (e.g. "
