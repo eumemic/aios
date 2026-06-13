@@ -31,6 +31,16 @@ def valid_png_bytes() -> bytes:
     return _valid_image("PNG")
 
 
+def valid_gif_bytes() -> bytes:
+    """A genuinely-decodable 1x1 GIF. See :func:`_valid_image`."""
+    return _valid_image("GIF")
+
+
+def valid_webp_bytes() -> bytes:
+    """A genuinely-decodable 1x1 WEBP. See :func:`_valid_image`."""
+    return _valid_image("WEBP")
+
+
 def valid_tiff_bytes() -> bytes:
     """A genuinely-decodable 1x1 TIFF — a format Pillow decodes but no vision
     provider accepts for inlining, used to exercise the render boundary's

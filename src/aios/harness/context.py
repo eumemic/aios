@@ -45,6 +45,7 @@ from aios.harness.vision import (
     PROVIDER_INLINE_IMAGE_FORMATS,
     can_inline_image,
     correct_image_mime_b64,
+    inline_image_format,
     make_image_url_part,
     text_marker,
 )
@@ -525,45 +526,6 @@ def render_user_event(
     return {"role": "user", "content": marker}
 
 
-def _inline_image_format(data: bytes) -> str | None:
-    """Return Pillow's format name ("JPEG"/"PNG"/"TIFF"/...) if ``data`` fully
-    decodes as an image, else ``None``.
-
-    The render boundary inlines an image only when the provider will accept it
-    — which needs two things neither the declared mime
-    (:func:`~aios.harness.vision.can_inline_image`) nor the 24-byte magic sniff
-    (:func:`make_image_url_part`) can establish: the bytes must FULLY decode
-    (``img.load()`` — ``verify()`` passes a truncated body), and the ACTUAL
-    format must be one the provider supports (the caller checks the returned
-    name against :data:`~aios.harness.vision.PROVIDER_INLINE_IMAGE_FORMATS`).
-    A TIFF/BMP decodes fine yet every provider 400s on it, and a declared mime
-    can lie either way (a JPEG sent as image/jpg, a TIFF sent as image/png), so
-    only the decoded format is trustworthy. Both failure modes — undecodable,
-    or decodable-but-unsupported — degrade to a text marker the model can
-    ``read``, instead of re-sending a rejected part on every replay wake.
-
-    Returns ``None`` on ANY decode failure (total): Pillow raises a wide,
-    format-plugin-dependent set on hostile bytes (UnidentifiedImageError/
-    OSError, DecompressionBombError, ValueError/SyntaxError/struct.error).
-    Catching only a subset would let an exotic decoder error escape to
-    ``build_messages``' poison backstop, quarantining the WHOLE event (losing
-    the message text and sibling attachments) rather than degrading just this
-    attachment — so catch ``Exception`` (never ``BaseException``).
-    """
-    if not data:
-        return None
-    from io import BytesIO
-
-    from PIL import Image
-
-    try:
-        with Image.open(BytesIO(data)) as img:
-            img.load()
-            return img.format
-    except Exception:
-        return None
-
-
 def _apply_attachments(
     msg: dict[str, Any],
     attachments: list[Any],
@@ -633,7 +595,7 @@ def _apply_attachments(
             )
             marker_lines.append(text_marker(record))
             continue
-        image_format = _inline_image_format(payload)
+        image_format = inline_image_format(payload)
         if image_format is None:
             # Bytes that pass the mime+size gate but don't actually decode (a
             # truncated/corrupt body behind a valid magic prefix, or a

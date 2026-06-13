@@ -109,6 +109,45 @@ def supports_vision(model: str) -> bool:
 PROVIDER_INLINE_IMAGE_FORMATS = frozenset({"JPEG", "PNG", "GIF", "WEBP"})
 
 
+def inline_image_format(data: bytes) -> str | None:
+    """Return Pillow's format name ("JPEG"/"PNG"/"TIFF"/...) if ``data`` fully
+    decodes as an image, else ``None``.
+
+    Every inline path (the attachment render boundary in
+    ``context._apply_attachments`` and the ``read`` tool's ``_read_image``)
+    must apply the SAME verdict the provider will: it full-decodes the bytes
+    and 400s on anything it can't, so neither the declared mime
+    (:func:`can_inline_image`) nor the 24-byte magic sniff
+    (:func:`make_image_url_part`) is enough. ``img.load()`` forces the full
+    decode (``verify()`` passes a truncated body); the caller then checks the
+    returned name against :data:`PROVIDER_INLINE_IMAGE_FORMATS`. A TIFF/BMP
+    decodes fine yet no provider accepts it, and a declared mime can lie either
+    way (a JPEG sent as image/jpg, a TIFF sent as image/png), so only the
+    decoded format is trustworthy. Both failure modes — undecodable, or
+    decodable-but-unsupported — degrade to a text marker rather than re-sending
+    a rejected part on every replay wake (a permanent brick the model can't
+    see). This helper is shared so the two inline paths cannot drift apart —
+    which is exactly how the ``read`` path missed the gate the render path got.
+
+    Returns ``None`` on ANY decode failure (total): Pillow raises a wide,
+    format-plugin-dependent set on hostile bytes (UnidentifiedImageError/
+    OSError, DecompressionBombError, ValueError/SyntaxError/struct.error), so
+    catch ``Exception`` (never ``BaseException``).
+    """
+    if not data:
+        return None
+    from io import BytesIO
+
+    from PIL import Image
+
+    try:
+        with Image.open(BytesIO(data)) as img:
+            img.load()
+            return img.format
+    except Exception:
+        return None
+
+
 def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
     """True when ``model`` can see image bytes inlined as ``image_url``.
 
