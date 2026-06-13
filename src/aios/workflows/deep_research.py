@@ -1,56 +1,13 @@
-"""Reference deep-research workflow script templates.
+"""Reference deep-research workflow script template.
 
-The exported builders return workflow source code that is authored into the
-workflow runtime.  The full script is the issue #792 live-demo workload; tests use
-``build_deep_research_fixture_script`` to exercise the same strange-loop shape
-with a small deterministic fan-out and simulated child returns.
+``build_deep_research_fixture_script`` returns workflow source code that
+exercises the strange-loop shape with a small deterministic fan-out and
+simulated child returns; tests author it into the workflow runtime.
 """
 
 from __future__ import annotations
 
 from textwrap import dedent
-
-SCOUT_ANGLES: tuple[str, ...] = (
-    "direct-factual",
-    "recent-developments",
-    "primary-source",
-    "contrarian-counter-evidence",
-    "academic",
-    "statistical",
-    "historical-context",
-    "stakeholder",
-    "technical-deep-dive",
-    "regulatory-legal",
-)
-
-
-def build_deep_research_script(
-    *,
-    scout_agent_id: str = "scout",
-    reader_agent_id: str = "reader",
-    synthesis_agent_id: str = "synthesis",
-    critic_agent_id: str = "critic",
-    angles: tuple[str, ...] = SCOUT_ANGLES,
-    top_k: int = 16,
-    supplementary_limit: int = 4,
-    failing_agent_id: str = "scout_nonexistent_deep_research_parity",
-) -> str:
-    """Return the full deep-research parity workflow source.
-
-    The defaults match the resource names used in the live demo.  Tests pass real
-    generated agent ids while preserving the script shape.
-    """
-
-    return _render_script(
-        scout_agent_id=scout_agent_id,
-        reader_agent_id=reader_agent_id,
-        synthesis_agent_id=synthesis_agent_id,
-        critic_agent_id=critic_agent_id,
-        angles=angles,
-        top_k=top_k,
-        supplementary_limit=supplementary_limit,
-        failing_agent_id=failing_agent_id,
-    )
 
 
 def build_deep_research_fixture_script(
