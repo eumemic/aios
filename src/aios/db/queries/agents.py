@@ -15,12 +15,13 @@ import asyncpg
 from aios.db.queries import (
     _archive_scoped,
     _get_scoped,
+    _get_versioned,
     _list_scoped,
+    _list_versioned,
     parse_jsonb,
 )
 from aios.errors import (
     ConflictError,
-    NotFoundError,
     ValidationError,
 )
 from aios.ids import (
@@ -389,18 +390,16 @@ async def get_agent_version(
     *,
     account_id: str,
 ) -> AgentVersion:
-    row = await conn.fetchrow(
-        "SELECT * FROM agent_versions WHERE agent_id = $1 AND version = $2 AND account_id = $3",
-        agent_id,
-        version,
-        account_id,
+    return await _get_versioned(
+        conn,
+        table="agent_versions",
+        parent_column="agent_id",
+        parent_id=agent_id,
+        version=version,
+        account_id=account_id,
+        row=_row_to_agent_version,
+        noun="agent",
     )
-    if row is None:
-        raise NotFoundError(
-            f"agent {agent_id} version {version} not found",
-            detail={"agent_id": agent_id, "version": version},
-        )
-    return _row_to_agent_version(row)
 
 
 async def list_agent_versions(
@@ -412,21 +411,13 @@ async def list_agent_versions(
     after: int | None = None,
 ) -> list[AgentVersion]:
     """List versions in descending order (newest first)."""
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM agent_versions WHERE agent_id = $1 AND account_id = $2 "
-            "ORDER BY version DESC LIMIT $3",
-            agent_id,
-            account_id,
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM agent_versions WHERE agent_id = $1 AND version < $2 "
-            "AND account_id = $3 ORDER BY version DESC LIMIT $4",
-            agent_id,
-            after,
-            account_id,
-            limit,
-        )
-    return [_row_to_agent_version(r) for r in rows]
+    return await _list_versioned(
+        conn,
+        table="agent_versions",
+        parent_column="agent_id",
+        parent_id=agent_id,
+        account_id=account_id,
+        row=_row_to_agent_version,
+        limit=limit,
+        after=after,
+    )

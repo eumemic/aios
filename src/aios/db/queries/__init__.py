@@ -104,6 +104,72 @@ async def _list_scoped[T](
     return [row(r) for r in await conn.fetch(sql, *args)]
 
 
+async def _get_versioned[T](
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    parent_column: str,
+    parent_id: str,
+    version: int,
+    account_id: str,
+    row: Callable[[asyncpg.Record], T],
+    noun: str,
+) -> T:
+    """``SELECT * FROM <table> WHERE <parent_column>=$1 AND version=$2 AND account_id=$3``.
+
+    Raise NotFound on miss. ``table``/``parent_column``/``noun`` are static
+    literals from the calling module — never user input.
+    """
+    rec = await conn.fetchrow(
+        f"SELECT * FROM {table} WHERE {parent_column} = $1 AND version = $2 AND account_id = $3",
+        parent_id,
+        version,
+        account_id,
+    )
+    if rec is None:
+        raise NotFoundError(
+            f"{noun} {parent_id} version {version} not found",
+            detail={parent_column: parent_id, "version": version},
+        )
+    return row(rec)
+
+
+async def _list_versioned[T](
+    conn: asyncpg.Connection[Any],
+    *,
+    table: str,
+    parent_column: str,
+    parent_id: str,
+    account_id: str,
+    row: Callable[[asyncpg.Record], T],
+    limit: int = 50,
+    after: int | None = None,
+) -> list[T]:
+    """List a parent's versions newest-first (``version DESC``), keyset-paginated by ``after``.
+
+    ``table``/``parent_column`` are static literals from the calling module —
+    never user input.
+    """
+    if after is None:
+        rows = await conn.fetch(
+            f"SELECT * FROM {table} WHERE {parent_column} = $1 AND account_id = $2 "
+            "ORDER BY version DESC LIMIT $3",
+            parent_id,
+            account_id,
+            limit,
+        )
+    else:
+        rows = await conn.fetch(
+            f"SELECT * FROM {table} WHERE {parent_column} = $1 AND version < $2 "
+            "AND account_id = $3 ORDER BY version DESC LIMIT $4",
+            parent_id,
+            after,
+            account_id,
+            limit,
+        )
+    return [row(r) for r in rows]
+
+
 async def _archive_scoped(
     conn: asyncpg.Connection[Any],
     *,

@@ -15,7 +15,9 @@ import asyncpg
 from aios.db.queries import (
     _archive_scoped,
     _get_scoped,
+    _get_versioned,
     _list_scoped,
+    _list_versioned,
     parse_jsonb,
 )
 from aios.errors import (
@@ -189,18 +191,16 @@ async def get_skill_version(
     *,
     account_id: str,
 ) -> SkillVersion:
-    row = await conn.fetchrow(
-        "SELECT * FROM skill_versions WHERE skill_id = $1 AND version = $2 AND account_id = $3",
-        skill_id,
-        version,
-        account_id,
+    return await _get_versioned(
+        conn,
+        table="skill_versions",
+        parent_column="skill_id",
+        parent_id=skill_id,
+        version=version,
+        account_id=account_id,
+        row=_row_to_skill_version,
+        noun="skill",
     )
-    if row is None:
-        raise NotFoundError(
-            f"skill {skill_id} version {version} not found",
-            detail={"skill_id": skill_id, "version": version},
-        )
-    return _row_to_skill_version(row)
 
 
 async def get_latest_skill_version(
@@ -231,24 +231,16 @@ async def list_skill_versions(
     after: int | None = None,
 ) -> list[SkillVersion]:
     """List versions in descending order (newest first)."""
-    if after is None:
-        rows = await conn.fetch(
-            "SELECT * FROM skill_versions WHERE skill_id = $1 AND account_id = $2 "
-            "ORDER BY version DESC LIMIT $3",
-            skill_id,
-            account_id,
-            limit,
-        )
-    else:
-        rows = await conn.fetch(
-            "SELECT * FROM skill_versions WHERE skill_id = $1 AND version < $2 "
-            "AND account_id = $3 ORDER BY version DESC LIMIT $4",
-            skill_id,
-            after,
-            account_id,
-            limit,
-        )
-    return [_row_to_skill_version(r) for r in rows]
+    return await _list_versioned(
+        conn,
+        table="skill_versions",
+        parent_column="skill_id",
+        parent_id=skill_id,
+        account_id=account_id,
+        row=_row_to_skill_version,
+        limit=limit,
+        after=after,
+    )
 
 
 async def resolve_skill_refs(
