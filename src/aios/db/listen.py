@@ -108,6 +108,17 @@ if TYPE_CHECKING:
 
 log = get_logger("aios.db.listen")
 
+# Sentinel payload fired on ``events_<session_id>`` when a session is archived
+# mid-flight (see :func:`aios.services.sessions.archive_session`). The
+# ``events_`` channel otherwise carries committed-event ids (``evt_…``) and
+# transient streaming-delta JSON (``{"delta": …}``); this sentinel is neither —
+# it's a content-free wake poke so consumers blocked on the channel (the
+# ``await`` primitive, the long-poll ``wait`` endpoint, the SSE ``/stream``)
+# re-read and observe the archive instead of sitting until their own timeout.
+# It deliberately does NOT start with ``{`` so it's distinguishable from a
+# delta payload, and isn't an ``evt_`` id so consumers don't try to fetch a row.
+EVENTS_ARCHIVED_NOTIFY = "archived"
+
 
 async def _connect_listener(db_url: str) -> asyncpg.Connection[object]:
     """Open a dedicated (non-pooled) asyncpg connection tagged with this

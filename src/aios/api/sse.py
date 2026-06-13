@@ -35,6 +35,7 @@ import asyncpg
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
 from aios.db import queries
+from aios.db.listen import EVENTS_ARCHIVED_NOTIFY
 from aios.logging import get_logger
 from aios.models.workflows import TERMINAL_RUN_STATUSES
 
@@ -176,6 +177,15 @@ async def sse_event_stream(
             if notification.startswith("{"):
                 yield ServerSentEvent(data=notification, event="delta")
                 continue
+
+            # Archive poke (#906): the session was archived mid-stream. An
+            # archived session is permanently gone — terminal, just like a
+            # ``lifecycle: terminated`` event — so end the stream cleanly
+            # rather than treat the sentinel as a (missing) event id and log
+            # a spurious ``sse.event_not_found`` warning.
+            if notification == EVENTS_ARCHIVED_NOTIFY:
+                yield ServerSentEvent(data="{}", event="done")
+                return
 
             event_id = notification
             async with pool.acquire() as conn:

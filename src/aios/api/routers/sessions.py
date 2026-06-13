@@ -27,6 +27,7 @@ from aios.api.deps import (
 from aios.api.sse import SSE_PREFLIGHT_EXCEPTIONS, make_sse_response, sse_event_stream
 from aios.db import queries
 from aios.db.listen import (
+    EVENTS_ARCHIVED_NOTIFY,
     SESSION_INTERRUPT_CHANNEL,
     listen_for_events,
     open_listen_for_events,
@@ -806,6 +807,12 @@ async def wait_for_events(
                     break
                 if payload.startswith("{"):
                     continue
+                # Archive poke (#906): the session was archived mid-poll. It
+                # appends no event, so re-reading would find nothing and the
+                # client would block out the full timeout; instead return
+                # promptly so the caller observes the now-archived session.
+                if payload == EVENTS_ARCHIVED_NOTIFY:
+                    break
                 events = await service.read_events(
                     pool, session_id, after_seq=after, account_id=account_id
                 )
