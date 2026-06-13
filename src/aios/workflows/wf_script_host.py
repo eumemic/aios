@@ -24,7 +24,10 @@ each branch keys its own capabilities (so every ``call_key`` is deterministic ac
 replays), and the whole live frontier is emitted at once when the run suspends.
 
 The model-facing statement of this contract is
-``aios.models.workflows.WORKFLOW_SCRIPT_CONTRACT``; keep it in sync.
+``aios.models.workflows.WORKFLOW_SCRIPT_CONTRACT``. The two are kept in sync
+structurally: the injected author namespace lives in ``author_namespace`` and
+``tests/unit/test_workflow_script_contract_drift.py`` asserts every public
+capability name there appears in the contract prose.
 """
 
 from __future__ import annotations
@@ -481,6 +484,32 @@ SAFE_BUILTINS["__import__"] = _safe_import
 SAFE_BUILTINS["__build_class__"] = builtins.__build_class__
 
 
+def author_namespace() -> dict[str, Any]:
+    """The names injected into a workflow-author script's global namespace.
+
+    This is the single source of truth for the author-facing capability set. The
+    model-facing prose statement of it is ``WORKFLOW_SCRIPT_CONTRACT``
+    (``aios.models.workflows``); the two are kept structurally in agreement by
+    ``tests/unit/test_workflow_script_contract_drift.py``, which introspects this
+    dict and asserts every public capability name appears in the contract prose.
+    """
+    return {
+        "__builtins__": SAFE_BUILTINS,
+        "gate": gate,
+        "agent": agent,
+        "tool": tool,
+        "budget": budget,
+        "parallel": parallel,
+        "pipeline": pipeline,
+        "log": log,
+        "phase": phase,
+        # The agent() failure type lives with its capability in the author API
+        # (not SAFE_BUILTINS), so `try/except AgentError` resolves it as a global.
+        "AgentError": AgentError,
+        "AgentNoReturnError": AgentNoReturnError,
+    }
+
+
 def _build_coroutine(source: str, input_value: Any) -> Any:
     # The script runs as a REAL module registered in sys.modules: a class body's
     # first op is ``__module__ = __name__`` (so the name must resolve), and
@@ -491,23 +520,7 @@ def _build_coroutine(source: str, input_value: Any) -> Any:
     module = types.ModuleType("<workflow>")
     sys.modules[module.__name__] = module
     namespace: dict[str, Any] = module.__dict__
-    namespace.update(
-        {
-            "__builtins__": SAFE_BUILTINS,
-            "gate": gate,
-            "agent": agent,
-            "tool": tool,
-            "budget": budget,
-            "parallel": parallel,
-            "pipeline": pipeline,
-            "log": log,
-            "phase": phase,
-            # The agent() failure type lives with its capability in the author API
-            # (not SAFE_BUILTINS), so `try/except AgentError` resolves it as a global.
-            "AgentError": AgentError,
-            "AgentNoReturnError": AgentNoReturnError,
-        }
-    )
+    namespace.update(author_namespace())
     # dont_inherit: without it the script inherits THIS module's ``from __future__
     # import annotations`` (PEP 563), stringifying every annotation — which silently
     # breaks dataclasses' ClassVar/InitVar detection. Compiled clean, annotations
