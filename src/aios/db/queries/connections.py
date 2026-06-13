@@ -1034,11 +1034,19 @@ async def try_record_inbound_ack(
 
     Called from the worker's inbound handler in the same transaction as
     :func:`append_event`.  The PK
-    ``(connector, external_account_id, event_id)`` enforces at-most-once
-    event append: a duplicate inbound (same ULID re-emitted on connector
-    reconnect because the previous worker crashed before acking) hits
-    ``ON CONFLICT DO NOTHING`` and the caller rolls back the txn so no
+    ``(account_id, connector, external_account_id, event_id)`` enforces
+    at-most-once event append: a duplicate inbound (same ULID re-emitted on
+    connector reconnect because the previous worker crashed before acking)
+    hits ``ON CONFLICT DO NOTHING`` and the caller rolls back the txn so no
     second event lands.
+
+    ``account_id`` is part of the key because two tenants can independently
+    hold the same external identity (migration 0060 relaxed connections
+    uniqueness to per-account for the #694 reparent primitive) and
+    ``event_id`` is a deterministic function of the chat namespace
+    (``telegram-{chat}-{msg}``), not a global ULID — without tenant scoping
+    one account's ack would swallow another's first-ever delivery of the
+    same event_id.
 
     The ``appended_seq`` is the gapless seq the in-flight ``append_event``
     just allocated; it makes the ledger row queryable for the operator
@@ -1047,12 +1055,13 @@ async def try_record_inbound_ack(
     row = await conn.fetchrow(
         """
         INSERT INTO connector_inbound_acks (
-            connector, external_account_id, event_id, appended_seq
+            account_id, connector, external_account_id, event_id, appended_seq
         )
-        VALUES ($1, $2, $3, $4)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT DO NOTHING
         RETURNING 1
         """,
+        account_id,
         connector,
         external_account_id,
         event_id,
