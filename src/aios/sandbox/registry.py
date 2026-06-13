@@ -1437,12 +1437,18 @@ class SandboxRegistry:
 
         # Pass 3b — per-account snapshot cap (quota tiers / plan limits, §5.7).
         # Skip artifacts the pool-budget pass already evicted this tick.
-        await self._gc_account_cap_pass(
+        cap_evicted = await self._gc_account_cap_pass(
             retained, image_states, instance_id, already_evicted=pool_evicted
         )
 
-        # Pass 4 — pointer reconciliation against local store truth.
-        await self._gc_reconcile_pointers(retained, image_states, instance_id)
+        # Pass 4 — pointer reconciliation against local store truth. Skip every
+        # snapshot evicted this tick (passes 3 + 3b): its image is gone, but the
+        # tick-start state still shows the pre-eviction pointer, so reconciling
+        # would resurrect a pointer to a now-removed image (a dangling pointer →
+        # unresumable session).
+        await self._gc_reconcile_pointers(
+            retained, image_states, instance_id, already_evicted=pool_evicted | cap_evicted
+        )
 
         log.info(
             "sandbox.gc_tick",
@@ -1622,7 +1628,7 @@ class SandboxRegistry:
         instance_id: str,
         *,
         already_evicted: set[str] | None = None,
-    ) -> None:
+    ) -> set[str]:
         """Enforce per-account snapshot caps (``config.sandbox_snapshot_bytes``, §5.7).
 
         Mirrors the per-host pool-budget pass, but partitioned by account: each
@@ -1630,6 +1636,10 @@ class SandboxRegistry:
         model-visible ``sandbox_fs_expired {account_cap}`` event) until the
         account is back under cap. An account with no configured cap (none up its
         parent chain) is never enforced; under-cap accounts are untouched.
+
+        Returns the session_ids it evicted, so the pointer-reconcile pass can
+        skip them — their image is gone this tick but the tick-start state still
+        shows the pre-eviction pointer.
         """
         from aios.harness import runtime
 
@@ -1650,12 +1660,13 @@ class SandboxRegistry:
             totals[st.account_id] = totals.get(st.account_id, 0) + ub
 
         pool = runtime.require_pool()
+        evicted: set[str] = set()
         for account_id, sized in by_account.items():
             async with pool.acquire() as conn:
                 cap = await queries.resolve_effective_sandbox_snapshot_bytes(conn, account_id)
             if cap is None or totals[account_id] <= cap:
                 continue
-            await self._evict_most_dormant(
+            evicted |= await self._evict_most_dormant(
                 sized,
                 states,
                 instance_id,
@@ -1663,6 +1674,7 @@ class SandboxRegistry:
                 budget=cap,
                 reason="account_cap",
             )
+        return evicted
 
     async def _evict_most_dormant(
         self,
@@ -1711,6 +1723,8 @@ class SandboxRegistry:
         retained: list[GcImageVerdict],
         states: dict[str, SessionSnapshotState],
         instance_id: str,
+        *,
+        already_evicted: set[str] | None = None,
     ) -> None:
         """Heal a NULL/stale pointer for a retained canonical tag (§5.5 pass 4).
 
@@ -1718,7 +1732,13 @@ class SandboxRegistry:
         sessions whose ``snapshot_host`` is this host (or NULL, for the crash
         heal). Multi-host compare-and-swap is deferred — the ``snapshot_host``
         column is the seam that makes it additive.
+
+        ``already_evicted`` names sessions whose canonical image passes 3/3b
+        removed this tick. They are still in ``retained`` (the eviction passes
+        don't mutate it) with a tick-start NULL/stale pointer, so without this
+        skip the heal would write a pointer to an image that no longer exists.
         """
+        skip = already_evicted or set()
         base_sizes: dict[str, int] = {}  # shared across the pass (sessions share a base)
         for v in retained:
             if not v.is_canonical:
@@ -1726,6 +1746,8 @@ class SandboxRegistry:
             sid = v.session_id
             if sid is None:
                 continue
+            if sid in skip:
+                continue  # evicted this tick — its image is gone; never resurrect the pointer
             st = states.get(sid)
             if st is None:
                 continue
