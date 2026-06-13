@@ -178,6 +178,23 @@ async def install_packages(
             )
 
 
+# Pick the legacy netfilter backend when it's available (#1022). gVisor's
+# netstack (``runsc``) implements the *legacy* netfilter ABI, NOT nftables,
+# but debian/ubuntu images default the ``iptables`` command to the nft
+# backend via update-alternatives — so a bare ``iptables`` invocation inside a
+# runsc netns fails with ``Failed to initialize nft: Protocol not supported``
+# and the fail-closed gate refuses to provision the sandbox. The legacy binary
+# ships in debian's ``iptables`` package as the ``iptables-legacy`` alternative,
+# so we always prefer it when present and fall back to ``iptables`` on runc
+# hosts whose (custom) image lacks it. Both the apply and the read-back verify
+# scripts run this same preamble so they agree on which backend's table holds
+# the rules — selecting different backends would let the verify read an empty
+# table while the DROP policy sits in the other.
+_IPTABLES_BACKEND_SELECT = (
+    "if command -v iptables-legacy >/dev/null 2>&1; then IPT=iptables-legacy; else IPT=iptables; fi"
+)
+
+
 def build_iptables_script(
     allowed_hosts: set[str],
     extra_host_ports: Sequence[tuple[str, int]] = (),
@@ -219,18 +236,20 @@ def build_iptables_script(
     lines = [
         "set -e",
         "",
+        _IPTABLES_BACKEND_SELECT,
+        "",
         "# Flush existing OUTPUT rules",
-        "iptables -F OUTPUT",
+        '"$IPT" -F OUTPUT',
         "",
         "# Allow loopback",
-        "iptables -A OUTPUT -o lo -j ACCEPT",
+        '"$IPT" -A OUTPUT -o lo -j ACCEPT',
         "",
         "# Allow established/related connections",
-        "iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+        '"$IPT" -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
         "",
         "# Allow DNS (UDP and TCP port 53)",
-        "iptables -A OUTPUT -p udp --dport 53 -j ACCEPT",
-        "iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT",
+        '"$IPT" -A OUTPUT -p udp --dport 53 -j ACCEPT',
+        '"$IPT" -A OUTPUT -p tcp --dport 53 -j ACCEPT',
     ]
 
     for host in sorted(allowed_hosts):
@@ -239,8 +258,8 @@ def build_iptables_script(
         lines.append(
             f"for ip in $(getent ahosts {host} 2>/dev/null | awk '{{print $1}}' | sort -u); do"
         )
-        lines.append('  iptables -A OUTPUT -d "$ip" -p tcp --dport 80 -j ACCEPT')
-        lines.append('  iptables -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
+        lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 80 -j ACCEPT')
+        lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
         lines.append("done")
 
     for host, port in extra_host_ports:
@@ -249,7 +268,7 @@ def build_iptables_script(
         lines.append(
             f"for ip in $(getent ahosts {host} 2>/dev/null | awk '{{print $1}}' | sort -u); do"
         )
-        lines.append(f'  iptables -A OUTPUT -d "$ip" -p tcp --dport {port} -j ACCEPT')
+        lines.append(f'  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport {port} -j ACCEPT')
         lines.append("done")
 
     if dnat_target is not None and dnat_hosts:
@@ -278,7 +297,7 @@ def build_iptables_script(
                 "| awk '{print $1}' | sort -u); do"
             )
             lines.append(
-                '    iptables -t nat -A OUTPUT -d "$ip" -p tcp --dport 443 '
+                '    "$IPT" -t nat -A OUTPUT -d "$ip" -p tcp --dport 443 '
                 f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"'
             )
             lines.append("  done")
@@ -286,7 +305,7 @@ def build_iptables_script(
 
     lines.append("")
     lines.append("# Drop everything else")
-    lines.append("iptables -P OUTPUT DROP")
+    lines.append('"$IPT" -P OUTPUT DROP')
 
     return "\n".join(lines)
 
@@ -303,7 +322,9 @@ _EMBEDDED_DNS_ADDRESS = "127.0.0.11"
 # Read-back assertion that the default OUTPUT policy is DROP — proves the
 # lockdown actually took effect in the shared netns, not just that the apply
 # script exited 0.
-_LOCKDOWN_VERIFY_SCRIPT = "iptables -S OUTPUT | grep -qx -- '-P OUTPUT DROP'"
+_LOCKDOWN_VERIFY_SCRIPT = (
+    f"{_IPTABLES_BACKEND_SELECT}\n\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'"
+)
 
 
 async def apply_network_lockdown(
