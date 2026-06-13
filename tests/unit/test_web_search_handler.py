@@ -65,3 +65,25 @@ class TestWebSearchHandler:
         mock_tavily.side_effect = WebToolError("TAVILY_API_KEY not set")
         with pytest.raises(WebToolError):
             await web_search_handler("sess_01TEST", {"query": "test"})
+
+    async def test_partial_result_missing_title_url_defaults(self, mock_tavily: AsyncMock) -> None:
+        """Tavily /search guarantees no per-entry fields. A result lacking
+        'title'/'url' must default to '' (like web_fetch's defensive .get), not
+        raise a KeyError that escapes the handler's except and — via
+        _classify_tool_error — needlessly evicts the session's sandbox while the
+        model sees a cryptic 'KeyError: title' instead of a legible result."""
+        mock_tavily.return_value = {"results": [{"content": "desc only, no title or url"}]}
+        result = await web_search_handler("sess_01TEST", {"query": "x"})
+        assert result["results"][0]["title"] == ""
+        assert result["results"][0]["url"] == ""
+        assert result["results"][0]["description"] == "desc only, no title or url"
+
+    async def test_malformed_response_without_results_returns_error(
+        self, mock_tavily: AsyncMock
+    ) -> None:
+        """A 200 response missing the 'results' key surfaces as a legible tool
+        error (mirroring web_fetch), not a KeyError that escapes and evicts the
+        sandbox."""
+        mock_tavily.return_value = {}
+        result = await web_search_handler("sess_01TEST", {"query": "x"})
+        assert "error" in result
