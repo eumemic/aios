@@ -227,6 +227,43 @@ class TestMcpSessionPool:
         assert e2 is e1
         session.initialize.assert_awaited_once()
 
+    async def test_release_rereads_discard_flag_set_while_it_waited_on_lock(self) -> None:
+        """evict_by_vault flips ``discard_on_release`` while holding the key
+        Condition. If release() reads that flag BEFORE acquiring the same lock,
+        a concurrent eviction lands in the gap and the stale-token session is
+        returned to idle for reuse — the #1030 rotated-credential gap reopened
+        under a race. release() must re-read the flag UNDER the lock.
+        """
+        session = _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
+        ):
+            pool = McpSessionPool()
+            key = (URL, "vault_a", EMPTY_KEY)
+            e1 = await pool.acquire(URL, "vault_a", EMPTY_KEY, {"Authorization": "Bearer old"})
+
+            # Hold the key Condition so release() blocks at `async with cond`,
+            # then flag the entry (as evict_by_vault does under this same lock)
+            # before letting release() proceed — the exact TOCTOU window.
+            cond = pool._condition_for(key)
+            await cond.acquire()
+            rel = asyncio.create_task(pool.release(URL, "vault_a", EMPTY_KEY, e1))
+            await asyncio.sleep(0)  # release() runs up to `async with cond` and parks
+            e1.discard_on_release = True
+            cond.release()
+            await rel
+            # Let the fire-and-forget close task run.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            assert e1._owner_task.done(), (
+                "a flag set while release() waited on the lock must still discard the entry"
+            )
+            assert key not in pool._idle, (
+                "the stale-token session must not be returned to idle for reuse"
+            )
+
     async def test_concurrent_acquires_open_distinct_sessions_up_to_cap(self) -> None:
         """N concurrent checkouts of a cold key open N distinct sessions (no
         shared state) — replaces the old shared-session 'single initialize'
