@@ -866,3 +866,91 @@ class TestWaitConnectionServed:
 
         assert "conn_direct" in c._connection_served
         assert c._connection_served["conn_direct"].is_set()
+
+
+class TestDiscoveryLoopReconnectsOnStaleStream:
+    """A silently half-open discovery stream surfaces ``httpx.ReadTimeout``
+    (an ``httpx.HTTPError``); the loop must reconnect and re-process the
+    backfill rather than wedging forever (aios#962).
+
+    The connector SDK now sets a bounded read timeout so a zombied stream
+    raises instead of blocking; the loop's existing ``except
+    httpx.HTTPError`` retry path is what restores correctness — its
+    reconnect replays the backfill, which surfaces any connection created
+    while the stream was dead.
+    """
+
+    @staticmethod
+    def _added_msg(connection_id: str):
+        from aios_sdk import SseMessage
+
+        return SseMessage(
+            event="connection",
+            data=json.dumps(
+                {
+                    "event": "added",
+                    "connection_id": connection_id,
+                    "external_account_id": "acct_x",
+                }
+            ),
+        )
+
+    async def test_read_timeout_triggers_reconnect_and_backfill_replay(self) -> None:
+        c = _ProbeConnector()
+        added: list[str] = []
+
+        async def _fake_added(tg: Any, connection_id: str, external_account_id: str) -> None:
+            del tg, external_account_id
+            added.append(connection_id)
+
+        c._on_connection_added = _fake_added  # type: ignore[method-assign]
+
+        attempts = {"n": 0}
+
+        async def _fake_stream(httpx_client: Any, connector: str):
+            del httpx_client, connector
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                # First connection goes silently half-open: the bounded
+                # read timeout fires after a stretch of no events / no
+                # heartbeat.
+                raise httpx.ReadTimeout("stream stalled")
+            # Reconnect: backfill replays the connection that was created
+            # while the stream was dead.
+            yield self._added_msg("conn_late")
+            await asyncio.Event().wait()  # then idle (live tail)
+
+        sleeps: list[float] = []
+        _real_sleep = asyncio.sleep
+
+        async def _fake_sleep(delay: float) -> None:
+            # Record the backoff but collapse the wait to a real zero-delay
+            # yield so the test doesn't actually sleep for ``delay`` seconds
+            # while still ceding control to the event loop.
+            sleeps.append(delay)
+            await _real_sleep(0)
+
+        with (
+            patch("aios_connector_http.runner.stream_connection_discovery", new=_fake_stream),
+            patch("aios_connector_http.runner.asyncio.sleep", new=_fake_sleep),
+        ):
+            mock_tg = MagicMock()
+            loop_task = asyncio.create_task(c._discovery_loop(mock_tg))
+            try:
+                # Spin the event loop until the reconnect has replayed the
+                # backfilled connection.
+                for _ in range(100):
+                    await _real_sleep(0)
+                    if added:
+                        break
+            finally:
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop_task
+
+        # The loop reconnected after the ReadTimeout and processed the
+        # connection that appeared while the stream was zombied.
+        assert added == ["conn_late"]
+        # It backed off between the failed attempt and the reconnect
+        # (rather than busy-looping).
+        assert sleeps and sleeps[0] >= 1.0

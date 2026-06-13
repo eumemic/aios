@@ -50,12 +50,24 @@ log = get_logger("aios.api.sse")
 # (issue #376). Anything else bubbles as an unhandled 500.
 SSE_PREFLIGHT_EXCEPTIONS = (asyncpg.PostgresError, OSError)
 
+# Heartbeat interval (seconds) for every SSE response built here.
+# sse-starlette emits an SSE comment (``: ping``) every ``ping`` seconds
+# when the generator is idle, which keeps proxies (Traefik) from
+# classifying a quiet stream as dead AND lets the client distinguish a
+# healthy-idle stream from a silently half-open one.  The connector SDK's
+# read timeout (``CONNECTOR_STREAM_READ_TIMEOUT`` in
+# ``aios_sdk.streaming``) is sized as a multiple of this interval, so the
+# two MUST stay in sync — a connection created while a connector's
+# discovery stream is zombied is otherwise invisible until the container
+# restarts (aios#962).
+SSE_PING_SECONDS = 15
+
 
 def make_sse_response(
     subscription: ListenSubscription,
     content: AsyncIterator[ServerSentEvent],
     *,
-    ping: int = 15,
+    ping: int = SSE_PING_SECONDS,
 ) -> EventSourceResponse:
     """Build an ``EventSourceResponse`` whose ``ListenSubscription`` is
     cleaned up even on paths that never iterate the wrapped generator.

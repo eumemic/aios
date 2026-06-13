@@ -29,6 +29,25 @@ import httpx
 
 from aios_sdk._generated import AuthenticatedClient
 
+# Connector discovery / calls / management streams sit idle for long
+# stretches (a connector with zero connections sees zero events for
+# hours).  The server emits an SSE heartbeat comment (``: ping``) every
+# ``SSE_SERVER_PING_SECONDS`` so a healthy idle stream still produces a
+# steady trickle of bytes — see ``aios.api.sse.make_sse_response``.
+#
+# An ``httpx`` read timeout is the gap allowed BETWEEN consecutive bytes,
+# so it is reset by each heartbeat on a live stream but fires when a proxy
+# or server silently drops the connection without a FIN (Traefik idle
+# timeout on a quiet SSE response is the documented culprit — aios#962).
+# We set it to a small multiple of the ping interval so two consecutive
+# missed heartbeats trip the timeout: the consuming loop then surfaces
+# ``httpx.ReadTimeout`` (an ``httpx.HTTPError``) and reconnects with
+# backoff, and the reconnect's backfill restores correctness.  Without a
+# bounded read timeout a half-open stream blocks forever and connections
+# created in the meantime are invisible until the container restarts.
+SSE_SERVER_PING_SECONDS = 15.0
+CONNECTOR_STREAM_READ_TIMEOUT = 3 * SSE_SERVER_PING_SECONDS
+
 
 @dataclass(frozen=True, slots=True)
 class SseMessage:
@@ -197,7 +216,11 @@ async def _stream_sse(httpx_client: httpx.AsyncClient, path: str) -> AsyncIterat
         "GET",
         path,
         headers={"Accept": "text/event-stream"},
-        timeout=httpx.Timeout(60.0, read=None),
+        # Bounded read timeout (NOT ``read=None``): a healthy idle stream
+        # is kept alive by the server's ``: ping`` heartbeat, so this only
+        # fires when the stream has gone silently half-open — see
+        # ``CONNECTOR_STREAM_READ_TIMEOUT`` (aios#962).
+        timeout=httpx.Timeout(60.0, read=CONNECTOR_STREAM_READ_TIMEOUT),
     ) as response:
         response.raise_for_status()
         # Synthetic open marker so HttpConnector loops can mark themselves
