@@ -94,6 +94,7 @@ class WfRun(BaseModel):
     input: Any = None  # arbitrary JSON: a workflow's input need not be an object
     output: Any = None  # arbitrary JSON: the script's return value
     budget_usd: float | None = None
+    default_child_model: str | None = None
     last_event_seq: int
     created_at: datetime
     updated_at: datetime
@@ -157,7 +158,7 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
 - Entry point: define `async def main(input)`. A run's output is the value returned by
   `main`.
 - Injected capability API, available without imports:
-  - `agent(agent_id, input, output_schema=None)`: invoke an agent and await its result.
+  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.
   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
   - `gate()`: suspend until an external resume delivers a value.
   - `budget()`: read this run's shared child-spend budget, or None when unset.
@@ -193,9 +194,8 @@ Minimal example:
 ```python
 async def main(input):
     result = await agent(
-        input["agent_id"],
         {"task": input["task"]},
-        None,
+        agent_id=input["agent_id"],
     )
     return result
 ```
@@ -282,6 +282,10 @@ class WfRunCreate(BaseModel):
         default=None,
         gt=0,
         description="Optional shared USD spend ceiling for this run's direct agent() children.",
+    )
+    default_child_model: str | None = Field(
+        default=None,
+        description="Optional model used by generic agent() children when they omit model=.",
     )
 
 

@@ -23,6 +23,7 @@ from aios.models.agents import (
 )
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
+from aios.workflows.generic_child import GENERIC_CHILD_SYSTEM
 
 
 async def create_agent(
@@ -156,18 +157,32 @@ async def _load_for_session_conn(
                 f"workflow child {session.id} has no frozen surface snapshot "
                 "(parent_run_id set but surface_frozen is false)"
             )
-        # A workflow child always pins a concrete agent_version at spawn
-        # (insert_child_session requires the int), so this is never a "latest" read.
+        if session.agent_id is None:
+            return AgentVersion(
+                agent_id="",
+                version=0,
+                model=session.model,
+                system=GENERIC_CHILD_SYSTEM.format(model=session.model),
+                tools=frozen.tools,
+                skills=[],
+                mcp_servers=frozen.mcp_servers,
+                http_servers=frozen.http_servers,
+                litellm_extra={},
+                window_min=50_000,
+                window_max=150_000,
+                created_at=session.created_at,
+            )
         version = await queries.get_agent_version(
             conn, session.agent_id, session.agent_version, account_id=account_id
         )
-        return version.model_copy(
-            update={
-                "tools": frozen.tools,
-                "mcp_servers": frozen.mcp_servers,
-                "http_servers": frozen.http_servers,
-            }
-        )
+        updates: dict[str, Any] = {
+            "tools": frozen.tools,
+            "mcp_servers": frozen.mcp_servers,
+            "http_servers": frozen.http_servers,
+        }
+        if session.model is not None:
+            updates["model"] = session.model
+        return version.model_copy(update=updates)
     if session.agent_version is not None:
         return await queries.get_agent_version(
             conn, session.agent_id, session.agent_version, account_id=account_id

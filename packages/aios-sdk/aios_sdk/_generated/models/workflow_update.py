@@ -41,7 +41,8 @@ class WorkflowUpdate:
                 - Entry point: define `async def main(input)`. A run's output is the value returned by
                   `main`.
                 - Injected capability API, available without imports:
-                  - `agent(agent_id, input, output_schema=None)`: invoke an agent and await its result.
+                  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named
+                agent and await its result.
                   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
                   - `gate()`: suspend until an external resume delivers a value.
                   - `budget()`: read this run's shared child-spend budget, or None when unset.
@@ -77,9 +78,8 @@ class WorkflowUpdate:
                 ```python
                 async def main(input):
                     result = await agent(
-                        input["agent_id"],
                         {"task": input["task"]},
-                        None,
+                        agent_id=input["agent_id"],
                     )
                     return result
                 ```

@@ -499,6 +499,13 @@ async def test_run_children_usage_sums_direct_children_and_includes_archived(
     await wf_conn.execute(
         "INSERT INTO agents (id, name, model, system, account_id) VALUES ('agent_usage', 'usage-agent', 'm', 's', 'acc_root')"
     )
+    # Named workflow children must carry a pinned agent_version (0095's
+    # sessions_agent_version_pair_ck: a child with agent_id set requires a
+    # non-NULL agent_version); seed the matching agent_versions row.
+    await wf_conn.execute(
+        "INSERT INTO agent_versions (agent_id, version, model, system, account_id) "
+        "VALUES ('agent_usage', 1, 'm', 's', 'acc_root')"
+    )
     await wf_conn.execute(
         """
         INSERT INTO sessions (
@@ -506,8 +513,8 @@ async def test_run_children_usage_sums_direct_children_and_includes_archived(
             workspace_volume_path, account_id, parent_run_id, input_tokens, output_tokens,
             cache_read_input_tokens, cache_creation_input_tokens, cost_microusd, archived_at
         ) VALUES
-            ('ses_child_a', 'agent_usage', 'env_root', NULL, NULL, '{}'::jsonb, '/tmp/a', 'acc_root', $1, 10, 20, 3, 4, 123456, NULL),
-            ('ses_child_b', 'agent_usage', 'env_root', NULL, NULL, '{}'::jsonb, '/tmp/b', 'acc_root', $1, 1, 2, 5, 6, 654321, now())
+            ('ses_child_a', 'agent_usage', 'env_root', 1, NULL, '{}'::jsonb, '/tmp/a', 'acc_root', $1, 10, 20, 3, 4, 123456, NULL),
+            ('ses_child_b', 'agent_usage', 'env_root', 1, NULL, '{}'::jsonb, '/tmp/b', 'acc_root', $1, 1, 2, 5, 6, 654321, now())
         """,
         run_id,
     )

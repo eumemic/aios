@@ -347,9 +347,10 @@ async def create_child_session(
     *,
     session_id: str,
     account_id: str,
-    agent_id: str,
+    agent_id: str | None,
     environment_id: str,
-    agent_version: int,
+    agent_version: int | None,
+    model: str | None,
     parent_run_id: str,
     surface: Surface,
     vault_ids: list[str],
@@ -394,6 +395,7 @@ async def create_child_session(
             agent_id=agent_id,
             environment_id=environment_id,
             agent_version=agent_version,
+            model=model,
             parent_run_id=parent_run_id,
             tools=surface.tools,
             mcp_servers=surface.mcp_servers,
@@ -496,13 +498,13 @@ async def compute_awaiting(
     # run-attenuated surface (#794), so two children of the same agent/version under
     # different runs would collide on the old key and misclassify authority — they key
     # per-session instead.
-    agent_cache: dict[str | tuple[str, int | None], Agent | AgentVersion] = {}
+    agent_cache: dict[str | tuple[str | None, int | None], Agent | AgentVersion] = {}
     out: dict[str, list[AwaitingToolCall]] = {}
     for session in sessions:
         unresolved = unresolved_by_sid.get(session.id)
         if not unresolved:
             continue
-        key: str | tuple[str, int | None] = (
+        key: str | tuple[str | None, int | None] = (
             session.id
             if session.parent_run_id is not None
             else (session.agent_id, session.agent_version)

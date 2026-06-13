@@ -281,6 +281,7 @@ async def test_timer_fire_threads_owner_lineage(trig_runtime: asyncpg.Pool[Any])
         agent_id=agent.id,
         environment_id=env.id,
         agent_version=agent.version,
+        model=None,
         parent_run_id=parent_run.id,
         surface=Surface([], [], []),
         vault_ids=[],

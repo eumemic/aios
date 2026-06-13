@@ -266,9 +266,10 @@ class Session(BaseModel):
     """
 
     id: str
-    agent_id: str
+    agent_id: str | None
     environment_id: str
     agent_version: int | None
+    model: str | None = None
     title: str | None
     metadata: dict[str, Any]
     status: SessionStatus
