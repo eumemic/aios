@@ -1,4 +1,4 @@
-"""Migration 0096 promotes ``events_tool_result_idx`` to a partial UNIQUE
+"""Migration 0097 promotes ``events_tool_result_idx`` to a partial UNIQUE
 index on tool-result events ``(session_id, data->>'tool_call_id')`` and
 backfills out any pre-existing duplicate rows (keeping the lowest-seq row).
 """

@@ -41,7 +41,7 @@ slipped in after the backfill), the partially-built ``*_new`` index
 lingers as INVALID; drop it manually (``DROP INDEX CONCURRENTLY IF EXISTS
 events_tool_result_idx_new``) before retrying.
 
-Revision ID: 0096
+Revision ID: 0097
 Revises: 0095
 """
 
@@ -51,7 +51,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0096"
+revision: str = "0097"
 down_revision: str = "0095"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
