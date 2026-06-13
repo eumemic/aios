@@ -27,24 +27,37 @@ def mock_safe_url() -> Any:
 
 
 class TestWebFetchHandler:
-    async def test_valid_url_returns_content(
+    async def test_valid_url_derives_title_from_first_heading(
         self, mock_tavily: AsyncMock, mock_safe_url: Any
     ) -> None:
+        """Tavily's /extract returns only url + raw_content (no title field —
+        that belongs to /search), so the title is derived from the markdown's
+        first heading. The mock uses the REAL /extract shape (no title key)."""
         mock_tavily.return_value = {
             "results": [
                 {
                     "url": "https://example.com",
-                    "title": "Example",
                     "raw_content": "# Hello World\n\nSome content.",
-                    "content": "fallback",
                 }
             ]
         }
         result = await web_fetch_handler("sess_01TEST", {"url": "https://example.com"})
         assert result["url"] == "https://example.com"
-        assert result["title"] == "Example"
+        assert result["title"] == "Hello World"
         assert result["content"] == "# Hello World\n\nSome content."
         mock_tavily.assert_awaited_once()
+
+    async def test_no_heading_yields_empty_title(
+        self, mock_tavily: AsyncMock, mock_safe_url: Any
+    ) -> None:
+        """Best-effort: content with no markdown heading yields an empty title
+        rather than crashing or fabricating one."""
+        mock_tavily.return_value = {
+            "results": [{"url": "https://example.com", "raw_content": "plain body, no heading"}]
+        }
+        result = await web_fetch_handler("sess_01TEST", {"url": "https://example.com"})
+        assert result["title"] == ""
+        assert result["content"] == "plain body, no heading"
 
     async def test_ssrf_blocked_url_returns_error(
         self, mock_tavily: AsyncMock, mock_safe_url: Any
@@ -84,18 +97,13 @@ class TestWebFetchHandler:
         result = await web_fetch_handler("sess_01TEST", {"url": "https://example.com"})
         assert len(result["content"]) == 100_000
 
-    async def test_falls_back_to_content_field(
+    async def test_empty_raw_content_yields_empty_content(
         self, mock_tavily: AsyncMock, mock_safe_url: Any
     ) -> None:
-        mock_tavily.return_value = {
-            "results": [
-                {
-                    "url": "https://example.com",
-                    "title": "Fallback",
-                    "raw_content": "",
-                    "content": "fallback content",
-                }
-            ]
-        }
+        """/extract carries only raw_content (no 'content' field — that's a
+        /search field). An empty/absent raw_content yields empty content and an
+        empty title, with no crash; there is no phantom 'content' to fall back to."""
+        mock_tavily.return_value = {"results": [{"url": "https://example.com", "raw_content": ""}]}
         result = await web_fetch_handler("sess_01TEST", {"url": "https://example.com"})
-        assert result["content"] == "fallback content"
+        assert result["content"] == ""
+        assert result["title"] == ""
