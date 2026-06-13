@@ -82,6 +82,16 @@ class ActiveBinding(NamedTuple):
     session_template_id: str | None
 
 
+def _row_to_active_binding(row: asyncpg.Record) -> ActiveBinding:
+    return ActiveBinding(
+        id=row["id"],
+        connection_id=row["connection_id"],
+        mode=row["mode"],
+        session_id=row["session_id"],
+        session_template_id=row["session_template_id"],
+    )
+
+
 async def get_active_binding(
     conn: asyncpg.Connection[Any],
     connection_id: str,
@@ -107,13 +117,7 @@ async def get_active_binding(
     )
     if row is None:
         return None
-    return ActiveBinding(
-        id=row["id"],
-        connection_id=row["connection_id"],
-        mode=row["mode"],
-        session_id=row["session_id"],
-        session_template_id=row["session_template_id"],
-    )
+    return _row_to_active_binding(row)
 
 
 async def insert_binding(
@@ -201,13 +205,7 @@ async def archive_active_binding(
     )
     if row is None:
         return None
-    return ActiveBinding(
-        id=row["id"],
-        connection_id=row["connection_id"],
-        mode=row["mode"],
-        session_id=row["session_id"],
-        session_template_id=row["session_template_id"],
-    )
+    return _row_to_active_binding(row)
 
 
 async def _raise_for_failed_binding_insert(
