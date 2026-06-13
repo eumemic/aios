@@ -265,3 +265,64 @@ async def test_ceil_div_never_overshoots_window(
     assert remaining_effective <= window_max, (
         f"post-drop {remaining_effective} exceeds window_max={window_max}"
     )
+
+
+@pytest.mark.asyncio
+async def test_overhead_clamp_never_drops_entire_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The windower must never drop the *entire* window.
+
+    When per-step overhead exceeds ``window_min``, ``events_window_min``
+    clamps to its 0 floor (events.py) — losing the floor that normally
+    guarantees a non-empty tail (cf. ``select_window``, which requires
+    ``min_tokens >= 1``). The chunked snap then drops in full-window chunks,
+    and the asymmetric ``ceil(drop_effective / ratio)`` back-conversion can
+    push ``drop`` up to ``total``. The retained scan (``cumulative_tokens >
+    drop``) then matches ZERO rows while the omission complement
+    (``<= drop``) matches every row — so ``read_windowed_events`` returns an
+    empty event list paired with a non-None omission. ``build_messages``
+    relies on the inverse invariant and reads ``events[0].created_at`` to
+    anchor the omission marker, crashing with IndexError — and since
+    ``build_messages`` is pure replay, the session wedges permanently.
+
+    The boundary must keep ``drop < total`` so the most recent event always
+    survives (the last event's ``cumulative_tokens == total``; the scan is
+    ``> drop``).
+    """
+    account_id = "acc_test_stub"
+    ratio = 1.2
+    total_local = 534
+    window_min, window_max, overhead_local = 1_000, 2_000, 1_400
+    # overhead_effective = round(1400*1.2) = 1680 → events_window_max = 320,
+    # events_window_min = max(0, 1000-1680) = 0; total_effective =
+    # round(534*1.2) = 641 > 320 → drop_effective = tokens_to_drop(641,
+    # min=0, max=320) = 640 → ceil(640/1.2) = 534 == total (drops everything).
+    monkeypatch.setattr(queries, "model_token_ratio", AsyncMock(return_value=ratio))
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=total_local)
+    conn.fetchrow = AsyncMock(  # omission complement matches every row here
+        return_value={"began_at": _BEGAN_AT, "omitted_messages": 7}
+    )
+    captured: dict[str, int] = {}
+
+    async def _fetch(_sql: str, *args: Any) -> list[Any]:
+        captured["drop_local"] = args[1]
+        return []
+
+    conn.fetch = _fetch
+    await queries.read_windowed_events(
+        conn,
+        "sess_x",
+        window_min=window_min,
+        window_max=window_max,
+        model="m",
+        overhead_local=overhead_local,
+        account_id=account_id,
+    )
+    drop_local = captured["drop_local"]
+    assert drop_local < total_local, (
+        f"drop_local={drop_local} >= total={total_local} drops the entire "
+        "window, leaving an empty retained scan paired with a non-None "
+        "omission — which crashes build_messages on events[0]"
+    )
