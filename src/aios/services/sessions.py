@@ -624,7 +624,7 @@ async def await_session(
     # session's worker into the streaming model path for the entire await
     # window — wasted work for a consumer that ignores deltas. Mirrors how
     # open_listen_for_run_events omits the lock (issue #81).
-    subscription = await open_listen_for_events(db_url, session_id, acquire_lock=False)
+    subscription = await open_listen_for_events(db_url, session_id, on_connected=None)
     try:
         state = await await_completion(
             subscription.queue,
