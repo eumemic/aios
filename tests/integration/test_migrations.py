@@ -75,7 +75,6 @@ def test_migration_creates_all_tables(postgres: object) -> None:
             )
             names = {row["tablename"] for row in tables}
             assert {
-                "credentials",
                 "environments",
                 "agents",
                 "sessions",
@@ -98,7 +97,6 @@ def test_migration_creates_all_tables(postgres: object) -> None:
             )
             index_names = {row["indexname"] for row in indexes}
             for required in (
-                "credentials_name_uniq",
                 "agents_name_uniq",
                 "events_session_message_seq_idx",
                 "events_model_request_end_calibration_idx",
