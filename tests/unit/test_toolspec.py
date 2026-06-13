@@ -25,6 +25,20 @@ class TestDefaults:
         assert spec.enabled is True
         assert spec.permission is None
 
+    def test_custom_mcp_prefix_name_rejected(self) -> None:
+        # ``mcp__`` namespaces MCP-dispatched tools (``is_mcp_tool_name``); a
+        # custom tool with that prefix is classified as MCP by
+        # ``_classify_tool_call`` BEFORE the custom fallback, so it is errored
+        # as an unknown server and never held for the client to execute.
+        # Reject it at definition — the layer the operator controls.
+        with pytest.raises(ValueError, match="mcp__"):
+            ToolSpec(
+                type="custom",
+                name="mcp__foo",
+                description="bar",
+                input_schema={"type": "object"},
+            )
+
 
 class TestPermissionField:
     def test_always_allow(self) -> None:
