@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from aios.harness.context import build_messages
+from aios.harness.window import WindowOmission
 from aios.models.events import Event
 
 _AT = datetime(2026, 6, 10, tzinfo=UTC)
@@ -143,3 +144,29 @@ def test_non_allowlisted_lifecycle_event_is_skipped() -> None:
     ]
     result = build_messages(events, system_prompt=None)
     assert all("boom" not in (m.get("content") or "") for m in result.messages)
+
+
+def test_omission_marker_anchors_on_leading_notice() -> None:
+    """Now that the windowing read carries FS-loss notices, the first retained
+    event can be a notice — one in the gap between the last dropped message and
+    the first retained message. The head omission marker anchors on
+    ``events[0].created_at`` (#1044's non-empty-window invariant), which must
+    hold whether ``events[0]`` is a message or a notice — accessing
+    ``created_at`` on a lifecycle event must not raise. Pins that this no longer
+    assumes a leading message."""
+    events = [
+        _lifecycle(7, {"event": "sandbox_fs_reset", "reason": "snapshot_missing"}),
+        _msg(8, "user", "still here?"),
+    ]
+    omission = WindowOmission(began_at=datetime(2026, 6, 9, tzinfo=UTC), omitted_messages=4)
+
+    # Must not raise: events[0] is a lifecycle notice, not a message.
+    result = build_messages(events, system_prompt=None, omission=omission)
+
+    # The head omission marker landed, and the notice itself still renders.
+    assert result.messages[0]["role"] == "user"
+    assert "messages" in result.messages[0]["content"]
+    assert any(
+        isinstance(m.get("content"), str) and "fresh base filesystem" in m["content"]
+        for m in result.messages
+    )
