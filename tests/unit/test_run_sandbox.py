@@ -29,6 +29,7 @@ from aios.models.agents import ToolSpec
 from aios.models.workflows import WORKFLOW_SCRIPT_CONTRACT
 from aios.sandbox.backends.base import CommandResult, SandboxBackendError, SandboxHandle
 from aios.workflows import run_sandbox, run_tools
+from aios.workflows.idempotency_key import idempotency_key
 
 
 def _run() -> Any:
@@ -300,7 +301,10 @@ async def test_prepends_hashed_idempotency_preamble() -> None:
         tool_input={"command": "curl -X POST https://api/charge"},
     )
     execed = registry.exec_calls[0]["command"]
-    idem = hashlib.sha256(f"wfr_1\0{call_key}".encode()).hexdigest()
+    # The sandbox path uses the shared per-call derivation — pin cross-path byte-identity
+    # against the worker http_request delivery (a drift in either is a silent dedup bug).
+    idem = idempotency_key("wfr_1", call_key)
+    assert idem == hashlib.sha256(f"wfr_1\0{call_key}".encode()).hexdigest()  # wire-format pin
     expected_preamble = (
         f"export AIOS_RUN_ID={shlex.quote('wfr_1')} AIOS_IDEMPOTENCY_KEY={shlex.quote(idem)}\n"
     )
@@ -309,7 +313,7 @@ async def test_prepends_hashed_idempotency_preamble() -> None:
     registry2 = _FakeRegistry()
     captured2: dict[str, Any] = {}
     await _drive(registry2, captured2, call_key="sha:other#0", tool_input={"command": "echo x"})
-    other_idem = hashlib.sha256(b"wfr_1\0sha:other#0").hexdigest()
+    other_idem = idempotency_key("wfr_1", "sha:other#0")
     assert other_idem in registry2.exec_calls[0]["command"]
     assert idem not in registry2.exec_calls[0]["command"]
 
