@@ -1088,3 +1088,193 @@ async def delete_session_github_repos(
         session_id,
         account_id,
     )
+
+
+async def delete_session_memory_store(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    memory_store_id: str,
+    *,
+    account_id: str,
+) -> None:
+    """Detach a single memory store from a session by ``memory_store_id``.
+
+    The granular remove-one path (#270). ``memory_versions`` rows are
+    never touched (never-delete) — only the ``session_memory_stores``
+    binding row goes away. Raises :class:`NotFoundError` if no row
+    matched (unknown id, or wrong account).
+    """
+    result = await conn.execute(
+        "DELETE FROM session_memory_stores "
+        "WHERE session_id = $1 AND memory_store_id = $2 AND account_id = $3",
+        session_id,
+        memory_store_id,
+        account_id,
+    )
+    if result == "DELETE 0":
+        raise NotFoundError(
+            f"memory_store {memory_store_id} not attached to session {session_id}",
+            detail={"session_id": session_id, "memory_store_id": memory_store_id},
+        )
+
+
+async def delete_session_github_repo(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    resource_id: str,
+    *,
+    account_id: str,
+) -> None:
+    """Detach a single github_repository attachment by its row id (#270).
+
+    Single-row variant of :func:`delete_session_github_repos`. Raises
+    :class:`NotFoundError` if no row matched.
+    """
+    result = await conn.execute(
+        "DELETE FROM session_github_repositories "
+        "WHERE session_id = $1 AND id = $2 AND account_id = $3",
+        session_id,
+        resource_id,
+        account_id,
+    )
+    if result == "DELETE 0":
+        raise NotFoundError(
+            f"github_repository resource {resource_id} not found on session {session_id}",
+            detail={"session_id": session_id, "resource_id": resource_id},
+        )
+
+
+async def acquire_session_resources_lock(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+) -> None:
+    """Per-session transaction-scoped advisory lock for resource cap
+    enforcement (#270).
+
+    Held for the duration of the surrounding transaction; serializes
+    concurrent count-check + INSERT pairs across workers so the per-type
+    resource caps (``MAX_STORES_PER_SESSION`` / ``MAX_REPOS_PER_SESSION``)
+    are contractual instead of approximate. Mirrors the idiom of
+    :func:`aios.db.queries.acquire_account_triggers_lock`.
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"resources:{session_id}",
+    )
+
+
+async def list_session_memory_store_ranks(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> list[int]:
+    """Return the in-use ranks for a session's memory-store attachments.
+
+    The granular add-one path (#270) needs the used ranks to pick the
+    lowest free rank in ``0..7`` (memory rank has a
+    ``CHECK (rank BETWEEN 0 AND 7)``), so a naive ``max(rank)+1`` after a
+    low-rank delete doesn't violate the bound.
+    """
+    rows = await conn.fetch(
+        "SELECT rank FROM session_memory_stores WHERE session_id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    return [r["rank"] for r in rows]
+
+
+async def insert_session_memory_store(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    memory_store_id: str,
+    rank: int,
+    access: str,
+    instructions: str,
+    name_at_attach: str,
+    description_at_attach: str,
+    account_id: str,
+) -> None:
+    """Insert a single ``session_memory_stores`` row at an explicit rank.
+
+    Single-row variant of :func:`attach_memory_stores_to_session` for the
+    granular add-one path (#270); the caller resolves the snapshotted
+    name/description and the lowest-free rank.
+    """
+    await conn.execute(
+        """
+        INSERT INTO session_memory_stores
+            (session_id, memory_store_id, rank, access, instructions,
+             name_at_attach, description_at_attach, account_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        """,
+        session_id,
+        memory_store_id,
+        rank,
+        access,
+        instructions,
+        name_at_attach,
+        description_at_attach,
+        account_id,
+    )
+
+
+async def list_session_github_repo_ranks(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> list[int]:
+    """Return the in-use ranks for a session's github_repository
+    attachments (granular add-one rank assignment, #270)."""
+    rows = await conn.fetch(
+        "SELECT rank FROM session_github_repositories WHERE session_id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    return [r["rank"] for r in rows]
+
+
+async def insert_session_github_repo(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    rank: int,
+    repo_url: str,
+    mount_path: str,
+    blob: EncryptedBlob,
+    git_user_name: str | None,
+    git_user_email: str | None,
+    account_id: str,
+) -> GithubRepositoryResourceEcho:
+    """Insert a single ``session_github_repositories`` row at an explicit
+    rank and return its echo.
+
+    Single-row variant of :func:`attach_github_repos_to_session` for the
+    granular add-one path (#270). A ``(session_id, mount_path)`` collision
+    surfaces as :class:`asyncpg.UniqueViolationError`, which the service
+    layer maps to a 4xx (same as the bulk attach).
+    """
+    rid = make_id(GITHUB_REPOSITORY)
+    row = await conn.fetchrow(
+        """
+        INSERT INTO session_github_repositories
+            (id, session_id, rank, repo_url, mount_path, ciphertext, nonce,
+             git_user_name, git_user_email, account_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING *
+        """,
+        rid,
+        session_id,
+        rank,
+        repo_url,
+        mount_path,
+        blob.ciphertext,
+        blob.nonce,
+        git_user_name,
+        git_user_email,
+        account_id,
+    )
+    assert row is not None
+    return _row_to_github_repo_echo(row)

@@ -1,13 +1,11 @@
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
-from ...models.github_repository_resource_echo import GithubRepositoryResourceEcho
-from ...models.github_repository_update import GithubRepositoryUpdate
 from ...models.http_validation_error import HTTPValidationError
 from ...types import UNSET, Response, Unset
 
@@ -16,7 +14,6 @@ def _get_kwargs(
     session_id: str,
     resource_id: str,
     *,
-    body: GithubRepositoryUpdate,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -24,16 +21,12 @@ def _get_kwargs(
         headers["Authorization"] = authorization
 
     _kwargs: dict[str, Any] = {
-        "method": "put",
+        "method": "delete",
         "url": "/v1/sessions/{session_id}/resources/{resource_id}".format(
             session_id=quote(str(session_id), safe=""),
             resource_id=quote(str(resource_id), safe=""),
         ),
     }
-
-    _kwargs["json"] = body.to_dict()
-
-    headers["Content-Type"] = "application/json"
 
     _kwargs["headers"] = headers
     return _kwargs
@@ -41,11 +34,10 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> GithubRepositoryResourceEcho | HTTPValidationError | None:
-    if response.status_code == 200:
-        response_200 = GithubRepositoryResourceEcho.from_dict(response.json())
-
-        return response_200
+) -> Any | HTTPValidationError | None:
+    if response.status_code == 204:
+        response_204 = cast(Any, None)
+        return response_204
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -60,7 +52,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[GithubRepositoryResourceEcho | HTTPValidationError]:
+) -> Response[Any | HTTPValidationError]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -74,42 +66,31 @@ def sync_detailed(
     resource_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: GithubRepositoryUpdate,
     authorization: None | str | Unset = UNSET,
-) -> Response[GithubRepositoryResourceEcho | HTTPValidationError]:
-    """Update Resource
+) -> Response[Any | HTTPValidationError]:
+    """Remove Resource
 
-     Rotate the auth token on a github_repository attachment.
-
-    The bumped ``updated_at`` propagates through the mount snapshot, so
-    the next sandbox provision recycles the container and re-clones the
-    working tree with the new token.
+     Detach a single resource by id. Granular remove-one operation per
+    #270. A ``memstore_`` id detaches that memory store (the id IS the
+    memory_store_id); a ``ghrepo_`` id detaches that attachment and purges
+    its working tree. A malformed/unknown-prefix id is a 4xx.
 
     Args:
         session_id (str):
         resource_id (str):
         authorization (None | str | Unset):
-        body (GithubRepositoryUpdate): Request body for ``POST
-            /v1/sessions/{sid}/resources/{rid}``.
-
-            Token rotation is the primary action; ``git_user_name`` /
-            ``git_user_email`` may also be supplied alongside, in which case the
-            stored identity is replaced.  ``url`` and ``mount_path`` are
-            immutable after creation — to change them, detach the resource and
-            attach a new one.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[GithubRepositoryResourceEcho | HTTPValidationError]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
         session_id=session_id,
         resource_id=resource_id,
-        body=body,
         authorization=authorization,
     )
 
@@ -125,43 +106,32 @@ def sync(
     resource_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: GithubRepositoryUpdate,
     authorization: None | str | Unset = UNSET,
-) -> GithubRepositoryResourceEcho | HTTPValidationError | None:
-    """Update Resource
+) -> Any | HTTPValidationError | None:
+    """Remove Resource
 
-     Rotate the auth token on a github_repository attachment.
-
-    The bumped ``updated_at`` propagates through the mount snapshot, so
-    the next sandbox provision recycles the container and re-clones the
-    working tree with the new token.
+     Detach a single resource by id. Granular remove-one operation per
+    #270. A ``memstore_`` id detaches that memory store (the id IS the
+    memory_store_id); a ``ghrepo_`` id detaches that attachment and purges
+    its working tree. A malformed/unknown-prefix id is a 4xx.
 
     Args:
         session_id (str):
         resource_id (str):
         authorization (None | str | Unset):
-        body (GithubRepositoryUpdate): Request body for ``POST
-            /v1/sessions/{sid}/resources/{rid}``.
-
-            Token rotation is the primary action; ``git_user_name`` /
-            ``git_user_email`` may also be supplied alongside, in which case the
-            stored identity is replaced.  ``url`` and ``mount_path`` are
-            immutable after creation — to change them, detach the resource and
-            attach a new one.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        GithubRepositoryResourceEcho | HTTPValidationError
+        Any | HTTPValidationError
     """
 
     return sync_detailed(
         session_id=session_id,
         resource_id=resource_id,
         client=client,
-        body=body,
         authorization=authorization,
     ).parsed
 
@@ -171,42 +141,31 @@ async def asyncio_detailed(
     resource_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: GithubRepositoryUpdate,
     authorization: None | str | Unset = UNSET,
-) -> Response[GithubRepositoryResourceEcho | HTTPValidationError]:
-    """Update Resource
+) -> Response[Any | HTTPValidationError]:
+    """Remove Resource
 
-     Rotate the auth token on a github_repository attachment.
-
-    The bumped ``updated_at`` propagates through the mount snapshot, so
-    the next sandbox provision recycles the container and re-clones the
-    working tree with the new token.
+     Detach a single resource by id. Granular remove-one operation per
+    #270. A ``memstore_`` id detaches that memory store (the id IS the
+    memory_store_id); a ``ghrepo_`` id detaches that attachment and purges
+    its working tree. A malformed/unknown-prefix id is a 4xx.
 
     Args:
         session_id (str):
         resource_id (str):
         authorization (None | str | Unset):
-        body (GithubRepositoryUpdate): Request body for ``POST
-            /v1/sessions/{sid}/resources/{rid}``.
-
-            Token rotation is the primary action; ``git_user_name`` /
-            ``git_user_email`` may also be supplied alongside, in which case the
-            stored identity is replaced.  ``url`` and ``mount_path`` are
-            immutable after creation — to change them, detach the resource and
-            attach a new one.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[GithubRepositoryResourceEcho | HTTPValidationError]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
         session_id=session_id,
         resource_id=resource_id,
-        body=body,
         authorization=authorization,
     )
 
@@ -220,36 +179,26 @@ async def asyncio(
     resource_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: GithubRepositoryUpdate,
     authorization: None | str | Unset = UNSET,
-) -> GithubRepositoryResourceEcho | HTTPValidationError | None:
-    """Update Resource
+) -> Any | HTTPValidationError | None:
+    """Remove Resource
 
-     Rotate the auth token on a github_repository attachment.
-
-    The bumped ``updated_at`` propagates through the mount snapshot, so
-    the next sandbox provision recycles the container and re-clones the
-    working tree with the new token.
+     Detach a single resource by id. Granular remove-one operation per
+    #270. A ``memstore_`` id detaches that memory store (the id IS the
+    memory_store_id); a ``ghrepo_`` id detaches that attachment and purges
+    its working tree. A malformed/unknown-prefix id is a 4xx.
 
     Args:
         session_id (str):
         resource_id (str):
         authorization (None | str | Unset):
-        body (GithubRepositoryUpdate): Request body for ``POST
-            /v1/sessions/{sid}/resources/{rid}``.
-
-            Token rotation is the primary action; ``git_user_name`` /
-            ``git_user_email`` may also be supplied alongside, in which case the
-            stored identity is replaced.  ``url`` and ``mount_path`` are
-            immutable after creation — to change them, detach the resource and
-            attach a new one.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        GithubRepositoryResourceEcho | HTTPValidationError
+        Any | HTTPValidationError
     """
 
     return (
@@ -257,7 +206,6 @@ async def asyncio(
             session_id=session_id,
             resource_id=resource_id,
             client=client,
-            body=body,
             authorization=authorization,
         )
     ).parsed

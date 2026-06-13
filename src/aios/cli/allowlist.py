@@ -112,11 +112,11 @@ NEEDS_CLI_TRACKED: dict[str, str] = {
     "issue_runtime_token": "needs CLI; tracked in aios#TBD (runtime-tokens group)",
     "revoke_runtime_token": "needs CLI; tracked in aios#TBD (runtime-tokens group)",
     # ── Session resources / context (followup) ───────────────────────
-    # Tracked: aios#TBD — extend `aios sessions` with `context`, `resources …`.
+    # Tracked: aios#TBD — extend `aios sessions` with `context`.
+    # list/add/remove/rotate resources now have `aios sessions resources …`
+    # commands (#270); get_session_resource has no CLI yet.
     "get_session_context": "needs CLI; tracked in aios#TBD (sessions context/resources)",
-    "list_session_resources": "needs CLI; tracked in aios#TBD (sessions context/resources)",
     "get_session_resource": "needs CLI; tracked in aios#TBD (sessions context/resources)",
-    "update_session_resource": "needs CLI; tracked in aios#TBD (sessions context/resources)",
     # ── Account usage (followup) ─────────────────────────────────────
     # Tracked: aios#TBD — add `aios accounts usage <ID>`.
     "get_account_usage": "needs CLI; tracked in aios#TBD (accounts usage)",

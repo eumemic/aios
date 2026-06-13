@@ -21,12 +21,14 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.errors import MemoryStoreArchivedError
+from aios.errors import ConflictError, MemoryStoreArchivedError, RateLimitedError
 from aios.models.memory_stores import (
+    MAX_STORES_PER_SESSION,
     Memory,
     MemoryPrefix,
     MemoryStore,
     MemoryStoreResource,
+    MemoryStoreResourceEcho,
     MemoryVersion,
 )
 from aios.sandbox.atomic_mirror import atomic_delete, atomic_write
@@ -405,3 +407,98 @@ async def set_session_resources(
             conn, session_id, resources, account_id=account_id
         )
     return True
+
+
+def _lowest_free_rank(used: list[int], *, cap: int) -> int:
+    """Return the lowest rank in ``0..cap-1`` not already used.
+
+    Memory rank carries a ``CHECK (rank BETWEEN 0 AND 7)``, so a naive
+    ``max(rank)+1`` after filling and deleting a low rank would violate
+    the bound. Picking the lowest free slot keeps us inside it; rank is
+    display-only / order-independent for the mount spec. Callers gate the
+    count against the cap first, so a free rank always exists here.
+    """
+    used_set = set(used)
+    for rank in range(cap):
+        if rank not in used_set:
+            return rank
+    raise AssertionError("no free rank — caller must enforce the cap first")
+
+
+async def add_one(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    resource: MemoryStoreResource,
+    *,
+    account_id: str,
+) -> MemoryStoreResourceEcho:
+    """Attach a single memory store to a session (granular add-one, #270).
+
+    Caller owns the transaction and holds the per-session advisory lock.
+
+    - Resolves the snapshotted ``name`` / ``description`` from the parent
+      store (rejecting an archived or cross-tenant store).
+    - Rejects a resolved ``name_at_attach`` that collides with an
+      already-attached store with :class:`ConflictError` — the DB has no
+      uniqueness on ``name_at_attach`` and the bulk attach's name check is
+      batch-local, so a single add would otherwise silently dual-mount at
+      ``/mnt/memory/<name>`` (#270 blocker-1).
+    - Enforces ``MAX_STORES_PER_SESSION`` against ``len(current)+1``.
+    - Inserts at the lowest free rank in ``0..MAX_STORES_PER_SESSION-1``.
+    """
+    store = await queries.get_memory_store(
+        conn, resource.memory_store_id, allow_archived=False, account_id=account_id
+    )
+    current = await queries.list_session_memory_store_echoes(
+        conn, session_id, account_id=account_id
+    )
+    if any(e.name == store.name for e in current):
+        raise ConflictError(
+            f"a memory store named {store.name!r} is already attached to this "
+            "session; detach it or rename before attaching another",
+            detail={"session_id": session_id, "conflicting_name": store.name},
+        )
+    if len(current) + 1 > MAX_STORES_PER_SESSION:
+        raise RateLimitedError(
+            f"session at memory-store cap ({len(current)}/{MAX_STORES_PER_SESSION}); "
+            "detach an existing store to free a slot"
+        )
+    used_ranks = await queries.list_session_memory_store_ranks(
+        conn, session_id, account_id=account_id
+    )
+    rank = _lowest_free_rank(used_ranks, cap=MAX_STORES_PER_SESSION)
+    await queries.insert_session_memory_store(
+        conn,
+        session_id,
+        memory_store_id=resource.memory_store_id,
+        rank=rank,
+        access=resource.access,
+        instructions=resource.instructions,
+        name_at_attach=store.name,
+        description_at_attach=store.description,
+        account_id=account_id,
+    )
+    return MemoryStoreResourceEcho(
+        memory_store_id=resource.memory_store_id,
+        access=resource.access,
+        instructions=resource.instructions,
+        name=store.name,
+        description=store.description,
+        mount_path=f"/mnt/memory/{store.name}",
+    )
+
+
+async def remove_one(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    memory_store_id: str,
+    *,
+    account_id: str,
+) -> None:
+    """Detach a single memory store from a session by ``memory_store_id``
+    (granular remove-one, #270). ``memory_versions`` rows are untouched
+    (never-delete). Raises :class:`NotFoundError` if not attached.
+    """
+    await queries.delete_session_memory_store(
+        conn, session_id, memory_store_id, account_id=account_id
+    )

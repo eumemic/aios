@@ -45,7 +45,10 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import runtime
-from aios.models.github_repositories import GithubRepositoryResource
+from aios.models.github_repositories import (
+    GithubRepositoryResource,
+    GithubRepositoryResourceEcho,
+)
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.vaults import VaultCredentialCreate
 from aios.services import connections as connections_service
@@ -369,3 +372,84 @@ async def test_vault_credential_rotation_does_not_evict(
     )
 
     spy.evict.assert_not_called()
+
+
+# ── granular add-one / remove-one evict (recycle by next step, #270) ────────
+
+
+async def test_add_resource_memory_evicts(
+    env: tuple[asyncpg.Pool[Any], str, CryptoBox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """add-one of a memory store changes the mount snapshot, so the worker
+    must recycle the sandbox by the next step (the eviction hook is the
+    latency optimization on top of the per-step drift detector)."""
+    pool, session_id, crypto_box = env
+    store = await memory_stores_service.create_store(
+        pool, account_id=_ACCOUNT_ID, name="add-notes", description="d", metadata={}
+    )
+    spy = _install_spy(monkeypatch)
+
+    await sessions_service.add_resource(
+        pool,
+        session_id,
+        MemoryStoreResource(
+            type="memory_store",
+            memory_store_id=store.id,
+            access="read_write",
+            instructions="",
+        ),
+        crypto_box=crypto_box,
+        account_id=_ACCOUNT_ID,
+    )
+
+    spy.evict.assert_called_once_with(session_id, unload_session_caches=False)
+
+
+async def test_add_resource_github_evicts(
+    env: tuple[asyncpg.Pool[Any], str, CryptoBox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool, session_id, crypto_box = env
+    spy = _install_spy(monkeypatch)
+
+    await sessions_service.add_resource(
+        pool,
+        session_id,
+        GithubRepositoryResource(
+            type="github_repository",
+            url="https://github.com/example/repo.git",
+            mount_path="/mnt/repo",
+            authorization_token=SecretStr("ghp_fake_token"),
+        ),
+        crypto_box=crypto_box,
+        account_id=_ACCOUNT_ID,
+    )
+
+    spy.evict.assert_called_once_with(session_id, unload_session_caches=False)
+
+
+async def test_remove_resource_evicts(
+    env: tuple[asyncpg.Pool[Any], str, CryptoBox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool, session_id, crypto_box = env
+    echo = await sessions_service.add_resource(
+        pool,
+        session_id,
+        GithubRepositoryResource(
+            type="github_repository",
+            url="https://github.com/example/repo.git",
+            mount_path="/mnt/repo",
+            authorization_token=SecretStr("ghp_fake_token"),
+        ),
+        crypto_box=crypto_box,
+        account_id=_ACCOUNT_ID,
+    )
+    assert isinstance(echo, GithubRepositoryResourceEcho)
+    # Spy installed AFTER the add, so only the remove's eviction is observed.
+    spy = _install_spy(monkeypatch)
+
+    await sessions_service.remove_resource(pool, session_id, echo.id, account_id=_ACCOUNT_ID)
+
+    spy.evict.assert_called_once_with(session_id, unload_session_caches=False)

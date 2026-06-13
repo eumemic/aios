@@ -44,8 +44,11 @@ class SessionCreate:
             /messages.
         resources (list[GithubRepositoryResource | MemoryStoreResource] | Unset): Resources to attach. Mix of memory
             stores (mounted under /mnt/memory/<name>/) and github repositories (cloned to a user-specified mount_path). Each
-            type has its own per-session cap; duplicates within a type are rejected. Use ``PUT /v1/sessions/{id}`` with
-            ``resources`` to detach or replace the set after creation.
+            type has its own per-session cap; duplicates within a type are rejected. After creation, prefer the granular
+            sub-collection endpoints — ``POST /v1/sessions/{id}/resources`` to attach one resource without touching the
+            others, and ``DELETE /v1/sessions/{id}/resources/{resource_id}`` to detach one. ``PUT /v1/sessions/{id}`` with
+            ``resources`` replaces the WHOLE list (omitting a resource detaches it), so the granular endpoints are the safe
+            path for add/remove (#270).
         triggers (list[TriggerCreate] | Unset): Triggers attached at session creation. Each pairs a ``source`` (cron /
             one_shot) with an ``action`` (a ``sandbox_command`` bash task that fires without waking the model, or a
             ``wake_owner`` message that wakes it). Manage after creation via ``POST/DELETE/PUT /v1/sessions/{id}/triggers``;

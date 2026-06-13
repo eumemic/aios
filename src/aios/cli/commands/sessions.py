@@ -752,3 +752,153 @@ def triggers_runs(
         render_list(state.output_format, envelope, columns=_TRIGGER_RUN_COLS)
 
     run_or_die(_run)
+
+
+# ─── resources sub-app ─────────────────────────────────────────────────────
+
+
+resources_app = typer.Typer(
+    name="resources",
+    help="Manage a session's resources (memory stores + github repositories).",
+    no_args_is_help=True,
+)
+app.add_typer(resources_app)
+
+_RESOURCE_COLS = ("type", "memory_store_id", "id", "name", "url", "mount_path")
+
+
+@resources_app.command("list", help="List resources attached to a session.")
+@covers("list_session_resources")
+def resources_list(ctx: typer.Context, session_id: str) -> None:
+    def _run() -> None:
+        state, client = with_client(ctx)
+        with client:
+            envelope = client.request("GET", f"/v1/sessions/{session_id}/resources")
+        render_list(state.output_format, envelope, columns=_RESOURCE_COLS)
+
+    run_or_die(_run)
+
+
+@resources_app.command("add", help="Attach a single resource to a session (additive, #270).")
+@covers("add_session_resource")
+def resources_add(
+    ctx: typer.Context,
+    session_id: str,
+    memory_store_id: Annotated[
+        str | None,
+        typer.Option("--memory-store-id", help="Attach this memory store (memory_store)."),
+    ] = None,
+    access: Annotated[
+        str, typer.Option("--access", help="Memory store access: read_write or read_only.")
+    ] = "read_write",
+    instructions: Annotated[
+        str, typer.Option("--instructions", help="Memory store usage instructions.")
+    ] = "",
+    url: Annotated[
+        str | None, typer.Option("--url", help="Github repository clone URL (github_repository).")
+    ] = None,
+    mount_path: Annotated[
+        str | None, typer.Option("--mount-path", help="Where to clone the github repository.")
+    ] = None,
+    token: Annotated[
+        str | None,
+        typer.Option("--token", help="Github authorization token (write-only)."),
+    ] = None,
+    git_user_name: Annotated[str | None, typer.Option("--git-user-name")] = None,
+    git_user_email: Annotated[str | None, typer.Option("--git-user-email")] = None,
+    file: Annotated[Path | None, typer.Option("--file")] = None,
+    stdin: Annotated[bool, typer.Option("--stdin")] = False,
+    data: Annotated[str | None, typer.Option("--data")] = None,
+) -> None:
+    def _run() -> int | None:
+        if any([file, stdin, data]):
+            payload = load_payload(file, stdin, data)
+        elif memory_store_id is not None:
+            payload = {
+                "type": "memory_store",
+                "memory_store_id": memory_store_id,
+                "access": access,
+                "instructions": instructions,
+            }
+        elif url is not None or mount_path is not None or token is not None:
+            if not (url and mount_path and token):
+                print_error("github_repository requires --url, --mount-path, and --token together.")
+                return 64
+            payload = {
+                "type": "github_repository",
+                "url": url,
+                "mount_path": mount_path,
+                "authorization_token": token,
+            }
+            if git_user_name is not None:
+                payload["git_user_name"] = git_user_name
+            if git_user_email is not None:
+                payload["git_user_email"] = git_user_email
+        else:
+            print_error(
+                "provide --memory-store-id (memory store), or --url/--mount-path/--token "
+                "(github repository), or a full payload via --file/--stdin/--data."
+            )
+            return 64
+        client = just_client(ctx)
+        with client:
+            obj = client.request("POST", f"/v1/sessions/{session_id}/resources", json_body=payload)
+        render_single(obj)
+        return None
+
+    run_or_die(_run)
+
+
+@resources_app.command("remove", help="Detach a single resource by id (additive, #270).")
+@covers("remove_session_resource")
+def resources_remove(ctx: typer.Context, session_id: str, resource_id: str) -> None:
+    def _run() -> None:
+        client = just_client(ctx)
+        with client:
+            client.request("DELETE", f"/v1/sessions/{session_id}/resources/{resource_id}")
+        print_success("removed", resource_id)
+
+    run_or_die(_run)
+
+
+@resources_app.command("rotate", help="Rotate a github_repository's auth token by id.")
+@covers("update_session_resource")
+def resources_rotate(
+    ctx: typer.Context,
+    session_id: str,
+    resource_id: str,
+    token: Annotated[
+        str | None, typer.Option("--token", help="New github authorization token.")
+    ] = None,
+    git_user_name: Annotated[str | None, typer.Option("--git-user-name")] = None,
+    git_user_email: Annotated[str | None, typer.Option("--git-user-email")] = None,
+    file: Annotated[Path | None, typer.Option("--file")] = None,
+    stdin: Annotated[bool, typer.Option("--stdin")] = False,
+    data: Annotated[str | None, typer.Option("--data")] = None,
+) -> None:
+    def _run() -> int | None:
+        if any([file, stdin, data]):
+            payload = load_payload(file, stdin, data)
+        elif token is not None:
+            payload = {"authorization_token": token}
+            if git_user_name is not None:
+                payload["git_user_name"] = git_user_name
+            if git_user_email is not None:
+                payload["git_user_email"] = git_user_email
+        else:
+            print_error(
+                "provide --token (and optionally --git-user-name/--git-user-email), "
+                "or a full payload via --file/--stdin/--data."
+            )
+            return 64
+        client = just_client(ctx)
+        with client:
+            obj = client.request(
+                "PUT",
+                f"/v1/sessions/{session_id}/resources/{resource_id}",
+                json_body=payload,
+            )
+        render_single(obj)
+        return None
+
+    run_or_die(_run)

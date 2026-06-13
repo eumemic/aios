@@ -20,8 +20,9 @@ import asyncpg
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import ConflictError
+from aios.errors import ConflictError, RateLimitedError
 from aios.models.github_repositories import (
+    MAX_REPOS_PER_SESSION,
     GithubRepositoryResource,
     GithubRepositoryResourceEcho,
 )
@@ -223,3 +224,87 @@ async def get_session_token(
         conn, session_id, resource_id, account_id=account_id
     )
     return crypto_box.derive_account_subkey(account_id).decrypt(blob)
+
+
+def _lowest_free_rank(used: list[int], *, cap: int) -> int:
+    """Return the lowest rank in ``0..cap-1`` not already used.
+
+    github attachments have no rank CHECK, but they get the same
+    lowest-free-rank treatment as memory stores for consistency (#270).
+    Callers gate the count against the cap first, so a free slot always
+    exists here.
+    """
+    used_set = set(used)
+    for rank in range(cap):
+        if rank not in used_set:
+            return rank
+    raise AssertionError("no free rank — caller must enforce the cap first")
+
+
+async def add_one(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    resource: GithubRepositoryResource,
+    crypto_box: CryptoBox,
+    *,
+    account_id: str,
+) -> GithubRepositoryResourceEcho:
+    """Attach a single github_repository to a session (granular add-one, #270).
+
+    Caller owns the transaction and holds the per-session advisory lock.
+
+    - Enforces ``MAX_REPOS_PER_SESSION`` against ``existing + 1``.
+    - Inserts at the lowest free rank.
+    - A ``mount_path`` collision surfaces as
+      :class:`asyncpg.UniqueViolationError`, mapped to a 4xx
+      :class:`ConflictError` (same as the bulk attach path).
+    """
+    current = await queries.list_session_github_repo_echoes(conn, session_id, account_id=account_id)
+    if len(current) + 1 > MAX_REPOS_PER_SESSION:
+        raise RateLimitedError(
+            f"session at github-repository cap ({len(current)}/{MAX_REPOS_PER_SESSION}); "
+            "detach an existing repository to free a slot"
+        )
+    used_ranks = await queries.list_session_github_repo_ranks(
+        conn, session_id, account_id=account_id
+    )
+    rank = _lowest_free_rank(used_ranks, cap=MAX_REPOS_PER_SESSION)
+    blob = _encrypt_token(
+        crypto_box, resource.authorization_token.get_secret_value(), account_id=account_id
+    )
+    try:
+        return await queries.insert_session_github_repo(
+            conn,
+            session_id,
+            rank=rank,
+            repo_url=resource.url,
+            mount_path=resource.mount_path,
+            blob=blob,
+            git_user_name=resource.git_user_name,
+            git_user_email=resource.git_user_email,
+            account_id=account_id,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            "duplicate mount_path among github_repository attachments",
+            detail={"session_id": session_id, "mount_path": resource.mount_path},
+        ) from exc
+
+
+async def remove_one(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    resource_id: str,
+    *,
+    account_id: str,
+) -> None:
+    """Detach a single github_repository attachment by its row id (#270).
+
+    Raises :class:`NotFoundError` if the attachment doesn't exist. After
+    the row is deleted, purges its on-disk working tree — the
+    ``.git/config`` embeds the auth token, so leaving it on disk would be
+    a slow plaintext-token leak (same cleanup as
+    :func:`detach_all_from_session`).
+    """
+    await queries.delete_session_github_repo(conn, session_id, resource_id, account_id=account_id)
+    _purge_working_trees(session_id, [resource_id])

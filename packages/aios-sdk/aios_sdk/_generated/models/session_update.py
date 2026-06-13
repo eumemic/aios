@@ -27,6 +27,13 @@ class SessionUpdate:
     the current set alone, ``[]`` detaches everything, and a non-empty
     list replaces the bound set entirely.
 
+    To add or remove a SINGLE resource without re-supplying the rest of
+    the list, use the granular sub-collection endpoints —
+    ``POST /v1/sessions/{id}/resources`` (attach one) and
+    ``DELETE /v1/sessions/{id}/resources/{resource_id}`` (detach one).
+    A one-resource ``resources`` list here silently detaches everything
+    else; the granular endpoints are the safe add/remove path (#270).
+
         Attributes:
             agent_id (None | str | Unset):
             agent_version (int | None | Unset):
