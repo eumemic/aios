@@ -73,10 +73,14 @@ class Scenario:
         self,
         *,
         body: str = LONG_BODY,
+        comments: list[str] | None = None,
         existing_pr: bool = False,
         implement_escalated: bool = False,
+        implement_error: bool = False,
         review_results: list[dict[str, Any]] | None = None,
+        review_error_on: str | None = None,
         ci_results: list[dict[str, Any]] | None = None,
+        ci_error_on: str | None = None,
         risk_result: dict[str, Any] | None = None,
         merge_guard_exit: int = 0,
         merge_status: int = 200,
@@ -84,14 +88,21 @@ class Scenario:
         gate_results: dict[str, Any] | None = None,
         master_ci: str = "green",
         master_ci_error: bool = False,
+        transient_5xx: dict[tuple[str, str], int] | None = None,
     ) -> None:
         self.body = body
+        # The comment-thread the GET /issues/{n}/comments responder returns (list of body
+        # strings → GitHub comment objects). None => no comments (empty array).
+        self.comments = comments or []
         self.existing_pr = existing_pr
         self.implement_escalated = implement_escalated
+        self.implement_error = implement_error
         self.review_results = review_results or [
             {"verdict": "pass", "issues": [], "artifact_posted": True}
         ]
+        self.review_error_on = review_error_on  # an agent label that raises AgentError
         self.ci_results = ci_results or [{"status": "green", "detail": ""}]
+        self.ci_error_on = ci_error_on  # an agent label that raises AgentError
         self.risk_result = (
             risk_result if risk_result is not None else {"tier": 1, "summary": "safe"}
         )
@@ -101,14 +112,39 @@ class Scenario:
         self.gate_results = gate_results or {}
         self.master_ci = master_ci
         self.master_ci_error = master_ci_error
+        # {(method, path): N} — return a transient 5xx for the FIRST N attempts of that call,
+        # then the real response. Counts are mutated as attempts arrive (replay-stable because
+        # each retry is a distinct call_key, so a replay re-asks each attempt exactly once).
+        self.transient_5xx = dict(transient_5xx or {})
         self.tasks: list[str] = []
+        self.agent_inputs: list[dict[str, Any]] = []
         self.gates: list[dict[str, Any]] = []
         self.http: list[tuple[str, str]] = []
+        self.labels_added: list[str] = []  # every label name POSTed to /labels (item 3)
+        self.labels_removed: list[str] = []  # every label name DELETEd from /labels
+
+    def _comments_json(self) -> str:
+        return json.dumps([{"id": i, "body": c} for i, c in enumerate(self.comments)])
 
     def _http(self, args: dict[str, Any]) -> dict[str, Any]:
         path, method = args["path"], args["method"]
+        remaining = self.transient_5xx.get((method, path), 0)
+        if remaining > 0:
+            self.transient_5xx[(method, path)] = remaining - 1
+            self.http.append((method, path))
+            return {"status": 503, "body": ""}  # transient -> gh_retry re-issues
         self.http.append((method, path))
         assert "?" not in path, f"query string in path is rejected by http_request: {path!r}"
+        if method == "POST" and path.endswith("/labels"):  # add label(s) — capture names
+            raw = args.get("body")
+            if isinstance(raw, str):
+                self.labels_added.extend(json.loads(raw).get("labels", []))
+            return {"status": 200, "body": "[]"}
+        if method == "DELETE" and "/labels/" in path:  # remove one label — capture decoded name
+            self.labels_removed.append(path.rsplit("/labels/", 1)[1].replace("%3A", ":"))
+            return {"status": 200, "body": "[]"}
+        if method == "GET" and path == "/repos/o/r/issues/5/comments":  # the item-1 thread read
+            return {"status": 200, "body": self._comments_json()}
         is_issue_get = (
             method == "GET"
             and "/issues/5" in path
@@ -149,7 +185,10 @@ class Scenario:
             task = spec["input"].get("task")
             label = cap.annotations.get("label", "")
             self.tasks.append(label or task)
+            self.agent_inputs.append(spec["input"])
             if task == "implement":
+                if self.implement_error and label == "implement":
+                    return {"error": {"kind": "agent_not_found"}}
                 return {
                     "ok": {
                         "branch": BRANCH,
@@ -160,6 +199,8 @@ class Scenario:
                     }
                 }
             if task == "review":
+                if self.review_error_on == label:
+                    return {"error": {"kind": "child_errored"}}
                 idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
                 return {"ok": self.review_results[min(idx, len(self.review_results) - 1)]}
             if task == "watch_ci":
@@ -167,11 +208,15 @@ class Scenario:
                     if self.master_ci_error:
                         return {"error": {"kind": "child_errored"}}
                     return {"ok": {"status": self.master_ci, "detail": ""}}
+                if self.ci_error_on == label:
+                    return {"error": {"kind": "child_errored"}}
                 idx = int(label.rsplit("-", 1)[1]) if label.startswith("ci-") else 0
                 return {"ok": self.ci_results[min(idx, len(self.ci_results) - 1)]}
             if task == "risk":
                 return {"ok": self.risk_result}
             if task in ("fix", "fix_ci"):
+                if self.review_error_on == label or self.ci_error_on == label:
+                    return {"error": {"kind": "child_errored"}}
                 return {"ok": {"head_sha": f"sha_{label}", "pushed": True}}
         if cid == "gate":
             self.gates.append(spec)
@@ -238,6 +283,12 @@ async def test_happy_path_merges_and_completes() -> None:
     assert scn.tasks == ["implement", "review-0", "ci-0", "risk", "master-ci"]
     # never used a query string (the production-path bug the review caught)
     assert all("?" not in path for _, path in scn.http)
+    # item 1: the comment thread is read at ingest
+    assert ("GET", "/repos/o/r/issues/5/comments") in scn.http
+    # item 3: in-progress claimed at ingest, released on success, never marked failed
+    assert "autodev:in-progress" in scn.labels_added
+    assert "autodev:in-progress" in scn.labels_removed
+    assert "autodev:failed" not in scn.labels_added
 
 
 async def test_adopts_existing_open_pr_instead_of_creating() -> None:
@@ -258,6 +309,9 @@ async def test_spec_gate_short_circuits_without_spawning_agents() -> None:
     assert phases == ["ingest", "spec-gate"]
     assert scn.tasks == []  # no implement agent — failed before any spend
     assert ("POST", "/repos/o/r/issues/5/labels") in scn.http
+    # item 3: a spec failure is a terminal NON-gate failure -> labelled autodev:failed
+    assert "autodev:failed" in scn.labels_added
+    assert "autodev:in-progress" in scn.labels_removed
 
 
 async def test_spec_gate_blocks_unresolved_marker() -> None:
@@ -266,6 +320,69 @@ async def test_spec_gate_blocks_unresolved_marker() -> None:
     value, _, _ = await _drive(scn)
     assert value["state"] == "spec_failed"
     assert "unresolved marker" in value["reason"]
+
+
+async def test_spec_gate_marker_resolved_in_comment_does_not_bounce() -> None:
+    # The body carries a marker; a LATER comment quotes that exact line AND signals a
+    # resolution -> the gate must NOT bounce, and the run proceeds to implement.
+    marker_line = "Approach: TBD — still an open question we must settle first."
+    body = LONG_BODY + "\n\n" + marker_line
+    scn = Scenario(
+        body=body,
+        comments=["Resolved: " + marker_line + " We will use a typed enum with a fallback arm."],
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"  # marker suppressed -> full pipeline ran
+    assert "implement" in scn.tasks
+
+
+async def test_spec_gate_comment_without_resolution_signal_still_bounces() -> None:
+    # A comment that merely QUOTES the marker line but carries NO resolution signal must
+    # NOT suppress it (no regression of the marker-trap protection).
+    marker_line = "Approach: TBD — still an open question we must settle first."
+    body = LONG_BODY + "\n\n" + marker_line
+    scn = Scenario(body=body, comments=["I also wonder: " + marker_line])
+    value, _, _ = await _drive(scn)
+    assert value["state"] == "spec_failed"
+    assert "unresolved marker" in value["reason"]
+
+
+async def test_spec_gate_comment_resolution_word_without_quote_still_bounces() -> None:
+    # A resolution word with NO quote of the offending line must not unlock the gate.
+    marker_line = "Approach: TBD — still an open question we must settle first."
+    body = LONG_BODY + "\n\n" + marker_line
+    scn = Scenario(body=body, comments=["This is all resolved now, trust me."])
+    value, _, _ = await _drive(scn)
+    assert value["state"] == "spec_failed"
+    assert "unresolved marker" in value["reason"]
+
+
+async def test_thin_body_satisfied_by_comment_thread_proceeds() -> None:
+    # A body too short on its own clears the word-count once the comment thread (a design
+    # pass) is threaded in — autodev's "comments count toward the spec" behaviour.
+    scn = Scenario(body="Add a retry wrapper.", comments=[LONG_BODY])
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+
+
+async def test_comments_threaded_into_every_agent_node() -> None:
+    # The comment array reaches implement, review, and fix agents (item 1).
+    scn = Scenario(
+        comments=["design note: prefer a typed enum"],
+        review_results=[
+            {"verdict": "fail", "issues": ["x"], "artifact_posted": True},
+            {"verdict": "pass", "issues": [], "artifact_posted": True},
+        ],
+    )
+    value, _, _ = await _drive(scn, max_review_iters=3, max_ci_iters=2)
+    assert value["state"] == "done"
+    threaded = "design note: prefer a typed enum"
+    implement_in = [i for i in scn.agent_inputs if i.get("task") == "implement"]
+    review_in = [i for i in scn.agent_inputs if i.get("task") == "review"]
+    fix_in = [i for i in scn.agent_inputs if i.get("task") == "fix"]
+    assert implement_in and all(threaded in i.get("comments", []) for i in implement_in)
+    assert review_in and all(threaded in i.get("comments", []) for i in review_in)
+    assert fix_in and all(threaded in i.get("comments", []) for i in fix_in)
 
 
 # ─── escalations park at a gate (the durable-workflow upgrade of awaiting_triage) ─
@@ -436,6 +553,122 @@ async def test_review_exhaustion_parks_at_gate() -> None:
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "escalated"
     assert value["reason"] == "verify_exhausted"
+
+
+# ─── transient-5xx retry (item 2) ─────────────────────────────────────────────
+
+
+async def test_transient_5xx_then_success_completes() -> None:
+    # The first two attempts of the ingest GET and the merge PUT return 503; gh's bounded
+    # retry re-issues and the third attempt succeeds -> the run completes normally.
+    scn = Scenario(
+        transient_5xx={
+            ("GET", "/repos/o/r/issues/5"): 2,
+            ("PUT", "/repos/o/r/pulls/42/merge"): 2,
+        }
+    )
+    value, _, keys = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["merged"] is True
+    # the ingest GET was attempted 3 times (2 transient + 1 success), and so was the merge
+    assert sum(1 for m, p in scn.http if (m, p) == ("GET", "/repos/o/r/issues/5")) == 3
+    assert sum(1 for m, p in scn.http if (m, p) == ("PUT", "/repos/o/r/pulls/42/merge")) == 3
+    # replay stayed stable across all the extra attempts (no duplicate call_key)
+    assert len(keys) == len(set(keys))
+
+
+async def test_persistent_5xx_surfaces_failure_not_zombie() -> None:
+    # All three ingest attempts 503 -> gh returns the last 503; the run reports the read
+    # failure AND labels autodev:failed (item 3) rather than hanging silently.
+    scn = Scenario(transient_5xx={("GET", "/repos/o/r/issues/5"): 99})
+    value, _, _ = await _drive(scn)
+    assert value["state"] == "error"
+    assert "autodev:failed" in scn.labels_added
+    # exactly 3 attempts (the bounded retry cap), then it gives up
+    assert sum(1 for m, p in scn.http if (m, p) == ("GET", "/repos/o/r/issues/5")) == 3
+
+
+# ─── failure surfacing (item 3) ───────────────────────────────────────────────
+
+
+async def test_merge_failed_is_labelled_autodev_failed() -> None:
+    scn = Scenario(merge_status=405, pr_merged_on_confirm=False)
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "merge_failed"
+    assert "autodev:failed" in scn.labels_added
+    assert "autodev:in-progress" in scn.labels_removed
+
+
+async def test_gate_park_is_not_labelled_failed() -> None:
+    # An escalation parks at a gate; a deliberate "stay escalated" resume is NOT a silent
+    # failure, so the run must NOT raise autodev:failed (the contract: a gate park ≠ fail).
+    scn = Scenario(implement_escalated=True, gate_results={"design": {"resolved": False}})
+    value, _, _ = await _drive(scn)
+    assert value["state"] == "escalated"
+    assert "autodev:failed" not in scn.labels_added
+
+
+# ─── AgentError guards on every judgment node (item 5) ─────────────────────────
+
+
+async def test_implement_agent_error_escalates_to_design_gate() -> None:
+    scn = Scenario(implement_error=True, gate_results={"design": {"resolved": False}})
+    value, _, _ = await _drive(scn)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "design"
+    assert any(g["kind"] == "design" for g in scn.gates)  # parked, did not crash the run
+
+
+async def test_review_agent_error_escalates_to_verify_gate() -> None:
+    scn = Scenario(review_error_on="review-0", gate_results={"verify": {"resolved": False}})
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "verify_agent_error"
+    assert any(g["kind"] == "verify" for g in scn.gates)
+
+
+async def test_ci_watch_agent_error_escalates_to_verify_gate() -> None:
+    scn = Scenario(ci_error_on="ci-0", gate_results={"verify": {"resolved": False}})
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "ci_agent_error"
+    assert any(g["kind"] == "verify" for g in scn.gates)
+
+
+async def test_agent_error_resume_resolved_continues() -> None:
+    # A reviewer error that the human resumes as resolved lets the run proceed to done.
+    scn = Scenario(review_error_on="review-0", gate_results={"verify": {"resolved": True}})
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+
+
+# ─── auto-recovery retry budget (item 4) ──────────────────────────────────────
+
+
+async def test_retry_count_under_budget_runs_normally() -> None:
+    scn = Scenario()
+    value, _, _ = await _drive(
+        scn,
+        input={"repo": REPO, "issue_number": ISSUE, "kind": "issue", "retry_count": 1},
+        max_review_iters=2,
+        max_ci_iters=2,
+    )
+    assert value["state"] == "done"
+
+
+async def test_retry_count_at_budget_dead_letters() -> None:
+    # A re-launched run that has already burned MAX_RUN_RETRIES (2) terminates at the
+    # dead-letter state instead of looping, and is labelled autodev:failed.
+    scn = Scenario()
+    value, phases, _ = await _drive(
+        scn,
+        input={"repo": REPO, "issue_number": ISSUE, "kind": "issue", "retry_count": 2},
+    )
+    assert value["state"] == "dead_letter"
+    assert value["retry_count"] == 2
+    assert phases == []  # dead-lettered before even the ingest phase
+    assert scn.tasks == []  # no spend
+    assert "autodev:failed" in scn.labels_added
 
 
 # ─── trigger envelope ─────────────────────────────────────────────────────────

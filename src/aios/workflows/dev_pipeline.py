@@ -42,6 +42,38 @@ the load-bearing properties — validate the LIVE ``refs/pull/N/merge`` commit, 
 runs the configured sentinel commands against it; per-sentinel path-prefix *selection* (an
 efficiency optimisation, not a safety property) is deferred, so v1 runs every configured
 sentinel (strictly safer: more checks, never fewer).
+
+RESILIENCE CONTRACT (the Phase-0 hardening, aios#987; design doc §10):
+1. **Read the full issue.** S1 ingests the body AND ``GET /issues/{n}/comments``; the spec
+   gate counts words over body+comments and threads the comment array into every agent node
+   (implement/review/fix) so a design pass in the thread reaches the coder. The marker trap
+   still scans the BODY (no regression), but a body marker is SUPPRESSED when a later comment
+   quotes the offending line AND carries a resolution signal (resolved/settled/answer:/
+   decided/closed) — see ``spec_ok``. Comment pagination is a V1 deferral: the path-only route
+   allowlist forbids ``?page=``, so the clean ``/comments`` path returns GitHub's first page
+   (≤30); the dominant resolve-in-thread case is recent comments.
+2. **Retry transient 5xx.** Every scripted GitHub call goes through ``gh_retry`` — a bounded
+   (≤3) loop that re-issues the request on a 5xx / transport error / ``{"error":...}`` and
+   returns the last result for the caller to branch. Each retry is a fresh ``tool()`` await,
+   so the CallKeyer assigns it a distinct per-content-hash ordinal (``#0``/``#1``/``#2``) and
+   replay stays stable (the retry decision is a pure function of the memoized result).
+3. **Surface failures, never zombie.** ``autodev:in-progress`` is labelled at ingest and
+   removed on success; every terminal NON-gate failure ``return`` first labels
+   ``autodev:failed``. A gate park is a durable suspension (auto-recover on resume), NOT a
+   failure, so it is deliberately not labelled failed.
+4. **Auto-recovery.** ``retry_count`` rides the input envelope; a re-launched run that arrives
+   with ``retry_count >= MAX_RUN_RETRIES`` terminates at ``dead_letter`` instead of looping.
+   The DEPLOY-TIME WIRING (Phase 2, not in this script): a ``run_completion`` trigger fires on
+   ``status=errored`` and re-launches the workflow with ``retry_count + 1`` and the same
+   ``{repo, issue_number}``. Re-launch is idempotent by construction — S4 lists open PRs and
+   ADOPTS the branch's PR instead of creating a duplicate ("open-pr"; a 422 on create re-lists
+   and adopts), and MERGE re-confirms ``GET /pulls/{n}.merged`` before declaring
+   ``merge_failed`` so an already-merged PR is never double-merged or lost.
+5. **AgentError guards.** Every agentic node (implement/review/fix/ci-watch/risk) runs under a
+   defensive guard: an ``agent_not_found`` / transient agent error escalates to the relevant
+   gate (design / verify) or, for the best-effort risk + post-merge nodes, degrades to the
+   conservative default — so a flaky judgment agent parks the run for a human instead of
+   crashing it (an uncaught ``AgentError`` at the root fails the whole run).
 """
 
 from __future__ import annotations
@@ -122,6 +154,30 @@ SPEC_BLOCKERS: tuple[str, ...] = (
     r"(?i)needs? (more |further )?(design|discussion|thought|spec|input|clarification)",
     r"(?i)TODO[:\s].*spec",
 )
+# A later comment SUPPRESSES a body marker only when it both (a) quotes the offending
+# line and (b) carries one of these resolution signals — so a passing mention of "open
+# question" can't unlock the gate, but an explicit "Resolved: <quoted line> — use a typed
+# enum" does. Word-boundaried and case-insensitive (the body marker-trap itself is
+# untouched: a marker the comments never resolve still bounces).
+RESOLUTION_SIGNALS: tuple[str, ...] = (
+    r"(?i)\bresolved\b",
+    r"(?i)\bsettled\b",
+    r"(?i)\banswer\s*:",
+    r"(?i)\bdecided\b",
+    r"(?i)\bclosed\b",
+)
+
+# Failure-surfacing labels (item 3): never a silent zombie. ``IN_PROGRESS`` is applied at
+# ingest and removed on success; ``FAILED`` is applied on every terminal NON-gate failure
+# (a gate park is a durable suspension, not a failure, so it is NOT labelled failed).
+LABEL_IN_PROGRESS = "autodev:in-progress"
+LABEL_FAILED = "autodev:failed"
+
+# Auto-recovery (item 4): a re-launched run carries ``retry_count`` in its input envelope;
+# the deploy-time ``run_completion`` trigger (Phase 2) re-launches an ``errored`` run with
+# ``retry_count + 1``. The script-level guard bounds that loop: a run that arrives with
+# ``retry_count >= MAX_RUN_RETRIES`` terminates at the dead-letter state instead of looping.
+MAX_RUN_RETRIES = 2
 
 
 def _py(name: str, value: Any) -> str:
@@ -164,6 +220,10 @@ def _render_constants(
         _py("MIN_SPEC_BODY_WORDS", MIN_SPEC_BODY_WORDS),
         _py("MIN_BUG_BODY_WORDS", MIN_BUG_BODY_WORDS),
         _py("SPEC_BLOCKERS", list(SPEC_BLOCKERS)),
+        _py("RESOLUTION_SIGNALS", list(RESOLUTION_SIGNALS)),
+        _py("LABEL_IN_PROGRESS", LABEL_IN_PROGRESS),
+        _py("LABEL_FAILED", LABEL_FAILED),
+        _py("MAX_RUN_RETRIES", MAX_RUN_RETRIES),
         _py("IMPLEMENT_SCHEMA", IMPLEMENT_SCHEMA),
         _py("REVIEW_SCHEMA", REVIEW_SCHEMA),
         _py("FIX_SCHEMA", FIX_SCHEMA),
@@ -212,33 +272,76 @@ def _strip_meta(body):
     return "\n".join(out)
 
 
-def _find_blocker(body):
+def _comment_texts(comments):
+    """The body strings of the issue's comment thread (skipping empties/non-dicts).
+    ``comments`` is the array from ``GET /issues/{n}/comments`` (or [] when unread)."""
+    out = []
+    if isinstance(comments, list):
+        for c in comments:
+            if isinstance(c, dict):
+                text = c.get("body")
+                if isinstance(text, str) and text.strip():
+                    out.append(text)
+    return out
+
+
+def _marker_resolved(line_text, comments):
+    """True if SOME comment both quotes the offending body line AND carries a resolution
+    signal — the explicit "this open question is settled" handshake. Quoting is a
+    substring match on the marker line's stripped text (after blockquote/`>` stripping,
+    so a GitHub `> quoted line` still matches); a bare resolution word with no quote, or
+    a quote with no resolution word, does NOT suppress."""
+    needle = (line_text or "").strip()
+    if not needle:
+        return False
+    for raw in _comment_texts(comments):
+        dequoted = "\n".join(
+            re.sub(r"^\s*>+\s?", "", ln) for ln in raw.split("\n")
+        )
+        if needle not in dequoted:
+            continue
+        for pat in RESOLUTION_SIGNALS:
+            if re.search(pat, dequoted):
+                return True
+    return False
+
+
+def _find_blocker(body, comments=None):
+    """First unresolved marker in the BODY (comments never ADD markers — no regression of
+    the trap). A body marker whose line a later comment quotes-and-resolves is skipped."""
     scan = _strip_meta(body)
     for i, line in enumerate(scan.split("\n"), start=1):
         for pat in SPEC_BLOCKERS:
             if re.search(pat, line):
+                if comments is not None and _marker_resolved(line.strip(), comments):
+                    continue  # quoted + resolved in a later comment -> suppressed
                 return (pat, i, line.strip())
     return None
 
 
-def spec_ok(issue, kind):
+def spec_ok(issue, kind, comments=None):
     """The scripted pre-flight gate (V1 subset of autodev validation): empty-body,
-    word-count, unresolved-marker. Returns (ok, reason)."""
+    word-count, unresolved-marker. Returns (ok, reason).
+
+    The word-count runs over body PLUS the comment thread (a design pass in comments can
+    satisfy a thin body); the marker trap scans the BODY (a comment never introduces a
+    marker) but suppresses a body marker that a later comment quotes-and-resolves."""
     body = (issue.get("body") or "").strip()
     if not body:
         return (False, "Issue body is empty -- no spec to implement.")
-    words = len(body.split())
+    spec_text = "\n\n".join([body] + _comment_texts(comments))
+    words = len(spec_text.split())
     minimum = MIN_BUG_BODY_WORDS if kind == "bug" else MIN_SPEC_BODY_WORDS
     if words < minimum:
         return (False, "Issue body is too short (%d words, minimum %d)." % (words, minimum))
-    hit = _find_blocker(body)
+    hit = _find_blocker(body, comments)
     if hit is not None:
         return (False, "Spec contains an unresolved marker on line %d: %r. "
                        "Resolve all open questions before implementation." % (hit[1], hit[2]))
     return (True, "")
 
 
-async def gh(method, path, body=None):
+async def _gh_once(method, path, body=None):
     """One GitHub REST/GraphQL call through the run's bound-vault-authed http_request. A
     non-2xx or transport error is a VALUE the caller branches on, never a raise. ``path``
     must NOT carry a query string (the route allowlist is path-only) — filter in-script."""
@@ -246,6 +349,35 @@ async def gh(method, path, body=None):
     if body is not None:
         args["body"] = json.dumps(body)
     return await tool("http_request", args)
+
+
+def _is_transient(resp):
+    """A retryable GitHub response: a 5xx status, OR a transport/tool error (the
+    http_request tool surfaces a connection failure as ``{"error": ...}`` with no/None
+    status). A 4xx is the caller's problem (auth, 404, 422-already-exists) — NOT retried,
+    so a deterministic client error fails fast rather than burning three attempts."""
+    if not isinstance(resp, dict):
+        return True  # a non-dict result is a malformed tool return -> treat as transient
+    if resp.get("error") is not None:
+        return True
+    st = resp.get("status")
+    return isinstance(st, int) and 500 <= st <= 599
+
+
+async def gh(method, path, body=None):
+    """A GitHub call with bounded transient-5xx retry. Re-issues the request up to 3 times
+    on a 5xx / transport error / ``{"error":...}`` and returns the LAST result for the
+    caller to branch on (a value, never a raise — a persistent failure surfaces as the
+    last non-2xx response). Each attempt is a fresh ``tool()`` await, so the CallKeyer
+    gives it a distinct per-content-hash ordinal and replay stays stable. (Named ``gh`` so
+    every existing call site retries for free; the single-shot is ``_gh_once``.)"""
+    resp = None
+    for _ in range(3):
+        resp = await _gh_once(method, path, body)
+        if not _is_transient(resp):
+            return resp
+        log("gh transient failure, retrying:", method, path, _status(resp))
+    return resp
 
 
 def _status(resp):
@@ -320,6 +452,25 @@ def _mark_ready_query():
             "{pullRequest{isDraft}}}")
 
 
+async def _label(repo, issue_number, name):
+    """Add one label (best-effort, retried by gh)."""
+    await gh("POST", _ipath(repo, "/issues/%d/labels" % issue_number), {"labels": [name]})
+
+
+async def _unlabel(repo, issue_number, name):
+    """Remove one label by name (URL-encoded). A 404 (label absent) is a value gh ignores."""
+    await gh("DELETE", _ipath(repo, "/issues/%d/labels/%s"
+                              % (issue_number, name.replace(":", "%3A"))))
+
+
+async def _fail(repo, issue_number, result):
+    """Surface a terminal NON-gate failure: drop in-progress, raise autodev:failed, then
+    return the result the run terminates with (item 3 — never a silent zombie)."""
+    await _unlabel(repo, issue_number, LABEL_IN_PROGRESS)
+    await _label(repo, issue_number, LABEL_FAILED)
+    return result
+
+
 # ─── the state machine ───────────────────────────────────────────────────────
 
 async def main(input):
@@ -328,33 +479,63 @@ async def main(input):
     issue_number = int(payload["issue_number"])
     kind = payload.get("kind", "issue")
     model = payload.get("model") or DEFAULT_MODEL
+    # Auto-recovery (item 4): the Phase-2 run_completion trigger re-launches an errored run
+    # with retry_count+1. Bound that loop here so a deterministically-failing run dead-letters
+    # instead of looping forever; a missing/garbage value floors to 0 (first attempt).
+    try:
+        retry_count = int(payload.get("retry_count") or 0)
+    except (TypeError, ValueError):
+        retry_count = 0
+    if retry_count >= MAX_RUN_RETRIES:
+        log("retry budget exhausted (retry_count=%d) -> dead-letter" % retry_count)
+        await _label(repo, issue_number, LABEL_FAILED)
+        return {"state": "dead_letter", "retry_count": retry_count,
+                "reason": "exceeded MAX_RUN_RETRIES (%d) auto-recovery attempts" % MAX_RUN_RETRIES}
     escalations = []
 
-    # S1 — ingest the issue
+    # S1 — ingest the issue: body AND the comment thread (item 1). A design pass / resolved-
+    # decision lives in comments; thread it into the gate (word-count + marker-resolution) and
+    # every downstream agent. Claim the issue with autodev:in-progress so an in-flight run is
+    # never a silent zombie (item 3); it is removed on success / replaced by autodev:failed.
     phase("ingest")
+    await _label(repo, issue_number, LABEL_IN_PROGRESS)
     resp = await gh("GET", _ipath(repo, "/issues/%d" % issue_number))
     issue = _json_body(resp)
     if _status(resp) != 200 or issue is None:
-        return {"state": "error", "reason": "could not read issue %d (status %r)"
-                % (issue_number, _status(resp))}
+        return await _fail(repo, issue_number,
+                           {"state": "error", "reason": "could not read issue %d (status %r)"
+                            % (issue_number, _status(resp))})
+    comments_resp = await gh("GET", _ipath(repo, "/issues/%d/comments" % issue_number))
+    comments = _json_body(comments_resp)
+    if not isinstance(comments, list):
+        comments = []  # a comments-endpoint failure degrades to body-only (autodev's pattern)
+    comment_bodies = _comment_texts(comments)
 
-    # S2 — scripted pre-flight spec gate (regex/word-count; fail-fast before any spend)
+    # S2 — scripted pre-flight spec gate (regex/word-count over body+comments; fail-fast).
     phase("spec-gate")
-    ok, reason = spec_ok(issue, kind)
+    ok, reason = spec_ok(issue, kind, comments)
     if not ok:
         log("spec gate failed:", reason)
         await gh("POST", _ipath(repo, "/issues/%d/comments" % issue_number),
                  {"body": "## Spec not ready for implementation\n\n" + reason})
         await gh("POST", _ipath(repo, "/issues/%d/labels" % issue_number),
                  {"labels": ["underspecified"]})
-        return {"state": "spec_failed", "reason": reason}
+        return await _fail(repo, issue_number, {"state": "spec_failed", "reason": reason})
 
-    # A3 — implement (the coding agent: clone, explore, plan, TDD, self-review, push)
+    # A3 — implement (the coding agent: clone, explore, plan, TDD, self-review, push). The
+    # comment thread rides along so a design pass reaches the coder. An agent error escalates
+    # to the design gate (item 5) instead of crashing the run.
     phase("implement")
-    impl = await agent(
-        {"task": "implement", "repo": repo, "issue_number": issue_number, "kind": kind,
-         "title": issue.get("title", ""), "body": issue.get("body", "")},
-        agent_id=IMPLEMENT_AGENT_ID, output_schema=IMPLEMENT_SCHEMA, model=model, label="implement")
+    try:
+        impl = await agent(
+            {"task": "implement", "repo": repo, "issue_number": issue_number, "kind": kind,
+             "title": issue.get("title", ""), "body": issue.get("body", ""),
+             "comments": comment_bodies},
+            agent_id=IMPLEMENT_AGENT_ID, output_schema=IMPLEMENT_SCHEMA, model=model,
+            label="implement")
+    except AgentError as exc:
+        impl = {"escalated": True,
+                "escalation_reason": "implement agent error: %s" % exc}
     if impl.get("escalated"):
         escalations.append("design")
         decision = await gate({"kind": "design", "issue": issue_number,
@@ -362,13 +543,23 @@ async def main(input):
         if not (isinstance(decision, dict) and decision.get("resolved")):
             return {"state": "escalated", "reason": "design", "escalations": escalations}
         # resumed with a settled direction -> re-implement with the chairman's answer
-        impl = await agent(
-            {"task": "implement", "repo": repo, "issue_number": issue_number, "kind": kind,
-             "title": issue.get("title", ""), "body": issue.get("body", ""),
-             "resolution": decision.get("resolution", "")},
-            agent_id=IMPLEMENT_AGENT_ID, output_schema=IMPLEMENT_SCHEMA, model=model,
-            label="implement-resumed")
-    branch = impl["branch"]
+        try:
+            impl = await agent(
+                {"task": "implement", "repo": repo, "issue_number": issue_number, "kind": kind,
+                 "title": issue.get("title", ""), "body": issue.get("body", ""),
+                 "comments": comment_bodies, "resolution": decision.get("resolution", "")},
+                agent_id=IMPLEMENT_AGENT_ID, output_schema=IMPLEMENT_SCHEMA, model=model,
+                label="implement-resumed")
+        except AgentError as exc:
+            return await _fail(repo, issue_number,
+                               {"state": "failed_implement", "escalations": escalations,
+                                "reason": "implement agent error after resume: %s" % exc})
+    try:
+        branch = impl["branch"]
+    except (KeyError, TypeError) as exc:
+        return await _fail(repo, issue_number,
+                           {"state": "failed_implement", "escalations": escalations,
+                            "reason": "implement returned no branch: %s" % exc})
 
     # S4 — open / reconcile the PR. List open PRs (clean path; filter in-script), adopt one
     # for this branch if present, else create. A create that 422s (PR already exists, e.g. a
@@ -385,9 +576,10 @@ async def main(input):
         elif _status(created) == 422:  # already exists (re-drive / race) -> adopt it
             pr = _find_open_pr(_json_body(await gh("GET", _ipath(repo, "/pulls"))), branch)
         if pr is None:
-            return {"state": "failed_no_pr",
-                    "reason": "could not open or adopt a PR for branch %r (status %r)"
-                    % (branch, _status(created))}
+            return await _fail(repo, issue_number,
+                               {"state": "failed_no_pr",
+                                "reason": "could not open or adopt a PR for branch %r (status %r)"
+                                % (branch, _status(created))})
     pr_number = int(pr["number"])
     pr_node_id = pr.get("node_id", "")
     pr_url = pr.get("html_url", "")
@@ -399,10 +591,23 @@ async def main(input):
     phase("verify")
     review_ok = False
     for i in range(MAX_REVIEW_ITERS + 1):
-        review = await agent(
-            {"task": "review", "repo": repo, "pr_number": pr_number, "head_sha": head_sha},
-            agent_id=REVIEW_AGENT_ID, output_schema=REVIEW_SCHEMA, model=model,
-            label="review-%d" % i)
+        # A review-agent error escalates to the verify gate (item 5) — a flaky reviewer
+        # parks for a human rather than crashing the run. Resume-resolved continues.
+        try:
+            review = await agent(
+                {"task": "review", "repo": repo, "pr_number": pr_number, "head_sha": head_sha,
+                 "comments": comment_bodies},
+                agent_id=REVIEW_AGENT_ID, output_schema=REVIEW_SCHEMA, model=model,
+                label="review-%d" % i)
+        except AgentError as exc:
+            escalations.append("verify")
+            decision = await gate({"kind": "verify", "pr": pr_number,
+                                   "reason": "review agent error: %s" % exc})
+            if not (isinstance(decision, dict) and decision.get("resolved")):
+                return {"state": "escalated", "reason": "verify_agent_error",
+                        "escalations": escalations}
+            review_ok = True
+            break
         if not review.get("artifact_posted"):
             escalations.append("verify")
             decision = await gate({"kind": "verify", "pr": pr_number,
@@ -418,10 +623,21 @@ async def main(input):
         if i == MAX_REVIEW_ITERS:  # final re-review still failing -> exhausted
             break
         before = head_sha
-        fix = await agent(
-            {"task": "fix", "repo": repo, "pr_number": pr_number, "issues": review["issues"]},
-            agent_id=FIX_AGENT_ID, output_schema=FIX_SCHEMA, model=model, label="fix-%d" % i)
-        head_sha = fix["head_sha"]
+        try:
+            fix = await agent(
+                {"task": "fix", "repo": repo, "pr_number": pr_number, "issues": review["issues"],
+                 "comments": comment_bodies},
+                agent_id=FIX_AGENT_ID, output_schema=FIX_SCHEMA, model=model, label="fix-%d" % i)
+            head_sha = fix["head_sha"]
+        except AgentError as exc:
+            escalations.append("verify")
+            decision = await gate({"kind": "verify", "pr": pr_number,
+                                   "reason": "fix agent error: %s" % exc})
+            if not (isinstance(decision, dict) and decision.get("resolved")):
+                return {"state": "escalated", "reason": "verify_agent_error",
+                        "escalations": escalations}
+            review_ok = True
+            break
         if before and head_sha == before:  # empirical no-commit guard (head unchanged)
             escalations.append("verify")
             decision = await gate({"kind": "verify", "pr": pr_number,
@@ -443,29 +659,46 @@ async def main(input):
     # A9 — CI watch (the agent OWNS the durable wait) -> fix -> re-watch, bounded
     # (N watches, N-1 fixes — matches autodev's CI loop).
     ci_ok = False
+    ci_agent_error = False
     for i in range(MAX_CI_ITERS):
-        ci = await agent(
-            {"task": "watch_ci", "repo": repo, "pr_number": pr_number, "head_sha": head_sha},
-            agent_id=CI_AGENT_ID, output_schema=CI_SCHEMA, model=model, label="ci-%d" % i)
+        # A ci-watch / ci-fix agent error breaks the loop and falls through to the verify
+        # gate (item 5) — it does NOT crash the run nor silently pass a red PR.
+        try:
+            ci = await agent(
+                {"task": "watch_ci", "repo": repo, "pr_number": pr_number, "head_sha": head_sha},
+                agent_id=CI_AGENT_ID, output_schema=CI_SCHEMA, model=model, label="ci-%d" % i)
+        except AgentError as exc:
+            log("ci-watch agent error -> escalate:", exc)
+            ci_agent_error = True
+            break
         if ci["status"] in ("green", "no_ci"):
             ci_ok = True
             break
         if i == MAX_CI_ITERS - 1:
             break
         before = head_sha
-        fix = await agent(
-            {"task": "fix_ci", "repo": repo, "pr_number": pr_number,
-             "detail": ci.get("detail", "")},
-            agent_id=FIX_AGENT_ID, output_schema=FIX_SCHEMA, model=model, label="ci-fix-%d" % i)
-        head_sha = fix["head_sha"]
+        try:
+            fix = await agent(
+                {"task": "fix_ci", "repo": repo, "pr_number": pr_number,
+                 "detail": ci.get("detail", ""), "comments": comment_bodies},
+                agent_id=FIX_AGENT_ID, output_schema=FIX_SCHEMA, model=model,
+                label="ci-fix-%d" % i)
+            head_sha = fix["head_sha"]
+        except AgentError as exc:
+            log("ci-fix agent error -> escalate:", exc)
+            ci_agent_error = True
+            break
         if before and head_sha == before:
             break
     if not ci_ok:
+        _ci_reason = ("CI-watch agent error" if ci_agent_error
+                      else "CI failing after %d checks" % MAX_CI_ITERS)
         escalations.append("verify")
-        decision = await gate({"kind": "verify", "pr": pr_number,
-                               "reason": "CI failing after %d checks" % MAX_CI_ITERS})
+        decision = await gate({"kind": "verify", "pr": pr_number, "reason": _ci_reason})
         if not (isinstance(decision, dict) and decision.get("resolved")):
-            return {"state": "escalated", "reason": "ci_exhausted", "escalations": escalations}
+            return {"state": "escalated",
+                    "reason": "ci_agent_error" if ci_agent_error else "ci_exhausted",
+                    "escalations": escalations}
 
     # A10/S11 — risk tiering (best-effort; never blocks). Conservative tier-3 default. The
     # guard tolerates BOTH a child failure (AgentError) AND a malformed/short return
@@ -528,9 +761,11 @@ async def main(input):
         if isinstance(confirm, dict) and confirm.get("merged"):
             merged = True
         else:
-            return {"state": "merge_failed", "pr_url": pr_url, "pr_number": pr_number,
-                    "risk_tier": tier, "reason": "merge call returned %r" % _status(merge_resp),
-                    "escalations": escalations}
+            return await _fail(repo, issue_number,
+                               {"state": "merge_failed", "pr_url": pr_url, "pr_number": pr_number,
+                                "risk_tier": tier,
+                                "reason": "merge call returned %r" % _status(merge_resp),
+                                "escalations": escalations})
 
     # A15 — post-merge master-CI watch (the D-2 missing state). Red OR an errored watch =>
     # HALT at a gate; the merge is a committed fact, so we never discard it by failing here.
@@ -548,6 +783,8 @@ async def main(input):
         escalations.append("master_red")
         await gate({"kind": "master_red", "repo": repo, "detail": master_detail})
 
+    # Success: the issue is done, so release the in-progress claim (item 3).
+    await _unlabel(repo, issue_number, LABEL_IN_PROGRESS)
     return {"state": "done", "pr_url": pr_url, "pr_number": pr_number, "merged": merged,
             "risk_tier": tier, "escalations": escalations}
 '''
