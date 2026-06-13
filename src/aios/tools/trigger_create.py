@@ -126,14 +126,9 @@ _SOURCE_SCHEMA: dict[str, Any] = {
 
 _SANDBOX_COMMAND_DESCRIPTION = (
     "Bash command run in the session's sandbox at each fire, WITHOUT waking "
-    "the model. To escalate (wake the model with a user-role message), the "
-    "canonical bash invocation is:\n"
-    "\n"
-    '  tool wake_self \'{"content":"<message to deliver to yourself>"}\'\n'
-    "\n"
-    "This keeps the broker secret out of the command string. Advanced or "
-    "scripted callers may still POST to "
-    "``$TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages`` directly."
+    "the model. To escalate (wake the model with a user-role message), call "
+    '``tool wake_self \'{"content":"<message to deliver to yourself>"}\'`` '
+    "from inside the cron command."
 )
 
 _ACTION_SCHEMA: dict[str, Any] = {

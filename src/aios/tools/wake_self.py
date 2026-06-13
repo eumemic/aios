@@ -1,9 +1,8 @@
 """The ``wake_self`` tool — append a user-role message to *this* session.
 
-Canonical self-wake primitive for cron-fired bash commands (and any
-other sandbox-side caller). Replaces the older curl-the-broker idiom
-so the broker secret never has to be interpolated into the command
-string.
+Self-wake primitive for cron-fired bash commands (and any other
+sandbox-side caller): escalate a tool result, finding, or external
+event into a model wake.
 """
 
 from __future__ import annotations
@@ -24,13 +23,11 @@ class WakeSelfArgumentError(AiosError):
 
 WAKE_SELF_DESCRIPTION = (
     "Append content as a user-role message to your own session and "
-    "schedule the next step. This is the canonical self-wake primitive "
-    "from inside a trigger's sandbox_command (or any sandbox bash "
-    "command) — it replaces the older "
-    "``curl $TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages`` "
-    "idiom and keeps the broker secret out of the command string. The "
-    "appended message is delivered to your next model call as a normal "
-    "user-role event. Available on both the model-tool surface and as "
+    "schedule the next step. Use from inside a trigger's sandbox_command "
+    "(or any sandbox bash command) to escalate a tool result, finding, or "
+    "external event into a model wake. The appended message is delivered "
+    "to your next model call as a normal user-role event. Available on "
+    "both the model-tool surface and as "
     '``tool wake_self \'{"content":"..."}\'`` from inside the sandbox.'
 )
 
