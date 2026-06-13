@@ -24,9 +24,9 @@ from aios.sandbox.backends.base import (
 )
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.setup import (
-    _LOCKDOWN_VERIFY_SCRIPT,
     apply_network_lockdown,
     build_iptables_script,
+    build_lockdown_verify_script,
 )
 from tests.helpers.sandbox import FakeBackend, make_handle
 
@@ -129,6 +129,25 @@ class TestBuildIptablesScript:
         assert "getent ahosts api.example.com" in script
         assert "getent ahosts cdn.example.com" in script
 
+    def test_flushes_filter_output_chain(self) -> None:
+        script = build_iptables_script(allowed_hosts={"api.example.com"})
+        assert '"$IPT" -F OUTPUT' in script
+
+    def test_flushes_nat_output_chain_for_idempotent_reapply(self) -> None:
+        """#984: a future re-apply path (e.g. credential rotation refreshing the
+        lockdown without a full netns recycle) would accumulate duplicate DNAT
+        entries unless the nat OUTPUT chain is flushed alongside the filter
+        chain. Flushing both makes re-apply idempotent."""
+        script = build_iptables_script(
+            allowed_hosts={"api.example.com"},
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        assert '"$IPT" -t nat -F OUTPUT' in script
+        # The nat flush precedes the DNAT rules, so re-running the script
+        # replaces (not appends to) the existing nat OUTPUT chain.
+        assert script.index('"$IPT" -t nat -F OUTPUT') < script.index("-j DNAT")
+
     def test_loopback_and_dns_always_allowed(self) -> None:
         script = build_iptables_script(allowed_hosts=set())
         assert '"$IPT" -A OUTPUT -o lo -j ACCEPT' in script
@@ -202,11 +221,13 @@ class TestBuildIptablesScript:
         assert "REDIRECT" not in script
 
     def test_no_nat_rules_without_dnat_target(self) -> None:
+        # The unconditional nat flush is always present (#984 idempotency); what
+        # must be absent without a dnat_target is the DNAT rule *addition*.
         script = build_iptables_script(
             allowed_hosts={"api.example.com"},
             dnat_hosts=["api.secret.com"],
         )
-        assert "-t nat" not in script
+        assert "-t nat -A OUTPUT" not in script
         assert "DNAT" not in script
 
     def test_no_nat_rules_without_dnat_hosts(self) -> None:
@@ -215,12 +236,13 @@ class TestBuildIptablesScript:
             dnat_hosts=[],
             dnat_target=("aios-worker", 49152),
         )
-        assert "-t nat" not in script
+        assert "-t nat -A OUTPUT" not in script
         assert "DNAT" not in script
 
     def test_existing_callers_unchanged(self) -> None:
         script = build_iptables_script(allowed_hosts={"api.example.com"})
-        assert "-t nat" not in script
+        assert "-t nat -A OUTPUT" not in script
+        assert "DNAT" not in script
         assert '"$IPT" -P OUTPUT DROP' in script
 
     def test_allowed_host_gets_accept_not_dnat(self) -> None:
@@ -241,6 +263,47 @@ class TestBuildIptablesScript:
             dnat_target=("aios-worker", 49152),
         )
         assert "--dport 80 -j DNAT" not in script
+
+
+# ── read-back verify script asserts DROP + DNAT coverage (#984) ───────────────
+
+
+class TestBuildLockdownVerifyScript:
+    def test_asserts_filter_drop_policy(self) -> None:
+        script = build_lockdown_verify_script()
+        assert "\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'" in script
+
+    def test_no_dnat_assertion_without_dnat_hosts(self) -> None:
+        """With no credential hosts, there's no nat coverage to assert — the
+        verify must not reference the nat table."""
+        script = build_lockdown_verify_script(dnat_hosts=[])
+        assert "-t nat" not in script
+        assert "DNAT" not in script
+
+    def test_asserts_nat_dnat_coverage_when_dnat_hosts_present(self) -> None:
+        """#984: a credential host whose getent returns zero IPs emits no DNAT
+        rule and no error — apply exits 0 and a filter-only verify passes,
+        silently running the session without DNAT. When dnat_hosts is non-empty
+        the verify must ALSO assert the nat table carries a DNAT OUTPUT rule, so
+        the zero-IP omission fails the verify (and thus the provision) instead of
+        passing silently."""
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
+        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in script
+        # The filter-table DROP assertion is still present.
+        assert "OUTPUT DROP" in script
+
+    def test_uses_selected_backend_no_bare_iptables(self) -> None:
+        """Both assertions go through the ``$IPT`` selector so the verify reads
+        the same netfilter backend the apply wrote to (#1022)."""
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
+        assert "command -v iptables-legacy" in script
+        for line in script.splitlines():
+            stripped = line.strip()
+            if "command -v iptables-legacy" in stripped:
+                continue
+            assert not stripped.startswith("iptables "), (
+                f"verify uses a bare iptables (nft default): {line!r}"
+            )
 
 
 # ── docker backend translates network policy to docker run argv ────────────────
@@ -496,10 +559,27 @@ class TestApplyNetworkLockdown:
             dnat_target=("aios-worker", 49152),
         )
 
-        script = self._sidecar_scripts(backend)[0]
-        assert '"$IPT" -t nat -A OUTPUT' in script
-        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
-        assert "getent ahosts api.secret.com" in script
+        apply_script, verify_script = self._sidecar_scripts(backend)
+        assert '"$IPT" -t nat -A OUTPUT' in apply_script
+        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in apply_script
+        assert "getent ahosts api.secret.com" in apply_script
+        # #984: with dnat_hosts present, the read-back verify also asserts the
+        # nat table carries a DNAT rule — a zero-IP host fails closed.
+        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in verify_script
+
+    @pytest.mark.asyncio
+    async def test_verify_omits_nat_assertion_without_dnat_hosts(self) -> None:
+        """Without credential DNAT, the read-back verify only asserts the filter
+        DROP policy — it must not reference the nat table (#984)."""
+        backend = FakeBackend()
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
+
+        await apply_network_lockdown(backend, handle, networking)
+
+        _apply, verify_script = self._sidecar_scripts(backend)
+        assert "-t nat" not in verify_script
+        assert "DNAT" not in verify_script
 
     @pytest.mark.asyncio
     async def test_apply_and_verify_agree_on_legacy_backend(self) -> None:
@@ -527,12 +607,13 @@ class TestApplyNetworkLockdown:
                 f"verify uses a bare iptables (nft default): {line!r}"
             )
 
-    def test_verify_script_constant_uses_selected_backend(self) -> None:
-        """The module-level verify constant itself selects the legacy backend so
-        any caller that runs it directly stays consistent with the apply path."""
-        assert "command -v iptables-legacy" in _LOCKDOWN_VERIFY_SCRIPT
-        assert '"$IPT" -S OUTPUT' in _LOCKDOWN_VERIFY_SCRIPT
-        assert "OUTPUT DROP" in _LOCKDOWN_VERIFY_SCRIPT
+    def test_verify_script_uses_selected_backend(self) -> None:
+        """The verify script itself selects the legacy backend so any caller
+        that runs it directly stays consistent with the apply path."""
+        script = build_lockdown_verify_script()
+        assert "command -v iptables-legacy" in script
+        assert '"$IPT" -S OUTPUT' in script
+        assert "OUTPUT DROP" in script
 
     @pytest.mark.asyncio
     async def test_runtime_threaded_to_both_sidecar_calls(self) -> None:
