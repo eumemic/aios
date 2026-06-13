@@ -247,8 +247,6 @@ def _escape_like(value: str) -> str:
 # ``patch.object(queries, "foo")`` reaching the real callee.
 
 from .accounts import (  # noqa: E402
-    _row_to_account,
-    _row_to_runtime_token,
     archive_account,
     bootstrap_root_account,
     count_account_resources,
@@ -279,8 +277,6 @@ from .accounts import (  # noqa: E402
     update_account,
 )
 from .agents import (  # noqa: E402
-    _row_to_agent,
-    _row_to_agent_version,
     archive_agent,
     get_agent,
     get_agent_version,
@@ -290,12 +286,7 @@ from .agents import (  # noqa: E402
     update_agent,
 )
 from .connections import (  # noqa: E402
-    _CONNECTION_COLUMNS,
-    _CONNECTION_FROM,
-    _CONNECTION_UPDATE_CTE_TAIL,
-    _MODE_PREDICATES,
     ActiveBinding,
-    _raise_for_failed_binding_insert,
     _row_to_connection,
     _session_bound_to_connection_predicate,
     archive_active_binding,
@@ -329,7 +320,6 @@ from .connections import (  # noqa: E402
     update_connector_tools_schema,
 )
 from .environments import (  # noqa: E402
-    _row_to_environment,
     archive_environment,
     get_environment,
     get_environment_config_for_id,
@@ -339,12 +329,6 @@ from .environments import (  # noqa: E402
     update_environment,
 )
 from .events import (  # noqa: E402
-    _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS,
-    _MODEL_TOKEN_RATIO_BUCKET_FLOOR,
-    _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS,
-    _MODEL_TOKEN_RATIO_MIN,
-    _MODEL_TOKEN_RATIO_MIN_SAMPLES,
-    _MODEL_TOKEN_RATIO_SIGMA_PRIOR,
     _clear_model_token_ratio_cache,
     _derive_is_error,
     _derive_sender_name,
@@ -353,10 +337,6 @@ from .events import (  # noqa: E402
     _latest_cumulative_tokens,
     _list_bound_connection_ids,
     _lookup_tool_parent_channel,
-    _model_token_ratio_cache,
-    _resolve_event_channel,
-    _row_to_event,
-    _tool_result_ids_by_session,
     _unresolved_tool_calls,
     append_event,
     find_tool_confirmed_event,
@@ -377,16 +357,10 @@ from .events import (  # noqa: E402
     read_windowed_events,
 )
 from .files import (  # noqa: E402
-    _row_to_file,
     insert_file,
 )
 from .memory_stores import (  # noqa: E402
     _allocate_version_seq,
-    _build_actor,
-    _row_to_github_repo_echo,
-    _row_to_memory,
-    _row_to_memory_store,
-    _row_to_memory_version,
     archive_memory_store,
     attach_github_repos_to_session,
     attach_memory_stores_to_session,
@@ -421,7 +395,6 @@ from .sandboxes import (  # noqa: E402
     unscoped_set_session_snapshot,
 )
 from .session_templates import (  # noqa: E402
-    _row_to_session_template,
     archive_session_template,
     get_session_template,
     insert_session_template,
@@ -432,8 +405,6 @@ from .sessions import (  # noqa: E402
     _SESSION_ACTIVE_EXPR,
     _SESSION_ERRORED_EXPR,
     _SESSION_STATUS_EXPR,
-    _default_workspace_path,
-    _row_to_session,
     archive_session,
     clone_session,
     count_request_nudges,
@@ -467,8 +438,6 @@ from .sessions import (  # noqa: E402
     write_response_if_absent,
 )
 from .skills import (  # noqa: E402
-    _row_to_skill,
-    _row_to_skill_version,
     archive_skill,
     get_latest_skill_version,
     get_skill,
@@ -482,8 +451,6 @@ from .skills import (  # noqa: E402
 from .triggers import (  # noqa: E402
     TriggerFireRef,
     TriggerRow,
-    _row_to_trigger_echo,
-    _row_to_trigger_run_echo,
     acquire_account_triggers_lock,
     add_trigger,
     batch_list_session_triggers,
@@ -510,11 +477,8 @@ from .triggers import (  # noqa: E402
     update_trigger,
 )
 from .vaults import (  # noqa: E402
-    _SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE,
     EnvVarCredentialEcho,
     EnvVarCredentialRow,
-    _row_to_vault,
-    _row_to_vault_credential,
     archive_vault,
     archive_vault_credential,
     batch_get_session_vault_ids,
@@ -547,18 +511,7 @@ from .vaults import (  # noqa: E402
 )
 
 __all__ = [
-    "_CONNECTION_COLUMNS",
-    "_CONNECTION_FROM",
-    "_CONNECTION_UPDATE_CTE_TAIL",
-    "_MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS",
-    "_MODEL_TOKEN_RATIO_BUCKET_FLOOR",
-    "_MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS",
-    "_MODEL_TOKEN_RATIO_MIN",
-    "_MODEL_TOKEN_RATIO_MIN_SAMPLES",
-    "_MODEL_TOKEN_RATIO_SIGMA_PRIOR",
-    "_MODE_PREDICATES",
     "_SESSION_ACTIVE_EXPR",
-    "_SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE",
     "_SESSION_ERRORED_EXPR",
     "_SESSION_STATUS_EXPR",
     "ActiveBinding",
@@ -568,10 +521,8 @@ __all__ = [
     "TriggerRow",
     "_allocate_version_seq",
     "_archive_scoped",
-    "_build_actor",
     "_build_set_assignments",
     "_clear_model_token_ratio_cache",
-    "_default_workspace_path",
     "_derive_is_error",
     "_derive_sender_name",
     "_derive_tool_name",
@@ -582,31 +533,8 @@ __all__ = [
     "_list_bound_connection_ids",
     "_list_scoped",
     "_lookup_tool_parent_channel",
-    "_model_token_ratio_cache",
-    "_raise_for_failed_binding_insert",
-    "_resolve_event_channel",
-    "_row_to_account",
-    "_row_to_agent",
-    "_row_to_agent_version",
     "_row_to_connection",
-    "_row_to_environment",
-    "_row_to_event",
-    "_row_to_file",
-    "_row_to_github_repo_echo",
-    "_row_to_memory",
-    "_row_to_memory_store",
-    "_row_to_memory_version",
-    "_row_to_runtime_token",
-    "_row_to_session",
-    "_row_to_session_template",
-    "_row_to_skill",
-    "_row_to_skill_version",
-    "_row_to_trigger_echo",
-    "_row_to_trigger_run_echo",
-    "_row_to_vault",
-    "_row_to_vault_credential",
     "_session_bound_to_connection_predicate",
-    "_tool_result_ids_by_session",
     "_unresolved_tool_calls",
     "acquire_account_triggers_lock",
     "add_trigger",
