@@ -338,6 +338,44 @@ class TestUpdate:
         assert r.status_code == 200
         assert r.json()["can_mint_children"] is True
 
+    async def test_child_cannot_self_grant_mint(
+        self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
+    ) -> None:
+        """A can_mint_children=False child must not be able to PATCH its OWN
+        account to grant itself the privilege. can_mint_children flows down
+        from a privileged parent (as mint_child enforces); a node setting its
+        own flag is escalation up the lattice. Complement of
+        test_update_can_mint_children, where the *root* (privileged) caller
+        legitimately grants a child — that path must keep working."""
+        m = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "self-escalator", "can_mint_children": False},
+        )
+        assert m.status_code == 201, m.text
+        child_id = m.json()["account_id"]
+        child_key = m.json()["plaintext_key"]
+        assert (await http_client.get("/v1/accounts/me", headers=_bearer(child_key))).json()[
+            "can_mint_children"
+        ] is False
+
+        # The child grants itself the privilege on its own account.
+        escalate = await http_client.patch(
+            f"/v1/accounts/{child_id}",
+            headers=_bearer(child_key),
+            json={"can_mint_children": True},
+        )
+        assert escalate.status_code == 403, escalate.text
+
+        # Defense in depth: even end-to-end, the escalation took no effect —
+        # the child still cannot mint a sub-tenant.
+        grandchild = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(child_key),
+            json={"display_name": "grandchild", "can_mint_children": False},
+        )
+        assert grandchild.status_code == 403, grandchild.text
+
     async def test_update_cross_tenant_404(
         self, http_client: httpx.AsyncClient, aios_env: dict[str, str]
     ) -> None:

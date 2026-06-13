@@ -165,11 +165,12 @@ async def update_account(
     Omitted fields are preserved. Both fields null is a valid no-op
     that returns the current row.
     """
-    account_id, key_id, _can_mint = auth
+    account_id, key_id, can_mint = auth
     updated = await service.update_account(
         pool,
         target_account_id=target_id,
         caller_account_id=account_id,
+        caller_can_mint_children=can_mint,
         display_name=body.display_name,
         can_mint_children=body.can_mint_children,
         config=body.config,
