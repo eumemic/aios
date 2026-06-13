@@ -14,7 +14,7 @@ import json
 from collections.abc import Iterable, Iterator
 from typing import Any
 
-from aios.cli.sse import SseMessage
+from aios_sdk.streaming import SseMessage
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
 CONTENT_PREVIEW_MAX = 240

@@ -22,8 +22,8 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from aios.cli.sse import SseMessage, parse_sse_lines
 from aios.models.common import ErrorResponse
+from aios_sdk.streaming import SseMessage, parse_sse_lines
 
 
 class AiosApiError(Exception):
