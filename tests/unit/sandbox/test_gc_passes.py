@@ -353,3 +353,52 @@ async def test_account_cap_pass_skips_waking_session(
     # The waking session is skipped; the next-most-dormant is evicted instead.
     assert old.removal_ref not in removed
     assert removed == [new.removal_ref]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skips_snapshot_evicted_this_tick(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass 4 must not re-point a session whose canonical image an earlier pass
+    removed this tick.
+
+    The eviction passes leave the verdict in ``retained`` and don't mutate the
+    tick-start ``states``, so an evicted session still presents its pre-eviction
+    pointer (here NULL — the first-commit-crash-heal window: a committed tag
+    whose pointer write was lost). Without the ``already_evicted`` skip, pass 4
+    heals that NULL pointer by writing a pointer to the image pass 3 just
+    removed — a dangling pointer that makes the session unresumable.
+    """
+    instance_id = get_settings().instance_id
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    _stub_event_and_pointer(registry)  # stub eviction's event + pointer-clear side effects
+    verdict = _canonical_verdict("sess_x", size_bytes=2_000_000)
+    states = {
+        "sess_x": SessionSnapshotState(
+            session_id="sess_x",
+            account_id="acct",
+            archived=False,
+            last_event_at=_NOW - timedelta(days=1),
+            snapshot_ref=None,  # live canonical image on disk, but NULL DB pointer
+            snapshot_host=instance_id,
+            snapshot_bytes=None,
+        )
+    }
+    set_pointer = AsyncMock()
+    monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_set_session_snapshot", set_pointer)
+
+    # Baseline: with nothing evicted, pass 4 legitimately heals the NULL pointer.
+    # This proves the resurrection path is live, so the skip below is not vacuous.
+    await registry._gc_reconcile_pointers([verdict], states, instance_id, already_evicted=set())
+    set_pointer.assert_awaited_once()
+    set_pointer.reset_mock()
+
+    # Pass 3 evicts sess_x under disk pressure (2 MB snapshot vs 1 MB pool budget).
+    evicted = await registry._gc_pool_budget_pass([verdict], states, 1_000_000, instance_id)
+    assert evicted == {"sess_x"}
+    assert verdict.removal_ref in backend.removed_image_refs
+
+    # Pass 4, told what was evicted this tick, must NOT re-point the removed image.
+    await registry._gc_reconcile_pointers([verdict], states, instance_id, already_evicted=evicted)
+    set_pointer.assert_not_awaited()
