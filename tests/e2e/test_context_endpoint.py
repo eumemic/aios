@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from tests.helpers.connections import authed_client, wired_app
+from tests.helpers.images import valid_png_bytes
 
 
 def _uniq() -> str:
@@ -292,7 +293,7 @@ class TestContextEndpoint:
 
         # Stage the image at the session's real ``workspace_volume_path``
         # (post-#409 ``<workspace_root>/<account_id>/<session_id>`` shape).
-        payload = b"PNGWORKSPACEBYTES"
+        payload = valid_png_bytes()  # must decode: the render boundary now gates inline images
         workspace_path = await sessions_svc.load_session_workspace_path(
             pool, session.id, account_id=account_id
         )
