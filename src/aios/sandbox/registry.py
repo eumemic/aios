@@ -802,10 +802,27 @@ class SandboxRegistry:
         if outcome.image_id is not None:
             # Edge-trigger the over-limit notice only on the crossing — read
             # the prior bytes only when we're actually over budget (rare).
+            # The notice (this read + the append below) is BEST-EFFORT: the
+            # snapshot verb and pointer write are the durable outcome, so a DB
+            # hiccup on the informational notice must not propagate. If it did,
+            # it would skip ``backend.destroy`` in the caller and surface as a
+            # harness_error retry — undoing a successful snapshot, which the
+            # no-propagate contract on ``_snapshot_and_remove`` forbids. A
+            # failed read loses the edge signal, so skip the notice rather than
+            # emit a possibly-spurious one.
             prev_bytes: int | None = None
             over_now = disk_limit_bytes is not None and outcome.unique_bytes > disk_limit_bytes
             if over_now:
-                prev_bytes = await self._read_snapshot_bytes(session_id)
+                try:
+                    prev_bytes = await self._read_snapshot_bytes(session_id)
+                except Exception as err:
+                    log.warning(
+                        "sandbox.over_limit_notice_read_failed",
+                        session_id=session_id,
+                        container_id=sandbox_id[:12],
+                        error=str(err),
+                    )
+                    over_now = False
             try:
                 await self._write_snapshot_pointer(session_id, tag, outcome.unique_bytes)
             except Exception as err:
@@ -821,11 +838,19 @@ class SandboxRegistry:
                 and over_now
                 and (prev_bytes is None or prev_bytes <= disk_limit_bytes)
             ):
-                await self._append_fs_event(
-                    session_id,
-                    SANDBOX_FS_OVER_LIMIT_EVENT,
-                    {"unique_bytes": outcome.unique_bytes, "limit_bytes": disk_limit_bytes},
-                )
+                try:
+                    await self._append_fs_event(
+                        session_id,
+                        SANDBOX_FS_OVER_LIMIT_EVENT,
+                        {"unique_bytes": outcome.unique_bytes, "limit_bytes": disk_limit_bytes},
+                    )
+                except Exception as err:
+                    log.warning(
+                        "sandbox.over_limit_notice_append_failed",
+                        session_id=session_id,
+                        container_id=sandbox_id[:12],
+                        error=str(err),
+                    )
 
         log.info(
             "sandbox.snapshot",
