@@ -114,6 +114,17 @@ def _limit_to_microusd(limit_usd: float | None) -> int | None:
     return round(limit_usd * 1_000_000)
 
 
+def _resolve_cost_microusd(
+    model: str, usage: dict[str, int], cost_usd: float | None, *, session_id: str
+) -> int:
+    """Cost of a model call in micro-USD; warn and return 0 if the model is cost-unmapped."""
+    effective_cost_usd = cost_usd if cost_usd is not None else estimate_cost_usd(model, usage)
+    if effective_cost_usd is None:
+        log.warning("usage.model_cost_unmapped", model=model, session_id=session_id)
+        return 0
+    return round(effective_cost_usd * 1_000_000)
+
+
 def _crossed_spend_warning_threshold(
     new_spent_microusd: int, cost_microusd: int, limit_microusd: int | None
 ) -> bool:
@@ -579,12 +590,7 @@ async def _run_session_step_body(
     # calibration reads (the partial index and the aggregate query both
     # filter on ``is_error=false``).
     local_tokens = approx_tokens(messages, tools=tools)
-    effective_cost_usd = cost_usd if cost_usd is not None else estimate_cost_usd(agent.model, usage)
-    if effective_cost_usd is None:
-        cost_microusd = 0
-        log.warning("usage.model_cost_unmapped", model=agent.model, session_id=session_id)
-    else:
-        cost_microusd = round(effective_cost_usd * 1_000_000)
+    cost_microusd = _resolve_cost_microusd(agent.model, usage, cost_usd, session_id=session_id)
     await sessions_service.append_event(
         pool,
         session_id,
@@ -1122,12 +1128,7 @@ async def _handle_streaming_model_deadline(
         },
         account_id=account_id,
     )
-    effective_cost_usd = cost_usd if cost_usd is not None else estimate_cost_usd(model, usage)
-    if effective_cost_usd is None:
-        cost_microusd = 0
-        log.warning("usage.model_cost_unmapped", model=model, session_id=session_id)
-    else:
-        cost_microusd = round(effective_cost_usd * 1_000_000)
+    cost_microusd = _resolve_cost_microusd(model, usage, cost_usd, session_id=session_id)
     await sessions_service.increment_usage(
         pool,
         session_id,
