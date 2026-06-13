@@ -238,8 +238,9 @@ def build_iptables_script(
         "",
         _IPTABLES_BACKEND_SELECT,
         "",
-        "# Flush existing OUTPUT rules",
+        "# Flush existing OUTPUT rules (filter + nat) for idempotent re-apply",
         '"$IPT" -F OUTPUT',
+        '"$IPT" -t nat -F OUTPUT',
         "",
         "# Allow loopback",
         '"$IPT" -A OUTPUT -o lo -j ACCEPT',
@@ -319,12 +320,36 @@ def build_iptables_script(
 # fails CLOSED (the host gets no ACCEPT rule → blocked), never a bypass.
 _EMBEDDED_DNS_ADDRESS = "127.0.0.11"
 
+
 # Read-back assertion that the default OUTPUT policy is DROP — proves the
 # lockdown actually took effect in the shared netns, not just that the apply
 # script exited 0.
-_LOCKDOWN_VERIFY_SCRIPT = (
-    f"{_IPTABLES_BACKEND_SELECT}\n\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'"
-)
+def build_lockdown_verify_script(dnat_hosts: Sequence[str] = ()) -> str:
+    """Build the read-back verify script run by the lockdown sidecar.
+
+    Always asserts the filter-table default OUTPUT policy is ``DROP`` — proof
+    the lockdown actually landed in the shared netns, not merely that the apply
+    script exited 0.
+
+    When ``dnat_hosts`` is non-empty it ALSO asserts the nat table carries at
+    least one ``DNAT`` OUTPUT rule. Without this, a credential host whose
+    ``getent`` returns zero IPs emits no DNAT rule and no error: apply exits 0,
+    a filter-only verify passes, and the session runs WITHOUT DNAT for that host
+    — the placeholder goes direct to the real upstream and auth fails with no
+    operator signal (#984). Asserting nat coverage turns that silent omission
+    into a fail-closed provision error. (Coverage is asserted at the table
+    level, not per-host: any host resolving to zero IPs with NO other DNAT rule
+    present fails the verify; the proxy-alias DNS-miss case — where the whole
+    nat block is guarded out — is the documented fail-open-to-placeholder path
+    in :func:`build_iptables_script` and is out of scope here.)
+    """
+    lines = [
+        _IPTABLES_BACKEND_SELECT,
+        "\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'",
+    ]
+    if dnat_hosts:
+        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'")
+    return "\n".join(lines)
 
 
 async def apply_network_lockdown(
@@ -350,9 +375,11 @@ async def apply_network_lockdown(
 
     ``dnat_hosts`` + ``dnat_target`` are threaded into
     :func:`build_iptables_script` to DNAT credential-host :443 egress through
-    the secret-egress proxy (#878). The read-back verify reads the **filter**
-    table (``iptables -S OUTPUT``) only, so the added nat-table OUTPUT rules
-    don't affect it.
+    the secret-egress proxy (#878). The read-back verify always asserts the
+    filter-table DROP policy and, when ``dnat_hosts`` is non-empty, ALSO
+    asserts the nat table carries a ``DNAT`` OUTPUT rule
+    (:func:`build_lockdown_verify_script`) so a host resolving to zero IPs
+    fails closed instead of silently running without DNAT (#984).
 
     **Off the tenant-writable filesystem (§5.8).** Under durable persistence,
     running the lockdown *inside* the sandbox (its own ``iptables``/``getent``)
@@ -422,7 +449,7 @@ async def apply_network_lockdown(
         verify = await backend.run_netns_sidecar(
             handle.sandbox_id,
             image=settings.docker_image,
-            script=_LOCKDOWN_VERIFY_SCRIPT,
+            script=build_lockdown_verify_script(dnat_hosts),
             timeout_seconds=15,
             max_output_bytes=settings.bash_max_output_bytes,
             runtime=runtime,
