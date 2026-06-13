@@ -117,6 +117,15 @@ def sync_detailed(
 ) -> Response[HTTPValidationError | ListResponseSession]:
     """List
 
+     List sessions, newest first, keyset-paginated.
+
+    Soft-archived sessions are hidden by default. Two filters surface them so a
+    workflow run's spent ``agent()`` children stay enumerable with their terminal
+    status and token usage (#831): ``?parent_run_id=`` lists a run's children
+    (alive or archived), and ``?status=archived`` lists the terminal ones. Each
+    row carries the derived ``status`` ({active, idle, archived}) and cumulative
+    ``usage``.
+
     Args:
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
@@ -161,6 +170,15 @@ def sync(
 ) -> HTTPValidationError | ListResponseSession | None:
     """List
 
+     List sessions, newest first, keyset-paginated.
+
+    Soft-archived sessions are hidden by default. Two filters surface them so a
+    workflow run's spent ``agent()`` children stay enumerable with their terminal
+    status and token usage (#831): ``?parent_run_id=`` lists a run's children
+    (alive or archived), and ``?status=archived`` lists the terminal ones. Each
+    row carries the derived ``status`` ({active, idle, archived}) and cumulative
+    ``usage``.
+
     Args:
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
@@ -199,6 +217,15 @@ async def asyncio_detailed(
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
     """List
+
+     List sessions, newest first, keyset-paginated.
+
+    Soft-archived sessions are hidden by default. Two filters surface them so a
+    workflow run's spent ``agent()`` children stay enumerable with their terminal
+    status and token usage (#831): ``?parent_run_id=`` lists a run's children
+    (alive or archived), and ``?status=archived`` lists the terminal ones. Each
+    row carries the derived ``status`` ({active, idle, archived}) and cumulative
+    ``usage``.
 
     Args:
         cursor (None | str | Unset):
@@ -241,6 +268,15 @@ async def asyncio(
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
     """List
+
+     List sessions, newest first, keyset-paginated.
+
+    Soft-archived sessions are hidden by default. Two filters surface them so a
+    workflow run's spent ``agent()`` children stay enumerable with their terminal
+    status and token usage (#831): ``?parent_run_id=`` lists a run's children
+    (alive or archived), and ``?status=archived`` lists the terminal ones. Each
+    row carries the derived ``status`` ({active, idle, archived}) and cumulative
+    ``usage``.
 
     Args:
         cursor (None | str | Unset):

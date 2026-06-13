@@ -77,8 +77,10 @@ async def _list_scoped[T](
     after: str | None = None,
     filters: list[tuple[str, Any]] | None = None,
     extra_select: str | None = None,
+    include_archived: bool = False,
 ) -> list[T]:
-    """Keyset-paginated SELECT scoped by ``account_id`` + ``archived_at IS NULL``.
+    """Keyset-paginated SELECT scoped by ``account_id`` (+ ``archived_at IS NULL``
+    unless ``include_archived``).
 
     ``filters`` is a list of ``(column, value)`` equality predicates;
     entries whose ``value`` is ``None`` are skipped (mirrors the per-arg
@@ -87,9 +89,14 @@ async def _list_scoped[T](
 
     ``extra_select`` is an optional SQL expression (a static literal from
     this module, never user input) appended to the projection — e.g. a
-    correlated subquery that derives a column the base table doesn't store."""
+    correlated subquery that derives a column the base table doesn't store.
+
+    ``include_archived`` drops the default ``archived_at IS NULL`` clause so
+    soft-archived rows are visible — e.g. enumerating a workflow run's spent
+    ``agent()`` children (#831). The default keeps every other resource listing
+    archive-blind, as before."""
     args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
+    where = ["account_id = $1"] if include_archived else ["archived_at IS NULL", "account_id = $1"]
     for column, value in filters or []:
         if value is None:
             continue

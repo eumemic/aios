@@ -3,6 +3,7 @@ from enum import Enum
 
 class WaitResponseSessionStatus(str, Enum):
     ACTIVE = "active"
+    ARCHIVED = "archived"
     IDLE = "idle"
 
     def __str__(self) -> str:

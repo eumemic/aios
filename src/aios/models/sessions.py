@@ -72,9 +72,9 @@ def _validate_session_resources(resources: list[SessionResource]) -> None:
     _validate_github_resources(github)
 
 
-SessionStatus = Literal["active", "idle"]
-"""Derived session activity, computed from the event log at read time (there is
-no persisted status column).
+SessionStatus = Literal["active", "idle", "archived"]
+"""Derived session activity, computed from the event log + ``archived_at`` at
+read time (there is no persisted status column).
 
 * ``active`` — the session has owed/in-flight work that will advance WITHOUT a
   new unprompted user message: an unreacted user/tool stimulus, or an unresolved
@@ -82,6 +82,10 @@ no persisted status column).
   custom-tool result — see :class:`AwaitingToolCall`).
 * ``idle`` — quiescent: nothing is owed; only a new unprompted user message (or
   an armed timer firing) will move it. ``idle`` implies ``awaiting == []``.
+* ``archived`` — terminal: the session has been soft-archived (``archived_at``
+  set), e.g. a workflow ``agent()`` child that reclaimed itself on idle
+  (``archive_when_idle``). It will never wake again. This dominates the
+  active/idle derivation so a listing can report a run's spent judgment nodes.
 
 An *errored* session (model-call retry budget exhausted, not yet recovered) is a
 special case of ``idle``: it reads ``idle`` with ``stop_reason.type == "error"``

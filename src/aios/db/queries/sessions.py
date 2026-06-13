@@ -73,7 +73,17 @@ _SESSION_ACTIVE_EXPR = (
     f" AND NOT {_SESSION_ERRORED_EXPR})"
 )
 
-_SESSION_STATUS_EXPR = f"CASE WHEN {_SESSION_ACTIVE_EXPR} THEN 'active' ELSE 'idle' END"
+# Read-path status label ({active, idle, archived}). ``archived`` is terminal
+# and DOMINATES the active/idle derivation: a soft-archived session
+# (``archived_at`` set) — e.g. a workflow ``agent()`` child that reclaimed itself
+# on idle (``archive_when_idle``, #831) — never wakes again, so reporting it as
+# ``active``/``idle`` would be a lie. This wraps, but does NOT alter,
+# ``_SESSION_ACTIVE_EXPR``: the sweep's candidate filter uses that predicate
+# directly under its own ``archived_at IS NULL`` WHERE clause and is untouched.
+_SESSION_STATUS_EXPR = (
+    "CASE WHEN sessions.archived_at IS NOT NULL THEN 'archived' "
+    f"WHEN {_SESSION_ACTIVE_EXPR} THEN 'active' ELSE 'idle' END"
+)
 
 
 def _row_to_session(row: asyncpg.Record) -> Session:
@@ -719,7 +729,18 @@ async def list_sessions(
     ``parent_run_id`` is a plain column filter (the session is a workflow run's
     ``agent()`` child) — the session-side analog of filtering runs by their
     parent, so a run can list the agent sessions it spawned.
+
+    Soft-archived rows are normally invisible, but a workflow ``agent()`` child
+    reclaims itself on idle (``archive_when_idle``), so an account could never
+    enumerate its spent judgment nodes or sum their token spend (#831). Two
+    listings therefore drop the ``archived_at IS NULL`` clause: filtering by
+    ``parent_run_id`` (a run enumerating its children, alive or terminal) and
+    ``status="archived"`` (the explicit terminal-status query). All other
+    listings stay archive-blind. The ``({_SESSION_STATUS_EXPR})`` filter then
+    matches ``'archived'`` like any other status, so ``status="archived"``
+    returns exactly the archived rows.
     """
+    include_archived = parent_run_id is not None or status == "archived"
     return await _list_scoped(
         conn,
         table="sessions",
@@ -727,6 +748,7 @@ async def list_sessions(
         row=_row_to_session,
         limit=limit,
         after=after,
+        include_archived=include_archived,
         filters=[
             ("agent_id", agent_id),
             (f"({_SESSION_STATUS_EXPR})", status),
