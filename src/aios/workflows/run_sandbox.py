@@ -35,7 +35,6 @@ scratch container, never corrupting durable state. An author who needs an
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import math
 import shlex
 from typing import Any
@@ -182,7 +181,7 @@ async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any
         log.warning("run_sandbox.provision_failed", run_id=run.id, error=str(exc))
         return {"error": f"sandbox provisioning failed: {exc}"}
 
-    idem = hashlib.sha256(f"{run.id}\0{call_key}".encode()).hexdigest()
+    idem = run_tools.idempotency_key(run.id, call_key)
     preamble = (
         f"export AIOS_RUN_ID={shlex.quote(run.id)} AIOS_IDEMPOTENCY_KEY={shlex.quote(idem)}\n"
     )

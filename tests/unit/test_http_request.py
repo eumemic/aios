@@ -718,3 +718,102 @@ class TestDoHttpRequest:
             resolve_auth=resolve_auth,
         )
         assert "error" in out and "unknown server_ref" in out["error"]
+
+    async def test_idempotency_key_threads_into_the_request_header(self) -> None:
+        """When the caller mints an ``idempotency_key`` (the workflow-run path does, from
+        ``(run_id, call_key)``), the core sends it as the ``Idempotency-Key`` header so a
+        crash re-drive's re-fired POST dedupes at the upstream."""
+        servers = [
+            _server(
+                name="api",
+                base_url="https://api.example.com/v1",
+                routes=[_route("/issues/1/comments")],
+            )
+        ]
+        capture: dict[str, Any] = {}
+
+        async def resolve_auth(base_url: str) -> tuple[str | None, dict[str, str]]:
+            return ("vlt", {"Authorization": "Bearer t"})
+
+        with (
+            _patch_safe_url(True),
+            patch(
+                "aios.tools.http_request.httpx.AsyncClient",
+                _make_stub_client(response=httpx.Response(201, json={"ok": True}), capture=capture),
+            ),
+        ):
+            out = await _do_http_request(
+                servers=servers,
+                arguments={
+                    "server_ref": "api",
+                    "path": "/issues/1/comments",
+                    "method": "POST",
+                    "body": "{}",
+                },
+                resolve_auth=resolve_auth,
+                idempotency_key="abc123",
+            )
+        assert out["status"] == 201
+        assert capture["kwargs"]["headers"]["Idempotency-Key"] == "abc123"
+
+    async def test_no_idempotency_key_sends_no_header(self) -> None:
+        """The session path passes no key — no ``Idempotency-Key`` header is added."""
+        servers = [
+            _server(name="api", base_url="https://api.example.com/v1", routes=[_route("/lights/*")])
+        ]
+        capture: dict[str, Any] = {}
+
+        async def resolve_auth(base_url: str) -> tuple[str | None, dict[str, str]]:
+            return ("vlt", {})
+
+        with (
+            _patch_safe_url(True),
+            patch(
+                "aios.tools.http_request.httpx.AsyncClient",
+                _make_stub_client(response=httpx.Response(200, json={"ok": True}), capture=capture),
+            ),
+        ):
+            await _do_http_request(
+                servers=servers,
+                arguments={"server_ref": "api", "path": "/lights/1", "method": "GET"},
+                resolve_auth=resolve_auth,
+            )
+        assert "Idempotency-Key" not in capture["kwargs"]["headers"]
+
+    async def test_idempotency_key_overrides_a_caller_supplied_header(self) -> None:
+        """``Idempotency-Key`` is worker-managed when minted: a caller-supplied value in
+        ``headers`` must not displace the run-derived key (same stance as ``Authorization``
+        / ``Host``), or a script could defeat dedup by forging the key per re-drive."""
+        servers = [
+            _server(
+                name="api",
+                base_url="https://api.example.com/v1",
+                routes=[_route("/issues/1/comments")],
+            )
+        ]
+        capture: dict[str, Any] = {}
+
+        async def resolve_auth(base_url: str) -> tuple[str | None, dict[str, str]]:
+            return ("vlt", {})
+
+        with (
+            _patch_safe_url(True),
+            patch(
+                "aios.tools.http_request.httpx.AsyncClient",
+                _make_stub_client(response=httpx.Response(201, json={"ok": True}), capture=capture),
+            ),
+        ):
+            await _do_http_request(
+                servers=servers,
+                arguments={
+                    "server_ref": "api",
+                    "path": "/issues/1/comments",
+                    "method": "POST",
+                    "headers": {"Idempotency-Key": "forged", "X-Other": "ok"},
+                },
+                resolve_auth=resolve_auth,
+                idempotency_key="minted",
+            )
+        sent = capture["kwargs"]["headers"]
+        assert sent["Idempotency-Key"] == "minted"
+        assert sent["X-Other"] == "ok"

@@ -16,16 +16,24 @@ the run's snapshotted ``tools``. An undeclared/unknown tool is a *recoverable* `
 value the script branches on — not a run-terminal error (matching ``agent()``'s "errors resolve"
 and ``http_request``'s own error contract).
 
-**At-least-once.** A hard worker crash mid-task leaves no signal; the periodic sweep re-wakes the
-run and the step re-dispatches. Safe for idempotent tools (``web_*`` / GET); a non-idempotent
-``http_request`` (POST/DELETE) may double-execute — the same exposure the session tool path has.
-The ``idempotent`` flag that would surface ``may_have_completed`` instead of re-dispatching is a
-deferred follow-up.
+**At-least-once + idempotency key (#830).** A hard worker crash mid-task leaves no signal; the
+periodic sweep re-wakes the run and the step re-dispatches. ``web_*`` / GET are idempotent so a
+re-dispatch is harmless. A non-idempotent ``http_request`` (POST/DELETE) would otherwise
+double-execute — so the run path mints a per-call idempotency key (:func:`idempotency_key`,
+``sha256(run_id\\0call_key)``, the SAME derivation the run sandbox exports as
+``$AIOS_IDEMPOTENCY_KEY``) and threads it into the outbound request as the worker-managed
+``Idempotency-Key`` header. A re-drive carries the SAME ``(run_id, call_key)`` → a byte-identical
+key, so an upstream that honors ``Idempotency-Key`` (GitHub on some APIs; many payment/messaging
+providers) drops the re-fired duplicate. The key is minted unconditionally for every run
+``http_request`` (the method is the script's to choose at the wire); an upstream that ignores the
+header is no worse off than before. The session tool path has no stable per-call key and so passes
+none — its at-least-once exposure is unchanged.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from typing import Any
 
 import asyncpg
@@ -56,6 +64,20 @@ RUN_TOOLS: frozenset[str] = frozenset({"web_search", "web_fetch", "http_request"
 # sibling-triggered re-wake — e.g. parallel([tool(), agent()]) — doesn't double-dispatch a
 # still-running tool); never gates *harvesting* (the signal in the DB is the truth).
 _INFLIGHT: dict[tuple[str, str], asyncio.Task[None]] = {}
+
+
+def idempotency_key(run_id: str, call_key: str) -> str:
+    """The run-tool idempotency key: ``sha256(run_id\\0call_key)``, hex.
+
+    A pure function of ``(run_id, call_key)``: a crash re-drive carries the SAME
+    ``run.id`` + ``call_key`` and so reproduces a byte-identical key, while distinct
+    calls differ. Opaque, fixed-width hex — the structural punctuation of a raw
+    ``call_key`` never leaks into an outbound header. This is the SAME derivation the
+    run sandbox exports as ``$AIOS_IDEMPOTENCY_KEY`` (:mod:`aios.workflows.run_sandbox`),
+    so a workflow author sees one consistent dedup contract across both run-tool
+    execution classes (worker ``http_request`` and sandbox ``bash``).
+    """
+    return hashlib.sha256(f"{run_id}\0{call_key}".encode()).hexdigest()
 
 
 def has_inflight(run_id: str, call_key: str) -> bool:
@@ -93,7 +115,11 @@ async def _run_tool_task(
     try:
         try:
             result = await invoke_run_tool(
-                run=run, account_id=run.account_id, tool_name=tool_name, tool_input=tool_input
+                run=run,
+                account_id=run.account_id,
+                call_key=call_key,
+                tool_name=tool_name,
+                tool_input=tool_input,
             )
         except Exception as exc:  # backstop — invoke_run_tool returns dicts, never raises
             log.exception("run_tool.unexpected", run_id=run.id, tool=tool_name)
@@ -140,10 +166,14 @@ def gate_run_tool(run: WfRun, tool_name: str) -> dict[str, Any] | None:
 
 
 async def invoke_run_tool(
-    *, run: WfRun, account_id: str, tool_name: str, tool_input: Any
+    *, run: WfRun, account_id: str, call_key: str, tool_name: str, tool_input: Any
 ) -> dict[str, Any]:
     """Dispatch one declared tool for a run. Always returns a dict (success or ``{"error": …}``);
-    never raises — gating, validation, and handler errors all surface as recoverable values."""
+    never raises — gating, validation, and handler errors all surface as recoverable values.
+
+    ``call_key`` is the run-frontier key for this call; for ``http_request`` it mints the
+    per-call idempotency key (:func:`idempotency_key`) threaded into the outbound request so
+    a crash re-drive dedupes at the upstream (#830)."""
     if (err := gate_run_tool(run, tool_name)) is not None:
         return err
 
@@ -182,7 +212,10 @@ async def invoke_run_tool(
             )
 
         return await _do_http_request(
-            servers=run.http_servers, arguments=args, resolve_auth=resolve_auth
+            servers=run.http_servers,
+            arguments=args,
+            resolve_auth=resolve_auth,
+            idempotency_key=idempotency_key(run.id, call_key),
         )
     if tool_name == "web_search":
         return await web_search_handler("", args)

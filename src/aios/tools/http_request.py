@@ -213,11 +213,19 @@ async def _do_http_request(
     servers: list[HttpServerSpec],
     arguments: dict[str, Any],
     resolve_auth: Callable[[str], Awaitable[tuple[str | None, dict[str, str]]]],
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """The owner-agnostic core: match a path against ``servers``' route allowlist,
     author the ``Authorization`` header via the injected ``resolve_auth``, and make the
     request. Shared by the session handler (servers = agent's) and the workflow-run
     dispatcher (servers = run's snapshot); the core never learns which principal it serves.
+
+    ``idempotency_key`` (workflow-run path only): when set, sent as the worker-managed
+    ``Idempotency-Key`` request header so a re-fired call across a crash re-drive dedupes
+    at the upstream (#830). It is worker-managed like ``Authorization``/``Host`` — a
+    caller-supplied ``Idempotency-Key`` in ``headers`` never displaces the minted value,
+    or a script could defeat dedup by forging a fresh key per re-drive. The session path
+    passes ``None`` (no stable per-call key) and no header is added.
     """
     server_ref = arguments["server_ref"]
     path = arguments["path"]
@@ -261,6 +269,14 @@ async def _do_http_request(
         k: v for k, v in caller_headers.items() if k.lower() not in _RESERVED_HEADERS
     }
     request_headers.update(auth_headers)
+    # A minted idempotency key is worker-managed: drop any caller-supplied
+    # ``Idempotency-Key`` (case-insensitively) and set the minted one, so a script
+    # cannot forge a fresh key per re-drive and defeat upstream dedup.
+    if idempotency_key is not None:
+        request_headers = {
+            k: v for k, v in request_headers.items() if k.lower() != "idempotency-key"
+        }
+        request_headers["Idempotency-Key"] = idempotency_key
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 from aios.models.agents import HttpPermissionPolicy, HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.workflows import run_tools
-from aios.workflows.run_tools import invoke_run_tool
+from aios.workflows.run_tools import idempotency_key, invoke_run_tool
 from aios.workflows.wf_script_host import tool
 
 
@@ -28,7 +28,11 @@ async def test_undeclared_tool_is_recoverable_error() -> None:
     # web_search is a run tool, but the workflow didn't declare it → recoverable value.
     run = _run(tools=[])
     out = await invoke_run_tool(
-        run=run, account_id="acc_t", tool_name="web_search", tool_input={"query": "x"}
+        run=run,
+        account_id="acc_t",
+        call_key="ck_1",
+        tool_name="web_search",
+        tool_input={"query": "x"},
     )
     assert "error" in out and "declared" in out["error"]
 
@@ -37,7 +41,9 @@ async def test_non_run_tool_rejected() -> None:
     # read is an out-of-scope sandbox tool — not callable from a run, even if
     # (somehow) declared. (bash IS run-callable now; it routes to the run sandbox.)
     run = _run(tools=[ToolSpec(type="read")])
-    out = await invoke_run_tool(run=run, account_id="acc_t", tool_name="read", tool_input={})
+    out = await invoke_run_tool(
+        run=run, account_id="acc_t", call_key="ck_1", tool_name="read", tool_input={}
+    )
     assert "error" in out and "workflow run" in out["error"]
 
 
@@ -66,7 +72,11 @@ async def test_web_search_routed_when_declared() -> None:
         run_tools, "web_search_handler", new=AsyncMock(return_value={"results": ["R"]})
     ) as handler:
         out = await invoke_run_tool(
-            run=run, account_id="acc_t", tool_name="web_search", tool_input={"query": "x"}
+            run=run,
+            account_id="acc_t",
+            call_key="ck_1",
+            tool_name="web_search",
+            tool_input={"query": "x"},
         )
     assert out == {"results": ["R"]}
     handler.assert_awaited_once_with("", {"query": "x"})  # owner-agnostic: empty owner id
@@ -75,7 +85,7 @@ async def test_web_search_routed_when_declared() -> None:
 async def test_invalid_args_surface_a_schema_error() -> None:
     run = _run(tools=[ToolSpec(type="web_search")])
     out = await invoke_run_tool(
-        run=run, account_id="acc_t", tool_name="web_search", tool_input={}
+        run=run, account_id="acc_t", call_key="ck_1", tool_name="web_search", tool_input={}
     )  # missing required "query"
     assert "error" in out
 
@@ -89,9 +99,12 @@ async def test_http_request_routed_to_the_run_resolver() -> None:
     )
     captured: dict[str, Any] = {}
 
-    async def _fake_do(*, servers: Any, arguments: Any, resolve_auth: Any) -> dict[str, Any]:
+    async def _fake_do(
+        *, servers: Any, arguments: Any, resolve_auth: Any, idempotency_key: Any = None
+    ) -> dict[str, Any]:
         captured["servers"] = servers
         captured["auth"] = await resolve_auth("https://x")  # exercise the injected resolver
+        captured["idempotency_key"] = idempotency_key
         return {"status": 200}
 
     with (
@@ -107,6 +120,7 @@ async def test_http_request_routed_to_the_run_resolver() -> None:
         out = await invoke_run_tool(
             run=run,
             account_id="acc_t",
+            call_key="ck_1",
             tool_name="http_request",
             tool_input={"server_ref": "api", "path": "/p", "method": "GET"},
         )
@@ -115,13 +129,45 @@ async def test_http_request_routed_to_the_run_resolver() -> None:
     assert captured["servers"] == run.http_servers  # the run's snapshot
     assert captured["auth"] == ("vlt", {"Authorization": "Bearer t"})
     run_resolver.assert_awaited_once()  # the run-scoped resolver, not the session one
+    # The run path mints an idempotency key from (run_id, call_key) and threads it in,
+    # so a crash re-drive's re-fired POST dedupes at the upstream (#830).
+    assert captured["idempotency_key"] == idempotency_key("wfr_1", "ck_1")
+
+
+def test_idempotency_key_is_stable_per_call_and_distinct_across_calls() -> None:
+    """The minted key is a pure function of ``(run_id, call_key)``: a crash re-drive
+    (same run, same call_key) reproduces the SAME key so the upstream dedupes; distinct
+    calls (different call_key) get distinct keys so unrelated effects are not collapsed."""
+    k1 = idempotency_key("wfr_1", "ck_a")
+    # Stable across re-derivation (the re-drive case).
+    assert idempotency_key("wfr_1", "ck_a") == k1
+    # Distinct per call_key within a run.
+    assert idempotency_key("wfr_1", "ck_b") != k1
+    # Distinct per run.
+    assert idempotency_key("wfr_2", "ck_a") != k1
+    # Opaque, fixed-width hex (sha256) — no raw call_key punctuation leaks through.
+    assert len(k1) == 64 and all(c in "0123456789abcdef" for c in k1)
+
+
+def test_idempotency_key_matches_the_bash_sandbox_derivation() -> None:
+    """The http_request key uses the SAME derivation the bash sandbox exports as
+    ``$AIOS_IDEMPOTENCY_KEY`` (sha256 of ``run_id\\0call_key``), so an author sees one
+    consistent dedup contract across both run-tool execution classes."""
+    import hashlib
+
+    expected = hashlib.sha256(b"wfr_1\x00ck_1").hexdigest()
+    assert idempotency_key("wfr_1", "ck_1") == expected
 
 
 async def test_disabled_tool_is_treated_as_undeclared() -> None:
     # A declared-but-disabled tool is invisible to the run (fail-closed), like a session.
     run = _run(tools=[ToolSpec(type="web_search", enabled=False)])
     out = await invoke_run_tool(
-        run=run, account_id="acc_t", tool_name="web_search", tool_input={"query": "x"}
+        run=run,
+        account_id="acc_t",
+        call_key="ck_1",
+        tool_name="web_search",
+        tool_input={"query": "x"},
     )
     assert "error" in out and "declared" in out["error"]
 
@@ -139,6 +185,7 @@ async def test_always_ask_route_is_denied_from_a_run() -> None:
     out = await invoke_run_tool(
         run=run,
         account_id="acc_t",
+        call_key="ck_1",
         tool_name="http_request",
         tool_input={"server_ref": "api", "path": "/things/1", "method": "GET"},
     )
