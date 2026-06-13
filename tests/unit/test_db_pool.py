@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -10,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import structlog
 
-from aios.db.pool import create_pool, normalize_dsn
+from aios.db.pool import _register_jsonb_codec, create_pool, normalize_dsn
 
 
 def _make_fake_pool(pg_max_connections: str) -> MagicMock:
@@ -110,3 +111,28 @@ async def test_raises_when_asyncpg_returns_none() -> None:
         pytest.raises(RuntimeError),
     ):
         await create_pool("postgresql://stub/db")
+
+
+@pytest.mark.asyncio
+async def test_pool_registers_jsonb_codec_init() -> None:
+    """create_pool wires _register_jsonb_codec as the pool init callback."""
+    fake_pool = _make_fake_pool("200")
+    with patch(
+        "aios.db.pool.asyncpg.create_pool", new=AsyncMock(return_value=fake_pool)
+    ) as mock_create:
+        await create_pool("postgresql://stub/db")
+        _, kwargs = mock_create.call_args
+        assert kwargs["init"] is _register_jsonb_codec
+
+
+@pytest.mark.asyncio
+async def test_register_jsonb_codec_uses_json_round_trip() -> None:
+    """The init callback registers the pg_catalog jsonb codec with json en/decoders."""
+    conn = AsyncMock()
+    await _register_jsonb_codec(conn)
+    conn.set_type_codec.assert_awaited_once_with(
+        "jsonb",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )

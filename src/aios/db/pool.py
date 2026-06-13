@@ -7,6 +7,7 @@ The API and worker processes each construct their own pool via
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import asyncpg
@@ -51,6 +52,24 @@ def listener_application_name(instance_id: str | None = None) -> str:
     return f"aios-listener:{iid}"[:63]
 
 
+async def _register_jsonb_codec(conn: asyncpg.Connection[Any]) -> None:
+    """Pool ``init`` callback: make JSONB cross the seam as native Python.
+
+    Without a codec, asyncpg returns JSONB columns as raw JSON *strings* on read
+    and demands pre-serialized strings on write, forcing every call site to
+    hand-roll ``json.loads``/``json.dumps``. Registering the standard codec once,
+    on every pooled connection, enforces the impedance boundary at the pool
+    instead of at ~140 vigilant call sites: reads return parsed Python and writes
+    accept bare dicts/lists.
+    """
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
+
+
 async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> asyncpg.Pool[Any]:
     """Create a new asyncpg pool against ``db_url``."""
     # asyncpg exposes no client-side keepalive kwarg, so the statement/idle
@@ -61,6 +80,7 @@ async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> a
         dsn=normalize_dsn(db_url),
         min_size=min_size,
         max_size=max_size,
+        init=_register_jsonb_codec,
         server_settings={
             "statement_timeout": "30000",
             "idle_in_transaction_session_timeout": "60000",

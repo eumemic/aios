@@ -31,9 +31,12 @@ from aios.errors import NotFoundError
 def parse_jsonb(raw: Any) -> Any:
     """Normalize a JSONB cell to its parsed Python form.
 
-    asyncpg returns JSONB as a raw JSON string by default (no codec is
-    registered on the pool); the ``isinstance`` guard also accepts an
-    already-parsed dict/list, which is what callers want either way.
+    The pool now registers a ``jsonb`` codec (:func:`aios.db.pool._register_jsonb_codec`),
+    so pool-sourced reads already arrive as parsed Python and this function is a
+    passthrough — the ``isinstance(raw, str)`` branch never fires on pool rows.
+    The guard is retained so the helper stays safe over the incremental Stage 2
+    sweep that deletes its ~140 call sites; once those are gone, this helper is
+    removed too.
     """
     return json.loads(raw) if isinstance(raw, str) else raw
 
