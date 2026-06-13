@@ -26,11 +26,15 @@ from aios.harness.context import (
 )
 from aios.models.events import Event
 from aios.sandbox.volumes import session_attachments_dir
+from tests.helpers.images import valid_jpeg_bytes
 
 # These tests exercise attachment/vision rendering, not the `received=` envelope
 # (their assertions are substring checks). Inject a fixed created_at so callers
 # needn't thread one through; the resulting `received` field is inert here.
 _CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+
+_VALID_JPEG = valid_jpeg_bytes()
 
 
 def render_user_event(
@@ -92,7 +96,7 @@ def _user_event(
 class TestVisionAwareRendering:
     def test_inlinable_image_emits_image_url_part(self, temp_workspace_root: Path) -> None:
         sandbox_path = _stage_image(
-            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", b"jpegbytes"
+            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", _VALID_JPEG
         )
         event = _user_event(
             content="hello",
@@ -100,7 +104,7 @@ class TestVisionAwareRendering:
                 {
                     "filename": "photo.jpg",
                     "content_type": "image/jpeg",
-                    "size": len(b"jpegbytes"),
+                    "size": len(_VALID_JPEG),
                     "in_sandbox_path": sandbox_path,
                 }
             ],
@@ -119,9 +123,47 @@ class TestVisionAwareRendering:
         assert content[1] == {
             "type": "image_url",
             "image_url": {
-                "url": f"data:image/jpeg;base64,{base64.b64encode(b'jpegbytes').decode()}"
+                "url": f"data:image/jpeg;base64,{base64.b64encode(_VALID_JPEG).decode()}"
             },
         }
+
+    def test_undecodable_under_cap_image_falls_back_to_marker(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """An image-typed attachment under the inline cap whose bytes Pillow
+        cannot decode (a corrupt body behind a valid JPEG magic prefix, or a
+        zero-byte file) must degrade to a text marker, NOT be inlined.
+
+        Providers full-decode an inline image and 400 on such bytes; the bytes
+        are immutable in the event log, so inlining them re-sends the rejected
+        part on every wake — bricking the turn into a terminal error the model
+        never sees (it's a provider-side 400, not something the model emitted).
+        The render boundary must apply the provider's own decodability verdict.
+        """
+        corrupt = b"\xff\xd8\xff" + b"garbage" * 4  # valid JPEG magic, undecodable body
+        sandbox_path = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-bad.jpg", corrupt)
+        event = _user_event(
+            content="look",
+            attachments=[
+                {
+                    "filename": "bad.jpg",
+                    "content_type": "image/jpeg",
+                    "size": len(corrupt),
+                    "in_sandbox_path": sandbox_path,
+                }
+            ],
+        )
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="model/vision",
+            session_id="sess-1",
+        )
+        # Marker-only render: content collapses to a string (no image_url part).
+        assert isinstance(msg["content"], str), "undecodable image must not be inlined"
+        assert "[image: bad.jpg" in msg["content"]
+        assert "/mnt/attachments/echo/evt-1-bad.jpg" in msg["content"]
 
     def test_non_dict_attachment_record_is_skipped(self, temp_workspace_root: Path) -> None:
         """A non-dict element in ``metadata.attachments`` must not crash the renderer.
@@ -156,14 +198,14 @@ class TestVisionAwareRendering:
         """A valid record next to malformed ones still renders correctly —
         the malformed entries are skipped, the valid one inlines as usual."""
         sandbox_path = _stage_image(
-            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", b"jpegbytes"
+            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", _VALID_JPEG
         )
         mixed: list[Any] = [
             "stray-string",
             {
                 "filename": "photo.jpg",
                 "content_type": "image/jpeg",
-                "size": len(b"jpegbytes"),
+                "size": len(_VALID_JPEG),
                 "in_sandbox_path": sandbox_path,
             },
             None,
@@ -221,7 +263,7 @@ class TestVisionAwareRendering:
         """
         oversize = vision.INLINE_SIZE_CAP_BYTES + 1
         _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-big.jpg", b"\0" * oversize)
-        inline_payload = b"resizedjpegbytes"
+        inline_payload = _VALID_JPEG
         inline_sandbox_path = _stage_image(
             temp_workspace_root,
             "sess-1",
@@ -365,7 +407,7 @@ class TestVisionAwareRendering:
         correct independent of what its caller happens to prepend.
         """
         sandbox_path = _stage_image(
-            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", b"PNG"
+            temp_workspace_root, "sess-1", "echo", "evt-1-photo.jpg", _VALID_JPEG
         )
         msg: dict[str, Any] = {"role": "user", "content": ""}  # empty leading text
         _apply_attachments(
@@ -374,7 +416,7 @@ class TestVisionAwareRendering:
                 {
                     "filename": "photo.jpg",
                     "content_type": "image/jpeg",
-                    "size": 3,
+                    "size": len(_VALID_JPEG),
                     "in_sandbox_path": sandbox_path,
                 }
             ],
@@ -404,7 +446,7 @@ class TestVisionAwareRendering:
         declarations from before the fix, so the renderer is the layer
         that unwedges them at replay time.
         """
-        jpeg_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+        jpeg_bytes = _VALID_JPEG
         sandbox_path = _stage_image(
             temp_workspace_root, "sess-1", "echo", "evt-1-lies.png", jpeg_bytes
         )
@@ -442,7 +484,7 @@ class TestVisionAwareRendering:
         pre-#409 ``workspace_root/session_id`` synthetic path."""
         nested = (temp_workspace_root / "acct-1" / "sess-1").resolve()
         nested.mkdir(parents=True)
-        payload = b"JPGNESTED"
+        payload = _VALID_JPEG
         (nested / "img.png").write_bytes(payload)
 
         event = _user_event(
@@ -511,7 +553,7 @@ class TestVisionAwareRendering:
         assert "[image: img.png" in msg["content"]
 
     def test_multiple_attachments_mixed(self, temp_workspace_root: Path) -> None:
-        a = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-a.jpg", b"AAA")
+        a = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-a.jpg", _VALID_JPEG)
         b = _stage_image(temp_workspace_root, "sess-1", "echo", "evt-1-b.pdf", b"PDF")
         event = _user_event(
             content="two",
@@ -519,7 +561,7 @@ class TestVisionAwareRendering:
                 {
                     "filename": "a.jpg",
                     "content_type": "image/jpeg",
-                    "size": 3,
+                    "size": len(_VALID_JPEG),
                     "in_sandbox_path": a,
                 },
                 {

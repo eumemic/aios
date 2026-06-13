@@ -534,6 +534,43 @@ def render_user_event(
     return {"role": "user", "content": marker}
 
 
+def _image_bytes_decode(data: bytes) -> bool:
+    """True iff Pillow can FULLY decode ``data`` as an image.
+
+    The inline gate (:func:`~aios.harness.vision.can_inline_image`) checks
+    only the mime prefix and the byte cap, and :func:`make_image_url_part`
+    only magic-byte-sniffs a 24-byte header — neither proves the pixels
+    decode. Providers DO full-decode an inline image and reject (HTTP 400)
+    bytes they can't, so the render boundary must apply the same verdict, or
+    an undecodable attachment (truncated/corrupt body behind a valid magic
+    prefix, or a zero-byte file) bricks the turn on every wake. ``img.load()``
+    forces the full decode — ``verify()`` passes a truncated body.
+
+    This predicate is TOTAL: any decode failure means "don't inline." Pillow
+    raises a wide, format-plugin-dependent set on hostile bytes —
+    ``UnidentifiedImageError``/``OSError`` (garbage/zero-byte/truncated),
+    ``DecompressionBombError`` (a pixel bomb we must not hand to the provider),
+    and ``ValueError``/``SyntaxError``/``struct.error`` from individual format
+    decoders. Catching only a subset would let an exotic decoder error escape
+    to ``build_messages``' poison backstop, which quarantines the WHOLE event
+    (losing the message text and any sibling attachments) rather than degrading
+    just this one attachment to a marker — so catch ``Exception`` (never
+    ``BaseException``: control-flow signals still propagate).
+    """
+    if not data:
+        return False
+    from io import BytesIO
+
+    from PIL import Image
+
+    try:
+        with Image.open(BytesIO(data)) as img:
+            img.load()
+    except Exception:
+        return False
+    return True
+
+
 def _apply_attachments(
     msg: dict[str, Any],
     attachments: list[Any],
@@ -600,6 +637,22 @@ def _apply_attachments(
                 "context.attachment_read_failed",
                 path=str(host_path),
                 error=str(err),
+            )
+            marker_lines.append(text_marker(record))
+            continue
+        if not _image_bytes_decode(payload):
+            # Bytes that pass the mime+size gate but don't actually decode (a
+            # truncated/corrupt body behind a valid magic prefix, or a
+            # zero-byte file). The provider full-decodes and 400s on these,
+            # and the bytes are immutable in the log, so inlining them re-sends
+            # the rejected part on every wake — terminally erroring the turn
+            # the model can't see. Degrade to a marker the model can ``read``,
+            # the same stance as the read-failure branch above and the
+            # build_messages poison backstop.
+            log.warning(
+                "context.attachment_undecodable",
+                path=str(host_path),
+                filename=record.get("filename"),
             )
             marker_lines.append(text_marker(record))
             continue
