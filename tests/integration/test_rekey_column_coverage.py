@@ -26,15 +26,11 @@ from aios.cli.commands.ops import _REKEY_COLUMNS
 from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
-# ``credentials`` (migration 0001) is the pre-multi-tenancy, pre-vaults
-# credential store, superseded by ``vaults``/``vault_credentials`` (0005) and
-# read/written by NO current code. It has no ``account_id`` column, so the
-# per-account-subkey scheme ``rekey`` uses cannot apply to it — it can be
-# neither rekeyed in place nor blindly added to ``_REKEY_COLUMNS``. Removing it
-# (and the ``agents``/``agent_versions`` ``credential_id`` FKs) is a separate
-# destructive-migration decision tracked outside this guard, so the table is
-# excluded here rather than silently passing the coverage assertion.
-_LEGACY_UNREKEYABLE = {("credentials", "ciphertext")}
+# The legacy ``credentials`` table (migration 0001) was the one historically
+# un-rekeyable encrypted column — no ``account_id`` for the per-account subkey,
+# read/written by no current code. Migration 0099 dropped it, so the coverage
+# assertion below is now TOTAL: every ``ciphertext`` column in the live schema
+# must be covered by ``_REKEY_COLUMNS``, with no exceptions.
 
 
 @pytest.fixture(scope="module")
@@ -69,7 +65,7 @@ def test_rekey_covers_every_encrypted_column(postgres: object) -> None:
 
         schema_cols = {(r["table_name"], r["column_name"]) for r in rows}
         rekey_cols = {(c.table, c.ciphertext) for c in _REKEY_COLUMNS}
-        missing = schema_cols - rekey_cols - _LEGACY_UNREKEYABLE
+        missing = schema_cols - rekey_cols
         assert not missing, (
             "encrypted columns present in the schema but NOT re-encrypted by "
             "`aios rekey` — a vault-key rotation would orphan these rows under "
