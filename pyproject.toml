@@ -23,6 +23,11 @@ dependencies = [
     "psycopg[binary]>=3.2",     # required by procrastinate; aios uses asyncpg directly
     "croniter>=3.0",            # cron expression validation + next-fire computation (scheduled_tasks)
     "dateparser>=1.2",          # natural-language time parsing for schedule_wake's `at` argument
+    # dateparser resolves its TIMEZONE setting through pytz and raises
+    # pytz's UnknownTimeZoneError for an unknown `tz`; schedule_wake catches
+    # that to reject bad model input as a client error. Declared directly
+    # (not relied on transitively) so the caught exception type is pinned.
+    "pytz>=2024.1",
     # Bundled IANA tz database so zoneinfo resolves named zones for per-account
     # received-at rendering regardless of whether the deploy image ships a
     # system tzdb (otherwise tzdata is only a win32-marked transitive dep).
@@ -179,6 +184,8 @@ module = [
     "croniter.*",
     "dateparser",
     "dateparser.*",
+    "pytz",
+    "pytz.*",
     "jsonschema",
 ]
 ignore_missing_imports = true
