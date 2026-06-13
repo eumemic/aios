@@ -1172,7 +1172,7 @@ async def _unresolved_tool_calls(
     # string-interpolated into the SQL.
     asst_rows = await conn.fetch(
         """
-        SELECT session_id, data
+        SELECT session_id, data, created_at
           FROM events
          WHERE session_id = ANY($1::text[])
            AND account_id = $2
@@ -1202,7 +1202,13 @@ async def _unresolved_tool_calls(
         completed: set[str] = results_by_sid.get(sid, set())
         for tc in data.get("tool_calls") or []:
             if tc.get("id") and tc["id"] not in completed:
-                out.setdefault(sid, []).append(tc)
+                # Shallow copy so the read-model carries the parent
+                # assistant turn's created_at without mutating the parsed
+                # source dict (parse_jsonb may return a shared reference if
+                # a JSONB codec is ever registered). Connector-SSE consumers
+                # build their own explicit output dicts, so this extra key
+                # never leaks into their payloads.
+                out.setdefault(sid, []).append({**tc, "_pending_since": row["created_at"]})
     return out
 
 
@@ -1246,7 +1252,8 @@ async def list_unresolved_tool_calls_batch(
     unresolved on an earlier turn still appears in ``Session.awaiting``
     (#741).  Used by :func:`services.sessions.compute_awaiting` to build the
     ``Session.awaiting`` derived view. Returned dicts have keys
-    ``tool_call_id``, ``name``, ``arguments``, ``has_allow_lifecycle``
+    ``tool_call_id``, ``name``, ``arguments``, ``has_allow_lifecycle``,
+    ``pending_since`` (the parent assistant event's ``created_at``)
     — the caller classifies kind / needs_confirm using ``agent`` (and
     the tool's ``classify_permission`` for arg-aware routes like
     ``http_request``).
@@ -1288,6 +1295,7 @@ async def list_unresolved_tool_calls_batch(
                     "name": name,
                     "arguments": fn.get("arguments", "{}"),
                     "has_allow_lifecycle": tc["id"] in allows,
+                    "pending_since": tc["_pending_since"],
                 }
             )
         if entries:

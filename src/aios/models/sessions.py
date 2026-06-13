@@ -114,9 +114,9 @@ class SessionUsage(BaseModel):
 class AwaitingToolCall(BaseModel):
     """One pending tool call the harness will not dispatch itself.
 
-    Derived view on session reads. Each entry is a tool_call in the
-    latest assistant message with no paired tool_result and no
-    in-process executor:
+    Derived view on session reads. Each entry is a tool_call on any
+    assistant turn (#741) with no paired tool_result and no in-process
+    executor:
 
     * ``kind == "custom"`` — client-executed; awaits POST to
       ``/sessions/:id/tool-results`` (operator-facing) or
@@ -125,11 +125,28 @@ class AwaitingToolCall(BaseModel):
       confirmed; awaits POST to ``/sessions/:id/tool-confirmations``.
       Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't
       appear here — they're harness-internal.
+
+    ``pending_since`` is the ``created_at`` of the assistant event that
+    declared this tool_call (tz-aware UTC). For a ``kind == "custom"``
+    call an entry exists from the moment the assistant declares it until
+    a result is posted, so a healthy in-flight connector call (e.g.
+    ``signal_react``, ~2s) is otherwise indistinguishable from a stuck
+    one whose client died. Clients age-threshold custom calls against
+    ``pending_since`` (fresh = in-flight, present quietly; stale = stuck,
+    alert); builtin/mcp are approval-gated and alert immediately.
+
+    This is the SAME clock the sweep's ``client_tool_call_max_age_seconds``
+    abandonment bound (#752) keys off — the assistant turn's
+    ``created_at``. The two thresholds are intentionally different
+    timescales for different purposes (a cosmetic seconds-scale UI hint
+    here vs. an irreversible 24h "client is gone" abandonment there), not
+    an inconsistency.
     """
 
     tool_call_id: str
     name: str
     kind: Literal["builtin", "mcp", "custom"]
+    pending_since: datetime
 
 
 class SessionCreate(BaseModel):

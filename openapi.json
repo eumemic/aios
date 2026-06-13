@@ -10329,16 +10329,22 @@
               "custom"
             ],
             "title": "Kind"
+          },
+          "pending_since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Pending Since"
           }
         },
         "type": "object",
         "required": [
           "tool_call_id",
           "name",
-          "kind"
+          "kind",
+          "pending_since"
         ],
         "title": "AwaitingToolCall",
-        "description": "One pending tool call the harness will not dispatch itself.\n\nDerived view on session reads. Each entry is a tool_call in the\nlatest assistant message with no paired tool_result and no\nin-process executor:\n\n* ``kind == \"custom\"`` \u2014 client-executed; awaits POST to\n  ``/sessions/:id/tool-results`` (operator-facing) or\n  ``/connectors/runtime/tool-results`` (runtime-container-facing).\n* ``kind == \"builtin\" | \"mcp\"`` \u2014 ``always_ask``-gated and not yet\n  confirmed; awaits POST to ``/sessions/:id/tool-confirmations``.\n  Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't\n  appear here \u2014 they're harness-internal."
+        "description": "One pending tool call the harness will not dispatch itself.\n\nDerived view on session reads. Each entry is a tool_call on any\nassistant turn (#741) with no paired tool_result and no in-process\nexecutor:\n\n* ``kind == \"custom\"`` \u2014 client-executed; awaits POST to\n  ``/sessions/:id/tool-results`` (operator-facing) or\n  ``/connectors/runtime/tool-results`` (runtime-container-facing).\n* ``kind == \"builtin\" | \"mcp\"`` \u2014 ``always_ask``-gated and not yet\n  confirmed; awaits POST to ``/sessions/:id/tool-confirmations``.\n  Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't\n  appear here \u2014 they're harness-internal.\n\n``pending_since`` is the ``created_at`` of the assistant event that\ndeclared this tool_call (tz-aware UTC). For a ``kind == \"custom\"``\ncall an entry exists from the moment the assistant declares it until\na result is posted, so a healthy in-flight connector call (e.g.\n``signal_react``, ~2s) is otherwise indistinguishable from a stuck\none whose client died. Clients age-threshold custom calls against\n``pending_since`` (fresh = in-flight, present quietly; stale = stuck,\nalert); builtin/mcp are approval-gated and alert immediately.\n\nThis is the SAME clock the sweep's ``client_tool_call_max_age_seconds``\nabandonment bound (#752) keys off \u2014 the assistant turn's\n``created_at``. The two thresholds are intentionally different\ntimescales for different purposes (a cosmetic seconds-scale UI hint\nhere vs. an irreversible 24h \"client is gone\" abandonment there), not\nan inconsistency."
       },
       "BindChatRequest": {
         "properties": {

@@ -292,6 +292,20 @@ class TestStaleConnectorBackfill:
         assert by_id["tc_fresh"]["name"] == SEND_TOOL
         assert by_id["tc_fresh"]["connection_id"]
         assert by_id["tc_fresh"]["arguments"] == '{"text": "hi"}'
+        # #816: the awaiting read-model now stamps each unresolved tool_call
+        # with a per-row ``pending_since`` (and an internal ``_pending_since``
+        # carrier from ``_unresolved_tool_calls``). The connector backfill
+        # builds its own explicit output dict, so neither key must leak into
+        # the transmit payload — its shape is exactly the documented set.
+        assert set(by_id["tc_fresh"]) == {
+            "session_id",
+            "tool_call_id",
+            "name",
+            "arguments",
+            "connection_id",
+            "focal_channel",
+            "workspace_path",
+        }
 
 
 class TestStaleConnectorTail:
