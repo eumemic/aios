@@ -101,6 +101,9 @@ def fake_pool_yielding_conn(conn: Any, **kwargs: Any) -> Any:
     cm.__aenter__ = AsyncMock(return_value=conn)
     cm.__aexit__ = AsyncMock(return_value=None)
     pool.acquire.return_value = cm
+    # ``asyncpg.Pool.execute`` is awaitable — used directly (no acquire) by
+    # post-commit ``pg_notify`` call sites; keep the stand-in faithful.
+    pool.execute = AsyncMock()
     return pool
 
 

@@ -35,7 +35,7 @@ import asyncpg
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
-from aios.db.listen import listen_for_session_interrupts
+from aios.db.listen import listen_for_mcp_evict_vault, listen_for_session_interrupts
 from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, create_pool, normalize_dsn
 from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
@@ -211,6 +211,7 @@ async def worker_main() -> None:
     procrastinate_opened = False
     sweep_task: asyncio.Task[None] | None = None
     interrupt_task: asyncio.Task[None] | None = None
+    mcp_evict_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
     scheduler_task: asyncio.Task[None] | None = None
     supervised_latch = asyncio.Event()
@@ -330,6 +331,15 @@ async def worker_main() -> None:
         )
         _supervise(interrupt_task, latch=supervised_latch, fatal=supervised_failure)
 
+        # Listen for operator credential-rotation NOTIFYs and evict the
+        # rotated vault's pooled MCP sessions so the new secret propagates
+        # immediately, instead of waiting out the idle TTL (#1030).
+        mcp_evict_task = asyncio.create_task(
+            _run_mcp_evict_listener(settings.db_url),
+            name="mcp_evict_listener",
+        )
+        _supervise(mcp_evict_task, latch=supervised_latch, fatal=supervised_failure)
+
         # Start event-driven scheduler. Sleeps until the next due
         # ``next_fire``, woken early by NOTIFY on
         # ``aios_scheduled_tasks_due`` (insert/delete or
@@ -401,6 +411,8 @@ async def worker_main() -> None:
             await _cancel_and_drain(sweep_task)
         if interrupt_task is not None:
             await _cancel_and_drain(interrupt_task)
+        if mcp_evict_task is not None:
+            await _cancel_and_drain(mcp_evict_task)
         if scheduler_task is not None:
             await _cancel_and_drain(scheduler_task)
         if sandbox_registry is not None:
@@ -579,4 +591,51 @@ async def _run_interrupt_listener(
             raise
         except Exception:
             log.exception("interrupt_listener.listen_failed_will_retry")
+            await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_SECONDS)
+
+
+async def _run_mcp_evict_listener(db_url: str) -> None:
+    """Drain pg_notify on the MCP-pool eviction channel and evict pooled
+    sessions for the rotated vault.
+
+    An operator credential mutation (PUT/archive/delete on a vault
+    credential, plus vault archive/delete) runs in the API process and
+    NOTIFYs ``aios_mcp_evict_vault`` with the ``vault_id``. The worker owns
+    the MCP session pool, so it LISTENs here and calls
+    :meth:`McpSessionPool.evict_by_vault` — discarding idle sessions and
+    flagging in-use ones for discard-on-release so the rotated secret
+    propagates immediately, instead of waiting out the 900s idle TTL that
+    active polling defeats (#1030).
+
+    Mirrors :func:`_run_interrupt_listener`'s survivability contract: the
+    dispatch try/except is nested INSIDE ``while True`` so a transient
+    eviction failure doesn't disable the listener for the worker's lifetime;
+    LISTEN-connection failures escape to the outer reconnect loop.
+    ``CancelledError`` propagates so worker shutdown stays clean.
+    """
+    log = get_logger("aios.worker.mcp_evict_listener")
+    while True:
+        try:
+            async with listen_for_mcp_evict_vault(db_url) as queue:
+                while True:
+                    try:
+                        vault_id = await queue.get()
+                        if vault_id == "":
+                            raise ConnectionError("mcp evict LISTEN connection terminated")
+                        pool = runtime.mcp_session_pool
+                        if pool is None:
+                            # Pool not yet initialized (startup race) or already
+                            # torn down — nothing to evict; the idle reaper and
+                            # a fresh pool cover the gap.
+                            continue
+                        await pool.evict_by_vault(vault_id)
+                        log.info("mcp_evict_listener.dispatch", vault_id=vault_id)
+                    except ConnectionError:
+                        raise
+                    except Exception:
+                        log.exception("mcp_evict_listener.dispatch_failed")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("mcp_evict_listener.listen_failed_will_retry")
             await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_SECONDS)

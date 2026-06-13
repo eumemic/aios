@@ -161,6 +161,11 @@ class _Entry:
         # vector (a vault whose tenant never returns) — defense-in-depth
         # signed off in #459's planning round, not silent accretion.
         self.last_used = last_used
+        # Set by :meth:`McpSessionPool.evict_by_vault` when an operator rotates
+        # the vault credential while this entry is checked out. The entry's live
+        # ClientSession baked in the OLD bearer at open time, so it must not
+        # return to idle for reuse: :meth:`release` discards it instead (#1030).
+        self.discard_on_release = False
 
     async def close(self) -> None:
         """Signal the owner task to exit its contexts and await its completion.
@@ -322,7 +327,16 @@ class McpSessionPool:
         application-level HTTP error (the transport is unaffected). Stamps
         ``last_used`` (the reaper's staleness signal) and notifies one waiter
         that a slot is free.
+
+        Exception: if :meth:`evict_by_vault` flagged this entry mid-checkout
+        (an operator rotated the vault credential), the entry's live session
+        still carries the OLD bearer, so it is DISCARDED here instead of being
+        returned to idle — the next acquire then opens a fresh session on the
+        rotated secret (#1030).
         """
+        if entry.discard_on_release:
+            await self.discard(url, vault_id, headers_key, entry)
+            return
         entry.last_used = time.monotonic()
         key: _PoolKey = (url, vault_id, headers_key)
         cond = self._condition_for(key)
@@ -352,6 +366,61 @@ class McpSessionPool:
         self._close_tasks.add(task)
         task.add_done_callback(self._close_tasks.discard)
         log.info("mcp_pool.discarded", url=url)
+
+    async def evict_by_vault(self, vault_id: str) -> None:
+        """Discard every pooled session keyed on ``vault_id`` — an operator
+        rotated (PUT/archive/delete) this vault's credential (#1030).
+
+        The resolved bearer is baked into each live ``ClientSession`` at open
+        time and the pool key is stable across token changes (by design, for
+        OAuth-refresh reuse), so a rotated ``secret_value`` would otherwise keep
+        serving the OLD token until the 900s idle reaper — which active polling
+        defeats. This is the explicit eviction signal that closes that gap.
+
+        Idle entries are closed and dropped immediately. In-use (checked-out)
+        entries can't be torn down under their owner — closing mid-call would
+        cancel the in-flight transport — so they are FLAGGED
+        (``discard_on_release``); :meth:`release` then discards instead of
+        returning them to idle. Either way no stale-token session survives to a
+        later acquire.
+
+        Fired cross-process: the credential mutation runs in the API process,
+        the pool lives in the worker, so the worker's evict-listener invokes
+        this on a NOTIFY (see ``MCP_EVICT_VAULT_CHANNEL`` /
+        ``_run_mcp_evict_listener``). Unconditional — no config knob.
+        """
+        idle_closed = 0
+        flagged = 0
+        # Snapshot the matching idle entries under each key's Condition, then
+        # close them outside the lock (close awaits the owner task, which the
+        # Condition holder must not block on). Mirrors the reaper's TOCTOU
+        # shape: re-check membership under the lock before removing.
+        for key in [k for k in self._idle if k[1] == vault_id]:
+            cond = self._condition_for(key)
+            to_close: list[_Entry] = []
+            async with cond:
+                idle = self._idle.get(key)
+                if idle is None:
+                    continue
+                to_close = list(idle)
+                del self._idle[key]
+            for entry in to_close:
+                idle_closed += 1
+                await entry.close()
+        # Flag in-use entries so their release discards them.
+        for key in [k for k in self._in_use if k[1] == vault_id]:
+            cond = self._condition_for(key)
+            async with cond:
+                for entry in self._in_use.get(key, set()):
+                    entry.discard_on_release = True
+                    flagged += 1
+        if idle_closed or flagged:
+            log.info(
+                "mcp_pool.evict_by_vault",
+                vault_id=vault_id,
+                idle_closed=idle_closed,
+                in_use_flagged=flagged,
+            )
 
     async def _reap_idle_once(self, *, idle_timeout: float, now: float) -> None:
         """Close idle entries unused longer than ``idle_timeout`` seconds.
