@@ -62,10 +62,14 @@ async def web_search_handler(session_id: str, arguments: dict[str, Any]) -> dict
             "search",
             {"query": query, "max_results": min(limit, _MAX_LIMIT), "include_images": False},
         )
+        # Tavily /search guarantees no per-entry fields, so default each one
+        # (like web_fetch). A bracket read would raise KeyError that escapes
+        # this except and — via _classify_tool_error — evicts the session's
+        # sandbox while the model sees a cryptic Python error, not a tool error.
         normalized = [
             {
-                "title": r["title"],
-                "url": r["url"],
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
                 "description": r.get("content", ""),
             }
             for r in response["results"]
@@ -77,6 +81,10 @@ async def web_search_handler(session_id: str, arguments: dict[str, Any]) -> dict
         return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"}
     except httpx.TimeoutException:
         return {"error": "Search request timed out"}
+    except (KeyError, IndexError):
+        # A 200 response missing the 'results' key — surface a legible tool
+        # error instead of letting the KeyError escape and evict the sandbox.
+        return {"error": "No results returned for query"}
 
 
 def _register() -> None:
