@@ -22,8 +22,10 @@ from aios.errors import AiosError
 from aios.harness import runtime
 from aios.harness.vision import (
     INLINE_SIZE_CAP_BYTES,
+    PROVIDER_INLINE_IMAGE_FORMATS,
     can_inline_image,
     human_size,
+    inline_image_format,
     make_image_url_part,
     supports_vision,
 )
@@ -241,6 +243,29 @@ async def _read_image(
                 f"Image at {path} exists ({human_size(size)}, {mime}) but cannot "
                 f"be inlined. Mind vision support: {vision}. "
                 f"Inline cap: {cap_mib:.2f} MiB ({INLINE_SIZE_CAP_BYTES} bytes)."
+            ),
+            is_error=False,
+        )
+
+    image_format = inline_image_format(data)
+    if image_format is None or image_format not in PROVIDER_INLINE_IMAGE_FORMATS:
+        # Passes the mime+size+vision gate but the provider will reject it:
+        # undecodable (corrupt/truncated body behind a valid magic prefix) or a
+        # decodable-but-unsupported format (e.g. a TIFF/BMP saved as .png — the
+        # .png extension skips the magic re-sniff). Inlining persists the bad
+        # data URI into the tool_result event, which build_messages replays on
+        # every wake → a 400 that terminally errors the turn the model can't
+        # see. Same decode+format gate the attachment render path applies.
+        detail = (
+            "its bytes do not decode as an image"
+            if image_format is None
+            else f"its format ({image_format}) is not one a vision model accepts "
+            "(only JPEG/PNG/GIF/WEBP)"
+        )
+        return ToolResult(
+            content=(
+                f"Image at {path} ({human_size(size)}, {mime}) cannot be inlined: "
+                f"{detail}. The file is present; use other tools to process it if needed."
             ),
             is_error=False,
         )

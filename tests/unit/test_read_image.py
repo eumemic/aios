@@ -19,6 +19,13 @@ from aios.sandbox.backends.base import CommandResult, SandboxHandle
 from aios.sandbox.volumes import session_attachments_dir, workspace_dir_for
 from aios.tools.read import read_handler
 from aios.tools.registry import ToolResult
+from tests.helpers.images import (
+    valid_gif_bytes,
+    valid_jpeg_bytes,
+    valid_png_bytes,
+    valid_tiff_bytes,
+    valid_webp_bytes,
+)
 
 
 class _StubRegistry:
@@ -131,7 +138,8 @@ class TestImageBranch:
         stub_get_session_model: Any,
     ) -> None:
         stub_get_session_model.value = "model/vision"
-        _stage_workspace_image("sess_01TEST", "screenshot.png", b"PNGbytes")
+        payload = valid_png_bytes()
+        _stage_workspace_image("sess_01TEST", "screenshot.png", payload)
 
         result = await read_handler("sess_01TEST", {"path": "/workspace/screenshot.png"})
 
@@ -141,9 +149,35 @@ class TestImageBranch:
         assert "Image: screenshot.png" in result.content[0]["text"]
         assert result.content[1] == {
             "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{base64.b64encode(b'PNGbytes').decode()}"},
+            "image_url": {"url": f"data:image/png;base64,{base64.b64encode(payload).decode()}"},
         }
         assert result.is_error is False
+
+    async def test_undecodable_or_unsupported_image_returns_marker_not_inline(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """A file routed to the image branch whose bytes don't fully decode as
+        a provider-accepted format must NOT be inlined: the provider
+        full-decodes the data URI and 400s, and the tool_result is replayed
+        verbatim on every wake — bricking the turn. Two reachable vectors:
+        (a) a TIFF saved as .png (the .png extension skips the magic re-sniff,
+        and correct_image_mime_b64 can't re-sniff TIFF), and (b) a corrupt body
+        behind a valid PNG signature. Both must degrade to an explanatory text
+        result, the same as the attachment render path's decode+format gate."""
+        stub_get_session_model.value = "model/vision"
+        corrupt_png = b"\x89PNG\r\n\x1a\n" + b"not-a-real-png" * 8  # valid magic, garbage body
+        for name, payload in (("scan.png", valid_tiff_bytes()), ("broken.png", corrupt_png)):
+            _stage_workspace_image("sess_01TEST", name, payload)
+            result = await read_handler("sess_01TEST", {"path": f"/workspace/{name}"})
+            assert isinstance(result, ToolResult)
+            assert isinstance(result.content, str), (
+                f"{name}: unsupported/undecodable image must not inline; got {result.content!r}"
+            )
+            assert "image_url" not in result.content
+            assert result.is_error is False
 
     async def test_attachment_image_inlines_for_vision_mind(
         self,
@@ -152,7 +186,7 @@ class TestImageBranch:
         stub_get_session_model: Any,
     ) -> None:
         stub_get_session_model.value = "model/vision"
-        _stage_attachment("sess_01TEST", "echo", "evt-1-photo.jpg", b"JPGbytes")
+        _stage_attachment("sess_01TEST", "echo", "evt-1-photo.jpg", valid_jpeg_bytes())
 
         result = await read_handler(
             "sess_01TEST", {"path": "/mnt/attachments/echo/evt-1-photo.jpg"}
@@ -218,7 +252,7 @@ class TestImageBranch:
         # the pre-#409 path ``workspace_dir_for`` would compute.
         nested = (temp_workspace_root / "acct-X" / "sess_01TEST").resolve()
         nested.mkdir(parents=True)
-        payload = b"PNG-NESTED"
+        payload = valid_png_bytes()
         (nested / "img.png").write_bytes(payload)
 
         handle = SandboxHandle(
@@ -427,16 +461,14 @@ class TestExtensionlessImageDetection:
     @pytest.mark.parametrize(
         ("name", "payload", "mime"),
         [
-            ("unnamed", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRrest-of-png-bytes", "image/png"),
-            (
-                "signal-abc-unnamed",
-                b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00rest",
-                "image/jpeg",
-            ),
-            ("img", b"GIF89a\x01\x00\x01\x00\x80\x00\x00rest-of-gif-bytes", "image/gif"),
-            # WebP is a RIFF container — ``RIFF<4-byte size>WEBP`` — so the
-            # discriminating tag sits at offset 8.  The 16-byte probe covers it.
-            ("photo", b"RIFF\x24\x58\x00\x00WEBPVP8 \x18\x00\x00\x00webp-body", "image/webp"),
+            # Real decodable images of each format: the magic-byte probe routes
+            # by signature AND the render gate now full-decodes, so the payloads
+            # must be genuine (not the minimal magic-prefix fragments that
+            # passed the old sniff-only path).
+            ("unnamed", valid_png_bytes(), "image/png"),
+            ("signal-abc-unnamed", valid_jpeg_bytes(), "image/jpeg"),
+            ("img", valid_gif_bytes(), "image/gif"),
+            ("photo", valid_webp_bytes(), "image/webp"),
         ],
     )
     async def test_extensionless_image_inlines_via_magic_byte_sniff(
@@ -470,7 +502,7 @@ class TestExtensionlessImageDetection:
     ) -> None:
         """Finding 1: a NON-image extension whose bytes are a real image is detected by the sniff and inlined."""
         stub_get_session_model.value = "model/vision"
-        payload = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00jpeg-mislabeled-as-dat"
+        payload = valid_jpeg_bytes()  # a real JPEG mislabeled with a .dat extension
         _stage_workspace_image("sess_01TEST", "scan.dat", payload)
         result = await read_handler("sess_01TEST", {"path": "/workspace/scan.dat"})
         assert isinstance(result, ToolResult)
@@ -526,7 +558,7 @@ class TestExtensionlessImageDetection:
     ) -> None:
         """An image extension resolves the mime from the extension alone — no probe read."""
         stub_get_session_model.value = "model/vision"
-        _stage_workspace_image("sess_01TEST", "screenshot.png", b"PNGbytes")
+        _stage_workspace_image("sess_01TEST", "screenshot.png", valid_png_bytes())
         result = await read_handler("sess_01TEST", {"path": "/workspace/screenshot.png"})
         assert isinstance(result, ToolResult)
         assert isinstance(result.content, list)
@@ -541,8 +573,8 @@ class TestExtensionlessImageDetection:
     ) -> None:
         """Outside any bind mount the probe falls back to one docker-exec (with set -o pipefail), then the full read is a second exec."""
         stub_get_session_model.value = "model/vision"
-        png_head = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-        full = png_head + b"-more-png-bytes"
+        full = valid_png_bytes()
+        png_head = full[:16]  # the head -c 16 probe sniffs the PNG signature
         stub_runtime.exec = AsyncMock(
             side_effect=[
                 CommandResult(
