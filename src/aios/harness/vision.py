@@ -98,6 +98,17 @@ def supports_vision(model: str) -> bool:
     return bool(info.get("supports_vision"))
 
 
+# Image formats every vision-capable provider in aios's routing set accepts as
+# an inline ``image_url`` — the intersection of Anthropic (jpeg/png/gif/webp)
+# and OpenAI (png/jpeg/webp/gif). Values are Pillow ``Image.format`` names
+# (uppercase). Other formats (TIFF, BMP, ICO, HEIC, AVIF, SVG) decode in Pillow
+# but the providers 400 on them, so the renderer degrades them to a text marker
+# the model can still ``read``. The check runs on the DECODED format, not the
+# declared mime — a sender can mislabel either way (a JPEG sent as image/jpg, a
+# TIFF sent as image/png), so only the decoded format is trustworthy.
+PROVIDER_INLINE_IMAGE_FORMATS = frozenset({"JPEG", "PNG", "GIF", "WEBP"})
+
+
 def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
     """True when ``model`` can see image bytes inlined as ``image_url``.
 

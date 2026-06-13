@@ -29,3 +29,10 @@ def valid_jpeg_bytes() -> bytes:
 def valid_png_bytes() -> bytes:
     """A genuinely-decodable 1x1 PNG. See :func:`_valid_image`."""
     return _valid_image("PNG")
+
+
+def valid_tiff_bytes() -> bytes:
+    """A genuinely-decodable 1x1 TIFF — a format Pillow decodes but no vision
+    provider accepts for inlining, used to exercise the render boundary's
+    provider-format gate. See :func:`_valid_image`."""
+    return _valid_image("TIFF")
