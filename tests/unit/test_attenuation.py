@@ -149,9 +149,11 @@ class TestServerSurvival:
         assert out.mcp_servers[0].headers == {"X-Toolsets": "issues"}  # launcher wins
         assert out != canon(Surface([], [d_srv], []))  # child must declare it identically
 
-    def test_http_routes_parent_wins_frozen(self) -> None:
-        # First-match-wins ordering: a child re-declaring the broad route must NOT be
-        # able to escape the launcher's earlier always_ask gate on /reports/admin.
+    def test_http_routes_path_permission_ordering_parent_wins_frozen(self) -> None:
+        # First-match-wins ordering / permission gates stay launcher-verbatim: a child
+        # re-declaring the broad route must NOT escape the launcher's earlier always_ask
+        # gate on /reports/admin, nor re-order, re-gate, or add routes. The ONLY thing a
+        # child can narrow is the per-route ``methods`` dimension (#828).
         l_routes = [
             HttpRouteSpec(
                 path_pattern="/reports/admin",
@@ -174,8 +176,117 @@ class TestServerSurvival:
             ],
         )
         out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
-        assert out.http_servers[0].routes == l_routes  # launcher-verbatim, both routes
-        assert out != canon(Surface([], [], [d_srv]))  # narrowing is rejected (R1: verbatim only)
+        # Both routes survive in launcher order with launcher permission/path/ordering;
+        # the child declared no ``methods`` so nothing is narrowed → launcher-verbatim.
+        assert out.http_servers[0].routes == l_routes
+
+    def test_http_route_method_meet_intersection(self) -> None:
+        # #828: the child narrows a launcher route's methods → sorted set intersection.
+        l_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/repos/**", methods=["GET", "POST", "DELETE"])],
+        )
+        d_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/repos/**", methods=["POST", "DELETE", "PUT"])],
+        )
+        out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+        # PUT is dropped (launcher lacks it); result sorted.
+        assert out.http_servers[0].routes[0].methods == ["DELETE", "POST"]
+
+    def test_http_route_method_meet_none_is_top(self) -> None:
+        # meet(None, X) == X ; meet(X, None) == X ; meet(None, None) == None
+        l_open = HttpServerSpec(
+            name="api", base_url="https://api", routes=[HttpRouteSpec(path_pattern="/r/**")]
+        )
+        d_get = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/r/**", methods=["GET"])],
+        )
+        out = att(Surface([], [], [d_get]), Surface([], [], [l_open]))
+        assert out.http_servers[0].routes[0].methods == ["GET"]  # meet(None, [GET]) == [GET]
+
+        l_get = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/r/**", methods=["GET"])],
+        )
+        d_open = HttpServerSpec(
+            name="api", base_url="https://api", routes=[HttpRouteSpec(path_pattern="/r/**")]
+        )
+        out2 = att(Surface([], [], [d_open]), Surface([], [], [l_get]))
+        assert out2.http_servers[0].routes[0].methods == ["GET"]  # meet([GET], None) == [GET]
+
+        out3 = att(Surface([], [], [d_open]), Surface([], [], [l_open]))
+        assert out3.http_servers[0].routes[0].methods is None  # meet(None, None) == None
+
+    def test_http_route_method_meet_empty_is_deny_all_not_dropped(self) -> None:
+        # Disjoint methods → empty intersection → methods=[] (deny-all), route KEPT
+        # so launcher ordering / permission gates are not shifted.
+        l_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/r/**", methods=["GET"])],
+        )
+        d_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/r/**", methods=["POST"])],
+        )
+        out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+        assert out.http_servers[0].routes[0].methods == []
+
+    def test_http_route_child_undeclared_path_keeps_launcher_methods(self) -> None:
+        # Child declares only /a; launcher has /a and /b. /b is emitted unchanged
+        # (child's silence does not narrow — parent-wins-frozen).
+        l_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[
+                HttpRouteSpec(path_pattern="/a", methods=["GET", "POST"]),
+                HttpRouteSpec(path_pattern="/b", methods=["GET"]),
+            ],
+        )
+        d_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/a", methods=["GET"])],
+        )
+        out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+        routes = out.http_servers[0].routes
+        assert [r.path_pattern for r in routes] == ["/a", "/b"]  # launcher order, both kept
+        assert routes[0].methods == ["GET"]  # /a narrowed
+        assert routes[1].methods == ["GET"]  # /b launcher-verbatim
+
+    def test_http_route_methods_normalized_in_canon(self) -> None:
+        srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/r/**", methods=["POST", "GET", "GET"])],
+        )
+        out = canon(Surface([], [], [srv]))
+        assert out.http_servers[0].routes[0].methods == ["GET", "POST"]  # sorted, deduped
+
+    def test_http_route_meet_is_canon_fixpoint(self) -> None:
+        # attenuate(x, x) == canonicalize(x) and attenuate(attenuate(d,l),l) == attenuate(d,l)
+        l_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/r/**", methods=["GET", "POST"])],
+        )
+        d_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/r/**", methods=["POST"])],
+        )
+        lau = Surface([], [], [l_srv])
+        dec = Surface([], [], [d_srv])
+        assert att(lau, lau) == canon(lau)
+        once = att(dec, lau)
+        assert att(once, lau) == once
 
     def test_http_server_absent_is_dropped(self) -> None:
         d_srv = HttpServerSpec(name="api", base_url="https://api")

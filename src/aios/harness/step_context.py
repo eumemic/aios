@@ -270,10 +270,13 @@ def _build_instructions_block(
 def _build_http_servers_block(http_servers: list[HttpServerSpec]) -> str:
     """Render the agent's ``http_servers`` allowlist for the system prompt.
 
-    Includes server description plus each enabled route's pattern and
-    description, so the model knows what ``http_request`` calls it can
-    make. Iteration order is ``agent.http_servers`` declaration order
-    (prefix-cache-stable across steps).
+    Includes server description plus each enabled route's allowed HTTP
+    methods, pattern, and description, so the model knows what
+    ``http_request`` calls it can make. The method prefix renders the
+    route's scoped verbs (``ANY`` when unrestricted) so the model does not
+    attempt a verb the route gate would refuse (#828). Iteration order is
+    ``agent.http_servers`` declaration order (prefix-cache-stable across
+    steps).
     """
     if not http_servers:
         return ""
@@ -288,8 +291,9 @@ def _build_http_servers_block(http_servers: list[HttpServerSpec]) -> str:
             lines.append("")
             lines.append("Routes:")
             for r in enabled_routes:
+                verbs = "ANY" if r.methods is None else ",".join(sorted(set(r.methods)))
                 suffix = f" — {r.description}" if r.description else ""
-                lines.append(f"- {r.path_pattern}{suffix}")
+                lines.append(f"- {verbs} {r.path_pattern}{suffix}")
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
 

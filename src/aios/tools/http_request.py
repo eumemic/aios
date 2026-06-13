@@ -101,10 +101,18 @@ def _find_server(servers: list[HttpServerSpec], server_ref: str) -> HttpServerSp
     return None
 
 
-def _match_route(server: HttpServerSpec, path: str) -> HttpRouteSpec | None:
+def _match_route(server: HttpServerSpec, path: str, method: str) -> HttpRouteSpec | None:
+    """First enabled route whose pattern matches ``path`` AND whose ``methods``
+    admit ``method``. ``methods is None`` means all verbs are allowed (the
+    method-dimension lattice top); a list scopes the route to exactly those
+    verbs (``[]`` = deny-all). First-match-wins on launcher route order, so a
+    method-disjoint earlier route does not shadow a later matching one."""
     for r in server.routes:
-        if r.enabled and match_glob(r.path_pattern, path):
-            return r
+        if not (r.enabled and match_glob(r.path_pattern, path)):
+            continue
+        if r.methods is not None and method not in r.methods:
+            continue
+        return r
     return None
 
 
@@ -155,20 +163,21 @@ def _classify_permission(
     leave the call unresolved (pending confirmation via
     ``POST /sessions/:id/tool-confirmations``) if the operator marked it
     ``always_ask``. Returns ``None`` for missing server / no route match
-    / bad args / query-or-fragment-bearing / dot-segment-bearing path —
-    the handler then runs and emits a typed error the model can
-    self-correct from.
+    (including method-disallowed) / bad args / query-or-fragment-bearing /
+    dot-segment-bearing path — the handler then runs and emits a typed
+    error the model can self-correct from.
     """
     server_ref = args.get("server_ref")
     path = args.get("path")
-    if not isinstance(server_ref, str) or not isinstance(path, str):
+    method = args.get("method")
+    if not isinstance(server_ref, str) or not isinstance(path, str) or not isinstance(method, str):
         return None
     if _path_rejected_reason(path) is not None:
         return None
     server = _find_server(agent.http_servers, server_ref)
     if server is None:
         return None
-    route = _match_route(server, path)
+    route = _match_route(server, path, method)
     if route is None or route.permission_policy is None:
         return None
     return route.permission_policy.type
@@ -227,10 +236,12 @@ async def _do_http_request(
     server = _find_server(servers, server_ref)
     if server is None:
         return {"error": (f"unknown server_ref {server_ref!r}; not declared on http_servers")}
-    if _match_route(server, path) is None:
+    if _match_route(server, path, method) is None:
         return {
             "error": (
-                f"path {path!r} does not match any enabled route on http_server {server_ref!r}"
+                f"{method} {path!r} does not match any enabled route on "
+                f"http_server {server_ref!r} — the path may be unlisted, or the "
+                f"route's allowed methods may not include this verb"
             )
         }
 

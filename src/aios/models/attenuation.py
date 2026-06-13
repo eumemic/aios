@@ -35,6 +35,8 @@ from __future__ import annotations
 from typing import NamedTuple, Protocol
 
 from aios.models.agents import (
+    HttpMethod,
+    HttpRouteSpec,
     HttpServerSpec,
     McpPermissionPolicy,
     McpServerSpec,
@@ -312,6 +314,63 @@ def _meet_builtin(declared: ToolSpec, launcher: ToolSpec) -> ToolSpec | None:
     )
 
 
+# ── HTTP route method normal form (#828) ──────────────────────────────────────
+
+
+def _norm_methods(methods: list[HttpMethod] | None) -> list[HttpMethod] | None:
+    """Normal form for a route's ``methods``: ``None`` (all verbs — the method
+    lattice top) stays ``None``; a list is sorted and de-duplicated so the
+    normal-form contract holds byte-for-byte (``[]`` = deny-all stays ``[]``)."""
+    if methods is None:
+        return None
+    return sorted(set(methods))
+
+
+def _meet_methods(
+    declared: list[HttpMethod] | None, launcher: list[HttpMethod] | None
+) -> list[HttpMethod] | None:
+    """Set-intersection meet of two method sets. ``None`` is the top (all verbs),
+    so ``meet(None, X) == X``, ``meet(X, None) == X``, ``meet(None, None) == None``.
+    Two concrete sets meet to their (sorted) intersection — possibly ``[]`` (deny-all,
+    the bottom), which is kept verbatim rather than treated as a drop signal."""
+    if declared is None:
+        return _norm_methods(launcher)
+    if launcher is None:
+        return _norm_methods(declared)
+    return sorted(set(declared) & set(launcher))
+
+
+def _canon_http_server(s: HttpServerSpec) -> HttpServerSpec:
+    """Resolve an http server to its normal form: identity/headers/route order kept
+    verbatim, each route's ``methods`` normalized (sorted/deduped, ``None`` preserved)."""
+    routes = [r.model_copy(update={"methods": _norm_methods(r.methods)}) for r in s.routes]
+    return s.model_copy(update={"routes": routes})
+
+
+def _meet_http_server(declared: HttpServerSpec, launcher: HttpServerSpec) -> HttpServerSpec:
+    """Meet two http servers sharing a ``base_url`` key.
+
+    Path patterns, ordering, ``description``, ``enabled`` and ``permission_policy`` are
+    **launcher-verbatim** (parent-wins-frozen: a child cannot re-order, re-gate, or add
+    routes — preserving first-match-wins permission gates). The single dimension a child
+    may narrow is ``methods``: for each launcher route, if the child declares a route with
+    the same ``path_pattern``, the output route's methods are ``meet(launcher, child)``
+    (set intersection; ``None`` = all). A child that does not declare a matching path leaves
+    that launcher route's methods unchanged. The result is emitted in launcher route order.
+    """
+    declared_by_pattern: dict[str, HttpRouteSpec] = {}
+    for r in declared.routes:
+        declared_by_pattern.setdefault(r.path_pattern, r)  # first child declaration wins
+    out_routes: list[HttpRouteSpec] = []
+    for lr in launcher.routes:
+        child = declared_by_pattern.get(lr.path_pattern)
+        methods = (
+            _norm_methods(lr.methods) if child is None else _meet_methods(child.methods, lr.methods)
+        )
+        out_routes.append(lr.model_copy(update={"methods": methods}))
+    return launcher.model_copy(update={"routes": out_routes})
+
+
 # ── the operator ──────────────────────────────────────────────────────────────
 
 
@@ -324,10 +383,12 @@ def canonicalize(
     """Resolve a surface to its normal form (the identity element of the meet).
 
     Prunes disabled tools and dangling toolsets, resolves every ``None`` sentinel to
-    its concrete default, and emits toolsets in minimal-config normal form. Servers
+    its concrete default, and emits toolsets in minimal-config normal form. MCP servers
     are kept verbatim (they are compared and copied wholesale; normalizing e.g.
-    ``headers None→{}`` would create needless drift). ``canonicalize(x) ==
-    attenuate(x, x)``.
+    ``headers None→{}`` would create needless drift). HTTP servers keep their identity,
+    headers, and route order verbatim, but each route's ``methods`` is normalized
+    (sorted/deduped, ``None`` preserved) so the method-dimension meet has a byte-stable
+    normal form (#828). ``canonicalize(x) == attenuate(x, x)``.
 
     ``default_mcp_permission`` and ``builtin_transports`` are passed in (read from
     settings / the tool registry by the caller) to keep the operator pure.
@@ -347,7 +408,7 @@ def canonicalize(
             tools.append(
                 _canon_builtin(t, transport_default=builtin_transports.get(t.type, "both"))
             )
-    return Surface(tools, list(s.mcp_servers), list(s.http_servers))
+    return Surface(tools, list(s.mcp_servers), [_canon_http_server(srv) for srv in s.http_servers])
 
 
 def attenuate(
@@ -360,14 +421,15 @@ def attenuate(
     """The lattice meet: ``declared`` clamped to never exceed ``launcher``.
 
     Per identity key in ``declared``: absent from ``launcher`` → drop; present → the
-    per-dimension meet, dropping if it bottoms out. Servers survive only on a key match
+    per-dimension meet, dropping if it bottoms out. MCP servers survive only on a key match
     and are emitted **launcher-verbatim** (parent-wins-frozen: routes and headers come
-    from the launcher; the child narrows only by dropping whole servers). http servers
-    survive on a ``base_url`` key and are emitted launcher-verbatim — the child's declared
-    routes are inert here, consistent with the authoring gate, which now admits http
-    servers by identity (``(name, base_url)``) and inherits the launcher's frozen routes.
-    MCP servers key on the joint ``(name, url)`` — a re-pointed name is a different key
-    and drops. Output is canonical (``attenuate(d, l)`` is a fixpoint of ``canonicalize``).
+    from the launcher; the child narrows only by dropping whole servers); they key on the
+    joint ``(name, url)`` — a re-pointed name is a different key and drops. http servers
+    survive on a ``base_url`` key; their path patterns / ordering / ``description`` /
+    ``enabled`` / ``permission_policy`` are launcher-verbatim, but the child may narrow each
+    route's ``methods`` (set intersection; ``None`` = all verbs) — the one read/write
+    attenuation dimension (#828). Output is canonical (``attenuate(d, l)`` is a fixpoint of
+    ``canonicalize``).
     """
     d = canonicalize(
         declared,
@@ -380,9 +442,14 @@ def attenuate(
         builtin_transports=builtin_transports,
     )
 
-    # http_servers — key base_url, launcher-verbatim survival.
+    # http_servers — key base_url; launcher-verbatim path/order/permission, per-route
+    # ``methods`` narrowed by the child's matching declaration (#828).
     l_http = {srv.base_url: srv for srv in lau.http_servers}
-    out_http = [l_http[srv.base_url] for srv in d.http_servers if srv.base_url in l_http]
+    out_http = [
+        _meet_http_server(srv, l_http[srv.base_url])
+        for srv in d.http_servers
+        if srv.base_url in l_http
+    ]
 
     # mcp_servers — joint (name, url) key, launcher-verbatim survival.
     l_mcp = {(srv.name, srv.url): srv for srv in lau.mcp_servers}
