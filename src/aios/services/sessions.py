@@ -148,6 +148,32 @@ async def _batch_list_all_echoes(
     return {sid: [*memory_map[sid], *github_map[sid]] for sid in session_ids}
 
 
+async def _enrich_session(
+    conn: asyncpg.Connection[Any],
+    session: Session,
+    *,
+    account_id: str,
+) -> Session:
+    """Hydrate a ``Session`` row with its side-table reads — bound vault ids,
+    resource echoes (memory + github), and trigger echoes.
+
+    The three reads share the caller's connection so the enrichment is
+    consistent with the row just read or written within the caller's
+    transaction. Callers that also need ``awaiting`` (event-derived, not a
+    side-table read) layer it on after.
+    """
+    vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
+    echoes = await _list_all_echoes(conn, session.id, account_id=account_id)
+    trigger_echoes = await queries.list_triggers(conn, session.id, account_id=account_id)
+    return session.model_copy(
+        update={
+            "vault_ids": vault_ids,
+            "resources": echoes,
+            "triggers": trigger_echoes,
+        }
+    )
+
+
 def _evict_sandbox_for_resource_change(session_id: str) -> None:
     """Force a fresh sandbox provision after a session-scoped resource
     mutation commits (#713).
@@ -533,18 +559,9 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: s
     # a separate connection sees ≥ the snapshot's events, not a tear.
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         session = await queries.get_session(conn, session_id, account_id=account_id)
-        vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
-        echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
-        trigger_echoes = await queries.list_triggers(conn, session_id, account_id=account_id)
+        session = await _enrich_session(conn, session, account_id=account_id)
     awaiting_by_sid = await compute_awaiting(pool, [session], account_id=account_id)
-    return session.model_copy(
-        update={
-            "vault_ids": vault_ids,
-            "resources": echoes,
-            "triggers": trigger_echoes,
-            "awaiting": awaiting_by_sid.get(session_id, []),
-        }
-    )
+    return session.model_copy(update={"awaiting": awaiting_by_sid.get(session_id, [])})
 
 
 async def await_session(
@@ -1248,18 +1265,10 @@ async def archive_session(pool: asyncpg.Pool[Any], session_id: str, *, account_i
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )
         session = await queries.archive_session(conn, session_id, account_id=account_id)
-        vault_ids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
-        echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
-        trigger_echoes = await queries.list_triggers(conn, session_id, account_id=account_id)
+        session = await _enrich_session(conn, session, account_id=account_id)
     if parent_run_id is not None:
         await defer_run_wake(parent_run_id, batch=True)
-    return session.model_copy(
-        update={
-            "vault_ids": vault_ids,
-            "resources": echoes,
-            "triggers": trigger_echoes,
-        }
-    )
+    return session
 
 
 async def clone_session(
@@ -1276,16 +1285,7 @@ async def clone_session(
         session = await queries.clone_session(
             conn, parent_session_id, workspace_path=workspace_path, account_id=account_id
         )
-        vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
-        echoes = await _list_all_echoes(conn, session.id, account_id=account_id)
-        trigger_echoes = await queries.list_triggers(conn, session.id, account_id=account_id)
-        return session.model_copy(
-            update={
-                "vault_ids": vault_ids,
-                "resources": echoes,
-                "triggers": trigger_echoes,
-            }
-        )
+        return await _enrich_session(conn, session, account_id=account_id)
 
 
 async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> None:
@@ -1368,16 +1368,7 @@ async def update_session(
                 changed |= await github_repo_service.detach_all_from_session(
                     conn, session_id, account_id=account_id
                 )
-        vids = await queries.get_session_vault_ids(conn, session_id, account_id=account_id)
-        echoes = await _list_all_echoes(conn, session_id, account_id=account_id)
-        trigger_echoes = await queries.list_triggers(conn, session_id, account_id=account_id)
-        result = session.model_copy(
-            update={
-                "vault_ids": vids,
-                "resources": echoes,
-                "triggers": trigger_echoes,
-            }
-        )
+        result = await _enrich_session(conn, session, account_id=account_id)
 
     # Eviction fires AFTER the transaction commits — recycling mid-transaction
     # could re-provision against an uncommitted spec (#713). A resource or
