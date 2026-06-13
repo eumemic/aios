@@ -88,12 +88,25 @@ class _Candidate:
 # (#840).  Sessions with open calls still return ALL their
 # assistant-with-tool_calls events, so the per-tcid candidate loop downstream is
 # behaviorally unchanged.
+#
+# Also bounded by the errored-session predicate ``NOT (s.last_error_seq > 0 AND
+# s.last_error_seq > s.last_user_seq)`` (#897): an errored session is parked
+# until a user message recovers it, so its open tool_calls are part of the
+# terminal landing pad and must NOT be reaped.  ``find_and_repair_ghosts``
+# already drops these via the Python ``_errored_session_ids`` post-filter;
+# pushing the same predicate here stops the wasted event-log fetch on every 30s
+# sweep for the small set of errored sessions that still carry open calls.  The
+# predicate is byte-for-byte identical (modulo table alias) to
+# ``ERRORED_SESSIONS_SQL``'s ``WHERE`` — both consume the same maintained scalar
+# columns (migration 0066), so the SQL pre-filter's errored set EQUALS the
+# Python post-filter's; the post-filter is retained as defense in depth.
 GHOST_ASST_SQL = """
     SELECT e.session_id, e.data, e.created_at
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE s.archived_at IS NULL
        AND s.open_tool_call_count > 0
+       AND NOT (s.last_error_seq > 0 AND s.last_error_seq > s.last_user_seq)
        AND e.kind = 'message'
        AND e.role = 'assistant'
        AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
@@ -284,6 +297,9 @@ async def find_and_repair_ghosts(
         # Skip errored sessions: their dispatched-but-unresolved tool calls are
         # part of the terminal landing pad and stay unreaped until a user
         # message recovers the session (mirrors the pre-derivation status skip).
+        # ``GHOST_ASST_SQL`` already pushes the identical errored predicate, so
+        # ``asst_rows`` carries no errored session here; this post-filter is
+        # retained as defense in depth (#897).
         errored = await _errored_session_ids(conn, session_id=session_id)
         if errored:
             asst_rows = [r for r in asst_rows if r["session_id"] not in errored]
