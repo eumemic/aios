@@ -1492,6 +1492,19 @@ async def read_windowed_events(
 
     drop = math.ceil(drop_effective / ratio)
 
+    # Never drop the entire window. ``select_window`` keeps a non-empty tail
+    # because it requires ``min_tokens >= 1``; here ``events_window_min`` can
+    # clamp to 0 when overhead exceeds ``window_min`` (above), and the
+    # asymmetric ceil back-conversion can then push ``drop`` up to ``total`` —
+    # the retained scan (``cumulative_tokens > drop``) would match zero rows
+    # while the omission complement still matches every row. That pairing
+    # (empty events + a non-None omission) crashes ``build_messages``, which
+    # reads ``events[0].created_at`` to anchor the omission marker and relies
+    # on the inverse invariant. Clamp so the most recent event always survives
+    # (its ``cumulative_tokens == total``), matching select_window's
+    # retain-the-tail-even-when-oversized guarantee.
+    drop = min(drop, total - 1)
+
     # Bounded range scan: only events past the boundary.
     rows = await conn.fetch(
         "SELECT * FROM events "
