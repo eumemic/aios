@@ -1693,6 +1693,7 @@
           "sessions"
         ],
         "summary": "List ",
+        "description": "List sessions, newest first, keyset-paginated.\n\nSoft-archived sessions are hidden by default. Two filters surface them so a\nworkflow run's spent ``agent()`` children stay enumerable with their terminal\nstatus and token usage (#831): ``?parent_run_id=`` lists a run's children\n(alive or archived), and ``?status=archived`` lists the terminal ones. Each\nrow carries the derived ``status`` ({active, idle, archived}) and cumulative\n``usage``.",
         "operationId": "list_sessions",
         "parameters": [
           {
@@ -1736,7 +1737,8 @@
                 {
                   "enum": [
                     "active",
-                    "idle"
+                    "idle",
+                    "archived"
                   ],
                   "type": "string"
                 },
@@ -13424,7 +13426,8 @@
             "type": "string",
             "enum": [
               "active",
-              "idle"
+              "idle",
+              "archived"
             ],
             "title": "Status"
           },
@@ -16023,7 +16026,8 @@
             "type": "string",
             "enum": [
               "active",
-              "idle"
+              "idle",
+              "archived"
             ],
             "title": "Session Status"
           },

@@ -38,7 +38,7 @@ def list_(
     agent_id: Annotated[str | None, typer.Option("--agent-id")] = None,
     status_filter: Annotated[
         str | None,
-        typer.Option("--status", help="Filter by status: active, idle."),
+        typer.Option("--status", help="Filter by status: active, idle, archived."),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
     all_: Annotated[bool, typer.Option("--all")] = False,

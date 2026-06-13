@@ -120,6 +120,15 @@ async def list_(
     parent_run_id: str | None = None,
     limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> ListResponse[Session]:
+    """List sessions, newest first, keyset-paginated.
+
+    Soft-archived sessions are hidden by default. Two filters surface them so a
+    workflow run's spent ``agent()`` children stay enumerable with their terminal
+    status and token usage (#831): ``?parent_run_id=`` lists a run's children
+    (alive or archived), and ``?status=archived`` lists the terminal ones. Each
+    row carries the derived ``status`` ({active, idle, archived}) and cumulative
+    ``usage``.
+    """
     st = page_cursor(
         cursor,
         {
