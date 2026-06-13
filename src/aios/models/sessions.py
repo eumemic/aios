@@ -195,9 +195,14 @@ class SessionCreate(BaseModel):
             "Resources to attach. Mix of memory stores (mounted under "
             "/mnt/memory/<name>/) and github repositories (cloned to a "
             "user-specified mount_path). Each type has its own per-session "
-            "cap; duplicates within a type are rejected. Use "
-            "``PUT /v1/sessions/{id}`` with ``resources`` to detach or "
-            "replace the set after creation."
+            "cap; duplicates within a type are rejected. After creation, "
+            "prefer the granular sub-collection endpoints — "
+            "``POST /v1/sessions/{id}/resources`` to attach one resource "
+            "without touching the others, and "
+            "``DELETE /v1/sessions/{id}/resources/{resource_id}`` to detach "
+            "one. ``PUT /v1/sessions/{id}`` with ``resources`` replaces the "
+            "WHOLE list (omitting a resource detaches it), so the granular "
+            "endpoints are the safe path for add/remove (#270)."
         ),
     )
     triggers: list[TriggerCreate] = Field(
@@ -240,6 +245,13 @@ class SessionUpdate(BaseModel):
     use full-list-replacement semantics: ``None`` (the default) leaves
     the current set alone, ``[]`` detaches everything, and a non-empty
     list replaces the bound set entirely.
+
+    To add or remove a SINGLE resource without re-supplying the rest of
+    the list, use the granular sub-collection endpoints —
+    ``POST /v1/sessions/{id}/resources`` (attach one) and
+    ``DELETE /v1/sessions/{id}/resources/{resource_id}`` (detach one).
+    A one-resource ``resources`` list here silently detaches everything
+    else; the granular endpoints are the safe add/remove path (#270).
     """
 
     model_config = ConfigDict(extra="forbid")

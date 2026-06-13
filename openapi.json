@@ -2054,6 +2054,103 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Add Resource",
+        "description": "Attach a single resource. Granular add-one operation per #270 \u2014\nadditive, so it leaves every other attached resource untouched\n(unlike ``PUT /v1/sessions/{id}`` with ``resources``, which replaces\nthe whole list). Dispatches on the body's ``type`` discriminator.",
+        "operationId": "add_session_resource",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/MemoryStoreResource"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GithubRepositoryResource"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "type",
+                  "mapping": {
+                    "memory_store": "#/components/schemas/MemoryStoreResource",
+                    "github_repository": "#/components/schemas/GithubRepositoryResource"
+                  }
+                },
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/MemoryStoreResourceEcho"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GithubRepositoryResourceEcho"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "type",
+                    "mapping": {
+                      "memory_store": "#/components/schemas/MemoryStoreResourceEcho",
+                      "github_repository": "#/components/schemas/GithubRepositoryResourceEcho"
+                    }
+                  },
+                  "title": "Response Add Session Resource"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/sessions/{session_id}/resources/{resource_id}": {
@@ -2123,7 +2220,66 @@
           }
         }
       },
-      "post": {
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Remove Resource",
+        "description": "Detach a single resource by id. Granular remove-one operation per\n#270. A ``memstore_`` id detaches that memory store (the id IS the\nmemory_store_id); a ``ghrepo_`` id detaches that attachment and purges\nits working tree. A malformed/unknown-prefix id is a 4xx.",
+        "operationId": "remove_session_resource",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Resource Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
         "tags": [
           "sessions"
         ],
@@ -13849,7 +14005,7 @@
             "type": "array",
             "maxItems": 16,
             "title": "Resources",
-            "description": "Resources to attach. Mix of memory stores (mounted under /mnt/memory/<name>/) and github repositories (cloned to a user-specified mount_path). Each type has its own per-session cap; duplicates within a type are rejected. Use ``PUT /v1/sessions/{id}`` with ``resources`` to detach or replace the set after creation."
+            "description": "Resources to attach. Mix of memory stores (mounted under /mnt/memory/<name>/) and github repositories (cloned to a user-specified mount_path). Each type has its own per-session cap; duplicates within a type are rejected. After creation, prefer the granular sub-collection endpoints \u2014 ``POST /v1/sessions/{id}/resources`` to attach one resource without touching the others, and ``DELETE /v1/sessions/{id}/resources/{resource_id}`` to detach one. ``PUT /v1/sessions/{id}`` with ``resources`` replaces the WHOLE list (omitting a resource detaches it), so the granular endpoints are the safe path for add/remove (#270)."
           },
           "triggers": {
             "items": {
@@ -14243,7 +14399,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "SessionUpdate",
-        "description": "Request body for ``PUT /v1/sessions/{id}``.\n\nAll fields are optional; omitted fields are preserved. Changing\n``agent_id`` resets ``agent_version`` to null (latest) unless\n``agent_version`` is also provided. ``resources`` and ``vault_ids``\nuse full-list-replacement semantics: ``None`` (the default) leaves\nthe current set alone, ``[]`` detaches everything, and a non-empty\nlist replaces the bound set entirely."
+        "description": "Request body for ``PUT /v1/sessions/{id}``.\n\nAll fields are optional; omitted fields are preserved. Changing\n``agent_id`` resets ``agent_version`` to null (latest) unless\n``agent_version`` is also provided. ``resources`` and ``vault_ids``\nuse full-list-replacement semantics: ``None`` (the default) leaves\nthe current set alone, ``[]`` detaches everything, and a non-empty\nlist replaces the bound set entirely.\n\nTo add or remove a SINGLE resource without re-supplying the rest of\nthe list, use the granular sub-collection endpoints \u2014\n``POST /v1/sessions/{id}/resources`` (attach one) and\n``DELETE /v1/sessions/{id}/resources/{resource_id}`` (detach one).\nA one-resource ``resources`` list here silently detaches everything\nelse; the granular endpoints are the safe add/remove path (#270)."
       },
       "SessionUsage": {
         "properties": {

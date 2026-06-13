@@ -50,6 +50,7 @@ from aios.models.sessions import (
     SessionCloneRequest,
     SessionCreate,
     SessionInterruptRequest,
+    SessionResource,
     SessionResourceEcho,
     SessionStatus,
     SessionUpdate,
@@ -229,7 +230,48 @@ async def get_resource(
     )
 
 
-@router.post("/{session_id}/resources/{resource_id}", operation_id="update_session_resource")
+@router.post(
+    "/{session_id}/resources",
+    operation_id="add_session_resource",
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_resource(
+    session_id: str,
+    body: SessionResource,
+    pool: PoolDep,
+    crypto_box: CryptoBoxDep,
+    account_id: AccountIdDep,
+) -> SessionResourceEcho:
+    """Attach a single resource. Granular add-one operation per #270 —
+    additive, so it leaves every other attached resource untouched
+    (unlike ``PUT /v1/sessions/{id}`` with ``resources``, which replaces
+    the whole list). Dispatches on the body's ``type`` discriminator.
+    """
+    return await service.add_resource(
+        pool, session_id, body, crypto_box=crypto_box, account_id=account_id
+    )
+
+
+@router.delete(
+    "/{session_id}/resources/{resource_id}",
+    operation_id="remove_session_resource",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_resource(
+    session_id: str,
+    resource_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> None:
+    """Detach a single resource by id. Granular remove-one operation per
+    #270. A ``memstore_`` id detaches that memory store (the id IS the
+    memory_store_id); a ``ghrepo_`` id detaches that attachment and purges
+    its working tree. A malformed/unknown-prefix id is a 4xx.
+    """
+    await service.remove_resource(pool, session_id, resource_id, account_id=account_id)
+
+
+@router.put("/{session_id}/resources/{resource_id}", operation_id="update_session_resource")
 async def update_resource(
     session_id: str,
     resource_id: str,

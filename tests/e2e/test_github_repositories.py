@@ -554,7 +554,9 @@ class TestApi:
         assert echo["type"] == "github_repository"
         assert "authorization_token" not in echo
 
-    async def test_token_rotation_via_post(self, http_client: httpx.AsyncClient) -> None:
+    async def test_token_rotation_via_put(self, http_client: httpx.AsyncClient) -> None:
+        # Rotation moved from POST to PUT /resources/{rid} (#270) so the
+        # collection POST is free for the additive add-one operation.
         env_id, agent_id = await _create_env_and_agent_via_api(http_client)
         r = await http_client.post(
             "/v1/sessions",
@@ -575,7 +577,7 @@ class TestApi:
         sid = r.json()["id"]
         original_echo = r.json()["resources"][0]
 
-        r = await http_client.post(
+        r = await http_client.put(
             f"/v1/sessions/{sid}/resources/{original_echo['id']}",
             json={"authorization_token": _pat()},
         )

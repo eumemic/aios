@@ -29,6 +29,7 @@ from aios.errors import (
     ValidationError,
 )
 from aios.harness.window import WindowedEvents
+from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, split_id
 from aios.models.agents import (
     Agent,
     AgentVersion,
@@ -37,6 +38,7 @@ from aios.models.agents import (
 )
 from aios.models.attenuation import Surface
 from aios.models.events import Event, EventKind
+from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
     AwaitingToolCall,
@@ -1452,6 +1454,80 @@ async def update_session(
     if changed:
         _evict_sandbox_for_resource_change(session_id)
     return result
+
+
+async def add_resource(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    resource: SessionResource,
+    *,
+    crypto_box: CryptoBox,
+    account_id: str,
+) -> SessionResourceEcho:
+    """Attach a single resource to a session (granular add-one, #270).
+
+    The additive counterpart to the full-list-replace ``update_session``:
+    attaching one resource leaves every other resource untouched. The
+    per-session advisory lock serializes the count-check + insert so the
+    per-type caps are contractual against concurrent adds. Eviction fires
+    AFTER the transaction commits (the per-step drift detector is the
+    correctness floor; this is the latency win — see
+    :func:`_evict_sandbox_for_resource_change`).
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.acquire_session_resources_lock(conn, session_id)
+        # Authorize the session under this account BEFORE touching any
+        # resource rows: a cross-tenant or unknown session id is a 404,
+        # not a silent attach onto someone else's session.
+        await queries.get_session_bare(conn, session_id, account_id=account_id)
+        echo: SessionResourceEcho
+        if isinstance(resource, MemoryStoreResource):
+            echo = await memory_service.add_one(conn, session_id, resource, account_id=account_id)
+        else:
+            echo = await github_repo_service.add_one(
+                conn, session_id, resource, crypto_box, account_id=account_id
+            )
+    _evict_sandbox_for_resource_change(session_id)
+    return echo
+
+
+async def remove_resource(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    resource_id: str,
+    *,
+    account_id: str,
+) -> None:
+    """Detach a single resource from a session by id (granular remove-one,
+    #270). Dispatches on the id prefix: a ``memstore_`` id IS the memory
+    store id (no separate attachment id); a ``ghrepo_`` id is the
+    attachment row id. A malformed or unknown-prefix id raises
+    :class:`ValidationError` (4xx), not a 404.
+    """
+    try:
+        prefix, _ = split_id(resource_id)
+    except ValueError as exc:
+        raise ValidationError(
+            f"malformed resource id: {resource_id!r}",
+            detail={"resource_id": resource_id},
+        ) from exc
+    if prefix not in (MEMORY_STORE, GITHUB_REPOSITORY):
+        raise ValidationError(
+            "resource id must be a memory store ('memstore_') or github repository ('ghrepo_') id",
+            detail={"resource_id": resource_id, "prefix": prefix},
+        )
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.acquire_session_resources_lock(conn, session_id)
+        # Authorize the session under this account before dispatching the
+        # detach (cross-tenant / unknown session id is a 404).
+        await queries.get_session_bare(conn, session_id, account_id=account_id)
+        if prefix == MEMORY_STORE:
+            await memory_service.remove_one(conn, session_id, resource_id, account_id=account_id)
+        else:
+            await github_repo_service.remove_one(
+                conn, session_id, resource_id, account_id=account_id
+            )
+    _evict_sandbox_for_resource_change(session_id)
 
 
 # ─── tool confirmations ────────────────────────────────────────────────────
