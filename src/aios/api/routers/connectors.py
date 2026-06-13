@@ -37,10 +37,10 @@ from aios.api.deps import (
     RuntimeAuthDep,
 )
 from aios.api.sse import (
-    SSE_PREFLIGHT_EXCEPTIONS,
     connection_discovery_stream,
     make_sse_response,
     management_calls_stream,
+    preflight_subscription,
     runtime_connector_calls_stream,
 )
 from aios.db import queries
@@ -55,7 +55,6 @@ from aios.errors import (
     ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
-    SSEPreflightFailedError,
     ValidationError,
 )
 from aios.logging import get_logger
@@ -347,19 +346,13 @@ async def get_connection_discovery(
     loop just doesn't see them.
     """
     _, connector, account_id, auth_connection_ids = auth
-    try:
-        subscription = await open_listen_for_connection_discovery(db_url, connector)
-    except SSE_PREFLIGHT_EXCEPTIONS as exc:
-        log.warning(
-            "sse.connection_discovery.preflight_failed",
-            connector=connector,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        raise SSEPreflightFailedError(
-            "could not establish LISTEN connection for connection-discovery stream",
-            detail={"stream": "connection_discovery"},
-        ) from exc
+    subscription = await preflight_subscription(
+        open_listen_for_connection_discovery(db_url, connector),
+        stream_name="connection_discovery",
+        log_key="sse.connection_discovery.preflight_failed",
+        log_fields={"connector": connector},
+        log=log,
+    )
     return make_sse_response(
         subscription,
         connection_discovery_stream(
@@ -622,19 +615,13 @@ async def get_runtime_calls(
     filter to that set — out-of-scope calls are silently omitted.
     """
     _, connector, account_id, auth_connection_ids = auth
-    try:
-        subscription = await open_listen_for_connector_calls_by_type(db_url, connector)
-    except SSE_PREFLIGHT_EXCEPTIONS as exc:
-        log.warning(
-            "sse.runtime_calls.preflight_failed",
-            connector=connector,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        raise SSEPreflightFailedError(
-            "could not establish LISTEN connection for runtime-calls stream",
-            detail={"stream": "runtime_calls"},
-        ) from exc
+    subscription = await preflight_subscription(
+        open_listen_for_connector_calls_by_type(db_url, connector),
+        stream_name="runtime_calls",
+        log_key="sse.runtime_calls.preflight_failed",
+        log_fields={"connector": connector},
+        log=log,
+    )
     return make_sse_response(
         subscription,
         runtime_connector_calls_stream(
@@ -664,19 +651,13 @@ async def get_runtime_management_calls(
     calls are connector-type-wide, not per-connection.
     """
     _, connector, account_id, _scope = auth
-    try:
-        subscription = await open_listen_for_management_calls(db_url, connector)
-    except SSE_PREFLIGHT_EXCEPTIONS as exc:
-        log.warning(
-            "sse.management_calls.preflight_failed",
-            connector=connector,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        raise SSEPreflightFailedError(
-            "could not establish LISTEN connection for management-calls stream",
-            detail={"stream": "management_calls"},
-        ) from exc
+    subscription = await preflight_subscription(
+        open_listen_for_management_calls(db_url, connector),
+        stream_name="management_calls",
+        log_key="sse.management_calls.preflight_failed",
+        log_fields={"connector": connector},
+        log=log,
+    )
     return make_sse_response(
         subscription,
         management_calls_stream(subscription, pool, connector, account_id=account_id),

@@ -281,6 +281,11 @@ async def create_session(
         # agent id would silently bind another tenant's model/surface into the
         # session. Mirrors the environment guard above (issue #755 / #851).
         await queries.get_agent(conn, agent_id, account_id=account_id)
+        # Reject a pinned version that doesn't exist before binding it — the
+        # supplied agent_id is the resolved binding here (no merge on create).
+        await agents_service.validate_pinned_agent_version(
+            conn, agent_id=agent_id, agent_version=agent_version, account_id=account_id
+        )
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,
@@ -624,7 +629,7 @@ async def await_session(
     # session's worker into the streaming model path for the entire await
     # window — wasted work for a consumer that ignores deltas. Mirrors how
     # open_listen_for_run_events omits the lock (issue #81).
-    subscription = await open_listen_for_events(db_url, session_id, acquire_lock=False)
+    subscription = await open_listen_for_events(db_url, session_id, on_connected=None)
     try:
         state = await await_completion(
             subscription.queue,
@@ -1058,33 +1063,13 @@ async def append_tool_result(
             conn, session_id, tool_call_id, account_id=account_id
         )
         if existing is not None:
-            # Idempotent retry: a prior call with matching intent
-            # (same ``is_error`` outcome) — return the original event.
-            # Intent-mismatch is a CONFLICT, not a retry: e.g., a deny
-            # arriving after the tool already produced a success result
-            # (two-tab race; always_allow tool; bogus pre-confirm
-            # pre-#533). Returning the success event would lie to the
-            # operator ("you denied successfully") while the model's
-            # context still carries the success result. Raise so the
-            # operator learns the deny is too late.
-            existing_is_error = bool(existing.data.get("is_error", False))
-            if existing_is_error == is_error:
-                await queries.decrement_open_tool_call_count(
-                    conn, session_id, account_id=account_id
-                )
-                return existing
-            raise ConflictError(
-                f"tool_call_id {tool_call_id!r} already has a "
-                f"{'error' if existing_is_error else 'success'} "
-                f"result; cannot append a "
-                f"{'error' if is_error else 'success'} result with "
-                f"the same tool_call_id",
-                detail={
-                    "session_id": session_id,
-                    "tool_call_id": tool_call_id,
-                    "existing_is_error": existing_is_error,
-                    "requested_is_error": is_error,
-                },
+            return await _classify_existing_tool_result(
+                conn,
+                session_id,
+                tool_call_id,
+                existing,
+                is_error=is_error,
+                account_id=account_id,
             )
 
         name = await queries.lookup_tool_name_by_call_id(
@@ -1103,13 +1088,81 @@ async def append_tool_result(
         }
         if is_error:
             data["is_error"] = True
-        return await queries.append_event(
-            conn,
-            session_id=session_id,
-            kind="message",
-            data=data,
-            account_id=account_id,
-        )
+        try:
+            return await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="message",
+                data=data,
+                account_id=account_id,
+            )
+        except asyncpg.UniqueViolationError:
+            # Structural floor (#1082): the partial UNIQUE index
+            # ``events_tool_result_idx`` forbids a second tool-role row for
+            # ``(session_id, tool_call_id)``. A racing appender (a worker tool
+            # task, or a concurrent operator POST) committed its row between
+            # the read-check above and this INSERT, so ``find_tool_result_event``
+            # saw nothing but the index rejects the write. ``append_event``'s
+            # own ``conn.transaction()`` rolled back the seq increment with the
+            # violation, so gapless seq is preserved and no duplicate landed.
+            # A bare UniqueViolation collapses the idempotent-retry and
+            # deny-after-success cases, so re-read and re-run the SAME classify
+            # logic as the read-check path.
+            existing = await queries.find_tool_result_event(
+                conn, session_id, tool_call_id, account_id=account_id
+            )
+            assert existing is not None  # the UniqueViolation proves a row exists
+            return await _classify_existing_tool_result(
+                conn,
+                session_id,
+                tool_call_id,
+                existing,
+                is_error=is_error,
+                account_id=account_id,
+            )
+
+
+async def _classify_existing_tool_result(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    existing: Event,
+    *,
+    is_error: bool,
+    account_id: str,
+) -> Event:
+    """Classify an already-present tool-role result against the new intent.
+
+    Shared by the read-check fast path and the ``UniqueViolation`` catch in
+    :func:`append_tool_result` (#1082): a bare UniqueViolation collapses both
+    cases, so the catch handler must re-read and re-classify here.
+
+    Idempotent retry: a prior call with matching intent (same ``is_error``
+    outcome) — return the original event and decrement the id-blind ``+1``
+    applied at assistant-turn time (#890). Intent-mismatch is a CONFLICT, not
+    a retry: e.g. a deny arriving after the tool already produced a success
+    result (two-tab race; always_allow tool; bogus pre-confirm pre-#533).
+    Returning the success event would lie to the operator ("you denied
+    successfully") while the model's context still carries the success result.
+    Raise so the operator learns the deny is too late.
+    """
+    existing_is_error = bool(existing.data.get("is_error", False))
+    if existing_is_error == is_error:
+        await queries.decrement_open_tool_call_count(conn, session_id, account_id=account_id)
+        return existing
+    raise ConflictError(
+        f"tool_call_id {tool_call_id!r} already has a "
+        f"{'error' if existing_is_error else 'success'} "
+        f"result; cannot append a "
+        f"{'error' if is_error else 'success'} result with "
+        f"the same tool_call_id",
+        detail={
+            "session_id": session_id,
+            "tool_call_id": tool_call_id,
+            "existing_is_error": existing_is_error,
+            "requested_is_error": is_error,
+        },
+    )
 
 
 async def read_events(
@@ -1348,6 +1401,16 @@ async def update_session(
             agent_version=agent_version,
             title=title,
             metadata=metadata,
+            account_id=account_id,
+        )
+        # Validate the resolved pin: agent_version may be supplied without
+        # agent_id (re-pin on the current agent), and changing agent_id resets
+        # the version to null — only the post-merge row knows the effective
+        # (agent_id, agent_version) binding.
+        await agents_service.validate_pinned_agent_version(
+            conn,
+            agent_id=session.agent_id,
+            agent_version=session.agent_version,
             account_id=account_id,
         )
         changed = False

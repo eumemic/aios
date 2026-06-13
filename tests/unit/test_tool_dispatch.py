@@ -313,3 +313,173 @@ class TestParentChannelThreading:
             tool_parent_channel="tg:42",
         )
         assert captured["tool_parent_channel"] == "tg:42"
+
+
+def _mock_pool_conn() -> tuple[Any, Any]:
+    """Build a mock asyncpg pool whose ``acquire()`` yields a conn with a
+    nesting-safe ``transaction()`` (the inner ``append_event`` SAVEPOINT and
+    the outer ``_append_tool_result_event`` transaction both no-op here)."""
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=tx)
+    acquire = MagicMock()
+    acquire.__aenter__ = AsyncMock(return_value=conn)
+    acquire.__aexit__ = AsyncMock(return_value=None)
+    pool = MagicMock()
+    pool.acquire = MagicMock(return_value=acquire)
+    return pool, conn
+
+
+class TestToolResultUniqueFloor:
+    """The partial UNIQUE index ``events_tool_result_idx`` (#1082) is the
+    structural floor under the manual dedup: a racing committed appender that
+    slips past the read-check makes ``append_event`` raise
+    ``UniqueViolationError``; ``_append_tool_result_event`` must re-read, treat
+    it as a dedup-skip, and apply the ``open_tool_call_count`` compensation —
+    NOT propagate the raw DB error."""
+
+    async def test_unique_violation_treated_as_dedup_skip(self, monkeypatch: Any) -> None:
+        import asyncpg
+
+        from aios.db import queries
+
+        winner = MagicMock()
+        winner.data = {"is_error": False}
+        # The read-check sees nothing (the racing row committed AFTER it),
+        # then the re-read after the violation finds the winning row.
+        find = AsyncMock(side_effect=[None, winner])
+        monkeypatch.setattr(queries, "find_tool_result_event", find)
+        monkeypatch.setattr(
+            queries,
+            "append_event",
+            AsyncMock(side_effect=asyncpg.UniqueViolationError("dup")),
+        )
+        decrement = AsyncMock()
+        monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)
+
+        pool, _conn = _mock_pool_conn()
+
+        # Must NOT raise — the late append no-ops.
+        await tool_dispatch._append_tool_result_event(
+            pool,
+            "ses_1",
+            "tc_1",
+            {"role": "tool", "tool_call_id": "tc_1", "content": "ok"},
+            account_id="acc_1",
+        )
+        assert find.await_count == 2  # read-check + post-violation re-read
+        assert decrement.await_count == 1  # id-blind +1 compensation applied once
+
+    async def test_read_check_hit_skips_append(self, monkeypatch: Any) -> None:
+        """Fast path: when the read-check already finds the winning row, the
+        append is never attempted and the compensation runs once."""
+        from aios.db import queries
+
+        winner = MagicMock()
+        winner.data = {"is_error": False}
+        monkeypatch.setattr(queries, "find_tool_result_event", AsyncMock(return_value=winner))
+        append = AsyncMock()
+        monkeypatch.setattr(queries, "append_event", append)
+        decrement = AsyncMock()
+        monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)
+
+        pool, _conn = _mock_pool_conn()
+        await tool_dispatch._append_tool_result_event(
+            pool,
+            "ses_1",
+            "tc_1",
+            {"role": "tool", "tool_call_id": "tc_1", "content": "ok"},
+            account_id="acc_1",
+        )
+        assert append.await_count == 0
+        assert decrement.await_count == 1
+
+
+class TestAppendToolResultUniqueFloor:
+    """``services.sessions.append_tool_result`` (#1082): a ``UniqueViolation``
+    from the racing-committed-row case re-reads + re-classifies — collapsing
+    into idempotent-retry (return existing) or deny-after-success
+    (``ConflictError``) exactly as the read-check path does."""
+
+    @staticmethod
+    def _patch_common(monkeypatch: Any) -> None:
+        from aios.db import queries
+
+        monkeypatch.setattr(queries, "lock_active_session_for_update", AsyncMock(return_value=None))
+        monkeypatch.setattr(queries, "lookup_tool_name_by_call_id", AsyncMock(return_value="demo"))
+        # No spill capping in unit tests.
+        monkeypatch.setattr(
+            "aios.sandbox.tool_result_spill.cap_tool_result_content",
+            AsyncMock(side_effect=lambda *a, **k: a[2]),
+        )
+
+    @staticmethod
+    def _mock_conn() -> Any:
+        conn = MagicMock()
+        tx = MagicMock()
+        tx.__aenter__ = AsyncMock(return_value=None)
+        tx.__aexit__ = AsyncMock(return_value=None)
+        conn.transaction = MagicMock(return_value=tx)
+        return conn
+
+    async def test_unique_violation_matching_intent_returns_existing(
+        self, monkeypatch: Any
+    ) -> None:
+        import asyncpg
+
+        from aios.db import queries
+        from aios.models.events import Event
+
+        self._patch_common(monkeypatch)
+        existing = MagicMock(spec=Event)
+        existing.data = {"is_error": False}
+        monkeypatch.setattr(
+            queries, "find_tool_result_event", AsyncMock(side_effect=[None, existing])
+        )
+        monkeypatch.setattr(
+            queries, "append_event", AsyncMock(side_effect=asyncpg.UniqueViolationError("dup"))
+        )
+        decrement = AsyncMock()
+        monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)
+
+        result = await sessions_service.append_tool_result(
+            self._mock_conn(),
+            account_id="acc_1",
+            session_id="ses_1",
+            tool_call_id="tc_1",
+            content="ok",
+            is_error=False,
+        )
+        assert result is existing
+        assert decrement.await_count == 1
+
+    async def test_unique_violation_intent_mismatch_raises_conflict(self, monkeypatch: Any) -> None:
+        import asyncpg
+
+        from aios.db import queries
+        from aios.models.events import Event
+
+        self._patch_common(monkeypatch)
+        existing = MagicMock(spec=Event)
+        existing.data = {"is_error": False}  # prior SUCCESS already committed
+        monkeypatch.setattr(
+            queries, "find_tool_result_event", AsyncMock(side_effect=[None, existing])
+        )
+        monkeypatch.setattr(
+            queries, "append_event", AsyncMock(side_effect=asyncpg.UniqueViolationError("dup"))
+        )
+        monkeypatch.setattr(queries, "decrement_open_tool_call_count", AsyncMock())
+
+        # Late DENY (is_error=True) against a committed SUCCESS — too-late.
+        with pytest.raises(ConflictError):
+            await sessions_service.append_tool_result(
+                self._mock_conn(),
+                account_id="acc_1",
+                session_id="ses_1",
+                tool_call_id="tc_1",
+                content="denied",
+                is_error=True,
+            )

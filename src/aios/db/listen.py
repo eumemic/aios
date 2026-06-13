@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -104,7 +105,8 @@ from aios.db.sse_lock import acquire_subscriber_lock
 from aios.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager
 
 log = get_logger("aios.db.listen")
 
@@ -158,29 +160,37 @@ class ListenSubscription:
         self._conn.terminate()
 
 
-async def open_listen_for_events(
+async def _open_drop_oldest_listener(
     db_url: str,
-    session_id: str,
+    channel: str,
     *,
-    queue_max: int = 1000,
-    acquire_lock: bool = True,
+    queue_max: int,
+    log_key: str,
+    log_fields: dict[str, str],
+    on_connected: Callable[[asyncpg.Connection[object]], Awaitable[None]] | None = None,
 ) -> ListenSubscription:
-    """Open a dedicated asyncpg connection, LISTEN events_<session_id>,
-    acquire the SSE subscriber lock, and return a :class:`ListenSubscription`.
+    """Open a dedicated asyncpg connection LISTENing ``channel`` with a
+    bounded **drop-oldest** delivery queue, and return a
+    :class:`ListenSubscription`.
 
-    Two-phase counterpart to :func:`listen_for_events` for callers (SSE
-    route handlers) that need to preflight setup BEFORE constructing the
-    streaming response.
+    This is the single source of the LISTEN-subscription open lifecycle that
+    #502 ("close conn on add_listener failure") and #609 ("reap PG backends on
+    disconnect via ``conn.terminate()``") previously had to shotgun-patch across
+    five byte-identical copies. Every ``open_listen_for_*`` below is a thin
+    call-through that supplies its channel template + log key/fields; a future
+    backpressure/terminate-class fix lands here once.
 
-    ``acquire_lock`` (default ``True``) controls whether the subscriber
-    advisory lock is taken (issue #81): with it held, the worker's
-    :func:`aios.db.sse_lock.has_subscriber` check returns True and the model
-    call takes the streaming path (deltas → ``pg_notify`` → SSE clients).
-    A caller that consumes ONLY the terminal completion state — never the
-    deltas — should pass ``acquire_lock=False`` so it doesn't force the
-    awaited session's worker into the slower streaming path for a consumer
-    that ignores deltas. The ``await``-primitive poller does exactly this,
-    mirroring how :func:`open_listen_for_run_events` omits the lock entirely.
+    On queue overflow the callback drops the OLDEST queued payload to make room
+    for the new one and logs ``log_key`` with ``log_fields`` (+ ``queue_max``).
+    SSE consumers recover from drops by reconnecting with ``?after_seq=``.
+
+    ``on_connected`` is an optional post-``add_listener`` hook run on the
+    dedicated connection. It exists for exactly one caller —
+    :func:`open_listen_for_events`, which passes ``acquire_subscriber_lock`` to
+    take the #81 subscriber advisory lock — and is deliberately a documented,
+    greppable hook rather than a bare ``lock: bool`` flag, so that a session's
+    streaming-vs-non-streaming inference economics can't be silently flipped by
+    toggling a boolean (see :func:`open_listen_for_events`).
 
     Any failure after the initial ``asyncpg.connect`` succeeds will
     ``conn.terminate()`` and re-raise.
@@ -188,7 +198,6 @@ async def open_listen_for_events(
     conn = await _connect_listener(db_url)
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-        channel = f"events_{session_id}"
 
         def _callback(
             _conn: asyncpg.Connection[object],
@@ -201,11 +210,7 @@ async def open_listen_for_events(
             try:
                 queue.put_nowait(payload)
             except asyncio.QueueFull:
-                log.warning(
-                    "listen.queue_full_drop",
-                    session_id=session_id,
-                    queue_max=queue_max,
-                )
+                log.warning(log_key, queue_max=queue_max, **log_fields)
                 # Drop oldest to make room. The SSE consumer can recover by
                 # reconnecting with `?after_seq=`.
                 try:
@@ -215,15 +220,76 @@ async def open_listen_for_events(
                     pass
 
         await conn.add_listener(channel, _callback)
-        if acquire_lock:
-            # Hold a shared advisory lock on this dedicated connection so the
-            # worker can detect that an SSE subscriber exists (issue #81).
-            # pg_locks releases automatically on connection close — no cleanup.
-            await acquire_subscriber_lock(conn, session_id)
+        if on_connected is not None:
+            await on_connected(conn)
     except BaseException:
         conn.terminate()
         raise
     return ListenSubscription(queue=queue, _conn=conn)
+
+
+# Sentinel distinguishing "caller did not pass on_connected, use the default
+# subscriber-lock hook" from "caller explicitly passed None to OMIT the lock".
+# The await-poller passes ``on_connected=None`` to deliberately skip the #81
+# lock (see below + services/sessions.py); a default of ``None`` would make
+# that omission indistinguishable from the unspecified case.
+_ACQUIRE_SUBSCRIBER_LOCK_DEFAULT = object()
+
+
+async def open_listen_for_events(
+    db_url: str,
+    session_id: str,
+    *,
+    queue_max: int = 1000,
+    on_connected: Callable[[asyncpg.Connection[object]], Awaitable[None]]
+    | None
+    | object = _ACQUIRE_SUBSCRIBER_LOCK_DEFAULT,
+) -> ListenSubscription:
+    """Open a dedicated asyncpg connection, LISTEN events_<session_id>,
+    acquire the SSE subscriber lock, and return a :class:`ListenSubscription`.
+
+    Two-phase counterpart to :func:`listen_for_events` for callers (SSE
+    route handlers) that need to preflight setup BEFORE constructing the
+    streaming response.
+
+    By default this acquires the #81 subscriber advisory lock via the explicit
+    ``on_connected=acquire_subscriber_lock`` hook: with the lock held, the
+    worker's :func:`aios.db.sse_lock.has_subscriber` check returns True and the
+    model call takes the streaming path (deltas → ``pg_notify`` → SSE clients).
+
+    A caller that consumes ONLY the terminal completion state — never the
+    deltas — should pass ``on_connected=None`` to OMIT the lock, so it doesn't
+    force the awaited session's worker into the slower streaming path for a
+    consumer that ignores deltas. The ``await``-primitive poller does exactly
+    this, mirroring how :func:`open_listen_for_run_events` omits the lock
+    entirely.
+
+    The lock is a documented, greppable ``on_connected`` call-site — NOT a bare
+    ``lock: bool`` flag — by design (issue #81): a future caller flipping a
+    boolean would silently change a session's streaming-vs-non-streaming
+    inference economics, whereas naming the hook keeps that coupling explicit
+    and at exactly one site.
+
+    Any failure after the initial ``asyncpg.connect`` succeeds will
+    ``conn.terminate()`` and re-raise.
+    """
+    if on_connected is _ACQUIRE_SUBSCRIBER_LOCK_DEFAULT:
+        # Hold a shared advisory lock on this dedicated connection so the
+        # worker can detect that an SSE subscriber exists (issue #81).
+        # pg_locks releases automatically on connection close — no cleanup.
+        hook: Callable[[asyncpg.Connection[object]], Awaitable[None]] | None = functools.partial(
+            acquire_subscriber_lock, session_id=session_id
+        )
+    else:
+        hook = on_connected  # type: ignore[assignment]
+    return await _open_drop_oldest_listener(
+        db_url,
+        f"events_{session_id}",
+        queue_max=queue_max,
+        log_key="listen.queue_full_drop",
+        log_fields={"session_id": session_id},
+        on_connected=hook,
+    )
 
 
 async def open_listen_for_run_events(
@@ -240,36 +306,13 @@ async def open_listen_for_run_events(
     signal (issue #81) with no workflow equivalent (a lost run wake self-heals via
     the needs-step sweep clauses, not via subscriber gating).
     """
-    conn = await _connect_listener(db_url)
-    try:
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-        channel = f"wf_run_events_{run_id}"
-
-        def _callback(
-            _conn: asyncpg.Connection[object],
-            _pid: int,
-            _channel: str,
-            payload: str,
-        ) -> None:
-            # Sync-only (asyncpg read loop). Same drop-oldest backpressure; the SSE
-            # consumer recovers by reconnecting with `?after_seq=`.
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                log.warning(
-                    "listen.wf_run_events_queue_full_drop", run_id=run_id, queue_max=queue_max
-                )
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-
-        await conn.add_listener(channel, _callback)
-    except BaseException:
-        conn.terminate()
-        raise
-    return ListenSubscription(queue=queue, _conn=conn)
+    return await _open_drop_oldest_listener(
+        db_url,
+        f"wf_run_events_{run_id}",
+        queue_max=queue_max,
+        log_key="listen.wf_run_events_queue_full_drop",
+        log_fields={"run_id": run_id},
+    )
 
 
 async def open_listen_for_connector_calls_by_type(
@@ -282,36 +325,13 @@ async def open_listen_for_connector_calls_by_type(
 
     Two-phase counterpart to :func:`listen_for_connector_calls_by_type`.
     """
-    conn = await _connect_listener(db_url)
-    try:
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-        channel = f"connector_calls_{connector}"
-
-        def _callback(
-            _conn: asyncpg.Connection[object],
-            _pid: int,
-            _channel: str,
-            payload: str,
-        ) -> None:
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                log.warning(
-                    "listen.connector_calls_type_queue_full_drop",
-                    connector=connector,
-                    queue_max=queue_max,
-                )
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-
-        await conn.add_listener(channel, _callback)
-    except BaseException:
-        conn.terminate()
-        raise
-    return ListenSubscription(queue=queue, _conn=conn)
+    return await _open_drop_oldest_listener(
+        db_url,
+        f"connector_calls_{connector}",
+        queue_max=queue_max,
+        log_key="listen.connector_calls_type_queue_full_drop",
+        log_fields={"connector": connector},
+    )
 
 
 async def open_listen_for_management_calls(
@@ -321,36 +341,13 @@ async def open_listen_for_management_calls(
     queue_max: int = 1000,
 ) -> ListenSubscription:
     """Open a dedicated asyncpg conn LISTENing ``connector_management_calls_<connector>``."""
-    conn = await _connect_listener(db_url)
-    try:
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-        channel = f"connector_management_calls_{connector}"
-
-        def _callback(
-            _conn: asyncpg.Connection[object],
-            _pid: int,
-            _channel: str,
-            payload: str,
-        ) -> None:
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                log.warning(
-                    "listen.connector_management_calls_queue_full_drop",
-                    connector=connector,
-                    queue_max=queue_max,
-                )
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-
-        await conn.add_listener(channel, _callback)
-    except BaseException:
-        conn.terminate()
-        raise
-    return ListenSubscription(queue=queue, _conn=conn)
+    return await _open_drop_oldest_listener(
+        db_url,
+        f"connector_management_calls_{connector}",
+        queue_max=queue_max,
+        log_key="listen.connector_management_calls_queue_full_drop",
+        log_fields={"connector": connector},
+    )
 
 
 async def open_listen_for_connection_discovery(
@@ -360,36 +357,13 @@ async def open_listen_for_connection_discovery(
     queue_max: int = 1000,
 ) -> ListenSubscription:
     """Open a dedicated asyncpg conn LISTENing ``connections_<connector>``."""
-    conn = await _connect_listener(db_url)
-    try:
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
-        channel = f"connections_{connector}"
-
-        def _callback(
-            _conn: asyncpg.Connection[object],
-            _pid: int,
-            _channel: str,
-            payload: str,
-        ) -> None:
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                log.warning(
-                    "listen.connection_discovery_queue_full_drop",
-                    connector=connector,
-                    queue_max=queue_max,
-                )
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-
-        await conn.add_listener(channel, _callback)
-    except BaseException:
-        conn.terminate()
-        raise
-    return ListenSubscription(queue=queue, _conn=conn)
+    return await _open_drop_oldest_listener(
+        db_url,
+        f"connections_{connector}",
+        queue_max=queue_max,
+        log_key="listen.connection_discovery_queue_full_drop",
+        log_fields={"connector": connector},
+    )
 
 
 @asynccontextmanager
@@ -434,12 +408,28 @@ async def listen_for_connector_result(
 
 
 @asynccontextmanager
-async def listen_for_events(
+async def _listen_subscription(
+    open_coro: Awaitable[ListenSubscription],
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """Generic context-manager wrapper over any ``open_listen_for_*`` coroutine.
+
+    Single-sources the ``sub = await open_*()`` / ``yield sub.queue`` /
+    ``finally: sub.terminate()`` skeleton shared by the named ``listen_for_*``
+    wrappers below, so the terminate-on-exit guarantee lives in one place.
+    """
+    subscription = await open_coro
+    try:
+        yield subscription.queue
+    finally:
+        subscription.terminate()
+
+
+def listen_for_events(
     db_url: str,
     session_id: str,
     *,
     queue_max: int = 1000,
-) -> AsyncIterator[asyncio.Queue[str]]:
+) -> AbstractAsyncContextManager[asyncio.Queue[str]]:
     """Open a dedicated asyncpg connection, LISTEN events_<session_id>,
     yield an asyncio.Queue that receives event ids as they arrive.
 
@@ -462,20 +452,15 @@ async def listen_for_events(
         Bound on the in-memory queue. Defaults to 1000 — generous enough
         that a slow consumer can fall behind by ~1000 events before drops.
     """
-    subscription = await open_listen_for_events(db_url, session_id, queue_max=queue_max)
-    try:
-        yield subscription.queue
-    finally:
-        subscription.terminate()
+    return _listen_subscription(open_listen_for_events(db_url, session_id, queue_max=queue_max))
 
 
-@asynccontextmanager
-async def listen_for_connector_calls_by_type(
+def listen_for_connector_calls_by_type(
     db_url: str,
     connector: str,
     *,
     queue_max: int = 1000,
-) -> AsyncIterator[asyncio.Queue[str]]:
+) -> AbstractAsyncContextManager[asyncio.Queue[str]]:
     """LISTEN ``connector_calls_<connector>``; yield a queue of ``"<session_id>|<connection_id>"`` payloads.
 
     Used by the runtime SSE introduced in #328 PR 5: one runtime
@@ -485,40 +470,32 @@ async def listen_for_connector_calls_by_type(
 
     Thin wrapper over :func:`open_listen_for_connector_calls_by_type`.
     """
-    subscription = await open_listen_for_connector_calls_by_type(
-        db_url, connector, queue_max=queue_max
+    return _listen_subscription(
+        open_listen_for_connector_calls_by_type(db_url, connector, queue_max=queue_max)
     )
-    try:
-        yield subscription.queue
-    finally:
-        subscription.terminate()
 
 
-@asynccontextmanager
-async def listen_for_management_calls(
+def listen_for_management_calls(
     db_url: str,
     connector: str,
     *,
     queue_max: int = 1000,
-) -> AsyncIterator[asyncio.Queue[str]]:
+) -> AbstractAsyncContextManager[asyncio.Queue[str]]:
     """LISTEN ``connector_management_calls_<connector>``; yield a queue of ``call_id`` payloads.
 
     Thin wrapper over :func:`open_listen_for_management_calls`.
     """
-    subscription = await open_listen_for_management_calls(db_url, connector, queue_max=queue_max)
-    try:
-        yield subscription.queue
-    finally:
-        subscription.terminate()
+    return _listen_subscription(
+        open_listen_for_management_calls(db_url, connector, queue_max=queue_max)
+    )
 
 
-@asynccontextmanager
-async def listen_for_connection_discovery(
+def listen_for_connection_discovery(
     db_url: str,
     connector: str,
     *,
     queue_max: int = 1000,
-) -> AsyncIterator[asyncio.Queue[str]]:
+) -> AbstractAsyncContextManager[asyncio.Queue[str]]:
     """LISTEN ``connections_<connector>``; yield a queue of ``"<event>|<connection_id>|<account>"``.
 
     Backs the connection-discovery SSE (#328 PR 5). The emit side lives
@@ -527,13 +504,9 @@ async def listen_for_connection_discovery(
 
     Thin wrapper over :func:`open_listen_for_connection_discovery`.
     """
-    subscription = await open_listen_for_connection_discovery(
-        db_url, connector, queue_max=queue_max
+    return _listen_subscription(
+        open_listen_for_connection_discovery(db_url, connector, queue_max=queue_max)
     )
-    try:
-        yield subscription.queue
-    finally:
-        subscription.terminate()
 
 
 SESSION_INTERRUPT_CHANNEL = "aios_session_interrupt"

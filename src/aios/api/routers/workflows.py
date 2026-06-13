@@ -15,9 +15,8 @@ from fastapi import APIRouter, Query, status
 from sse_starlette import EventSourceResponse
 
 from aios.api.deps import AccountIdDep, DbUrlDep, PoolDep
-from aios.api.sse import SSE_PREFLIGHT_EXCEPTIONS, make_sse_response, wf_run_event_stream
+from aios.api.sse import make_sse_response, preflight_subscription, wf_run_event_stream
 from aios.db.listen import open_listen_for_run_events
-from aios.errors import SSEPreflightFailedError
 from aios.logging import get_logger
 from aios.models.common import ListResponse
 from aios.models.pagination import page_cursor
@@ -295,19 +294,13 @@ async def stream_run_events(
     transient connect failure is a clean 503 rather than a half-open stream.
     """
     await service.get_run(pool, run_id, account_id=account_id)  # 404s cross-tenant
-    try:
-        subscription = await open_listen_for_run_events(db_url, run_id)
-    except SSE_PREFLIGHT_EXCEPTIONS as exc:
-        log.warning(
-            "sse.wf_run_events.preflight_failed",
-            run_id=run_id,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        raise SSEPreflightFailedError(
-            "could not establish LISTEN connection for run events stream",
-            detail={"stream": "wf_run_events"},
-        ) from exc
+    subscription = await preflight_subscription(
+        open_listen_for_run_events(db_url, run_id),
+        stream_name="wf_run_events",
+        log_key="sse.wf_run_events.preflight_failed",
+        log_fields={"run_id": run_id},
+        log=log,
+    )
     return make_sse_response(
         subscription, wf_run_event_stream(subscription, pool, run_id, after_seq=after_seq)
     )

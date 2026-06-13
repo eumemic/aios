@@ -36,11 +36,14 @@ from sse_starlette import EventSourceResponse, ServerSentEvent
 
 from aios.db import queries
 from aios.db.listen import EVENTS_ARCHIVED_NOTIFY
+from aios.errors import SSEPreflightFailedError
 from aios.logging import get_logger
 from aios.models.workflows import TERMINAL_RUN_STATUSES
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable
+
+    import structlog
 
     from aios.db.listen import ListenSubscription
 
@@ -62,6 +65,43 @@ SSE_PREFLIGHT_EXCEPTIONS = (asyncpg.PostgresError, OSError)
 # discovery stream is zombied is otherwise invisible until the container
 # restarts (aios#962).
 SSE_PING_SECONDS = 15
+
+
+async def preflight_subscription(
+    open_coro: Awaitable[ListenSubscription],
+    *,
+    stream_name: str,
+    log_key: str,
+    log_fields: dict[str, str],
+    log: structlog.stdlib.BoundLogger,
+) -> ListenSubscription:
+    """Await ``open_coro`` (an ``open_listen_for_*`` call), translating the
+    realistic transient setup failures into a clean 503 (issue #376).
+
+    Single-sources the ``try: sub = await open_*() except
+    SSE_PREFLIGHT_EXCEPTIONS: log.warning(...); raise SSEPreflightFailedError``
+    block that the five SSE route handlers used to repeat verbatim. Each route
+    still names its own ``open_*`` coroutine, ``stream_name``, ``log_key`` and
+    resource ``log_fields`` — only the open-or-503 wiring is shared.
+
+    On success returns the :class:`ListenSubscription`; on
+    :data:`SSE_PREFLIGHT_EXCEPTIONS` logs ``log_key`` with ``log_fields`` and
+    raises :class:`aios.errors.SSEPreflightFailedError` with
+    ``detail={"stream": stream_name}``.
+    """
+    try:
+        return await open_coro
+    except SSE_PREFLIGHT_EXCEPTIONS as exc:
+        log.warning(
+            log_key,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            **log_fields,
+        )
+        raise SSEPreflightFailedError(
+            f"could not establish LISTEN connection for {stream_name} stream",
+            detail={"stream": stream_name},
+        ) from exc
 
 
 def make_sse_response(

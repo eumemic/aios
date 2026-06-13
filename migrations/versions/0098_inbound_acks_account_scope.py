@@ -12,8 +12,8 @@ tenants' dedup keyspaces collide and one tenant's *first-ever* delivery of
 an event_id the other already acked is silently swallowed. Add ``account_id``
 to the ledger key to restore per-tenant dedup.
 
-Revision ID: 0096
-Revises: 0095
+Revision ID: 0098
+Revises: 0097
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0096"
-down_revision: str = "0095"
+revision: str = "0098"
+down_revision: str = "0097"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

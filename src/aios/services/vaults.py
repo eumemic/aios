@@ -314,6 +314,14 @@ async def refresh_credential(
             seconds = 0
         if seconds > 0:
             payload["expires_at"] = (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+        else:
+            # No expires_in in the response: drop any prior expires_at so the
+            # fresh token reads as never-expiring. The prior value is within-skew
+            # by construction (a refresh only fires when is_expiring was True), so
+            # inheriting it would keep is_expiring True and re-trigger a refresh on
+            # every subsequent call — churning a rotated refresh_token and tripping
+            # rate limits. Mirrors _store_oauth_credential's write-even-when-None.
+            payload.pop("expires_at", None)
 
         new_blob = subkey.encrypt_dict(payload)
         await conn.execute(

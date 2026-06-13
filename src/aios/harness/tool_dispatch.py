@@ -320,24 +320,62 @@ async def _append_tool_result_event(
             conn, session_id, tool_call_id, account_id=account_id
         )
         if existing is not None:
-            existing_is_error = bool(existing.data.get("is_error", False))
-            log.warning(
-                "tool.result_dedup_skip",
-                session_id=session_id,
-                tool_call_id=tool_call_id,
-                existing_is_error=existing_is_error,
-                attempted_is_error=bool(event_data.get("is_error", False)),
-            )
-            await queries.decrement_open_tool_call_count(conn, session_id, account_id=account_id)
+            await _dedup_skip(conn, session_id, tool_call_id, existing, event_data, account_id)
             return
-        await queries.append_event(
-            conn,
-            session_id=session_id,
-            kind="message",
-            data=event_data,
-            account_id=account_id,
-            tool_parent_channel=tool_parent_channel,
-        )
+        try:
+            await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="message",
+                data=event_data,
+                account_id=account_id,
+                tool_parent_channel=tool_parent_channel,
+            )
+        except asyncpg.UniqueViolationError:
+            # Structural floor (#1082): the partial UNIQUE index
+            # ``events_tool_result_idx`` forbids a second tool-role row for
+            # ``(session_id, tool_call_id)``. A racing appender (the operator
+            # deny path, or another worker task) committed its row between our
+            # read-check above and this INSERT, so ``find_tool_result_event``
+            # saw nothing but the index rejects the write. The append runs in
+            # ``append_event``'s own ``conn.transaction()``, so the
+            # UniqueViolation rolled back the seq increment with it — gapless
+            # seq preserved, no duplicate row. Re-read and apply the same
+            # id-blind compensation as the read-check path: the winning row is
+            # the one already committed.
+            existing = await queries.find_tool_result_event(
+                conn, session_id, tool_call_id, account_id=account_id
+            )
+            assert existing is not None  # the UniqueViolation proves a row exists
+            await _dedup_skip(conn, session_id, tool_call_id, existing, event_data, account_id)
+
+
+async def _dedup_skip(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    existing: Any,
+    event_data: dict[str, Any],
+    account_id: str,
+) -> None:
+    """Log the dedup-skip and apply the ``open_tool_call_count`` compensation.
+
+    Shared by the read-check fast path and the ``UniqueViolation`` catch in
+    :func:`_append_tool_result_event` so both leave identical state: the
+    winning row stays, the late worker append no-ops, and the id-blind ``+1``
+    that was applied at assistant-turn time (issue #890) is decremented once.
+    """
+    from aios.db import queries
+
+    existing_is_error = bool(existing.data.get("is_error", False))
+    log.warning(
+        "tool.result_dedup_skip",
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        existing_is_error=existing_is_error,
+        attempted_is_error=bool(event_data.get("is_error", False)),
+    )
+    await queries.decrement_open_tool_call_count(conn, session_id, account_id=account_id)
 
 
 async def _append_tool_result(

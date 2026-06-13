@@ -65,7 +65,7 @@ async def test_archive_fires_notify_on_events_channel(
     after the archive commits."""
     pool, account_id, session_id = pool_and_session
 
-    subscription = await open_listen_for_events(migrated_db_url, session_id, acquire_lock=False)
+    subscription = await open_listen_for_events(migrated_db_url, session_id, on_connected=None)
     try:
         await service.archive_session(pool, session_id, account_id=account_id)
         payload = await asyncio.wait_for(subscription.queue.get(), timeout=5)
@@ -119,7 +119,7 @@ async def test_archive_already_archived_does_not_fire_second_poke(
     pool, account_id, session_id = pool_and_session
     await service.archive_session(pool, session_id, account_id=account_id)
 
-    subscription = await open_listen_for_events(migrated_db_url, session_id, acquire_lock=False)
+    subscription = await open_listen_for_events(migrated_db_url, session_id, on_connected=None)
     try:
         with pytest.raises(NotFoundError):
             await service.archive_session(pool, session_id, account_id=account_id)

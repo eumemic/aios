@@ -14,6 +14,7 @@ import asyncpg
 
 from aios.db import queries
 from aios.models.session_templates import SessionTemplate
+from aios.services import agents as agents_service
 
 
 async def create_session_template(
@@ -44,6 +45,11 @@ async def create_session_template(
             await queries.get_vault(conn, vault_id, account_id=account_id)
         for store_id in memory_store_ids:
             await queries.get_memory_store(conn, store_id, account_id=account_id)
+        # Reject a pinned version that doesn't exist before binding it — the
+        # supplied agent_id is the resolved binding here (no merge on create).
+        await agents_service.validate_pinned_agent_version(
+            conn, agent_id=agent_id, agent_version=agent_version, account_id=account_id
+        )
         return await queries.insert_session_template(
             conn,
             name=name,
@@ -106,7 +112,7 @@ async def update_session_template(
         if memory_store_ids is not None:
             for store_id in memory_store_ids:
                 await queries.get_memory_store(conn, store_id, account_id=account_id)
-        return await queries.update_session_template(
+        template = await queries.update_session_template(
             conn,
             template_id,
             name=name,
@@ -119,6 +125,15 @@ async def update_session_template(
             archive_when_idle=archive_when_idle,
             account_id=account_id,
         )
+        # Validate the resolved pin: agent_version may be supplied without
+        # agent_id, so only the post-merge row knows the effective binding.
+        await agents_service.validate_pinned_agent_version(
+            conn,
+            agent_id=template.agent_id,
+            agent_version=template.agent_version,
+            account_id=account_id,
+        )
+        return template
 
 
 async def archive_session_template(

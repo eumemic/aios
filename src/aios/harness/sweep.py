@@ -178,22 +178,21 @@ CONFIRMED_ROWS_SQL = """
        {scope_clause}
 """
 
+# The reaction watermark — ``MAX(COALESCE(reacting_to, seq))`` over assistant
+# messages — lives in exactly ONE writable place: the ``last_reacted_seq``
+# UPDATE in ``append_event`` (db/queries/events.py), seeded once by migration
+# 0066's backfill. This gate consumes that maintained scalar directly via a
+# JOIN; it does NOT recompute the watermark. Re-deriving the formula here (the
+# pre-#1080 ``session_max_reacting`` CTE) re-introduces the #155-class drift
+# the deletion in #1080 foreclosed — keep this an equality JOIN, not a CTE.
 UNREACTED_ROWS_SQL = """
-    WITH session_max_reacting AS (
-        SELECT session_id,
-               MAX(COALESCE((data->>'reacting_to')::bigint, seq)) AS max_reacting
-          FROM events
-         WHERE kind = 'message' AND role = 'assistant'
-           AND session_id = ANY($1::text[])
-         GROUP BY session_id
-    )
     SELECT e.session_id, e.data
       FROM events e
-      LEFT JOIN session_max_reacting smr ON smr.session_id = e.session_id
+      JOIN sessions s ON s.id = e.session_id
      WHERE e.session_id = ANY($1::text[])
        AND e.kind = 'message'
        AND e.role <> 'assistant'
-       AND e.seq > COALESCE(smr.max_reacting, 0)
+       AND e.seq > s.last_reacted_seq
 """
 
 ALL_RESULT_ROWS_SQL = """
