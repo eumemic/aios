@@ -281,6 +281,11 @@ async def create_session(
         # agent id would silently bind another tenant's model/surface into the
         # session. Mirrors the environment guard above (issue #755 / #851).
         await queries.get_agent(conn, agent_id, account_id=account_id)
+        # Reject a pinned version that doesn't exist before binding it — the
+        # supplied agent_id is the resolved binding here (no merge on create).
+        await agents_service.validate_pinned_agent_version(
+            conn, agent_id=agent_id, agent_version=agent_version, account_id=account_id
+        )
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,
@@ -1348,6 +1353,16 @@ async def update_session(
             agent_version=agent_version,
             title=title,
             metadata=metadata,
+            account_id=account_id,
+        )
+        # Validate the resolved pin: agent_version may be supplied without
+        # agent_id (re-pin on the current agent), and changing agent_id resets
+        # the version to null — only the post-merge row knows the effective
+        # (agent_id, agent_version) binding.
+        await agents_service.validate_pinned_agent_version(
+            conn,
+            agent_id=session.agent_id,
+            agent_version=session.agent_version,
             account_id=account_id,
         )
         changed = False

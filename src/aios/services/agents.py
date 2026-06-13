@@ -140,6 +140,36 @@ async def get_agent_version(
         return await queries.get_agent_version(conn, agent_id, version, account_id=account_id)
 
 
+async def validate_pinned_agent_version(
+    conn: asyncpg.Connection[Any],
+    *,
+    agent_id: str | None,
+    agent_version: int | None,
+    account_id: str,
+) -> None:
+    """Reject a pinned ``agent_version`` that has no matching ``agent_versions`` row.
+
+    ``agent_version=None`` means "latest" and needs no check. A non-null pin is
+    otherwise write-trusted but read-fatal: the bare ``agent_id`` FK doesn't
+    constrain the integer, so a bad pin (e.g. a version past the agent's current
+    one) is accepted at write time, then the first step's ``load_for_session``
+    calls ``get_agent_version``, raises ``NotFoundError``, and the session burns
+    its retry budget into the terminal ``errored`` state — unrecoverable, since
+    ``agent_versions`` is append-only and the number only ever increments past
+    the bad pin. Validating here turns that silent mid-run brick into a clean
+    404 at the write the operator initiated. Shared by the session and template
+    create/update writers (on a caller ``conn`` so it joins their txn and rolls
+    back with them) so every pin path enforces it.
+    """
+    if agent_version is None:
+        return
+    # A non-null version always pairs with a non-null agent_id: sessions enforce
+    # it via sessions_agent_version_pair_ck (migration 0095); session_templates
+    # via the NOT NULL agent_id column (migration 0027).
+    assert agent_id is not None
+    await queries.get_agent_version(conn, agent_id, agent_version, account_id=account_id)
+
+
 async def _load_for_session_conn(
     conn: asyncpg.Connection[Any], session: Any, *, account_id: str
 ) -> Agent | AgentVersion:
