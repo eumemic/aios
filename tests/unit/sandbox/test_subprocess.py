@@ -1,27 +1,29 @@
-"""The double-timeout give-up path must close the subprocess transport.
+"""The SIGKILL cleanup paths in ``_subprocess`` must release the
+parent-side pipe FDs.
 
-When the post-SIGKILL drain in ``run_subprocess_with_timeout`` also
-times out (a child wedged in uninterruptible D-state — ``docker``
-against a flapping daemon, ``git`` on a dead mount), the give-up branch
-must close ``proc._transport`` so the cancelled ``communicate()``
-doesn't strand the parent-side stdout/stderr pipe FDs. Every container
-provision and host git-clone funnels through this runner; pre-fix,
-repeated wedges exhaust the worker's FD ceiling and starve both
-connection pools. The mechanism is documented at the fix site in
-``_subprocess.py``.
+When a child is killed but its transport isn't closed — the
+double-timeout give-up path, or an outer ``CancelledError`` that skips
+the timeout branch — the cancelled ``communicate()`` strands the
+parent-side stdout/stderr pipe FDs. Every container provision, host
+git-clone, and snapshot flatten funnels through this module; pre-fix,
+repeated wedges/cancellations exhaust the worker's FD ceiling and starve
+both connection pools (and, for the ``docker export | docker import``
+flatten pipeline, orphan multi-GB subprocesses). The mechanism is
+documented at each fix site in ``_subprocess.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from aios.sandbox import _subprocess
-from aios.sandbox._subprocess import run_subprocess_with_timeout
+from aios.sandbox._subprocess import run_docker_pipeline, run_subprocess_with_timeout
 
 
 class _WedgedProc:
@@ -94,3 +96,46 @@ async def test_outer_cancellation_kills_and_closes_transport(
 
     assert proc._transport.kill.called
     proc._transport.close.assert_called_once()
+
+
+async def test_pipeline_outer_cancel_kills_and_closes_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outer cancellation of the flatten pipeline must SIGKILL *both*
+    docker children and close *both* pipe transports before propagating.
+
+    ``CancelledError`` is a ``BaseException``, not a ``TimeoutError``, so
+    it skips ``run_docker_pipeline``'s timeout branch — the same gap the
+    sibling ``run_subprocess_with_timeout`` closes. Without it, a worker
+    SIGTERM or job-deadline cancel mid ``docker export | docker import``
+    leaves both children running and strands their parent-side pipe
+    FDs."""
+    producer = _WedgedProc()
+    consumer = _WedgedProc()
+    spawned = iter((producer, consumer))
+
+    async def _fake_spawn(*_argv: Any, **_kwargs: Any) -> _WedgedProc:
+        return next(spawned)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn)
+    # Keep the pipe plumbing hermetic — no real host FDs are created or closed.
+    monkeypatch.setattr(os, "pipe", lambda: (100, 101))
+    monkeypatch.setattr(os, "close", lambda _fd: None)
+
+    # Generous timeout so the wait_for itself never fires — outer
+    # cancellation is what we're testing.
+    task = asyncio.create_task(
+        run_docker_pipeline(
+            ["docker", "export", "x"], ["docker", "import", "-", "tag"], timeout_s=60.0
+        )
+    )
+    # Let the task reach `await asyncio.wait_for(_drain(), ...)`.
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert producer._transport.kill.called
+    assert consumer._transport.kill.called
+    producer._transport.close.assert_called_once()
+    consumer._transport.close.assert_called_once()

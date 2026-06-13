@@ -173,6 +173,22 @@ async def run_docker_pipeline(
                 f"docker pipeline timed out after {timeout_s}s: "
                 f"{' '.join(producer_argv)} | {' '.join(consumer_argv)}"
             ) from timeout_err
+        except BaseException:
+            # CancelledError is a BaseException, not a TimeoutError, so an
+            # outer cancel (caller's job deadline, worker SIGTERM mid
+            # multi-GB export) skips the timeout branch above — both
+            # children keep running and their parent-side pipe FDs leak.
+            # Mirror run_subprocess_with_timeout: SIGKILL both and close
+            # their transports before propagating. (The timeout branch
+            # needs no close — the loop reclaims each transport on the
+            # killed child's pipe EOF — but a propagating cancel returns
+            # immediately, so it must release them here.)
+            for proc in (producer, consumer):
+                if proc is not None:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    proc._transport.close()  # type: ignore[attr-defined]  # typeshed omits Process._transport
+            raise
 
         if producer.returncode != 0:
             raise SandboxBackendError(
