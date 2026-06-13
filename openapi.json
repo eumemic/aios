@@ -13368,7 +13368,14 @@
             "title": "Id"
           },
           "agent_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Agent Id"
           },
           "environment_id": {
@@ -13385,6 +13392,17 @@
               }
             ],
             "title": "Agent Version"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
           },
           "title": {
             "anyOf": [
@@ -16167,6 +16185,17 @@
             ],
             "title": "Budget Usd"
           },
+          "default_child_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Child Model"
+          },
           "last_event_seq": {
             "type": "integer",
             "title": "Last Event Seq"
@@ -16244,6 +16273,18 @@
             ],
             "title": "Budget Usd",
             "description": "Optional shared USD spend ceiling for this run's direct agent() children."
+          },
+          "default_child_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Child Model",
+            "description": "Optional model used by generic agent() children when they omit model=."
           }
         },
         "additionalProperties": false,
@@ -16695,7 +16736,7 @@
           "script": {
             "type": "string",
             "title": "Script",
-            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(agent_id, input, output_schema=None)`: invoke an agent and await its result.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): the bash\n  environment exposes `$AIOS_IDEMPOTENCY_KEY` (stable across crash re-runs of the same\n  call, distinct per call) \u2014 pass it to the external service as an idempotency key so\n  the service drops a re-fired duplicate, or knowingly accept at-least-once.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        input[\"agent_id\"],\n        {\"task\": input[\"task\"]},\n        None,\n    )\n    return result\n```\n"
+            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): the bash\n  environment exposes `$AIOS_IDEMPOTENCY_KEY` (stable across crash re-runs of the same\n  call, distinct per call) \u2014 pass it to the external service as an idempotency key so\n  the service drops a re-fired duplicate, or knowingly accept at-least-once.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        {\"task\": input[\"task\"]},\n        agent_id=input[\"agent_id\"],\n    )\n    return result\n```\n"
           },
           "input_schema": {
             "anyOf": [
@@ -16792,7 +16833,7 @@
               }
             ],
             "title": "Script",
-            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(agent_id, input, output_schema=None)`: invoke an agent and await its result.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): the bash\n  environment exposes `$AIOS_IDEMPOTENCY_KEY` (stable across crash re-runs of the same\n  call, distinct per call) \u2014 pass it to the external service as an idempotency key so\n  the service drops a re-fired duplicate, or knowingly accept at-least-once.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        input[\"agent_id\"],\n        {\"task\": input[\"task\"]},\n        None,\n    )\n    return result\n```\n"
+            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): the bash\n  environment exposes `$AIOS_IDEMPOTENCY_KEY` (stable across crash re-runs of the same\n  call, distinct per call) \u2014 pass it to the external service as an idempotency key so\n  the service drops a re-fired duplicate, or knowingly accept at-least-once.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        {\"task\": input[\"task\"]},\n        agent_id=input[\"agent_id\"],\n    )\n    return result\n```\n"
           },
           "input_schema": {
             "anyOf": [

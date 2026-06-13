@@ -421,6 +421,10 @@ class Settings(BaseSettings):
         "single-``parallel()`` fan-out width is bounded separately, in the "
         "host (``wf_script_host.MAX_PARALLEL_FANOUT``).",
     )
+    workflow_default_child_model: str | None = Field(
+        default=None,
+        description="Default model for generic workflow agent() children launched via operator/HTTP runs when no per-run or per-call model is supplied.",
+    )
     workflow_max_inflight_children_per_run: int = Field(
         default=8,
         ge=1,

@@ -862,6 +862,7 @@ async def _spawn_child(
         agent_id=agent.id,
         environment_id=ENV,
         agent_version=agent.version,
+        model=None,
         parent_run_id=run_id,
         surface=surface,
         vault_ids=vault_ids or [],

@@ -848,26 +848,41 @@ async def _open_agent_capability(
                 "(references must resolve within the schema; remote refs are unsupported)",
             )
     agent_id = spec.get("agent_id")
-    if not isinstance(agent_id, str):
+    if agent_id is not None and not isinstance(agent_id, str):
         return await _reject(
-            "bad_agent_call", f"agent() requires a string agent_id, got {agent_id!r}"
+            "bad_agent_call", f"agent() requires agent_id to be a string or None, got {agent_id!r}"
         )
+    model = spec.get("model")
+    if model is not None and not isinstance(model, str):
+        return await _reject("bad_agent_call", f"agent() model must be a string, got {model!r}")
 
     child_id = child_session_id(run.id, cap.call_key)
-    try:
-        # The full agent (head row) — both the pinned version AND its declared surface,
-        # which the run clamps. One query, same NotFoundError contract as before.
-        agent = await db_queries.get_agent(conn, agent_id, account_id=account_id)
-    except NotFoundError:
-        return await _reject("agent_not_found", f"agent {agent_id!r} not found")
+    pinned: int | None
+    stamped_model: str | None = model
+    if agent_id is None:
+        pinned = None
+        stamped_model = model or run.default_child_model
+        if stamped_model is None:
+            return await _reject(
+                "bad_agent_call",
+                "generic agent() call has no model: pass model= or set the run's default child model",
+            )
+        child_surface = surface_of(run)
+    else:
+        try:
+            # The full agent (head row) — both the pinned version AND its declared surface,
+            # which the run clamps. One query, same NotFoundError contract as before.
+            agent = await db_queries.get_agent(conn, agent_id, account_id=account_id)
+        except NotFoundError:
+            return await _reject("agent_not_found", f"agent {agent_id!r} not found")
+        pinned = agent.version
+        # #794: named children wield agent ∩ run, frozen at spawn; vaults are the run's.
+        child_surface = attenuation_service.clamp(surface_of(agent), surface_of(run))
     # Lifetime cap (H1) enforced HERE — past every rejection gate, before the child is
     # created — so only caps that genuinely spawn count. ``agent_spawns`` already excludes
     # rejected caps; this child would be the (agent_spawns + 1)-th, so cap it on strict ``>``.
     if agent_spawns + 1 > max_agent_calls:
         return _SpawnResult(rejected=False, needs_rewake=False, quota_exceeded=True)
-    pinned = agent.version
-    # #794: the child wields agent ∩ run, frozen at spawn; its vaults are the run's.
-    child_surface = attenuation_service.clamp(surface_of(agent), surface_of(run))
     run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=account_id)
 
     created = await create_child_session(
@@ -877,6 +892,7 @@ async def _open_agent_capability(
         agent_id=agent_id,
         environment_id=run.environment_id,
         agent_version=pinned,
+        model=stamped_model,
         parent_run_id=run.id,
         surface=child_surface,
         vault_ids=run_vaults,
@@ -910,6 +926,8 @@ async def _open_agent_capability(
         "child_session_id": child_id,
         "child_agent_version": child_version,
     }
+    if "label" in cap.annotations:
+        cap_payload["label"] = cap.annotations["label"]
     if output_schema is not None:
         cap_payload["output_schema"] = output_schema  # audit: the shape this call demanded
     await wf_queries.append_run_event(

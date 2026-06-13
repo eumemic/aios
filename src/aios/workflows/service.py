@@ -48,6 +48,7 @@ async def create_run(
     parent_run_id: str | None = None,
     expected_version: int | None = None,
     budget_usd: float | None = None,
+    default_child_model: str | None = None,
 ) -> WfRun:
     """Create a run that snapshots the workflow's current script, then wake it.
 
@@ -95,6 +96,7 @@ async def create_run(
     # snapshots the workflow verbatim. Threading `conn` (vs a second pool.acquire())
     # keeps the whole path single-connection, so it is safe on a size-1 pool.
     launcher_surface: Surface | None = None
+    run_default_child_model = default_child_model or get_settings().workflow_default_child_model
     async with pool.acquire() as conn, conn.transaction():
         await get_environment(conn, environment_id, account_id=account_id)  # 404s foreign/absent
         workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
@@ -118,6 +120,7 @@ async def create_run(
                 pool, launcher_session, account_id=account_id, conn=conn
             )
             launcher_surface = surface_of(launcher_agent)
+            run_default_child_model = launcher_agent.model
         # Clamp the snapshot to the launcher's surface (sub-runs compose for free: a
         # child launcher's load_for_session already returns its frozen clamp).
         effective = (
@@ -197,6 +200,7 @@ async def create_run(
             mcp_servers=effective.mcp_servers,
             http_servers=effective.http_servers,
             budget_usd=budget_usd,
+            default_child_model=run_default_child_model,
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)

@@ -52,6 +52,7 @@ class WfRun:
             input_ (Any | Unset):
             output (Any | Unset):
             budget_usd (float | None | Unset):
+            default_child_model (None | str | Unset):
             archived_at (datetime.datetime | None | Unset):
     """
 
@@ -74,6 +75,7 @@ class WfRun:
     input_: Any | Unset = UNSET
     output: Any | Unset = UNSET
     budget_usd: float | None | Unset = UNSET
+    default_child_model: None | str | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -143,6 +145,12 @@ class WfRun:
         else:
             budget_usd = self.budget_usd
 
+        default_child_model: None | str | Unset
+        if isinstance(self.default_child_model, Unset):
+            default_child_model = UNSET
+        else:
+            default_child_model = self.default_child_model
+
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
             archived_at = UNSET
@@ -184,6 +192,8 @@ class WfRun:
             field_dict["output"] = output
         if budget_usd is not UNSET:
             field_dict["budget_usd"] = budget_usd
+        if default_child_model is not UNSET:
+            field_dict["default_child_model"] = default_child_model
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -278,6 +288,17 @@ class WfRun:
 
         budget_usd = _parse_budget_usd(d.pop("budget_usd", UNSET))
 
+        def _parse_default_child_model(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        default_child_model = _parse_default_child_model(
+            d.pop("default_child_model", UNSET)
+        )
+
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -315,6 +336,7 @@ class WfRun:
             input_=input_,
             output=output,
             budget_usd=budget_usd,
+            default_child_model=default_child_model,
             archived_at=archived_at,
         )
 

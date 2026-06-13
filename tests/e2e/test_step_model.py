@@ -956,6 +956,7 @@ class TestSessionVersionBinding:
         await harness.run_until_idle(session.id)
 
         # Update the agent's system prompt
+        assert session.agent_id is not None
         agent = await agents_service.get_agent(
             harness._pool, session.agent_id, account_id=account_id
         )
@@ -998,6 +999,7 @@ class TestSessionVersionBinding:
         )
 
         # Update agent to version 2
+        assert session.agent_id is not None
         agent = await agents_service.get_agent(
             harness._pool, session.agent_id, account_id=account_id
         )
