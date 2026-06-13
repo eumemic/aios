@@ -77,6 +77,41 @@ Trigger: any API route, response model, error envelope, or pydantic schema
 change that flows through FastAPI introspection. **Run both before pushing**
 when you've touched API-layer code.
 
+## Database migrations
+
+- **Migrations run post-deploy.** Coolify executes `aios migrate` as the
+  **post-deployment** command on aios-api. It runs in the **new** container,
+  which has the new migration scripts baked in. (A pre-deploy command always
+  runs in the OLD container by design, so it would migrate against the previous
+  deployment's code and never see the new migration files — the
+  alembic-0055-phantom symptom on 2026-05-23.)
+
+- **The new-code/old-schema window.** Between "new container starts serving
+  traffic" and "post-deploy migrate completes," the new code is briefly running
+  against the **old** schema. For **purely-additive** migrations (`add column`,
+  `add table`, `add index`) this is safe: the new code's reads/writes against
+  the old schema keep working, and the migration is invisible to the running
+  container until it completes.
+
+- **Destructive migrations need expand/contract.** For `drop column`,
+  `drop table`, `change type`, etc., the new code might query a soon-to-be-removed
+  column during the window. A PR that introduces a destructive migration **MUST**
+  either:
+  - **Split into three deploys:** deploy A (code handles both old and new
+    schema) → deploy B (run the migration via post-deploy as usual) → deploy C
+    (code requires the new schema), **OR**
+  - **Ship together with code that handles both schemas** across the window:
+    read-tolerant of either form, write-tolerant of either form.
+
+- **Only aios-api owns migrations.** aios-worker, aios-signal, aios-telegram,
+  and aios-whatsapp do **not** run migrations. The eumemic-ops `coolify-flags`
+  audit enforces this constellation-wide: any non-aios-api app with `migrate` in
+  either its pre- or post-deployment command fails the audit.
+
+Operator-facing background lives in eumemic-ops at
+`skills/coolify-api/references/db-direct.md` §"Run migrations against the new
+code (use post_deployment_command)".
+
 ## Architecture
 
 aios is an event-driven agent runtime. The headline property: **every tool is implicitly async** — the model stays responsive to user messages even while tools are running.
