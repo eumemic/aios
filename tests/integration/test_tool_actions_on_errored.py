@@ -14,7 +14,7 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import ConflictError
-from aios.harness.sweep import find_and_repair_ghosts
+from aios.harness.sweep import GHOST_ASST_SQL, find_and_repair_ghosts
 from aios.harness.task_registry import TaskRegistry
 from aios.services import sessions as sessions_service
 from tests.integration.conftest import seed_agent_env_session
@@ -161,4 +161,104 @@ async def test_ghost_repair_skips_errored_session(
         f"ghost-repair attempted on an errored session (got {repaired}); "
         f"find_and_repair_ghosts is missing the derived-errored exclusion "
         f"(_errored_session_ids)."
+    )
+
+
+async def test_ghost_asst_sql_excludes_errored_session(
+    errored_session_with_tool_call: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """``GHOST_ASST_SQL`` itself must drop the errored session's
+    assistant-with-tool_calls rows — the errored exclusion is pushed into
+    SQL (#897), not only applied by the Python ``_errored_session_ids``
+    post-filter. The errored session here has an open tool_call ``tc_x``
+    (``open_tool_call_count > 0``), so without the pushed-down
+    ``last_error_seq`` predicate the row would survive the scan and be
+    fetched from the event log on every 30s sweep only to be discarded."""
+    pool, _account_id, session_id = errored_session_with_tool_call
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            GHOST_ASST_SQL.format(scope_clause="AND e.session_id = $1"),
+            session_id,
+        )
+    assert rows == [], (
+        f"GHOST_ASST_SQL returned rows for an errored session (got {len(rows)}); "
+        f"the errored-session exclusion (#897) was not pushed into SQL."
+    )
+
+
+@pytest.fixture
+async def healthy_session_with_open_tool_call(
+    migrated_db_url: str, _reset_db_state: None
+) -> AsyncIterator[tuple[asyncpg.Pool[Any], str, str]]:
+    """Yield ``(pool, account_id, session_id)`` for a NON-errored session
+    carrying an assistant ``tool_call`` (``tc_live``) for the registered
+    built-in ``bash`` tool with no matching result — a genuine ghost.
+
+    This is the positive counterpart to the errored fixture: it pins that
+    pushing the errored predicate into ``GHOST_ASST_SQL`` does NOT
+    over-exclude a healthy errored-adjacent session. The session has
+    ``open_tool_call_count > 0`` but ``last_error_seq`` is unset, so it must
+    survive the scan and the ghost must be repaired."""
+    pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
+                VALUES ('acc_live_tool', NULL, TRUE, 'healthy-open-call')
+                """
+            )
+        _agent, _env, session = await seed_agent_env_session(
+            pool, account_id="acc_live_tool", prefix="live-tool"
+        )
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                session_id=session.id,
+                kind="message",
+                data={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "tc_live",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        }
+                    ],
+                },
+                account_id="acc_live_tool",
+            )
+        yield pool, "acc_live_tool", session.id
+    finally:
+        await pool.close()
+
+
+async def test_ghost_repair_handles_healthy_session_with_open_call(
+    healthy_session_with_open_tool_call: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """A non-errored session with an open dispatched tool_call still has its
+    ghost repaired (#897). Pushing the errored predicate into
+    ``GHOST_ASST_SQL`` must not drop a session that ``ERRORED_SESSIONS_SQL``
+    would NOT classify as errored — otherwise a genuine ghost would never be
+    repaired."""
+    pool, _account_id, session_id = healthy_session_with_open_tool_call
+
+    # The session's assistant-with-tool_calls row must survive the scan.
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            GHOST_ASST_SQL.format(scope_clause="AND e.session_id = $1"),
+            session_id,
+        )
+    assert len(rows) == 1, (
+        f"GHOST_ASST_SQL dropped a healthy (non-errored) session with an open "
+        f"tool_call (got {len(rows)} rows); the #897 predicate over-excludes."
+    )
+
+    repaired = await find_and_repair_ghosts(pool, TaskRegistry(), session_id=session_id)
+    assert (session_id, "tc_live") in repaired, (
+        f"ghost-repair missed the open dispatched tool_call on a healthy "
+        f"session (got {repaired}); the #897 errored exclusion must not "
+        f"over-exclude non-errored sessions."
     )
