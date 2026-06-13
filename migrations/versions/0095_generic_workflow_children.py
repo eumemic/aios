@@ -23,7 +23,7 @@ def upgrade() -> None:
     op.execute("ALTER TABLE wf_runs ADD COLUMN default_child_model text")
     op.execute(
         "ALTER TABLE sessions ADD CONSTRAINT sessions_agent_version_pair_ck "
-        "CHECK ((agent_id IS NULL) = (agent_version IS NULL))"
+        "CHECK (parent_run_id IS NULL OR ((agent_id IS NULL) = (agent_version IS NULL)))"
     )
     op.execute(
         "ALTER TABLE sessions ADD CONSTRAINT sessions_agentless_workflow_child_ck "
