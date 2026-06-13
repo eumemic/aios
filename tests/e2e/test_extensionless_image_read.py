@@ -35,14 +35,18 @@ from aios.tools.read import read_handler
 from aios.tools.registry import ToolResult
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
+from tests.helpers.images import valid_gif_bytes, valid_jpeg_bytes, valid_png_bytes
 
 pytestmark = pytest.mark.docker
 
-# (extension-less filename, leading magic bytes, expected mime).
+# (extension-less filename, full decodable image bytes, expected mime). Real
+# images, not magic-prefix fragments: the read tool now full-decodes before
+# inlining (the provider 400s on undecodable bytes), so this sniff-routing test
+# must stage bytes that both sniff AND decode.
 _CASES = [
-    ("unnamed_png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR", "image/png"),
-    ("unnamed_jpg", b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00", "image/jpeg"),
-    ("unnamed_gif", b"GIF89a\x01\x00\x01\x00\x80\x00\x00", "image/gif"),
+    ("unnamed_png", valid_png_bytes(), "image/png"),
+    ("unnamed_jpg", valid_jpeg_bytes(), "image/jpeg"),
+    ("unnamed_gif", valid_gif_bytes(), "image/gif"),
 ]
 
 
@@ -63,8 +67,7 @@ class TestExtensionlessImageRead:
         # bind mount, so it exercises the real ``set -o pipefail; head -c 16 |
         # base64`` exec probe + ``_stat_and_read_via_exec`` full read.
         for parent in ("/workspace", "/tmp"):
-            for name, magic, expected_mime in _CASES:
-                payload = magic + f"-{parent}-{name}-sentinel".encode()
+            for name, payload, expected_mime in _CASES:
                 b64 = base64.b64encode(payload).decode("ascii")
                 write_cmd = f"printf '%s' {b64} | base64 -d > {parent}/{name}"
                 write_result = await bash_handler(session.id, {"command": write_cmd})

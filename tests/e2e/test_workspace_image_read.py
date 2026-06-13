@@ -26,6 +26,7 @@ from aios.tools.read import read_handler
 from aios.tools.registry import ToolResult
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
+from tests.helpers.images import valid_png_bytes
 
 pytestmark = pytest.mark.docker
 
@@ -52,7 +53,7 @@ class TestWorkspaceImageRead:
         # inside the container.  The container sees ``/workspace`` as the
         # bind mount; the host sees it at
         # ``<workspace_root>/<account_id>/<session_id>``.
-        sentinel = b"PNG-SENTINEL-660"
+        sentinel = valid_png_bytes()  # must decode: the read tool now full-decodes before inlining
         b64 = base64.b64encode(sentinel).decode("ascii")
         write_cmd = f"printf '%s' {b64} | base64 -d > /workspace/img.png"
         write_result = await bash_handler(session.id, {"command": write_cmd})
