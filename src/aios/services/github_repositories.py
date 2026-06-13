@@ -154,18 +154,6 @@ async def detach_all_from_session(
     return bool(old_ids)
 
 
-async def list_session_echoes(
-    pool: asyncpg.Pool[Any],
-    session_id: str,
-    *,
-    account_id: str,
-) -> list[GithubRepositoryResourceEcho]:
-    async with pool.acquire() as conn:
-        return await queries.list_session_github_repo_echoes(
-            conn, session_id, account_id=account_id
-        )
-
-
 async def get_resource(
     pool: asyncpg.Pool[Any],
     session_id: str,

@@ -27,7 +27,6 @@ from aios.models.memory_stores import (
     MemoryPrefix,
     MemoryStore,
     MemoryStoreResource,
-    MemoryStoreResourceEcho,
     MemoryVersion,
 )
 from aios.sandbox.atomic_mirror import atomic_delete, atomic_write
@@ -346,21 +345,6 @@ async def redact_version(
             actor_type=actor_type,
             actor_ref=actor_ref,
             account_id=account_id,
-        )
-
-
-# ── session bridge (used by sessions service) ──────────────────────────────
-
-
-async def list_session_echoes(
-    pool: asyncpg.Pool[Any],
-    session_id: str,
-    *,
-    account_id: str,
-) -> list[MemoryStoreResourceEcho]:
-    async with pool.acquire() as conn:
-        return await queries.list_session_memory_store_echoes(
-            conn, session_id, account_id=account_id
         )
 
 
