@@ -250,17 +250,17 @@ def _render_script(
 
         async def failed_scout():
             try:
-                await agent(FAILING_AGENT_ID, {{"expected_failure": True}}, output_schema=SCOUT_SCHEMA)
+                await agent({{"expected_failure": True}}, agent_id=FAILING_AGENT_ID, output_schema=SCOUT_SCHEMA)
             except AgentError as e:
                 log(f"scout failed (expected): {{e}}")
                 return None
             return None
 
         def scout_thunk(angle):
-            return lambda: agent(SCOUT_AGENT_ID, {{"question": QUESTION, "angle": angle}}, output_schema=SCOUT_SCHEMA)
+            return lambda: agent({{"question": QUESTION, "angle": angle}}, agent_id=SCOUT_AGENT_ID, output_schema=SCOUT_SCHEMA)
 
         def read_stage(source):
-            return agent(READER_AGENT_ID, {{"question": QUESTION, "source": source}}, output_schema=READER_SCHEMA)
+            return agent({{"question": QUESTION, "source": source}}, agent_id=READER_AGENT_ID, output_schema=READER_SCHEMA)
 
         def normalize_stage(reading, source, index):
             if not reading:
@@ -271,18 +271,18 @@ def _render_script(
 
         async def synthesize(question, sources, readings):
             return await agent(
-                SYNTHESIS_AGENT_ID,
                 {{"question": question, "sources": sources, "readings": readings}},
+                agent_id=SYNTHESIS_AGENT_ID,
                 output_schema=SYNTHESIS_SCHEMA,
             )
 
         async def critique(question, draft):
-            return await agent(CRITIC_AGENT_ID, {{"question": question, "draft": draft}}, output_schema=CRITIC_SCHEMA)
+            return await agent({{"question": question, "draft": draft}}, agent_id=CRITIC_AGENT_ID, output_schema=CRITIC_SCHEMA)
 
         async def supplementary_scout(gap):
             return await agent(
-                SCOUT_AGENT_ID,
                 {{"question": QUESTION, "angle": gap.get("suggested_angle", "supplementary"), "gap": gap}},
+                agent_id=SCOUT_AGENT_ID,
                 output_schema=SCOUT_SCHEMA,
             )
 
