@@ -49,12 +49,36 @@ def _install_query_backfill(
     attr: str,
     pool: MagicMock,
     exc: Exception | None,
-) -> None:
-    """Stub a ``aios.api.sse.queries.<attr>`` backfill function."""
-    if exc is None:
-        monkeypatch.setattr(f"aios.api.sse.queries.{attr}", AsyncMock(return_value=[]))
-    else:
-        monkeypatch.setattr(f"aios.api.sse.queries.{attr}", AsyncMock(side_effect=exc))
+) -> AsyncMock:
+    """Stub a ``aios.api.sse.queries.<attr>`` backfill function.
+
+    Returns the installed mock so the caller can assert it was awaited —
+    a wrong-symbol patch (one the generator no longer calls) then fails
+    loudly instead of passing for the wrong reason.
+    """
+    mock = AsyncMock(return_value=[]) if exc is None else AsyncMock(side_effect=exc)
+    monkeypatch.setattr(f"aios.api.sse.queries.{attr}", mock)
+    return mock
+
+
+def _install_discovery_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+    pool: MagicMock,
+    exc: Exception | None,
+) -> AsyncMock:
+    """Dedicated installer for ``connection_discovery_stream``.
+
+    After migration (#814) the discovery backfill no longer calls
+    ``aios.api.sse.queries.list_connections`` directly — it consumes
+    ``connections_service.iter_all_connections``, which calls
+    ``aios.services.connections.queries.list_connections``. Patch THAT
+    symbol (leaving ``_install_query_backfill`` untouched for the two
+    sse-local cases) and return the mock so the test can assert it was
+    actually awaited.
+    """
+    mock = AsyncMock(return_value=[]) if exc is None else AsyncMock(side_effect=exc)
+    monkeypatch.setattr("aios.services.connections.queries.list_connections", mock)
+    return mock
 
 
 def _install_session_event_backfill(
@@ -125,7 +149,7 @@ _CASES = [
     ),
     pytest.param(
         lambda sub, pool: connection_discovery_stream(sub, pool, "telegram", account_id="acct_X"),
-        lambda mp, pool, exc: _install_query_backfill(mp, "list_connections", pool, exc),
+        lambda mp, pool, exc: _install_discovery_backfill(mp, pool, exc),
         id="connection_discovery_stream",
     ),
     pytest.param(
@@ -145,7 +169,7 @@ async def test_generator_terminates_conn_on_cancel(
     """Cancelling the consumer task must trigger subscription.terminate()."""
     subscription = _mk_subscription()
     pool = _mk_pool()
-    install_backfill(monkeypatch, pool, None)
+    backfill_mock = install_backfill(monkeypatch, pool, None)
 
     gen = build_gen(subscription, pool)
 
@@ -161,6 +185,10 @@ async def test_generator_terminates_conn_on_cancel(
         await task
 
     subscription._conn.terminate.assert_called_once()
+    # Where the installer patches a query symbol, it must have actually been
+    # awaited — guards against a wrong-symbol patch passing for the wrong reason.
+    if backfill_mock is not None:
+        backfill_mock.assert_awaited()
 
 
 @pytest.mark.parametrize("build_gen, install_backfill", _CASES)
@@ -172,7 +200,7 @@ async def test_generator_terminates_conn_when_backfill_raises(
     """Backfill query failure must still terminate the subscription."""
     subscription = _mk_subscription()
     pool = _mk_pool()
-    install_backfill(monkeypatch, pool, RuntimeError("backfill kaboom"))
+    backfill_mock = install_backfill(monkeypatch, pool, RuntimeError("backfill kaboom"))
 
     gen = build_gen(subscription, pool)
 
@@ -184,3 +212,7 @@ async def test_generator_terminates_conn_when_backfill_raises(
         await _consume()
 
     subscription._conn.terminate.assert_called_once()
+    # The raising symbol must have actually been awaited — guards against a
+    # wrong-symbol patch making the cleanup test pass for the wrong reason.
+    if backfill_mock is not None:
+        backfill_mock.assert_awaited()

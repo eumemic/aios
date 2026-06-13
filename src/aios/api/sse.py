@@ -39,6 +39,7 @@ from aios.db.listen import EVENTS_ARCHIVED_NOTIFY
 from aios.errors import SSEPreflightFailedError
 from aios.logging import get_logger
 from aios.models.workflows import TERMINAL_RUN_STATUSES
+from aios.services import connections as connections_service
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable
@@ -504,32 +505,26 @@ async def connection_discovery_stream(
     try:
         emitted_added: set[str] = set()
 
-        # Page through all active connections of this type; the default
-        # ``list_connections`` limit (50) would silently under-fanout for
-        # runtimes with more than 50 active connections.
-        cursor: str | None = None
-        while True:
-            async with pool.acquire() as conn:
-                page = await queries.list_connections(
-                    conn, connector=connector, limit=200, after=cursor, account_id=account_id
-                )
-            for connection in page:
-                if allowlist is not None and connection.id not in allowlist:
-                    continue
-                emitted_added.add(connection.id)
-                yield ServerSentEvent(
-                    data=json.dumps(
-                        {
-                            "event": "added",
-                            "connection_id": connection.id,
-                            "external_account_id": connection.external_account_id,
-                        }
-                    ),
-                    event="connection",
-                )
-            if len(page) < 200:
-                break
-            cursor = page[-1].id
+        # Backfill every active connection of this type. ``iter_all_connections``
+        # keyset-paginates internally (acquiring/releasing the pool per page),
+        # so this fan-out can't silently under-count for runtimes with more
+        # than the default page of connections — and we don't re-roll the loop.
+        async for connection in connections_service.iter_all_connections(
+            pool, connector=connector, account_id=account_id
+        ):
+            if allowlist is not None and connection.id not in allowlist:
+                continue
+            emitted_added.add(connection.id)
+            yield ServerSentEvent(
+                data=json.dumps(
+                    {
+                        "event": "added",
+                        "connection_id": connection.id,
+                        "external_account_id": connection.external_account_id,
+                    }
+                ),
+                event="connection",
+            )
 
         while True:
             payload = await queue.get()
