@@ -28,10 +28,12 @@ from aios.harness import vision
 from aios.models.events import Event
 from aios.sandbox.volumes import session_attachments_dir
 from aios.tools.switch_channel import render_reorient_block
+from tests.helpers.images import valid_jpeg_bytes
 
 CHAN_A = "signal/acct/chat-a"
 CHAN_B = "signal/acct/chat-b"
 SESSION_ID = "sess-test"
+_VALID_JPEG = valid_jpeg_bytes()
 
 
 @pytest.fixture
@@ -130,7 +132,7 @@ class TestRecapVision:
         return type widens from ``str`` to a content-parts list to
         carry the multimodal payload.
         """
-        payload = b"jpegbytes"
+        payload = _VALID_JPEG
         sandbox_path = _stage_image(temp_workspace_root, "signal", "evt-1-photo.jpg", payload)
         events = [
             _user_with_image(
@@ -161,14 +163,14 @@ class TestRecapVision:
         the model reads "this is historical content from the channel,
         and here's the picture they sent".
         """
-        sandbox_path = _stage_image(temp_workspace_root, "signal", "evt-1-photo.jpg", b"PNGdata")
+        sandbox_path = _stage_image(temp_workspace_root, "signal", "evt-1-photo.jpg", _VALID_JPEG)
         events = [
             _user_with_image(
                 1,
                 channel=CHAN_A,
                 content="look at this banana",
                 sandbox_path=sandbox_path,
-                size=7,
+                size=len(_VALID_JPEG),
             )
         ]
         out = render_reorient_block(events, CHAN_A, model="model/vision", session_id=SESSION_ID)
