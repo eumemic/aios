@@ -607,25 +607,24 @@ async def _run_session_step_body(
         account_id=account_id,
     )
 
-    # Increment cumulative session-level token counters. A refusal still
-    # consumed tokens upstream, so this (and the model_request_end span above)
-    # runs unconditionally — only the *persist + dispatch* below is suppressed.
-    new_spent_microusd = await sessions_service.increment_usage(
-        pool,
-        session_id,
-        input_tokens=usage.get("input_tokens", 0),
-        output_tokens=usage.get("output_tokens", 0),
-        cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
-        cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
-        cost_microusd=cost_microusd,
-        account_id=account_id,
-    )
-    if _crossed_spend_warning_threshold(new_spent_microusd, cost_microusd, spend_limit_microusd):
-        log.warning(
-            "account.spend_limit_warning",
+    # Charge cumulative session-level usage AFTER the model response is durably
+    # recorded — the assistant message persisted below, or the refusal span in
+    # the branch. increment_usage commits in its own transaction, so charging
+    # BEFORE the persist double-bills whenever the persist raises (a DB error
+    # caught upstream → a retry that re-calls the model). Charging after fails
+    # safe: a crash in the gap loses the charge rather than duplicating it. A
+    # refusal still consumed tokens, so it charges too — after _handle_refusal
+    # records its span and latches errored.
+    async def _charge_usage() -> int:
+        return await sessions_service.increment_usage(
+            pool,
+            session_id,
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+            cost_microusd=cost_microusd,
             account_id=account_id,
-            spent_usd=new_spent_microusd / 1_000_000,
-            spend_limit_usd=spend_limit_usd,
         )
 
     # A refusal bricks the turn: the assistant message is partial/empty and its
@@ -643,6 +642,7 @@ async def _run_session_step_body(
             finish_reason=finish_reason,
             account_id=account_id,
         )
+        await _charge_usage()
         log.warning(
             "step.model_refusal",
             session_id=session_id,
@@ -682,6 +682,15 @@ async def _run_session_step_body(
         account_id=account_id,
         parent_run_id=session.parent_run_id,
     )
+    # Charge now that the assistant message is durably persisted (see _charge_usage).
+    new_spent_microusd = await _charge_usage()
+    if _crossed_spend_warning_threshold(new_spent_microusd, cost_microusd, spend_limit_microusd):
+        log.warning(
+            "account.spend_limit_warning",
+            account_id=account_id,
+            spent_usd=new_spent_microusd / 1_000_000,
+            spend_limit_usd=spend_limit_usd,
+        )
     nudged = guard_result.nudged
     autoerror_caller_run_id = guard_result.autoerror_caller_run_id
     # The appended assistant event's locked focal stamp — threaded into the
