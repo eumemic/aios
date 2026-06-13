@@ -906,7 +906,7 @@ async def get_session_model(
         session_id,
         account_id,
     )
-    if row is None:
+    if row is None or row["model"] is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     return str(row["model"])
 

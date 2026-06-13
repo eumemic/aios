@@ -4370,9 +4370,15 @@ async def test_over_budget_agent_refusal_is_catchable(
         await conn.execute(
             "INSERT INTO agents (id, name, model, system, account_id) VALUES ('agent_cost_seed', 'cost-seed', 'm', 's', 'acc_wf')"
         )
+        # Named workflow children must carry a pinned agent_version (0095's
+        # sessions_agent_version_pair_ck); seed the matching agent_versions row.
+        await conn.execute(
+            "INSERT INTO agent_versions (agent_id, version, model, system, account_id) "
+            "VALUES ('agent_cost_seed', 1, 'm', 's', 'acc_wf')"
+        )
         await conn.execute(
             "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, workspace_volume_path, account_id, parent_run_id, cost_microusd) "
-            "VALUES ('ses_cost_seed', 'agent_cost_seed', 'env_wf', NULL, NULL, '{}'::jsonb, '/tmp/cost', 'acc_wf', $1, 1000000)",
+            "VALUES ('ses_cost_seed', 'agent_cost_seed', 'env_wf', 1, NULL, '{}'::jsonb, '/tmp/cost', 'acc_wf', $1, 1000000)",
             run.id,
         )
     await run_workflow_step(run.id)
