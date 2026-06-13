@@ -148,7 +148,7 @@ class WfRunWaitResponse(BaseModel):
     done: bool  # run_status in TERMINAL_RUN_STATUSES (completed/errored/cancelled)
     output: Any = None  # the run's return value (on completed; None otherwise)
     is_error: bool = False  # run_status == errored
-    error: dict[str, Any] | None = None  # the run_completed event's {kind} (on errored)
+    error: dict[str, Any] | None = None  # the run_completed event's {kind,message,traceback}
 
 
 # ─── request models (the public HTTP surface) ────────────────────────────────

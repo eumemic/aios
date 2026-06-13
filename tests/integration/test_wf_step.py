@@ -2614,7 +2614,8 @@ async def test_epoch_mismatch_errors_before_replay(wf_runtime: asyncpg.Pool[Any]
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
     assert run is not None and run.status == "errored"
-    assert run.output is None
+    # Errored runs persist the author-facing error message as output (#926).
+    assert "engine semantics changed" in (run.output or "")
     assert [event.type for event in events] == ["run_completed"]
     assert events[-1].payload["is_error"] is True
     assert events[-1].payload["error"]["kind"] == "engine_semantics_changed"
@@ -3369,19 +3370,48 @@ async def test_await_run_returns_when_already_completed(
     assert resp.output == 1 and resp.is_error is False and resp.error is None
 
 
-async def test_await_run_surfaces_error_kind(
+async def test_await_run_surfaces_sync_def_author_error_message(
     wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
 ) -> None:
-    """An errored run returns ``is_error`` + the ``error.kind`` lifted from the
-    ``run_completed`` payload (``author_exception`` for an uncaught script raise)."""
+    """A malformed workflow entrypoint returns the host's author-facing diagnostic,
+    not just an opaque ``author_exception`` kind."""
     pool = wf_runtime
-    run_id = await _make_run(pool, "async def main(input):\n    raise ValueError('boom')")
+    run_id = await _make_run(pool, "def main(input):\n    return 1")
+    await run_workflow_step(run_id)  # sync def → errored
+    resp = await wf_service.await_run(
+        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
+    )
+    assert resp.done is True and resp.run_status == "errored" and resp.is_error is True
+    assert resp.output == "WorkflowScriptError: workflow script must define `async def main(input)`"
+    assert resp.error == {
+        "kind": "author_exception",
+        "message": "WorkflowScriptError: workflow script must define `async def main(input)`",
+    }
+
+
+async def test_await_run_surfaces_runtime_author_traceback_line(
+    wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
+) -> None:
+    """A mid-script raise carries type, message, and author-visible line number while
+    host implementation frames are sanitized out."""
+    pool = wf_runtime
+    run_id = await _make_run(
+        pool,
+        "async def main(input):\n    x = 1\n    raise ValueError('boom')\n    return x\n",
+    )
     await run_workflow_step(run_id)  # raise → errored
     resp = await wf_service.await_run(
         pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
     )
     assert resp.done is True and resp.run_status == "errored" and resp.is_error is True
-    assert resp.error == {"kind": "author_exception"}
+    assert resp.output == "ValueError: boom"
+    assert resp.error is not None
+    assert resp.error["kind"] == "author_exception"
+    assert resp.error["message"] == "ValueError: boom"
+    tb = resp.error["traceback"]
+    assert 'File "<workflow>", line 3, in main' in tb
+    assert "raise ValueError('boom')" in tb
+    assert "wf_script_host.py" not in tb
 
 
 async def test_await_run_times_out_on_non_terminal_run(

@@ -129,6 +129,7 @@ class HostOutcome:
     annotations: list[EmittedAnnotation] = field(default_factory=list)
     value: Any = None
     error_repr: str | None = None
+    error_traceback: str | None = None
     error_kind: HostErrorKind | None = None
     # The child's real stderr — crash diagnostics only (a host-crash traceback, an
     # rlimit message). log()/phase() no longer route through here; they are journaled
@@ -202,6 +203,7 @@ def _outcome_from_frames(
         emitted=emitted,
         annotations=annotations,
         error_repr=terminal.get("repr"),
+        error_traceback=terminal.get("traceback"),
         # The host stamps a specific kind on structural failures it detects itself
         # (e.g. the fan-out cap); an uncaught author exception carries none → generic.
         error_kind=terminal.get("kind") or "author_exception",
