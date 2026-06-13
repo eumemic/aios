@@ -153,10 +153,7 @@ async def test_author_exception_is_terminal_raised() -> None:
 
 async def test_author_exception_traceback_is_author_sanitized() -> None:
     out = await _run(
-        "async def main(input):\n"
-        "    x = 1\n"
-        "    raise RuntimeError('kapow')\n"
-        "    return x\n"
+        "async def main(input):\n    x = 1\n    raise RuntimeError('kapow')\n    return x\n"
     )
     assert out.kind == "raised"
     assert out.error_repr == "RuntimeError: kapow"

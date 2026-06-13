@@ -521,7 +521,9 @@ def _author_traceback(exc: BaseException) -> str:
     internals). The script itself is author-visible by definition, so keep its
     filename/line/function/code entries plus the exception type/message footer.
     """
-    frames = [frame for frame in traceback.extract_tb(exc.__traceback__) if frame.filename == "<workflow>"]
+    frames = [
+        frame for frame in traceback.extract_tb(exc.__traceback__) if frame.filename == "<workflow>"
+    ]
     if not frames:
         return ""
     lines = ["Traceback (most recent call last):\n"]

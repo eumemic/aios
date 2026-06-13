@@ -2614,7 +2614,8 @@ async def test_epoch_mismatch_errors_before_replay(wf_runtime: asyncpg.Pool[Any]
         run = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
     assert run is not None and run.status == "errored"
-    assert run.output is None
+    # Errored runs persist the author-facing error message as output (#926).
+    assert "engine semantics changed" in (run.output or "")
     assert [event.type for event in events] == ["run_completed"]
     assert events[-1].payload["is_error"] is True
     assert events[-1].payload["error"]["kind"] == "engine_semantics_changed"
@@ -3396,10 +3397,7 @@ async def test_await_run_surfaces_runtime_author_traceback_line(
     pool = wf_runtime
     run_id = await _make_run(
         pool,
-        "async def main(input):\n"
-        "    x = 1\n"
-        "    raise ValueError('boom')\n"
-        "    return x\n",
+        "async def main(input):\n    x = 1\n    raise ValueError('boom')\n    return x\n",
     )
     await run_workflow_step(run_id)  # raise → errored
     resp = await wf_service.await_run(
