@@ -827,7 +827,7 @@ def _omission_marker(omission: WindowOmission, boundary: datetime, tz_name: str)
     cache-stability rationale.  The boundary timestamp reuses
     :func:`_format_received` so it renders identically to the
     ``received=`` envelope headers; the start date uses the same account
-    timezone, date-only.  ``_prune_leading_orphans`` may hide a few more
+    timezone, date-only.  ``_prune_orphans`` may hide a few more
     rendered messages at/after the boundary — "everything before" remains
     true regardless, so the claim direction is safe.
     """
@@ -1033,6 +1033,18 @@ def build_messages(
                     max_stimulus_seq = max(max_stimulus_seq, real_result_seqs[inj_tcid])
 
             elif role == "tool":
+                # Reaching this branch means NO in-window assistant declared
+                # this tcid — the assistant branch above records every id it
+                # emits in ``emitted_tcids``, so a standalone tool event here
+                # is always a structural orphan (its issuing assistant was
+                # windowed out). We still advance ``max_stimulus_seq``: the
+                # result is a real stimulus the watermark must count
+                # (``reacting_to`` = f(log)), and under-counting it risks
+                # re-waking on an already-consumed event. The structurally
+                # invalid message itself is removed downstream by
+                # ``_prune_orphans`` (message list = f(structural validity)) —
+                # do NOT "correct-by-construction" this by skipping the append
+                # here, which would entangle the two and regress the watermark.
                 tcid = e.data.get("tool_call_id")
                 if tcid and tcid not in emitted_tcids:
                     messages.append(e.data)
@@ -1066,7 +1078,7 @@ def build_messages(
     # windowing can cut in the middle of an assistant+tool_result group,
     # leaving orphan tool results or an assistant with missing paired
     # results.
-    messages = _prune_leading_orphans(messages)
+    messages = _prune_orphans(messages)
 
     # Head omission marker (#738): when the window omits transcript, tell
     # the model how much and how to recall it. After the prune (so it can't
@@ -1135,19 +1147,38 @@ def _is_degenerate_empty_assistant(msg: dict[str, Any]) -> bool:
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 
-def _prune_leading_orphans(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop messages from the front until we reach a clean conversation start.
+def _prune_orphans(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop structurally-orphaned messages produced by window cuts.
 
-    Windowing can cut in the middle of an assistant + tool_result group,
-    leaving orphan tool results at the start (no preceding assistant with
-    matching tool_calls) or an assistant whose paired results were
-    partially dropped.
+    DB-level windowing slices the event log at a token budget and can cut
+    through an assistant + tool_result group, leaving an invalid
+    chat-completions sequence that strict providers (Anthropic / Bedrock)
+    reject. Because :func:`build_messages` is pure replay over the
+    immutable window, that rejection recurs on every wake and permanently
+    wedges the session — so the structure must be repaired here. Two
+    orphan shapes arise:
 
-    Walk forward and drop until we find a ``user`` message or an
-    ``assistant`` without ``tool_calls`` — both are valid starts. An
-    ``assistant`` with ``tool_calls`` is valid only if ALL its
-    tool_call_ids have matching tool results later in the list.
+    * **Incomplete leading assistant** — an ``assistant`` at the front
+      whose ``tool_calls`` ids are not all matched by following ``tool``
+      results (a paired result was dropped by the boundary, or a
+      ``tool_call`` carries no ``id``). The whole leading group is dropped.
+    * **Orphan tool result** — a ``tool`` message whose ``tool_call_id``
+      has no preceding ``assistant`` ``tool_calls`` declaring it (the
+      issuing assistant was dropped). This sits at the FRONT of the
+      window, or MID-list: the blind-spot race appends a late tool result
+      after an interleaved user message (assistant < user < result in seq
+      order), and a boundary that drops the assistant but keeps the user
+      and the result strands the result *after* a clean ``user`` start.
+      Such orphans are dropped at ANY position.
+
+    The leading scan stops at the first clean start (a ``user`` or a
+    complete ``assistant``), so it alone cannot reach a mid-list orphan;
+    the position-independent sweep that follows is what catches those.
     """
+    # Leading scan: establish a clean conversation start by dropping a
+    # leading incomplete-assistant group (and any orphan tool results
+    # ahead of it). Walk forward until a ``user`` or an ``assistant``
+    # whose tool_calls are all paired — both are valid starts.
     start = 0
     while start < len(messages):
         msg = messages[start]
@@ -1177,7 +1208,26 @@ def _prune_leading_orphans(messages: list[dict[str, Any]]) -> list[dict[str, Any
         # tool or anything else at the front — orphan, drop.
         start += 1
 
-    return messages[start:]
+    messages = messages[start:]
+
+    # Position-independent sweep: drop any tool result whose tool_call_id
+    # was never declared by a preceding in-window assistant. Catches the
+    # mid-list orphan the leading scan stops short of (the interleaved-user
+    # window cut above); a no-op on lists the leading scan already cleaned.
+    declared: set[str] = set()
+    pruned: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant":
+            declared.update(tc["id"] for tc in (msg.get("tool_calls") or []) if tc.get("id"))
+            pruned.append(msg)
+        elif role == "tool":
+            if msg.get("tool_call_id") in declared:
+                pruned.append(msg)
+            # else: orphan result with no declaring assistant — drop
+        else:
+            pruned.append(msg)
+    return pruned
 
 
 def stub_missing_reasoning_content(

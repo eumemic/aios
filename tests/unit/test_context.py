@@ -331,6 +331,45 @@ class TestBuildMessages:
         assert msgs[0]["content"] == f"[received={RECEIVED}]\nnext question"
         assert msgs[1]["role"] == "assistant"
 
+    def test_prune_orphan_tool_result_after_interleaved_user(self) -> None:
+        """A window cut between an assistant's tool_call and a LATER
+        interleaved user message leaves a MID-list orphan tool result.
+
+        The blind-spot race (CLAUDE.md): an assistant emits a tool_call,
+        a user message arrives DURING inference (higher seq), then the
+        tool completes and appends its result (higher seq still) — log
+        order assistant < user < result. When the token-budget window
+        boundary drops the tool_call assistant but keeps the interleaved
+        user message and the late result, the result is an orphan sitting
+        AFTER a clean ``user`` start, which the leading-only prune stops
+        before ever reaching. The emitted ``role=="tool"`` message then
+        has no preceding ``tool_calls`` declaring it — an invalid
+        chat-completions sequence that strict providers (Anthropic /
+        Bedrock) reject, permanently wedging the session since
+        ``build_messages`` is pure replay over the immutable window.
+        """
+        events = [
+            _evt(11, "user", content="are you there?"),
+            _evt(12, "tool", tool_call_id="bash_1", content="output"),
+            _evt(13, "assistant", content="yes done"),
+        ]
+        events[2].data["reacting_to"] = 11
+        msgs = build_messages(events, system_prompt=None).messages
+        # Every tool result must be preceded by an assistant whose
+        # tool_calls declare its id (same invariant asserted by
+        # test_prune_partial_assistant_tool_group).
+        for m in msgs:
+            if m.get("role") == "tool":
+                tc_id = m.get("tool_call_id")
+                has_parent = any(
+                    tc_id in {tc["id"] for tc in prior.get("tool_calls") or []}
+                    for prior in msgs[: msgs.index(m)]
+                    if prior.get("role") == "assistant"
+                )
+                assert has_parent, (
+                    f"orphan tool result {tc_id!r}; roles={[mm.get('role') for mm in msgs]}"
+                )
+
     def test_user_metadata_excluded_from_messages(self) -> None:
         """Metadata on user message events must not leak into the
         chat-completions message list sent to the model."""
