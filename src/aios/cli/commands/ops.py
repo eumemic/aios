@@ -73,6 +73,12 @@ _REKEY_COLUMNS = (
         "placeholder_salt_ciphertext IS NOT NULL",
         "id",
     ),
+    # In-flight Connect OAuth flow state (#818 vault-oauth): the blob carries the
+    # PKCE code_verifier + client_secret, encrypted with the same per-account
+    # subkey as vault_credentials. Rows are short-lived (deleted on complete,
+    # pruned at ~10min) and ciphertext is NOT NULL — so "TRUE" rekeys every
+    # live row. Omitting it left an active flow undecryptable across a rotation.
+    _EncryptedColumn("oauth_flows", "ciphertext", "nonce", "TRUE"),
 )
 
 
