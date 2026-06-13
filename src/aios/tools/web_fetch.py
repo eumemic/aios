@@ -4,11 +4,15 @@ Uses Tavily's /extract endpoint for HTML-to-markdown conversion.
 SSRF protection blocks private/internal URLs.
 
 Return shape: {"url": "...", "title": "...", "content": "markdown..."}
+The ``title`` is derived from the markdown's first heading: Tavily's /extract
+response carries only ``url`` + ``raw_content`` (no title field — that belongs
+to /search), so reading a ``title`` key returned ``""`` on every real call.
 On error: {"error": "..."}
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -27,6 +31,17 @@ class WebFetchArgumentError(AiosError):
 
 
 _MAX_CONTENT_CHARS = 100_000
+
+# First markdown ATX heading (``# `` … ``###### ``) — Tavily's /extract gives no
+# title, so we derive one from the converted markdown's first heading.
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _title_from_markdown(content: str) -> str:
+    """Best-effort page title: the text of the markdown's first heading, or ``""``."""
+    match = _HEADING_RE.search(content)
+    return match.group(1) if match else ""
+
 
 WEB_FETCH_DESCRIPTION = (
     "Fetch a URL and return its content as markdown. Uses Tavily's "
@@ -56,9 +71,11 @@ async def web_fetch_handler(session_id: str, arguments: dict[str, Any]) -> dict[
     try:
         response = await tavily_request("extract", {"urls": [url]})
         result = response["results"][0]
-        content = result.get("raw_content", "") or result.get("content", "")
-        content = content[:_MAX_CONTENT_CHARS]
-        return {"url": url, "title": result.get("title", ""), "content": content}
+        # /extract returns only ``raw_content`` (markdown); there is no ``title``
+        # or ``content`` field to read (those are /search fields), so derive the
+        # title from the markdown's first heading.
+        content = (result.get("raw_content") or "")[:_MAX_CONTENT_CHARS]
+        return {"url": url, "title": _title_from_markdown(content), "content": content}
     except WebToolError:
         raise
     except httpx.HTTPStatusError as exc:
