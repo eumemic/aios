@@ -300,7 +300,7 @@ async def test_await_listen_does_not_acquire_subscriber_lock(
     pool, _account_id, session_id = pool_and_session
 
     # await-poller open: lock skipped → no subscriber observed.
-    sub = await open_listen_for_events(migrated_db_url, session_id, acquire_lock=False)
+    sub = await open_listen_for_events(migrated_db_url, session_id, on_connected=None)
     try:
         assert await has_subscriber(pool, session_id) is False
     finally:

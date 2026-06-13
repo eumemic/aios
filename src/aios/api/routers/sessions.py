@@ -24,7 +24,7 @@ from aios.api.deps import (
     PoolDep,
     ProcrastinateDep,
 )
-from aios.api.sse import SSE_PREFLIGHT_EXCEPTIONS, make_sse_response, sse_event_stream
+from aios.api.sse import make_sse_response, preflight_subscription, sse_event_stream
 from aios.db import queries
 from aios.db.listen import (
     EVENTS_ARCHIVED_NOTIFY,
@@ -32,7 +32,7 @@ from aios.db.listen import (
     listen_for_events,
     open_listen_for_events,
 )
-from aios.errors import SSEPreflightFailedError, ValidationError
+from aios.errors import ValidationError
 from aios.ids import GITHUB_REPOSITORY, split_id
 from aios.logging import get_logger
 from aios.models.common import ListResponse
@@ -757,19 +757,13 @@ async def stream_events(
     after 200 OK has gone out.
     """
     await service.get_session_basic(pool, session_id, account_id=account_id)
-    try:
-        subscription = await open_listen_for_events(db_url, session_id)
-    except SSE_PREFLIGHT_EXCEPTIONS as exc:
-        log.warning(
-            "sse.session_events.preflight_failed",
-            session_id=session_id,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        raise SSEPreflightFailedError(
-            "could not establish LISTEN connection for session events stream",
-            detail={"stream": "session_events"},
-        ) from exc
+    subscription = await preflight_subscription(
+        open_listen_for_events(db_url, session_id),
+        stream_name="session_events",
+        log_key="sse.session_events.preflight_failed",
+        log_fields={"session_id": session_id},
+        log=log,
+    )
     return make_sse_response(
         subscription,
         sse_event_stream(subscription, pool, session_id, after_seq=after_seq),
