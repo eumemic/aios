@@ -1045,6 +1045,15 @@ async def append_tool_result(
     work in the same transaction (e.g. a connection-binding auth check
     in the connector-facing endpoint).  The caller is responsible for
     deferring the wake afterwards.
+
+    Lock discipline (issue #991): the parent-name+channel lookup, the
+    tool-result content cap, and (inside ``append_event``) the tokenizer
+    pass all run BEFORE the session ``FOR UPDATE`` is taken — only the
+    idempotency decision and the INSERT serialise under the lock.  The
+    pre-fix structure held an outer ``FOR UPDATE`` across the tokenizer
+    (the ~100 KB tool-result case from #862).  Idempotency is unchanged:
+    the dedup decision still runs under the same session row lock, now
+    taken by ``append_event`` itself via the ``dedup`` hook.
     """
     from aios.sandbox.tool_result_spill import cap_tool_result_content
 
@@ -1052,64 +1061,82 @@ async def append_tool_result(
         content = await cap_tool_result_content(
             session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
         )
-    async with conn.transaction():
-        await queries.lock_active_session_for_update(conn, session_id, account_id=account_id)
-        existing = await queries.find_tool_result_event(
-            conn, session_id, tool_call_id, account_id=account_id
-        )
-        if existing is not None:
-            # Idempotent retry: a prior call with matching intent
-            # (same ``is_error`` outcome) — return the original event.
-            # Intent-mismatch is a CONFLICT, not a retry: e.g., a deny
-            # arriving after the tool already produced a success result
-            # (two-tab race; always_allow tool; bogus pre-confirm
-            # pre-#533). Returning the success event would lie to the
-            # operator ("you denied successfully") while the model's
-            # context still carries the success result. Raise so the
-            # operator learns the deny is too late.
-            existing_is_error = bool(existing.data.get("is_error", False))
-            if existing_is_error == is_error:
-                await queries.decrement_open_tool_call_count(
-                    conn, session_id, account_id=account_id
-                )
-                return existing
-            raise ConflictError(
-                f"tool_call_id {tool_call_id!r} already has a "
-                f"{'error' if existing_is_error else 'success'} "
-                f"result; cannot append a "
-                f"{'error' if is_error else 'success'} result with "
-                f"the same tool_call_id",
-                detail={
-                    "session_id": session_id,
-                    "tool_call_id": tool_call_id,
-                    "existing_is_error": existing_is_error,
-                    "requested_is_error": is_error,
-                },
-            )
 
-        name = await queries.lookup_tool_name_by_call_id(
-            conn, session_id, tool_call_id, account_id=account_id
+    # ONE parent-assistant ``@>`` scan per append (issue #991): co-select the
+    # ``focal_channel_at_arrival`` so we can pass ``tool_parent_channel=``
+    # explicitly below and skip ``append_event``'s fallback
+    # ``_lookup_tool_parent_channel`` (which would scan the identical row).
+    # The append-only log means this read is stable: the parent can't vanish
+    # between here and the locked INSERT.
+    lookup = await queries.lookup_tool_name_by_call_id(
+        conn, session_id, tool_call_id, account_id=account_id
+    )
+    if lookup is None:
+        raise NotFoundError(
+            f"tool_call_id {tool_call_id!r} not found",
+            detail={"session_id": session_id, "tool_call_id": tool_call_id},
         )
-        if name is None:
-            raise NotFoundError(
-                f"tool_call_id {tool_call_id!r} not found",
-                detail={"session_id": session_id, "tool_call_id": tool_call_id},
+    name, parent_focal = lookup
+
+    async def _dedup(locked_conn: asyncpg.Connection[Any]) -> Event | None:
+        # Runs under the session row lock taken by ``append_event`` BEFORE its
+        # seq-allocating UPDATE — the same serialization the old outer
+        # ``FOR UPDATE`` provided, minus the tokenizer.  Enforce the
+        # active-session precondition (re-locks the already-held row — a no-op
+        # lock that surfaces NotFound/errored exactly as before), then apply
+        # the idempotency guard.
+        await queries.lock_active_session_for_update(locked_conn, session_id, account_id=account_id)
+        existing = await queries.find_tool_result_event(
+            locked_conn, session_id, tool_call_id, account_id=account_id
+        )
+        if existing is None:
+            return None
+        # Idempotent retry: a prior call with matching intent
+        # (same ``is_error`` outcome) — return the original event.
+        # Intent-mismatch is a CONFLICT, not a retry: e.g., a deny
+        # arriving after the tool already produced a success result
+        # (two-tab race; always_allow tool; bogus pre-confirm
+        # pre-#533). Returning the success event would lie to the
+        # operator ("you denied successfully") while the model's
+        # context still carries the success result. Raise so the
+        # operator learns the deny is too late.
+        existing_is_error = bool(existing.data.get("is_error", False))
+        if existing_is_error == is_error:
+            await queries.decrement_open_tool_call_count(
+                locked_conn, session_id, account_id=account_id
             )
-        data: dict[str, Any] = {
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": content,
-            "name": name,
-        }
-        if is_error:
-            data["is_error"] = True
-        return await queries.append_event(
-            conn,
-            session_id=session_id,
-            kind="message",
-            data=data,
-            account_id=account_id,
+            return existing
+        raise ConflictError(
+            f"tool_call_id {tool_call_id!r} already has a "
+            f"{'error' if existing_is_error else 'success'} "
+            f"result; cannot append a "
+            f"{'error' if is_error else 'success'} result with "
+            f"the same tool_call_id",
+            detail={
+                "session_id": session_id,
+                "tool_call_id": tool_call_id,
+                "existing_is_error": existing_is_error,
+                "requested_is_error": is_error,
+            },
         )
+
+    data: dict[str, Any] = {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": content,
+        "name": name,
+    }
+    if is_error:
+        data["is_error"] = True
+    return await queries.append_event(
+        conn,
+        session_id=session_id,
+        kind="message",
+        data=data,
+        account_id=account_id,
+        tool_parent_channel=parent_focal,
+        dedup=_dedup,
+    )
 
 
 async def read_events(
@@ -1462,6 +1489,10 @@ async def confirm_tool_allow(
             )
             is None
         ):
+            # Only the existence of a matching parent matters here; the
+            # returned ``(name, focal)`` tuple is non-None iff a parent row
+            # exists (issue #991), so the ``is None`` check still gates
+            # validation correctly.
             raise NotFoundError(
                 f"tool_call_id {tool_call_id!r} not found",
                 detail={"session_id": session_id, "tool_call_id": tool_call_id},

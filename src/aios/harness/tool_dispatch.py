@@ -38,6 +38,7 @@ from aios.errors import AiosError
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.agents import McpServerSpec
+from aios.models.events import Event
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments
 from aios.tools.registry import ToolResult
@@ -293,11 +294,14 @@ async def _append_tool_result_event(
     next prompt carries the tool's successful output as if no deny had
     happened (silent failure symmetric to PR #535).
 
-    Transaction + ``SELECT ... FOR UPDATE`` mirrors
-    :func:`services.sessions.append_tool_result` so the worker-vs-API
-    race serialises through the same session-row lock as the operator
-    path; "first commit wins, second commit no-ops" applies to either
-    ordering.
+    The dedup decision serialises through the session row lock that
+    ``append_event`` itself takes (via its ``dedup`` hook), the SAME lock
+    :func:`services.sessions.append_tool_result` uses, so the worker-vs-API
+    race resolves "first commit wins, second commit no-ops" in either
+    ordering.  Issue #991: that lock is no longer held across the tokenizer
+    pass — ``append_event`` runs the tokenizer pre-lock, then takes the lock
+    only for the dedup check + INSERT, so a large (~100 KB) tool result no
+    longer tokenizes under the session lock.
     """
     from aios.db import queries
 
@@ -310,26 +314,28 @@ async def _append_tool_result_event(
             session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
         )
 
-    async with pool.acquire() as conn, conn.transaction():
-        await conn.execute(
-            "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
-            session_id,
-            account_id,
-        )
+    async def _dedup(conn: asyncpg.Connection[Any]) -> Event | None:
+        # Runs under the session row lock ``append_event`` takes before its
+        # seq-allocating UPDATE.  A hit logs + compensates the id-blind +1 and
+        # returns the existing event so ``append_event`` short-circuits without
+        # burning a seq.
         existing = await queries.find_tool_result_event(
             conn, session_id, tool_call_id, account_id=account_id
         )
-        if existing is not None:
-            existing_is_error = bool(existing.data.get("is_error", False))
-            log.warning(
-                "tool.result_dedup_skip",
-                session_id=session_id,
-                tool_call_id=tool_call_id,
-                existing_is_error=existing_is_error,
-                attempted_is_error=bool(event_data.get("is_error", False)),
-            )
-            await queries.decrement_open_tool_call_count(conn, session_id, account_id=account_id)
-            return
+        if existing is None:
+            return None
+        existing_is_error = bool(existing.data.get("is_error", False))
+        log.warning(
+            "tool.result_dedup_skip",
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            existing_is_error=existing_is_error,
+            attempted_is_error=bool(event_data.get("is_error", False)),
+        )
+        await queries.decrement_open_tool_call_count(conn, session_id, account_id=account_id)
+        return existing
+
+    async with pool.acquire() as conn:
         await queries.append_event(
             conn,
             session_id=session_id,
@@ -337,6 +343,7 @@ async def _append_tool_result_event(
             data=event_data,
             account_id=account_id,
             tool_parent_channel=tool_parent_channel,
+            dedup=_dedup,
         )
 
 

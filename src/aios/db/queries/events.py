@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from types import EllipsisType
 from typing import Any
@@ -447,18 +448,28 @@ async def lookup_tool_name_by_call_id(
     tool_call_id: str,
     *,
     account_id: str,
-) -> str | None:
-    """Return the function name of the matching ``tool_call`` on the parent
-    assistant event, or None if no parent is found.
+) -> tuple[str | None, str | None] | None:
+    """Return ``(function_name, focal_channel_at_arrival)`` of the matching
+    ``tool_call`` on the parent assistant event, or ``None`` if no parent is
+    found.
 
     Used by the custom tool-result handler to stamp a ``name`` field on
     the tool-role event it appends, so ``_derive_tool_name`` populates
     the ``tool_name`` column (issue #133, migration 0022).  Mirrors the
     parent-assistant lookup in ``_lookup_tool_parent_channel`` — same ``@>``
     predicate, same partial index (``events_assistant_tool_calls_idx``).
+
+    Co-selects the parent's ``focal_channel_at_arrival`` (issue #991): it is
+    the SAME row ``_lookup_tool_parent_channel`` would scan, so returning it
+    here lets ``append_tool_result`` pass ``tool_parent_channel=`` explicitly
+    and skip the second identical ``@>`` scan — one parent scan per append
+    instead of two.  ``name`` is ``None`` only when the parent exists but its
+    ``tool_calls`` entry is malformed; the whole result is ``None`` only when
+    no parent row matches.
     """
-    raw = await conn.fetchval(
-        "SELECT data->'tool_calls' FROM events "
+    row = await conn.fetchrow(
+        "SELECT data->'tool_calls' AS tool_calls, focal_channel_at_arrival "
+        "FROM events "
         "WHERE session_id = $1 "
         "  AND account_id = $3 "
         "  AND kind = 'message' "
@@ -471,20 +482,21 @@ async def lookup_tool_name_by_call_id(
         tool_call_id,
         account_id,
     )
-    if raw is None:
+    if row is None:
         return None
-    tool_calls = parse_jsonb(raw)
+    parent_focal: str | None = row["focal_channel_at_arrival"]
+    tool_calls = parse_jsonb(row["tool_calls"])
     if not isinstance(tool_calls, list):
-        return None
+        return None, parent_focal
     for tc in tool_calls:
         if not isinstance(tc, dict) or tc.get("id") != tool_call_id:
             continue
         function = tc.get("function")
         if not isinstance(function, dict):
-            return None
+            return None, parent_focal
         name = function.get("name")
-        return name if isinstance(name, str) else None
-    return None
+        return (name if isinstance(name, str) else None), parent_focal
+    return None, parent_focal
 
 
 async def list_confirmed_unresolved_tool_calls(
@@ -595,6 +607,7 @@ async def append_event(
     data: dict[str, Any],
     orig_channel: str | None = None,
     tool_parent_channel: str | None | EllipsisType = ...,
+    dedup: Callable[[asyncpg.Connection[Any]], Awaitable[Event | None]] | None = None,
 ) -> Event:
     """Append an event to ``session_id`` with gapless seq allocation.
 
@@ -639,6 +652,19 @@ async def append_event(
     the documented vision/tz drifts below (absorbed by ``model_token_ratio``
     calibration).  The STORED ``focal_channel_at_arrival`` is always the
     locked RETURNING value, never the pre-read.
+
+    Dedup hook (issue #991): tool-result appenders need a "first write wins"
+    idempotency guard on ``tool_call_id`` that is atomic with the seq
+    allocation, yet they MUST NOT hold a ``SELECT ... FOR UPDATE`` across the
+    pre-transaction tokenizer pass — that was the WP-23 regression on the
+    tool-result paths.  ``dedup`` lets a caller run its find-existing decision
+    INSIDE this function's own transaction, after the pre-lock compute and
+    after a row lock on the session, but BEFORE the seq-allocating UPDATE.  If
+    it returns an :class:`Event`, that event is returned unchanged and NO seq
+    is burned (gaplessness preserved); the callback owns any compensating
+    bookkeeping (e.g. ``decrement_open_tool_call_count``).  The session row
+    lock taken here is exactly the lock the old outer transaction held, so the
+    worker-vs-API race still serialises — just without the tokenizer under it.
     """
     new_id = make_id(EVENT)
     data_json = json.dumps(data)
@@ -720,6 +746,21 @@ async def append_event(
         )
 
     async with conn.transaction():
+        if dedup is not None:
+            # Run the caller's idempotency decision under the session row lock
+            # but BEFORE the seq-allocating UPDATE (issue #991): a dedup hit
+            # must NOT burn a seq (gaplessness), and the lock — exactly the one
+            # the old outer transaction held — keeps concurrent appenders for
+            # the same ``tool_call_id`` serialised.  The pre-transaction
+            # tokenizer/parent-lookup compute already ran lock-free above.
+            await conn.execute(
+                "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+                session_id,
+                account_id,
+            )
+            deduped = await dedup(conn)
+            if deduped is not None:
+                return deduped
         seq_row = await conn.fetchrow(
             "UPDATE sessions "
             "SET last_event_seq = last_event_seq + 1, "
