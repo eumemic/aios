@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import datetime
 from collections.abc import Mapping
 from typing import Any, TypeVar
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
+from dateutil.parser import isoparse
 
 from ..models.awaiting_tool_call_kind import AwaitingToolCallKind
 
@@ -27,15 +29,24 @@ class AwaitingToolCall:
       Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't
       appear here — they're harness-internal.
 
+    ``pending_since`` is the ``created_at`` of the assistant event that
+    declared the call — the moment the call became pending. Consumers use
+    it to distinguish a healthy in-flight custom call (fresh) from a stuck
+    one whose client died (stale), without loading the transcript. For a
+    tool_call spanning multiple unresolved turns it is the declaring
+    assistant's timestamp, not "now".
+
         Attributes:
             tool_call_id (str):
             name (str):
             kind (AwaitingToolCallKind):
+            pending_since (datetime.datetime):
     """
 
     tool_call_id: str
     name: str
     kind: AwaitingToolCallKind
+    pending_since: datetime.datetime
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -45,6 +56,8 @@ class AwaitingToolCall:
 
         kind = self.kind.value
 
+        pending_since = self.pending_since.isoformat()
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -52,6 +65,7 @@ class AwaitingToolCall:
                 "tool_call_id": tool_call_id,
                 "name": name,
                 "kind": kind,
+                "pending_since": pending_since,
             }
         )
 
@@ -66,10 +80,13 @@ class AwaitingToolCall:
 
         kind = AwaitingToolCallKind(d.pop("kind"))
 
+        pending_since = isoparse(d.pop("pending_since"))
+
         awaiting_tool_call = cls(
             tool_call_id=tool_call_id,
             name=name,
             kind=kind,
+            pending_since=pending_since,
         )
 
         awaiting_tool_call.additional_properties = d

@@ -125,11 +125,19 @@ class AwaitingToolCall(BaseModel):
       confirmed; awaits POST to ``/sessions/:id/tool-confirmations``.
       Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't
       appear here — they're harness-internal.
+
+    ``pending_since`` is the ``created_at`` of the assistant event that
+    declared the call — the moment the call became pending. Consumers use
+    it to distinguish a healthy in-flight custom call (fresh) from a stuck
+    one whose client died (stale), without loading the transcript. For a
+    tool_call spanning multiple unresolved turns it is the declaring
+    assistant's timestamp, not "now".
     """
 
     tool_call_id: str
     name: str
     kind: Literal["builtin", "mcp", "custom"]
+    pending_since: datetime
 
 
 class SessionCreate(BaseModel):

@@ -10173,16 +10173,22 @@
               "custom"
             ],
             "title": "Kind"
+          },
+          "pending_since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Pending Since"
           }
         },
         "type": "object",
         "required": [
           "tool_call_id",
           "name",
-          "kind"
+          "kind",
+          "pending_since"
         ],
         "title": "AwaitingToolCall",
-        "description": "One pending tool call the harness will not dispatch itself.\n\nDerived view on session reads. Each entry is a tool_call in the\nlatest assistant message with no paired tool_result and no\nin-process executor:\n\n* ``kind == \"custom\"`` \u2014 client-executed; awaits POST to\n  ``/sessions/:id/tool-results`` (operator-facing) or\n  ``/connectors/runtime/tool-results`` (runtime-container-facing).\n* ``kind == \"builtin\" | \"mcp\"`` \u2014 ``always_ask``-gated and not yet\n  confirmed; awaits POST to ``/sessions/:id/tool-confirmations``.\n  Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't\n  appear here \u2014 they're harness-internal."
+        "description": "One pending tool call the harness will not dispatch itself.\n\nDerived view on session reads. Each entry is a tool_call in the\nlatest assistant message with no paired tool_result and no\nin-process executor:\n\n* ``kind == \"custom\"`` \u2014 client-executed; awaits POST to\n  ``/sessions/:id/tool-results`` (operator-facing) or\n  ``/connectors/runtime/tool-results`` (runtime-container-facing).\n* ``kind == \"builtin\" | \"mcp\"`` \u2014 ``always_ask``-gated and not yet\n  confirmed; awaits POST to ``/sessions/:id/tool-confirmations``.\n  Confirmed-but-not-yet-dispatched and ``always_allow`` calls don't\n  appear here \u2014 they're harness-internal.\n\n``pending_since`` is the ``created_at`` of the assistant event that\ndeclared the call \u2014 the moment the call became pending. Consumers use\nit to distinguish a healthy in-flight custom call (fresh) from a stuck\none whose client died (stale), without loading the transcript. For a\ntool_call spanning multiple unresolved turns it is the declaring\nassistant's timestamp, not \"now\"."
       },
       "BindChatRequest": {
         "properties": {

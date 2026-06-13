@@ -479,13 +479,16 @@ def _classify_awaiting(
     name = tc["name"]
     tool_call_id = tc["tool_call_id"]
     has_allow_lifecycle = tc["has_allow_lifecycle"]
+    pending_since = tc["pending_since"]
 
     if is_mcp_tool_name(name):
         if (
             agents_service.effective_mcp_permission(name, agent.tools) == "always_ask"
             and not has_allow_lifecycle
         ):
-            return AwaitingToolCall(tool_call_id=tool_call_id, name=name, kind="mcp")
+            return AwaitingToolCall(
+                tool_call_id=tool_call_id, name=name, kind="mcp", pending_since=pending_since
+            )
         return None
     if tool_registry.has(name):
         perm_tool = resolve_permission(name, agent.tools)
@@ -496,10 +499,14 @@ def _classify_awaiting(
             if args is not None:
                 perm_route = tool_def.classify_permission(args, agent)
         if (perm_tool == "always_ask" or perm_route == "always_ask") and not has_allow_lifecycle:
-            return AwaitingToolCall(tool_call_id=tool_call_id, name=name, kind="builtin")
+            return AwaitingToolCall(
+                tool_call_id=tool_call_id, name=name, kind="builtin", pending_since=pending_since
+            )
         return None
     # Unknown name: client-executed custom tool.
-    return AwaitingToolCall(tool_call_id=tool_call_id, name=name, kind="custom")
+    return AwaitingToolCall(
+        tool_call_id=tool_call_id, name=name, kind="custom", pending_since=pending_since
+    )
 
 
 async def compute_awaiting(

@@ -1094,7 +1094,7 @@ async def _unresolved_tool_calls(
     # string-interpolated into the SQL.
     asst_rows = await conn.fetch(
         """
-        SELECT session_id, data
+        SELECT session_id, data, created_at
           FROM events
          WHERE session_id = ANY($1::text[])
            AND account_id = $2
@@ -1121,10 +1121,15 @@ async def _unresolved_tool_calls(
     for row in asst_rows:
         sid: str = row["session_id"]
         data = parse_jsonb(row["data"])
+        # The declaring assistant event's ``created_at`` is the moment each
+        # of its tool_calls became pending — stamp it onto every emitted call
+        # so the read model can surface ``pending_since`` without a second
+        # lookup (clients age custom calls to tell in-flight from stuck).
+        pending_since = row["created_at"]
         completed: set[str] = results_by_sid.get(sid, set())
         for tc in data.get("tool_calls") or []:
             if tc.get("id") and tc["id"] not in completed:
-                out.setdefault(sid, []).append(tc)
+                out.setdefault(sid, []).append({**tc, "pending_since": pending_since})
     return out
 
 
@@ -1168,7 +1173,8 @@ async def list_unresolved_tool_calls_batch(
     unresolved on an earlier turn still appears in ``Session.awaiting``
     (#741).  Used by :func:`services.sessions.compute_awaiting` to build the
     ``Session.awaiting`` derived view. Returned dicts have keys
-    ``tool_call_id``, ``name``, ``arguments``, ``has_allow_lifecycle``
+    ``tool_call_id``, ``name``, ``arguments``, ``has_allow_lifecycle``,
+    ``pending_since`` (the declaring assistant event's ``created_at``)
     — the caller classifies kind / needs_confirm using ``agent`` (and
     the tool's ``classify_permission`` for arg-aware routes like
     ``http_request``).
@@ -1210,6 +1216,7 @@ async def list_unresolved_tool_calls_batch(
                     "name": name,
                     "arguments": fn.get("arguments", "{}"),
                     "has_allow_lifecycle": tc["id"] in allows,
+                    "pending_since": tc["pending_since"],
                 }
             )
         if entries:

@@ -110,9 +110,40 @@ class TestAwaitingSpansAllAssistants:
             unresolved = await queries.list_unresolved_tool_calls_batch(
                 conn, [session_id], account_id=account_id
             )
-        tcids = {e["tool_call_id"] for e in unresolved.get(session_id, [])}
+        entries = unresolved.get(session_id, [])
+        tcids = {e["tool_call_id"] for e in entries}
         assert tcids == {"tc_X", "tc_Z"}, (
             "Session.awaiting missed tc_X (on the earlier assistant A1) because "
             "the unresolved-tool_calls query only inspected the latest assistant "
             "turn (#741, sibling of #737)"
         )
+
+    async def test_pending_since_is_declaring_assistants_created_at(
+        self,
+        session_with_two_assistant_turns: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """#816: each unresolved entry carries ``pending_since`` — the
+        ``created_at`` of the assistant event that declared it. The earlier
+        call (tc_X) must be stamped strictly before the later call (tc_Z),
+        not with a single shared "now"."""
+        pool, account_id, session_id = session_with_two_assistant_turns
+        async with pool.acquire() as conn:
+            unresolved = await queries.list_unresolved_tool_calls_batch(
+                conn, [session_id], account_id=account_id
+            )
+            asst_times = {
+                r["tcid"]: r["created_at"]
+                for r in await conn.fetch(
+                    "SELECT data->'tool_calls'->0->>'id' AS tcid, created_at "
+                    "FROM events WHERE session_id = $1 AND role = 'assistant' "
+                    "AND data ? 'tool_calls'",
+                    session_id,
+                )
+            }
+        by_tcid = {e["tool_call_id"]: e for e in unresolved[session_id]}
+        for tcid, entry in by_tcid.items():
+            assert "pending_since" in entry
+            assert entry["pending_since"] == asst_times[tcid], (
+                f"pending_since for {tcid} must equal its declaring assistant event's created_at"
+            )
+        assert by_tcid["tc_X"]["pending_since"] < by_tcid["tc_Z"]["pending_since"]
