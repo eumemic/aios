@@ -42,6 +42,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from aios.harness.vision import (
+    PROVIDER_INLINE_IMAGE_FORMATS,
     can_inline_image,
     correct_image_mime_b64,
     make_image_url_part,
@@ -524,31 +525,33 @@ def render_user_event(
     return {"role": "user", "content": marker}
 
 
-def _image_bytes_decode(data: bytes) -> bool:
-    """True iff Pillow can FULLY decode ``data`` as an image.
+def _inline_image_format(data: bytes) -> str | None:
+    """Return Pillow's format name ("JPEG"/"PNG"/"TIFF"/...) if ``data`` fully
+    decodes as an image, else ``None``.
 
-    The inline gate (:func:`~aios.harness.vision.can_inline_image`) checks
-    only the mime prefix and the byte cap, and :func:`make_image_url_part`
-    only magic-byte-sniffs a 24-byte header — neither proves the pixels
-    decode. Providers DO full-decode an inline image and reject (HTTP 400)
-    bytes they can't, so the render boundary must apply the same verdict, or
-    an undecodable attachment (truncated/corrupt body behind a valid magic
-    prefix, or a zero-byte file) bricks the turn on every wake. ``img.load()``
-    forces the full decode — ``verify()`` passes a truncated body.
+    The render boundary inlines an image only when the provider will accept it
+    — which needs two things neither the declared mime
+    (:func:`~aios.harness.vision.can_inline_image`) nor the 24-byte magic sniff
+    (:func:`make_image_url_part`) can establish: the bytes must FULLY decode
+    (``img.load()`` — ``verify()`` passes a truncated body), and the ACTUAL
+    format must be one the provider supports (the caller checks the returned
+    name against :data:`~aios.harness.vision.PROVIDER_INLINE_IMAGE_FORMATS`).
+    A TIFF/BMP decodes fine yet every provider 400s on it, and a declared mime
+    can lie either way (a JPEG sent as image/jpg, a TIFF sent as image/png), so
+    only the decoded format is trustworthy. Both failure modes — undecodable,
+    or decodable-but-unsupported — degrade to a text marker the model can
+    ``read``, instead of re-sending a rejected part on every replay wake.
 
-    This predicate is TOTAL: any decode failure means "don't inline." Pillow
-    raises a wide, format-plugin-dependent set on hostile bytes —
-    ``UnidentifiedImageError``/``OSError`` (garbage/zero-byte/truncated),
-    ``DecompressionBombError`` (a pixel bomb we must not hand to the provider),
-    and ``ValueError``/``SyntaxError``/``struct.error`` from individual format
-    decoders. Catching only a subset would let an exotic decoder error escape
-    to ``build_messages``' poison backstop, which quarantines the WHOLE event
-    (losing the message text and any sibling attachments) rather than degrading
-    just this one attachment to a marker — so catch ``Exception`` (never
-    ``BaseException``: control-flow signals still propagate).
+    Returns ``None`` on ANY decode failure (total): Pillow raises a wide,
+    format-plugin-dependent set on hostile bytes (UnidentifiedImageError/
+    OSError, DecompressionBombError, ValueError/SyntaxError/struct.error).
+    Catching only a subset would let an exotic decoder error escape to
+    ``build_messages``' poison backstop, quarantining the WHOLE event (losing
+    the message text and sibling attachments) rather than degrading just this
+    attachment — so catch ``Exception`` (never ``BaseException``).
     """
     if not data:
-        return False
+        return None
     from io import BytesIO
 
     from PIL import Image
@@ -556,9 +559,9 @@ def _image_bytes_decode(data: bytes) -> bool:
     try:
         with Image.open(BytesIO(data)) as img:
             img.load()
+            return img.format
     except Exception:
-        return False
-    return True
+        return None
 
 
 def _apply_attachments(
@@ -630,7 +633,8 @@ def _apply_attachments(
             )
             marker_lines.append(text_marker(record))
             continue
-        if not _image_bytes_decode(payload):
+        image_format = _inline_image_format(payload)
+        if image_format is None:
             # Bytes that pass the mime+size gate but don't actually decode (a
             # truncated/corrupt body behind a valid magic prefix, or a
             # zero-byte file). The provider full-decodes and 400s on these,
@@ -641,6 +645,20 @@ def _apply_attachments(
             # build_messages poison backstop.
             log.warning(
                 "context.attachment_undecodable",
+                path=str(host_path),
+                filename=record.get("filename"),
+            )
+            marker_lines.append(text_marker(record))
+            continue
+        if image_format not in PROVIDER_INLINE_IMAGE_FORMATS:
+            # Decodes, but no vision provider accepts this format (TIFF, BMP,
+            # …) — they take only jpeg/png/gif/webp and 400 on the rest, so
+            # inlining it bricks the turn on every replay wake just like
+            # undecodable bytes. Gate on the DECODED format, not the declared
+            # mime (which can mislabel either way), and degrade to a marker.
+            log.warning(
+                "context.attachment_unsupported_image_format",
+                image_format=image_format,
                 path=str(host_path),
                 filename=record.get("filename"),
             )

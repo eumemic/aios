@@ -26,7 +26,7 @@ from aios.harness.context import (
 )
 from aios.models.events import Event
 from aios.sandbox.volumes import session_attachments_dir
-from tests.helpers.images import valid_jpeg_bytes
+from tests.helpers.images import valid_jpeg_bytes, valid_tiff_bytes
 
 # These tests exercise attachment/vision rendering, not the `received=` envelope
 # (their assertions are substring checks). Inject a fixed created_at so callers
@@ -164,6 +164,42 @@ class TestVisionAwareRendering:
         assert isinstance(msg["content"], str), "undecodable image must not be inlined"
         assert "[image: bad.jpg" in msg["content"]
         assert "/mnt/attachments/echo/evt-1-bad.jpg" in msg["content"]
+
+    def test_decodable_but_provider_unsupported_format_falls_back_to_marker(
+        self, temp_workspace_root: Path
+    ) -> None:
+        """A TIFF under the cap DECODES in Pillow (so the decode gate passes
+        it) but no vision provider accepts TIFF — they take only
+        jpeg/png/gif/webp and 400 on the rest, bricking the turn on every wake.
+        The render boundary gates on the ACTUAL decoded format (not the
+        declared mime, which can lie either way) and degrades an unsupported
+        one to a text marker the model can still ``read``.
+        """
+        payload = valid_tiff_bytes()
+        sandbox_path = _stage_image(
+            temp_workspace_root, "sess-1", "echo", "evt-1-scan.tiff", payload
+        )
+        event = _user_event(
+            content="scan",
+            attachments=[
+                {
+                    "filename": "scan.tiff",
+                    "content_type": "image/tiff",
+                    "size": len(payload),
+                    "in_sandbox_path": sandbox_path,
+                }
+            ],
+        )
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="model/vision",
+            session_id="sess-1",
+        )
+        # Unsupported format → marker-only render (content collapses to a str).
+        assert isinstance(msg["content"], str), "unsupported image format must not be inlined"
+        assert "[image: scan.tiff" in msg["content"]
 
     def test_non_dict_attachment_record_is_skipped(self, temp_workspace_root: Path) -> None:
         """A non-dict element in ``metadata.attachments`` must not crash the renderer.
