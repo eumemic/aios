@@ -222,6 +222,21 @@ uv run aios dev status      # show this worktree's instance
 uv run aios dev teardown    # drop the DB and prune containers
 ```
 
+By default the admin DSN is `postgresql://aios:aios@localhost:5432/postgres`. On a
+host that runs more than one Postgres, `localhost:5432` may belong to a **foreign**
+(e.g. production) server — and bootstrap/teardown would otherwise `CREATE`/`DROP`
+databases inside it. To guard against this, the default DSN is only trusted once the
+target server is marked as an aios dev server:
+
+```bash
+# one-time, on your real dev Postgres:
+psql -c 'CREATE ROLE aios_dev_marker;'
+```
+
+Alternatively, point at the right server explicitly via `AIOS_POSTGRES_ADMIN_URL`
+(in your shell env or `~/.aios/secrets.env`); an explicit DSN is trusted and skips
+the marker check.
+
 ## Client CLI
 
 `aios` is a Typer-based client CLI. Config is read from env (`AIOS_URL`, `AIOS_API_KEY`) or `.env`; every command accepts `--url` / `--api-key` overrides and a global `--format {table,json}`.

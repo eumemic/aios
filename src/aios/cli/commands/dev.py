@@ -182,6 +182,15 @@ def load_instance_env(repo_root: Path) -> dict[str, str]:
 
 DEFAULT_ADMIN_URL = "postgresql://aios:aios@localhost:5432/postgres"
 
+# Sentinel role that marks a Postgres server as an aios dev server. When the
+# admin DSN is the built-in default (rather than an explicitly-configured
+# AIOS_POSTGRES_ADMIN_URL), bootstrap/teardown REFUSE to run CREATE/DROP
+# DATABASE unless this role exists — otherwise the default ``localhost:5432``
+# might point at a FOREIGN Postgres (e.g. a colocated production instance) and
+# we'd silently create/drop databases inside it (#824). Create it once on your
+# real dev server with:  CREATE ROLE aios_dev_marker;
+DEV_MARKER_ROLE = "aios_dev_marker"
+
 
 def derive_runtime_db_url(admin_url: str, instance_id: str) -> str:
     """Return an AIOS_DB_URL for this instance by swapping the DB name only.
@@ -339,12 +348,76 @@ async def _count_db_clients(db_url: str) -> int:
     return int(result or 0)
 
 
-def _resolve_admin_url(secrets: dict[str, str]) -> str:
-    """Pick the admin DSN from process env, then parsed secrets, then default."""
-    return (
-        os.environ.get("AIOS_POSTGRES_ADMIN_URL")
-        or secrets.get("AIOS_POSTGRES_ADMIN_URL")
-        or DEFAULT_ADMIN_URL
+def resolve_admin_url(secrets: dict[str, str]) -> tuple[str, bool]:
+    """Pick the admin DSN and report whether it was explicitly configured.
+
+    Resolution order: process env, then parsed secrets, then the built-in
+    :data:`DEFAULT_ADMIN_URL`. The second element of the tuple is ``True``
+    when the URL came from explicit config (env or secrets) and ``False``
+    when it fell back to the default. The default targets ``localhost:5432``,
+    which on a multi-Postgres host may be a FOREIGN server — callers must
+    gate destructive ops on this flag via :func:`require_safe_admin_target`.
+    """
+    explicit = os.environ.get("AIOS_POSTGRES_ADMIN_URL") or secrets.get("AIOS_POSTGRES_ADMIN_URL")
+    if explicit:
+        return explicit, True
+    return DEFAULT_ADMIN_URL, False
+
+
+async def _server_has_dev_marker(admin_url: str) -> bool:
+    """Return True if the target server carries the :data:`DEV_MARKER_ROLE`.
+
+    The marker is a no-privilege Postgres ROLE the operator creates once on
+    their genuine dev server. Its presence is the proof-of-identity that
+    distinguishes "my aios dev Postgres" from "whatever else happens to own
+    localhost:5432".
+    """
+    conn = await asyncpg.connect(admin_url)
+    try:
+        found = await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", DEV_MARKER_ROLE)
+    finally:
+        await conn.close()
+    return found is not None
+
+
+def require_safe_admin_target(admin_url: str, *, is_explicit: bool) -> None:
+    """Refuse to run destructive DB ops against an unverified default server.
+
+    An explicitly-configured admin DSN is trusted — the operator deliberately
+    pointed us at it. The built-in default (``localhost:5432``) is NOT trusted
+    on its own: it may be a foreign/production Postgres (#824). For the default
+    we require the server to carry :data:`DEV_MARKER_ROLE`; if it's absent (or
+    the probe fails), we ``typer.Exit(1)`` with actionable guidance rather than
+    silently creating/dropping databases inside someone else's server.
+    """
+    if is_explicit:
+        return
+    try:
+        marked = asyncio.run(_server_has_dev_marker(admin_url))
+    except (asyncpg.exceptions.PostgresError, OSError) as exc:
+        print_error(f"could not verify the dev Postgres server identity: {exc}")
+        print_note(f"Admin DSN (default): {admin_url}")
+        _print_marker_guidance()
+        raise typer.Exit(1) from exc
+    if marked:
+        return
+    print_error(
+        "refusing to use the default admin DSN: the server at "
+        f"{admin_url} is not marked as an aios dev server. On a multi-Postgres "
+        "host the default localhost:5432 can be a FOREIGN/production instance, "
+        "and bootstrap/teardown would CREATE/DROP databases inside it (#824)."
+    )
+    _print_marker_guidance()
+    raise typer.Exit(1)
+
+
+def _print_marker_guidance() -> None:
+    """Tell the operator how to either mark the server or point elsewhere."""
+    print_note("To proceed, either:")
+    print_note(f"  1) mark this server as your aios dev server: CREATE ROLE {DEV_MARKER_ROLE};")
+    print_note(
+        "  2) or point at the right server explicitly via AIOS_POSTGRES_ADMIN_URL "
+        "(env or ~/.aios/secrets.env)."
     )
 
 
@@ -415,7 +488,8 @@ def bootstrap() -> None:
         print_note("Plus any provider keys (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, ...).")
         raise typer.Exit(1)
 
-    admin_url = _resolve_admin_url(secrets)
+    admin_url, admin_url_explicit = resolve_admin_url(secrets)
+    require_safe_admin_target(admin_url, is_explicit=admin_url_explicit)
 
     try:
         asyncio.run(_preflight_role_can_create_db(admin_url))
@@ -545,7 +619,8 @@ def teardown(
     _force_remove_containers(container_ids)
 
     secrets = parse_env_file(Path.home() / ".aios" / "secrets.env")
-    admin_url = _resolve_admin_url(secrets)
+    admin_url, admin_url_explicit = resolve_admin_url(secrets)
+    require_safe_admin_target(admin_url, is_explicit=admin_url_explicit)
     try:
         asyncio.run(_drop_database(admin_url, db_name))
     except asyncpg.exceptions.PostgresError as exc:

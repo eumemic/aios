@@ -10,13 +10,18 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import typer
 
 from aios.cli.commands.dev import (
+    DEFAULT_ADMIN_URL,
+    DEV_MARKER_ROLE,
     INSTANCE_ID_PATTERN,
     MAX_DB_NAME_BYTES,
     derive_instance_id,
     derive_runtime_db_url,
     parse_env_file,
+    require_safe_admin_target,
+    resolve_admin_url,
     validate_instance_id_for_db,
     write_env_atomic,
 )
@@ -272,3 +277,103 @@ def test_settings_instance_id_rejects_unsafe_value(
 
     with pytest.raises(ValidationError):
         Settings(_env_file=(str(secrets),))
+
+
+# ── resolve_admin_url: explicit vs default-fallback ────────────────────────
+
+
+def test_resolve_admin_url_env_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AIOS_POSTGRES_ADMIN_URL", "postgresql://u:p@h:5432/postgres")
+    url, explicit = resolve_admin_url({})
+    assert url == "postgresql://u:p@h:5432/postgres"
+    assert explicit is True
+
+
+def test_resolve_admin_url_secrets_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AIOS_POSTGRES_ADMIN_URL", raising=False)
+    url, explicit = resolve_admin_url(
+        {"AIOS_POSTGRES_ADMIN_URL": "postgresql://u:p@h:6543/postgres"}
+    )
+    assert url == "postgresql://u:p@h:6543/postgres"
+    assert explicit is True
+
+
+def test_resolve_admin_url_default_is_not_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AIOS_POSTGRES_ADMIN_URL", raising=False)
+    url, explicit = resolve_admin_url({})
+    assert url == DEFAULT_ADMIN_URL
+    assert explicit is False
+
+
+def test_resolve_admin_url_env_beats_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AIOS_POSTGRES_ADMIN_URL", "postgresql://env@h/postgres")
+    url, explicit = resolve_admin_url(
+        {"AIOS_POSTGRES_ADMIN_URL": "postgresql://secrets@h/postgres"}
+    )
+    assert url == "postgresql://env@h/postgres"
+    assert explicit is True
+
+
+# ── require_safe_admin_target: foreign-postgres guard ──────────────────────
+
+
+def test_require_safe_admin_target_explicit_skips_marker_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicitly-configured DSN is trusted: no marker probe, no refusal."""
+    probed = False
+
+    async def _never(_url: str) -> bool:
+        nonlocal probed
+        probed = True
+        return False
+
+    monkeypatch.setattr("aios.cli.commands.dev._server_has_dev_marker", _never)
+    # Should not raise and should not probe.
+    require_safe_admin_target("postgresql://u:p@h:5432/postgres", is_explicit=True)
+    assert probed is False
+
+
+def test_require_safe_admin_target_default_with_marker_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default DSN is allowed when the server carries the dev sentinel marker."""
+
+    async def _has(_url: str) -> bool:
+        return True
+
+    monkeypatch.setattr("aios.cli.commands.dev._server_has_dev_marker", _has)
+    require_safe_admin_target(DEFAULT_ADMIN_URL, is_explicit=False)
+
+
+def test_require_safe_admin_target_default_without_marker_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default DSN against an unmarked (possibly FOREIGN) server is refused."""
+
+    async def _missing(_url: str) -> bool:
+        return False
+
+    monkeypatch.setattr("aios.cli.commands.dev._server_has_dev_marker", _missing)
+    with pytest.raises(typer.Exit) as ei:
+        require_safe_admin_target(DEFAULT_ADMIN_URL, is_explicit=False)
+    assert ei.value.exit_code == 1
+
+
+def test_require_safe_admin_target_default_probe_error_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the marker probe itself fails (e.g. unreachable), refuse — fail hard."""
+
+    async def _boom(_url: str) -> bool:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("aios.cli.commands.dev._server_has_dev_marker", _boom)
+    with pytest.raises(typer.Exit) as ei:
+        require_safe_admin_target(DEFAULT_ADMIN_URL, is_explicit=False)
+    assert ei.value.exit_code == 1
+
+
+def test_dev_marker_role_name_is_stable() -> None:
+    """The sentinel role name is a documented contract; guard against drift."""
+    assert DEV_MARKER_ROLE == "aios_dev_marker"
