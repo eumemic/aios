@@ -157,7 +157,11 @@ async def invoke_run_tool(
         # which a run has no channel for. Deny rather than execute unconfirmed, so a run is
         # never *more* privileged than a session on the identical declared surface.
         server = _find_server(run.http_servers, str(args.get("server_ref", "")))
-        route = _match_route(server, str(args.get("path", ""))) if server is not None else None
+        route = (
+            _match_route(server, str(args.get("path", "")), str(args.get("method", "")))
+            if server is not None
+            else None
+        )
         if (
             route is not None
             and route.permission_policy is not None

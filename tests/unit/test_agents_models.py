@@ -5,11 +5,31 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from aios.models.agents import AgentCreate, AgentUpdate
+from aios.models.agents import AgentCreate, AgentUpdate, HttpRouteSpec
 
 
 def _http_server(name: str, base_url: str) -> dict[str, str]:
     return {"name": name, "base_url": base_url}
+
+
+class TestHttpRouteSpecMethods:
+    def test_methods_default_none_means_all(self) -> None:
+        route = HttpRouteSpec(path_pattern="/x")
+        assert route.methods is None
+
+    def test_methods_accepts_explicit_list(self) -> None:
+        route = HttpRouteSpec(path_pattern="/x", methods=["GET", "POST"])
+        assert route.methods == ["GET", "POST"]
+
+    def test_methods_empty_list_is_deny_all(self) -> None:
+        # [] = lattice bottom (deny-all); a legitimate, if pointless, author choice
+        # and the natural empty-intersection result of the method meet.
+        route = HttpRouteSpec(path_pattern="/x", methods=[])
+        assert route.methods == []
+
+    def test_methods_rejects_unknown_verb(self) -> None:
+        with pytest.raises(ValidationError):
+            HttpRouteSpec.model_validate({"path_pattern": "/x", "methods": ["FETCH"]})
 
 
 class TestAgentCreateHttpServers:

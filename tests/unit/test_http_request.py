@@ -55,6 +55,7 @@ def _route(
     enabled: bool = True,
     policy: str | None = None,
     description: str | None = None,
+    methods: list[str] | None = None,
 ) -> HttpRouteSpec:
     permission = HttpPermissionPolicy(type=policy) if policy else None
     return HttpRouteSpec(
@@ -62,6 +63,7 @@ def _route(
         enabled=enabled,
         permission_policy=permission,
         description=description,
+        methods=cast(Any, methods),
     )
 
 
@@ -87,20 +89,25 @@ class TestClassifyPermission:
             ]
         )
         assert (
-            _classify_permission({"server_ref": "hue", "path": "/lights/1/state"}, agent)
+            _classify_permission(
+                {"server_ref": "hue", "path": "/lights/1/state", "method": "GET"}, agent
+            )
             == "always_ask"
         )
 
     def test_matched_route_with_always_allow(self) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*", policy="always_allow")])])
         assert (
-            _classify_permission({"server_ref": "hue", "path": "/lights/1"}, agent)
+            _classify_permission({"server_ref": "hue", "path": "/lights/1", "method": "GET"}, agent)
             == "always_allow"
         )
 
     def test_matched_route_with_no_policy_returns_none(self) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
-        assert _classify_permission({"server_ref": "hue", "path": "/lights/1"}, agent) is None
+        assert (
+            _classify_permission({"server_ref": "hue", "path": "/lights/1", "method": "GET"}, agent)
+            is None
+        )
 
     def test_disabled_route_does_not_match(self) -> None:
         agent = _agent(
@@ -110,12 +117,38 @@ class TestClassifyPermission:
                 )
             ]
         )
-        assert _classify_permission({"server_ref": "hue", "path": "/lights/1"}, agent) is None
+        assert (
+            _classify_permission({"server_ref": "hue", "path": "/lights/1", "method": "GET"}, agent)
+            is None
+        )
 
     def test_bad_args_returns_none(self) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
         assert _classify_permission({"server_ref": "hue"}, agent) is None
         assert _classify_permission({"server_ref": 123, "path": "/lights/1"}, agent) is None
+
+    def test_method_scoped_route_classifies_only_matching_method(self) -> None:
+        # A route scoped to POST with always_ask classifies a POST but not a GET
+        # (GET doesn't match the route at all → None → handler emits a typed error).
+        agent = _agent(
+            http_servers=[
+                _server(routes=[_route("/lights/*", policy="always_ask", methods=["POST"])])
+            ]
+        )
+        assert (
+            _classify_permission(
+                {"server_ref": "hue", "path": "/lights/1", "method": "POST"}, agent
+            )
+            == "always_ask"
+        )
+        assert (
+            _classify_permission({"server_ref": "hue", "path": "/lights/1", "method": "GET"}, agent)
+            is None
+        )
+
+    def test_missing_method_returns_none(self) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*", policy="always_ask")])])
+        assert _classify_permission({"server_ref": "hue", "path": "/lights/1"}, agent) is None
 
 
 # ── _classify_tool_call (loop.py) over http_request ──────────────────────────
@@ -280,6 +313,44 @@ class TestHttpRequestHandler:
             )
         assert "error" in result
         assert "does not match any enabled route" in result["error"]
+
+    async def test_method_not_allowed_returns_error(self, _stub_runtime: Any) -> None:
+        # A route scoped to GET refuses a POST at the gate (no upstream dispatch).
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*", methods=["GET"])])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "POST"},
+            )
+        assert "error" in result
+        assert "POST" in result["error"]
+        assert "does not match any enabled route" in result["error"]
+        assert "url" not in captured  # not dispatched upstream
+
+    async def test_method_scoped_route_allows_matching_method(self, _stub_runtime: Any) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*", methods=["GET"])])])
+        response = httpx.Response(
+            200, headers={"content-type": "application/json"}, content=b'{"on": true}'
+        )
+        stub = _make_stub_client(response=response)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth({"Authorization": "Bearer xyz"}),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert result["status"] == 200
 
     async def test_path_with_query_string_rejected(self, _stub_runtime: Any) -> None:
         """A ``path`` carrying a query string must be rejected even when the

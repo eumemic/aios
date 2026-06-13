@@ -11250,6 +11250,27 @@
                 "type": "null"
               }
             ]
+          },
+          "methods": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "GET",
+                    "POST",
+                    "PUT",
+                    "DELETE",
+                    "PATCH"
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Methods"
           }
         },
         "additionalProperties": false,
@@ -11258,7 +11279,7 @@
           "path_pattern"
         ],
         "title": "HttpRouteSpec",
-        "description": "One entry in an ``HttpServerSpec.routes`` allowlist.\n\n``path_pattern`` is a glob against the request path (``*`` matches one\nsegment, ``**`` matches any number of segments).  ``description`` is\noperator-authored prose rendered into the system prompt so the agent\nknows what the route does and how to call it.  ``permission_policy``\ngates *invocation*: ``always_ask`` leaves the call unresolved in the\nevent log until the client confirms via\n``POST /sessions/:id/tool-confirmations``."
+        "description": "One entry in an ``HttpServerSpec.routes`` allowlist.\n\n``path_pattern`` is a glob against the request path (``*`` matches one\nsegment, ``**`` matches any number of segments).  ``description`` is\noperator-authored prose rendered into the system prompt so the agent\nknows what the route does and how to call it.  ``permission_policy``\ngates *invocation*: ``always_ask`` leaves the call unresolved in the\nevent log until the client confirms via\n``POST /sessions/:id/tool-confirmations``.\n\n``methods`` scopes the route to a set of HTTP verbs so a surface can\nexpress read/write attenuation structurally \u2014 e.g. ``GET`` everywhere\nbut ``POST`` only on a sandbox path (#828).  ``None`` (the default)\nmeans *all* methods are allowed (the method-dimension lattice top;\nbackward-compatible with routes authored before method scoping).  A\nnon-empty list restricts the route to exactly those verbs.  An empty\nlist (``[]``) is *deny-all* \u2014 the method-dimension lattice bottom, and\nthe natural result of intersecting two disjoint method sets during\nattenuation; it matches nothing.  The capability meet\n(:mod:`aios.models.attenuation`) intersects ``methods`` per route, so a\nchild surface can narrow a parent route's verbs but never widen them.\n\nGraphQL caveat \u2014 **REST-only discipline for attenuated surfaces.**\nMethod scoping confines REST read/write because the verb encodes the\nsemantics.  A GraphQL endpoint serves both queries (reads) and\nmutations (writes) over a single ``POST`` path, so method scoping\n*cannot* separate read from write there, and the broker does not\ninspect request bodies.  An operator who needs to confine writes on a\nGraphQL surface must place reads and writes behind distinct\n``base_url`` servers (each with its own credential/route allowlist) or\naccept that granting ``POST`` grants both."
       },
       "HttpServerSpec": {
         "properties": {

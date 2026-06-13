@@ -67,6 +67,10 @@ PermissionPolicy = Literal["always_allow", "always_ask"]
 # ``McpToolsetConfig`` / ``McpToolConfig`` can override per-tool.
 ToolTransport = Literal["cli", "agent_tool", "both"]
 
+# HTTP methods an ``http_request`` route may be scoped to. Mirrors the broker's
+# ``_ALLOWED_METHODS`` tuple in ``tools/http_request.py``.
+HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
+
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
 
 # Header names the MCP streamable-http transport authors on every request
@@ -219,6 +223,28 @@ class HttpRouteSpec(BaseModel):
     gates *invocation*: ``always_ask`` leaves the call unresolved in the
     event log until the client confirms via
     ``POST /sessions/:id/tool-confirmations``.
+
+    ``methods`` scopes the route to a set of HTTP verbs so a surface can
+    express read/write attenuation structurally — e.g. ``GET`` everywhere
+    but ``POST`` only on a sandbox path (#828).  ``None`` (the default)
+    means *all* methods are allowed (the method-dimension lattice top;
+    backward-compatible with routes authored before method scoping).  A
+    non-empty list restricts the route to exactly those verbs.  An empty
+    list (``[]``) is *deny-all* — the method-dimension lattice bottom, and
+    the natural result of intersecting two disjoint method sets during
+    attenuation; it matches nothing.  The capability meet
+    (:mod:`aios.models.attenuation`) intersects ``methods`` per route, so a
+    child surface can narrow a parent route's verbs but never widen them.
+
+    GraphQL caveat — **REST-only discipline for attenuated surfaces.**
+    Method scoping confines REST read/write because the verb encodes the
+    semantics.  A GraphQL endpoint serves both queries (reads) and
+    mutations (writes) over a single ``POST`` path, so method scoping
+    *cannot* separate read from write there, and the broker does not
+    inspect request bodies.  An operator who needs to confine writes on a
+    GraphQL surface must place reads and writes behind distinct
+    ``base_url`` servers (each with its own credential/route allowlist) or
+    accept that granting ``POST`` grants both.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -227,6 +253,7 @@ class HttpRouteSpec(BaseModel):
     description: str | None = None
     enabled: bool = True
     permission_policy: HttpPermissionPolicy | None = None
+    methods: list[HttpMethod] | None = None
 
 
 class HttpServerSpec(BaseModel):

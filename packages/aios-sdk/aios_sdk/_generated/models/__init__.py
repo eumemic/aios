@@ -62,6 +62,7 @@ from .github_repository_update import GithubRepositoryUpdate
 from .http_permission_policy import HttpPermissionPolicy
 from .http_permission_policy_type import HttpPermissionPolicyType
 from .http_route_spec import HttpRouteSpec
+from .http_route_spec_methods_type_0_item import HttpRouteSpecMethodsType0Item
 from .http_server_spec import HttpServerSpec
 from .http_validation_error import HTTPValidationError
 from .limited_networking import LimitedNetworking
@@ -330,6 +331,7 @@ __all__ = (
     "HttpPermissionPolicy",
     "HttpPermissionPolicyType",
     "HttpRouteSpec",
+    "HttpRouteSpecMethodsType0Item",
     "HttpServerSpec",
     "HTTPValidationError",
     "LimitedNetworking",
