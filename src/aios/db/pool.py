@@ -52,19 +52,41 @@ def listener_application_name(instance_id: str | None = None) -> str:
     return f"aios-listener:{iid}"[:63]
 
 
+def _jsonb_encoder(value: Any) -> str:
+    """Encode a Python value for a JSONB bind parameter.
+
+    A bare ``str`` is assumed to be **already-serialized JSON text** and passes
+    through untouched; anything else is ``json.dumps``'d. This is the load-bearing
+    detail that makes the codec land additively (Stage 1 of #1062): the existing
+    ~57 write sites still pre-serialize with ``json.dumps(...)`` + ``$N::jsonb``,
+    and asyncpg's codec encoder runs *on top of* that bound value — a plain
+    ``json.dumps`` encoder would double-encode every current write (store
+    ``"{\\"a\\": 1}"`` instead of ``{"a": 1}``). Passthrough-on-``str`` keeps every
+    pre-serialized write single-encoded while already accepting the bare
+    dicts/lists the Stage 2 sweep will switch writes to.
+
+    The passthrough is unambiguous because no JSONB column is ever written a bare
+    top-level JSON *string* value — every write is an object or array — so a
+    ``str`` at this boundary is always serialized JSON, never a scalar payload.
+    When Stage 2 retires the pre-serialization, this collapses to plain
+    ``json.dumps``.
+    """
+    return value if isinstance(value, str) else json.dumps(value)
+
+
 async def _register_jsonb_codec(conn: asyncpg.Connection[Any]) -> None:
     """Pool ``init`` callback: make JSONB cross the seam as native Python.
 
     Without a codec, asyncpg returns JSONB columns as raw JSON *strings* on read
     and demands pre-serialized strings on write, forcing every call site to
-    hand-roll ``json.loads``/``json.dumps``. Registering the standard codec once,
-    on every pooled connection, enforces the impedance boundary at the pool
-    instead of at ~140 vigilant call sites: reads return parsed Python and writes
-    accept bare dicts/lists.
+    hand-roll ``json.loads``/``json.dumps``. Registering the codec once, on every
+    pooled connection, enforces the impedance boundary at the pool instead of at
+    ~140 vigilant call sites: reads return parsed Python (``json.loads`` decoder)
+    and writes accept bare dicts/lists (:func:`_jsonb_encoder`).
     """
     await conn.set_type_codec(
         "jsonb",
-        encoder=json.dumps,
+        encoder=_jsonb_encoder,
         decoder=json.loads,
         schema="pg_catalog",
     )

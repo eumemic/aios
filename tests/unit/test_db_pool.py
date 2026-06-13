@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import structlog
 
-from aios.db.pool import _register_jsonb_codec, create_pool, normalize_dsn
+from aios.db.pool import (
+    _jsonb_encoder,
+    _register_jsonb_codec,
+    create_pool,
+    normalize_dsn,
+)
 
 
 def _make_fake_pool(pg_max_connections: str) -> MagicMock:
@@ -126,13 +131,31 @@ async def test_pool_registers_jsonb_codec_init() -> None:
 
 
 @pytest.mark.asyncio
-async def test_register_jsonb_codec_uses_json_round_trip() -> None:
-    """The init callback registers the pg_catalog jsonb codec with json en/decoders."""
+async def test_register_jsonb_codec_wires_pg_catalog_codec() -> None:
+    """The init callback registers the pg_catalog jsonb codec with our en/decoders."""
     conn = AsyncMock()
     await _register_jsonb_codec(conn)
     conn.set_type_codec.assert_awaited_once_with(
         "jsonb",
-        encoder=json.dumps,
+        encoder=_jsonb_encoder,
         decoder=json.loads,
         schema="pg_catalog",
     )
+
+
+def test_jsonb_encoder_serializes_bare_python() -> None:
+    """Bare dicts/lists (the Stage 2 write shape) are json.dumps'd."""
+    assert json.loads(_jsonb_encoder({"a": 1})) == {"a": 1}
+    assert json.loads(_jsonb_encoder([1, 2, 3])) == [1, 2, 3]
+
+
+def test_jsonb_encoder_passes_through_preserialized_string() -> None:
+    """A pre-serialized JSON string passes through untouched — NOT re-dumped.
+
+    This is the additive-Stage-1 guarantee: existing writes that already
+    json.dumps(...) their value must not be double-encoded by the codec.
+    """
+    pre = json.dumps({"a": 1})
+    assert _jsonb_encoder(pre) == pre  # no extra layer of quoting
+    # A plain json.dumps encoder would have produced a double-encoded string.
+    assert _jsonb_encoder(pre) != json.dumps(pre)
