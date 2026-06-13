@@ -166,6 +166,8 @@ class _ListRunEventsArgs(BaseModel):
     run_id: str
     after_seq: int = Field(default=0, ge=0)
     limit: int = Field(default=200, ge=1, le=500)
+
+
 class _ResumeGateArgs(BaseModel):
     """``resume_gate`` arguments. The resumer is the trusted executing session;
     it may resume only gates in runs it launched."""
@@ -358,6 +360,8 @@ async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) ->
     )
     # payloads returned in full; paging is via after_seq/limit
     return {"events": [e.model_dump(mode="json") for e in events]}
+
+
 async def resume_gate_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
