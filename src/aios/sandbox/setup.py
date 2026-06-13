@@ -238,9 +238,8 @@ def build_iptables_script(
         "",
         _IPTABLES_BACKEND_SELECT,
         "",
-        "# Flush existing OUTPUT rules (filter + nat) for idempotent re-apply",
+        "# Flush existing OUTPUT rules",
         '"$IPT" -F OUTPUT',
-        '"$IPT" -t nat -F OUTPUT',
         "",
         "# Allow loopback",
         '"$IPT" -A OUTPUT -o lo -j ACCEPT',
@@ -274,6 +273,14 @@ def build_iptables_script(
 
     if dnat_target is not None and dnat_hosts:
         proxy_alias, proxy_port = dnat_target
+        lines.append("")
+        # Flush the nat OUTPUT chain before appending DNAT rules, mirroring the
+        # filter-table flush above. Scoped to the DNAT path so a plain Limited
+        # sandbox never touches the nat table: a restricted host with filter- but
+        # not nat-table access must not fail provision over a lockdown that emits
+        # no DNAT rules. The flush precedes the rule additions below.
+        lines.append("# Flush existing nat OUTPUT rules")
+        lines.append('"$IPT" -t nat -F OUTPUT')
         lines.append("")
         lines.append("# Route credential-host HTTPS through the secret-egress proxy (#878)")
         # Resolve the proxy alias to an IP ONCE — iptables --to-destination
@@ -343,7 +350,13 @@ def build_lockdown_verify_script(dnat_hosts: Sequence[str] = ()) -> str:
     nat block is guarded out — is the documented fail-open-to-placeholder path
     in :func:`build_iptables_script` and is out of scope here.)
     """
+    # ``set -e`` is load-bearing: without it the script exits with the status of
+    # its LAST assertion, so a failed DROP-policy check (grep → 1) is masked by a
+    # passing DNAT check (grep → 0). That would let verify pass with OUTPUT policy
+    # != DROP — an unrestricted-egress credentialed sandbox. With ``set -e`` the
+    # DROP assertion aborts the script the instant it fails.
     lines = [
+        "set -e",
         _IPTABLES_BACKEND_SELECT,
         "\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'",
     ]

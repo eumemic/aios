@@ -133,19 +133,18 @@ class TestBuildIptablesScript:
         script = build_iptables_script(allowed_hosts={"api.example.com"})
         assert '"$IPT" -F OUTPUT' in script
 
-    def test_flushes_nat_output_chain_for_idempotent_reapply(self) -> None:
-        """#984: a future re-apply path (e.g. credential rotation refreshing the
-        lockdown without a full netns recycle) would accumulate duplicate DNAT
-        entries unless the nat OUTPUT chain is flushed alongside the filter
-        chain. Flushing both makes re-apply idempotent."""
+    def test_flushes_nat_output_chain_before_dnat_rules(self) -> None:
+        """The nat OUTPUT chain is flushed before the DNAT rules are appended,
+        mirroring the filter-table flush, so the chain ends up holding exactly
+        the DNAT rules this apply emits. The flush is scoped to the DNAT path
+        (see test_no_nat_rules_without_dnat_target)."""
         script = build_iptables_script(
             allowed_hosts={"api.example.com"},
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
         )
         assert '"$IPT" -t nat -F OUTPUT' in script
-        # The nat flush precedes the DNAT rules, so re-running the script
-        # replaces (not appends to) the existing nat OUTPUT chain.
+        # The flush precedes the DNAT rule additions in the script.
         assert script.index('"$IPT" -t nat -F OUTPUT') < script.index("-j DNAT")
 
     def test_loopback_and_dns_always_allowed(self) -> None:
@@ -221,13 +220,14 @@ class TestBuildIptablesScript:
         assert "REDIRECT" not in script
 
     def test_no_nat_rules_without_dnat_target(self) -> None:
-        # The unconditional nat flush is always present (#984 idempotency); what
-        # must be absent without a dnat_target is the DNAT rule *addition*.
+        # Without a dnat_target the script must not touch the nat table at all —
+        # not even the flush. A plain Limited sandbox on a host with filter- but
+        # not nat-table access would otherwise fail provision under `set -e`.
         script = build_iptables_script(
             allowed_hosts={"api.example.com"},
             dnat_hosts=["api.secret.com"],
         )
-        assert "-t nat -A OUTPUT" not in script
+        assert "-t nat" not in script
         assert "DNAT" not in script
 
     def test_no_nat_rules_without_dnat_hosts(self) -> None:
@@ -236,12 +236,14 @@ class TestBuildIptablesScript:
             dnat_hosts=[],
             dnat_target=("aios-worker", 49152),
         )
-        assert "-t nat -A OUTPUT" not in script
+        assert "-t nat" not in script
         assert "DNAT" not in script
 
     def test_existing_callers_unchanged(self) -> None:
+        # A non-DNAT caller never touches the nat table (flush included), so a
+        # host with filter- but not nat-table access still provisions.
         script = build_iptables_script(allowed_hosts={"api.example.com"})
-        assert "-t nat -A OUTPUT" not in script
+        assert "-t nat" not in script
         assert "DNAT" not in script
         assert '"$IPT" -P OUTPUT DROP' in script
 
@@ -272,6 +274,16 @@ class TestBuildLockdownVerifyScript:
     def test_asserts_filter_drop_policy(self) -> None:
         script = build_lockdown_verify_script()
         assert "\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'" in script
+
+    def test_set_e_precedes_drop_assertion(self) -> None:
+        """Without `set -e` the script exits with the status of its LAST
+        assertion, so a failed DROP check is masked by a passing DNAT check —
+        verify would pass with OUTPUT policy != DROP, leaving an
+        unrestricted-egress credentialed sandbox. `set -e` must lead the script
+        so the DROP assertion aborts the moment it fails."""
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
+        assert script.startswith("set -e\n")
+        assert script.index("set -e") < script.index("OUTPUT DROP")
 
     def test_no_dnat_assertion_without_dnat_hosts(self) -> None:
         """With no credential hosts, there's no nat coverage to assert — the
