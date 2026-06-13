@@ -220,6 +220,7 @@ async def update_account(
     *,
     target_account_id: str,
     caller_account_id: str,
+    caller_can_mint_children: bool,
     display_name: str | None,
     can_mint_children: bool | None,
     config: AccountConfig | None = None,
@@ -230,8 +231,20 @@ async def update_account(
     (set keys only). Raises :class:`NotFoundError` if the target is missing,
     archived, or out of scope — the API doesn't distinguish out-of-scope from
     missing.
+
+    Granting ``can_mint_children`` requires the caller to hold it: the privilege
+    only ever flows DOWN from a privileged parent (the same rule
+    :func:`mint_child` enforces). Without this a child minted with
+    ``can_mint_children=False`` could PATCH its own account to ``True`` and
+    self-escalate up the lattice. Revoking it (or any update by a privileged
+    caller, including the legitimate parent-grants-child path) is unaffected.
     """
     await get_account_in_scope(pool, target_account_id, caller_account_id=caller_account_id)
+    if can_mint_children and not caller_can_mint_children:
+        raise ForbiddenError(
+            "caller account is not authorized to grant can_mint_children",
+            detail={"account_id": caller_account_id, "target_account_id": target_account_id},
+        )
     async with pool.acquire() as conn:
         updated = await queries.update_account(
             conn,
