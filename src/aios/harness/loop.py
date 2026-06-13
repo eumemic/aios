@@ -845,23 +845,6 @@ def _tc_name(tc: dict[str, Any]) -> str:
     return name
 
 
-def _is_known_mcp_server(server_name: str, mcp_server_map: dict[str, McpServerSpec]) -> bool:
-    """Return True if ``server_name`` resolves to a registered MCP server.
-
-    ``mcp_server_map`` is the agent-derived map of MCP server names →
-    ``McpServerSpec`` (built upstream from both agent-declared HTTP MCP
-    servers and connection-provided MCP servers — all HTTP transport
-    since #318).
-
-    Used by :func:`_classify_tool_call` to short-circuit hallucinated
-    tool names before the permission gate, so the model gets a tool
-    error in one turn instead of leaving the call sitting unresolved
-    forever waiting on a confirmation that would surface as an
-    unknown-server tool error anyway.
-    """
-    return server_name in mcp_server_map
-
-
 type ToolDispatchKind = Literal[
     "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp"
 ]
@@ -898,7 +881,8 @@ def _classify_tool_call(
             server_name, _ = _parse_mcp_tool_name(name)
         except ValueError:
             return "unknown_mcp"
-        if not _is_known_mcp_server(server_name, mcp_server_map):
+        # hallucinated/unregistered server -> unknown_mcp tool error so the model self-corrects
+        if server_name not in mcp_server_map:
             return "unknown_mcp"
         perm = agents_service.effective_mcp_permission(name, agent.tools)
         if perm == "always_allow":
