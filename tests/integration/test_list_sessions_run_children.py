@@ -25,7 +25,7 @@ from tests.integration.conftest import seed_agent_env_session
 pytestmark = pytest.mark.integration
 
 
-async def _seed_run(conn: asyncpg.Connection[Any], account_id: str) -> str:
+async def _seed_run(conn: asyncpg.Connection[Any], account_id: str, environment_id: str) -> str:
     wf = await wf_queries.insert_workflow(
         conn,
         account_id=account_id,
@@ -36,7 +36,7 @@ async def _seed_run(conn: asyncpg.Connection[Any], account_id: str) -> str:
         conn,
         account_id=account_id,
         workflow_id=wf.id,
-        environment_id="env_lsrc",
+        environment_id=environment_id,
         script=wf.script,
         host_semantics_epoch=HOST_SEMANTICS_EPOCH,
         script_sha="deadbeef",
@@ -55,24 +55,20 @@ class TestListSessionsRunChildren:
                     "INSERT INTO accounts (id, parent_account_id, can_mint_children, "
                     "display_name) VALUES ('acc_lsrc', NULL, TRUE, 'run-children-test')"
                 )
-                await conn.execute(
-                    "INSERT INTO environments (id, name, config, account_id) "
-                    "VALUES ('env_lsrc', 'lsrc-env', '{}'::jsonb, 'acc_lsrc')"
-                )
 
-            agent, _env, _parent = await seed_agent_env_session(
+            agent, env, _parent = await seed_agent_env_session(
                 pool, account_id="acc_lsrc", prefix="lsrc"
             )
 
             async with pool.acquire() as conn:
-                run_id = await _seed_run(conn, "acc_lsrc")
+                run_id = await _seed_run(conn, "acc_lsrc", env.id)
                 child = await queries.insert_child_session(
                     conn,
                     session_id="ses_lsrc_child",
                     account_id="acc_lsrc",
                     agent_id=agent.id,
-                    environment_id="env_lsrc",
-                    agent_version=1,
+                    environment_id=env.id,
+                    agent_version=agent.version,
                     model="openrouter/test",
                     parent_run_id=run_id,
                     tools=[],
