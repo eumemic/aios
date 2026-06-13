@@ -71,6 +71,39 @@ class WhatsappManagementMixin:
         return {"external_account_id": external_account_id, "code": code}
 
     @management_handler()
+    async def getPairingCode(self, *, external_account_id: str) -> dict[str, Any]:
+        """Return the rotated QR code currently live for the in-flight attempt.
+
+        whatsmeow rotates the code ~every 20 s over a ~100 s attempt;
+        :meth:`startPairing` surfaces only the first.  Operators poll this
+        every few seconds and re-render when ``rotation_seq`` changes so
+        each ~20 s window is scannable, not just the first.
+
+        Returns ``{external_account_id, code, rotation_seq}``.  Raises
+        :class:`ManagementHandlerError` if the daemon returns an empty code
+        (no live attempt / already terminated) so the AIOS server route can
+        surface a 404/502 rather than 200 OK with a blank QR.
+        """
+        state = self._state_for_phone(external_account_id)
+        result = await state.daemon.get_pairing_code()
+        code = result.get("code")
+        if not code:
+            raise ManagementHandlerError(
+                {
+                    "status": "error",
+                    "external_account_id": external_account_id,
+                    "reason": "daemon returned empty pairing code",
+                }
+            )
+        return {
+            "external_account_id": external_account_id,
+            "code": code,
+            # rotation_seq defaults to 0 (the first code) when the daemon
+            # omits it — a missing seq means no rotation has happened yet.
+            "rotation_seq": result.get("rotation_seq", 0),
+        }
+
+    @management_handler()
     async def confirmPairing(self, *, external_account_id: str) -> dict[str, Any]:
         """Block until pairing terminates.
 

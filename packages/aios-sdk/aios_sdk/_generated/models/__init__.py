@@ -250,6 +250,8 @@ from .whatsapp_confirm_pairing_response import WhatsappConfirmPairingResponse
 from .whatsapp_confirm_pairing_response_status import (
     WhatsappConfirmPairingResponseStatus,
 )
+from .whatsapp_pairing_code_request import WhatsappPairingCodeRequest
+from .whatsapp_pairing_code_response import WhatsappPairingCodeResponse
 from .whatsapp_start_pairing_request import WhatsappStartPairingRequest
 from .whatsapp_start_pairing_response import WhatsappStartPairingResponse
 from .whatsapp_unpair_request import WhatsappUnpairRequest
@@ -502,6 +504,8 @@ __all__ = (
     "WhatsappConfirmPairingRequest",
     "WhatsappConfirmPairingResponse",
     "WhatsappConfirmPairingResponseStatus",
+    "WhatsappPairingCodeRequest",
+    "WhatsappPairingCodeResponse",
     "WhatsappStartPairingRequest",
     "WhatsappStartPairingResponse",
     "WhatsappUnpairRequest",

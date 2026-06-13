@@ -12,6 +12,7 @@ import (
 // decoupled from whatsmeow types so tests can stub it.
 type Pairer interface {
 	StartPairing(ctx context.Context) (string, error)
+	GetPairingCode(ctx context.Context) (string, int, error)
 	ConfirmPairing(ctx context.Context) (PairingOutcome, error)
 	Unpair(ctx context.Context) error
 }
@@ -30,6 +31,11 @@ type startPairingResult struct {
 	Code string `json:"code"`
 }
 
+type getPairingCodeResult struct {
+	Code        string `json:"code"`
+	RotationSeq int    `json:"rotation_seq"`
+}
+
 type confirmPairingResult struct {
 	Status   string `json:"status"`
 	JID      string `json:"jid,omitempty"`
@@ -45,6 +51,13 @@ func RegisterPairing(reg *Registry, p Pairer) {
 			return nil, &rpc.Error{Code: rpc.ErrCodeServerError, Message: err.Error()}
 		}
 		return startPairingResult{Code: code}, nil
+	})
+	reg.Register("getPairingCode", func(ctx context.Context, _ json.RawMessage) (any, *rpc.Error) {
+		code, seq, err := p.GetPairingCode(ctx)
+		if err != nil {
+			return nil, &rpc.Error{Code: rpc.ErrCodeServerError, Message: err.Error()}
+		}
+		return getPairingCodeResult{Code: code, RotationSeq: seq}, nil
 	})
 	reg.Register("confirmPairing", func(ctx context.Context, _ json.RawMessage) (any, *rpc.Error) {
 		outcome, err := p.ConfirmPairing(ctx)
