@@ -21,7 +21,12 @@ from aios.errors import CryptoDecryptError
 def _run_api() -> int:
     import uvicorn
 
+    from aios.cli.commands.dev import assert_not_shared_in_worktree
     from aios.config import get_settings
+
+    # Abort before any DB connection if a linked worktree is about to use the
+    # shared dev DB (#349). No-op in the main checkout / when bootstrapped.
+    assert_not_shared_in_worktree()
 
     settings = get_settings()
     uvicorn.run(
@@ -36,8 +41,13 @@ def _run_api() -> int:
 
 
 def _run_worker() -> int:
+    from aios.cli.commands.dev import assert_not_shared_in_worktree
     from aios.harness.worker import worker_main
     from aios.logging import get_logger
+
+    # Abort before spawning any container / DB connection if a linked worktree
+    # is about to use the shared dev DB (#349). No-op in the main checkout.
+    assert_not_shared_in_worktree()
 
     try:
         asyncio.run(worker_main())

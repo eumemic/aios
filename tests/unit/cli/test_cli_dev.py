@@ -10,14 +10,21 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import typer
 
+from aios.cli.commands import dev as dev_mod
 from aios.cli.commands.dev import (
     INSTANCE_ID_PATTERN,
     MAX_DB_NAME_BYTES,
     _resolve_admin_url,
+    assert_not_shared_in_worktree,
+    classify_instance_mode,
+    db_name_is_shared,
     derive_instance_id,
     derive_runtime_db_url,
+    is_linked_worktree,
     parse_env_file,
+    runtime_db_url,
     validate_instance_id_for_db,
     write_env_atomic,
 )
@@ -302,3 +309,174 @@ def test_resolve_admin_url_uses_secrets_when_no_env(
     monkeypatch.delenv("AIOS_POSTGRES_ADMIN_URL", raising=False)
     secrets = {"AIOS_POSTGRES_ADMIN_URL": "postgresql://secrets@localhost:5433/postgres"}
     assert _resolve_admin_url(secrets) == "postgresql://secrets@localhost:5433/postgres"
+
+
+# ── db_name_is_shared (criterion 1) ────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "db_url,expected",
+    [
+        ("postgresql://h/aios", True),
+        ("postgresql://localhost/test", True),
+        ("postgresql://localhost:5433/aios", True),
+        ("postgresql://h/aios_dev_x", False),
+        ("postgresql://h/aios_dev_x?sslmode=require", False),
+        ("postgresql://user:pw@host:5432/aios_dev_proj_abcd1234", False),
+    ],
+)
+def test_db_name_is_shared(db_url: str, expected: bool) -> None:
+    assert db_name_is_shared(db_url) is expected
+
+
+# ── is_linked_worktree (criteria 4, 5) ─────────────────────────────────────
+
+
+def test_is_linked_worktree_true_when_dirs_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = iter([".git/worktrees/foo\n", ".git\n"])
+    monkeypatch.setattr(
+        "aios.cli.commands.dev.subprocess.check_output", lambda *a, **k: next(outputs)
+    )
+    assert is_linked_worktree() is True
+
+
+def test_is_linked_worktree_false_when_dirs_equal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = iter([".git\n", ".git\n"])
+    monkeypatch.setattr(
+        "aios.cli.commands.dev.subprocess.check_output", lambda *a, **k: next(outputs)
+    )
+    assert is_linked_worktree() is False
+
+
+def test_is_linked_worktree_false_on_called_process_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    def _boom(*a, **k):
+        raise subprocess.CalledProcessError(128, "git")
+
+    monkeypatch.setattr("aios.cli.commands.dev.subprocess.check_output", _boom)
+    assert is_linked_worktree() is False
+
+
+def test_is_linked_worktree_false_on_file_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*a, **k):
+        raise FileNotFoundError("git not installed")
+
+    monkeypatch.setattr("aios.cli.commands.dev.subprocess.check_output", _boom)
+    assert is_linked_worktree() is False
+
+
+# ── runtime_db_url ─────────────────────────────────────────────────────────
+
+
+def test_runtime_db_url_prefers_exported_over_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text("AIOS_DB_URL=postgresql://h/aios_dev_x\n")
+    monkeypatch.setenv("AIOS_DB_URL", "postgresql://h/aios")
+    assert runtime_db_url(tmp_path) == "postgresql://h/aios"
+
+
+def test_runtime_db_url_falls_back_to_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text("AIOS_DB_URL=postgresql://h/aios_dev_x\n")
+    monkeypatch.delenv("AIOS_DB_URL", raising=False)
+    assert runtime_db_url(tmp_path) == "postgresql://h/aios_dev_x"
+
+
+def test_runtime_db_url_none_when_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AIOS_DB_URL", raising=False)
+    assert runtime_db_url(tmp_path) is None
+
+
+# ── classify_instance_mode (criterion 7) ───────────────────────────────────
+
+_FULL_ENV = {
+    "AIOS_INSTANCE_ID": "proj_abcd1234",
+    "AIOS_DB_URL": "postgresql://h/aios_dev_proj_abcd1234",
+    "AIOS_API_PORT": "8090",
+    "AIOS_WORKSPACE_ROOT": "/tmp/ws",
+}
+
+
+def test_classify_unbootstrapped_when_keys_missing() -> None:
+    assert classify_instance_mode({}, None, True) == "unbootstrapped"
+    partial = dict(_FULL_ENV)
+    del partial["AIOS_DB_URL"]
+    assert classify_instance_mode(partial, None, True) == "unbootstrapped"
+
+
+def test_classify_shared_when_linked_worktree_and_shared_db() -> None:
+    assert classify_instance_mode(_FULL_ENV, "postgresql://h/aios", True) == "shared"
+
+
+def test_classify_isolated_when_linked_worktree_and_dev_db() -> None:
+    assert (
+        classify_instance_mode(_FULL_ENV, "postgresql://h/aios_dev_proj_abcd1234", True)
+        == "isolated"
+    )
+
+
+def test_classify_isolated_when_main_checkout_even_on_shared_db() -> None:
+    assert classify_instance_mode(_FULL_ENV, "postgresql://h/aios", False) == "isolated"
+
+
+# ── assert_not_shared_in_worktree (criteria 2, 3) ──────────────────────────
+
+
+def test_assert_raises_on_linked_shared_no_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AIOS_ALLOW_SHARED_DB", raising=False)
+    monkeypatch.setattr(dev_mod, "is_linked_worktree", lambda: True)
+    monkeypatch.setattr(dev_mod, "get_git_repo_root", lambda: Path("/repo"))
+    monkeypatch.setattr(dev_mod, "runtime_db_url", lambda _root: "postgresql://h/aios")
+
+    messages: list[str] = []
+    monkeypatch.setattr(dev_mod, "print_error", lambda msg: messages.append(msg))
+
+    with pytest.raises(typer.Exit) as excinfo:
+        assert_not_shared_in_worktree()
+    assert excinfo.value.exit_code == 1
+    joined = " ".join(messages)
+    assert "aios dev bootstrap" in joined
+    assert "AIOS_ALLOW_SHARED_DB=1" in joined
+
+
+def test_assert_noop_when_not_linked_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AIOS_ALLOW_SHARED_DB", raising=False)
+    monkeypatch.setattr(dev_mod, "is_linked_worktree", lambda: False)
+    monkeypatch.setattr(dev_mod, "get_git_repo_root", lambda: Path("/repo"))
+    monkeypatch.setattr(dev_mod, "runtime_db_url", lambda _root: "postgresql://h/aios")
+    assert_not_shared_in_worktree()  # must not raise
+
+
+def test_assert_noop_when_db_is_dev_prefixed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AIOS_ALLOW_SHARED_DB", raising=False)
+    monkeypatch.setattr(dev_mod, "is_linked_worktree", lambda: True)
+    monkeypatch.setattr(dev_mod, "get_git_repo_root", lambda: Path("/repo"))
+    monkeypatch.setattr(dev_mod, "runtime_db_url", lambda _root: "postgresql://h/aios_dev_x")
+    assert_not_shared_in_worktree()  # must not raise
+
+
+def test_assert_noop_when_override_set_even_if_linked_shared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AIOS_ALLOW_SHARED_DB", "1")
+    monkeypatch.setattr(dev_mod, "is_linked_worktree", lambda: True)
+    monkeypatch.setattr(dev_mod, "get_git_repo_root", lambda: Path("/repo"))
+    monkeypatch.setattr(dev_mod, "runtime_db_url", lambda _root: "postgresql://h/aios")
+    assert_not_shared_in_worktree()  # must not raise
