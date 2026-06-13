@@ -99,6 +99,10 @@ def _docker_run(
         "curl",
         "git",
         "iptables",  # required for limited-networking mode
+        # gVisor's netstack (runsc) implements legacy netfilter, NOT nft; the
+        # lockdown sidecar selects iptables-legacy when present (#1022), so the
+        # image MUST ship it. It's the iptables package's legacy alternative.
+        "iptables-legacy",
         "update-ca-certificates",  # egress-CA trust install (sandbox/setup.py)
         "jq",  # JSON-from-bash composition, esp. piping `tool <name> '{...}'`
         "tool",  # sandbox-native broker CLI (baked from repo bin/tool; #635)

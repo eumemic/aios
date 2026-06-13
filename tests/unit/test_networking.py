@@ -24,6 +24,7 @@ from aios.sandbox.backends.base import (
 )
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.setup import (
+    _LOCKDOWN_VERIFY_SCRIPT,
     apply_network_lockdown,
     build_iptables_script,
 )
@@ -121,7 +122,7 @@ class TestEnvironmentConfigNetworking:
 class TestBuildIptablesScript:
     def test_drops_everything_else(self) -> None:
         script = build_iptables_script(allowed_hosts={"api.example.com"})
-        assert "iptables -P OUTPUT DROP" in script
+        assert '"$IPT" -P OUTPUT DROP' in script
 
     def test_includes_each_allowed_host(self) -> None:
         script = build_iptables_script(allowed_hosts={"api.example.com", "cdn.example.com"})
@@ -130,9 +131,9 @@ class TestBuildIptablesScript:
 
     def test_loopback_and_dns_always_allowed(self) -> None:
         script = build_iptables_script(allowed_hosts=set())
-        assert "iptables -A OUTPUT -o lo -j ACCEPT" in script
-        assert "iptables -A OUTPUT -p udp --dport 53 -j ACCEPT" in script
-        assert "iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT" in script
+        assert '"$IPT" -A OUTPUT -o lo -j ACCEPT' in script
+        assert '"$IPT" -A OUTPUT -p udp --dport 53 -j ACCEPT' in script
+        assert '"$IPT" -A OUTPUT -p tcp --dport 53 -j ACCEPT' in script
 
     def test_extra_host_ports_added(self) -> None:
         script = build_iptables_script(
@@ -142,6 +143,40 @@ class TestBuildIptablesScript:
         assert "aios-worker:8765" in script
         assert "--dport 8765 -j ACCEPT" in script
 
+    # ── legacy-vs-nft backend selection (#1022, gVisor netstack) ──────────────
+
+    def test_selects_legacy_binary_when_present(self) -> None:
+        """gVisor's netstack implements legacy netfilter, NOT nftables, but
+        debian/ubuntu images default ``iptables`` to the nft backend. The
+        sidecar script must prefer ``iptables-legacy`` when it is installed
+        (and fall back to ``iptables`` on hosts whose image lacks it)."""
+        script = build_iptables_script(allowed_hosts={"api.example.com"})
+        # The preamble detects the legacy binary and falls back to plain iptables.
+        assert "command -v iptables-legacy" in script
+        # Once the binary is selected, every rule invokes the SELECTED binary
+        # via the shell variable — never a bare ``iptables`` command.
+        assert '"$IPT" -P OUTPUT DROP' in script
+        assert '"$IPT" -F OUTPUT' in script
+        assert '"$IPT" -A OUTPUT -o lo -j ACCEPT' in script
+
+    def test_no_bare_iptables_invocations(self) -> None:
+        """Every netfilter command goes through the ``$IPT`` selector so apply
+        and verify agree on the backend; a bare ``iptables ...`` invocation
+        (line start or after a guard) would silently use the nft default."""
+        script = build_iptables_script(
+            allowed_hosts={"api.example.com"},
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        for line in script.splitlines():
+            stripped = line.strip()
+            # The detection preamble names the binaries; that's expected.
+            if "command -v iptables-legacy" in stripped:
+                continue
+            assert not stripped.startswith("iptables "), (
+                f"bare iptables invocation would use the nft default: {line!r}"
+            )
+
     # ── nat-table DNAT to the secret-egress proxy (#878) ──────────────────────
 
     def test_dnat_rule_emitted_per_credential_host_on_443(self) -> None:
@@ -150,7 +185,7 @@ class TestBuildIptablesScript:
             dnat_hosts=["api.secret.com", "data.secret.com"],
             dnat_target=("aios-worker", 49152),
         )
-        assert "iptables -t nat -A OUTPUT" in script
+        assert '"$IPT" -t nat -A OUTPUT' in script
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
         assert "getent ahosts api.secret.com" in script
         assert "getent ahosts data.secret.com" in script
@@ -186,7 +221,7 @@ class TestBuildIptablesScript:
     def test_existing_callers_unchanged(self) -> None:
         script = build_iptables_script(allowed_hosts={"api.example.com"})
         assert "-t nat" not in script
-        assert "iptables -P OUTPUT DROP" in script
+        assert '"$IPT" -P OUTPUT DROP' in script
 
     def test_allowed_host_gets_accept_not_dnat(self) -> None:
         script = build_iptables_script(
@@ -194,7 +229,7 @@ class TestBuildIptablesScript:
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
         )
-        assert 'iptables -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT' in script
+        assert '"$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT' in script
         assert "getent ahosts plain.example.com" in script
         # Only the credential host is DNAT'd; the plain allowed host is not.
         assert script.count("-j DNAT --to-destination") == 1
@@ -386,7 +421,7 @@ class TestApplyNetworkLockdown:
         # Two sidecar invocations: apply, then read-back verify.
         assert len(scripts) == 2
         apply_script, verify_script = scripts
-        assert "iptables -P OUTPUT DROP" in apply_script
+        assert '"$IPT" -P OUTPUT DROP' in apply_script
         assert "getent ahosts api.example.com" in apply_script
         # The sidecar inherits the operator image's (empty) resolv.conf, so the
         # apply script points itself at the netns embedded DNS before getent.
@@ -462,9 +497,42 @@ class TestApplyNetworkLockdown:
         )
 
         script = self._sidecar_scripts(backend)[0]
-        assert "iptables -t nat -A OUTPUT" in script
+        assert '"$IPT" -t nat -A OUTPUT' in script
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
         assert "getent ahosts api.secret.com" in script
+
+    @pytest.mark.asyncio
+    async def test_apply_and_verify_agree_on_legacy_backend(self) -> None:
+        """#1022: gVisor only implements legacy netfilter. The apply script
+        and the read-back verify script must select the SAME iptables backend,
+        or the verify could read an empty nft table while the legacy table holds
+        the DROP policy (or vice versa)."""
+        backend = FakeBackend()
+        handle = make_handle()
+        networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
+
+        await apply_network_lockdown(backend, handle, networking)
+
+        apply_script, verify_script = self._sidecar_scripts(backend)
+        # Both scripts run the same backend-selection preamble.
+        assert "command -v iptables-legacy" in apply_script
+        assert "command -v iptables-legacy" in verify_script
+        # The verify reads the OUTPUT chain via the selected binary, not bare iptables.
+        assert '"$IPT" -S OUTPUT' in verify_script
+        for line in verify_script.splitlines():
+            stripped = line.strip()
+            if "command -v iptables-legacy" in stripped:
+                continue
+            assert not stripped.startswith("iptables "), (
+                f"verify uses a bare iptables (nft default): {line!r}"
+            )
+
+    def test_verify_script_constant_uses_selected_backend(self) -> None:
+        """The module-level verify constant itself selects the legacy backend so
+        any caller that runs it directly stays consistent with the apply path."""
+        assert "command -v iptables-legacy" in _LOCKDOWN_VERIFY_SCRIPT
+        assert '"$IPT" -S OUTPUT' in _LOCKDOWN_VERIFY_SCRIPT
+        assert "OUTPUT DROP" in _LOCKDOWN_VERIFY_SCRIPT
 
     @pytest.mark.asyncio
     async def test_runtime_threaded_to_both_sidecar_calls(self) -> None:
