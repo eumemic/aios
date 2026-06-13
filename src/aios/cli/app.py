@@ -13,9 +13,9 @@ from typing import Annotated
 
 import typer
 
-from aios.cli.config import resolve_base_url
 from aios.cli.output import OutputFormat
 from aios.cli.runtime import CliState
+from aios_sdk.config import resolve_base_url
 
 # Restore the default SIGPIPE disposition so piping the CLI into a
 # consumer that exits early (``aios ... | head``, a scripted pipeline

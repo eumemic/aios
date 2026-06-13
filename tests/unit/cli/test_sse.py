@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from aios.cli.sse import SseMessage, parse_sse_lines
+from aios_sdk.streaming import SseMessage, parse_sse_lines
 
 
 def test_single_message():

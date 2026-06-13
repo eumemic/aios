@@ -10,7 +10,7 @@ from __future__ import annotations
 from typer.testing import CliRunner
 
 from aios.cli.app import app
-from aios.cli.config import resolve_base_url
+from aios_sdk.config import resolve_base_url
 
 runner = CliRunner()
 
