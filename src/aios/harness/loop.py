@@ -1053,6 +1053,42 @@ async def _append_model_request_error_span(
     )
 
 
+async def _latch_errored(
+    pool: Any,
+    session_id: str,
+    *,
+    error_kind: str,
+    stop_reason: dict[str, Any],
+    account_id: str,
+) -> None:
+    """Park a session in the terminal ``errored`` state.
+
+    Runs the load-bearing trio in order: fail the session's open requests, latch
+    the error ``stop_reason``, then append the ``turn_ended``/``error`` lifecycle
+    event that drives the derived ``errored`` state (which the sweep skips — see
+    ``sweep.ERRORED_SESSIONS_SQL`` — so an in-flight tool task completing after
+    this sits unreaped until a user message recovers the session).
+
+    The fail-requests-before-latch order is load-bearing. A workflow child whose
+    turn errored can no longer answer the requests it was invoked with; failing
+    each with a monotonic ``error_kind`` response (a no-op when nothing is owed)
+    lets every invoking run resolve — and raise ``AgentError`` — instead of
+    hanging on a dead child. It MUST precede the latch: the latch makes the sweep
+    skip the session, so a crash in between would strand the child
+    errored-and-unanswered forever, whereas responses-before-latch leaves a crash
+    recoverable (the sweep re-wakes it, it re-errors, the responses no-op).
+    """
+    await fail_all_open_requests(
+        pool, session_id, account_id=account_id, error={"kind": error_kind}
+    )
+    await sessions_service.set_session_stop_reason(
+        pool, session_id, stop_reason, account_id=account_id
+    )
+    await _append_lifecycle(
+        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
+    )
+
+
 async def _handle_streaming_model_deadline(
     pool: Any,
     session_id: str,
@@ -1093,20 +1129,15 @@ async def _handle_streaming_model_deadline(
         account_id=account_id,
     )
     deadline_s = get_settings().model_call_deadline_s
-    await fail_all_open_requests(
-        pool, session_id, account_id=account_id, error={"kind": "model_call_deadline"}
-    )
-    await sessions_service.set_session_stop_reason(
+    await _latch_errored(
         pool,
         session_id,
-        {
+        error_kind="model_call_deadline",
+        stop_reason={
             "type": "error",
             "message": f"model call exceeded its {deadline_s:.0f}s total deadline while still streaming; partial token usage was recorded",
         },
         account_id=account_id,
-    )
-    await _append_lifecycle(
-        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
     )
 
 
@@ -1134,29 +1165,15 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
             account_id=account_id,
         )
         return delay
-    # Terminal landing pad (#353): the ``turn_ended``/``error`` lifecycle event
-    # appended below puts the session in the derived ``errored`` state, which
-    # the sweep skips (see ``sweep.ERRORED_SESSIONS_SQL``); any in-flight tool
-    # task that completes after this point sits unreaped until a user message
-    # recovers the session (its seq overtakes the error event).
-    #
-    # A workflow child whose model errored past its retry budget can no longer
-    # answer the requests it was invoked with. Error every one on its behalf with a
-    # monotonic response so each invoking run resolves (and can raise AgentError)
-    # instead of hanging forever on a dead child (no-op for a non-child / nothing
-    # owed). This MUST land BEFORE the error latch below: the latch makes the sweep
-    # skip the session, so a crash after latching-but-before-responding would strand
-    # the child errored-and-unanswered, with no path to ever resolve its callers.
-    # Responses-before-latch means a crash leaves the child un-latched (recoverable —
-    # the sweep re-wakes it, it re-errors, and the now-written responses no-op).
-    await fail_all_open_requests(
-        pool, session_id, account_id=account_id, error={"kind": "child_errored"}
-    )
-    await sessions_service.set_session_stop_reason(
-        pool, session_id, {"type": "error"}, account_id=account_id
-    )
-    await _append_lifecycle(
-        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
+    # Terminal landing pad (#353): the retry budget is spent, so latch the
+    # session errored rather than rescheduling (the branch above). See
+    # ``_latch_errored`` for the load-bearing fail-requests-before-latch ordering.
+    await _latch_errored(
+        pool,
+        session_id,
+        error_kind="child_errored",
+        stop_reason={"type": "error"},
+        account_id=account_id,
     )
     return None
 
@@ -1182,17 +1199,12 @@ async def _handle_spend_cap(
         },
         account_id=account_id,
     )
-    await fail_all_open_requests(
-        pool, session_id, account_id=account_id, error={"kind": "spend_cap_exceeded"}
-    )
-    await sessions_service.set_session_stop_reason(
+    await _latch_errored(
         pool,
         session_id,
-        {"type": "error", "message": _SPEND_CAP_STOP_REASON_MESSAGE},
+        error_kind="spend_cap_exceeded",
+        stop_reason={"type": "error", "message": _SPEND_CAP_STOP_REASON_MESSAGE},
         account_id=account_id,
-    )
-    await _append_lifecycle(
-        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
     )
 
 
@@ -1211,8 +1223,8 @@ async def _handle_refusal(
     truncated). The partial content/tool_calls are stashed on a ``span`` event
     for debugging — ``build_messages`` only replays ``kind == "message"`` events,
     so the span never re-enters context. The session then lands in the terminal
-    ``errored`` state via the same surface as the retry-budget-exhausted path
-    (see ``_apply_retry_or_failure``): a workflow child's open requests are
+    ``errored`` state via the shared ``_latch_errored`` surface (as the
+    retry-budget-exhausted path): a workflow child's open requests are
     failed so its callers resolve, the stop_reason latches to ``error`` (drives
     the console "Errored" pill), and the error lifecycle event bumps
     ``last_error_seq`` so the sweep parks the session until a user message
@@ -1232,24 +1244,16 @@ async def _handle_refusal(
         },
         account_id=account_id,
     )
-    # Mirror the terminal branch of ``_apply_retry_or_failure``: resolve a
-    # workflow child's open requests BEFORE latching the error (the latch makes
-    # the sweep skip the session — see the ordering note there).
-    await fail_all_open_requests(
-        pool, session_id, account_id=account_id, error={"kind": "model_refusal"}
-    )
-    await sessions_service.set_session_stop_reason(
+    await _latch_errored(
         pool,
         session_id,
-        {
+        error_kind="model_refusal",
+        stop_reason={
             "type": "error",
             "message": _REFUSAL_STOP_REASON_MESSAGE,
             "finish_reason": finish_reason,
         },
         account_id=account_id,
-    )
-    await _append_lifecycle(
-        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
     )
 
 
