@@ -826,6 +826,17 @@ async def attach_memory_stores_to_session(
         )
 
 
+def _row_to_memory_store_echo(row: asyncpg.Record) -> MemoryStoreResourceEcho:
+    return MemoryStoreResourceEcho(
+        memory_store_id=row["memory_store_id"],
+        access=row["access"],
+        instructions=row["instructions"],
+        name=row["name_at_attach"],
+        description=row["description_at_attach"],
+        mount_path=f"/mnt/memory/{row['name_at_attach']}",
+    )
+
+
 async def list_session_memory_store_echoes(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -837,17 +848,7 @@ async def list_session_memory_store_echoes(
         session_id,
         account_id,
     )
-    return [
-        MemoryStoreResourceEcho(
-            memory_store_id=r["memory_store_id"],
-            access=r["access"],
-            instructions=r["instructions"],
-            name=r["name_at_attach"],
-            description=r["description_at_attach"],
-            mount_path=f"/mnt/memory/{r['name_at_attach']}",
-        )
-        for r in rows
-    ]
+    return [_row_to_memory_store_echo(r) for r in rows]
 
 
 # GitHub repository attachments ────────────────────────────────────────────
@@ -937,16 +938,7 @@ async def batch_list_session_memory_store_echoes(
     )
     result: dict[str, list[MemoryStoreResourceEcho]] = {sid: [] for sid in session_ids}
     for r in rows:
-        result[r["session_id"]].append(
-            MemoryStoreResourceEcho(
-                memory_store_id=r["memory_store_id"],
-                access=r["access"],
-                instructions=r["instructions"],
-                name=r["name_at_attach"],
-                description=r["description_at_attach"],
-                mount_path=f"/mnt/memory/{r['name_at_attach']}",
-            )
-        )
+        result[r["session_id"]].append(_row_to_memory_store_echo(r))
     return result
 
 
