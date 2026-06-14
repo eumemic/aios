@@ -935,10 +935,33 @@ def build_messages(
         else:
             horizon_for[seq] = _INF
 
+    # Blind-spot injection for USER messages — the symmetric twin of the
+    # tool-result injection below. A user message that arrived DURING the last
+    # assistant's inference (committed before it, but after its visibility
+    # horizon ``reacting_to``) is "stranded": in seq order it lands *before* that
+    # trailing assistant turn, so the assembled context would END on an assistant
+    # message. Current reasoning models reject a trailing assistant turn as an
+    # unsupported prefill ("the conversation must end with a user message"), and
+    # the inference gate fires for it anyway (it's genuinely unreacted). So defer
+    # such messages to the tail (flushed after the walk). Only the LAST assistant
+    # can strand the tail — a user blind to an earlier assistant is followed by a
+    # later one that reacted, so it never ends the list.
+    stranded_user_seqs: set[int] = set()
+    if asst_list:
+        last_asst_seq, last_asst_rt = asst_list[-1]
+        for _e in events:
+            if (
+                _e.kind == "message"
+                and _e.data.get("role") == "user"
+                and last_asst_rt < _e.seq < last_asst_seq
+            ):
+                stranded_user_seqs.add(_e.seq)
+
     # Walk events in seq order.
     emitted_tcids: set[str] = set()
     messages: list[dict[str, Any]] = []
     inject_after: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+    deferred_user_tail: list[tuple[int, dict[str, Any]]] = []
     max_stimulus_seq: int = 0
 
     for e in events:
@@ -976,8 +999,13 @@ def build_messages(
                     session_id=session_id,
                     workspace_path=workspace_path,
                 )
-                messages.append(msg)
-                max_stimulus_seq = max(max_stimulus_seq, e.seq)
+                if e.seq in stranded_user_seqs:
+                    # Blind to the last assistant — surface at the tail (below),
+                    # not here, so the context can't end on that assistant turn.
+                    deferred_user_tail.append((e.seq, msg))
+                else:
+                    messages.append(msg)
+                    max_stimulus_seq = max(max_stimulus_seq, e.seq)
 
             elif role == "assistant":
                 messages.append(e.data)
@@ -1097,6 +1125,14 @@ def build_messages(
             )
             messages.append(_quarantine_placeholder(e.seq))
             max_stimulus_seq = max(max_stimulus_seq, e.seq)
+
+    # Flush blind-spot USER injections at the tail (see the precompute above):
+    # the stranded message(s) now follow the assistant turn that never saw them,
+    # so the context ends on a user turn — the faithful chronology, since that
+    # turn's context never contained them — and no accidental prefill is sent.
+    for _seq, _msg in deferred_user_tail:
+        messages.append(_msg)
+        max_stimulus_seq = max(max_stimulus_seq, _seq)
 
     # Prune dangling messages at the start of the window.  DB-level
     # windowing can cut in the middle of an assistant+tool_result group,
