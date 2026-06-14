@@ -317,7 +317,9 @@ class TestReparentConnection:
                 "binding_session_id": None,
                 "binding_session_template_id": None,
                 "binding_created_at": None,
-                "metadata": "{}",
+                # The pool's jsonb codec decodes JSONB to native Python, so the
+                # query layer sees a dict here (was the raw "{}" text pre-codec).
+                "metadata": {},
                 "secrets_ciphertext": None,
                 "created_at": _NOW,
                 "updated_at": _NOW,

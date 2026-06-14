@@ -49,7 +49,7 @@ async def test_terminal_status_drains_catch_up_tail_then_done() -> None:
         "seq": 5,
         "type": "run_completed",
         "call_key": None,
-        "payload": json.dumps({"output": 2, "is_error": False}),
+        "payload": {"output": 2, "is_error": False},
         "created_at": datetime(2024, 1, 1, tzinfo=UTC),
     }
     conn = MagicMock()
@@ -81,7 +81,7 @@ async def test_annotation_event_surfaces_in_the_stream() -> None:
         "seq": 1,
         "type": "annotation",
         "call_key": "sha:ann#0",
-        "payload": json.dumps({"kind": "phase", "text": "build"}),
+        "payload": {"kind": "phase", "text": "build"},
         "created_at": datetime(2024, 1, 1, tzinfo=UTC),
     }
     run_completed_row = {
@@ -90,7 +90,7 @@ async def test_annotation_event_surfaces_in_the_stream() -> None:
         "seq": 2,
         "type": "run_completed",
         "call_key": None,
-        "payload": json.dumps({"output": None, "is_error": False}),
+        "payload": {"output": None, "is_error": False},
         "created_at": datetime(2024, 1, 1, tzinfo=UTC),
     }
     conn = MagicMock()

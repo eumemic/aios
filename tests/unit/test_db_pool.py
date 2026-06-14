@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -10,7 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import structlog
 
-from aios.db.pool import create_pool, normalize_dsn
+from aios.db.pool import (
+    _jsonb_encoder,
+    create_pool,
+    normalize_dsn,
+    register_jsonb_codec,
+)
+from aios.db.queries import parse_jsonb
 
 
 def _make_fake_pool(pg_max_connections: str) -> MagicMock:
@@ -110,3 +117,65 @@ async def test_raises_when_asyncpg_returns_none() -> None:
         pytest.raises(RuntimeError),
     ):
         await create_pool("postgresql://stub/db")
+
+
+@pytest.mark.asyncio
+async def test_pool_registers_jsonb_codec_init() -> None:
+    """create_pool wires register_jsonb_codec as the pool init callback."""
+    fake_pool = _make_fake_pool("200")
+    with patch(
+        "aios.db.pool.asyncpg.create_pool", new=AsyncMock(return_value=fake_pool)
+    ) as mock_create:
+        await create_pool("postgresql://stub/db")
+        _, kwargs = mock_create.call_args
+        assert kwargs["init"] is register_jsonb_codec
+
+
+@pytest.mark.asyncio
+async def test_register_jsonb_codec_wires_pg_catalog_codec() -> None:
+    """The init callback registers the pg_catalog jsonb codec with our en/decoders."""
+    conn = AsyncMock()
+    await register_jsonb_codec(conn)
+    conn.set_type_codec.assert_awaited_once_with(
+        "jsonb",
+        encoder=_jsonb_encoder,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
+
+
+def test_jsonb_encoder_serializes_bare_python() -> None:
+    """Bare dicts/lists (the Stage 2 write shape) are json.dumps'd."""
+    assert json.loads(_jsonb_encoder({"a": 1})) == {"a": 1}
+    assert json.loads(_jsonb_encoder([1, 2, 3])) == [1, 2, 3]
+
+
+def test_jsonb_encoder_passes_through_preserialized_string() -> None:
+    """A pre-serialized JSON string passes through untouched — NOT re-dumped.
+
+    This is the additive-Stage-1 guarantee: existing writes that already
+    json.dumps(...) their value must not be double-encoded by the codec.
+    """
+    pre = json.dumps({"a": 1})
+    assert _jsonb_encoder(pre) == pre  # no extra layer of quoting
+    # A plain json.dumps encoder would have produced a double-encoded string.
+    assert _jsonb_encoder(pre) != json.dumps(pre)
+
+
+def test_parse_jsonb_is_a_pure_passthrough() -> None:
+    """parse_jsonb must return codec-decoded values unchanged — never re-parse.
+
+    The pool codec already decodes jsonb to native Python. A JSONB column may
+    legitimately hold a bare top-level JSON *string* (e.g. ``wf_runs.output``
+    stores a script's string return value or an error message), which the codec
+    decodes to a Python ``str``. The retired ``json.loads(raw) if isinstance(raw,
+    str)`` guard would try to JSON-parse that already-decoded string and raise on
+    the first non-JSON character — so the passthrough must hand strings back as-is.
+    """
+    assert parse_jsonb({"a": 1}) == {"a": 1}
+    assert parse_jsonb([1, 2, 3]) == [1, 2, 3]
+    # A decoded bare string (not valid JSON) must survive untouched.
+    assert parse_jsonb("nondeterministic replay: ['sha:deadbeef#0']") == (
+        "nondeterministic replay: ['sha:deadbeef#0']"
+    )
+    assert parse_jsonb(None) is None

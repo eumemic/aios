@@ -49,7 +49,7 @@ import asyncpg
 import httpx
 import pytest
 
-from aios.db.pool import listener_application_name
+from aios.db.pool import create_pool, listener_application_name
 from tests.conftest import needs_docker
 from tests.e2e.conftest import live_aios_server, wait_for_predicate
 from tests.helpers.db import count_active_backends
@@ -92,7 +92,11 @@ async def _backend_states(db_url: str) -> list[dict[str, Any]]:
 
 
 async def _seed_session(db_url: str) -> str:
-    pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
+    # Use the project pool factory, not raw asyncpg.create_pool, so the pool
+    # carries the jsonb codec (init=register_jsonb_codec). seed_agent_env_session
+    # reads the agent back through _row_to_agent, which now relies on the codec
+    # to decode jsonb columns (parse_jsonb is a pure passthrough since #1062).
+    pool = await create_pool(db_url, min_size=1, max_size=2)
     try:
         _agent, _env, session = await seed_agent_env_session(
             pool, account_id="acc_test_stub", prefix="sseleak"

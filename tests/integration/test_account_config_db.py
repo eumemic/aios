@@ -13,6 +13,7 @@ import asyncpg
 import pytest
 
 from aios.db import queries
+from aios.db.pool import register_jsonb_codec
 from aios.models.accounts import AccountConfig
 
 
@@ -21,6 +22,8 @@ async def conn(
     migrated_db_url: str, _reset_db_state: None
 ) -> AsyncIterator[asyncpg.Connection[Any]]:
     c = await asyncpg.connect(migrated_db_url)
+    # Mirror the production pool: query functions read jsonb as native Python.
+    await register_jsonb_codec(c)
     try:
         yield c
     finally:

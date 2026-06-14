@@ -16,7 +16,7 @@ import pytest
 
 from aios.api.sse import wf_run_event_stream
 from aios.db.listen import open_listen_for_run_events
-from aios.db.pool import create_pool
+from aios.db.pool import create_pool, register_jsonb_codec
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, NotFoundError
 from aios.models.agents import ToolSpec
@@ -29,6 +29,8 @@ async def wf_conn(
 ) -> AsyncIterator[asyncpg.Connection[Any]]:
     """A conn with a single root tenant ``acc_root`` + env ``env_root``."""
     conn = await asyncpg.connect(migrated_db_url)
+    # Mirror the production pool: query functions read jsonb as native Python.
+    await register_jsonb_codec(conn)
     try:
         await conn.execute(
             "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
