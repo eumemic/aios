@@ -225,7 +225,7 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
 
     # ── tools ──────────────────────────────────────────────────────────
 
-    @tool()
+    @tool(fire_and_forget=True)
     async def whatsapp_send(
         self,
         text: str,
@@ -292,7 +292,7 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             "chat_type": _chat_type_from_jid(chat_id),
         }
 
-    @tool()
+    @tool(fire_and_forget=True)
     async def whatsapp_react(
         self,
         message_id: str,

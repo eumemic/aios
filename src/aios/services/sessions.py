@@ -1267,6 +1267,7 @@ async def append_tool_result(
     tool_call_id: str,
     content: str | list[dict[str, Any]],
     is_error: bool = False,
+    no_reaction: bool = False,
 ) -> Event:
     """Append a tool-role event for a custom tool call (#133).
 
@@ -1325,6 +1326,12 @@ async def append_tool_result(
     # GC's referenced-set sees it as live (#1093).  Done before the precompute
     # so the stored event and its token estimate reflect the same shape.
     record_spill_attachment(data, spill_attachment)
+    # Fire-and-forget delivery confirmation: stamp the marker so the wake gate
+    # (``CANDIDATE_ROWS_SQL`` via the scalar ``last_stimulus_seq``, and
+    # ``UNREACTED_ROWS_SQL``) excludes this row.  The model still sees the
+    # result in its context — only the WAKE decision skips it.
+    if no_reaction:
+        data["no_reaction"] = True
     precomputed = await queries.precompute_event_append(
         conn,
         account_id=account_id,

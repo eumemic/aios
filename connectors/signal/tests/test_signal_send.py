@@ -128,12 +128,14 @@ async def test_signal_send_dispatch_resolves_sandbox_path(
 
     # The dispatch_call → _post_tool_result path hits the generated SDK
     # op which doesn't tolerate an AsyncMock client; override with a
-    # no-op so the test focuses on the SandboxPath resolution, not the
+    # capture so the test focuses on the SandboxPath resolution, not the
     # result POST.
-    async def _noop_result(*_args: Any, **_kwargs: Any) -> None:
-        return None
+    captured: list[dict[str, Any]] = []
 
-    monkeypatch.setattr(connector, "_post_tool_result", _noop_result)
+    async def _capture_result(*_args: Any, **kwargs: Any) -> None:
+        captured.append(kwargs)
+
+    monkeypatch.setattr(connector, "_post_tool_result", _capture_result)
 
     await connector.dispatch_call(
         {
@@ -149,6 +151,12 @@ async def test_signal_send_dispatch_resolves_sandbox_path(
 
     sent_params = connector._daemon.rpc.call.call_args.args[1]  # type: ignore[union-attr]
     assert sent_params["attachments"] == [str(ws / "cat.jpg")]
+    # ``signal_send`` is fire-and-forget: a successful dispatch flags
+    # ``no_reaction`` so the delivery ack doesn't wake the session. The
+    # success path leaves ``is_error`` at its default (not passed), so only
+    # ``no_reaction`` is asserted here.
+    assert len(captured) == 1
+    assert captured[0]["no_reaction"] is True
 
 
 async def test_signal_send_dispatch_traversal_returns_error_result(
@@ -173,6 +181,7 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
         tool_call_id: str,
         content: Any,
         is_error: bool = False,
+        no_reaction: bool = False,
     ) -> None:
         del client
         captured.append(
@@ -182,6 +191,7 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
                 "tool_call_id": tool_call_id,
                 "content": content,
                 "is_error": is_error,
+                "no_reaction": no_reaction,
             }
         )
 
@@ -202,6 +212,9 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
     connector._daemon.rpc.call.assert_not_awaited()  # type: ignore[union-attr]
     assert len(captured) == 1
     assert captured[0]["is_error"] is True
+    # A FAILED fire-and-forget send must still wake — the error branch never
+    # sets ``no_reaction`` (it AND-gates with ``not is_error`` at the intake).
+    assert captured[0]["no_reaction"] is False
 
 
 # ── quote / reply ─────────────────────────────────────────────────────

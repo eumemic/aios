@@ -210,6 +210,14 @@ CONFIRMED_ROWS_SQL = f"""
 # JOIN; it does NOT recompute the watermark. Re-deriving the formula here (the
 # pre-#1080 ``session_max_reacting`` CTE) re-introduces the #155-class drift
 # the deletion in #1080 foreclosed — keep this an equality JOIN, not a CTE.
+# The ``no_reaction`` clause excludes fire-and-forget delivery confirmations (a
+# connector ``signal_send``/``telegram_react``/… success, stamped
+# ``data['no_reaction']=true`` by ``append_tool_result``) from the unreacted-
+# stimulus set the batch filter inspects — matching the scalar gate, where such
+# a result does not bump ``last_stimulus_seq`` (``append_event``'s
+# ``is_stimulus``). ``IS DISTINCT FROM 'true'`` is NULL-safe: a missing key →
+# NULL → TRUE → the row still counts (every historical/unmarked result wakes
+# exactly as before); only the literal JSON ``true`` is excluded.
 UNREACTED_ROWS_SQL = """
     SELECT e.session_id, e.data
       FROM events e
@@ -217,6 +225,7 @@ UNREACTED_ROWS_SQL = """
      WHERE e.session_id = ANY($1::text[])
        AND e.kind = 'message'
        AND e.role <> 'assistant'
+       AND e.data->>'no_reaction' IS DISTINCT FROM 'true'
        AND e.seq > s.last_reacted_seq
 """
 
