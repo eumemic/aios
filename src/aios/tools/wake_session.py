@@ -107,31 +107,43 @@ WAKE_SESSION_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
-async def _read_source_wake_depth(pool: Any, session_id: str, *, account_id: str) -> int:
-    """Return the wake_depth stamped on the most recent user-role message.
+# The system-owned event that carries trusted wake lineage.  It is a
+# ``kind='span'`` event — a kind NO caller-facing path can append (the
+# operator POST and connector inbound paths only ever write ``kind='message'``
+# user events).  This is what makes the wake-depth / wake-source cap
+# non-forgeable: the cap reads provenance from this span, never from the
+# user message's ``metadata`` (which the operator-POST / connector paths
+# pass through unstripped — see issue #1083).
+WAKE_LINEAGE_SPAN_EVENT = "wake_lineage"
 
-    Reads the source's own log to inherit the depth of the message that
-    triggered this step.  Returns 0 when no user message has ``wake_depth``
-    stamped (root call — a human-originated message or first wake of a
-    chain).
+
+async def _read_source_wake_depth(pool: Any, session_id: str, *, account_id: str) -> int:
+    """Return the trusted wake_depth for the most recent wake of this session.
+
+    Reads the source's own log, but ONLY from the system-owned
+    ``wake_lineage`` span event — never from user-message metadata, which
+    the operator-POST / connector ingestion paths can forge (issue #1083).
+    Returns 0 when no wake-lineage span is present (root call — a
+    human-originated message or first wake of a chain).
     """
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT COALESCE(
-                (data->'metadata'->>'wake_depth')::int,
+                (data->>'wake_depth')::int,
                 0
             ) AS depth
             FROM events
             WHERE session_id = $1
               AND account_id = $2
-              AND kind = 'message'
-              AND data->>'role' = 'user'
+              AND kind = 'span'
+              AND data->>'event' = $3
             ORDER BY seq DESC
             LIMIT 1
             """,
             session_id,
             account_id,
+            WAKE_LINEAGE_SPAN_EVENT,
         )
     if row is None:
         return 0
@@ -145,8 +157,12 @@ async def _count_recent_wakes_from(
     target_session_id: str,
     account_id: str,
 ) -> int:
-    """Count target-side user messages stamped with ``wake_source_session_id``
-    equal to ``source_session_id`` in the last hour.
+    """Count target-side ``wake_lineage`` spans stamped with
+    ``wake_source_session_id`` equal to ``source_session_id`` in the last hour.
+
+    Counts the system-owned ``wake_lineage`` span — NOT user-message
+    metadata, which the operator-POST / connector ingestion paths can forge
+    (issue #1083) to either evade or inflate the count.
 
     The rate-limit window is per (source, target) pair so an honest
     broadcast to many distinct targets isn't throttled; a single source
@@ -159,14 +175,15 @@ async def _count_recent_wakes_from(
             FROM events
             WHERE session_id = $1
               AND account_id = $2
-              AND kind = 'message'
-              AND data->>'role' = 'user'
-              AND data->'metadata'->>'wake_source_session_id' = $3
+              AND kind = 'span'
+              AND data->>'event' = $4
+              AND data->>'wake_source_session_id' = $3
               AND created_at > now() - interval '1 hour'
             """,
             target_session_id,
             account_id,
             source_session_id,
+            WAKE_LINEAGE_SPAN_EVENT,
         )
     return int(count or 0)
 
@@ -269,7 +286,22 @@ async def wake_session_handler(session_id: str, arguments: dict[str, Any]) -> di
     # ``append_user_message``) so we can stamp wake-tracking metadata
     # without involving the API-side size check / channel lift logic
     # — those are not relevant for an in-process wake.
+    #
+    # The ``metadata`` on the user message is DISPLAY-ONLY: it drives the
+    # model-visible wake header (``_wake_header`` in harness/context.py).
+    # It is NOT trusted by the depth / rate-limit cap, because the
+    # operator-POST and connector ingestion paths pass caller-supplied
+    # ``metadata`` through unstripped and could forge these keys (#1083).
     metadata: dict[str, Any] = {
+        "wake_source_session_id": session_id,
+        "wake_depth": new_depth,
+    }
+    # The TRUSTED carrier: a system-owned ``kind='span'`` event.  No
+    # caller-facing route appends span events, so the cap's reads
+    # (_read_source_wake_depth / _count_recent_wakes_from) can rely on it
+    # as non-forgeable provenance.
+    lineage_span: dict[str, Any] = {
+        "event": WAKE_LINEAGE_SPAN_EVENT,
         "wake_source_session_id": session_id,
         "wake_depth": new_depth,
     }
@@ -280,6 +312,13 @@ async def wake_session_handler(session_id: str, arguments: dict[str, Any]) -> di
             session_id=target_session_id,
             kind="message",
             data={"role": "user", "content": prompt, "metadata": metadata},
+        )
+        await queries.append_event(
+            conn,
+            account_id=target_account_id,
+            session_id=target_session_id,
+            kind="span",
+            data=lineage_span,
         )
     await defer_wake(
         pool,
