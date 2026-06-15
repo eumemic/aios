@@ -27,6 +27,7 @@ from aios.models.pagination import (
     page_cursor,
     resolve_page_limit,
 )
+from aios.models.trace import TraceResponse
 from aios.models.workflows import (
     GateResume,
     WfRun,
@@ -37,6 +38,7 @@ from aios.models.workflows import (
     WorkflowCreate,
     WorkflowUpdate,
 )
+from aios.services import trace as trace_service
 from aios.services import workflows as service
 
 log = get_logger("aios.api.routers.workflows")
@@ -269,6 +271,42 @@ async def list_run_events(
     # to "backward", which is right only for the id-DESC list endpoints).
     return ListResponse[WfRunEvent].paginate(
         items, page_limit, cursor=lambda x: x.seq, direction="forward"
+    )
+
+
+@runs_router.get("/{run_id}/trace", operation_id="get_run_trace")
+async def get_run_trace(
+    run_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    verbose: bool = False,
+) -> TraceResponse:
+    """One-call linear trace of a run + all nested sessions and sub-runs (#1149).
+
+    A read-projection over the invocation-edge tree: walks the parent→child edge
+    tree from this run, normalizes each node's outcome to
+    ``terminal_state ∈ {ok,errored,cancelled,suspended,running}`` (+ raw
+    ``error_kind``), and interleaves the nodes' journals into a flat
+    **DFS-pre-order** list (a CLI renders ``depth`` as indentation). A
+    deliberately-failed nested session's death cause is visible at a glance — the
+    node carries ``terminal_state`` + ``error_kind`` (e.g. ``no_return``) and the
+    abbreviated default co-locates the proximate ``is_error`` frame.
+
+    ``verbose=false`` (default) keeps only the load-bearing frames per node
+    (request/response/turn lifecycle, gates, errors); ``verbose=true`` lifts the
+    filter to the full per-node firehose. The walk runs in one ``REPEATABLE
+    READ`` snapshot with a node-count ceiling; a tree past the ceiling returns a
+    typed ``truncated: {at_nodes}`` marker.
+
+    Ordering caveat: cross-subtree time-ordering is best-effort to transaction
+    granularity; only the causal parent→child edge is exact. ``wake_session``
+    peer-pokes are out of scope (a peer stimulus, not a spawn). A cross-tenant
+    run 404s.
+    """
+    # Scope check: 404 a cross-tenant run id before walking its tree.
+    await service.get_run(pool, run_id, account_id=account_id)
+    return await trace_service.get_trace(
+        pool, root_kind="run", root_id=run_id, account_id=account_id, verbose=verbose
     )
 
 

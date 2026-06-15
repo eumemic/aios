@@ -69,6 +69,7 @@ from aios.models.sessions import (
     ToolResultRequest,
     WaitResponse,
 )
+from aios.models.trace import TraceResponse
 from aios.models.triggers import (
     TriggerCreate,
     TriggerEcho,
@@ -78,6 +79,7 @@ from aios.models.triggers import (
 from aios.services import files as files_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import sessions as service
+from aios.services import trace as trace_service
 from aios.services import triggers as triggers_service
 from aios.services.wake import defer_wake
 
@@ -700,6 +702,30 @@ async def list_events(
         cursor=lambda x: x.seq,
         direction=direction,
         filters={"kind": kind, "error_only": error_only},
+    )
+
+
+@router.get("/{session_id}/trace", operation_id="get_session_trace")
+async def get_session_trace(
+    session_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    verbose: bool = False,
+) -> TraceResponse:
+    """One-call linear trace rooted at a session + all nested sub-runs/sessions (#1149).
+
+    The session-root counterpart of ``GET /v1/runs/{id}/trace``: walks the
+    parent→child invocation-edge tree from this session (its ``agent()`` peer
+    sessions and any runs it launched via the still-live ``launcher_session_id``
+    FK), normalizes each node to ``terminal_state`` + raw ``error_kind``, and
+    interleaves journals into a flat DFS-pre-order list. See the run-trace
+    endpoint for the verbosity / ordering / scope caveats. A cross-tenant session
+    404s.
+    """
+    # Scope check: 404 a cross-tenant session id before walking its tree.
+    await service.get_session_basic(pool, session_id, account_id=account_id)
+    return await trace_service.get_trace(
+        pool, root_kind="session", root_id=session_id, account_id=account_id, verbose=verbose
     )
 
 
