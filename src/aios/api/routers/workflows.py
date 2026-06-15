@@ -23,6 +23,7 @@ from aios.models.pagination import (
     MAX_EVENT_PAGE_LIMIT,
     EventPageLimit,
     PageLimit,
+    cursor_as_int,
     page_cursor,
     resolve_page_limit,
 )
@@ -260,7 +261,7 @@ async def list_run_events(
     await service.get_run(pool, run_id, account_id=account_id)
     st = page_cursor(cursor, {"limit": limit})
     page_limit = resolve_page_limit(st, limit, default=200, maximum=MAX_EVENT_PAGE_LIMIT)
-    after_seq = int(st.cursor) if st is not None else 0
+    after_seq = cursor_as_int(st.cursor) if st is not None else 0
     items = await service.list_run_events(
         pool, run_id, account_id=account_id, after_seq=after_seq, limit=page_limit + 1
     )

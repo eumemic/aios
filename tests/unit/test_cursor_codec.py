@@ -12,6 +12,7 @@ from aios.models.pagination import (
     MAX_EVENT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
     CursorState,
+    cursor_as_int,
     decode_cursor,
     encode_cursor,
     reject_params_with_cursor,
@@ -152,3 +153,37 @@ class TestResolvePageLimitBounds:
         # No cursor: the (already Pydantic-bounded) ?limit= or the default flows through.
         assert resolve_page_limit(None, 25) == 25
         assert resolve_page_limit(None, None) >= 1
+
+
+class TestCursorAsInt:
+    """Seq/version-keyed endpoints coerce the cursor's keyset with ``cursor_as_int``.
+    The cursor is forgeable and ``decode_cursor`` stores ``c`` verbatim, so a tampered
+    non-int keyset must surface as a malformed-cursor 422, not a raw ``ValueError``
+    that escapes the router as an unhandled 500."""
+
+    def test_int_passes_through(self) -> None:
+        assert cursor_as_int(5) == 5
+
+    def test_numeric_string_coerces(self) -> None:
+        # A legit id-keyed cursor never reaches here, but a numeric string is a valid
+        # keyset position and must coerce without error.
+        assert cursor_as_int("42") == 42
+
+    def test_forged_non_int_raises_422(self) -> None:
+        with pytest.raises(ValidationError) as exc:
+            cursor_as_int("not-an-int")
+        assert exc.value.status_code == 422
+
+    def test_decoded_forged_keyset_raises_422(self) -> None:
+        # The full path: a tampered token decodes cleanly (c stored verbatim), then the
+        # int coercion the routers perform must 422 rather than 500.
+        forged = (
+            base64.urlsafe_b64encode(
+                json.dumps({"v": 1, "c": "abc", "d": "f", "f": {}, "l": 50}).encode()
+            )
+            .decode()
+            .rstrip("=")
+        )
+        st = decode_cursor(forged)
+        with pytest.raises(ValidationError):
+            cursor_as_int(st.cursor)

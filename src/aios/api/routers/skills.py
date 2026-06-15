@@ -6,7 +6,7 @@ from fastapi import APIRouter, status
 
 from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.common import ListResponse
-from aios.models.pagination import PageLimit, page_cursor, resolve_page_limit
+from aios.models.pagination import PageLimit, cursor_as_int, page_cursor, resolve_page_limit
 from aios.models.skills import Skill, SkillCreate, SkillVersion, SkillVersionCreate
 from aios.services import skills as service
 
@@ -105,7 +105,7 @@ async def list_versions(
     version is a complete file-bundle snapshot at the time it was created.
     """
     st = page_cursor(cursor, {"limit": limit})
-    after = int(st.cursor) if st is not None else None
+    after = cursor_as_int(st.cursor) if st is not None else None
     page_limit = resolve_page_limit(st, limit)
     items = await service.list_skill_versions(
         pool, skill_id, limit=page_limit + 1, after=after, account_id=account_id

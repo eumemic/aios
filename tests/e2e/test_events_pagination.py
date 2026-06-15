@@ -9,6 +9,8 @@ the past.
 
 from __future__ import annotations
 
+import base64
+import json
 import secrets
 from collections.abc import AsyncIterator
 from typing import Any
@@ -285,6 +287,26 @@ class TestCursorValidation:
     ) -> None:
         r = await http_client.get(
             _EVENTS.format(sid=session_with_events), params={"cursor": "not-a-real-token!!!"}
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_forged_non_int_keyset_is_422_not_500(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        # A well-formed-but-tampered token: it decodes cleanly (the cursor is
+        # unsigned base64url(JSON)), but carries a non-int keyset ``c``. This
+        # endpoint coerces the keyset to int (``seq = int(st.cursor)``); a forged
+        # non-int must surface as a malformed-cursor 422, not crash the coercion
+        # into an unhandled 500.
+        forged = (
+            base64.urlsafe_b64encode(
+                json.dumps({"v": 1, "c": "not-an-int", "d": "f", "f": {}, "l": 50}).encode()
+            )
+            .decode()
+            .rstrip("=")
+        )
+        r = await http_client.get(
+            _EVENTS.format(sid=session_with_events), params={"cursor": forged}
         )
         assert r.status_code == 422, r.text
 
