@@ -174,8 +174,9 @@ class ProvisioningPlan:
     # Per-session :class:`SecretEgressProxy` (#877), started here when the
     # session has env-var credentials. Like ``git_proxy``, the registry owns
     # its lifecycle: it records the proxy at provision time and stops it on
-    # release / recycle. ``None`` when the session has no env-var creds.
-    # INERT until #878 wires nat DNAT egress routing into it.
+    # release / recycle. ``None`` when the session has no env-var creds. The
+    # registry routes credential-host :443 egress through it via the nat-OUTPUT
+    # DNAT, under Limited (lockdown) and Unrestricted (DNAT-only) alike (#1153).
     secret_proxy: SecretEgressProxy | None = None
 
 
@@ -457,6 +458,47 @@ def _network_policy_from_config(env_config: EnvironmentConfig | None) -> Network
     return Unrestricted()
 
 
+def _warn_if_creds_under_open_egress(
+    owner_id: str,
+    env_config: EnvironmentConfig | None,
+    env_var_credentials: Sequence[ResolvedEnvVarCredential],
+) -> None:
+    """Log the operator-facing warning when env-var creds run under open egress.
+
+    Permit-with-warning (#1153): when a provision carries env-var credentials
+    AND the environment is not Limited, the secret swap still fires (the
+    DNAT-only chokepoint), but the environment allowlist is no longer the
+    exfil-containment boundary — the operator has elected that trade. This logs
+    a structured, operator-facing warning naming the trade precisely.
+
+    Operator-facing only (not model-visible): this is bowels-of-the-system
+    plumbing the operator owns, not something the model can act on.
+
+    No-op when there are no credentials, or when the environment is Limited (the
+    allowlist still contains exfiltration there).
+    """
+    if not env_var_credentials:
+        return
+    networking = env_config.networking if env_config else None
+    if isinstance(networking, LimitedNetworking):
+        return
+    cred_hosts = sorted({host for cred in env_var_credentials for host in cred.allowed_hosts})
+    log.warning(
+        "sandbox.envvar_creds_open_egress",
+        owner_id=owner_id,
+        credential_count=len(env_var_credentials),
+        cred_hosts=cred_hosts,
+        detail=(
+            "env-var credentials active under unrestricted egress. The egress proxy "
+            "is a bidirectional TLS-terminating MitM; upstream responses — including "
+            "3xx Location headers and error bodies that may echo request data — are "
+            "NOT scrubbed (#881), and with open egress there is no allowlist to "
+            "contain exfiltration of fetched/reflected data. Secret-string "
+            "confidentiality is still enforced by the egress proxy SNI host gate."
+        ),
+    )
+
+
 def _resolve_image(env_config: EnvironmentConfig | None, default_image: str) -> str:
     """Resolve the sandbox image from the environment config (#724) and enforce the
     cross-tenant snapshot gate (durable session sandboxes, §5.8).
@@ -525,22 +567,26 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     # allocated (#873): a corrupt blob fails hard here with nothing to
     # clean up, so this step stays OUTSIDE the cleanup envelope below.
     env_var_credentials = await _materialize_env_var_credentials(session_id, account_id=account_id)
-    # Two-layer env-var credential gate (#879): a session carrying
-    # environment_variable credentials requires a Limited environment whose
-    # allowed_hosts cover every credential host. The egress swap proxy only
-    # sees traffic via the Limited lockdown DNAT, so under Unrestricted the
-    # credential leaks/non-functions; the host-subset check prevents egress
-    # escalation. Provision is authoritative — both the env config and the
-    # credential set are independently mutable after attach, and only here do
-    # we see the current pair together. Skipped entirely when the session has
-    # no env-var credentials (zero behavior change for the common path).
-    # Raises before any host resource is allocated, so it too stays OUTSIDE
-    # the cleanup envelope.
+    # Env-var credential gate (#879, relaxed to permit-with-warning by #1153):
+    # under Limited, a session carrying environment_variable credentials still
+    # requires the env's allowed_hosts to cover every credential host (the
+    # egress-escalation guard — the DNAT sits ahead of the filter DROP). Under
+    # Unrestricted (or no env config) the credential is now ACCEPTED: the secret
+    # swap fires via the DNAT-only chokepoint and, with no DROP, there is no
+    # escalation hole to guard. Provision is authoritative — both the env config
+    # and the credential set are independently mutable after attach, and only
+    # here do we see the current pair together. Skipped entirely when the
+    # session has no env-var credentials. Raises before any host resource is
+    # allocated, so it too stays OUTSIDE the cleanup envelope.
     containment_error = env_var_credential_containment_error(
         env_config, [c.allowed_hosts for c in env_var_credentials]
     )
     if containment_error is not None:
         raise ValueError(containment_error)
+    # Permit-with-warning (#1153): a credentialed provision under non-Limited
+    # egress trades away exfil-containment (the operator's CMA-faithful choice);
+    # log the operator-facing warning. No-op for Limited or no-creds.
+    _warn_if_creds_under_open_egress(session_id, env_config, env_var_credentials)
 
     tool_broker = runtime.require_tool_broker()
     tool_socket_host_path = settings.tool_broker_socket_path
@@ -556,9 +602,10 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             session_id, account_id=account_id
         )
         # Start the per-session secret-egress proxy when the session has
-        # env-var credentials (#877). Inert until #878 routes egress through
-        # it; the registry owns its lifecycle from the returned plan,
-        # mirroring git_proxy.
+        # env-var credentials (#877). The registry routes credential-host egress
+        # through it via the nat-OUTPUT DNAT (#878 Limited / #1153 Unrestricted);
+        # the registry owns its lifecycle from the returned plan, mirroring
+        # git_proxy.
         #
         # Construct + start into a LOCAL, and only publish to the outer
         # ``secret_proxy`` once ``start()`` has returned cleanly. ``start()``
@@ -694,6 +741,9 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
     )
     if containment_error is not None:
         raise ValueError(containment_error)
+    # Permit-with-warning (#1153): same operator-facing warning as the session
+    # path when a credentialed run provisions under non-Limited egress.
+    _warn_if_creds_under_open_egress(run_id, env_config, env_var_credentials)
 
     workspace_path = ensure_run_workspace_dir(run_id)
 

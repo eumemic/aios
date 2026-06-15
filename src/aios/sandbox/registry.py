@@ -57,6 +57,7 @@ from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.network import WORKER_NETWORK_ALIAS
 from aios.sandbox.setup import (
     apply_network_lockdown,
+    apply_secret_egress_dnat,
     install_egress_ca,
     install_packages,
 )
@@ -464,7 +465,7 @@ class SandboxRegistry:
         try:
             await install_egress_ca(self._backend, handle)
             await install_packages(self._backend, handle, plan.env_config)
-            await self._maybe_apply_lockdown(handle, plan)
+            await self._apply_egress_rules(handle, plan)
         except BaseException:
             await self._destroy_quietly(handle, session_id)
             raise
@@ -560,7 +561,7 @@ class SandboxRegistry:
         try:
             await install_egress_ca(self._backend, handle)
             await install_packages(self._backend, handle, plan.env_config)
-            await self._maybe_apply_lockdown(handle, plan)
+            await self._apply_egress_rules(handle, plan)
         except BaseException:
             await self._destroy_run_quietly(run_id, handle)
             raise
@@ -616,48 +617,88 @@ class SandboxRegistry:
             return
         await self._destroy_run_quietly(run_id, handle)
 
-    async def _maybe_apply_lockdown(self, handle: SandboxHandle, plan: ProvisioningPlan) -> None:
-        """Apply network lockdown if the plan calls for it."""
-        from aios.harness import runtime
-        from aios.models.environments import LimitedNetworking
+    @staticmethod
+    def _secret_dnat(plan: ProvisioningPlan) -> tuple[list[str], tuple[str, int] | None]:
+        """Build the ``(dnat_hosts, dnat_target)`` pair for the secret-egress swap.
+
+        Shared by the Limited lockdown branch and the Unrestricted DNAT-only
+        branch (#1153) so the credential-host extraction lives in one place.
+        Returns ``([], None)`` when the plan carries no secret proxy (no env-var
+        credentials), so the caller can cleanly skip DNAT wiring.
+
+        Each credential's ``allowed_hosts`` holds canonical entries (a bare host
+        or a ``host/path-prefix``); the DNAT keys on the bare host only, de-dup'd.
+        """
         from aios.models.vaults import parse_allowed_host_entry
 
-        networking = plan.env_config.networking if plan.env_config else None
-        if not isinstance(networking, LimitedNetworking):
-            return
-        extra_host_ports: list[tuple[str, int]] = [
-            (WORKER_NETWORK_ALIAS, runtime.require_tool_broker().port),
-        ]
-        if plan.git_proxy is not None:
-            extra_host_ports.append((WORKER_NETWORK_ALIAS, plan.git_proxy.port))
+        if plan.secret_proxy is None:
+            return [], None
+        dnat_target = (WORKER_NETWORK_ALIAS, plan.secret_proxy.port)
         dnat_hosts: list[str] = []
-        dnat_target: tuple[str, int] | None = None
-        if plan.secret_proxy is not None:
-            # Open the filter OUTPUT for the rewritten (post-DNAT) flow to the
-            # proxy endpoint — mirrors the git_proxy precedent above. (#878)
-            extra_host_ports.append((WORKER_NETWORK_ALIAS, plan.secret_proxy.port))
-            dnat_target = (WORKER_NETWORK_ALIAS, plan.secret_proxy.port)
-            # Each credential's allowed_hosts holds canonical entries (host or
-            # host/path-prefix); DNAT keys on the bare host only.
-            seen: set[str] = set()
-            for cred in plan.env_var_credentials:
-                for entry in cred.allowed_hosts:
-                    host, _prefix = parse_allowed_host_entry(entry)
-                    if host not in seen:
-                        seen.add(host)
-                        dnat_hosts.append(host)
-        await apply_network_lockdown(
-            self._backend,
-            handle,
-            networking,
-            extra_host_ports=extra_host_ports,
-            dnat_hosts=dnat_hosts,
-            dnat_target=dnat_target,
-            # Pin the lockdown sidecar to the same container runtime as the
-            # sandbox it locks down (#1014) — sourced from the sandbox's own
-            # provisioning spec, never ambient config.
-            runtime=plan.spec.runtime,
-        )
+        seen: set[str] = set()
+        for cred in plan.env_var_credentials:
+            for entry in cred.allowed_hosts:
+                host, _prefix = parse_allowed_host_entry(entry)
+                if host not in seen:
+                    seen.add(host)
+                    dnat_hosts.append(host)
+        return dnat_hosts, dnat_target
+
+    async def _apply_egress_rules(self, handle: SandboxHandle, plan: ProvisioningPlan) -> None:
+        """Wire the sandbox's egress rules from the provisioning plan.
+
+        Three cases (#1153):
+
+        - **Limited** networking → full iptables lockdown (``-P OUTPUT DROP`` +
+          per-host ACCEPTs), plus the credential-host → proxy DNAT when the plan
+          carries env-var credentials. Today's path, unchanged.
+        - **Unrestricted / no-networking-config WITH env-var credentials** →
+          DNAT-only: install the credential-host → proxy swap chokepoint while
+          leaving general egress open (no DROP). The secret swap fires; the env
+          allowlist is not the containment boundary (the operator's CMA-faithful
+          choice).
+        - **Unrestricted / no config WITHOUT credentials** → nothing (today's
+          early return: no proxy, no DNAT).
+        """
+        from aios.harness import runtime
+        from aios.models.environments import LimitedNetworking
+
+        networking = plan.env_config.networking if plan.env_config else None
+        dnat_hosts, dnat_target = self._secret_dnat(plan)
+
+        if isinstance(networking, LimitedNetworking):
+            extra_host_ports: list[tuple[str, int]] = [
+                (WORKER_NETWORK_ALIAS, runtime.require_tool_broker().port),
+            ]
+            if plan.git_proxy is not None:
+                extra_host_ports.append((WORKER_NETWORK_ALIAS, plan.git_proxy.port))
+            if dnat_target is not None:
+                # Open the filter OUTPUT for the rewritten (post-DNAT) flow to
+                # the proxy endpoint — mirrors the git_proxy precedent. (#878)
+                extra_host_ports.append((WORKER_NETWORK_ALIAS, dnat_target[1]))
+            await apply_network_lockdown(
+                self._backend,
+                handle,
+                networking,
+                extra_host_ports=extra_host_ports,
+                dnat_hosts=dnat_hosts,
+                dnat_target=dnat_target,
+                # Pin the lockdown sidecar to the same container runtime as the
+                # sandbox it locks down (#1014) — sourced from the sandbox's own
+                # provisioning spec, never ambient config.
+                runtime=plan.spec.runtime,
+            )
+        elif dnat_target is not None:
+            # Unrestricted (or no networking config) WITH env-var credentials:
+            # install the DNAT-only swap chokepoint, leaving general egress open.
+            await apply_secret_egress_dnat(
+                self._backend,
+                handle,
+                dnat_hosts=dnat_hosts,
+                dnat_target=dnat_target,
+                runtime=plan.spec.runtime,
+            )
+        # else: Unrestricted, no credentials → nothing (today's early return).
 
     async def _stop_proxy_silently(
         self, proxy: GitProxy | SecretEgressProxy, session_id: str, *, kind: str

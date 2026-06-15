@@ -186,15 +186,55 @@ async def _build_with(*, env_config: object, creds: tuple[ResolvedEnvVarCredenti
         return await build_spec_from_session("sess_01TEST")
 
 
-async def test_env_var_cred_with_unrestricted_networking_rejected() -> None:
+async def test_env_var_cred_with_unrestricted_networking_provisions() -> None:
+    # Permit-with-warning (#1153): env-var creds under an Unrestricted env now
+    # provision (the secret swap fires via the DNAT-only chokepoint). The
+    # credential placeholder still lands in the env.
     env = EnvironmentConfig(networking=UnrestrictedNetworking())
-    with pytest.raises(ValueError, match="Limited"):
+    cred = _cred(["api.github.com"])
+    plan = await _build_with(env_config=env, creds=(cred,))
+    assert plan.spec.environment["GITHUB_TOKEN"] == cred.placeholder  # type: ignore[attr-defined]
+
+
+async def test_env_var_cred_with_no_env_config_provisions() -> None:
+    # No env config resolves to Unrestricted at runtime → permitted (#1153).
+    cred = _cred(["api.github.com"])
+    plan = await _build_with(env_config=None, creds=(cred,))
+    assert plan.spec.environment["GITHUB_TOKEN"] == cred.placeholder  # type: ignore[attr-defined]
+
+
+async def test_env_var_cred_under_unrestricted_logs_operator_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The permit-with-warning posture (#1153) logs a structured operator-facing
+    # warning naming the exfil-containment trade. Fires from build_spec_from_session.
+    env = EnvironmentConfig(networking=UnrestrictedNetworking())
+    with caplog.at_level(logging.WARNING, logger="aios.sandbox.spec"):
         await _build_with(env_config=env, creds=(_cred(["api.github.com"]),))
+    recs = [r for r in caplog.records if "sandbox.envvar_creds_open_egress" in r.getMessage()]
+    assert len(recs) == 1
 
 
-async def test_env_var_cred_with_no_env_config_rejected() -> None:
-    with pytest.raises(ValueError, match="Limited"):
-        await _build_with(env_config=None, creds=(_cred(["api.github.com"]),))
+async def test_env_var_cred_under_limited_no_open_egress_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A Limited env still contains exfiltration via the allowlist, so NO
+    # open-egress warning is logged (#1153).
+    with caplog.at_level(logging.WARNING, logger="aios.sandbox.spec"):
+        await _build_with(
+            env_config=limited_env("api.github.com"), creds=(_cred(["api.github.com"]),)
+        )
+    assert not [r for r in caplog.records if "sandbox.envvar_creds_open_egress" in r.getMessage()]
+
+
+async def test_no_creds_under_unrestricted_no_open_egress_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # No credentials ⇒ no warning even under Unrestricted (#1153).
+    env = EnvironmentConfig(networking=UnrestrictedNetworking())
+    with caplog.at_level(logging.WARNING, logger="aios.sandbox.spec"):
+        await _build_with(env_config=env, creds=())
+    assert not [r for r in caplog.records if "sandbox.envvar_creds_open_egress" in r.getMessage()]
 
 
 async def test_env_var_cred_uncovered_host_rejected_names_host() -> None:

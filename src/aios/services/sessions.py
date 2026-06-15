@@ -209,8 +209,12 @@ def _evict_sandbox_for_resource_change(session_id: str) -> None:
 async def _assert_env_var_creds_contained(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> None:
-    """Advisory #879 gate at attach: fast console 422 if the session's
-    env-var credentials aren't contained by its Limited environment.
+    """Advisory #879 gate at attach (relaxed by #1153): fast console 422 only
+    when, under a **Limited** environment, the session's env-var credential
+    hosts aren't covered by the env's allowed_hosts (the egress-escalation
+    guard). Under Unrestricted (or no env config) credentials are now accepted
+    (permit-with-warning), so this no longer 422s there — it shares the relaxed
+    ``env_var_credential_containment_error`` verdict.
 
     Best-effort UX only — ``build_spec_from_session`` is the authoritative
     gate (both sides are independently mutable after attach). Runs INSIDE
