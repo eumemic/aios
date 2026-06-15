@@ -32,6 +32,11 @@ class WfRun:
     ``status`` is persisted (unlike sessions): the run loop writes
     ``suspended``/``completed``/``errored``.
 
+    NB (#1140): the run's lifecycle field is ``status`` — there is no ``state``
+    field on a run. A watcher polling ``.state`` reads ``None`` forever even
+    though ``output`` is already populated; poll ``status`` (terminal values:
+    ``completed``/``errored``/``cancelled``).
+
         Attributes:
             id (str):
             workflow_id (str):
@@ -40,7 +45,8 @@ class WfRun:
             script (str):
             script_sha (str):
             host_semantics_epoch (int):
-            status (WfRunStatus):
+            status (WfRunStatus): The run's lifecycle status — the ONLY lifecycle field on a run (there is no `state` field;
+                a watcher keying on `.state` waits forever). Terminal values: `completed`/`errored`/`cancelled`.
             last_event_seq (int):
             created_at (datetime.datetime):
             updated_at (datetime.datetime):

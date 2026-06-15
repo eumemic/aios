@@ -90,10 +90,18 @@ def sync_detailed(
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseWfRunEvent]:
-    """List Run Events
+    r"""List Run Events
 
      A run's journal by sequence (oldest first). First page: optional ``limit``;
     subsequent pages: ``?cursor=<next_cursor>``.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a \"run reset\" — it
+    only means no journal rows past this ``seq`` yet. Page by ``seq`` and treat
+    an empty page as \"nothing new yet.\"
+
+    Schema (#1140): each item is a *run* event ``{type, payload, seq}`` — a
+    DIFFERENT shape from a child-*session* event (``{kind, data}`` on
+    ``/v1/sessions/{id}/events``). See ``docs/reference/run-observability.md``.
 
     Args:
         run_id (str):
@@ -131,10 +139,18 @@ def sync(
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseWfRunEvent | None:
-    """List Run Events
+    r"""List Run Events
 
      A run's journal by sequence (oldest first). First page: optional ``limit``;
     subsequent pages: ``?cursor=<next_cursor>``.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a \"run reset\" — it
+    only means no journal rows past this ``seq`` yet. Page by ``seq`` and treat
+    an empty page as \"nothing new yet.\"
+
+    Schema (#1140): each item is a *run* event ``{type, payload, seq}`` — a
+    DIFFERENT shape from a child-*session* event (``{kind, data}`` on
+    ``/v1/sessions/{id}/events``). See ``docs/reference/run-observability.md``.
 
     Args:
         run_id (str):
@@ -167,10 +183,18 @@ async def asyncio_detailed(
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseWfRunEvent]:
-    """List Run Events
+    r"""List Run Events
 
      A run's journal by sequence (oldest first). First page: optional ``limit``;
     subsequent pages: ``?cursor=<next_cursor>``.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a \"run reset\" — it
+    only means no journal rows past this ``seq`` yet. Page by ``seq`` and treat
+    an empty page as \"nothing new yet.\"
+
+    Schema (#1140): each item is a *run* event ``{type, payload, seq}`` — a
+    DIFFERENT shape from a child-*session* event (``{kind, data}`` on
+    ``/v1/sessions/{id}/events``). See ``docs/reference/run-observability.md``.
 
     Args:
         run_id (str):
@@ -206,10 +230,18 @@ async def asyncio(
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseWfRunEvent | None:
-    """List Run Events
+    r"""List Run Events
 
      A run's journal by sequence (oldest first). First page: optional ``limit``;
     subsequent pages: ``?cursor=<next_cursor>``.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a \"run reset\" — it
+    only means no journal rows past this ``seq`` yet. Page by ``seq`` and treat
+    an empty page as \"nothing new yet.\"
+
+    Schema (#1140): each item is a *run* event ``{type, payload, seq}`` — a
+    DIFFERENT shape from a child-*session* event (``{kind, data}`` on
+    ``/v1/sessions/{id}/events``). See ``docs/reference/run-observability.md``.
 
     Args:
         run_id (str):

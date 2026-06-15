@@ -28,6 +28,11 @@ class WfRunEvent:
     bookends. An ``annotation`` is a journaled progress marker (``payload`` =
     ``{"kind": "log" | "phase", "text": ...}``), not a capability call.
 
+    Schema note (#1140): a *run* event is ``{type, payload, seq}``. This is a
+    DIFFERENT shape from a child-*session* event (``{kind, data}`` — see
+    ``aios.models.events.Event``). Don't assume one schema across both
+    endpoints; ``docs/reference/run-observability.md`` documents the split.
+
         Attributes:
             id (str):
             run_id (str):
