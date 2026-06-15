@@ -63,6 +63,21 @@ def test_non_dict_result_is_transient(is_transient: Callable[[Any], bool]) -> No
     assert is_transient(None) is True
 
 
+def test_dispatch_backstop_envelope_is_transient(is_transient: Callable[[Any], bool]) -> None:
+    # run_tools.py's dispatch backstop wraps any exception that escaped invoke_run_tool as
+    # {"error": "tool 'http_request' failed: ..."}. On the http_request path the only
+    # un-try/excepted IO is resolve_auth (vault/DB-pool/OAuth-refresh), so such a raise is a
+    # genuine transport transient and must retry — restoring the pre-#1139 in-step retry.
+    resp = {
+        "error": "tool 'http_request' failed: ConnectionError: pool exhausted",
+    }
+    assert is_transient(resp) is True
+    resp_oauth = {
+        "error": "tool 'http_request' failed: TimeoutError: OAuth token refresh timed out",
+    }
+    assert is_transient(resp_oauth) is True
+
+
 # ─── deterministic broker/route rejections: terminal (the #1139 fix) ──────────
 
 

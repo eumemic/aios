@@ -351,7 +351,20 @@ async def _gh_once(method, path, body=None):
     return await tool("http_request", args)
 
 
-_TRANSIENT_ERROR_PREFIXES = ("Request timed out", "HTTP transport error")
+# Error-envelope message prefixes that mark a TRANSIENT failure worth a retry.
+# The first two are http_request.py's OWN transport faults (timeout / connection
+# reset / DNS). The third is run_tools.py's dispatch backstop (``_run_tool_task``):
+# it wraps any exception that ESCAPED ``invoke_run_tool`` as
+# ``{"error": "tool 'http_request' failed: ..."}``, and the only un-try/excepted IO
+# on the http_request path is ``resolve_auth`` (vault/DB-pool / OAuth-refresh) — whose
+# failures are transient. The broker's gate rejections are RETURNED values, never
+# raises, so they never reach that backstop (they stay terminal per #1139). ``gh()``
+# only ever routes ``http_request``, so the rendered ``{tool_name!r}`` is fixed.
+_TRANSIENT_ERROR_PREFIXES = (
+    "Request timed out",
+    "HTTP transport error",
+    "tool 'http_request' failed:",
+)
 
 
 def _is_transient(resp):
@@ -363,9 +376,11 @@ def _is_transient(resp):
     rejections — route-allowlist mismatch / method-not-allowed ("does not match any
     enabled route"), unknown server_ref, SSRF block, path rejection — are DETERMINISTIC
     (a 405-equivalent) and re-issuing the identical request just reproduces them. Retrying
-    those burned three pointless attempts on every such call (#1139). Only the transport
-    transients (request timeout, connection reset) earn a retry; every other error string
-    is terminal."""
+    those burned three pointless attempts on every such call (#1139). The transport
+    transients (request timeout, connection reset) earn a retry, AS DOES the dispatch
+    backstop envelope (``tool 'http_request' failed: ...``) — a raise that escaped the
+    tool dispatcher, on a path whose only un-guarded IO is a transient vault/OAuth/DB-pool
+    ``resolve_auth``; every other error string is terminal."""
     if not isinstance(resp, dict):
         return True  # a non-dict result is a malformed tool return -> treat as transient
     err = resp.get("error")
