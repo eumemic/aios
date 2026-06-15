@@ -13,6 +13,7 @@ No docker, no real upstream host, no real secret egress.
 from __future__ import annotations
 
 import asyncio
+import base64
 import socket
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -255,6 +256,84 @@ class TestSwapForwarding:
             assert proxy._client._transport._pool._max_keepalive_connections == 0  # type: ignore[attr-defined]
         finally:
             await proxy._client.aclose()
+
+
+def _basic(user: str, password: str) -> str:
+    """An ``Authorization: Basic <b64>`` header value for ``user:password``."""
+    token = base64.b64encode(f"{user}:{password}".encode("latin-1")).decode("ascii")
+    return f"Basic {token}"
+
+
+def _decode_basic(value: str) -> str:
+    """Decode an ``Authorization: Basic <b64>`` header to its ``user:pass``."""
+    scheme, token = value.split(" ", 1)
+    assert scheme == "Basic"
+    return base64.b64decode(token).decode("latin-1")
+
+
+class TestBasicAuthSwap:
+    """git-over-HTTPS / ``curl -u`` carry the credential as
+    ``Authorization: Basic base64("user:placeholder")`` — base64 hides the
+    placeholder from the literal-substring swap (#1134). The proxy must decode,
+    swap, and re-encode so the remote receives the real secret.
+    """
+
+    async def test_basic_auth_placeholder_swapped_after_decode(
+        self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
+    ) -> None:
+        proxy, captured = gh_proxy
+        # x-access-token:$GITHUB_TOKEN is git's HTTPS-auth shape.
+        header = _basic("x-access-token", PH_GH)
+        # Sanity: the placeholder is NOT a literal substring of the b64 header,
+        # so a raw .replace() would be a no-op (this is the bug).
+        assert PH_GH not in header
+        r = await _request(proxy, "api.allowed.test", "/x", headers={"Authorization": header})
+        assert r.status_code == 200
+        out = captured[0].headers["authorization"]
+        assert _decode_basic(out) == "x-access-token:ghp_REALSECRET"
+        # The real secret must never leave as a placeholder.
+        assert PH_GH not in _decode_basic(out)
+
+    async def test_basic_auth_placeholder_in_username(
+        self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
+    ) -> None:
+        proxy, captured = gh_proxy
+        header = _basic(PH_GH, "x-oauth-basic")
+        await _request(proxy, "api.allowed.test", "/x", headers={"Authorization": header})
+        out = captured[0].headers["authorization"]
+        assert _decode_basic(out) == "ghp_REALSECRET:x-oauth-basic"
+
+    async def test_bearer_auth_still_swapped_literally(
+        self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
+    ) -> None:
+        # Non-Basic schemes keep the existing literal-substring swap.
+        proxy, captured = gh_proxy
+        await _request(
+            proxy, "api.allowed.test", "/x", headers={"Authorization": f"Bearer {PH_GH}"}
+        )
+        assert captured[0].headers["authorization"] == "Bearer ghp_REALSECRET"
+
+    async def test_malformed_basic_value_falls_through_to_literal_swap(
+        self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
+    ) -> None:
+        # Not valid base64 → fall through to the literal swap rather than mangle.
+        proxy, captured = gh_proxy
+        await _request(
+            proxy, "api.allowed.test", "/x", headers={"Authorization": f"Basic not-b64-{PH_GH}"}
+        )
+        assert captured[0].headers["authorization"] == "Basic not-b64-ghp_REALSECRET"
+
+    async def test_basic_auth_outside_prefix_passes_placeholder_through(
+        self, make_proxy: MakeProxy
+    ) -> None:
+        proxy, captured = await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test/repos/ok",), PH_GH)]
+        )
+        header = _basic("x-access-token", PH_GH)
+        await _request(proxy, "api.allowed.test", "/repos/nope", headers={"Authorization": header})
+        out = captured[0].headers["authorization"]
+        # Outside the prefix → no swap → placeholder rides through verbatim.
+        assert _decode_basic(out) == f"x-access-token:{PH_GH}"
 
 
 class TestPathGating:

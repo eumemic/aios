@@ -54,6 +54,8 @@ recycle-on-rotation are follow-ups (#877/#878).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import os
 import re
@@ -180,6 +182,46 @@ def _apply_swaps_bytes(data: bytes, swaps: list[tuple[str, str]]) -> bytes:
     for placeholder, secret in swaps:
         data = data.replace(placeholder.encode(), secret.encode())
     return data
+
+
+def _swap_header_value(name: str, value: str, swaps: list[tuple[str, str]]) -> str:
+    """Swap placeholders in a single forwarded header value.
+
+    ``Authorization: Basic <b64>`` is decoded first: HTTP Basic auth carries
+    the credential as ``base64("user:pass")``, and base64 shifts byte
+    boundaries so the injected ``AIOS_SECRET_PLACEHOLDER_…`` does not appear as
+    a literal substring of the encoded value — a raw ``.replace()`` over the
+    header is a no-op and the placeholder rides out to the remote (git over
+    HTTPS, ``curl -u``, …). So when a Basic credential is present we decode the
+    ``user:pass``, run the swap over the *decoded* text, and re-encode. Every
+    other header value (``Bearer …``, ``X-Api-Key: …``, custom schemes) keeps
+    the literal-substring swap.
+    """
+    if name.lower() == "authorization":
+        decoded = _decode_basic_credential(value)
+        if decoded is not None:
+            swapped = _apply_swaps_str(decoded, swaps)
+            reencoded = base64.b64encode(swapped.encode("latin-1")).decode("ascii")
+            return f"Basic {reencoded}"
+    return _apply_swaps_str(value, swaps)
+
+
+def _decode_basic_credential(value: str) -> str | None:
+    """Decode an ``Authorization: Basic <b64>`` value to its ``user:pass``.
+
+    Returns ``None`` (leaving the value to the literal-substring swap) when the
+    scheme is not ``Basic`` or the credential is not valid base64 / not
+    decodable text — fail open to the existing path rather than mangle a header
+    we don't understand.
+    """
+    parts = value.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "basic":
+        return None
+    try:
+        raw = base64.b64decode(parts[1].strip(), validate=True)
+        return raw.decode("latin-1")
+    except (binascii.Error, ValueError):
+        return None
 
 
 async def _resolve_addrinfos(host: str, port: int) -> list[tuple[Any, ...]]:
@@ -523,7 +565,7 @@ class SecretEgressProxy:
             name = raw_name.decode("latin-1")
             if name.lower() in _HOP_BY_HOP_REQUEST_HEADERS:
                 continue
-            fwd.append((name, _apply_swaps_str(raw_value.decode("latin-1"), swaps)))
+            fwd.append((name, _swap_header_value(name, raw_value.decode("latin-1"), swaps)))
         # Forward to (and name) the SNI host we terminated for.
         fwd.append(("host", host))
         return fwd
