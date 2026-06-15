@@ -84,11 +84,13 @@ async def test_delayed_background_wake_is_also_demoted(in_memory_app: App) -> No
 
 
 async def test_reused_servicer_priority_is_per_stimulus(in_memory_app: App) -> None:
-    """The multi-edge per-stimulus distinction the locked decision turns on: the
-    same servicer woken by a bg-edge stimulus wakes background, and woken by a
-    fg-user stimulus wakes foreground. ``defer_wake`` derives priority freshly per
-    wake, so the carrier reflects *this* stimulus's edge — not a materialized
-    servicer-row scalar."""
+    """``defer_wake`` derives the job priority freshly per wake from
+    ``get_wake_priority_context`` — not from a materialized servicer-row scalar — so a
+    reused servicer's priority tracks *this* stimulus's edge. This tier **mocks** the
+    query (two verdicts → two priorities), proving only the wiring; the SQL that
+    actually picks the latest *open* edge over the oldest-ever one (the multi-edge
+    distinction itself) is covered by
+    ``tests/integration/test_wake_priority_context.py`` (``test_latest_open_edge_*``)."""
     pool = MagicMock()
     with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
         with patch(

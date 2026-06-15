@@ -84,6 +84,21 @@ async def _insert_session(
     return session.id
 
 
+async def _close_edge(pool: asyncpg.Pool[Any], *, session_id: str, request_id: str) -> None:
+    """Answer a request (``request_response``), so its edge is no longer open."""
+    async with pool.acquire() as conn:
+        wrote = await queries.write_response_if_absent(
+            conn,
+            session_id,
+            account_id=_ACCOUNT,
+            request_id=request_id,
+            is_error=False,
+            result={"ok": True},
+            error=None,
+        )
+    assert wrote
+
+
 async def test_no_edge_is_foreground(pool_env: tuple[asyncpg.Pool[Any], str, str, str]) -> None:
     """An ordinary root / fg-user session (no ``request_opened`` edge) → foreground."""
     pool, _account, agent_id, env_id = pool_env
@@ -166,3 +181,68 @@ async def test_missing_session_is_none(
     async with pool.acquire() as conn:
         ctx = await queries.get_wake_priority_context(conn, "ses_does_not_exist")
     assert ctx is None
+
+
+# --- Multi-edge per-stimulus correctness (#1125 oldest-vs-latest-open) --------
+#
+# A session that has served more than one request carries several
+# ``request_opened`` edges. The priority must reflect the **most-recently-opened
+# still-open** edge (the current stimulus), not the oldest-ever one. These cases
+# are the reachable inversions once ``POST /v1/invocations target_kind=session``
+# (#1128) appends a second edge to a live session; the single-edge cases above
+# cannot distinguish oldest from latest.
+
+
+async def test_latest_open_edge_wins_over_older_open(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A background-rooted child (run edge) later invoked at foreground (api edge)
+    wakes **foreground** — the latest open edge is the api stimulus, not the
+    oldest run edge. The starvation inversion #1125 exists to prevent."""
+    pool, _account, agent_id, env_id = pool_env
+    sid = await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="background")
+    await _open_edge(
+        pool, session_id=sid, request_id="req_run_old", caller={"kind": "run", "id": "wfr_1"}
+    )
+    await _open_edge(
+        pool, session_id=sid, request_id="req_api_new", caller={"kind": "api", "id": "k_1"}
+    )
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, sid)
+    assert ctx is not None and ctx[1] is False
+
+
+async def test_latest_open_edge_demotes_when_newer_is_background(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """The symmetric inversion: a foreground-first session (api edge) later driven
+    by a background run edge wakes **background** — the latest open edge is the run
+    stimulus, so background fan-out can't compete with user messages."""
+    pool, _account, agent_id, env_id = pool_env
+    sid = await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="background")
+    await _open_edge(
+        pool, session_id=sid, request_id="req_api_old", caller={"kind": "api", "id": "k_1"}
+    )
+    await _open_edge(
+        pool, session_id=sid, request_id="req_run_new", caller={"kind": "run", "id": "wfr_1"}
+    )
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, sid)
+    assert ctx is not None and ctx[1] is True
+
+
+async def test_answered_edge_is_excluded(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """An answered (``request_response``-closed) edge no longer counts: a session
+    whose only request has been answered falls back to the foreground default,
+    matching the docstring's **still-open** edge contract."""
+    pool, _account, agent_id, env_id = pool_env
+    sid = await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="background")
+    await _open_edge(
+        pool, session_id=sid, request_id="req_run_done", caller={"kind": "run", "id": "wfr_1"}
+    )
+    await _close_edge(pool, session_id=sid, request_id="req_run_done")
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, sid)
+    assert ctx is not None and ctx[1] is False

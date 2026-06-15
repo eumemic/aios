@@ -335,11 +335,19 @@ async def get_wake_priority_context(
     - ``caller.kind = 'api'`` → foreground.
     - no ``request_opened`` edge (an ordinary root / fg-user session) → foreground.
 
-    Returns the **oldest open** edge's background fact: v1 injects one request per
-    child, so this is the single edge. A ``None`` result is the deleted-session
-    race — :func:`defer_wake` maps it to the foreground default, then the wake
-    no-ops harmlessly. Unscoped (internal/trusted), mirroring
-    :func:`get_session_workflow_context`.
+    Derives the demotion from the **latest still-open** edge — the most-recent
+    ``request_opened`` not yet answered by a ``request_response`` (the same
+    ``asked MINUS answered`` open set as :func:`get_open_request_ids`). A session
+    that has served several requests wakes at the priority of the edge that
+    triggered *this* wake, not its oldest-ever edge — reachable since ``invoke``
+    with ``target_kind='session'`` (#1128) appends a second edge to a live session:
+    keying on the oldest would pin a re-invoked background child at background while
+    it serves a foreground api request (and a fg-first session at foreground while a
+    background descendant drives it). An answered-and-gone request contributes
+    nothing, so a quiescent session falls back to the foreground default. A ``None``
+    result is the deleted-session race — :func:`defer_wake` maps it to the
+    foreground default, then the wake no-ops harmlessly. Unscoped (internal/trusted),
+    mirroring :func:`get_session_workflow_context`.
     """
     row = await conn.fetchrow(
         "SELECT s.account_id, "
@@ -355,7 +363,13 @@ async def get_wake_priority_context(
         "    FROM events req "
         "    WHERE req.session_id = s.id AND req.account_id = s.account_id "
         "    AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
-        "    ORDER BY req.seq ASC LIMIT 1"
+        "    AND req.data->>'request_id' IS NOT NULL "
+        "    AND NOT EXISTS ("
+        "      SELECT 1 FROM events resp "
+        "      WHERE resp.session_id = s.id AND resp.account_id = s.account_id "
+        "      AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
+        "      AND resp.data->>'request_id' = req.data->>'request_id') "
+        "    ORDER BY req.seq DESC LIMIT 1"
         "  ), FALSE) AS is_background "
         "FROM sessions s WHERE s.id = $1",
         session_id,
