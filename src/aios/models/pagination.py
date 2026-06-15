@@ -98,6 +98,18 @@ def encode_cursor(state: CursorState) -> str:
     return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
 
+def _malformed_cursor() -> ValidationError:
+    """The 422 for any unusable cursor, single-sourced so the message and hint stay
+    identical wherever a cursor is rejected — :func:`decode_cursor` for the envelope,
+    :func:`cursor_as_int` for the keyset. A tampered cursor must be indistinguishable
+    from a garbage one, and the wording must not drift between the two rejection sites.
+    """
+    return ValidationError(
+        "Malformed pagination cursor.",
+        detail={"hint": "Re-issue the original first-page query; cursors are not hand-editable."},
+    )
+
+
 def decode_cursor(token: str) -> CursorState:
     """Decode an opaque token back into a :class:`CursorState`.
 
@@ -118,12 +130,24 @@ def decode_cursor(token: str) -> CursorState:
             filters=raw_filters if isinstance(raw_filters, dict) else {},
         )
     except Exception as exc:
-        raise ValidationError(
-            "Malformed pagination cursor.",
-            detail={
-                "hint": "Re-issue the original first-page query; cursors are not hand-editable."
-            },
-        ) from exc
+        raise _malformed_cursor() from exc
+
+
+def cursor_as_int(cursor: str | int) -> int:
+    """A keyset cursor's value as an ``int``, or a malformed-cursor 422.
+
+    Seq/version-keyed list endpoints page on an integer keyset and coerce
+    ``st.cursor`` with ``int(...)``. The cursor is unsigned and forgeable (see the
+    module docstring) and :func:`decode_cursor` stores ``c`` verbatim, so a
+    tampered token can carry a non-numeric keyset. Routing the coercion through
+    here surfaces that as a 422 — the same malformed-cursor outcome
+    :func:`decode_cursor` raises for a garbage token — instead of letting the raw
+    ``ValueError`` escape as an unhandled 500.
+    """
+    try:
+        return int(cursor)
+    except (TypeError, ValueError) as exc:
+        raise _malformed_cursor() from exc
 
 
 def reject_params_with_cursor(provided: dict[str, Any]) -> None:

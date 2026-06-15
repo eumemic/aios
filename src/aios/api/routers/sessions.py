@@ -49,6 +49,7 @@ from aios.models.pagination import (
     Direction,
     EventPageLimit,
     PageLimit,
+    cursor_as_int,
     page_cursor,
     resolve_page_limit,
 )
@@ -675,7 +676,7 @@ async def list_events(
         direction = st.direction
         kind = st.filters.get("kind")
         error_only = bool(st.filters.get("error_only"))
-        seq = int(st.cursor)
+        seq = cursor_as_int(st.cursor)
         after_seq, before = (seq, None) if direction == "forward" else (0, seq)
     else:
         error_only = bool(error_only)

@@ -7,7 +7,7 @@ from fastapi import APIRouter, status
 from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.agents import Agent, AgentCreate, AgentUpdate, AgentVersion
 from aios.models.common import ListResponse
-from aios.models.pagination import PageLimit, page_cursor, resolve_page_limit
+from aios.models.pagination import PageLimit, cursor_as_int, page_cursor, resolve_page_limit
 from aios.services import agents as service
 
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -127,7 +127,7 @@ async def list_versions(
     version is a complete snapshot of the agent's config at creation time.
     """
     st = page_cursor(cursor, {"limit": limit})
-    after = int(st.cursor) if st is not None else None
+    after = cursor_as_int(st.cursor) if st is not None else None
     page_limit = resolve_page_limit(st, limit)
     items = await service.list_agent_versions(
         pool, agent_id, limit=page_limit + 1, after=after, account_id=account_id
