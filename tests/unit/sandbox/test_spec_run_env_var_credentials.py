@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -127,7 +128,13 @@ async def test_run_placeholder_lands_in_env_secret_never_does() -> None:
     assert set(plan.spec.environment) == {*runtime_reserved, "PW_DEV_GATE_PASSWORD"}
 
 
-async def test_run_env_var_cred_with_unrestricted_networking_rejected_before_broker() -> None:
+async def test_run_env_var_cred_with_unrestricted_networking_provisions_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Permit-with-warning (#1153): a credentialed run under an Unrestricted env
+    # now provisions (the secret swap fires via the DNAT-only chokepoint), and
+    # logs the operator-facing exfil-containment warning. The broker IS
+    # registered (the provision proceeds past the old gate).
     broker = MagicMock()
     broker.port = 54321
     broker.register_session = MagicMock()
@@ -138,9 +145,11 @@ async def test_run_env_var_cred_with_unrestricted_networking_rejected_before_bro
             broker=broker,
         ):
             stack.enter_context(ctx)
-        with pytest.raises(ValueError, match="Limited"):
-            await build_spec_from_run(_RUN_ID)
-    broker.register_session.assert_not_called()
+        with caplog.at_level(logging.WARNING, logger="aios.sandbox.spec"):
+            plan = await build_spec_from_run(_RUN_ID)
+    assert plan.env_var_credentials == (_CRED,)
+    broker.register_session.assert_called_once()
+    assert [r for r in caplog.records if "sandbox.envvar_creds_open_egress" in r.getMessage()]
 
 
 async def test_run_secret_proxy_constructed_started_and_cleaned_on_assembly_failure() -> None:

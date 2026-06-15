@@ -749,16 +749,29 @@ def env_var_credential_containment_error(
     these already-fetched — this function does no DB I/O so it stays pure
     and unit-testable.
 
-    Two checks (both authoritative at provision; advisory at attach):
+    Permit-with-warning posture (#1153), matching the CMA spec the #871
+    epic ports: env-var credentials are accepted under **any** networking
+    mode. The secret-swap chokepoint (the credential-host → proxy DNAT)
+    now installs under Unrestricted too (DNAT-only, no lockdown), so the
+    swap fires regardless of the environment networking; the operator
+    accepts the loss of exfil-containment as an informed, CMA-documented
+    choice (the warning is logged at provision in ``spec.py``).
 
-    1. Networking must be ``Limited`` — the swap proxy only sees traffic
-       via the Limited lockdown DNAT, so under Unrestricted (or no env /
-       no networking config) the credential silently leaks/non-functions.
-    2. Every credential host must appear in the env's ``allowed_hosts``
-       host set (egress-escalation prevention). Host parts are compared
-       via ``parse_allowed_host_entry`` on BOTH sides — the single grammar
-       authority — so a credential path-prefix only tightens below an
-       already-allowed host.
+    The one residual check applies **only under Limited**:
+
+    - **Limited** → every credential host must appear in the env's
+      ``allowed_hosts`` host set (egress-escalation prevention: the DNAT
+      sits in nat-OUTPUT *ahead of* the filter DROP, so a credential host
+      outside the allowlist would manufacture a forbidden egress channel).
+      Host parts are compared via ``parse_allowed_host_entry`` on BOTH
+      sides — the single grammar authority — so a credential path-prefix
+      only tightens below an already-allowed host.
+    - **Unrestricted / None** → ``None`` (accepted). There is no filter
+      DROP under Unrestricted, so every host is reachable anyway and the
+      subset check guards no real escalation hole — its rationale
+      evaporates. (``env_config=None`` and ``env_config.networking=None``
+      both resolve to ``Unrestricted()`` at runtime via
+      ``_network_policy_from_config``, so this is one runtime case.)
 
     The two sides parse asymmetrically. ``LimitedNetworking`` validates
     its ``allowed_hosts`` against ``HOSTNAME_RE``, which accepts IP
@@ -782,17 +795,13 @@ def env_var_credential_containment_error(
 
     networking = env_config.networking if env_config else None
     if not isinstance(networking, LimitedNetworking):
-        if env_config is None:
-            return (
-                "environment_variable credential requires a Limited environment, but the "
-                "session has no environment configured; the environment's allowed_hosts "
-                "is the containment boundary for the egress swap proxy"
-            )
-        return (
-            "environment_variable credential requires a Limited environment "
-            "(networking is not 'limited'); env allowed_hosts is the containment "
-            "boundary for the egress swap proxy"
-        )
+        # Permit-with-warning (#1153): under Unrestricted (or no env / no
+        # networking config) the secret swap still fires via the DNAT-only
+        # chokepoint, and with no filter DROP there is no egress-escalation
+        # hole for the host-subset check to guard. So the credential is
+        # accepted; the operator-facing exfil-containment warning is logged at
+        # provision (spec.py), not raised here.
+        return None
 
     # DNS hostnames are case-insensitive but ``HOSTNAME_RE`` (and thus
     # ``parse_allowed_host_entry``) preserves the stored casing, so case-fold

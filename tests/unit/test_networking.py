@@ -25,8 +25,10 @@ from aios.sandbox.backends.base import (
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.setup import (
     apply_network_lockdown,
+    apply_secret_egress_dnat,
     build_iptables_script,
     build_lockdown_verify_script,
+    build_secret_egress_dnat_script,
 )
 from tests.helpers.sandbox import FakeBackend, make_handle
 
@@ -265,6 +267,83 @@ class TestBuildIptablesScript:
         assert "--dport 80 -j DNAT" not in script
 
 
+# ── DNAT-only Unrestricted swap chokepoint (no lockdown, #1153) ───────────────
+
+
+class TestBuildSecretEgressDnatScript:
+    """The Unrestricted DNAT-only script installs the credential-host → proxy
+    swap chokepoint while leaving general egress open (no ``-P OUTPUT DROP``)."""
+
+    def test_emits_nat_dnat_rule(self) -> None:
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com", "data.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        assert '"$IPT" -t nat -A OUTPUT' in script
+        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
+        assert "getent ahosts api.secret.com" in script
+        assert "getent ahosts data.secret.com" in script
+        assert "PROXY_IP=$(getent ahosts aios-worker" in script
+
+    def test_no_drop_policy(self) -> None:
+        # The whole point: general egress stays open under Unrestricted.
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        assert "-P OUTPUT DROP" not in script
+
+    def test_no_filter_accept_rules(self) -> None:
+        # No per-host filter ACCEPTs and no loopback/DNS/established ACCEPTs —
+        # the filter policy is left at its default ACCEPT (no lockdown).
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        assert "-A OUTPUT -o lo -j ACCEPT" not in script
+        assert "--dport 53 -j ACCEPT" not in script
+        assert "ESTABLISHED,RELATED -j ACCEPT" not in script
+        assert "--dport 443 -j ACCEPT" not in script
+
+    def test_flushes_nat_output_only_not_filter(self) -> None:
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        assert '"$IPT" -t nat -F OUTPUT' in script
+        # The filter OUTPUT chain is deliberately NOT flushed (would disturb a
+        # mode the operator left open).
+        assert '"$IPT" -F OUTPUT' not in script
+
+    def test_uses_selected_backend_no_bare_iptables(self) -> None:
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        assert "command -v iptables-legacy" in script
+        for line in script.splitlines():
+            stripped = line.strip()
+            if "command -v iptables-legacy" in stripped:
+                continue
+            assert not stripped.startswith("iptables "), (
+                f"bare iptables invocation would use the nft default: {line!r}"
+            )
+
+    def test_dnat_rule_shape_matches_lockdown_script(self) -> None:
+        # The shared ``_nat_dnat_lines`` helper means the DNAT rule shape is
+        # byte-identical to the Limited lockdown's — proven here by extracting
+        # the DNAT line from each and comparing.
+        dnat_only = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        lockdown = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+
+        def _dnat_line(script: str) -> str:
+            return next(line for line in script.splitlines() if "-j DNAT --to-destination" in line)
+
+        assert _dnat_line(dnat_only) == _dnat_line(lockdown)
+
+
 # ── read-back verify script asserts DROP + DNAT coverage (#984) ───────────────
 
 
@@ -304,6 +383,19 @@ class TestBuildLockdownVerifyScript:
             assert not stripped.startswith("iptables "), (
                 f"verify uses a bare iptables (nft default): {line!r}"
             )
+
+    def test_assert_drop_false_omits_drop_assertion(self) -> None:
+        # The DNAT-only Unrestricted path (#1153) leaves the filter policy at
+        # ACCEPT, so the verify must NOT assert a DROP policy (it would always
+        # fail) — but still asserts nat DNAT coverage.
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], assert_drop=False)
+        assert "OUTPUT DROP" not in script
+        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in script
+
+    def test_assert_drop_true_is_default(self) -> None:
+        # Backward-compat: the Limited callers pass no assert_drop and must keep
+        # getting the DROP assertion.
+        assert "OUTPUT DROP" in build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
 
 
 # ── docker backend translates network policy to docker run argv ────────────────
@@ -707,3 +799,124 @@ class TestApplyNetworkLockdownFailsClosed:
         networking = LimitedNetworking(type="limited", allowed_hosts=["api.example.com"])
 
         await apply_network_lockdown(backend, handle, networking)  # must not raise
+
+
+# ── DNAT-only apply for Unrestricted credentialed sandboxes (#1153) ────────────
+
+
+class TestApplySecretEgressDnat:
+    """``apply_secret_egress_dnat`` installs the credential-host → proxy DNAT in
+    an OPEN-egress sandbox: same operator-image netns sidecar + fail-closed
+    posture as the Limited path, but DNAT-only (no filter DROP) and verified
+    with ``assert_drop=False``."""
+
+    @staticmethod
+    def _sidecar_scripts(backend: FakeBackend) -> list[str]:
+        return [c[1]["script"] for c in backend.calls if c[0] == "run_netns_sidecar"]
+
+    @pytest.mark.asyncio
+    async def test_applies_dnat_only_no_drop_then_verifies(self) -> None:
+        backend = FakeBackend()
+        handle = make_handle()
+
+        await apply_secret_egress_dnat(
+            backend,
+            handle,
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+
+        apply_script, verify_script = self._sidecar_scripts(backend)
+        # DNAT installed, but general egress stays open (no DROP, no per-host ACCEPT).
+        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in apply_script
+        assert "getent ahosts api.secret.com" in apply_script
+        assert "-P OUTPUT DROP" not in apply_script
+        # The verify asserts nat DNAT coverage but NOT a DROP policy.
+        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in verify_script
+        assert "OUTPUT DROP" not in verify_script
+
+    @pytest.mark.asyncio
+    async def test_resolv_preamble_prepended_to_apply(self) -> None:
+        # The apply script points the netns-joining sidecar at the embedded
+        # resolver before any getent runs (same preamble as the Limited path).
+        backend = FakeBackend()
+        handle = make_handle()
+
+        await apply_secret_egress_dnat(
+            backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+
+        apply_script = self._sidecar_scripts(backend)[0]
+        assert "nameserver 127.0.0.11" in apply_script
+
+    @pytest.mark.asyncio
+    async def test_runtime_threaded_to_both_sidecar_calls(self) -> None:
+        backend = FakeBackend()
+        handle = make_handle()
+
+        await apply_secret_egress_dnat(
+            backend,
+            handle,
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            runtime="runsc",
+        )
+
+        runtimes = [c[1]["runtime"] for c in backend.calls if c[0] == "run_netns_sidecar"]
+        assert runtimes == ["runsc", "runsc"]
+
+    @pytest.mark.asyncio
+    async def test_nonzero_apply_raises_sandbox_backend_error(self) -> None:
+        backend = FakeBackend()
+        backend.sidecar_results = [
+            CommandResult(
+                exit_code=3,
+                stdout="",
+                stderr="iptables: command not found",
+                timed_out=False,
+                truncated=False,
+            )
+        ]
+        handle = make_handle()
+
+        with pytest.raises(SandboxBackendError, match="secret-egress DNAT failed"):
+            await apply_secret_egress_dnat(
+                backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            )
+
+    @pytest.mark.asyncio
+    async def test_failed_verify_raises(self) -> None:
+        # Apply succeeds but the read-back shows no DNAT rule landed (e.g. a
+        # zero-IP credential host, #984) → fail closed.
+        backend = FakeBackend()
+        ok = CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+        bad = CommandResult(exit_code=1, stdout="", stderr="", timed_out=False, truncated=False)
+        backend.sidecar_results = [ok, bad]
+        handle = make_handle()
+
+        with pytest.raises(SandboxBackendError, match="secret-egress DNAT verification failed"):
+            await apply_secret_egress_dnat(
+                backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            )
+
+    @pytest.mark.asyncio
+    async def test_sidecar_error_propagates(self) -> None:
+        backend = FakeBackend()
+        backend.run_netns_sidecar = AsyncMock(  # type: ignore[method-assign]
+            side_effect=SandboxBackendError("daemon hiccup")
+        )
+        handle = make_handle()
+
+        with pytest.raises(SandboxBackendError, match="daemon hiccup"):
+            await apply_secret_egress_dnat(
+                backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            )
+
+    @pytest.mark.asyncio
+    async def test_zero_exit_does_not_raise(self) -> None:
+        backend = FakeBackend()  # default sidecar returns exit 0 for both calls
+        handle = make_handle()
+
+        await apply_secret_egress_dnat(
+            backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )  # must not raise

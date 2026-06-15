@@ -484,7 +484,7 @@ class TestSecretProxyDnatThreading:
     :443 egress through the proxy (#878).
 
     ``apply_network_lockdown`` is patched with an ``AsyncMock`` spy:
-    ``_maybe_apply_lockdown``'s extraction logic still runs in full, so the
+    ``_apply_egress_rules``'s extraction logic still runs in full, so the
     captured kwargs reflect the real wiring without booting a sidecar.
     """
 
@@ -630,6 +630,101 @@ class TestSecretProxyDnatThreading:
 
         proxy.stop.assert_awaited_once()
         assert "run_X" not in registry._secret_proxies
+
+
+class TestUnrestrictedSecretEgressDnat:
+    """Under an Unrestricted (or no-config) environment that carries env-var
+    credentials, the registry routes egress wiring to ``apply_secret_egress_dnat``
+    (DNAT-only, general egress open) instead of ``apply_network_lockdown`` (#1153).
+    Both are patched with spies so the branch selection + credential-host
+    extraction run in full without booting a sidecar.
+    """
+
+    @staticmethod
+    def _unrestricted_plan_with_creds(
+        session_id: str, *, proxy_port: int = 49152
+    ) -> ProvisioningPlan:
+        cred = ResolvedEnvVarCredential(
+            credential_id="cred_1",
+            secret_name="API_TOKEN",
+            secret_value="real-secret",
+            allowed_hosts=("api.secret.com", "data.secret.com/v1"),
+            updated_at=datetime(2025, 1, 1, tzinfo=UTC),
+            placeholder="AIOS_SECRET_PLACEHOLDER_deadbeef",
+        )
+        base = _provisioning_plan(session_id)  # Unrestricted, env_config=None
+        return ProvisioningPlan(
+            spec=base.spec,
+            env_config=base.env_config,
+            memory_echoes=base.memory_echoes,
+            github_echoes=base.github_echoes,
+            git_proxy=base.git_proxy,
+            env_var_credentials=(cred,),
+            secret_proxy=cast(Any, FakeSecretProxy(port=proxy_port)),
+        )
+
+    @staticmethod
+    def _patches(plan: ProvisioningPlan, lockdown: AsyncMock, dnat_only: AsyncMock) -> ExitStack:
+        broker = MagicMock()
+        broker.port = 8765
+        stack = ExitStack()
+        for cm in (
+            patch("aios.harness.runtime.require_tool_broker", lambda: broker),
+            patch("aios.sandbox.registry.build_spec_from_session", AsyncMock(return_value=plan)),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", lockdown),
+            patch("aios.sandbox.registry.apply_secret_egress_dnat", dnat_only),
+        ):
+            stack.enter_context(cm)
+        return stack
+
+    async def test_dnat_only_called_not_lockdown_when_creds_under_unrestricted(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        plan = self._unrestricted_plan_with_creds("sess_X")
+        lockdown = AsyncMock()
+        dnat_only = AsyncMock()
+
+        with self._patches(plan, lockdown, dnat_only):
+            await registry.get_or_provision("sess_X")
+
+        # The Unrestricted path uses the DNAT-only helper, never the lockdown.
+        lockdown.assert_not_awaited()
+        dnat_only.assert_awaited_once()
+        kwargs = dnat_only.call_args.kwargs
+        assert kwargs["dnat_target"] == ("aios-worker", 49152)
+        # The ``/v1`` path prefix is stripped and bare hosts de-dup'd — same
+        # extraction the Limited path uses (shared ``_secret_dnat`` helper).
+        assert set(kwargs["dnat_hosts"]) == {"api.secret.com", "data.secret.com"}
+
+    async def test_runtime_threaded_to_dnat_only(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        plan = self._unrestricted_plan_with_creds("sess_X")
+        # The plan's spec carries the sandbox runtime; assert it reaches the DNAT call.
+        lockdown = AsyncMock()
+        dnat_only = AsyncMock()
+
+        with self._patches(plan, lockdown, dnat_only):
+            await registry.get_or_provision("sess_X")
+
+        assert "runtime" in dnat_only.call_args.kwargs
+
+    async def test_no_egress_wiring_when_unrestricted_without_creds(self) -> None:
+        # Unrestricted, no secret proxy / no creds → neither helper fires (the
+        # historical early-return path, preserved).
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        plan = _provisioning_plan("sess_X")  # Unrestricted, no creds, no proxy
+        lockdown = AsyncMock()
+        dnat_only = AsyncMock()
+
+        with self._patches(plan, lockdown, dnat_only):
+            await registry.get_or_provision("sess_X")
+
+        lockdown.assert_not_awaited()
+        dnat_only.assert_not_awaited()
 
 
 class TestStaleHandleDetection:

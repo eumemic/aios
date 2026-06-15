@@ -1247,28 +1247,26 @@ class TestEnvVarCredentialContainment:
         env = EnvironmentConfig(networking=UnrestrictedNetworking())
         assert env_var_credential_containment_error(env, []) is None
 
-    def test_unrestricted_env_with_creds_rejected(self) -> None:
+    def test_unrestricted_env_with_creds_permitted(self) -> None:
+        # Permit-with-warning (#1153): env-var creds under an Unrestricted env
+        # are now ACCEPTED — the secret swap fires via the DNAT-only chokepoint,
+        # and with no filter DROP there is no egress-escalation hole to guard.
+        # The exfil-containment warning is logged at provision (spec.py), not
+        # raised here.
         env = EnvironmentConfig(networking=UnrestrictedNetworking())
-        verdict = env_var_credential_containment_error(env, [("api.github.com",)])
-        assert verdict is not None
-        assert "Limited" in verdict
-        # An env IS bound (just not Limited) — the message must say so, distinct
-        # from the no-environment-configured branch below.
-        assert "networking is not" in verdict
+        assert env_var_credential_containment_error(env, [("api.github.com",)]) is None
 
-    def test_no_env_config_with_creds_rejected(self) -> None:
-        verdict = env_var_credential_containment_error(None, [("api.github.com",)])
-        assert verdict is not None
-        # No environment bound at all — the message must NOT point the operator
-        # at a networking setting that doesn't exist.
-        assert "no environment configured" in verdict
+    def test_no_env_config_with_creds_permitted(self) -> None:
+        # No environment bound at all resolves to Unrestricted() at runtime, so
+        # the same permit-with-warning posture applies (#1153).
+        assert env_var_credential_containment_error(None, [("api.github.com",)]) is None
 
-    def test_no_networking_config_with_creds_rejected(self) -> None:
-        # EnvironmentConfig() leaves networking unset (None) — not Limited.
-        verdict = env_var_credential_containment_error(EnvironmentConfig(), [("api.github.com",)])
-        assert verdict is not None
-        # An env IS bound; networking is just unset — the "not 'limited'" branch.
-        assert "networking is not" in verdict
+    def test_no_networking_config_with_creds_permitted(self) -> None:
+        # EnvironmentConfig() leaves networking unset (None) → Unrestricted() at
+        # runtime → permitted (#1153).
+        assert (
+            env_var_credential_containment_error(EnvironmentConfig(), [("api.github.com",)]) is None
+        )
 
     def test_covered_host_passes(self) -> None:
         env = limited_env("api.github.com")
@@ -1318,13 +1316,13 @@ class TestEnvVarCredentialContainment:
         assert verdict is not None
         assert "'pypi.org'" in verdict
 
-    def test_cred_with_empty_allowed_hosts_still_requireslimited_env(self) -> None:
-        # An empty allowed_hosts tuple still counts as "has a credential":
-        # the OUTER list is non-empty, so the Limited check still fires.
+    def test_cred_with_empty_allowed_hosts_permitted_under_unrestricted(self) -> None:
+        # An empty allowed_hosts tuple still counts as "has a credential" (the
+        # OUTER list is non-empty), but under Unrestricted the credential is now
+        # permitted (#1153) — the host-subset check is the only remaining gate
+        # and it applies only under Limited.
         env = EnvironmentConfig(networking=UnrestrictedNetworking())
-        verdict = env_var_credential_containment_error(env, [()])
-        assert verdict is not None
-        assert "Limited" in verdict
+        assert env_var_credential_containment_error(env, [()]) is None
 
     def test_ip_literal_env_host_is_skipped_not_crash(self) -> None:
         # LimitedNetworking.allowed_hosts accepts IP literals (HOSTNAME_RE), but
@@ -1349,9 +1347,9 @@ class TestEnvVarCredentialContainment:
         # returns None: the inner host loop never executes, so ∅ ⊆ env is
         # vacuously true. Such a credential is inert — there is no host for the
         # egress swap proxy to DNAT — and is prevented at create by
-        # VaultCredentialCreate._validate_shape. Note Check 1 (requires Limited)
-        # STILL fires for empty-hosts creds under Unrestricted, which
-        # test_cred_with_empty_allowed_hosts_still_requireslimited_env covers.
+        # VaultCredentialCreate._validate_shape. Under Unrestricted such a
+        # credential is now permitted (#1153), covered by
+        # test_cred_with_empty_allowed_hosts_permitted_under_unrestricted.
         assert env_var_credential_containment_error(limited_env("api.github.com"), [()]) is None
 
 
@@ -1373,7 +1371,10 @@ class TestEnvVarCredentialAttachGate:
     (credential list + env config), mirroring the call-site test style above."""
 
     @pytest.mark.asyncio
-    async def test_attach_unrestricted_env_with_creds_raises_422(self) -> None:
+    async def test_attach_unrestricted_env_with_creds_no_longer_raises(self) -> None:
+        # Permit-with-warning (#1153): the attach advisory shares the relaxed
+        # containment verdict, so env-var creds under an Unrestricted env no
+        # longer 422 at attach — they provision (with an operator warning).
         conn = MagicMock()
         env = EnvironmentConfig(networking=UnrestrictedNetworking())
         with (
@@ -1387,12 +1388,11 @@ class TestEnvVarCredentialAttachGate:
                 "get_environment_config_for_session",
                 AsyncMock(return_value=env),
             ),
-            pytest.raises(ValidationError, match="Limited") as exc,
         ):
+            # Must not raise.
             await sessions_service._assert_env_var_creds_contained(
                 conn, "sess_01TEST", account_id="acct_x"
             )
-        assert exc.value.status_code == 422
 
     @pytest.mark.asyncio
     async def test_attach_uncovered_host_raises_422_names_host(self) -> None:
