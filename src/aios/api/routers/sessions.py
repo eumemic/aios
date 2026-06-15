@@ -44,6 +44,7 @@ from aios.models.github_repositories import (
 )
 from aios.models.pagination import (
     DEFAULT_PAGE_LIMIT,
+    MAX_EVENT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
     Direction,
     EventPageLimit,
@@ -679,7 +680,7 @@ async def list_events(
     else:
         error_only = bool(error_only)
         after_seq, before = 0, None
-    page_limit = resolve_page_limit(st, limit, default=200)
+    page_limit = resolve_page_limit(st, limit, default=200, maximum=MAX_EVENT_PAGE_LIMIT)
     # Fetch one extra row to derive has_more without a separate COUNT query.
     rows = await service.read_events(
         pool,

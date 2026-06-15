@@ -19,7 +19,13 @@ from aios.api.sse import make_sse_response, preflight_subscription, wf_run_event
 from aios.db.listen import open_listen_for_run_events
 from aios.logging import get_logger
 from aios.models.common import ListResponse
-from aios.models.pagination import EventPageLimit, PageLimit, page_cursor, resolve_page_limit
+from aios.models.pagination import (
+    MAX_EVENT_PAGE_LIMIT,
+    EventPageLimit,
+    PageLimit,
+    page_cursor,
+    resolve_page_limit,
+)
 from aios.models.workflows import (
     GateResume,
     WfRun,
@@ -253,7 +259,7 @@ async def list_run_events(
     # Scope check: 404 a cross-tenant run id before reading its journal.
     await service.get_run(pool, run_id, account_id=account_id)
     st = page_cursor(cursor, {"limit": limit})
-    page_limit = resolve_page_limit(st, limit, default=200)
+    page_limit = resolve_page_limit(st, limit, default=200, maximum=MAX_EVENT_PAGE_LIMIT)
     after_seq = int(st.cursor) if st is not None else 0
     items = await service.list_run_events(
         pool, run_id, account_id=account_id, after_seq=after_seq, limit=page_limit + 1

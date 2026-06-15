@@ -163,8 +163,9 @@ def resolve_page_limit(
     limit: int | None,
     *,
     default: int = DEFAULT_PAGE_LIMIT,
+    maximum: int = MAX_PAGE_LIMIT,
 ) -> int:
-    """Resolve the effective page size for a list request.
+    """Resolve the effective page size for a list request, bounded to ``[1, maximum]``.
 
     Collapses the repeated triple-nested ternary every router hand-wrote::
 
@@ -174,7 +175,16 @@ def resolve_page_limit(
     page it's the supplied ``?limit=`` or ``default``. Endpoints with a
     non-standard default (the events endpoints page 200 at a time) pass it as a
     named ``default=`` override rather than re-typing the literal.
+
+    The result is clamped to ``[1, maximum]``. This is the cursor-path half of
+    the request-boundary ceiling: the ``PageLimit``/``EventPageLimit`` Query
+    aliases enforce ``ge=1, le=ceiling`` only on the first-page ``?limit=`` query
+    param, but the cursor is unsigned and forgeable (see the module docstring),
+    so the size it carries reaches Postgres as ``LIMIT $n`` unvalidated unless
+    re-bounded here — a forged negative value raises an unhandled 500, a huge
+    one is an unbounded-fetch DoS. ``maximum`` defaults to :data:`MAX_PAGE_LIMIT`;
+    the events endpoints pass :data:`MAX_EVENT_PAGE_LIMIT` so a legitimate
+    full-size events cursor is honored rather than shrunk.
     """
-    if st is not None:
-        return st.limit
-    return limit if limit is not None else default
+    raw = st.limit if st is not None else (limit if limit is not None else default)
+    return max(1, min(raw, maximum))
