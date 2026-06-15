@@ -65,6 +65,11 @@ from .http_route_spec import HttpRouteSpec
 from .http_route_spec_methods_type_0_item import HttpRouteSpecMethodsType0Item
 from .http_server_spec import HttpServerSpec
 from .http_validation_error import HTTPValidationError
+from .invocation_handle import InvocationHandle
+from .invocation_handle_servicer_kind import InvocationHandleServicerKind
+from .invocation_request import InvocationRequest
+from .invocation_request_output_schema_type_0 import InvocationRequestOutputSchemaType0
+from .invocation_request_target_kind import InvocationRequestTargetKind
 from .limited_networking import LimitedNetworking
 from .list_connections_mode_type_0 import ListConnectionsModeType0
 from .list_response_agent import ListResponseAgent
@@ -334,6 +339,11 @@ __all__ = (
     "HttpRouteSpecMethodsType0Item",
     "HttpServerSpec",
     "HTTPValidationError",
+    "InvocationHandle",
+    "InvocationHandleServicerKind",
+    "InvocationRequest",
+    "InvocationRequestOutputSchemaType0",
+    "InvocationRequestTargetKind",
     "LimitedNetworking",
     "ListConnectionsModeType0",
     "ListResponseAgent",
