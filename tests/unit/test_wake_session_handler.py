@@ -185,7 +185,8 @@ class TestWakeSessionHandlerPermission:
             {"target_session_id": "sess_01TARGET", "prompt": "wake up"},
         )
         assert result["woken"] is True
-        mock_append.assert_awaited_once()
+        # Two appends: the user message + the trusted wake_lineage span.
+        assert mock_append.await_count == 2
         mock_defer.assert_awaited_once()
 
 
@@ -258,10 +259,11 @@ class TestWakeSessionHandlerLimits:
             "target_session_id": "sess_01TARGET",
             "wake_depth": 3,
         }
-        # The append landed on the TARGET session under its account_id with
-        # wake_source_session_id + wake_depth metadata.
-        mock_append.assert_awaited_once()
-        kwargs = mock_append.call_args.kwargs
+        # The user-message append landed on the TARGET session under its
+        # account_id with wake_source_session_id + wake_depth (display) metadata.
+        assert mock_append.await_count == 2
+        msg_call = next(c for c in mock_append.call_args_list if c.kwargs["kind"] == "message")
+        kwargs = msg_call.kwargs
         assert kwargs["session_id"] == "sess_01TARGET"
         assert kwargs["account_id"] == "acc_test_stub"
         assert kwargs["kind"] == "message"
@@ -276,3 +278,142 @@ class TestWakeSessionHandlerLimits:
             cause="agent_wake",
             account_id="acc_test_stub",
         )
+
+
+class TestWakeSessionTrustedLineage:
+    """The wake-depth/source cap must read provenance from a system-owned
+    slot (a ``kind='span'`` lineage event), never from caller-suppliable
+    user-message metadata that the operator-POST / connector paths forge.
+
+    See issue #1083.
+    """
+
+    async def test_depth_query_filters_to_span_lineage(
+        self, monkeypatch: Any, install_pool: Any
+    ) -> None:
+        """The source-depth read must be scoped to ``kind='span'`` lineage
+        events. A user message (forgeable) must NOT be a source of truth."""
+        captured: dict[str, str] = {}
+
+        pool = MagicMock()
+        conn = MagicMock()
+
+        async def _fetchrow(sql: str, *args: Any) -> Any:
+            # First fetchrow = target row; second = source depth read.
+            if "account_id" in sql and "archived_at" in sql:
+                return {
+                    "account_id": "acc_test_stub",
+                    "status": "idle",
+                    "archived_at": None,
+                }
+            captured["depth_sql"] = sql
+            return {"depth": 4}
+
+        conn.fetchrow = AsyncMock(side_effect=_fetchrow)
+        conn.fetchval = AsyncMock(return_value=0)
+        conn.execute = AsyncMock()
+
+        class _CM:
+            async def __aenter__(self) -> MagicMock:
+                return conn
+
+            async def __aexit__(self, *a: Any) -> None:
+                return None
+
+        pool.acquire = lambda: _CM()
+        install_pool(pool)
+        monkeypatch.setattr("aios.db.queries.append_event", AsyncMock())
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
+
+        result = await wake_session_handler(
+            "sess_01SOURCE",
+            {"target_session_id": "sess_01TARGET", "prompt": "hi"},
+        )
+
+        # The depth read must be scoped to the trusted span carrier and must
+        # NOT trust user-message metadata.
+        assert "kind = 'span'" in captured["depth_sql"]
+        assert "'role' = 'user'" not in captured["depth_sql"]
+        # Trusted depth 4 (from the span) → new depth 5.
+        assert result["wake_depth"] == 5
+
+    async def test_rate_limit_query_filters_to_span_lineage(
+        self, monkeypatch: Any, install_pool: Any
+    ) -> None:
+        """The per-pair rate-limit count must be scoped to ``kind='span'``
+        lineage events, not forgeable user messages."""
+        captured: dict[str, str] = {}
+
+        pool = MagicMock()
+        conn = MagicMock()
+
+        conn.fetchrow = AsyncMock(
+            side_effect=[
+                {"account_id": "acc_test_stub", "status": "idle", "archived_at": None},
+                {"depth": 0},
+            ]
+        )
+
+        async def _fetchval(sql: str, *args: Any) -> int:
+            captured["rate_sql"] = sql
+            return 0
+
+        conn.fetchval = AsyncMock(side_effect=_fetchval)
+        conn.execute = AsyncMock()
+
+        class _CM:
+            async def __aenter__(self) -> MagicMock:
+                return conn
+
+            async def __aexit__(self, *a: Any) -> None:
+                return None
+
+        pool.acquire = lambda: _CM()
+        install_pool(pool)
+        monkeypatch.setattr("aios.db.queries.append_event", AsyncMock())
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
+
+        await wake_session_handler(
+            "sess_01SOURCE",
+            {"target_session_id": "sess_01TARGET", "prompt": "hi"},
+        )
+
+        assert "kind = 'span'" in captured["rate_sql"]
+        assert "'role' = 'user'" not in captured["rate_sql"]
+
+    async def test_appends_trusted_span_lineage_event(
+        self, monkeypatch: Any, install_pool: Any
+    ) -> None:
+        """wake_session must append a system-owned ``kind='span'`` lineage
+        event carrying the trusted wake_depth / wake_source_session_id, in
+        addition to the user message."""
+        install_pool(
+            _make_pool(
+                target_row={
+                    "account_id": "acc_test_stub",
+                    "status": "idle",
+                    "archived_at": None,
+                },
+                depth=2,
+                recent_wakes=0,
+            )
+        )
+        mock_append = AsyncMock()
+        monkeypatch.setattr("aios.db.queries.append_event", mock_append)
+        monkeypatch.setattr("aios.tools.wake_session.defer_wake", AsyncMock())
+
+        await wake_session_handler(
+            "sess_01SOURCE",
+            {"target_session_id": "sess_01TARGET", "prompt": "hi"},
+        )
+
+        # Two appends: the user message AND the trusted span lineage.
+        kinds = [c.kwargs["kind"] for c in mock_append.call_args_list]
+        assert "span" in kinds
+        span_call = next(c for c in mock_append.call_args_list if c.kwargs["kind"] == "span")
+        span_data = span_call.kwargs["data"]
+        assert span_call.kwargs["session_id"] == "sess_01TARGET"
+        assert span_call.kwargs["account_id"] == "acc_test_stub"
+        assert span_data["event"] == "wake_lineage"
+        assert span_data["wake_source_session_id"] == "sess_01SOURCE"
+        assert span_data["wake_depth"] == 3

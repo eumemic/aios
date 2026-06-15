@@ -99,6 +99,28 @@ async def _count_user_messages(pool: asyncpg.Pool[Any], session_id: str) -> int:
         )
 
 
+async def _stamp_lineage_span(
+    pool: asyncpg.Pool[Any], session_id: str, account_id: str, depth: int
+) -> None:
+    """Append a system-owned ``wake_lineage`` span — the trusted depth carrier
+    the cap reads. Mirrors what ``wake_session_handler`` writes on a real wake.
+    """
+    from aios.tools.wake_session import WAKE_LINEAGE_SPAN_EVENT
+
+    async with pool.acquire() as conn:
+        await queries.append_event(
+            conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind="span",
+            data={
+                "event": WAKE_LINEAGE_SPAN_EVENT,
+                "wake_source_session_id": "sess_seed_source",
+                "wake_depth": depth,
+            },
+        )
+
+
 @pytest.fixture
 def patched_defer_wake() -> Any:
     """Patch out the procrastinate enqueue.  The handler's SQL surface
@@ -203,27 +225,16 @@ class TestWakeSessionIntegration:
         pool_with_runtime: asyncpg.Pool[Any],
         patched_defer_wake: AsyncMock,
     ) -> None:
-        """Stamp a near-cap depth on the source's most recent user message;
-        a wake should bump to cap, the next attempt should refuse."""
+        """Stamp a near-cap depth in the trusted wake_lineage span on the
+        source; a wake should bump to cap, the next attempt should refuse."""
         pool = pool_with_runtime
         await _seed_account(pool, "acc_wake_depth", "wake-test-depth")
         _, _, source = await seed_agent_env_session(pool, account_id="acc_wake_depth", prefix="src")
         _, _, target = await seed_agent_env_session(pool, account_id="acc_wake_depth", prefix="dst")
 
-        # Stamp depth = MAX_DEPTH - 1 on the source so the next wake lands
-        # exactly at the cap and the one after would breach it.
-        async with pool.acquire() as conn:
-            await queries.append_event(
-                conn,
-                account_id="acc_wake_depth",
-                session_id=source.id,
-                kind="message",
-                data={
-                    "role": "user",
-                    "content": "incoming-wake",
-                    "metadata": {"wake_depth": WAKE_SESSION_MAX_DEPTH - 1},
-                },
-            )
+        # Stamp depth = MAX_DEPTH - 1 in the TRUSTED span carrier on the source
+        # so the next wake lands exactly at the cap and the one after breaches.
+        await _stamp_lineage_span(pool, source.id, "acc_wake_depth", WAKE_SESSION_MAX_DEPTH - 1)
 
         # First call: depth bumps from MAX-1 to MAX. Allowed.
         result = await wake_session_handler(
@@ -232,24 +243,104 @@ class TestWakeSessionIntegration:
         )
         assert result["wake_depth"] == WAKE_SESSION_MAX_DEPTH
 
-        # Stamp depth = MAX on the source so the next wake would breach.
-        async with pool.acquire() as conn:
-            await queries.append_event(
-                conn,
-                account_id="acc_wake_depth",
-                session_id=source.id,
-                kind="message",
-                data={
-                    "role": "user",
-                    "content": "second-wake-incoming",
-                    "metadata": {"wake_depth": WAKE_SESSION_MAX_DEPTH},
-                },
-            )
+        # Stamp depth = MAX in the trusted span so the next wake would breach.
+        await _stamp_lineage_span(pool, source.id, "acc_wake_depth", WAKE_SESSION_MAX_DEPTH)
 
         with pytest.raises(WakeSessionDepthExceededError):
             await wake_session_handler(
                 source.id,
                 {"target_session_id": target.id, "prompt": "should refuse"},
+            )
+
+    async def test_forged_user_metadata_does_not_evade_depth_cap(
+        self,
+        pool_with_runtime: asyncpg.Pool[Any],
+        patched_defer_wake: AsyncMock,
+    ) -> None:
+        """Red test for #1083: a caller posts a user message with a FORGED
+        ``metadata.wake_depth = 0`` on top of a real near-cap lineage span.
+        The cap must compute the TRUE depth from the trusted span and refuse
+        — the forged user metadata must be ignored.
+        """
+        pool = pool_with_runtime
+        await _seed_account(pool, "acc_wake_forge", "wake-test-forge")
+        _, _, source = await seed_agent_env_session(pool, account_id="acc_wake_forge", prefix="src")
+        _, _, target = await seed_agent_env_session(pool, account_id="acc_wake_forge", prefix="dst")
+
+        # The real, system-stamped lineage puts the source at the cap.
+        await _stamp_lineage_span(pool, source.id, "acc_wake_forge", WAKE_SESSION_MAX_DEPTH)
+
+        # Attacker injects a LATER user message claiming depth 0 — exactly
+        # what the operator-POST / connector paths pass through unstripped.
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                account_id="acc_wake_forge",
+                session_id=source.id,
+                kind="message",
+                data={
+                    "role": "user",
+                    "content": "reset my depth pretty please",
+                    "metadata": {"wake_depth": 0, "wake_source_session_id": "sess_forged"},
+                },
+            )
+
+        # The forged metadata must NOT reset the chain: the cap still sees
+        # the trusted depth at MAX and refuses.
+        with pytest.raises(WakeSessionDepthExceededError):
+            await wake_session_handler(
+                source.id,
+                {"target_session_id": target.id, "prompt": "evade the cap"},
+            )
+
+    async def test_forged_user_metadata_does_not_evade_rate_limit(
+        self,
+        pool_with_runtime: asyncpg.Pool[Any],
+        patched_defer_wake: AsyncMock,
+    ) -> None:
+        """Red test for #1083 (rate-limit side): the per-pair count must be
+        derived from the trusted lineage span, so forged user-message
+        metadata can neither inflate nor evade the count.
+
+        Here we cap the pair with REAL wakes, then inject a forged user
+        message claiming a DIFFERENT ``wake_source_session_id`` — which, if
+        trusted, would lower the count and let the cap be evaded.  The cap
+        must still refuse the next wake.
+        """
+        pool = pool_with_runtime
+        await _seed_account(pool, "acc_wake_rforge", "wake-test-rforge")
+        _, _, source = await seed_agent_env_session(
+            pool, account_id="acc_wake_rforge", prefix="src"
+        )
+        _, _, target = await seed_agent_env_session(
+            pool, account_id="acc_wake_rforge", prefix="dst"
+        )
+
+        for i in range(WAKE_SESSION_MAX_PER_HOUR):
+            await wake_session_handler(
+                source.id,
+                {"target_session_id": target.id, "prompt": f"wake-{i}"},
+            )
+
+        # Forge a user message on the target whose metadata claims a
+        # different source — counted nowhere if user metadata is ignored.
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                account_id="acc_wake_rforge",
+                session_id=target.id,
+                kind="message",
+                data={
+                    "role": "user",
+                    "content": "noise",
+                    "metadata": {"wake_source_session_id": "sess_other"},
+                },
+            )
+
+        with pytest.raises(WakeSessionRateLimitedError):
+            await wake_session_handler(
+                source.id,
+                {"target_session_id": target.id, "prompt": "over-cap"},
             )
 
     async def test_rate_limit_caps_per_pair(
