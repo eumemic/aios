@@ -163,7 +163,12 @@ def tool(
     A *failed* result always wakes regardless — the runner only sets
     ``no_reaction`` on the post-success path.  Leave it ``False`` for
     list/create/get/edit/delete tools whose results carry data the model
-    must consume.
+    must consume — and, crucially, for any *precursor* action the model
+    calls before doing more work, such as a "typing…"/presence indicator.
+    Its result is benign, but it is the only thing that would wake the
+    follow-up step; suppressing it strands a typing-only turn idle, never
+    sending (#1121).  Rule of thumb: fire-and-forget iff the turn is *over*
+    after this tool — not merely "the result is uninteresting."
     """
 
     def _wrap(f: ToolFn) -> ToolFn:
