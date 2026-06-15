@@ -351,15 +351,27 @@ async def _gh_once(method, path, body=None):
     return await tool("http_request", args)
 
 
+_TRANSIENT_ERROR_PREFIXES = ("Request timed out", "HTTP transport error")
+
+
 def _is_transient(resp):
-    """A retryable GitHub response: a 5xx status, OR a transport/tool error (the
-    http_request tool surfaces a connection failure as ``{"error": ...}`` with no/None
-    status). A 4xx is the caller's problem (auth, 404, 422-already-exists) — NOT retried,
-    so a deterministic client error fails fast rather than burning three attempts."""
+    """A retryable GitHub response: a 5xx status, OR a genuine transport transient (the
+    http_request tool surfaces a timeout / connection failure as ``{"error": ...}`` with
+    no status). A 4xx is the caller's problem (auth, 404, 422-already-exists) — NOT retried.
+
+    An ``{"error": ...}`` envelope is NOT automatically transient: the broker's own gate
+    rejections — route-allowlist mismatch / method-not-allowed ("does not match any
+    enabled route"), unknown server_ref, SSRF block, path rejection — are DETERMINISTIC
+    (a 405-equivalent) and re-issuing the identical request just reproduces them. Retrying
+    those burned three pointless attempts on every such call (#1139). Only the transport
+    transients (request timeout, connection reset) earn a retry; every other error string
+    is terminal."""
     if not isinstance(resp, dict):
         return True  # a non-dict result is a malformed tool return -> treat as transient
-    if resp.get("error") is not None:
-        return True
+    err = resp.get("error")
+    if err is not None:
+        # Only timeouts / transport faults are transient; broker gate rejections are not.
+        return isinstance(err, str) and err.startswith(_TRANSIENT_ERROR_PREFIXES)
     st = resp.get("status")
     return isinstance(st, int) and 500 <= st <= 599
 
