@@ -16527,6 +16527,11 @@
             ],
             "title": "Launcher Session Id"
           },
+          "depth": {
+            "type": "integer",
+            "title": "Depth",
+            "default": 0
+          },
           "script": {
             "type": "string",
             "title": "Script"

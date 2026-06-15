@@ -72,6 +72,7 @@ async def _make_run(pool: asyncpg.Pool[Any], *, status: str = "suspended") -> st
             script="x",
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             script_sha="x",
+            depth=10,
         )
         if status != "pending":
             await wf_queries.set_run_status(conn, run.id, status, account_id="acc_sw")

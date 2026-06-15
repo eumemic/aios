@@ -22,15 +22,26 @@ from aios.services import attenuation as attenuation_service
 from aios.services.wake import defer_run_wake
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
-# Vertical recursion bound: how deep a chain of runs (a run whose agent() child
-# launches a sub-run, and so on) may nest. Mirrors WAKE_SESSION_MAX_DEPTH — bounds
-# the strange loop the agent-acting builtins enable. Only the agent path threads a
-# parent_run_id, so the operator/HTTP path (parent_run_id=None) is never capped.
-WORKFLOW_RUN_MAX_DEPTH = 10
+# The single shared trusted-invocation depth budget (#1124): how many trusted
+# hops a chain of invocations (run→run sub-launches, run→session ``agent()``
+# children, and — once #1127/#1128 land their call sites — session→session and
+# api→session) may take before refusal. The DOWN-counter that replaces the
+# run-only ``parent_run_id`` ancestor walk (the deleted ``run_ancestor_depth``
+# CTE): every trusted edge carries ``parent.depth - 1`` and an edgeless root
+# (operator/HTTP ``POST /runs``, foreground session) seeds at the full budget.
+# The decrement IS the cycle bound — cycles (incl. session→session A↔B) bottom
+# out at the budget BY CONSTRUCTION, no wait-for-graph. The wake-side
+# ``WAKE_SESSION_MAX_DEPTH`` (#1083) is a separate carrier, left untouched here.
+INVOKE_MAX_DEPTH = 10
 
 
 class WorkflowRunDepthExceededError(AiosError):
-    """A ``create_run`` would nest deeper than ``WORKFLOW_RUN_MAX_DEPTH``."""
+    """A trusted invocation would nest past the shared depth budget (#1124).
+
+    Raised before the over-budget child run/edge is written — the model-visible
+    ``409`` refusal at every trusted-invocation hop (the ``error_type`` is kept
+    stable for clients across the run-only → edge-carried generalization).
+    """
 
     error_type = "workflow_run_depth_exceeded"
     status_code = 409
@@ -67,10 +78,13 @@ async def create_run(
     vaults bind as-is, account-scoped. Insert + bind are one transaction, so a breach
     or a bad vault leaves no run row; the wake fires only after commit.
 
-    ``parent_run_id`` records run lineage (an agent inside a run launching a sub-run)
-    and feeds the **vertical depth cap**: nesting past ``WORKFLOW_RUN_MAX_DEPTH`` raises
-    :class:`WorkflowRunDepthExceededError`. The operator/HTTP path passes none, so it is
-    a root run (never capped).
+    ``parent_run_id`` records run lineage (an agent inside a run launching a sub-run).
+    It also drives the **DOWN-counting trusted depth budget** (#1124): the new run
+    carries ``parent.depth - 1`` and the launch is **refused before any row is written**
+    when the parent run has no budget left — :class:`WorkflowRunDepthExceededError`. The
+    operator/HTTP path passes no parent, so it is an **edgeless root** seeded at the full
+    budget (``INVOKE_MAX_DEPTH``) — a chain launched off it still bottoms out at the
+    budget by construction.
 
     ``expected_version`` is the trigger ``workflow`` action's drift-assertion pin:
     when set, the workflow's CURRENT version must equal it or the launch raises
@@ -128,7 +142,14 @@ async def create_run(
             if launcher_surface is not None
             else surface_of(workflow)
         )
-        if parent_run_id is not None:
+        # The DOWN-counting trusted depth budget (#1124). An edgeless root
+        # (operator/HTTP ``POST /runs``, a trigger fire with no completing-run
+        # parent) seeds at the full budget; a nested launch reads the parent
+        # run's remaining budget off its row and refuses BEFORE writing the
+        # child when none is left, then carries ``parent.depth - 1``.
+        if parent_run_id is None:
+            child_depth = INVOKE_MAX_DEPTH
+        else:
             # ``parent_run_id`` is trusted same-account. Two callers set it: the
             # ``create_run`` builtin, threading the launcher session's own
             # ``parent_run_id`` (set by the run-spawn machinery to a same-account
@@ -136,18 +157,23 @@ async def create_run(
             # completing run's id (same-account by the completion matcher's
             # account-equality conjunct) or the owner session's own
             # ``parent_run_id`` — the same provenance as the builtin. The
-            # account-scoped ancestor walk relies on that — a foreign parent
-            # would resolve to depth 0 and read as a root. If a future path ever
-            # lets ``parent_run_id`` be caller-supplied, it must be
-            # account-validated here (like ``environment_id`` above).
-            parent_depth = await wf_queries.run_ancestor_depth(
+            # account-scoped read relies on that — a foreign/missing parent
+            # raises NotFoundError. If a future path ever lets ``parent_run_id``
+            # be caller-supplied, this same-account read is the gate (like
+            # ``environment_id`` above).
+            parent_depth = await wf_queries.get_run_depth(
                 conn, parent_run_id, account_id=account_id
             )
-            if parent_depth + 1 > WORKFLOW_RUN_MAX_DEPTH:
+            # Refuse-before-write: a parent with one (or zero) hop left cannot open
+            # another trusted edge — the child would be born at depth 0 with no way
+            # to bottom the chain out at the budget. The decrement IS the cycle
+            # bound; this is the only refusal, no wait-for-graph.
+            if parent_depth <= 1:
                 raise WorkflowRunDepthExceededError(
-                    f"run nesting would exceed depth {WORKFLOW_RUN_MAX_DEPTH}",
-                    detail={"max_depth": WORKFLOW_RUN_MAX_DEPTH, "parent_run_id": parent_run_id},
+                    f"trusted invocation would exceed depth budget {INVOKE_MAX_DEPTH}",
+                    detail={"max_depth": INVOKE_MAX_DEPTH, "parent_run_id": parent_run_id},
                 )
+            child_depth = parent_depth - 1
         if launcher_session_id is not None:
             held = set(
                 await get_session_vault_ids(conn, launcher_session_id, account_id=account_id)
@@ -201,6 +227,7 @@ async def create_run(
             http_servers=effective.http_servers,
             budget_usd=budget_usd,
             default_child_model=run_default_child_model,
+            depth=child_depth,
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)

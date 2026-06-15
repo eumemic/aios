@@ -134,6 +134,7 @@ async def _make_run(
             script=wf.script,
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             script_sha=hashlib.sha256(wf.script.encode("utf-8")).hexdigest(),
+            depth=10,
         )
         if vault_ids:
             await db_queries.workflows.set_run_vaults(

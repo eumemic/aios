@@ -7,7 +7,7 @@ directly, with every procrastinate defer patched out — the same surface
 - THE coalescing regression (§1.2): two completions of one watched workflow →
   exactly two carrier rows, two distinct-keyed dispatches, two launched runs.
 - parent_run_id threading on BOTH fire origins + the self-fire depth-cycle
-  termination at WORKFLOW_RUN_MAX_DEPTH.
+  termination at INVOKE_MAX_DEPTH.
 - consecutive_failures atomicity under concurrent event fires; auto-disable at
   exactly the threshold with ONE surfaced message.
 - the jsonb round-trip read-acceptance regression (numeric-expanded template
@@ -218,7 +218,7 @@ async def test_self_fire_cycle_terminates_at_depth_cap(
     trig_runtime: asyncpg.Pool[Any],
 ) -> None:
     """Obligation 1, the loop bound: a trigger watching the workflow its own
-    action launches terminates at WORKFLOW_RUN_MAX_DEPTH — the depth-11 fire
+    action launches terminates at INVOKE_MAX_DEPTH — the depth-11 fire
     errors BEFORE any run row exists, so no completion ever re-arms the chain."""
     pool = trig_runtime
     _, env, session = await seed_agent_env_session(pool, account_id=ACC, prefix="loop")
@@ -251,7 +251,7 @@ async def test_self_fire_cycle_terminates_at_depth_cap(
 
     async with pool.acquire() as conn:
         total_runs = await conn.fetchval("SELECT count(*) FROM wf_runs WHERE workflow_id = $1", w)
-    assert total_runs == service.WORKFLOW_RUN_MAX_DEPTH  # 10 — none past the cap
+    assert total_runs == service.INVOKE_MAX_DEPTH  # 10 — none past the budget
 
     rows = await _carrier_rows(pool, tid)
     assert len(rows) == 10  # one fire per completion

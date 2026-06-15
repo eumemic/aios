@@ -40,6 +40,7 @@ async def _seed_run(conn: asyncpg.Connection[Any], account_id: str, environment_
         script=wf.script,
         host_semantics_epoch=HOST_SEMANTICS_EPOCH,
         script_sha="deadbeef",
+        depth=10,
     )
     return run.id
 
