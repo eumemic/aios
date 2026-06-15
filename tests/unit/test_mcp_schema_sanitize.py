@@ -84,6 +84,40 @@ class TestSanitizer:
         assert "type" not in inner
         assert "anyOf" in inner
 
+    def test_preserves_property_literally_named_type(self) -> None:
+        # `type`/`anyOf`/`oneOf` are JSON Schema KEYWORDS, but inside a `properties`
+        # map they are property NAMES. A tool param literally named `type` must not
+        # be stripped just because a sibling param is named `anyOf`/`oneOf`: the
+        # union-strip targets the `type` KEYWORD (a str/list value), not a named
+        # sub-schema (a dict). aios sanitizes untrusted third-party MCP schemas, so a
+        # tool with a param named `type` (common) alongside one named `anyOf` would
+        # otherwise have its `type` param silently dropped — the model then sees a
+        # parameter with no schema and calls the tool wrong.
+        node = {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "description": "the kind"},
+                "anyOf": {"type": "integer"},
+            },
+        }
+        cleaned = sanitize_mcp_schema(node)
+        assert "type" in cleaned["properties"]
+        assert cleaned["properties"]["type"] == {"type": "string", "description": "the kind"}
+        assert "anyOf" in cleaned["properties"]
+
+    def test_preserves_param_named_type_when_keyword_type_is_a_list(self) -> None:
+        # The `type` keyword may be a list (`["string","null"]`); that form is still a
+        # keyword and IS stripped next to a union, but a param NAMED type (dict value)
+        # at the same map is preserved.
+        node = {
+            "properties": {
+                "type": {"type": ["string", "null"]},
+                "oneOf": {"type": "boolean"},
+            },
+        }
+        cleaned = sanitize_mcp_schema(node)
+        assert "type" in cleaned["properties"]
+
     def test_returns_non_dict_unchanged(self) -> None:
         assert sanitize_mcp_schema("string") == "string"
         assert sanitize_mcp_schema(42) == 42
