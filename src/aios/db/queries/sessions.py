@@ -316,6 +316,53 @@ async def get_session_workflow_context(
     return (row["account_id"], row["parent_run_id"]) if row is not None else None
 
 
+async def get_wake_priority_context(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> tuple[str, bool] | None:
+    """``(account_id, is_background)`` for a session's wake priority, or ``None``.
+
+    The single source of truth for :func:`aios.services.wake.defer_wake`'s
+    foreground/background demotion. Re-keys the demotion off the **triggering
+    edge's up-link** (#1123's ``request_opened`` ``caller``) rather than the
+    run-only ``parent_run_id`` column, so every caller kind (api/session/run)
+    demotes uniformly when its ancestor is background:
+
+    - ``caller.kind = 'run'`` → background (a workflow run is always background;
+      this preserves the legacy ``parent_run_id`` run path behavior-for-behavior).
+    - ``caller.kind = 'session'`` → background iff the caller session is itself
+      background-rooted (``origin = 'background'``); a foreground/user-rooted
+      session-invoke stays foreground.
+    - ``caller.kind = 'api'`` → foreground.
+    - no ``request_opened`` edge (an ordinary root / fg-user session) → foreground.
+
+    Returns the **oldest open** edge's background fact: v1 injects one request per
+    child, so this is the single edge. A ``None`` result is the deleted-session
+    race — :func:`defer_wake` maps it to the foreground default, then the wake
+    no-ops harmlessly. Unscoped (internal/trusted), mirroring
+    :func:`get_session_workflow_context`.
+    """
+    row = await conn.fetchrow(
+        "SELECT s.account_id, "
+        "  COALESCE(("
+        "    SELECT CASE req.data->'caller'->>'kind' "
+        "      WHEN 'run' THEN TRUE "
+        "      WHEN 'session' THEN ("
+        "        SELECT caller_s.origin = 'background' "
+        "        FROM sessions caller_s "
+        "        WHERE caller_s.id = req.data->'caller'->>'id') "
+        "      ELSE FALSE "
+        "    END "
+        "    FROM events req "
+        "    WHERE req.session_id = s.id AND req.account_id = s.account_id "
+        "    AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+        "    ORDER BY req.seq ASC LIMIT 1"
+        "  ), FALSE) AS is_background "
+        "FROM sessions s WHERE s.id = $1",
+        session_id,
+    )
+    return (row["account_id"], bool(row["is_background"])) if row is not None else None
+
+
 async def read_request_response(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
 ) -> dict[str, Any] | None:

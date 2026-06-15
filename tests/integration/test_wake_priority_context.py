@@ -1,0 +1,168 @@
+"""Integration tests for ``get_wake_priority_context`` (#1125).
+
+The DB-backed half of the wake-priority re-key: ``defer_wake`` derives its
+foreground/background demotion per-stimulus from the **triggering edge's
+up-link** (#1123's ``request_opened`` ``caller``) rather than the run-only
+``parent_run_id`` column, so every caller kind (api/session/run) demotes
+uniformly when its ancestor is background.
+
+Exercises ``get_wake_priority_context`` against real session + event rows for
+each caller kind; the unit tier (``tests/unit/test_wake_priority.py``) covers
+the ``defer_wake`` priority wiring with the query mocked.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Any
+
+import asyncpg
+import pytest
+
+from aios.db import queries
+from aios.db.pool import create_pool
+from tests.integration.conftest import seed_agent_env_session
+
+pytestmark = pytest.mark.integration
+
+_ACCOUNT = "acc_wake_priority"
+
+
+@pytest.fixture
+async def pool_env(
+    migrated_db_url: str, _reset_db_state: None
+) -> AsyncIterator[tuple[asyncpg.Pool[Any], str, str, str]]:
+    """Yield ``(pool, account_id, agent_id, environment_id)`` for a fresh tenant."""
+    pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+                "VALUES ($1, NULL, TRUE, 'wake-priority-test')",
+                _ACCOUNT,
+            )
+        agent, env, _session = await seed_agent_env_session(
+            pool, account_id=_ACCOUNT, prefix="wake-priority"
+        )
+        yield pool, _ACCOUNT, agent.id, env.id
+    finally:
+        await pool.close()
+
+
+async def _open_edge(
+    pool: asyncpg.Pool[Any], *, session_id: str, request_id: str, caller: dict[str, Any]
+) -> None:
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.append_request_opened(
+            conn,
+            session_id=session_id,
+            account_id=_ACCOUNT,
+            request_id=request_id,
+            caller=caller,
+            depth=0,
+            environment_id="env_x",
+            frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+            vault_ids=[],
+        )
+
+
+async def _insert_session(
+    pool: asyncpg.Pool[Any], *, agent_id: str, environment_id: str, origin: str
+) -> str:
+    """Insert a bare session with a chosen ``origin``, return its id."""
+    async with pool.acquire() as conn:
+        session = await queries.insert_session(
+            conn,
+            account_id=_ACCOUNT,
+            agent_id=agent_id,
+            environment_id=environment_id,
+            agent_version=1,
+            title=None,
+            metadata={},
+        )
+        await conn.execute("UPDATE sessions SET origin = $2 WHERE id = $1", session.id, origin)
+    return session.id
+
+
+async def test_no_edge_is_foreground(pool_env: tuple[asyncpg.Pool[Any], str, str, str]) -> None:
+    """An ordinary root / fg-user session (no ``request_opened`` edge) → foreground."""
+    pool, _account, agent_id, env_id = pool_env
+    sid = await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="foreground")
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, sid)
+    assert ctx is not None and ctx[1] is False
+
+
+async def test_run_caller_is_background(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A run-launched request-serving child (``caller.kind='run'``) → background
+    (the legacy ``parent_run_id`` run path, behavior-preserved)."""
+    pool, _account, agent_id, env_id = pool_env
+    sid = await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="background")
+    await _open_edge(
+        pool, session_id=sid, request_id="req_run", caller={"kind": "run", "id": "wfr_1"}
+    )
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, sid)
+    assert ctx is not None and ctx[1] is True
+
+
+async def test_session_caller_background_root_is_background(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A session-launched child whose caller session is itself background-rooted
+    (``origin='background'``) → background (the new behavior #1125 unlocks)."""
+    pool, _account, agent_id, env_id = pool_env
+    caller_sid = await _insert_session(
+        pool, agent_id=agent_id, environment_id=env_id, origin="background"
+    )
+    sid = await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="background")
+    await _open_edge(
+        pool, session_id=sid, request_id="req_s", caller={"kind": "session", "id": caller_sid}
+    )
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, sid)
+    assert ctx is not None and ctx[1] is True
+
+
+async def test_session_caller_foreground_root_is_foreground(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A session-launched child whose caller session is foreground-rooted stays
+    foreground — a fg-user session-invoke must not demote."""
+    pool, _account, agent_id, env_id = pool_env
+    caller_sid = await _insert_session(
+        pool, agent_id=agent_id, environment_id=env_id, origin="foreground"
+    )
+    sid = await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="background")
+    await _open_edge(
+        pool, session_id=sid, request_id="req_s2", caller={"kind": "session", "id": caller_sid}
+    )
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, sid)
+    assert ctx is not None and ctx[1] is False
+
+
+async def test_api_caller_is_foreground(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """An api-launched (direct user) request-serving session → foreground."""
+    pool, _account, agent_id, env_id = pool_env
+    sid = await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="foreground")
+    await _open_edge(
+        pool, session_id=sid, request_id="req_api", caller={"kind": "api", "id": "k_1"}
+    )
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, sid)
+    assert ctx is not None and ctx[1] is False
+
+
+async def test_missing_session_is_none(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """Deleted-session race: a vanished row → ``None`` (the foreground fall-through)."""
+    pool, _account, _agent_id, _env_id = pool_env
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, "ses_does_not_exist")
+    assert ctx is None

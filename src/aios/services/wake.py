@@ -60,17 +60,20 @@ async def defer_wake(
     """
     from aios.harness.procrastinate_app import app
 
-    # Foreground protection: a workflow agent() child yields to user-facing sessions so a
-    # fan-out can't starve a user's message. The signal is a non-null parent_run_id — set
-    # (together with origin='background') only by create_child_session — read here from the
-    # session's immutable row, so every wake of the child (first spawn, each tool-completion,
-    # the sweep) is demoted uniformly at this single chokepoint, with no caller plumbing. A
-    # missing row (deleted-session race) → foreground default; the wake then no-ops harmlessly.
-    # Resolved before the span/enqueue so it isn't a new failure point between them.
+    # Foreground protection: a request-serving descendant yields to user-facing sessions so a
+    # fan-out can't starve a user's message. The signal is derived per-stimulus from the
+    # triggering edge's up-link — #1123's ``request_opened`` ``caller`` — so every caller kind
+    # (api/session/run) demotes uniformly when its ancestor is background, not just the run path:
+    # a run-launched child stays background (behavior-preserved), a background-rooted session
+    # invoke demotes too, and a root / fg-user session stays foreground. Read here at this single
+    # chokepoint, so every wake of the descendant (first spawn, each tool-completion, the sweep)
+    # is demoted uniformly with no caller plumbing. A missing row (deleted-session race) →
+    # foreground default; the wake then no-ops harmlessly. Resolved before the span/enqueue so
+    # it isn't a new failure point between them.
     async with pool.acquire() as conn:
-        ctx = await queries.get_session_workflow_context(conn, session_id)
-    parent_run_id = ctx[1] if ctx is not None else None  # (account_id, parent_run_id) | None
-    priority = _BACKGROUND_PRIORITY if parent_run_id is not None else _FOREGROUND_PRIORITY
+        ctx = await queries.get_wake_priority_context(conn, session_id)
+    is_background = ctx[1] if ctx is not None else False  # (account_id, is_background) | None
+    priority = _BACKGROUND_PRIORITY if is_background else _FOREGROUND_PRIORITY
 
     span_data: dict[str, Any] = {"event": "wake_deferred", "cause": cause}
     if delay_seconds is not None:
