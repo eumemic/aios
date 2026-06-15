@@ -221,6 +221,10 @@ async def await_run(
     after ``timeout`` seconds returns ``done=false`` with its current status; call again to keep
     blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
     tool — an agent can await a sub-run and join. A cross-tenant run 404s.
+
+    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
+    response has NO ``state`` field, so a watcher keying on ``.state`` reads
+    ``None`` forever even after ``output`` is populated.
     """
     return await service.await_run(
         pool, db_url, run_id, account_id=account_id, timeout_seconds=timeout_seconds
@@ -236,7 +240,16 @@ async def list_run_events(
     limit: Annotated[int | None, Query(ge=1, le=500)] = None,
 ) -> ListResponse[WfRunEvent]:
     """A run's journal by sequence (oldest first). First page: optional ``limit``;
-    subsequent pages: ``?cursor=<next_cursor>``."""
+    subsequent pages: ``?cursor=<next_cursor>``.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a "run reset" — it
+    only means no journal rows past this ``seq`` yet. Page by ``seq`` and treat
+    an empty page as "nothing new yet."
+
+    Schema (#1140): each item is a *run* event ``{type, payload, seq}`` — a
+    DIFFERENT shape from a child-*session* event (``{kind, data}`` on
+    ``/v1/sessions/{id}/events``). See ``docs/reference/run-observability.md``.
+    """
     # Scope check: 404 a cross-tenant run id before reading its journal.
     await service.get_run(pool, run_id, account_id=account_id)
     st = page_cursor(cursor, {"limit": limit})

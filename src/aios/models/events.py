@@ -14,6 +14,13 @@ over-validate at the boundary. Per-kind shapes are documented but not
 enforced via pydantic discriminated unions, because the message kind in
 particular has to round-trip arbitrary LiteLLM extensions without rejecting
 them.
+
+Schema note (#1140): a (child-)*session* event is ``{kind, data}`` (this
+model). A *run* event is the DIFFERENT shape ``{type, payload, seq}`` (see
+``aios.models.workflows.WfRunEvent``). Consumers watching both surfaces must
+not assume a single schema; ``docs/reference/run-observability.md`` documents
+the split (and, for ``kind == "message"``, the ``data.role`` ∈
+user/assistant/tool axis).
 """
 
 from __future__ import annotations
@@ -37,7 +44,13 @@ MODEL_VISIBLE_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
 
 
 class Event(BaseModel):
-    """Read view of a single event from the session log."""
+    """Read view of a single event from the session log.
+
+    Schema (#1140): a session event is ``{kind, data, seq}`` — a DIFFERENT
+    shape from a *run* event (``{type, payload, seq}``, see
+    ``aios.models.workflows.WfRunEvent``). See module docstring and
+    ``docs/reference/run-observability.md`` for the split.
+    """
 
     id: str
     session_id: str

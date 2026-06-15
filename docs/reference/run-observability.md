@@ -1,0 +1,106 @@
+# Run & session observability: polling contract and event schemas
+
+Reference for anyone watching a run or session from the outside — an operator
+tailing with `aios`, an SDK consumer, or an agent awaiting a sub-run as an MCP
+tool. It pins down three contracts surfaced by the #1068 dogfood (#1140).
+
+## (a) Terminal state is `status` / `done`, never `state`
+
+A run's lifecycle field is **`status`**. There is **no `state` field** anywhere
+on a run row (`WfRun`) or on the `/wait` response (`WfRunWaitResponse`).
+
+A watcher that keys on `.state` reads `None` forever — even after `output` is
+already populated — because the field simply does not exist in the JSON. This is
+exactly the #1068 symptom: `GET /v1/runs/{id}/wait` "returned `state:None` while
+`output` was already populated."
+
+What to poll:
+
+| Surface | Field to poll | Terminal when |
+| --- | --- | --- |
+| `GET /v1/runs/{id}` (`WfRun`) | `status` | `status ∈ {completed, errored, cancelled}` |
+| `GET /v1/runs/{id}/wait` (`WfRunWaitResponse`) | `done` (bool) — or `run_status` | `done == true` (i.e. `run_status` terminal) |
+
+`/wait` is the await-a-completion primitive: it blocks until the run is terminal
+or `timeout` seconds elapse. On timeout it returns `done=false` with the live
+`run_status`; call again to keep blocking. The completion payload is
+`{done, output}` (success) or `{is_error, error}` (failure). `run_status`
+deliberately mirrors the run row's `status`; the response carries no `state`.
+
+> Sessions, by contrast, expose `status` (`SessionStatus`) and are not
+> persisted the way runs are — but the same rule holds: poll `status`, there is
+> no `state`.
+
+## (b) An empty event page is not a "session/run reset"
+
+`GET /v1/sessions/{id}/events` and `GET /v1/runs/{id}/events` can return an
+empty `items` list **transiently** — notably on back-to-back polls under load,
+which then recover on the next read. An empty page only means *no events match
+this page right now*; it is **never** a signal that the log was cleared or the
+session/run was reset.
+
+Causes of a legitimately-empty page:
+
+- A forward read whose `after_seq` is already at (or past) the current tail —
+  i.e. "nothing new yet."
+- Back-to-back polls racing the writer: the second read can momentarily observe
+  no new rows before the next event commits and notifies.
+- A filtered read (`?kind=`, `?error_only=`) with no matching rows in this
+  window.
+
+Correct consumer behavior: **page by `seq`** (carry the last `seq` you saw and
+read forward from it), and treat an empty page as "poll again," not as a reset.
+Do not infer log truncation, session loss, or run cancellation from emptiness —
+those are reported by `status` (see (a)), never by an empty list. For push-based
+consumption prefer the SSE `/stream` endpoint, which is backed by Postgres
+`LISTEN`/`NOTIFY`.
+
+## (c) Two event schemas coexist — don't assume one shape
+
+Run events and session events are **different shapes**. A consumer that watches
+both surfaces must branch on which endpoint produced the event.
+
+### Run events — `{type, payload, seq}`
+
+`GET /v1/runs/{id}/events` returns `WfRunEvent` rows (the run's append-only
+journal):
+
+```json
+{ "type": "run_started | call_started | call_result | annotation | run_completed",
+  "payload": { "...": "..." },
+  "seq": 1 }
+```
+
+`type` is the run journal's frame type. An `annotation` payload is a journaled
+progress marker, `{"kind": "log" | "phase", "text": ...}` — note this inner
+`kind` is *not* the session-event `kind` below.
+
+### Session events — `{kind, data}`
+
+`GET /v1/sessions/{id}/events` returns `Event` rows (the session log). These are
+the **child-session** events produced when a run spawns agent sessions:
+
+```json
+{ "kind": "message | lifecycle | span | interrupt",
+  "data": { "...": "..." },
+  "seq": 1 }
+```
+
+- `kind == "span"` — observability markers around model/tool calls.
+- `kind == "lifecycle"` — session state transitions (turn started/ended, status
+  changes, stop_reason).
+- `kind == "message"` — a chat-completions message dict; `data.role` ∈
+  `user | assistant | tool`.
+
+### At a glance
+
+| | Run event | Session event |
+| --- | --- | --- |
+| Endpoint | `/v1/runs/{id}/events` | `/v1/sessions/{id}/events` |
+| Model | `WfRunEvent` | `Event` |
+| Discriminator | `type` | `kind` |
+| Payload field | `payload` | `data` |
+| Values | run_started / call_started / call_result / annotation / run_completed | message / lifecycle / span / interrupt |
+
+Source of truth: `aios.models.workflows.WfRunEvent` and
+`aios.models.events.Event`.

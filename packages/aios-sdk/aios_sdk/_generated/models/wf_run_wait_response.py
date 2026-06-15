@@ -28,11 +28,15 @@ class WfRunWaitResponse:
     keep blocking.
 
         Attributes:
-            run_status (WfRunWaitResponseRunStatus):
-            done (bool):
-            output (Any | Unset):
-            is_error (bool | Unset):  Default: False.
-            error (None | Unset | WfRunWaitResponseErrorType0):
+            run_status (WfRunWaitResponseRunStatus): The run's terminal-or-current lifecycle status (the run row's `status`
+                field). This is the field to poll — there is no `state` field. Terminal values:
+                `completed`/`errored`/`cancelled`.
+            done (bool): True once `run_status` is terminal (completed/errored/cancelled). Poll `done` (or `run_status`);
+                there is no `state` field on this response (#1140).
+            output (Any | Unset): The run's return value, set when `done` and not `is_error`; None otherwise.
+            is_error (bool | Unset): True when run_status == errored. Default: False.
+            error (None | Unset | WfRunWaitResponseErrorType0): On is_error, the run_completed event's
+                {kind,message,traceback}; None otherwise.
     """
 
     run_status: WfRunWaitResponseRunStatus

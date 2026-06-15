@@ -22,17 +22,22 @@ T = TypeVar("T", bound="Event")
 class Event:
     """Read view of a single event from the session log.
 
-    Attributes:
-        id (str):
-        session_id (str):
-        seq (int):
-        kind (EventKind):
-        data (EventData):
-        created_at (datetime.datetime):
-        cumulative_tokens (int | None | Unset):
-        orig_channel (None | str | Unset):
-        focal_channel_at_arrival (None | str | Unset):
-        channel (None | str | Unset):
+    Schema (#1140): a session event is ``{kind, data, seq}`` — a DIFFERENT
+    shape from a *run* event (``{type, payload, seq}``, see
+    ``aios.models.workflows.WfRunEvent``). See module docstring and
+    ``docs/reference/run-observability.md`` for the split.
+
+        Attributes:
+            id (str):
+            session_id (str):
+            seq (int):
+            kind (EventKind):
+            data (EventData):
+            created_at (datetime.datetime):
+            cumulative_tokens (int | None | Unset):
+            orig_channel (None | str | Unset):
+            focal_channel_at_arrival (None | str | Unset):
+            channel (None | str | Unset):
     """
 
     id: str

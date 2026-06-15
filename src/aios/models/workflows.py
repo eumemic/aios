@@ -70,6 +70,11 @@ class WfRun(BaseModel):
     ``update_workflow`` never shifts an in-flight run's authority.
     ``status`` is persisted (unlike sessions): the run loop writes
     ``suspended``/``completed``/``errored``.
+
+    NB (#1140): the run's lifecycle field is ``status`` — there is no ``state``
+    field on a run. A watcher polling ``.state`` reads ``None`` forever even
+    though ``output`` is already populated; poll ``status`` (terminal values:
+    ``completed``/``errored``/``cancelled``).
     """
 
     id: str
@@ -90,7 +95,13 @@ class WfRun(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
-    status: WfRunStatus
+    status: WfRunStatus = Field(
+        description=(
+            "The run's lifecycle status — the ONLY lifecycle field on a run "
+            "(there is no `state` field; a watcher keying on `.state` waits "
+            "forever). Terminal values: `completed`/`errored`/`cancelled`."
+        )
+    )
     input: Any = None  # arbitrary JSON: a workflow's input need not be an object
     output: Any = None  # arbitrary JSON: the script's return value
     budget_usd: float | None = None
@@ -109,6 +120,11 @@ class WfRunEvent(BaseModel):
     emit-once across replays); it is ``None`` for the ``run_started``/``run_completed``
     bookends. An ``annotation`` is a journaled progress marker (``payload`` =
     ``{"kind": "log" | "phase", "text": ...}``), not a capability call.
+
+    Schema note (#1140): a *run* event is ``{type, payload, seq}``. This is a
+    DIFFERENT shape from a child-*session* event (``{kind, data}`` — see
+    ``aios.models.events.Event``). Don't assume one schema across both
+    endpoints; ``docs/reference/run-observability.md`` documents the split.
     """
 
     id: str
@@ -145,11 +161,29 @@ class WfRunWaitResponse(BaseModel):
     keep blocking.
     """
 
-    run_status: WfRunStatus
-    done: bool  # run_status in TERMINAL_RUN_STATUSES (completed/errored/cancelled)
-    output: Any = None  # the run's return value (on completed; None otherwise)
-    is_error: bool = False  # run_status == errored
-    error: dict[str, Any] | None = None  # the run_completed event's {kind,message,traceback}
+    run_status: WfRunStatus = Field(
+        description=(
+            "The run's terminal-or-current lifecycle status (the run row's "
+            "`status` field). This is the field to poll — there is no `state` "
+            "field. Terminal values: `completed`/`errored`/`cancelled`."
+        )
+    )
+    done: bool = Field(
+        description=(
+            "True once `run_status` is terminal "
+            "(completed/errored/cancelled). Poll `done` (or `run_status`); "
+            "there is no `state` field on this response (#1140)."
+        )
+    )
+    output: Any = Field(
+        default=None,
+        description="The run's return value, set when `done` and not `is_error`; None otherwise.",
+    )
+    is_error: bool = Field(default=False, description="True when run_status == errored.")
+    error: dict[str, Any] | None = Field(
+        default=None,
+        description="On is_error, the run_completed event's {kind,message,traceback}; None otherwise.",
+    )
 
 
 # ─── request models (the public HTTP surface) ────────────────────────────────

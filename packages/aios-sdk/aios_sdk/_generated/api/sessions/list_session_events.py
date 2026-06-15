@@ -120,7 +120,7 @@ def sync_detailed(
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
-    """List Events
+    r"""List Events
 
      List a session's events by sequence number.
 
@@ -129,6 +129,16 @@ def sync_detailed(
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
+    — it only means no events match this page (e.g. a forward read past the
+    current tail, or back-to-back polls racing the writer under load). Page by
+    ``seq`` and treat an empty page as \"nothing new yet,\" not as a cleared log.
+
+    Schema (#1140): each item is a session event ``{kind, data, seq}``
+    (``kind`` ∈ message/lifecycle/span/interrupt) — a DIFFERENT shape from a
+    *run* event (``{type, payload, seq}`` on ``/v1/runs/{id}/events``). See
+    ``docs/reference/run-observability.md``.
 
     Args:
         session_id (str):
@@ -175,7 +185,7 @@ def sync(
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
-    """List Events
+    r"""List Events
 
      List a session's events by sequence number.
 
@@ -184,6 +194,16 @@ def sync(
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
+    — it only means no events match this page (e.g. a forward read past the
+    current tail, or back-to-back polls racing the writer under load). Page by
+    ``seq`` and treat an empty page as \"nothing new yet,\" not as a cleared log.
+
+    Schema (#1140): each item is a session event ``{kind, data, seq}``
+    (``kind`` ∈ message/lifecycle/span/interrupt) — a DIFFERENT shape from a
+    *run* event (``{type, payload, seq}`` on ``/v1/runs/{id}/events``). See
+    ``docs/reference/run-observability.md``.
 
     Args:
         session_id (str):
@@ -225,7 +245,7 @@ async def asyncio_detailed(
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
-    """List Events
+    r"""List Events
 
      List a session's events by sequence number.
 
@@ -234,6 +254,16 @@ async def asyncio_detailed(
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
+    — it only means no events match this page (e.g. a forward read past the
+    current tail, or back-to-back polls racing the writer under load). Page by
+    ``seq`` and treat an empty page as \"nothing new yet,\" not as a cleared log.
+
+    Schema (#1140): each item is a session event ``{kind, data, seq}``
+    (``kind`` ∈ message/lifecycle/span/interrupt) — a DIFFERENT shape from a
+    *run* event (``{type, payload, seq}`` on ``/v1/runs/{id}/events``). See
+    ``docs/reference/run-observability.md``.
 
     Args:
         session_id (str):
@@ -278,7 +308,7 @@ async def asyncio(
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
-    """List Events
+    r"""List Events
 
      List a session's events by sequence number.
 
@@ -287,6 +317,16 @@ async def asyncio(
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
+    — it only means no events match this page (e.g. a forward read past the
+    current tail, or back-to-back polls racing the writer under load). Page by
+    ``seq`` and treat an empty page as \"nothing new yet,\" not as a cleared log.
+
+    Schema (#1140): each item is a session event ``{kind, data, seq}``
+    (``kind`` ∈ message/lifecycle/span/interrupt) — a DIFFERENT shape from a
+    *run* event (``{type, payload, seq}`` on ``/v1/runs/{id}/events``). See
+    ``docs/reference/run-observability.md``.
 
     Args:
         session_id (str):

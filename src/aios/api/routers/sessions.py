@@ -638,6 +638,16 @@ async def list_events(
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Transient-empty (#1140): an empty ``items`` list is NOT a "session reset"
+    — it only means no events match this page (e.g. a forward read past the
+    current tail, or back-to-back polls racing the writer under load). Page by
+    ``seq`` and treat an empty page as "nothing new yet," not as a cleared log.
+
+    Schema (#1140): each item is a session event ``{kind, data, seq}``
+    (``kind`` ∈ message/lifecycle/span/interrupt) — a DIFFERENT shape from a
+    *run* event (``{type, payload, seq}`` on ``/v1/runs/{id}/events``). See
+    ``docs/reference/run-observability.md``.
     """
     # Scope check: 404 cross-tenant probes before reading events. read_events
     # also filters by account_id, so the lookup yields a clean 404 rather than

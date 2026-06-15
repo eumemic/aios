@@ -86,6 +86,10 @@ def sync_detailed(
     blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
     tool — an agent can await a sub-run and join. A cross-tenant run 404s.
 
+    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
+    response has NO ``state`` field, so a watcher keying on ``.state`` reads
+    ``None`` forever even after ``output`` is populated.
+
     Args:
         run_id (str):
         timeout (int | Unset):  Default: 30.
@@ -129,6 +133,10 @@ def sync(
     blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
     tool — an agent can await a sub-run and join. A cross-tenant run 404s.
 
+    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
+    response has NO ``state`` field, so a watcher keying on ``.state`` reads
+    ``None`` forever even after ``output`` is populated.
+
     Args:
         run_id (str):
         timeout (int | Unset):  Default: 30.
@@ -166,6 +174,10 @@ async def asyncio_detailed(
     after ``timeout`` seconds returns ``done=false`` with its current status; call again to keep
     blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
     tool — an agent can await a sub-run and join. A cross-tenant run 404s.
+
+    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
+    response has NO ``state`` field, so a watcher keying on ``.state`` reads
+    ``None`` forever even after ``output`` is populated.
 
     Args:
         run_id (str):
@@ -207,6 +219,10 @@ async def asyncio(
     after ``timeout`` seconds returns ``done=false`` with its current status; call again to keep
     blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
     tool — an agent can await a sub-run and join. A cross-tenant run 404s.
+
+    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
+    response has NO ``state`` field, so a watcher keying on ``.state`` reads
+    ``None`` forever even after ``output`` is populated.
 
     Args:
         run_id (str):
