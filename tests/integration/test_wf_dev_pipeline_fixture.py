@@ -669,6 +669,11 @@ async def test_retry_count_at_budget_dead_letters() -> None:
     assert phases == []  # dead-lettered before even the ingest phase
     assert scn.tasks == []  # no spend
     assert "autodev:failed" in scn.labels_added
+    # item 3 (never a silent zombie): a prior attempt left autodev:in-progress; the
+    # dead-letter terminal must DROP it (replace with autodev:failed), exactly like _fail
+    # does on every other terminal failure — otherwise the issue is stuck both in-progress
+    # AND failed, perpetually claimed and never re-dispatchable.
+    assert "autodev:in-progress" in scn.labels_removed
 
 
 # ─── trigger envelope ─────────────────────────────────────────────────────────
