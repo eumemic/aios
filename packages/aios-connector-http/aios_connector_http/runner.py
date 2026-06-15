@@ -101,6 +101,7 @@ ToolFn = Callable[..., Awaitable[Any]]
 log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
 _TOOL_ATTR = "__aios_http_tool__"
+_TOOL_FAF_ATTR = "__aios_http_tool_fire_and_forget__"
 _MGMT_ATTR = "__aios_http_management__"
 
 
@@ -134,6 +135,7 @@ def _is_fatal_inbound_status(status_code: int) -> bool:
 def tool(
     *,
     name: str | None = None,
+    fire_and_forget: bool = False,
 ) -> Callable[[ToolFn], ToolFn]:
     """Decorate a method as a connector tool.
 
@@ -145,10 +147,22 @@ def tool(
     The runner publishes a derived JSON Schema for every ``@tool`` once
     at startup via ``PUT /v1/connectors/{connector}/tools_schema``;
     individual connections inherit it from the type catalog.
+
+    ``fire_and_forget`` declares the tool's result a *delivery
+    confirmation* the model has nothing to react to — a message send or
+    reaction whose only output is a ``{"sent_at_ms": N}`` ack.  A
+    *successful* result for such a tool is POSTed with ``no_reaction=true``
+    so aios appends it to the log (the model still sees it) but does NOT
+    wake the session to react to its own send (the duplicate-send loop).
+    A *failed* result always wakes regardless — the runner only sets
+    ``no_reaction`` on the post-success path.  Leave it ``False`` for
+    list/create/get/edit/delete tools whose results carry data the model
+    must consume.
     """
 
     def _wrap(f: ToolFn) -> ToolFn:
         setattr(f, _TOOL_ATTR, name or f.__name__)
+        setattr(f, _TOOL_FAF_ATTR, fire_and_forget)
         return f
 
     return _wrap
@@ -161,6 +175,7 @@ class _ToolMeta:
     fn: ToolFn
     focal_params: frozenset[str]
     sandbox_params: tuple[tuple[str, str], ...]  # (param_name, "scalar" | "list")
+    fire_and_forget: bool = False
 
 
 def management_handler(
@@ -913,12 +928,18 @@ class HttpConnector:
             return
         if not isinstance(result, str | list):
             result = json.dumps(result)
+        # Post-success path only: a fire-and-forget tool's successful result
+        # is a delivery ack the model has nothing to react to, so flag it
+        # ``no_reaction`` to keep aios from waking the session to react to its
+        # own send (the duplicate-send loop).  The error branches above NEVER
+        # set this — a failed send always wakes.
         await self._post_tool_result(
             client,
             connection_id=connection_id,
             session_id=session_id,
             tool_call_id=tool_call_id,
             content=result,
+            no_reaction=meta.fire_and_forget,
         )
         log.info(
             "connector.tool_call.completed",
@@ -1084,8 +1105,14 @@ class HttpConnector:
         tool_call_id: str,
         content: str | list[dict[str, Any]],
         is_error: bool = False,
+        no_reaction: bool = False,
     ) -> None:
-        """POST one tool result via the generated runtime op."""
+        """POST one tool result via the generated runtime op.
+
+        ``no_reaction`` marks a successful fire-and-forget result so the
+        intake appends it without waking the session to react.  Only the
+        post-success caller sets it; the error callers leave it False.
+        """
         # The generated model's list branch is typed as
         # ``list[RuntimeToolResultRequestContentType1Item]``; that item type is
         # a thin ``additional_properties`` bag whose ``from_dict``/``to_dict``
@@ -1102,6 +1129,7 @@ class HttpConnector:
             tool_call_id=tool_call_id,
             content=body_content,
             is_error=is_error,
+            no_reaction=no_reaction,
         )
         response = await _post_runtime_tool_result(client=client, body=body)
         if response.status_code >= 400:
@@ -1157,7 +1185,13 @@ def _build_tool_meta(fn: ToolFn) -> _ToolMeta:
         kind = _sandbox_path_kind(hint)
         if kind is not None:
             sandbox.append((param_name, kind))
-    return _ToolMeta(fn=fn, focal_params=focal, sandbox_params=tuple(sandbox))
+    fire_and_forget = bool(getattr(fn, _TOOL_FAF_ATTR, False))
+    return _ToolMeta(
+        fn=fn,
+        focal_params=focal,
+        sandbox_params=tuple(sandbox),
+        fire_and_forget=fire_and_forget,
+    )
 
 
 class SandboxPathError(ValueError):

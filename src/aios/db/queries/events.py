@@ -752,7 +752,16 @@ async def append_event(
     # the active predicate. This is deliberately broader than ``is_user_message``
     # (the error latch) — an unreacted tool result keeps the session active, but
     # must NOT clear an error. See ``_SESSION_ACTIVE_EXPR``.
-    is_stimulus = kind == "message" and role != "assistant"
+    #
+    # A fire-and-forget tool result (``data['no_reaction'] == True``, stamped by
+    # ``append_tool_result`` for a connector that declared the tool
+    # fire-and-forget) is a delivery confirmation the model has nothing to react
+    # to — it is NOT a stimulus, so it must not bump ``last_stimulus_seq`` and
+    # make the session a wake candidate (the duplicate-send loop). The result is
+    # still appended (the model sees it); only the wake decision excludes it.
+    # ``data.get`` is missing → falsy on every historical/unmarked result, so
+    # those keep counting as stimulus exactly as before (backward-compat).
+    is_stimulus = kind == "message" and role != "assistant" and not data.get("no_reaction")
     is_error_lifecycle = kind == "lifecycle" and data.get("stop_reason") == "error"
     is_assistant_message = kind == "message" and role == "assistant"
     tool_call_count_delta = (

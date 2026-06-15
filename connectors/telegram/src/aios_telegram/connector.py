@@ -389,7 +389,7 @@ class TelegramConnector(HttpConnector):
 
     # ── model-facing tools ────────────────────────────────────────────
 
-    @tool()
+    @tool(fire_and_forget=True)
     async def telegram_send(
         self,
         text: str,
@@ -498,7 +498,7 @@ class TelegramConnector(HttpConnector):
             "chat_type": _chat_kind(sent_group[0].chat.type),
         }
 
-    @tool()
+    @tool(fire_and_forget=True)
     async def telegram_typing(
         self,
         action: Literal[
@@ -589,7 +589,7 @@ class TelegramConnector(HttpConnector):
         await state.application.bot.delete_message(chat_id=chat_id_int, message_id=message_id)
         return {"status": "ok"}
 
-    @tool()
+    @tool(fire_and_forget=True)
     async def telegram_react(
         self,
         message_id: int,
