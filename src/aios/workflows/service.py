@@ -57,6 +57,10 @@ async def create_run(
     vault_ids: list[str] | None = None,
     launcher_session_id: str | None = None,
     parent_run_id: str | None = None,
+    run_id: str | None = None,
+    request_id: str | None = None,
+    caller: dict[str, Any] | None = None,
+    request_output_schema: dict[str, Any] | None = None,
     expected_version: int | None = None,
     budget_usd: float | None = None,
     default_child_model: str | None = None,
@@ -112,6 +116,18 @@ async def create_run(
     launcher_surface: Surface | None = None
     run_default_child_model = default_child_model or get_settings().workflow_default_child_model
     async with pool.acquire() as conn, conn.transaction():
+        # Idempotent re-attach (#1129): a deterministic ``run_id`` is the
+        # ``invoke_workflow`` sub-run spawn's replay key. A crash between this
+        # insert and the parent's ``call_started`` journal write re-drives the
+        # spawn; recomputing the same id and finding the existing row must
+        # re-attach (return it) rather than re-validate/re-insert (which would
+        # both double-count fan-out and ``insert_wf_run``'s ``ON CONFLICT DO
+        # NOTHING`` would return None). The operator/HTTP/agent ``create_run``
+        # paths pass no ``run_id`` and always mint a fresh one.
+        if run_id is not None:
+            existing = await wf_queries.get_run_for_step(conn, run_id)
+            if existing is not None and existing.account_id == account_id:
+                return existing
         await get_environment(conn, environment_id, account_id=account_id)  # 404s foreign/absent
         workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
         if workflow.archived_at is not None:
@@ -214,8 +230,12 @@ async def create_run(
             account_id=account_id,
             workflow_id=workflow_id,
             environment_id=environment_id,
+            run_id=run_id,
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
+            request_id=request_id,
+            caller=caller,
+            request_output_schema=request_output_schema,
             script=workflow.script,
             script_sha=script_sha,
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
@@ -231,15 +251,15 @@ async def create_run(
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)
-        # #1123 / TODO(#1126): the run→run request edge's ``request_opened`` would be
-        # emitted HERE, in this same servicer-creation transaction. It is deferred
-        # because its symmetric *answer* half — the run-side ``request_response``
-        # emitter — is #1126 and a run has no session-scoped ``events`` log to key
-        # the frame on yet; emitting an unanswerable edge now would leave a
-        # permanently-open request in ``get_open_request_ids`` for the launcher.
-        # The two session-creating launch sites (``create_child_session`` /
-        # ``_open_agent_capability``) emit the edge today (#1123); ``create_run``
-        # joins them once #1126 ships the run-side answer half.
+        # The run→run request edge (#1126/#1129) needs no session-scoped
+        # ``request_opened`` event here: a run has no session ``events`` log, and
+        # the *ask* half is already carried by the launching run's
+        # ``call_started{capability:'invoke_workflow'}`` journal frame, whose
+        # symmetric *answer* — the sub-run's ``request_response`` (#1126), keyed
+        # on the same ``request_id``/``caller`` recorded on this row — is resolved
+        # by ``derive_run_response``. (The session-creating launch sites
+        # ``create_child_session`` / ``_open_agent_capability`` still emit the
+        # session ``request_opened`` for their session-scoped edges, #1123.)
     await defer_run_wake(run.id)
     return run
 

@@ -29,6 +29,11 @@ WfRunEventType = Literal[
     "run_completed",
     "annotation",
     "frontier_deferred",
+    # The run-side mirror of the session ``request_response``: emitted at the
+    # terminal ``_complete_run`` chokepoint when the run services an inbound
+    # request (#1126), keyed on the request_id via ``call_key`` so the existing
+    # ``(run_id, call_key, type)`` unique index latches it exactly-once.
+    "request_response",
 ]
 WfRunSignalKind = Literal["gate_resume", "child_done", "cancel", "tool_result"]
 
@@ -95,6 +100,16 @@ class WfRun(BaseModel):
     # ``parent.depth - 1``. The decrement IS the cycle bound — a run at depth 0 may
     # open no further trusted edges.
     depth: int = 0
+    # The run's INBOUND request edge (#1126/#1129): set when the run was spawned
+    # *in service of a request* (a parent run's ``invoke_workflow``). ``request_id``
+    # is what the terminal ``request_response`` is keyed on; ``caller`` is the
+    # kind-agnostic provenance ({kind:'run'|'session'|'api', id});
+    # ``request_output_schema`` is the JSON Schema the request demands of this run's
+    # terminal output (validated fail-loud at completion). All None = an edgeless
+    # operator/HTTP run, which answers no request and emits no ``request_response``.
+    request_id: str | None = None
+    caller: dict[str, Any] | None = None
+    request_output_schema: dict[str, Any] | None = None
     script: str
     script_sha: str
     host_semantics_epoch: int
@@ -199,6 +214,7 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
   `main`.
 - Injected capability API, available without imports:
   - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.
+  - `invoke_workflow(workflow_id, input, *, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.
   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
   - `gate()`: suspend until an external resume delivers a value.
   - `budget()`: read this run's shared child-spend budget, or None when unset.
