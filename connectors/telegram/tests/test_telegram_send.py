@@ -100,6 +100,19 @@ def test_telegram_connector_subclasses_http_connector() -> None:
     assert expected <= set(c._tools)
 
 
+def test_message_tools_are_fire_and_forget_but_typing_is_not() -> None:
+    """Categorization guard (#1121 review): ``fire_and_forget`` marks a
+    *terminal* delivery confirmation the model needn't react to, so the runtime
+    skips the re-wake (closing the duplicate-send loop). ``telegram_typing`` is
+    a *precursor* the model calls before slow work — it MUST stay a normal
+    (waking) tool, or a typing-only turn settles idle and never sends.
+    """
+    tools = TelegramConnector()._tools
+    assert tools["telegram_send"].fire_and_forget is True
+    assert tools["telegram_react"].fire_and_forget is True
+    assert tools["telegram_typing"].fire_and_forget is False
+
+
 @pytest.fixture
 def bot() -> Any:
     b = MagicMock()

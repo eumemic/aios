@@ -498,7 +498,11 @@ class TelegramConnector(HttpConnector):
             "chat_type": _chat_kind(sent_group[0].chat.type),
         }
 
-    @tool(fire_and_forget=True)
+    # NOT fire_and_forget: typing is a PRECURSOR — the model calls it *before*
+    # doing slow work, so its result MUST wake the session to take the follow-up
+    # step that does the work and sends the reply. Marking it fire_and_forget
+    # stranded a typing-only turn idle, never sending (#1121 review).
+    @tool()
     async def telegram_typing(
         self,
         action: Literal[
