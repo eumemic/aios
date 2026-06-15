@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Annotated
-
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, status
 
 from aios.api.deps import AccountIdDep, CryptoBoxDep, PoolDep
 from aios.models.common import ListResponse
-from aios.models.pagination import page_cursor
+from aios.models.pagination import PageLimit, page_cursor, resolve_page_limit
 from aios.models.vaults import (
     OAuthCompleteRequest,
     OAuthStartRequest,
@@ -45,7 +43,7 @@ async def list_(
     pool: PoolDep,
     account_id: AccountIdDep,
     cursor: str | None = None,
-    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    limit: PageLimit = None,
 ) -> ListResponse[Vault]:
     """List vaults, newest first, excluding archived.
 
@@ -53,7 +51,7 @@ async def list_(
     """
     st = page_cursor(cursor, {"limit": limit})
     after = str(st.cursor) if st is not None else None
-    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    page_limit = resolve_page_limit(st, limit)
     items = await service.list_vaults(
         pool, limit=page_limit + 1, after=after, account_id=account_id
     )
@@ -202,7 +200,7 @@ async def list_credentials(
     pool: PoolDep,
     account_id: AccountIdDep,
     cursor: str | None = None,
-    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    limit: PageLimit = None,
 ) -> ListResponse[VaultCredential]:
     """List credentials in a vault, newest first, excluding archived.
 
@@ -212,7 +210,7 @@ async def list_credentials(
     """
     st = page_cursor(cursor, {"limit": limit})
     after = str(st.cursor) if st is not None else None
-    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    page_limit = resolve_page_limit(st, limit)
     items = await service.list_vault_credentials(
         pool, vault_id, limit=page_limit + 1, after=after, account_id=account_id
     )

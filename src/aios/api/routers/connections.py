@@ -31,7 +31,13 @@ from aios.models.connections import (
     ConnectionSetSecrets,
     RecentChat,
 )
-from aios.models.pagination import page_cursor
+from aios.models.pagination import (
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    PageLimit,
+    page_cursor,
+    resolve_page_limit,
+)
 from aios.services import connections as service
 
 router = APIRouter(prefix="/v1/connections", tags=["connections"])
@@ -104,7 +110,7 @@ async def list_(
     connector: str | None = None,
     session_id: str | None = None,
     mode: ConnectionMode | None = None,
-    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    limit: PageLimit = None,
 ) -> ListResponse[Connection]:
     """List connections, newest first, excluding archived.
 
@@ -118,7 +124,7 @@ async def list_(
         {"connector": connector, "session_id": session_id, "mode": mode, "limit": limit},
     )
     after = str(st.cursor) if st is not None else None
-    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    page_limit = resolve_page_limit(st, limit)
     if st is not None:
         connector = st.filters.get("connector")
         session_id = st.filters.get("session_id")
@@ -331,7 +337,7 @@ async def recent_chats(
     connection_id: str,
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_LIMIT)] = DEFAULT_PAGE_LIMIT,
 ) -> ListResponse[RecentChat]:
     """List chats that recently sent inbound on this connection, newest first.
 

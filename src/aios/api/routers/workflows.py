@@ -19,7 +19,7 @@ from aios.api.sse import make_sse_response, preflight_subscription, wf_run_event
 from aios.db.listen import open_listen_for_run_events
 from aios.logging import get_logger
 from aios.models.common import ListResponse
-from aios.models.pagination import page_cursor
+from aios.models.pagination import EventPageLimit, PageLimit, page_cursor, resolve_page_limit
 from aios.models.workflows import (
     GateResume,
     WfRun,
@@ -96,13 +96,13 @@ async def list_workflows(
     account_id: AccountIdDep,
     cursor: str | None = None,
     name: str | None = None,
-    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    limit: PageLimit = None,
 ) -> ListResponse[Workflow]:
     """List the account's workflows, newest first. First page: optional ``name`` +
     ``limit``; subsequent pages: ``?cursor=<next_cursor>``."""
     st = page_cursor(cursor, {"name": name, "limit": limit})
     after = str(st.cursor) if st is not None else None
-    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    page_limit = resolve_page_limit(st, limit)
     if st is not None:
         name = st.filters.get("name")
     items = await service.list_workflows(
@@ -163,7 +163,7 @@ async def list_runs(
     workflow_id: str | None = None,
     status: str | None = None,
     parent_run_id: str | None = None,
-    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    limit: PageLimit = None,
 ) -> ListResponse[WfRun]:
     """List the account's runs, newest first. First page: optional ``workflow_id`` /
     ``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:
@@ -178,7 +178,7 @@ async def list_runs(
         },
     )
     after = str(st.cursor) if st is not None else None
-    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    page_limit = resolve_page_limit(st, limit)
     if st is not None:
         workflow_id = st.filters.get("workflow_id")
         status = st.filters.get("status")
@@ -237,7 +237,7 @@ async def list_run_events(
     pool: PoolDep,
     account_id: AccountIdDep,
     cursor: str | None = None,
-    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+    limit: EventPageLimit = None,
 ) -> ListResponse[WfRunEvent]:
     """A run's journal by sequence (oldest first). First page: optional ``limit``;
     subsequent pages: ``?cursor=<next_cursor>``.
@@ -253,12 +253,8 @@ async def list_run_events(
     # Scope check: 404 a cross-tenant run id before reading its journal.
     await service.get_run(pool, run_id, account_id=account_id)
     st = page_cursor(cursor, {"limit": limit})
-    if st is not None:
-        page_limit = st.limit
-        after_seq = int(st.cursor)
-    else:
-        page_limit = limit if limit is not None else 200
-        after_seq = 0
+    page_limit = resolve_page_limit(st, limit, default=200)
+    after_seq = int(st.cursor) if st is not None else 0
     items = await service.list_run_events(
         pool, run_id, account_id=account_id, after_seq=after_seq, limit=page_limit + 1
     )
