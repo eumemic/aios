@@ -664,6 +664,7 @@ async def test_children_listable_by_parent_run_id(
             script_sha="sha",
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             parent_run_id=parent_id,
+            depth=9,
         )
         child_runs = await wf_queries.list_wf_runs(
             conn, account_id="acc_wf", parent_run_id=parent_id, limit=50
@@ -708,6 +709,74 @@ async def test_agent_spawn_creates_child_and_suspends(
         )
     assert user_msgs == 1
     child_wake.assert_awaited_once()  # prompt wake of the child
+
+
+async def test_agent_spawn_stamps_decremented_depth_on_edge(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The run->session ``agent()`` edge carries ``run.depth - 1`` (#1124): a root
+    run seeds at the full budget, so its child's ``request_opened`` edge is stamped
+    one below. The trusted depth rides ONLY the edge, never message metadata."""
+    from aios.workflows.service import INVOKE_MAX_DEPTH
+
+    pool = wf_runtime
+    script = f"async def main(input):\n    return await agent({{'task': 'go'}}, agent_id={wf_agent_id!r})\n"
+    run_id = await _make_run(pool, script)  # edgeless root -> depth == INVOKE_MAX_DEPTH
+    with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()):
+        await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        assert run is not None and run.depth == INVOKE_MAX_DEPTH
+        events = await wf_queries.list_run_events(conn, run_id)
+        child_id = next(e.payload["child_session_id"] for e in events if e.type == "call_started")
+        edge_depth = await conn.fetchval(
+            "SELECT (data->>'depth')::int FROM events WHERE session_id = $1 "
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_opened'",
+            child_id,
+        )
+    assert edge_depth == INVOKE_MAX_DEPTH - 1  # decremented one hop down
+
+
+async def test_agent_spawn_refused_when_run_depth_exhausted(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """A run at depth 0 has no trusted budget left: ``_open_agent_capability``
+    refuses BEFORE writing the child (a journaled, catchable rejection), so no
+    over-budget child session/edge ever exists (#1124)."""
+    from aios.workflows.host_launcher import EmittedCapability
+    from aios.workflows.step import _open_agent_capability
+
+    pool = wf_runtime
+    script = f"async def main(input):\n    return await agent('go', agent_id={wf_agent_id!r})\n"
+    run_id = await _make_run(pool, script)
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE wf_runs SET depth = 0 WHERE id = $1", run_id)
+
+    spec = {"agent_id": wf_agent_id, "input": "go", "output_schema": None}
+    call_key = CallKeyer().next("agent", spec)
+    cap = EmittedCapability(capability_id="agent", call_key=call_key, spec=spec)
+    cid = child_session_id(run_id, call_key)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        assert run is not None and run.depth == 0
+        with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w:
+            result = await _open_agent_capability(
+                conn, pool, run, cap, agent_spawns=0, max_agent_calls=1000
+            )
+        assert result.rejected  # catchable rejection journaled, not a crash
+        w.assert_not_awaited()  # no child -> no wake
+        # Refuse-BEFORE-write: neither the child row nor its edge was created.
+        assert await conn.fetchval("SELECT count(*) FROM sessions WHERE id = $1", cid) == 0
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM events WHERE session_id = $1 "
+                "AND kind = 'lifecycle' AND data->>'event' = 'request_opened'",
+                cid,
+            )
+            == 0
+        )
 
 
 async def test_generic_agent_spawn_creates_agentless_child_with_run_surface(

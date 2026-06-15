@@ -68,6 +68,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         environment_id=row["environment_id"],
         parent_run_id=row["parent_run_id"],
         launcher_session_id=row["launcher_session_id"],
+        depth=row["depth"],
         script=row["script"],
         script_sha=row["script_sha"],
         host_semantics_epoch=row["host_semantics_epoch"],
@@ -358,6 +359,25 @@ async def get_wf_run(conn: asyncpg.Connection[Any], run_id: str, *, account_id: 
     )
 
 
+async def get_run_depth(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> int:
+    """Read a run's DOWN-counting trusted invocation depth (#1124), account-scoped.
+
+    The remaining trusted-edge budget on ``run_id`` — what a sub-launch off this run
+    may carry as ``depth - 1``. ACCOUNT-SCOPED: a foreign or missing parent raises
+    ``NotFoundError`` (the same-account trust the deleted ``run_ancestor_depth`` CTE
+    enforced per hop, now a single point read). The depth is immutable once written,
+    so the read is race-free without locking.
+    """
+    depth: int | None = await conn.fetchval(
+        "SELECT depth FROM wf_runs WHERE id = $1 AND account_id = $2",
+        run_id,
+        account_id,
+    )
+    if depth is None:
+        raise NotFoundError(f"workflow run {run_id} not found", detail={"id": run_id})
+    return depth
+
+
 async def list_wf_runs(
     conn: asyncpg.Connection[Any],
     *,
@@ -417,10 +437,17 @@ async def insert_wf_run(
     http_servers: list[HttpServerSpec] | None = None,
     budget_usd: float | None = None,
     default_child_model: str | None = None,
+    depth: int,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
-    ``launcher_session_id`` records the agent session that launched it (NULL = operator)."""
+    ``launcher_session_id`` records the agent session that launched it (NULL = operator).
+
+    ``depth`` is the DOWN-counting trusted invocation budget (#1124) carried on the run:
+    the remaining hops this run may spend on its OUTGOING trusted edges. The caller
+    (``create_run``) computes it — full budget for an edgeless root, ``parent.depth - 1``
+    for a nested launch — and refuses BEFORE calling here when the parent has none left,
+    so no over-budget run row is ever written."""
     new_id = make_id(WORKFLOW_RUN)
     try:
         row = await conn.fetchrow(
@@ -428,9 +455,10 @@ async def insert_wf_run(
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
                  launcher_session_id, script, script_sha, host_semantics_epoch, status, input,
-                 tools, mcp_servers, http_servers, budget_total_microusd, default_child_model)
+                 tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
+                 depth)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10::jsonb,
-                    $11::jsonb, $12::jsonb, $13::jsonb, $14, $15)
+                    $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16)
             RETURNING *
             """,
             new_id,
@@ -448,6 +476,7 @@ async def insert_wf_run(
             json.dumps([s.model_dump() for s in (http_servers or [])]),
             round(budget_usd * 1_000_000) if budget_usd is not None else None,
             default_child_model,
+            depth,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -501,33 +530,6 @@ async def run_children_usage(
         cache_creation_input_tokens=row["cache_creation_input_tokens"],
         cost_microusd=row["cost_microusd"],
     )
-
-
-async def run_ancestor_depth(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> int:
-    """Depth of ``run_id`` in the ``parent_run_id`` chain (a root run = 1).
-
-    Walks ``wf_runs.parent_run_id`` upward via a recursive CTE, account-scoped on
-    every hop. Returns 0 if ``run_id`` doesn't exist for the account (defensive; the
-    depth cap passes a live ancestor). The chain is immutable once written, so the
-    count is race-free without locking — concurrent sibling inserts can't change an
-    ancestor's depth.
-    """
-    depth: int | None = await conn.fetchval(
-        """
-        WITH RECURSIVE chain AS (
-            SELECT id, parent_run_id, 1 AS depth
-              FROM wf_runs WHERE id = $1 AND account_id = $2
-            UNION ALL
-            SELECT r.id, r.parent_run_id, c.depth + 1
-              FROM wf_runs r JOIN chain c ON r.id = c.parent_run_id
-             WHERE r.account_id = $2
-        )
-        SELECT max(depth) FROM chain
-        """,
-        run_id,
-        account_id,
-    )
-    return depth or 0
 
 
 async def count_active_runs(

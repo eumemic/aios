@@ -57,6 +57,7 @@ async def _seed_run(conn: asyncpg.Connection[Any]) -> str:
         script=wf.script,
         host_semantics_epoch=HOST_SEMANTICS_EPOCH,
         script_sha="deadbeef",
+        depth=10,
     )
     return run.id
 
@@ -94,6 +95,7 @@ async def test_insert_run_snapshots_script(wf_conn: asyncpg.Connection[Any]) -> 
         script=wf.script,
         host_semantics_epoch=HOST_SEMANTICS_EPOCH,
         script_sha="sha-v1",
+        depth=10,
     )
     assert run.id.startswith("wfr_")
     assert run.status == "pending"
@@ -458,6 +460,7 @@ async def test_list_wf_runs_filters_by_launcher_session(wf_conn: asyncpg.Connect
             script_sha="sha",
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             launcher_session_id=launcher,
+            depth=10,
         )
         return run.id
 

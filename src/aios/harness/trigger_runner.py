@@ -546,9 +546,11 @@ async def _run_workflow(
                 if completed_run.status == "errored":
                     completed_error = await wf_queries.resolve_run_error(conn, completed_run.id)
             # The completing run is the lineage parent: same-account by the
-            # matcher's account-equality conjunct, and the existing depth cap
-            # then bounds completion→fire→run→completion cycles at
-            # WORKFLOW_RUN_MAX_DEPTH by construction.
+            # matcher's account-equality conjunct. ``create_run`` reads that
+            # parent's DOWN-counting depth (#1124) and stamps ``parent.depth - 1``
+            # on the new run, so completion→fire→run→completion cycles bottom out
+            # at the shared budget (INVOKE_MAX_DEPTH) BY CONSTRUCTION — the
+            # decrement IS the cycle bound.
             parent_run_id = completed_run.id
         else:
             # Timer fires inherit the owner session's own (immutable) lineage

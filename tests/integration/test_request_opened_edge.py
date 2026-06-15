@@ -82,6 +82,7 @@ async def _seed_parent_run(pool: asyncpg.Pool[Any], *, account_id: str, environm
             http_servers=[],
             budget_usd=None,
             default_child_model="openrouter/test",
+            depth=10,
         )
     return run.id
 
@@ -304,3 +305,63 @@ async def test_create_child_session_rollback_leaves_no_edge(
         )
     assert sess == 0
     assert edges == 0
+
+
+# ─── #1124: the DOWN-counting trusted depth on the edge bounds cycles ─────────
+
+
+async def test_session_to_session_cycle_bounded_by_construction(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A session→session A↔B ping-pong terminates at the shared budget BY
+    CONSTRUCTION (#1124) — no wait-for-graph, no cycle detection. Each trusted
+    edge carries ``parent_depth - 1``; once the budget is spent the next hop
+    would carry a negative depth, which the decrement rule refuses. This is the
+    coverage the run-only ``run_ancestor_depth`` CTE could never provide: the
+    cycle bound is the depth budget itself, applied uniformly to the edge.
+    """
+    pool, account_id, _agent_id, env_id = pool_env
+    from aios.workflows.service import INVOKE_MAX_DEPTH
+
+    _a_agent, _a_env, sess_a = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="cycle-a"
+    )
+    _b_agent, _b_env, sess_b = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="cycle-b"
+    )
+
+    # Replay the A↔B invocation cycle the decrement rule produces: an edgeless
+    # root seeds at the full budget, and each trusted hop stamps parent_depth - 1.
+    # The loop stops emitting the moment a hop has no budget left to spend.
+    targets = [sess_b.id, sess_a.id]  # A invokes B, B invokes A, A invokes B, ...
+    callers = [sess_a.id, sess_b.id]
+    depth = INVOKE_MAX_DEPTH
+    hops = 0
+    async with pool.acquire() as conn, conn.transaction():
+        while depth >= 1:  # refuse-before-write: a 0-budget caller opens no edge
+            child_depth = depth - 1
+            await queries.append_request_opened(
+                conn,
+                session_id=targets[hops % 2],
+                account_id=account_id,
+                request_id=f"req-cycle-{hops}",
+                caller={"kind": "session", "id": callers[hops % 2]},
+                depth=child_depth,
+                environment_id=env_id,
+                frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+                vault_ids=[],
+            )
+            hops += 1
+            depth = child_depth
+
+    # The cycle bottomed out after exactly INVOKE_MAX_DEPTH hops — purely from the
+    # decrement, regardless of the A↔B structure.
+    assert hops == INVOKE_MAX_DEPTH
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE account_id = $1 "
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_opened' "
+            "AND (data->>'request_id') LIKE 'req-cycle-%'",
+            account_id,
+        )
+    assert total == INVOKE_MAX_DEPTH

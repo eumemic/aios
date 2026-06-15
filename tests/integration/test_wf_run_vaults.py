@@ -51,7 +51,7 @@ from aios.services.sessions import create_child_session
 from aios.tools import workflow_management as wm
 from aios.workflows import service as wf_service_module
 from aios.workflows.child_id import child_session_id
-from aios.workflows.service import WORKFLOW_RUN_MAX_DEPTH, WorkflowRunDepthExceededError
+from aios.workflows.service import INVOKE_MAX_DEPTH, WorkflowRunDepthExceededError
 
 pytestmark = pytest.mark.integration
 
@@ -700,25 +700,63 @@ async def test_create_run_builtin_threads_parent_run_id(vault_pool: asyncpg.Pool
 
 
 async def test_create_run_depth_cap(vault_pool: asyncpg.Pool[Any]) -> None:
-    """The vertical depth cap: a parent_run_id chain may nest WORKFLOW_RUN_MAX_DEPTH deep, no more."""
+    """The DOWN-counting depth budget (#1124): a parent_run_id chain may take
+    INVOKE_MAX_DEPTH hops, no more. The edgeless root seeds at the full budget,
+    each child carries ``parent.depth - 1``, and the INVOKE_MAX_DEPTH-th run
+    bottoms out at depth 1 — the next launch refuses before any row is written."""
     pool = vault_pool
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-depth", script=_SCRIPT)
 
-    # Build a chain of runs at depths 1..MAX (the root has parent_run_id=None, uncapped).
+    # Build a chain: root seeds at INVOKE_MAX_DEPTH, then INVOKE_MAX_DEPTH-1 children
+    # decrementing to depth 1. INVOKE_MAX_DEPTH runs total, identical to the old up-walk.
     parent: str | None = None
-    for _ in range(WORKFLOW_RUN_MAX_DEPTH):
+    expected_depth = INVOKE_MAX_DEPTH
+    for _ in range(INVOKE_MAX_DEPTH):
         run = await wf_service.create_run(
             pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=parent
         )
+        assert run.depth == expected_depth  # the down-counter decrements each hop
         parent = run.id
+        expected_depth -= 1
 
-    # One more would be depth MAX+1 → refused, and no run row leaks.
+    # The leaf bottomed out at depth 1 → one more would be depth 0, refused before write.
     before = await _run_count(pool)
     with pytest.raises(WorkflowRunDepthExceededError):
         await wf_service.create_run(
             pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=parent
         )
     assert await _run_count(pool) == before
+
+
+async def test_create_run_edgeless_root_seeds_full_budget(vault_pool: asyncpg.Pool[Any]) -> None:
+    """An edgeless root — the operator/HTTP ``POST /runs`` path with no parent — is
+    seeded at the full shared budget (#1124), so a chain launched off it still has
+    INVOKE_MAX_DEPTH hops before it bottoms out."""
+    pool = vault_pool
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-root", script=_SCRIPT)
+
+    root = await wf_service.create_run(
+        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=None
+    )
+    assert root.depth == INVOKE_MAX_DEPTH
+
+    # The persisted column agrees with the returned row — the read-side the next hop uses.
+    async with pool.acquire() as conn:
+        assert await wf_queries.get_run_depth(conn, root.id, account_id=ACC) == INVOKE_MAX_DEPTH
+
+
+async def test_get_run_depth_account_scoped(vault_pool: asyncpg.Pool[Any]) -> None:
+    """``get_run_depth`` is account-scoped (#1124): a foreign id raises NotFoundError,
+    preserving the same-account trust the deleted ``run_ancestor_depth`` CTE enforced
+    per hop — a foreign parent can never launder a fresh full budget."""
+    pool = vault_pool
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-scope", script=_SCRIPT)
+    root = await wf_service.create_run(
+        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=None
+    )
+    async with pool.acquire() as conn:
+        with pytest.raises(NotFoundError):
+            await wf_queries.get_run_depth(conn, root.id, account_id="acc_other")
 
 
 async def test_create_run_rejects_foreign_environment(vault_pool: asyncpg.Pool[Any]) -> None:

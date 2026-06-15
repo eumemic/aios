@@ -256,6 +256,7 @@ async def test_runs_parent_run_id_filter(http_client: httpx.AsyncClient, pool: A
             script_sha="sha",
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             parent_run_id=parent["id"],
+            depth=9,
         )
     # An unrelated (parentless) run that must be excluded.
     await http_client.post("/v1/runs", json={"workflow_id": wf["id"], "environment_id": env_id})

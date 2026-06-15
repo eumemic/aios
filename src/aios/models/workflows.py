@@ -89,6 +89,12 @@ class WfRun(BaseModel):
     # The agent session that launched this run (None = operator/HTTP). Lineage, plus
     # the per-launcher fan-out cap's count key.
     launcher_session_id: str | None = None
+    # The DOWN-counting trusted invocation depth (#1124): the budget remaining for
+    # this run's OUTGOING trusted edges (run→run sub-launches, run→session ``agent()``
+    # children). An edgeless root seeds at the full budget; a nested launch carries
+    # ``parent.depth - 1``. The decrement IS the cycle bound — a run at depth 0 may
+    # open no further trusted edges.
+    depth: int = 0
     script: str
     script_sha: str
     host_semantics_epoch: int
