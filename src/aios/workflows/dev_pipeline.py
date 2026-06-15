@@ -80,6 +80,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
+from aios.models.workflows import WorkflowCreate
+
 # ─── default judgment-node agent ids (override per deployment) ───────────────
 DEFAULT_IMPLEMENT_AGENT_ID = "dev-implement"
 DEFAULT_REVIEW_AGENT_ID = "dev-review"
@@ -866,4 +869,91 @@ def build_dev_pipeline_fixture_script(
         max_review_iters=max_review_iters,
         max_ci_iters=max_ci_iters,
         auto_merge_max_tier=auto_merge_max_tier,
+    )
+
+
+# ─── deploy surface (the tool + http_server envelope a WorkflowCreate needs) ──
+#
+# ``build_dev_pipeline_script`` returns only the workflow *script string*. A deployed
+# workflow ALSO needs its tool + http_server surface declared on the ``WorkflowCreate``,
+# or the very first ``tool('bash')`` / ``tool('http_request')`` call errors at runtime
+# ("tool 'bash' is not in the workflow's declared tools"). Exporting the surface here
+# alongside the script keeps the two from drifting (#1135).
+#
+# ``REQUIRED_TOOLS`` is the UNION of the script's own tools (``bash``/``http_request``)
+# AND every named judgment agent's tools (``read``/``write``/``edit``/``glob``/``grep``).
+# The child-agent surface is ``agent ∩ run`` (attenuation), so declaring only the
+# script's two tools would strip the editing tools from the implement/fix agents and
+# cripple them — the workflow must declare the union, each agent declaring its subset.
+REQUIRED_TOOLS: list[ToolSpec] = [
+    ToolSpec(type="bash"),
+    ToolSpec(type="read"),
+    ToolSpec(type="write"),
+    ToolSpec(type="edit"),
+    ToolSpec(type="glob"),
+    ToolSpec(type="grep"),
+    ToolSpec(type="http_request"),
+]
+
+# The GitHub http_server the scripted nodes reach via ``tool('http_request', ...)``.
+# Two routes, because GraphQL and REST need distinct method scoping:
+#   - ``/repos/**`` REST: GET·POST·PUT·DELETE. DELETE is load-bearing — the success-path
+#     ``_unlabel(autodev:in-progress)`` issues ``DELETE /repos/.../labels/...``; omitting
+#     it silently fails every unlabel (route-mismatch, then 3 pointless retries).
+#   - ``/graphql`` POST: the mark-ready mutation (``_mark_ready_query``). GraphQL serves
+#     reads and writes over one POST path, so it lives on its own route.
+
+
+def _github_http_server(*, name: str, base_url: str) -> HttpServerSpec:
+    return HttpServerSpec(
+        name=name,
+        base_url=base_url,
+        description="GitHub REST + GraphQL API (auth resolved from the bound vault's GITHUB_TOKEN).",
+        routes=[
+            HttpRouteSpec(
+                path_pattern="/repos/**",
+                methods=["GET", "POST", "PUT", "DELETE"],
+                description="Issues, PRs, labels, statuses, refs (DELETE removes labels).",
+            ),
+            HttpRouteSpec(
+                path_pattern="/graphql",
+                methods=["POST"],
+                description="GraphQL mutations (mark-ready: markPullRequestReadyForReview).",
+            ),
+        ],
+    )
+
+
+REQUIRED_HTTP_SERVERS: list[HttpServerSpec] = [
+    _github_http_server(name="github", base_url="https://api.github.com")
+]
+
+
+def build_dev_pipeline_workflow_create(
+    *,
+    name: str,
+    description: str | None = None,
+    github_server: str = "github",
+    github_base_url: str = "https://api.github.com",
+    **script_kwargs: Any,
+) -> WorkflowCreate:
+    """Return the complete ``WorkflowCreate`` payload for the production dev-pipeline.
+
+    Bundles the script (``build_dev_pipeline_script``) with the tool + http_server surface
+    it requires (``REQUIRED_TOOLS`` and the two-route ``github`` http_server), so a deployer
+    can POST one object instead of hand-assembling the surface from source — and so the
+    declared surface can never drift from the script that needs it (#1135).
+
+    ``github_server`` names the http_server and is threaded into the script's
+    ``GITHUB_SERVER`` constant so ``tool('http_request', {server_ref: ...})`` resolves;
+    ``github_base_url`` is the http_server's ``base_url`` (the credential-resolution key).
+    Any remaining keyword args are forwarded verbatim to ``build_dev_pipeline_script``.
+    """
+    script = build_dev_pipeline_script(github_server=github_server, **script_kwargs)
+    return WorkflowCreate(
+        name=name,
+        description=description,
+        script=script,
+        tools=list(REQUIRED_TOOLS),
+        http_servers=[_github_http_server(name=github_server, base_url=github_base_url)],
     )
