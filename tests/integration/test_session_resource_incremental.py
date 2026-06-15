@@ -450,6 +450,25 @@ async def test_add_cross_tenant_session_not_found(
     assert store_id  # silence unused (the in-tenant store exists for contrast)
 
 
+async def test_add_cross_tenant_github_session_not_found(
+    env: tuple[asyncpg.Pool[Any], str, CryptoBox],
+) -> None:
+    """Github twin of the memory cross-tenant guard: a github add-one onto
+    another tenant's session 404s. Unlike the memory path, github ``add_one``
+    fetches no caller-owned resource to incidentally trip on — only the
+    session-ownership guard in ``add_resource`` stops the INSERT from silently
+    mounting the attacker's repo on the victim's session."""
+    pool, session_id, crypto_box = env
+    with pytest.raises(NotFoundError):
+        await sessions_service.add_resource(
+            pool,
+            session_id,
+            _gh("https://x/cross.git", "/mnt/cross"),
+            crypto_box=crypto_box,
+            account_id=_OTHER_ACCOUNT_ID,
+        )
+
+
 async def test_remove_cross_tenant_not_found(
     env: tuple[asyncpg.Pool[Any], str, CryptoBox],
 ) -> None:
