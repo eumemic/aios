@@ -42,7 +42,7 @@ from structlog.contextvars import bind_contextvars, clear_contextvars
 from aios.config import get_settings
 from aios.db import queries as db_queries
 from aios.db.queries import workflows as wf_queries
-from aios.errors import NotFoundError
+from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.attenuation import surface_of
@@ -57,8 +57,10 @@ from aios.services.wake import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.tools.registry import tool_executes_class
 from aios.workflows import run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
+from aios.workflows.child_run_id import child_run_id
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from aios.workflows.host_launcher import EmittedCapability, run_script_host
+from aios.workflows.service import WorkflowRunDepthExceededError, create_run
 
 log = get_logger("aios.workflows.step")
 
@@ -99,6 +101,27 @@ def _unresolvable_ref(schema: dict[str, Any]) -> str | None:
         except Unresolvable:
             return ref
     return None
+
+
+def _validate_output_against_schema(value: Any, schema: dict[str, Any]) -> str | None:
+    """Validate a run's terminal ``output`` against the request's ``output_schema``.
+
+    ``None`` on success; otherwise a human-readable message enumerating every
+    failure (the same shape the session ``return`` tool produces, minus the
+    self-correct hint — a run does NOT bounce-and-retry, it fails loud). Drives
+    the run-target ``output_schema_violation`` error-arm in :func:`_complete_run`.
+    """
+    errors = sorted(
+        jsonschema.Draft202012Validator(schema).iter_errors(value),
+        key=lambda e: list(e.absolute_path),
+    )
+    if not errors:
+        return None
+    lines = [f"run output does not match the request's required schema: {json.dumps(value)}"]
+    for err in errors:
+        path = ".".join(str(p) for p in err.absolute_path)
+        lines.append(f"  - at {'output.' + path if path else 'output'}: {err.message}")
+    return "\n".join(lines)
 
 
 def _usage_payload(usage: wf_queries.RunChildrenUsage) -> dict[str, Any]:
@@ -368,6 +391,22 @@ async def _run_workflow_step_body(
                     started_at=cap_event.created_at,
                     now=now,
                 )
+            elif cap_payload.get("capability") == "invoke_workflow":
+                # The sub-run was spawned with request_id = call_key (the
+                # invoke_workflow() call IS the request), so its terminal outcome
+                # is resolved under that same id through the SAME single resolver
+                # the agent arm uses — only its run-kind branch (#1126). No live
+                # await: a replay re-drives this fold from the journaled
+                # call_result (memo already carries the outcome; this arm is not
+                # reached), and a fresh wake resolves it from the durable log.
+                result_payload = await wf_queries.derive_run_response(
+                    conn,
+                    cap_payload["child_run_id"],
+                    account_id=account_id,
+                    request_id=call_key,
+                )
+                if result_payload is None:
+                    continue  # sub-run still in-flight and unanswered — stay suspended
             elif cap_payload.get("capability") == "tool":
                 sig = signals.get(call_key)
                 if sig is None and not run_tools.has_inflight(run_id, call_key):
@@ -691,6 +730,19 @@ async def _run_workflow_step_body(
                         call_key=cap.call_key,
                         payload={"capability": "agent"},
                     )
+            elif cap.capability_id == "invoke_workflow":
+                # Run-caller surface (#1129): spawn a sub-run, journal call_started.
+                # Modelled on the agent arm minus the wave/lifetime caps (those are
+                # agent-call specific); the run→run depth + fan-out caps live in
+                # create_run and apply for free. A bad output_schema / target
+                # rejects as a CATCHABLE author error (call_result error journaled),
+                # so self-wake to replay and throw the AgentError at the await.
+                spawn = await _open_invoke_workflow_capability(conn, pool, run, cap)
+                if spawn.rejected:
+                    needs_rewake = True
+                    owed_drive = True
+                elif spawn.needs_rewake:
+                    needs_rewake = True
             elif cap.capability_id == "budget":
                 usage = (
                     await wf_queries.run_children_usage(conn, run_id, account_id=account_id)
@@ -980,6 +1032,132 @@ async def _open_agent_capability(
     return _SpawnResult(rejected=False, needs_rewake=needs_rewake)
 
 
+async def _open_invoke_workflow_capability(
+    conn: asyncpg.Connection[Any],
+    pool: asyncpg.Pool[Any],
+    run: WfRun,
+    cap: EmittedCapability,
+) -> _SpawnResult:
+    """Open one ``invoke_workflow()`` frontier: spawn a sub-run, journal ``call_started``.
+
+    The run dual of :func:`_open_agent_capability` — same shape (validate →
+    create-or-reattach the servicer under a DETERMINISTIC id → journal
+    ``call_started`` carrying the servicer id), keyed by ``workflow_id`` instead of
+    ``agent_id``. Differences from the agent arm:
+
+    * The servicer is a sub-RUN, created by ``create_run`` (which applies the #794
+      surface clamp, the run→run depth cap, and the per-account fan-out cap for
+      free), spawned with ``request_id = cap.call_key`` (the call IS the request),
+      ``caller = {kind:'run', id:run.id}``, and the request's ``output_schema``.
+    * There is no lifetime "agent-call" cap (that is agent-call-specific); a
+      doomed-by-quota sub-run is refused by ``create_run`` and surfaces as a
+      catchable author error, not a run-terminating ``too_many_agents``.
+
+    A bad ``output_schema`` / missing workflow / cap breach is journaled as a
+    CATCHABLE ``call_result`` error (``rejected=True``) so the run self-wakes,
+    replays, and throws ``AgentError`` at the ``await``. ``needs_rewake=True`` when
+    a re-attached sub-run already carries its answer (it finished before this wake
+    journaled ``call_started``, so the pre-replay harvest missed it).
+    """
+    account_id = run.account_id
+
+    async def _reject(kind: str, message: str) -> _SpawnResult:
+        await _journal_agent_rejection(
+            conn, run=run, call_key=cap.call_key, kind=kind, message=message
+        )
+        return _SpawnResult(rejected=True, needs_rewake=False)
+
+    spec = cap.spec if isinstance(cap.spec, dict) else {}
+    workflow_id = spec.get("workflow_id")
+    if not isinstance(workflow_id, str):
+        return await _reject(
+            "bad_invoke_workflow",
+            f"invoke_workflow() requires workflow_id to be a string, got {workflow_id!r}",
+        )
+    # output_schema rides the wire as a canonical JSON *string* (mirror agent());
+    # reconstruct the dict and apply the SAME author-facing validity gates.
+    output_schema_raw = spec.get("output_schema")
+    output_schema = (
+        json.loads(output_schema_raw) if isinstance(output_schema_raw, str) else output_schema_raw
+    )
+    if output_schema is not None:
+        if not isinstance(output_schema, dict):
+            return await _reject(
+                "bad_invoke_workflow",
+                "invoke_workflow() output_schema must be a JSON object schema, "
+                f"got {type(output_schema).__name__}",
+            )
+        try:
+            jsonschema.Draft202012Validator.check_schema(output_schema)
+        except jsonschema.SchemaError as exc:
+            return await _reject(
+                "bad_invoke_workflow",
+                f"invoke_workflow() output_schema is not a valid JSON Schema: {exc.message}",
+            )
+        if (bad_ref := _unresolvable_ref(output_schema)) is not None:
+            return await _reject(
+                "bad_invoke_workflow",
+                f"invoke_workflow() output_schema has an unresolvable reference {bad_ref!r} "
+                "(references must resolve within the schema; remote refs are unsupported)",
+            )
+
+    sub_run_id = child_run_id(run.id, cap.call_key)
+    run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=account_id)
+    # Spawn (or idempotently re-attach) the sub-run. ``create_run`` owns its own
+    # transaction on a separate pooled connection (like ``create_child_session``);
+    # its create-or-reattach + caps are all internal. A 404 (workflow gone /
+    # archived) or a cap breach (depth / fan-out) is a catchable author error.
+    try:
+        sub_run = await create_run(
+            pool,
+            account_id=account_id,
+            workflow_id=workflow_id,
+            environment_id=run.environment_id,
+            input=spec.get("input"),
+            vault_ids=run_vaults,
+            run_id=sub_run_id,
+            parent_run_id=run.id,
+            request_id=cap.call_key,  # the invoke_workflow() call IS the request
+            caller={"kind": "run", "id": run.id},
+            request_output_schema=output_schema,
+        )
+    except NotFoundError:
+        return await _reject("workflow_not_found", f"workflow {workflow_id!r} not found")
+    except ConflictError as exc:
+        return await _reject("bad_invoke_workflow", str(exc))
+    except (WorkflowRunDepthExceededError, RateLimitedError, ForbiddenError) as exc:
+        return await _reject("invoke_workflow_refused", str(exc))
+
+    cap_payload: dict[str, Any] = {
+        "capability": "invoke_workflow",
+        "child_run_id": sub_run.id,
+        "workflow_id": workflow_id,
+    }
+    if "label" in cap.annotations:
+        cap_payload["label"] = cap.annotations["label"]
+    if output_schema is not None:
+        cap_payload["output_schema"] = output_schema  # audit: the shape this call demanded
+    await wf_queries.append_run_event(
+        conn,
+        account_id=account_id,
+        run_id=run.id,
+        type="call_started",
+        call_key=cap.call_key,
+        payload=cap_payload,
+    )
+    # If the sub-run already carries its answer (re-attach to a finished/gone run),
+    # ask the caller to self-wake so its next step harvests now rather than after a
+    # sweep tick — resolved through the SAME ``derive_run_response`` seam the harvest
+    # uses, so an already-gone sub-run triggers the prompt re-wake too.
+    needs_rewake = (
+        await wf_queries.derive_run_response(
+            conn, sub_run.id, account_id=account_id, request_id=cap.call_key
+        )
+        is not None
+    )
+    return _SpawnResult(rejected=False, needs_rewake=needs_rewake)
+
+
 async def _complete_run(
     conn: asyncpg.Connection[Any],
     run: WfRun,
@@ -1001,6 +1179,23 @@ async def _complete_run(
     used). The run's correctness never depended on reclaim. The
     ``run_session_step`` archived-guard makes that future reclaim crash-free.
     """
+    # Run-target error-arm (#1126 / #790 schema half): a run completing IN SERVICE
+    # OF A REQUEST validates its terminal output against the REQUEST's per-call
+    # output_schema and FAILS LOUD on mismatch (error_kind=output_schema_violation).
+    # No bounce-and-retry — the script already ran (unlike an agent, which the
+    # return-tool bounces). Only a *successful* output is schema-checked; an already-
+    # errored completion passes through (the error already explains the outcome).
+    if (
+        not is_error
+        and run.request_id is not None
+        and run.request_output_schema is not None
+        and (schema_error := _validate_output_against_schema(output, run.request_output_schema))
+        is not None
+    ):
+        output = schema_error
+        is_error = True
+        error_kind = "output_schema_violation"
+
     usage = await wf_queries.run_children_usage(conn, run.id, account_id=run.account_id)
     payload: dict[str, Any] = {
         "output": output,
@@ -1089,6 +1284,32 @@ async def _commit_terminal_and_dispatch(
             kind = error.get("kind")
             if kind in {"engine_semantics_changed", "nondeterministic_replay"}:
                 await _fail_child_requests_for_terminal_error(conn, run, error_kind=kind)
+        # The "one missing edge" (#1126): a run completing IN SERVICE OF A REQUEST
+        # emits a ``request_response`` keyed on its inbound ``request_id`` — the
+        # run-side mirror of the session ``respond_to_request`` writer, same data
+        # shape so ``derive_run_response``'s response arm reads it uniformly. It
+        # rides this SAME transaction so the answer commits atomically with the
+        # terminal transition, and inherits the run's exactly-once latch — keyed
+        # on ``call_key=request_id``, the existing ``(run_id, call_key, type)``
+        # unique index makes a replay / procrastinate dual-execution loser a no-op
+        # (no double-emit). Gated on the inbound edge: an edgeless operator/HTTP
+        # run (``request_id is None``) emits nothing. Cancellation answers via the
+        # liveness arm (terminal-with-no-response → ``child_gone``), not here.
+        if run.request_id is not None and status != "cancelled":
+            await wf_queries.append_run_event(
+                conn,
+                account_id=run.account_id,
+                run_id=run.id,
+                type="request_response",
+                call_key=run.request_id,
+                payload={
+                    "event": "request_response",
+                    "request_id": run.request_id,
+                    "is_error": payload["is_error"],
+                    "result": None if payload["is_error"] else output,
+                    "error": payload.get("error"),
+                },
+            )
         await wf_queries.set_run_terminal(
             conn, run.id, status=status, output=output, account_id=run.account_id
         )
@@ -1100,6 +1321,21 @@ async def _commit_terminal_and_dispatch(
                 run_id=run.id,
                 status=status,
             )
+    # Wake the CALLER run promptly so it harvests this answer on its next step,
+    # rather than waiting out the periodic sweep — mirroring how an agent() child
+    # wakes its run. Only when the request came from a run (caller.kind=='run');
+    # a session/api caller resumes through its own poll path. Best-effort and
+    # post-commit (the answer is durable; a lost wake is recovered by the sweep).
+    if (
+        inserted is not None
+        and run.request_id is not None
+        and status != "cancelled"
+        and isinstance(run.caller, dict)
+        and run.caller.get("kind") == "run"
+        and isinstance(run.caller.get("id"), str)
+    ):
+        with contextlib.suppress(Exception):
+            await defer_run_wake(run.caller["id"], batch=True)
     for fire in fires:
         try:
             await defer_trigger_fire(fire.trigger_id, fire.trigger_run_id)

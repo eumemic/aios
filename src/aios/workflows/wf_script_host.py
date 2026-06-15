@@ -188,6 +188,46 @@ def agent(
     )
 
 
+def invoke_workflow(
+    workflow_id: str,
+    input: Any,
+    *,
+    output_schema: Any = None,
+    label: str | None = None,
+) -> _Capability:
+    """Invoke another workflow as a sub-run and await its result — the dual of
+    :func:`agent` (which invokes a child *session*), keyed by id like
+    ``agent(agent_id=…)``.
+
+    Spawns a sub-run of ``workflow_id`` over ``input`` and suspends until the
+    sub-run completes; the sub-run runs ``surface_of(workflow) ∩ surface_of(this
+    run)`` (the #794 clamp, applied for free by ``create_run``). The result is the
+    sub-run's terminal output, resolved through the single kind-agnostic resolver
+    keyed on the request id (#1126). An ``output_schema`` constrains the sub-run's
+    terminal output; a mismatch fails the sub-run loud (``output_schema_violation``)
+    and surfaces here as an :class:`AgentError`. A sub-run that errors or goes gone
+    raises :class:`AgentError` at the ``await``. ``label`` is an observability
+    annotation and does not enter the call key.
+    """
+    annotations: dict[str, Any] = {}
+    if label is not None:
+        annotations["label"] = label
+    # output_schema as a canonical JSON *string* (mirror agent()) so a schema's
+    # numeric literals survive the call_key hash; reconstructed with json.loads in
+    # the worker's _open_invoke_workflow_capability.
+    return _Capability(
+        "invoke_workflow",
+        {
+            "workflow_id": workflow_id,
+            "input": input,
+            "output_schema": None
+            if output_schema is None
+            else canonical_schema_json(output_schema),
+        },
+        annotations,
+    )
+
+
 def budget() -> _Capability:
     """Read this run's shared direct-child spend budget, or None when unset."""
     return _Capability("budget", None)
@@ -505,6 +545,7 @@ def author_namespace() -> dict[str, Any]:
         "__builtins__": SAFE_BUILTINS,
         "gate": gate,
         "agent": agent,
+        "invoke_workflow": invoke_workflow,
         "tool": tool,
         "budget": budget,
         "parallel": parallel,

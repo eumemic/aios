@@ -69,6 +69,9 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         parent_run_id=row["parent_run_id"],
         launcher_session_id=row["launcher_session_id"],
         depth=row["depth"],
+        request_id=row.get("request_id"),
+        caller=parse_jsonb(row.get("caller")),
+        request_output_schema=parse_jsonb(row.get("request_output_schema")),
         script=row["script"],
         script_sha=row["script_sha"],
         host_semantics_epoch=row["host_semantics_epoch"],
@@ -430,8 +433,12 @@ async def insert_wf_run(
     script_sha: str,
     host_semantics_epoch: int,
     input: Any = None,
+    run_id: str | None = None,
     parent_run_id: str | None = None,
     launcher_session_id: str | None = None,
+    request_id: str | None = None,
+    caller: dict[str, Any] | None = None,
+    request_output_schema: dict[str, Any] | None = None,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
@@ -447,18 +454,26 @@ async def insert_wf_run(
     the remaining hops this run may spend on its OUTGOING trusted edges. The caller
     (``create_run``) computes it — full budget for an edgeless root, ``parent.depth - 1``
     for a nested launch — and refuses BEFORE calling here when the parent has none left,
-    so no over-budget run row is ever written."""
-    new_id = make_id(WORKFLOW_RUN)
+    so no over-budget run row is ever written.
+
+    ``run_id`` (#1129) pins the id to a deterministic value — the ``invoke_workflow``
+    sub-run spawn's replay key. The insert is ``ON CONFLICT (id) DO NOTHING``, so a
+    replay re-attaches the existing row (re-fetched here) instead of erroring; the
+    default (``None``) mints a fresh ULID for which the conflict can never fire."""
+    new_id = run_id if run_id is not None else make_id(WORKFLOW_RUN)
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
-                 launcher_session_id, script, script_sha, host_semantics_epoch, status, input,
+                 launcher_session_id, request_id, caller, request_output_schema,
+                 script, script_sha, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
                  depth)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10::jsonb,
-                    $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12,
+                    'pending', $13::jsonb,
+                    $14::jsonb, $15::jsonb, $16::jsonb, $17, $18, $19)
+            ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
             new_id,
@@ -467,6 +482,9 @@ async def insert_wf_run(
             environment_id,
             parent_run_id,
             launcher_session_id,
+            request_id,
+            json.dumps(caller) if caller is not None else None,
+            json.dumps(request_output_schema) if request_output_schema is not None else None,
             script,
             script_sha,
             host_semantics_epoch,
@@ -488,7 +506,14 @@ async def insert_wf_run(
                 "launcher_session_id": launcher_session_id,
             },
         ) from exc
-    assert row is not None
+    if row is None:
+        # ON CONFLICT DO NOTHING fired — a concurrent replay already inserted this
+        # deterministic id. Re-fetch the winning row and re-attach (#1129). Only
+        # reachable on the ``run_id``-pinned path; a fresh ULID never conflicts.
+        assert run_id is not None
+        existing = await conn.fetchrow("SELECT * FROM wf_runs WHERE id = $1", run_id)
+        assert existing is not None
+        return _row_to_wf_run(existing)
     return _row_to_wf_run(row)
 
 
@@ -898,6 +923,51 @@ async def resolve_run_error(conn: asyncpg.Connection[Any], run_id: str) -> dict[
         return None
     error: dict[str, Any] | None = completed.payload.get("error")
     return error
+
+
+async def derive_run_response(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str, request_id: str
+) -> dict[str, Any] | None:
+    """A run-servicer's **terminal outcome** for an inbound request, or ``None``.
+
+    The run-kind branch of the **one** kind-agnostic resolver (the dual of the
+    session-side :func:`aios.db.queries.sessions.derive_response`): a sub-run
+    invoked ``in service of a request`` answers identically to a session —
+
+    * a **written response** (the ``request_response`` journal event the run emits
+      at its terminal ``_complete_run`` chokepoint, #1126) → that outcome;
+    * else, if the run is **gone** — ``wf_runs`` terminal/archived with no written
+      response (so it can never answer) → a Failed ``child_gone`` outcome;
+    * else → ``None`` (alive and unanswered — still pending).
+
+    The **response arm is the log** (the ``request_response`` event in
+    ``wf_run_events``), and the **liveness arm is the run row** (``wf_runs``
+    terminal status / ``archived_at``) — the run-kind dispatch of
+    ``derive_response``'s liveness arm (session uses ``sessions.archived_at``).
+    Both are read in one snapshot, so a written response always dominates "gone".
+    """
+    row = await conn.fetchrow(
+        "SELECT (SELECT e.payload FROM wf_run_events e "
+        "        WHERE e.run_id = $1 AND e.type = 'request_response' "
+        "        AND e.payload->>'request_id' = $2 ORDER BY e.seq DESC LIMIT 1) AS response, "
+        "       EXISTS (SELECT 1 FROM wf_runs r WHERE r.id = $1 AND r.account_id = $3 "
+        "               AND r.archived_at IS NULL "
+        "               AND r.status NOT IN ('completed','errored','cancelled')) AS live",
+        run_id,
+        request_id,
+        account_id,
+    )
+    assert row is not None
+    if row["response"] is not None:
+        response = parse_jsonb(row["response"])
+        return {
+            "result": response.get("result"),
+            "is_error": bool(response.get("is_error")),
+            "error": response.get("error"),
+        }
+    if not row["live"]:
+        return {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
+    return None
 
 
 async def find_open_gate_call_key(

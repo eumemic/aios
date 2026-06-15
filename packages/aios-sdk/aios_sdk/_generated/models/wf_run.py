@@ -15,6 +15,10 @@ if TYPE_CHECKING:
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.tool_spec import ToolSpec
+    from ..models.wf_run_caller_type_0 import WfRunCallerType0
+    from ..models.wf_run_request_output_schema_type_0 import (
+        WfRunRequestOutputSchemaType0,
+    )
 
 
 T = TypeVar("T", bound="WfRun")
@@ -53,6 +57,9 @@ class WfRun:
             parent_run_id (None | str | Unset):
             launcher_session_id (None | str | Unset):
             depth (int | Unset):  Default: 0.
+            request_id (None | str | Unset):
+            caller (None | Unset | WfRunCallerType0):
+            request_output_schema (None | Unset | WfRunRequestOutputSchemaType0):
             tools (list[ToolSpec] | Unset):
             mcp_servers (list[McpServerSpec] | Unset):
             http_servers (list[HttpServerSpec] | Unset):
@@ -77,6 +84,9 @@ class WfRun:
     parent_run_id: None | str | Unset = UNSET
     launcher_session_id: None | str | Unset = UNSET
     depth: int | Unset = 0
+    request_id: None | str | Unset = UNSET
+    caller: None | Unset | WfRunCallerType0 = UNSET
+    request_output_schema: None | Unset | WfRunRequestOutputSchemaType0 = UNSET
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
@@ -88,6 +98,11 @@ class WfRun:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.wf_run_caller_type_0 import WfRunCallerType0
+        from ..models.wf_run_request_output_schema_type_0 import (
+            WfRunRequestOutputSchemaType0,
+        )
+
         id = self.id
 
         workflow_id = self.workflow_id
@@ -123,6 +138,28 @@ class WfRun:
             launcher_session_id = self.launcher_session_id
 
         depth = self.depth
+
+        request_id: None | str | Unset
+        if isinstance(self.request_id, Unset):
+            request_id = UNSET
+        else:
+            request_id = self.request_id
+
+        caller: dict[str, Any] | None | Unset
+        if isinstance(self.caller, Unset):
+            caller = UNSET
+        elif isinstance(self.caller, WfRunCallerType0):
+            caller = self.caller.to_dict()
+        else:
+            caller = self.caller
+
+        request_output_schema: dict[str, Any] | None | Unset
+        if isinstance(self.request_output_schema, Unset):
+            request_output_schema = UNSET
+        elif isinstance(self.request_output_schema, WfRunRequestOutputSchemaType0):
+            request_output_schema = self.request_output_schema.to_dict()
+        else:
+            request_output_schema = self.request_output_schema
 
         tools: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.tools, Unset):
@@ -192,6 +229,12 @@ class WfRun:
             field_dict["launcher_session_id"] = launcher_session_id
         if depth is not UNSET:
             field_dict["depth"] = depth
+        if request_id is not UNSET:
+            field_dict["request_id"] = request_id
+        if caller is not UNSET:
+            field_dict["caller"] = caller
+        if request_output_schema is not UNSET:
+            field_dict["request_output_schema"] = request_output_schema
         if tools is not UNSET:
             field_dict["tools"] = tools
         if mcp_servers is not UNSET:
@@ -216,6 +259,10 @@ class WfRun:
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.tool_spec import ToolSpec
+        from ..models.wf_run_caller_type_0 import WfRunCallerType0
+        from ..models.wf_run_request_output_schema_type_0 import (
+            WfRunRequestOutputSchemaType0,
+        )
 
         d = dict(src_dict)
         id = d.pop("id")
@@ -261,6 +308,55 @@ class WfRun:
         )
 
         depth = d.pop("depth", UNSET)
+
+        def _parse_request_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        request_id = _parse_request_id(d.pop("request_id", UNSET))
+
+        def _parse_caller(data: object) -> None | Unset | WfRunCallerType0:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                caller_type_0 = WfRunCallerType0.from_dict(data)
+
+                return caller_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | WfRunCallerType0, data)
+
+        caller = _parse_caller(d.pop("caller", UNSET))
+
+        def _parse_request_output_schema(
+            data: object,
+        ) -> None | Unset | WfRunRequestOutputSchemaType0:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                request_output_schema_type_0 = WfRunRequestOutputSchemaType0.from_dict(
+                    data
+                )
+
+                return request_output_schema_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | WfRunRequestOutputSchemaType0, data)
+
+        request_output_schema = _parse_request_output_schema(
+            d.pop("request_output_schema", UNSET)
+        )
 
         _tools = d.pop("tools", UNSET)
         tools: list[ToolSpec] | Unset = UNSET
@@ -345,6 +441,9 @@ class WfRun:
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
             depth=depth,
+            request_id=request_id,
+            caller=caller,
+            request_output_schema=request_output_schema,
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_servers,
