@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import uuid4
 
 import asyncpg
 import pytest
@@ -58,7 +59,7 @@ async def _seed_run(
     wf = await wf_service.create_workflow(
         pool,
         account_id=account_id,
-        name="trace-walk-wf",
+        name=f"trace-walk-wf-{uuid4().hex}",
         script="def main(ctx):\n    return None\n",
         description=None,
         tools=[],

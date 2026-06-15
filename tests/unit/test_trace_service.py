@@ -220,7 +220,7 @@ def test_walk_ceiling_truncates(monkeypatch: Any) -> None:
         ]
     }
     conn = _FakeConn(adjacency)
-    monkeypatch.setattr(svc.trace_q, "children_of", _fake_children_of)
+    monkeypatch.setattr("aios.services.trace.trace_q.children_of", _fake_children_of)
 
     nodes, truncated = asyncio.run(
         svc._walk(conn, root_kind="run", root_id="wfr_root", account_id="acct", ceiling=3)
@@ -234,7 +234,7 @@ def test_walk_no_truncation_under_ceiling(monkeypatch: Any) -> None:
         ("run", "wfr_root"): [ChildNode(kind="session", id="sess_x", label=None, request_id="r")]
     }
     conn = _FakeConn(adjacency)
-    monkeypatch.setattr(svc.trace_q, "children_of", _fake_children_of)
+    monkeypatch.setattr("aios.services.trace.trace_q.children_of", _fake_children_of)
     nodes, truncated = asyncio.run(
         svc._walk(conn, root_kind="run", root_id="wfr_root", account_id="acct", ceiling=50)
     )
@@ -249,7 +249,7 @@ def test_walk_is_cycle_safe(monkeypatch: Any) -> None:
         ("run", "wfr_b"): [ChildNode(kind="run", id="wfr_a", label=None, request_id="r2")],
     }
     conn = _FakeConn(adjacency)
-    monkeypatch.setattr(svc.trace_q, "children_of", _fake_children_of)
+    monkeypatch.setattr("aios.services.trace.trace_q.children_of", _fake_children_of)
     nodes, truncated = asyncio.run(
         svc._walk(conn, root_kind="run", root_id="wfr_a", account_id="acct", ceiling=50)
     )
