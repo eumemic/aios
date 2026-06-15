@@ -256,6 +256,43 @@ async def real_wake_setup(aios_env: dict[str, str]) -> AsyncIterator[Any]:
 
 
 @pytest.fixture
+async def open_procrastinate_app(aios_env: dict[str, str]) -> AsyncIterator[None]:
+    """Open the procrastinate ``app`` against the testcontainer DB for the test.
+
+    Provision-bearing e2e tests reach ``defer_run_wake`` (and any other
+    ``app.configure_task(...).defer_async(...)`` enqueue) on the run-provision
+    path. That call requires the procrastinate app to be open — in production
+    the api/worker lifespan opens it (``api/app.py``, ``harness/worker.py``);
+    in tests nothing does, so the enqueue raises ``procrastinate.AppNotOpen``
+    at **setup**, before the test exercises the behavior under test (#1148,
+    #1163).
+
+    The module-level ``app`` singleton's connector was built at import time
+    from possibly-stale settings, so — mirroring ``test_wake_lock_release_latency``
+    and ``test_worker_concurrency`` — this fixture builds a fresh
+    ``PsycopgConnector`` pointed at this test instance's DB, opens it, and
+    swaps it in via ``replace_connector`` for the fixture's lifetime. The
+    swapped connector is closed on teardown.
+
+    Shared so every provision-bearing e2e inherits an open app
+    (``docker_harness`` depends on it) rather than each test opening one
+    itself.
+    """
+    from procrastinate import PsycopgConnector
+
+    from aios.harness.procrastinate_app import _sync_dsn
+    from aios.harness.procrastinate_app import app as procrastinate_app
+
+    connector = PsycopgConnector(conninfo=_sync_dsn(aios_env["AIOS_DB_URL"]))
+    await connector.open_async()
+    try:
+        with procrastinate_app.replace_connector(connector):
+            yield
+    finally:
+        await connector.close_async()
+
+
+@pytest.fixture
 def crypto_box(aios_env: dict[str, str]) -> Any:
     """The :class:`CryptoBox` keyed by the test instance's ``AIOS_VAULT_KEY``.
 
@@ -341,8 +378,17 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
 
 
 @pytest.fixture
-async def docker_harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
+async def docker_harness(
+    aios_env: dict[str, str], open_procrastinate_app: None
+) -> AsyncIterator[Harness]:
     """Like ``harness`` but with a real SandboxRegistry for Docker tests.
+
+    Depends on ``open_procrastinate_app`` so the procrastinate app is open
+    for the harness's lifetime: provision-bearing run tests reach
+    ``defer_run_wake`` on the run-provision path, which enqueues a
+    procrastinate task and otherwise crashes at setup with
+    ``procrastinate.AppNotOpen`` (#1148, #1163). Sharing it here means every
+    provision-bearing e2e inherits the open app for free.
 
     pytest-xdist note: ``SANDBOX_NETWORK_NAME`` is a hardcoded host-global
     name (``aios-sandbox``).  Under ``-n 2``, both xdist workers' sandbox
