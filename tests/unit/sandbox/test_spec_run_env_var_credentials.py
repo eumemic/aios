@@ -127,7 +127,13 @@ async def test_run_placeholder_lands_in_env_secret_never_does() -> None:
     assert set(plan.spec.environment) == {*runtime_reserved, "PW_DEV_GATE_PASSWORD"}
 
 
-async def test_run_env_var_cred_with_unrestricted_networking_rejected_before_broker() -> None:
+async def test_run_env_var_cred_with_unrestricted_networking_provisions_with_warning() -> None:
+    # Permit-with-warning (#1153), run-side twin of the session-path test: an
+    # Unrestricted env carrying env-var creds now provisions and logs the
+    # structured open-egress warning (R5 — the warning fires from
+    # build_spec_from_run too, not just build_spec_from_session).
+    from structlog.testing import capture_logs
+
     broker = MagicMock()
     broker.port = 54321
     broker.register_session = MagicMock()
@@ -138,9 +144,12 @@ async def test_run_env_var_cred_with_unrestricted_networking_rejected_before_bro
             broker=broker,
         ):
             stack.enter_context(ctx)
-        with pytest.raises(ValueError, match="Limited"):
-            await build_spec_from_run(_RUN_ID)
-    broker.register_session.assert_not_called()
+        with capture_logs() as logs:
+            plan = await build_spec_from_run(_RUN_ID)
+    assert plan.spec.environment["PW_DEV_GATE_PASSWORD"] == _CRED.placeholder
+    broker.register_session.assert_called_once()
+    warning = next(e for e in logs if e["event"] == "sandbox.envvar_creds_open_egress")
+    assert warning["credential_count"] == 1
 
 
 async def test_run_secret_proxy_constructed_started_and_cleaned_on_assembly_failure() -> None:

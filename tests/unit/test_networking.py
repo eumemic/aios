@@ -25,8 +25,10 @@ from aios.sandbox.backends.base import (
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.setup import (
     apply_network_lockdown,
+    apply_secret_egress_dnat,
     build_iptables_script,
     build_lockdown_verify_script,
+    build_secret_egress_dnat_script,
 )
 from tests.helpers.sandbox import FakeBackend, make_handle
 
@@ -304,6 +306,164 @@ class TestBuildLockdownVerifyScript:
             assert not stripped.startswith("iptables "), (
                 f"verify uses a bare iptables (nft default): {line!r}"
             )
+
+
+# ── verify with assert_drop=False (Unrestricted DNAT-only path, #1153) ────────
+
+
+class TestBuildLockdownVerifyScriptNoDrop:
+    def test_omits_drop_assertion_when_assert_drop_false(self) -> None:
+        # Under the DNAT-only path there is no DROP policy to assert.
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], assert_drop=False)
+        assert "OUTPUT DROP" not in script
+        # The nat-DNAT coverage assertion is still present (always non-empty
+        # dnat_hosts on this path → never a no-op verify, #984).
+        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in script
+
+    def test_still_uses_backend_selector(self) -> None:
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], assert_drop=False)
+        assert "command -v iptables-legacy" in script
+
+
+# ── DNAT-only script for Unrestricted-with-creds (#1153) ──────────────────────
+
+
+class TestBuildSecretEgressDnatScript:
+    def test_installs_dnat_without_drop_or_filter_accepts(self) -> None:
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        # Routes the credential host's :443 to the proxy.
+        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
+        assert "getent ahosts api.secret.com" in script
+        # CRUCIALLY: no lockdown — no DROP policy, no filter ACCEPTs.
+        assert "-P OUTPUT DROP" not in script
+        assert "-j ACCEPT" not in script
+
+    def test_flushes_nat_output_only_not_filter(self) -> None:
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        assert '"$IPT" -t nat -F OUTPUT' in script
+        # The filter OUTPUT table is deliberately left untouched.
+        assert '"$IPT" -F OUTPUT' not in script
+
+    def test_guarded_on_proxy_ip_miss(self) -> None:
+        # Shares the fail-open-to-placeholder guard with build_iptables_script.
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        assert 'if [ -n "$PROXY_IP" ]; then' in script
+
+    def test_uses_backend_selector_no_bare_iptables(self) -> None:
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        assert "command -v iptables-legacy" in script
+        for line in script.splitlines():
+            stripped = line.strip()
+            if "command -v iptables-legacy" in stripped:
+                continue
+            assert not stripped.startswith("iptables "), (
+                f"DNAT-only script uses a bare iptables (nft default): {line!r}"
+            )
+
+    def test_no_dnat_target_emits_no_rules(self) -> None:
+        # Defensive: with no target the nat block is empty (the script is only
+        # the flush + backend select). The registry never calls this path
+        # without a target, but the helper must not emit a malformed rule.
+        script = build_secret_egress_dnat_script(dnat_hosts=[], dnat_target=None)
+        assert "DNAT" not in script
+
+    def test_nat_dnat_block_byte_identical_to_lockdown_script(self) -> None:
+        # The shared _nat_dnat_lines helper means the DNAT block emitted by the
+        # DNAT-only script matches the block inside the Limited lockdown script.
+        target = ("aios-worker", 49152)
+        hosts = ["api.secret.com", "data.secret.com"]
+        dnat_only = build_secret_egress_dnat_script(dnat_hosts=hosts, dnat_target=target)
+        lockdown = build_iptables_script(
+            allowed_hosts={"api.secret.com", "data.secret.com"},
+            dnat_hosts=hosts,
+            dnat_target=target,
+        )
+        # Extract the DNAT routing comment through the closing 'fi' from each.
+        marker = "# Route credential-host HTTPS through the secret-egress proxy"
+
+        def _dnat_block(s: str) -> str:
+            lines = s.splitlines()
+            start = next(i for i, line_ in enumerate(lines) if marker in line_)
+            end = next(i for i in range(start, len(lines)) if lines[i].strip() == "fi")
+            return "\n".join(lines[start : end + 1])
+
+        assert _dnat_block(dnat_only) == _dnat_block(lockdown)
+
+
+# ── apply_secret_egress_dnat: open-egress DNAT install via the sidecar ────────
+
+
+class TestApplySecretEgressDnat:
+    @staticmethod
+    def _sidecar_scripts(backend: FakeBackend) -> list[str]:
+        return [c[1]["script"] for c in backend.calls if c[0] == "run_netns_sidecar"]
+
+    @pytest.mark.asyncio
+    async def test_applies_and_verifies_dnat_only(self) -> None:
+        backend = FakeBackend()
+        handle = make_handle()
+
+        await apply_secret_egress_dnat(
+            backend,
+            handle,
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+
+        scripts = self._sidecar_scripts(backend)
+        assert len(scripts) == 2
+        apply_script, verify_script = scripts
+        # Apply installs the DNAT with NO lockdown.
+        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in apply_script
+        assert "-P OUTPUT DROP" not in apply_script
+        # Apply still points the sidecar at the embedded resolver before getent.
+        assert "127.0.0.11" in apply_script
+        # Verify asserts the nat DNAT rule, NOT a DROP policy.
+        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in verify_script
+        assert "OUTPUT DROP" not in verify_script
+        # The sidecar runs the operator image.
+        sidecar_call = next(c for c in backend.calls if c[0] == "run_netns_sidecar")
+        assert sidecar_call[1]["image"].endswith("aios-sandbox:latest")
+
+    @pytest.mark.asyncio
+    async def test_apply_nonzero_exit_fails_closed(self) -> None:
+        backend = FakeBackend()
+        backend.sidecar_results = [
+            CommandResult(exit_code=1, stdout="", stderr="boom", timed_out=False, truncated=False)
+        ]
+        handle = make_handle()
+
+        with pytest.raises(SandboxBackendError, match="secret-egress DNAT failed"):
+            await apply_secret_egress_dnat(
+                backend,
+                handle,
+                dnat_hosts=["api.secret.com"],
+                dnat_target=("aios-worker", 49152),
+            )
+
+    @pytest.mark.asyncio
+    async def test_runtime_threaded_to_sidecar(self) -> None:
+        backend = FakeBackend()
+        handle = make_handle()
+
+        await apply_secret_egress_dnat(
+            backend,
+            handle,
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            runtime="runsc",
+        )
+
+        sidecar_call = next(c for c in backend.calls if c[0] == "run_netns_sidecar")
+        assert sidecar_call[1]["runtime"] == "runsc"
 
 
 # ── docker backend translates network policy to docker run argv ────────────────

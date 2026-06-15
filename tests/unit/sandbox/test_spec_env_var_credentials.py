@@ -186,15 +186,55 @@ async def _build_with(*, env_config: object, creds: tuple[ResolvedEnvVarCredenti
         return await build_spec_from_session("sess_01TEST")
 
 
-async def test_env_var_cred_with_unrestricted_networking_rejected() -> None:
+async def test_env_var_cred_with_unrestricted_networking_provisions_with_warning() -> None:
+    # Permit-with-warning (#1153): an Unrestricted env carrying env-var creds
+    # now provisions (the DNAT-only chokepoint makes the swap fire) and logs a
+    # structured operator warning naming the open-egress exfil trade.
+    from structlog.testing import capture_logs
+
     env = EnvironmentConfig(networking=UnrestrictedNetworking())
-    with pytest.raises(ValueError, match="Limited"):
-        await _build_with(env_config=env, creds=(_cred(["api.github.com"]),))
+    cred = _cred(["api.github.com"])
+    with capture_logs() as logs:
+        plan = await _build_with(env_config=env, creds=(cred,))
+    assert plan.spec.environment["GITHUB_TOKEN"] == cred.placeholder  # type: ignore[attr-defined]
+    warning = next(e for e in logs if e["event"] == "sandbox.envvar_creds_open_egress")
+    assert warning["credential_count"] == 1
+    assert warning["cred_hosts"] == ["api.github.com"]
 
 
-async def test_env_var_cred_with_no_env_config_rejected() -> None:
-    with pytest.raises(ValueError, match="Limited"):
-        await _build_with(env_config=None, creds=(_cred(["api.github.com"]),))
+async def test_env_var_cred_with_no_env_config_provisions_with_warning() -> None:
+    # No env config resolves to Unrestricted at runtime → permitted + warned.
+    from structlog.testing import capture_logs
+
+    cred = _cred(["api.github.com"])
+    with capture_logs() as logs:
+        plan = await _build_with(env_config=None, creds=(cred,))
+    assert plan.spec.environment["GITHUB_TOKEN"] == cred.placeholder  # type: ignore[attr-defined]
+    assert any(e["event"] == "sandbox.envvar_creds_open_egress" for e in logs)
+
+
+async def test_env_var_cred_under_limited_does_not_warn_open_egress() -> None:
+    # The open-egress warning fires ONLY under non-Limited. A covered Limited
+    # env keeps the mandatory containment boundary, so no warning.
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        await _build_with(
+            env_config=limited_env("api.github.com"), creds=(_cred(["api.github.com"]),)
+        )
+    assert not any(e["event"] == "sandbox.envvar_creds_open_egress" for e in logs)
+
+
+async def test_no_creds_under_unrestricted_does_not_warn_open_egress() -> None:
+    # No env-var creds ⇒ no warning even under Unrestricted (the gate + warning
+    # are both no-ops for the common, credential-free path).
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        await _build_with(
+            env_config=EnvironmentConfig(networking=UnrestrictedNetworking()), creds=()
+        )
+    assert not any(e["event"] == "sandbox.envvar_creds_open_egress" for e in logs)
 
 
 async def test_env_var_cred_uncovered_host_rejected_names_host() -> None:

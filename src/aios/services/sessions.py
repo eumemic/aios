@@ -209,8 +209,12 @@ def _evict_sandbox_for_resource_change(session_id: str) -> None:
 async def _assert_env_var_creds_contained(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> None:
-    """Advisory #879 gate at attach: fast console 422 if the session's
+    """Advisory #879/#1153 gate at attach: fast console 422 if the session's
     env-var credentials aren't contained by its Limited environment.
+
+    Mode-aware (#1153): under Unrestricted (or no env) this no longer 422s —
+    the swap fires via the DNAT-only chokepoint and the host-subset check has no
+    DROP to guard. The 422 now only fires for the Limited host-subset violation.
 
     Best-effort UX only — ``build_spec_from_session`` is the authoritative
     gate (both sides are independently mutable after attach). Runs INSIDE

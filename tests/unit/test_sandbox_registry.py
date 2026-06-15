@@ -632,6 +632,116 @@ class TestSecretProxyDnatThreading:
         assert "run_X" not in registry._secret_proxies
 
 
+class TestApplyEgressRulesBranching:
+    """``_apply_egress_rules`` (renamed from ``_maybe_apply_lockdown``) picks the
+    egress mechanism by networking mode (#1153):
+
+    - Limited → ``apply_network_lockdown`` (lockdown + DNAT).
+    - Unrestricted/None WITH creds → ``apply_secret_egress_dnat`` (DNAT-only).
+    - Unrestricted/None WITHOUT creds → neither (the historical no-op).
+    """
+
+    @staticmethod
+    def _plan_unrestricted_with_creds(session_id: str) -> ProvisioningPlan:
+        from aios.models.environments import EnvironmentConfig, UnrestrictedNetworking
+
+        base = _provisioning_plan(session_id)  # env_config=None, Unrestricted spec
+        cred = ResolvedEnvVarCredential(
+            credential_id="cred_1",
+            secret_name="API_TOKEN",
+            secret_value="real-secret",
+            allowed_hosts=("api.secret.com", "data.secret.com/v1"),
+            updated_at=datetime(2025, 1, 1, tzinfo=UTC),
+            placeholder="AIOS_SECRET_PLACEHOLDER_deadbeef",
+        )
+        return ProvisioningPlan(
+            spec=base.spec,
+            env_config=EnvironmentConfig(networking=UnrestrictedNetworking()),
+            memory_echoes=base.memory_echoes,
+            github_echoes=base.github_echoes,
+            git_proxy=base.git_proxy,
+            env_var_credentials=(cred,),
+            secret_proxy=cast(Any, FakeSecretProxy(port=49152)),
+        )
+
+    @pytest.mark.asyncio
+    async def test_unrestricted_with_creds_calls_dnat_only(self) -> None:
+        registry = SandboxRegistry(backend=FakeBackend())
+        plan = self._plan_unrestricted_with_creds("sess_U")
+        handle = make_handle()
+        lockdown = AsyncMock()
+        dnat_only = AsyncMock()
+
+        with (
+            patch("aios.sandbox.registry.apply_network_lockdown", lockdown),
+            patch("aios.sandbox.registry.apply_secret_egress_dnat", dnat_only),
+        ):
+            await registry._apply_egress_rules(handle, plan)
+
+        lockdown.assert_not_awaited()
+        dnat_only.assert_awaited_once()
+        kwargs = dnat_only.call_args.kwargs
+        assert kwargs["dnat_target"] == ("aios-worker", 49152)
+        # The /v1 path prefix is stripped and bare hosts de-dup'd.
+        assert set(kwargs["dnat_hosts"]) == {"api.secret.com", "data.secret.com"}
+
+    @pytest.mark.asyncio
+    async def test_limited_with_creds_calls_lockdown_not_dnat_only(self) -> None:
+        registry = SandboxRegistry(backend=FakeBackend())
+        base = _provisioning_plan_limited("sess_L")
+        cred = ResolvedEnvVarCredential(
+            credential_id="cred_1",
+            secret_name="API_TOKEN",
+            secret_value="real-secret",
+            allowed_hosts=("api.example.com",),
+            updated_at=datetime(2025, 1, 1, tzinfo=UTC),
+            placeholder="AIOS_SECRET_PLACEHOLDER_deadbeef",
+        )
+        plan = ProvisioningPlan(
+            spec=base.spec,
+            env_config=base.env_config,
+            memory_echoes=base.memory_echoes,
+            github_echoes=base.github_echoes,
+            git_proxy=base.git_proxy,
+            env_var_credentials=(cred,),
+            secret_proxy=cast(Any, FakeSecretProxy(port=49152)),
+        )
+        handle = make_handle()
+        lockdown = AsyncMock()
+        dnat_only = AsyncMock()
+        broker = MagicMock()
+        broker.port = 8765
+
+        with (
+            patch("aios.harness.runtime.require_tool_broker", lambda: broker),
+            patch("aios.sandbox.registry.apply_network_lockdown", lockdown),
+            patch("aios.sandbox.registry.apply_secret_egress_dnat", dnat_only),
+        ):
+            await registry._apply_egress_rules(handle, plan)
+
+        dnat_only.assert_not_awaited()
+        lockdown.assert_awaited_once()
+        kwargs = lockdown.call_args.kwargs
+        assert kwargs["dnat_target"] == ("aios-worker", 49152)
+
+    @pytest.mark.asyncio
+    async def test_unrestricted_no_creds_applies_nothing(self) -> None:
+        registry = SandboxRegistry(backend=FakeBackend())
+        plan = _provisioning_plan("sess_N")  # env_config=None, no creds, no proxy
+        handle = make_handle()
+        lockdown = AsyncMock()
+        dnat_only = AsyncMock()
+
+        with (
+            patch("aios.sandbox.registry.apply_network_lockdown", lockdown),
+            patch("aios.sandbox.registry.apply_secret_egress_dnat", dnat_only),
+        ):
+            await registry._apply_egress_rules(handle, plan)
+
+        lockdown.assert_not_awaited()
+        dnat_only.assert_not_awaited()
+
+
 class TestStaleHandleDetection:
     """``get_or_provision`` validates handle liveness on every warm hit.
 

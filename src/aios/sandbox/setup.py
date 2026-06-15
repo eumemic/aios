@@ -272,43 +272,98 @@ def build_iptables_script(
         lines.append(f'  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport {port} -j ACCEPT')
         lines.append("done")
 
-    if dnat_target is not None and dnat_hosts:
-        proxy_alias, proxy_port = dnat_target
-        lines.append("")
-        lines.append("# Route credential-host HTTPS through the secret-egress proxy (#878)")
-        # Resolve the proxy alias to an IP ONCE — iptables --to-destination
-        # needs an IP, not a DNS name. The block is guarded on a non-empty
-        # $PROXY_IP, so a proxy-alias DNS miss emits no malformed ":<port>"
-        # rule. NOTE the resulting behavior: under #879's `cred ⊆ env` gate
-        # the credential host IS always in allowed_hosts and therefore
-        # filter-ACCEPTed on :443 — so on a proxy miss, traffic flows
-        # DIRECTLY to the real upstream carrying the opaque placeholder.
-        # That is fail-open-to-placeholder (auth failures), never a secret
-        # leak: the real secret never enters the container. (In practice the
-        # alias is the load-bearing WORKER_NETWORK_ALIAS, so a miss already
-        # means a non-functional sandbox.)
-        lines.append(
-            f"PROXY_IP=$(getent ahosts {proxy_alias} 2>/dev/null "
-            "| awk '{print $1}' | sort -u | head -n1)"
-        )
-        lines.append('if [ -n "$PROXY_IP" ]; then')
-        for host in sorted(dnat_hosts):
-            lines.append(
-                f"  for ip in $(getent ahosts {host} 2>/dev/null "
-                "| awk '{print $1}' | sort -u); do"
-            )
-            lines.append(
-                '    "$IPT" -t nat -A OUTPUT -d "$ip" -p tcp --dport 443 '
-                f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"'
-            )
-            lines.append("  done")
-        lines.append("fi")
+    lines.extend(_nat_dnat_lines(dnat_hosts, dnat_target))
 
     lines.append("")
     lines.append("# Drop everything else")
     lines.append('"$IPT" -P OUTPUT DROP')
 
     return "\n".join(lines)
+
+
+def _nat_dnat_lines(
+    dnat_hosts: Sequence[str],
+    dnat_target: tuple[str, int] | None,
+) -> list[str]:
+    """The nat-OUTPUT DNAT block: credential-host :443 → secret-egress proxy.
+
+    Shared by :func:`build_iptables_script` (the Limited lockdown script) and
+    :func:`build_secret_egress_dnat_script` (the Unrestricted DNAT-only script)
+    so the DNAT rule shape — and the ``$PROXY_IP``-miss
+    fail-open-to-placeholder guard — lives in exactly one place. Returns an
+    empty list (no rules) when ``dnat_target`` is ``None`` or ``dnat_hosts`` is
+    empty, preserving every existing no-credentials caller.
+
+    Resolve the proxy alias to an IP ONCE — iptables ``--to-destination`` needs
+    an IP, not a DNS name. The block is guarded on a non-empty ``$PROXY_IP``, so
+    a proxy-alias DNS miss emits no malformed ``:<port>`` rule. NOTE the
+    resulting behavior: the credential host's :443 is still reachable (under
+    Limited it is filter-ACCEPTed because dnat_hosts ⊆ allowed_hosts; under the
+    DNAT-only Unrestricted path the filter policy stays ACCEPT), so on a proxy
+    miss traffic flows DIRECTLY to the real upstream carrying the opaque
+    placeholder. That is fail-open-to-placeholder (auth failures), never a
+    secret leak: the real secret never enters the container. (In practice the
+    alias is the load-bearing WORKER_NETWORK_ALIAS, so a miss already means a
+    non-functional sandbox.)
+    """
+    if dnat_target is None or not dnat_hosts:
+        return []
+    proxy_alias, proxy_port = dnat_target
+    lines = [
+        "",
+        "# Route credential-host HTTPS through the secret-egress proxy (#878)",
+        (
+            f"PROXY_IP=$(getent ahosts {proxy_alias} 2>/dev/null "
+            "| awk '{print $1}' | sort -u | head -n1)"
+        ),
+        'if [ -n "$PROXY_IP" ]; then',
+    ]
+    for host in sorted(dnat_hosts):
+        lines.append(
+            f"  for ip in $(getent ahosts {host} 2>/dev/null | awk '{{print $1}}' | sort -u); do"
+        )
+        lines.append(
+            '    "$IPT" -t nat -A OUTPUT -d "$ip" -p tcp --dport 443 '
+            f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"'
+        )
+        lines.append("  done")
+    lines.append("fi")
+    return lines
+
+
+def build_secret_egress_dnat_script(
+    dnat_hosts: Sequence[str],
+    dnat_target: tuple[str, int] | None,
+) -> str:
+    """Install ONLY the credential-host → proxy nat-OUTPUT DNAT, with NO lockdown.
+
+    For an **Unrestricted** environment that nonetheless carries env-var
+    credentials (#1153): the secret swap must fire, but general egress stays
+    open. Unlike :func:`build_iptables_script`, this emits no filter-table
+    ACCEPTs and — crucially — no ``-P OUTPUT DROP``; the filter OUTPUT policy
+    keeps its default ``ACCEPT``. The DNATed packet (now to ``PROXY_IP:port``)
+    traverses the still-default-ACCEPT filter OUTPUT and is accepted, so no
+    explicit proxy-endpoint ACCEPT is needed (adding one would contradict the
+    no-lockdown intent).
+
+    The nat-OUTPUT flush keeps re-apply within a netns idempotent; the filter
+    OUTPUT table is deliberately left untouched.
+
+    Confidentiality of the secret string is enforced independently by the
+    proxy's SNI host-gate, exactly as on the Limited path — the DNAT only
+    *routes* the credential host's :443 to the proxy.
+    """
+    return "\n".join(
+        [
+            "set -e",
+            "",
+            _IPTABLES_BACKEND_SELECT,
+            "",
+            "# Flush nat OUTPUT for idempotent re-apply (do NOT touch filter OUTPUT)",
+            '"$IPT" -t nat -F OUTPUT',
+            *_nat_dnat_lines(dnat_hosts, dnat_target),
+        ]
+    )
 
 
 # Docker's embedded DNS, served inside every user-defined-network netns (the
@@ -321,20 +376,38 @@ def build_iptables_script(
 _EMBEDDED_DNS_ADDRESS = "127.0.0.11"
 
 
+# Sidecar preamble that points the netns-joining sidecar at the embedded
+# resolver before any ``getent`` runs. Shared by the Limited lockdown apply
+# and the Unrestricted DNAT-only apply (#1153) so both resolve allowed/DNAT
+# hosts against the same in-netns resolver.
+_RESOLV_PREAMBLE = (
+    f"printf 'nameserver {_EMBEDDED_DNS_ADDRESS}\\n' > /etc/resolv.conf 2>/dev/null || true\n"
+)
+
+
 # Read-back assertion that the default OUTPUT policy is DROP — proves the
 # lockdown actually took effect in the shared netns, not just that the apply
 # script exited 0.
-def build_lockdown_verify_script(dnat_hosts: Sequence[str] = ()) -> str:
+def build_lockdown_verify_script(
+    dnat_hosts: Sequence[str] = (), *, assert_drop: bool = True
+) -> str:
     """Build the read-back verify script run by the lockdown sidecar.
 
-    Always asserts the filter-table default OUTPUT policy is ``DROP`` — proof
-    the lockdown actually landed in the shared netns, not merely that the apply
-    script exited 0.
+    When ``assert_drop`` is ``True`` (the Limited lockdown default), asserts the
+    filter-table default OUTPUT policy is ``DROP`` — proof the lockdown actually
+    landed in the shared netns, not merely that the apply script exited 0.
 
-    When ``dnat_hosts`` is non-empty it ALSO asserts the nat table carries at
-    least one ``DNAT`` OUTPUT rule. Without this, a credential host whose
-    ``getent`` returns zero IPs emits no DNAT rule and no error: apply exits 0,
-    a filter-only verify passes, and the session runs WITHOUT DNAT for that host
+    When ``assert_drop`` is ``False`` (the Unrestricted DNAT-only path, #1153),
+    the filter OUTPUT policy is deliberately left at its default ``ACCEPT``, so
+    there is no DROP to assert; the verify asserts only the nat-table DNAT
+    coverage. Because the DNAT-only path is run **only** when there are
+    credentials, ``dnat_hosts`` is always non-empty there — the verify never
+    degenerates to a no-op.
+
+    When ``dnat_hosts`` is non-empty it asserts the nat table carries at least
+    one ``DNAT`` OUTPUT rule. Without this, a credential host whose ``getent``
+    returns zero IPs emits no DNAT rule and no error: apply exits 0, a
+    filter-only verify passes, and the session runs WITHOUT DNAT for that host
     — the placeholder goes direct to the real upstream and auth fails with no
     operator signal (#984). Asserting nat coverage turns that silent omission
     into a fail-closed provision error. (Coverage is asserted at the table
@@ -343,10 +416,9 @@ def build_lockdown_verify_script(dnat_hosts: Sequence[str] = ()) -> str:
     nat block is guarded out — is the documented fail-open-to-placeholder path
     in :func:`build_iptables_script` and is out of scope here.)
     """
-    lines = [
-        _IPTABLES_BACKEND_SELECT,
-        "\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'",
-    ]
+    lines = [_IPTABLES_BACKEND_SELECT]
+    if assert_drop:
+        lines.append("\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'")
     if dnat_hosts:
         lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'")
     return "\n".join(lines)
@@ -410,10 +482,7 @@ async def apply_network_lockdown(
         dnat_target=dnat_target,
     )
     # Point the sidecar at the netns's embedded resolver before getent runs.
-    apply_script = (
-        f"printf 'nameserver {_EMBEDDED_DNS_ADDRESS}\\n' > /etc/resolv.conf 2>/dev/null || true\n"
-        f"{iptables_script}"
-    )
+    apply_script = _RESOLV_PREAMBLE + iptables_script
     settings = get_settings()
 
     try:
@@ -474,5 +543,106 @@ async def apply_network_lockdown(
         owner_id=handle.owner_id,
         allowed_host_count=len(allowed),
         extra_host_port_count=len(extra_host_ports),
+        dnat_host_count=len(dnat_hosts),
+    )
+
+
+async def apply_secret_egress_dnat(
+    backend: SandboxBackend,
+    handle: SandboxHandle,
+    *,
+    dnat_hosts: Sequence[str],
+    dnat_target: tuple[str, int],
+    runtime: str | None = None,
+) -> None:
+    """Install the credential-host → proxy DNAT in an OPEN-egress sandbox (#1153).
+
+    Parallel to :func:`apply_network_lockdown` but for an **Unrestricted**
+    environment that nonetheless carries env-var credentials: the secret swap
+    must fire, but general egress stays open. The applied script
+    (:func:`build_secret_egress_dnat_script`) installs ONLY the nat-OUTPUT DNAT
+    and leaves the filter OUTPUT policy at its default ``ACCEPT`` — there is no
+    lockdown, no ``-P OUTPUT DROP``.
+
+    This is a deliberate sibling, NOT a shared ``_run_egress_sidecar`` helper:
+    the two paths have genuinely different error semantics. A Limited
+    apply/verify failure is a **policy violation** ("refusing to run a Limited
+    sandbox"); an Unrestricted DNAT apply/verify failure is a **plumbing
+    failure** (the secret-egress proxy/sidecar is unavailable). Routing both
+    through one helper would force generic logging that erases that distinction
+    — the log event here is ``sandbox.secret_egress_dnat_*`` and the message
+    names a proxy-plumbing failure, not a networking policy violation.
+
+    **Fails closed**, identically to the Limited path: a sidecar error, a
+    nonzero apply exit, or a failed read-back verify raises
+    :class:`SandboxBackendError`; the caller tears the sandbox down and aborts
+    the provision rather than handing back a half-wired credentialed sandbox
+    whose swap silently does not fire.
+
+    ``dnat_hosts`` is always non-empty here (the caller only invokes this when
+    the session carries credentials), so the read-back verify
+    (:func:`build_lockdown_verify_script` with ``assert_drop=False``) always has
+    a positive nat-DNAT assertion and never degenerates to a no-op (#984).
+    """
+    apply_script = _RESOLV_PREAMBLE + build_secret_egress_dnat_script(dnat_hosts, dnat_target)
+    settings = get_settings()
+
+    try:
+        result = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=apply_script,
+            timeout_seconds=30,
+            max_output_bytes=settings.bash_max_output_bytes,
+            runtime=runtime,
+        )
+    except SandboxBackendError:
+        # A credentialed sandbox whose DNAT couldn't even run must fail the
+        # provision — never hand back a box where the secret swap silently
+        # doesn't fire (the placeholder would leak to the real upstream as an
+        # opaque auth failure with no operator signal).
+        log.warning("sandbox.secret_egress_dnat_sidecar_error", owner_id=handle.owner_id)
+        raise
+
+    if result.exit_code != 0:
+        log.warning(
+            "sandbox.secret_egress_dnat_failed",
+            owner_id=handle.owner_id,
+            exit_code=result.exit_code,
+            stderr=result.stderr[:500],
+        )
+        raise SandboxBackendError(
+            f"secret-egress DNAT failed (exit {result.exit_code}) for session "
+            f"{handle.owner_id}; refusing to run a credentialed sandbox whose "
+            f"secret-swap proxy route did not install"
+        )
+
+    try:
+        verify = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=build_lockdown_verify_script(dnat_hosts, assert_drop=False),
+            timeout_seconds=15,
+            max_output_bytes=settings.bash_max_output_bytes,
+            runtime=runtime,
+        )
+    except SandboxBackendError:
+        log.warning("sandbox.secret_egress_dnat_verify_error", owner_id=handle.owner_id)
+        raise
+    if verify.exit_code != 0:
+        log.warning(
+            "sandbox.secret_egress_dnat_verify_failed",
+            owner_id=handle.owner_id,
+            exit_code=verify.exit_code,
+        )
+        raise SandboxBackendError(
+            f"secret-egress DNAT verification failed for session {handle.owner_id}: "
+            "no nat-table DNAT rule present after apply; refusing to run a "
+            "credentialed sandbox whose secret-swap proxy route is unverified"
+        )
+
+    log.info(
+        "sandbox.secret_egress_dnat_applied",
+        owner_id=handle.owner_id,
         dnat_host_count=len(dnat_hosts),
     )
