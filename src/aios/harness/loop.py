@@ -146,6 +146,9 @@ class _StepResult(NamedTuple):
       session so the model gets another turn (``defer_wake``).
     * ``autoerror_caller_run_id`` — the guard auto-errored a request past its budget;
       wake that caller run to harvest the ``no_return`` (``defer_run_wake``).
+    * ``autoerror_caller_session_ids`` — same, for session callers (#1127): wake each
+      caller session so its parked ``invoke`` tool task harvests the ``no_return``
+      (``defer_wake``).
     * ``archive_when_idle`` — the session was launched self-reclaiming; archive it
       (iff still idle) as the LAST write of the step, after ``step_end`` and the wakes
       (once archived, any further ``append_event`` hits the ``archived_at IS NULL`` fence).
@@ -154,6 +157,7 @@ class _StepResult(NamedTuple):
     retry_delay: float | None = None
     nudge_session: bool = False
     autoerror_caller_run_id: str | None = None
+    autoerror_caller_session_ids: tuple[str, ...] = ()
     archive_when_idle: bool = False
 
 
@@ -308,6 +312,12 @@ async def run_session_step(
         if result.autoerror_caller_run_id is not None:
             # batch: a no_return auto-error is a child completion like any other.
             await defer_run_wake(result.autoerror_caller_run_id, batch=True)
+        for caller_session_id in result.autoerror_caller_session_ids:
+            # Session caller (#1127): wake it so its parked invoke() tool task harvests
+            # the no_return response (its await_session is also self-subscribed here).
+            await defer_wake(
+                pool, caller_session_id, cause="invoke_response", account_id=account_id
+            )
 
         # Archive-on-quiescence, performed LAST: a session launched ``archive_when_idle``
         # self-archives the first time it goes idle. It runs after ``step_end`` and every
@@ -684,6 +694,7 @@ async def _run_session_step_body(
     )
     nudged = guard_result.nudged
     autoerror_caller_run_id = guard_result.autoerror_caller_run_id
+    autoerror_caller_session_ids = guard_result.autoerror_caller_session_ids
     # The appended assistant event's locked focal stamp — threaded into the
     # live tool dispatch so ``append_event`` skips the in-lock tool-parent
     # lookup for the results these calls produce (issue #862).
@@ -782,6 +793,7 @@ async def _run_session_step_body(
     return _StepResult(
         nudge_session=nudged,
         autoerror_caller_run_id=autoerror_caller_run_id,
+        autoerror_caller_session_ids=autoerror_caller_session_ids,
         archive_when_idle=session.archive_when_idle,
     )
 
