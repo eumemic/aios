@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Annotated
-
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, status
 
 from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.common import ListResponse
 from aios.models.environments import Environment, EnvironmentCreate, EnvironmentUpdate
-from aios.models.pagination import page_cursor
+from aios.models.pagination import PageLimit, page_cursor, resolve_page_limit
 from aios.services import environments as service
 
 router = APIRouter(prefix="/v1/environments", tags=["environments"])
@@ -34,7 +32,7 @@ async def list_(
     pool: PoolDep,
     account_id: AccountIdDep,
     cursor: str | None = None,
-    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    limit: PageLimit = None,
 ) -> ListResponse[Environment]:
     """List environments, newest first, excluding archived.
 
@@ -43,7 +41,7 @@ async def list_(
     """
     st = page_cursor(cursor, {"limit": limit})
     after = str(st.cursor) if st is not None else None
-    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    page_limit = resolve_page_limit(st, limit)
     items = await service.list_environments(
         pool, limit=page_limit + 1, after=after, account_id=account_id
     )

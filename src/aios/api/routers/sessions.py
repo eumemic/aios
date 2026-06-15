@@ -42,7 +42,15 @@ from aios.models.github_repositories import (
     GithubRepositoryResourceEcho,
     GithubRepositoryUpdate,
 )
-from aios.models.pagination import Direction, page_cursor
+from aios.models.pagination import (
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    Direction,
+    EventPageLimit,
+    PageLimit,
+    page_cursor,
+    resolve_page_limit,
+)
 from aios.models.sessions import (
     ContextResponse,
     Session,
@@ -120,7 +128,7 @@ async def list_(
         Query(alias="status"),
     ] = None,
     parent_run_id: str | None = None,
-    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    limit: PageLimit = None,
 ) -> ListResponse[Session]:
     """List sessions, newest first, keyset-paginated.
 
@@ -141,7 +149,7 @@ async def list_(
         },
     )
     after = str(st.cursor) if st is not None else None
-    page_limit = st.limit if st is not None else (limit if limit is not None else 50)
+    page_limit = resolve_page_limit(st, limit)
     if st is not None:
         agent_id = st.filters.get("agent_id")
         status_filter = st.filters.get("status")
@@ -403,7 +411,7 @@ async def list_trigger_runs(
     name: str,
     pool: PoolDep,
     account_id: AccountIdDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_LIMIT)] = DEFAULT_PAGE_LIMIT,
 ) -> ListResponse[TriggerRunEcho]:
     """List a trigger's fires (the per-fire audit), newest first.
 
@@ -629,7 +637,7 @@ async def list_events(
     error_only: bool | None = None,
     # Higher cap than the standard 200: operators page full event logs via
     # ``aios sessions events``; 500 is the audit-recommended ceiling.
-    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+    limit: EventPageLimit = None,
 ) -> ListResponse[Event]:
     """List a session's events by sequence number.
 
@@ -666,13 +674,12 @@ async def list_events(
         direction = st.direction
         kind = st.filters.get("kind")
         error_only = bool(st.filters.get("error_only"))
-        page_limit = st.limit
         seq = int(st.cursor)
         after_seq, before = (seq, None) if direction == "forward" else (0, seq)
     else:
         error_only = bool(error_only)
-        page_limit = limit if limit is not None else 200
         after_seq, before = 0, None
+    page_limit = resolve_page_limit(st, limit, default=200)
     # Fetch one extra row to derive has_more without a separate COUNT query.
     rows = await service.read_events(
         pool,

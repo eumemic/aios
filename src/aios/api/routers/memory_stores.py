@@ -18,7 +18,12 @@ from aios.models.memory_stores import (
     MemoryUpdate,
     MemoryVersion,
 )
-from aios.models.pagination import page_cursor
+from aios.models.pagination import (
+    MAX_PAGE_LIMIT,
+    PageLimit,
+    page_cursor,
+    resolve_page_limit,
+)
 from aios.services import memory_stores as service
 
 router = APIRouter(prefix="/v1/memory-stores", tags=["memory-stores"])
@@ -52,7 +57,7 @@ async def list_stores(
     account_id: AccountIdDep,
     cursor: str | None = None,
     include_archived: bool | None = None,
-    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    limit: PageLimit = None,
 ) -> ListResponse[MemoryStore]:
     """List memory stores, newest first.
 
@@ -63,7 +68,7 @@ async def list_stores(
     """
     st = page_cursor(cursor, {"include_archived": include_archived, "limit": limit})
     after = str(st.cursor) if st is not None else None
-    page_limit = st.limit if st is not None else (limit if limit is not None else 100)
+    page_limit = resolve_page_limit(st, limit, default=100)
     archived = (
         bool(st.filters.get("include_archived")) if st is not None else bool(include_archived)
     )
@@ -172,7 +177,7 @@ async def list_memories(
     path_prefix: str | None = None,
     order_by: str = "created_at",
     depth: int | None = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_LIMIT)] = 100,
 ) -> ListResponse[Memory | MemoryPrefix]:
     """List memories in a store, optionally filtered and grouped by path.
 
@@ -274,7 +279,7 @@ async def list_versions(
     pool: PoolDep,
     account_id: AccountIdDep,
     memory_id: str | None = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_LIMIT)] = 100,
 ) -> ListResponse[MemoryVersion]:
     """List memory versions in a store, newest first.
 

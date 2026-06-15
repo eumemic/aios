@@ -18,11 +18,45 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+
+from fastapi import Query
 
 from aios.errors import ValidationError
 
 Direction = Literal["forward", "backward"]
+
+# --- The list-endpoint ``limit`` contract -----------------------------------
+#
+# Single source of truth for the two coupled facts every paginated list
+# endpoint declares: the per-page default and the request-boundary ceiling.
+# Previously these were 35 bare literals hand-typed across the routers (the
+# ``Query(le=N)`` ceiling and the ``… else N`` default), with no named
+# constant — so "default exceeds ceiling" was representable and a dropped
+# constraint looked identical to a typo.
+#
+# ``MAX_PAGE_LIMIT`` is also imported by the CLI (``cli/commands/_shared.py``)
+# so the cross-process invariant "CLI page_size ≤ server ceiling" is a
+# derivation rather than a coincidence two literals happen to satisfy.
+#
+# The events endpoints legitimately want a higher ceiling (operators page full
+# event logs); they pass it as a *named* override (:data:`MAX_EVENT_PAGE_LIMIT`)
+# so the deviation is a one-token, greppable, intentional act.
+DEFAULT_PAGE_LIMIT = 50
+MAX_PAGE_LIMIT = 200
+MAX_EVENT_PAGE_LIMIT = 500
+
+# ``PageLimit`` keeps the ``ge``/``le`` literals inline in the request
+# signature (FastAPI needs them statically for OpenAPI / SDK regen — a
+# computed runtime value would not appear in the schema), while collapsing
+# the repeated ``Annotated[int | None, Query(ge=1, le=MAX_PAGE_LIMIT)]`` to a
+# single alias. The ceiling still derives from the constant, so the emitted
+# ``le`` is byte-identical to the old hand-typed ``200`` and the openapi
+# snapshot test is unaffected.
+PageLimit = Annotated[int | None, Query(ge=1, le=MAX_PAGE_LIMIT)]
+
+# Events endpoints (session events, run events): same shape, higher ceiling.
+EventPageLimit = Annotated[int | None, Query(ge=1, le=MAX_EVENT_PAGE_LIMIT)]
 
 _CURSOR_VERSION = 1
 _DIR_TO_WIRE: dict[Direction, str] = {"forward": "f", "backward": "b"}
@@ -122,3 +156,25 @@ def page_cursor(cursor: str | None, first_page_params: dict[str, Any]) -> Cursor
         return None
     reject_params_with_cursor(first_page_params)
     return decode_cursor(cursor)
+
+
+def resolve_page_limit(
+    st: CursorState | None,
+    limit: int | None,
+    *,
+    default: int = DEFAULT_PAGE_LIMIT,
+) -> int:
+    """Resolve the effective page size for a list request.
+
+    Collapses the repeated triple-nested ternary every router hand-wrote::
+
+        page_limit = st.limit if st is not None else (limit if limit is not None else N)
+
+    On a ``?cursor=`` page the size is whatever the cursor carried; on a first
+    page it's the supplied ``?limit=`` or ``default``. Endpoints with a
+    non-standard default (the events endpoints page 200 at a time) pass it as a
+    named ``default=`` override rather than re-typing the literal.
+    """
+    if st is not None:
+        return st.limit
+    return limit if limit is not None else default

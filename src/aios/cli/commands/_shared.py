@@ -13,6 +13,7 @@ from aios.cli.client import AiosApiError, AiosClient
 from aios.cli.output import OutputFormat, print_json, print_note, print_table
 from aios.cli.runtime import CliState, get_state
 from aios.models.common import ErrorResponse
+from aios.models.pagination import MAX_PAGE_LIMIT
 from aios_sdk._generated.types import Response, Unset
 
 
@@ -83,7 +84,7 @@ def fetch_all(
     path: str,
     *,
     params: dict[str, Any] | None = None,
-    page_size: int = 200,
+    page_size: int = MAX_PAGE_LIMIT,
 ) -> dict[str, Any]:
     """Walk every page of a list endpoint and return one envelope.
 
@@ -147,7 +148,7 @@ def render_paginated(
     all_: bool,
     limit: int = 50,
     max_widths: dict[str, int] | None = None,
-    page_size: int = 200,
+    page_size: int = MAX_PAGE_LIMIT,
     path_params: dict[str, Any] | None = None,
     **filters: Any,
 ) -> None:
@@ -198,7 +199,7 @@ def fetch_all_events(
     *,
     kind: str | None = None,
     direction: str = "forward",
-    page_size: int = 200,
+    page_size: int = MAX_PAGE_LIMIT,
 ) -> list[dict[str, Any]]:
     """Walk every page of ``/v1/sessions/:id/events`` and return the raw list.
 
