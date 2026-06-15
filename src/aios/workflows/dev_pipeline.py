@@ -503,9 +503,9 @@ async def main(input):
         retry_count = 0
     if retry_count >= MAX_RUN_RETRIES:
         log("retry budget exhausted (retry_count=%d) -> dead-letter" % retry_count)
-        await _label(repo, issue_number, LABEL_FAILED)
-        return {"state": "dead_letter", "retry_count": retry_count,
-                "reason": "exceeded MAX_RUN_RETRIES (%d) auto-recovery attempts" % MAX_RUN_RETRIES}
+        return await _fail(repo, issue_number,
+                           {"state": "dead_letter", "retry_count": retry_count,
+                            "reason": "exceeded MAX_RUN_RETRIES (%d) auto-recovery attempts" % MAX_RUN_RETRIES})
     escalations = []
 
     # S1 — ingest the issue: body AND the comment thread (item 1). A design pass / resolved-
