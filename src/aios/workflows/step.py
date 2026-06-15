@@ -902,6 +902,10 @@ async def _open_agent_capability(
     if agent_spawns + 1 > max_agent_calls:
         return _SpawnResult(rejected=False, needs_rewake=False, quota_exceeded=True)
     run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=account_id)
+    # #1123: the run→child request edge carries the run's lineage depth (carried,
+    # not enforced here — enforcement is #1124, which inherits this value). Sourced
+    # from the same account-scoped ancestor walk the create_run depth cap uses.
+    run_depth = await wf_queries.run_ancestor_depth(conn, run.id, account_id=account_id)
 
     created = await create_child_session(
         pool,
@@ -917,6 +921,7 @@ async def _open_agent_capability(
         request_id=cap.call_key,  # the agent() call IS the request the child must answer
         input=spec.get("input"),
         output_schema=output_schema,
+        depth=run_depth,
     )
     # On replay the row already carries its first-spawn version — journal THAT, so
     # call_started.child_agent_version always matches the version the child runs under.

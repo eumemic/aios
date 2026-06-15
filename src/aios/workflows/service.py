@@ -204,6 +204,15 @@ async def create_run(
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)
+        # #1123 / TODO(#1126): the run→run request edge's ``request_opened`` would be
+        # emitted HERE, in this same servicer-creation transaction. It is deferred
+        # because its symmetric *answer* half — the run-side ``request_response``
+        # emitter — is #1126 and a run has no session-scoped ``events`` log to key
+        # the frame on yet; emitting an unanswerable edge now would leave a
+        # permanently-open request in ``get_open_request_ids`` for the launcher.
+        # The two session-creating launch sites (``create_child_session`` /
+        # ``_open_agent_capability``) emit the edge today (#1123); ``create_run``
+        # joins them once #1126 ships the run-side answer half.
     await defer_run_wake(run.id)
     return run
 

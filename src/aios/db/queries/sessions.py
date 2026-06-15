@@ -350,22 +350,30 @@ async def get_open_request_ids(
 ) -> list[str]:
     """The ``request_id``s of the session's still-open requests, oldest first.
 
-    A request is a user message stamped ``metadata.request.request_id`` (see
-    ``create_child_session`` / `invoke_session`); it is *open* until a
-    ``request_response`` event answers it. Returns the asked-minus-answered set, so
-    an ordinary session (no requests) returns ``[]`` and the quiescence guard
-    no-ops for it. v1 injects one request per child, so this is ``[]`` or one id;
-    the set shape is ready for multi-request `invoke_session`.
+    A request is a trusted ``request_opened`` lifecycle event (the *ask* half of
+    the request edge, #1123 — appended only by the launch-path creation sites; see
+    :func:`append_request_opened`); it is *open* until a ``request_response`` event
+    (the symmetric *answer* half) answers it. The open set is
+    ``asked(request_opened) MINUS answered(request_response)``, so an ordinary
+    session (no edge) returns ``[]`` and the quiescence guard no-ops for it. v1
+    injects one request per child, so this is ``[]`` or one id; the set shape is
+    ready for multi-request `invoke_session`.
+
+    Reads the trusted ``request_opened`` frame rather than the forgeable
+    ``metadata.request`` user-message blob (which #1123 still dual-writes for the
+    legacy run path until #1131 retires it). Both halves are partial-indexed
+    (``events_request_opened_idx`` / ``events_request_response_idx``) so this stays
+    a point lookup rather than a per-wake history scan.
     """
     rows: list[asyncpg.Record] = await conn.fetch(
-        "SELECT req.data->'metadata'->'request'->>'request_id' AS rid FROM events req "
+        "SELECT req.data->>'request_id' AS rid FROM events req "
         "WHERE req.session_id = $1 AND req.account_id = $2 "
-        "AND req.kind = 'message' AND req.role = 'user' "
-        "AND req.data->'metadata'->'request'->>'request_id' IS NOT NULL "
+        "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+        "AND req.data->>'request_id' IS NOT NULL "
         "AND NOT EXISTS (SELECT 1 FROM events resp "
         "    WHERE resp.session_id = $1 AND resp.account_id = $2 "
         "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
-        "    AND resp.data->>'request_id' = req.data->'metadata'->'request'->>'request_id') "
+        "    AND resp.data->>'request_id' = req.data->>'request_id') "
         "ORDER BY req.seq ASC",
         session_id,
         account_id,
@@ -574,6 +582,60 @@ async def write_response_if_absent(
             },
         )
     return True
+
+
+async def append_request_opened(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str,
+    account_id: str,
+    request_id: str,
+    caller: dict[str, Any],
+    depth: int,
+    environment_id: str,
+    frozen_surface: dict[str, Any],
+    vault_ids: list[str],
+) -> None:
+    """Append the trusted ``request_opened`` lifecycle event — the *ask* half of
+    the request edge (#1123).
+
+    The symmetric counterpart of :func:`write_response_if_absent` (the *answer*
+    half, ``request_response``): a typed ``kind='lifecycle'`` frame in the
+    append-only ``events`` log carrying ``{event:'request_opened', request_id,
+    caller:{kind,id}, depth, environment_id, frozen_surface, vault_ids}``. Trust
+    derives from the writer being **service-code-only**: this is called from
+    exactly the launch-path creation sites (``create_run``,
+    ``create_child_session`` / ``insert_child_session``, ``_open_agent_capability``)
+    inside the same transaction as the servicer they open — never from
+    harness/model-facing code.
+
+    ``caller`` is ``{kind:'api'|'session'|'run', id}`` — the caller-kind-agnostic
+    provenance the run-only ``parent_run_id`` gate generalizes to. ``depth`` is
+    **carried, not enforced** here (enforcement is #1124); the run→child path
+    sources it from the existing depth computation so #1124 inherits a correct
+    value. ``frozen_surface`` / ``vault_ids`` are the #794 clamp results computed
+    at the launch site.
+
+    Idempotency is the **caller's** responsibility: the ``create_child_session``
+    path gates this behind its first-spawn ``ON CONFLICT`` check, so a replayed
+    wake opens the edge exactly once (see :func:`get_open_request_ids` for the
+    asked-minus-answered derivation this feeds).
+    """
+    await queries.append_event(
+        conn,
+        account_id=account_id,
+        session_id=session_id,
+        kind="lifecycle",
+        data={
+            "event": "request_opened",
+            "request_id": request_id,
+            "caller": caller,
+            "depth": depth,
+            "environment_id": environment_id,
+            "frozen_surface": frozen_surface,
+            "vault_ids": vault_ids,
+        },
+    )
 
 
 async def get_session(
