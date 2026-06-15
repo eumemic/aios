@@ -4,11 +4,16 @@ Vault credentials let a session use placeholder material in the sandbox while th
 
 ## Inbound boundary (#881)
 
-**What's protected:** credential material is withheld from the model until an outbound request crosses the egress swap for an allowed destination.
+**What's protected:** the real secret value never enters the sandbox. It is swapped onto a request only at the egress boundary, and only for an outbound HTTPS request whose TLS SNI host is on the credential's allow-set. That confinement of the secret *value* to allowed hosts holds in **every** networking mode.
 
-**What isn't protected:** inbound responses are not scrubbed. If an HTTPS host reflects authorization material, tokens, signed headers, or other credential-derived values in its response, the model can read them. Containment is the Limited-env network allowlist: it controls where the model can send what it learns, not whether reflected secrets are redacted from the response.
+**What isn't protected:** inbound responses are not scrubbed. If an allowed HTTPS host reflects authorization material, tokens, signed headers, or other credential-derived values in its response, the model can read them. The egress swap is outbound-only: it governs where the secret *value* may go, not whether a reflected secret is redacted on the way back.
 
-**What to do instead:** scope vault credentials only to hosts you trust not to reflect secrets, and use Limited-env allowlists to restrict any follow-on exfiltration paths.
+**Where a reflected secret can then go depends on the networking mode (#1153):**
+
+- **Limited** — the network lockdown (filter `-P OUTPUT DROP` plus allowlisted `ACCEPT`s) bounds where the model can send anything it learned, including a reflected secret. This allowlist is the exfiltration boundary.
+- **Unrestricted** — env-var credentials are permitted under a permit-with-warning posture (provision emits `sandbox.envvar_creds_open_egress`). Only the credential-host → proxy DNAT is installed; the filter policy stays at `ACCEPT` with **no** `-P OUTPUT DROP`. General egress remains open, so there is **no allowlist containment** — a reflected secret the model reads can be sent anywhere. The only protections that remain are the secret *value*'s confinement to allowed hosts (the SNI gate, above) and the forthcoming content/reflector-host denylist (#976). Running Unrestricted with credentials accepts this trade.
+
+**What to do instead:** scope vault credentials only to hosts you trust not to reflect secrets; prefer a Limited environment so its allowlist bounds any follow-on exfiltration; and treat Unrestricted-with-credentials as an explicit, warned trade-off rather than a default.
 
 ## HTTPS-only scope (#887)
 
