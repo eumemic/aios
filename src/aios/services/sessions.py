@@ -29,15 +29,16 @@ from aios.errors import (
     ValidationError,
 )
 from aios.harness.window import WindowedEvents
-from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, split_id
+from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, REQUEST, make_id, split_id
 from aios.models.agents import (
     Agent,
     AgentVersion,
     is_mcp_tool_name,
     resolve_permission,
 )
-from aios.models.attenuation import Surface
+from aios.models.attenuation import Surface, surface_of
 from aios.models.events import Event, EventKind
+from aios.models.invocations import InvocationHandle
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -484,6 +485,188 @@ async def create_child_session(
             vault_ids=vault_ids,
         )
         return True
+
+
+async def invoke(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    target_kind: str,
+    target: str,
+    input: Any,
+    output_schema: dict[str, Any] | None = None,
+    environment_id: str | None = None,
+    crypto_box: CryptoBox | None = None,
+) -> InvocationHandle:
+    """The API caller's request-*writer* (#1128).
+
+    Materializes the trusted request edge (#1123) and constructs-or-resolves a
+    servicer for an external/operator caller, returning a structured
+    :class:`InvocationHandle` the ephemeral caller awaits via the shipped
+    completion endpoints. Kind-agnostic — ``target_kind`` discriminates ``target``:
+
+    * ``agent``    — create a **session** servicer (env-bound) and inject a
+      channel-less request into it (the API analog of ``invoke_agent``).
+    * ``workflow`` — create a **run** servicer of the workflow.
+    * ``session``  — invoke an **existing** same-account session by id (no
+      ``environment_id`` — the session already exists).
+
+    The written edge **is** the authorization fact: ``caller={kind:"api", id:<account>}``
+    generalizes the run-only ``parent_run_id`` provenance gate to the HTTP caller.
+    A cross-tenant ``target`` 404s before any edge is written (the resolve-or-create
+    constructors all account-scope). ``environment_id`` is ownership-checked on the
+    ``agent`` / ``workflow`` create-paths (the per-field containment clamp is #1130).
+    """
+    caller = {"kind": "api", "id": account_id}
+
+    if target_kind == "agent":
+        if environment_id is None:
+            raise ValidationError(
+                "environment_id is required for target_kind=agent",
+                detail={"target_kind": target_kind},
+            )
+        # create_session account-scopes both agent_id and environment_id (404s a
+        # foreign id before any row is written) — the ownership half of #1130.
+        session = await create_session(
+            pool,
+            account_id=account_id,
+            agent_id=target,
+            environment_id=environment_id,
+            title=None,
+            metadata={},
+            crypto_box=crypto_box,
+            archive_when_idle=True,
+        )
+        request_id = await _inject_api_request(
+            pool,
+            session=session,
+            account_id=account_id,
+            caller=caller,
+            input=input,
+            output_schema=output_schema,
+        )
+        return InvocationHandle(
+            servicer_kind="session", servicer_id=session.id, request_id=request_id
+        )
+
+    if target_kind == "session":
+        # Resolve an existing same-account session (404s cross-tenant/missing
+        # before any edge is written). No environment_id applies.
+        if environment_id is not None:
+            raise ValidationError(
+                "environment_id is not applicable for target_kind=session",
+                detail={"target_kind": target_kind},
+            )
+        session = await get_session(pool, target, account_id=account_id)
+        request_id = await _inject_api_request(
+            pool,
+            session=session,
+            account_id=account_id,
+            caller=caller,
+            input=input,
+            output_schema=output_schema,
+        )
+        return InvocationHandle(
+            servicer_kind="session", servicer_id=session.id, request_id=request_id
+        )
+
+    if target_kind == "workflow":
+        if environment_id is None:
+            raise ValidationError(
+                "environment_id is required for target_kind=workflow",
+                detail={"target_kind": target_kind},
+            )
+        # create_run account-scopes both workflow_id and environment_id (404s a
+        # foreign id before the run row is written). The run→run request edge's
+        # ``request_opened`` is deferred to #1126 (a run has no session-scoped
+        # events log to key it on yet), so the run resolves via GET /runs/{id}/wait;
+        # the handle's request_id is the minted correlation id (table-free).
+        #
+        # Late import: ``services.workflows`` imports this module at load time,
+        # so a module-level import would be circular.
+        from aios.services import workflows as wf_service
+
+        run = await wf_service.create_run(
+            pool,
+            account_id=account_id,
+            workflow_id=target,
+            environment_id=environment_id,
+            input=input,
+        )
+        return InvocationHandle(
+            servicer_kind="run", servicer_id=run.id, request_id=make_id(REQUEST)
+        )
+
+    raise ValidationError(
+        f"unknown target_kind {target_kind!r}",
+        detail={"target_kind": target_kind},
+    )
+
+
+async def _inject_api_request(
+    pool: asyncpg.Pool[Any],
+    *,
+    session: Session,
+    account_id: str,
+    caller: dict[str, Any],
+    input: Any,
+    output_schema: dict[str, Any] | None,
+) -> str:
+    """Inject a channel-less request into ``session`` and open the request edge.
+
+    One transaction: append the request's ``user`` message (``metadata.request``
+    carries ``{request_id, caller}`` + optional ``output_schema`` so the target
+    correlates its response and the caller awaits it) and emit the trusted
+    ``request_opened`` lifecycle edge (#1123). Mirrors ``create_child_session``'s
+    dual-write, with ``caller={kind:"api", ...}`` and a **channel-less** message
+    (no ``orig_channel``) so the injected request never surfaces to a connector.
+
+    The request fires a wake so the target steps and answers it.
+    """
+    # Late import: ``services.wake`` imports this module at load time, so a
+    # module-level ``from aios.services.wake import defer_wake`` would be a
+    # circular import (mirrors the ``defer_run_wake`` pattern below).
+    from aios.services.wake import defer_wake
+
+    request_id = make_id(REQUEST)
+    content = input if isinstance(input, str) else json.dumps(input)
+    agent = await agents_service.load_for_session(pool, session, account_id=account_id)
+    frozen_surface = surface_of(agent)
+
+    request_meta: dict[str, Any] = {"request_id": request_id, "caller": caller}
+    if output_schema is not None:
+        request_meta["output_schema"] = output_schema
+
+    async with pool.acquire() as conn, conn.transaction():
+        vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
+        await queries.append_event(
+            conn,
+            account_id=account_id,
+            session_id=session.id,
+            kind="message",
+            data={
+                "role": "user",
+                "content": content,
+                "metadata": {"request": request_meta},
+            },
+        )
+        await queries.append_request_opened(
+            conn,
+            session_id=session.id,
+            account_id=account_id,
+            request_id=request_id,
+            caller=caller,
+            depth=0,
+            environment_id=session.environment_id,
+            frozen_surface={
+                "tools": [t.model_dump() for t in frozen_surface.tools],
+                "mcp_servers": [s.model_dump() for s in frozen_surface.mcp_servers],
+                "http_servers": [s.model_dump() for s in frozen_surface.http_servers],
+            },
+            vault_ids=vault_ids,
+        )
+    await defer_wake(pool, session.id, cause="api_invoke", account_id=account_id)
+    return request_id
 
 
 def _classify_awaiting(

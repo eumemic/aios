@@ -9549,6 +9549,66 @@
           "targets": []
         }
       }
+    },
+    "/v1/invocations": {
+      "post": {
+        "tags": [
+          "invocations"
+        ],
+        "summary": "Invoke",
+        "description": "Write a trusted request edge + resolve-or-create a servicer, returning a handle.\n\n``target_kind=agent`` creates a **session** servicer (env-bound) and injects a\nchannel-less request; ``target_kind=workflow`` creates a **run** servicer;\n``target_kind=session`` invokes an existing same-account session by id. The\nreturned ``request_id`` correlates the matching awaiter\n(``GET /v1/sessions/{id}/await?request_id=`` for sessions, ``GET /v1/runs/{id}/wait``\nfor runs). A cross-tenant ``target`` 404s before any edge is written; a supplied\n``environment_id`` is ownership-checked against the caller's account.",
+        "operationId": "invoke",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvocationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvocationHandle"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -11483,6 +11543,89 @@
         ],
         "title": "HttpServerSpec",
         "description": "One entry in an agent's ``http_servers`` list.\n\nDeclares an authenticated HTTP endpoint the agent can reach via the\n``http_request`` built-in tool.  ``base_url`` is the common URL\nprefix the agent's ``path`` argument is appended to; ``routes`` is\nthe allowlist of path patterns the broker permits.  Credentials are\nresolved at request time from the session's bound vaults, keyed on\n``base_url``.  Secret never enters the sandbox \u2014 the worker authors\nthe ``Authorization`` header from the vault credential."
+      },
+      "InvocationHandle": {
+        "properties": {
+          "servicer_kind": {
+            "type": "string",
+            "enum": [
+              "session",
+              "run"
+            ],
+            "title": "Servicer Kind"
+          },
+          "servicer_id": {
+            "type": "string",
+            "title": "Servicer Id"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "servicer_kind",
+          "servicer_id",
+          "request_id"
+        ],
+        "title": "InvocationHandle",
+        "description": "Structured handle returned by ``POST /v1/invocations``.\n\nPlain JSON fields, no opaque encoding: the handle is **not** an auth boundary\n(``await`` re-authorizes by ``account_id``). The caller picks the matching\nawaiter off ``servicer_kind`` \u2014 ``session`` \u2192 ``GET /sessions/{servicer_id}/await``\nwith ``request_id``, ``run`` \u2192 ``GET /runs/{servicer_id}/wait``."
+      },
+      "InvocationRequest": {
+        "properties": {
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "workflow",
+              "session"
+            ],
+            "title": "Target Kind"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target",
+            "description": "An agent_id / workflow_id / session_id, discriminated by ``target_kind``."
+          },
+          "input": {
+            "title": "Input",
+            "description": "The request payload delivered to the servicer (arbitrary JSON or a string)."
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Schema",
+            "description": "Optional JSON Schema the response ``value`` must satisfy. Rides the request edge, per-request \u2014 coexists with any definition-level schema."
+          },
+          "environment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Id",
+            "description": "Environment to bind a created servicer to (agent \u2192 session, workflow \u2192 run). Ownership-checked against the caller's account. Inapplicable for ``target_kind=session`` (the session already exists)."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_kind",
+          "target"
+        ],
+        "title": "InvocationRequest",
+        "description": "Request body for ``POST /v1/invocations`` \u2014 the API caller's request-writer.\n\n``target`` is an ``agent_id | workflow_id | session_id`` and ``target_kind``\ndiscriminates it:\n\n* ``agent``     \u2014 create a **session** servicer and inject a channel-less\n  request into it (the API analog of ``invoke_agent``).\n* ``workflow``  \u2014 create a **run** servicer of the workflow.\n* ``session``   \u2014 invoke an **existing** same-account session by id (the API\n  analog of #1127's ``invoke(session_id)``). No ``environment_id`` applies \u2014\n  the session already exists.\n\n``output_schema`` is the per-request JSON Schema the response ``value`` must\nsatisfy; it rides the edge (``metadata.request.output_schema``), coexisting\nwith any definition-level schema. ``environment_id`` is ownership-checked\nagainst the caller's account on the ``agent`` / ``workflow`` create-paths\n(the per-field containment clamp is #1130's deliverable)."
       },
       "LimitedNetworking": {
         "properties": {

@@ -67,6 +67,10 @@ OAUTH_FLOW: Final = "oaf"
 WORKFLOW: Final = "wf"
 WORKFLOW_RUN: Final = "wfr"
 WORKFLOW_EVENT: Final = "wfe"
+# Request edge (#1123/#1128): the id correlating a request to its response.
+# Run→child spawns reuse the workflow ``call_key`` as the request_id; the API
+# caller (#1128) has no call_key, so it mints a fresh ``req_`` id here.
+REQUEST: Final = "req"
 
 _PREFIXES: Final = frozenset(
     {
@@ -97,6 +101,7 @@ _PREFIXES: Final = frozenset(
         WORKFLOW,
         WORKFLOW_RUN,
         WORKFLOW_EVENT,
+        REQUEST,
     }
 )
 

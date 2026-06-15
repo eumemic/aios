@@ -25,6 +25,7 @@ from aios.api.routers import (
     connectors,
     environments,
     health,
+    invocations,
     memory_stores,
     runtime_tokens,
     session_templates,
@@ -133,6 +134,7 @@ def create_app() -> FastAPI:
     app.include_router(session_templates.router)
     app.include_router(workflows.router)
     app.include_router(workflows.runs_router)
+    app.include_router(invocations.router)
     _mount_mcp(app)
     return app
 
