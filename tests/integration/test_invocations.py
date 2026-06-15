@@ -36,6 +36,7 @@ from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
+_ROOT = "acc_invocations_root"
 _ACCOUNT = "acc_invocations"
 _OTHER = "acc_invocations_other"
 
@@ -54,10 +55,19 @@ async def pool_env(
     runtime.pool = pool
     try:
         async with pool.acquire() as conn:
+            # A single active root is permitted (accounts_one_active_root); the two
+            # test tenants are sibling children of that root.
+            await conn.execute(
+                "INSERT INTO accounts (id, parent_account_id, can_mint_children, "
+                "display_name) VALUES ($1, NULL, TRUE, 'invocations-root')",
+                _ROOT,
+            )
             for acc in (_ACCOUNT, _OTHER):
                 await conn.execute(
                     "INSERT INTO accounts (id, parent_account_id, can_mint_children, "
-                    "display_name) VALUES ($1, NULL, TRUE, 'invocations-test')",
+                    "display_name) VALUES ($1, $2, FALSE, $3)",
+                    acc,
+                    _ROOT,
                     acc,
                 )
         agent, env, session = await seed_agent_env_session(
