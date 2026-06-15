@@ -390,6 +390,7 @@ async def create_child_session(
     request_id: str,
     input: Any,
     output_schema: dict[str, Any] | None = None,
+    depth: int = 0,
 ) -> bool:
     """Idempotently spawn a workflow ``agent()`` child and inject the first request.
 
@@ -461,6 +462,26 @@ async def create_child_session(
                 "content": content,
                 "metadata": {"request": request_meta},
             },
+        )
+        # #1123: emit the trusted ``request_opened`` lifecycle edge alongside the
+        # legacy ``metadata.request`` blob (dual-write until #1131 retires the
+        # blob). Gated by the ``child is None`` first-spawn check above, so a
+        # replayed wake (ON CONFLICT → ``child is None`` → early return) never
+        # re-opens the edge — exactly-once per request.
+        await queries.append_request_opened(
+            conn,
+            session_id=session_id,
+            account_id=account_id,
+            request_id=request_id,
+            caller={"kind": "run", "id": parent_run_id},
+            depth=depth,
+            environment_id=environment_id,
+            frozen_surface={
+                "tools": [t.model_dump() for t in surface.tools],
+                "mcp_servers": [s.model_dump() for s in surface.mcp_servers],
+                "http_servers": [s.model_dump() for s in surface.http_servers],
+            },
+            vault_ids=vault_ids,
         )
         return True
 
