@@ -259,6 +259,57 @@ class TestBuildMessages:
         user_msgs = [m for m in msgs if m["role"] == "user"]
         assert len(user_msgs) == 1  # only the original user message
 
+    def test_user_message_in_last_assistant_blind_spot_moves_to_tail(self) -> None:
+        """A user message that arrives mid-inference (so the resulting assistant
+        turn's ``reacting_to`` is behind it) must not be left stranded before that
+        trailing assistant turn: the context would then END on an assistant
+        message, which current reasoning models reject as an unsupported prefill
+        ("the conversation must end with a user message"). It is deferred to the
+        tail — symmetric with the blind-spot handling for late tool results."""
+        events = [
+            _evt(1, "user", content="summarize the news"),
+            _evt(2, "assistant", tool_calls=[_tc("a", "web_search")]),
+            _evt(3, "tool", tool_call_id="a", content="search results"),
+            # arrives while the model is still composing its reply to the tool result
+            _evt(4, "user", content="actually, clear everything"),
+            # the reply only reacted to the tool result (seq 3); it never saw seq 4
+            _evt(5, "assistant", content="Here is the news summary."),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[4].data["reacting_to"] = 3  # blind to the user message at seq 4
+
+        ctx = build_messages(events, system_prompt=None)
+        msgs = ctx.messages
+
+        # The context must NOT end on an assistant turn (no accidental prefill).
+        assert msgs[-1]["role"] == "user"
+        assert "clear everything" in msgs[-1]["content"]
+        # The trailing user message sits AFTER the assistant turn that never saw it.
+        assert msgs[-2]["role"] == "assistant"
+        # Surfaced exactly once — moved to the tail, not duplicated.
+        clears = [
+            m
+            for m in msgs
+            if m.get("role") == "user" and "clear everything" in str(m.get("content"))
+        ]
+        assert len(clears) == 1
+        # reacting_to still advances to include the surfaced stimulus, so the
+        # inference gate sees it as reacted and won't re-fire for it next step.
+        assert ctx.reacting_to == 4
+
+    def test_user_message_after_last_assistant_stays_at_tail(self) -> None:
+        """The ordinary case — a user message that genuinely follows the last
+        assistant turn — is untouched (already at the tail, surfaced once)."""
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+            _evt(3, "user", content="how are you"),
+        ]
+        events[1].data["reacting_to"] = 1
+        msgs = build_messages(events, system_prompt=None).messages
+        assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
+        assert "how are you" in msgs[-1]["content"]
+
     def test_multiple_tool_batches(self) -> None:
         events = [
             _evt(1, "user", content="start"),
