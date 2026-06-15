@@ -59,6 +59,7 @@ from aios.workflows import run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from aios.workflows.host_launcher import EmittedCapability, run_script_host
+from aios.workflows.service import WORKFLOW_RUN_MAX_DEPTH
 
 log = get_logger("aios.workflows.step")
 
@@ -902,10 +903,18 @@ async def _open_agent_capability(
     if agent_spawns + 1 > max_agent_calls:
         return _SpawnResult(rejected=False, needs_rewake=False, quota_exceeded=True)
     run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=account_id)
-    # #1123: the run→child request edge carries the run's lineage depth (carried,
-    # not enforced here — enforcement is #1124, which inherits this value). Sourced
-    # from the same account-scoped ancestor walk the create_run depth cap uses.
-    run_depth = await wf_queries.run_ancestor_depth(conn, run.id, account_id=account_id)
+    # #1124: the run→session (agent() child) trusted hop, same rule as run→run. The
+    # child's ``request_opened`` edge carries ``run.depth - 1`` — the DOWN-counter
+    # decrement, read from the run's own row (the trusted scalar, not the deleted
+    # up-walk). Refuse BEFORE writing the child when the run has no budget left to spend
+    # (its depth is 0), so no over-budget edge ever lands; the cascade bottoms out at
+    # the budget by construction.
+    child_depth = run.depth - 1
+    if child_depth < 0:
+        return await _reject(
+            "run_depth_exceeded",
+            f"agent() nesting would exceed depth {WORKFLOW_RUN_MAX_DEPTH}",
+        )
 
     created = await create_child_session(
         pool,
@@ -921,7 +930,7 @@ async def _open_agent_capability(
         request_id=cap.call_key,  # the agent() call IS the request the child must answer
         input=spec.get("input"),
         output_schema=output_schema,
-        depth=run_depth,
+        depth=child_depth,
     )
     # On replay the row already carries its first-spawn version — journal THAT, so
     # call_started.child_agent_version always matches the version the child runs under.

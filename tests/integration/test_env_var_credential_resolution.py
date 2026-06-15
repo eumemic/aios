@@ -133,6 +133,7 @@ async def _make_run(
             environment_id=environment_id,
             script=wf.script,
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+            depth=10,  # #1124: root-budget seed for a directly-inserted run
             script_sha=hashlib.sha256(wf.script.encode("utf-8")).hexdigest(),
         )
         if vault_ids:

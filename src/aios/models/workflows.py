@@ -84,6 +84,13 @@ class WfRun(BaseModel):
     # The agent session that launched this run (None = operator/HTTP). Lineage, plus
     # the per-launcher fan-out cap's count key.
     launcher_session_id: str | None = None
+    # #1124: the trusted DOWN-counting recursion budget this run carries. An edgeless
+    # root (operator/HTTP, parent_run_id=None) is seeded at WORKFLOW_RUN_MAX_DEPTH; a
+    # child run is ``parent.depth - 1`` (refused before write at the floor). This is the
+    # depth the run's ``agent()`` children inherit onto their ``request_opened`` edge, so
+    # the whole trusted-invocation chain decrements by construction. Replaces the
+    # ``run_ancestor_depth`` up-walk; the wake-side ``wake_depth`` (#1083) is separate.
+    depth: int = 0
     script: str
     script_sha: str
     host_semantics_epoch: int

@@ -699,20 +699,43 @@ async def test_create_run_builtin_threads_parent_run_id(vault_pool: asyncpg.Pool
     assert out["parent_run_id"] == root.id
 
 
+async def test_create_run_edgeless_root_seeds_at_budget(vault_pool: asyncpg.Pool[Any]) -> None:
+    """#1124: an edgeless root (operator/HTTP, parent_run_id=None) is seeded at the full
+    budget on its (absent) stimulus — the DOWN-counter starts at WORKFLOW_RUN_MAX_DEPTH."""
+    pool = vault_pool
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-root", script=_SCRIPT)
+    root = await wf_service.create_run(
+        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=None
+    )
+    assert root.depth == WORKFLOW_RUN_MAX_DEPTH
+
+
 async def test_create_run_depth_cap(vault_pool: asyncpg.Pool[Any]) -> None:
-    """The vertical depth cap: a parent_run_id chain may nest WORKFLOW_RUN_MAX_DEPTH deep, no more."""
+    """#1124: the trusted DOWN-counter bounds the parent_run_id chain by construction.
+
+    ONE rule across every trusted hop: the edgeless root is seeded at
+    WORKFLOW_RUN_MAX_DEPTH; each child run is ``parent.depth - 1``; a run with no budget
+    left (depth 0) refuses BEFORE writing the child (it would go below the floor), and
+    no run row leaks. The down-counter is carried on the run row, NOT walked.
+    """
     pool = vault_pool
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-depth", script=_SCRIPT)
 
-    # Build a chain of runs at depths 1..MAX (the root has parent_run_id=None, uncapped).
+    # Build the chain down from the budget: depths MAX, MAX-1, ..., 1, 0 — assert the
+    # decrement at every hop. A depth-0 run is a valid terminal leaf; it just cannot
+    # spawn further. The chain is MAX + 1 runs long (root + MAX decrements).
     parent: str | None = None
-    for _ in range(WORKFLOW_RUN_MAX_DEPTH):
+    expected_depth = WORKFLOW_RUN_MAX_DEPTH
+    for _ in range(WORKFLOW_RUN_MAX_DEPTH + 1):
         run = await wf_service.create_run(
             pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=parent
         )
+        assert run.depth == expected_depth
         parent = run.id
+        expected_depth -= 1
+    assert expected_depth == -1  # the deepest run is at depth 0; one more would be < 0
 
-    # One more would be depth MAX+1 → refused, and no run row leaks.
+    # One more would be a below-floor (depth -1) child → refused before write; no leak.
     before = await _run_count(pool)
     with pytest.raises(WorkflowRunDepthExceededError):
         await wf_service.create_run(

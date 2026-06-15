@@ -663,6 +663,7 @@ async def test_children_listable_by_parent_run_id(
             script="async def main(i):\n    return 1",
             script_sha="sha",
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+            depth=10,  # #1124: root-budget seed for a directly-inserted run
             parent_run_id=parent_id,
         )
         child_runs = await wf_queries.list_wf_runs(

@@ -71,6 +71,7 @@ async def _make_run(pool: asyncpg.Pool[Any], *, status: str = "suspended") -> st
             environment_id="env_sw",
             script="x",
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+            depth=10,  # #1124: root-budget seed for a directly-inserted run
             script_sha="x",
         )
         if status != "pending":

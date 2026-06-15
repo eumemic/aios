@@ -68,6 +68,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         environment_id=row["environment_id"],
         parent_run_id=row["parent_run_id"],
         launcher_session_id=row["launcher_session_id"],
+        depth=row["depth"],
         script=row["script"],
         script_sha=row["script_sha"],
         host_semantics_epoch=row["host_semantics_epoch"],
@@ -412,6 +413,7 @@ async def insert_wf_run(
     input: Any = None,
     parent_run_id: str | None = None,
     launcher_session_id: str | None = None,
+    depth: int,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
@@ -420,17 +422,23 @@ async def insert_wf_run(
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
-    ``launcher_session_id`` records the agent session that launched it (NULL = operator)."""
+    ``launcher_session_id`` records the agent session that launched it (NULL = operator).
+
+    ``depth`` is the run's trusted DOWN-counting recursion budget (#1124): the caller
+    (``create_run``) seeds an edgeless root at the budget constant and stamps a child run
+    at ``parent.depth - 1`` — refusing before this write at the floor, so no over-budget
+    row is ever inserted."""
     new_id = make_id(WORKFLOW_RUN)
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
-                 launcher_session_id, script, script_sha, host_semantics_epoch, status, input,
+                 launcher_session_id, depth, script, script_sha, host_semantics_epoch,
+                 status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10::jsonb,
-                    $11::jsonb, $12::jsonb, $13::jsonb, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11::jsonb,
+                    $12::jsonb, $13::jsonb, $14::jsonb, $15, $16)
             RETURNING *
             """,
             new_id,
@@ -439,6 +447,7 @@ async def insert_wf_run(
             environment_id,
             parent_run_id,
             launcher_session_id,
+            depth,
             script,
             script_sha,
             host_semantics_epoch,
@@ -501,33 +510,6 @@ async def run_children_usage(
         cache_creation_input_tokens=row["cache_creation_input_tokens"],
         cost_microusd=row["cost_microusd"],
     )
-
-
-async def run_ancestor_depth(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> int:
-    """Depth of ``run_id`` in the ``parent_run_id`` chain (a root run = 1).
-
-    Walks ``wf_runs.parent_run_id`` upward via a recursive CTE, account-scoped on
-    every hop. Returns 0 if ``run_id`` doesn't exist for the account (defensive; the
-    depth cap passes a live ancestor). The chain is immutable once written, so the
-    count is race-free without locking — concurrent sibling inserts can't change an
-    ancestor's depth.
-    """
-    depth: int | None = await conn.fetchval(
-        """
-        WITH RECURSIVE chain AS (
-            SELECT id, parent_run_id, 1 AS depth
-              FROM wf_runs WHERE id = $1 AND account_id = $2
-            UNION ALL
-            SELECT r.id, r.parent_run_id, c.depth + 1
-              FROM wf_runs r JOIN chain c ON r.id = c.parent_run_id
-             WHERE r.account_id = $2
-        )
-        SELECT max(depth) FROM chain
-        """,
-        run_id,
-        account_id,
-    )
-    return depth or 0
 
 
 async def count_active_runs(

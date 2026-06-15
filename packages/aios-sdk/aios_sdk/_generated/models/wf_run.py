@@ -46,6 +46,7 @@ class WfRun:
             updated_at (datetime.datetime):
             parent_run_id (None | str | Unset):
             launcher_session_id (None | str | Unset):
+            depth (int | Unset):  Default: 0.
             tools (list[ToolSpec] | Unset):
             mcp_servers (list[McpServerSpec] | Unset):
             http_servers (list[HttpServerSpec] | Unset):
@@ -69,6 +70,7 @@ class WfRun:
     updated_at: datetime.datetime
     parent_run_id: None | str | Unset = UNSET
     launcher_session_id: None | str | Unset = UNSET
+    depth: int | Unset = 0
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
@@ -113,6 +115,8 @@ class WfRun:
             launcher_session_id = UNSET
         else:
             launcher_session_id = self.launcher_session_id
+
+        depth = self.depth
 
         tools: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.tools, Unset):
@@ -180,6 +184,8 @@ class WfRun:
             field_dict["parent_run_id"] = parent_run_id
         if launcher_session_id is not UNSET:
             field_dict["launcher_session_id"] = launcher_session_id
+        if depth is not UNSET:
+            field_dict["depth"] = depth
         if tools is not UNSET:
             field_dict["tools"] = tools
         if mcp_servers is not UNSET:
@@ -247,6 +253,8 @@ class WfRun:
         launcher_session_id = _parse_launcher_session_id(
             d.pop("launcher_session_id", UNSET)
         )
+
+        depth = d.pop("depth", UNSET)
 
         _tools = d.pop("tools", UNSET)
         tools: list[ToolSpec] | Unset = UNSET
@@ -330,6 +338,7 @@ class WfRun:
             updated_at=updated_at,
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
+            depth=depth,
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_servers,

@@ -255,6 +255,7 @@ async def test_runs_parent_run_id_filter(http_client: httpx.AsyncClient, pool: A
             script=_SCRIPT,
             script_sha="sha",
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+            depth=10,  # #1124: root-budget seed for a directly-inserted run
             parent_run_id=parent["id"],
         )
     # An unrelated (parentless) run that must be excluded.

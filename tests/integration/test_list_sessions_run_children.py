@@ -39,6 +39,7 @@ async def _seed_run(conn: asyncpg.Connection[Any], account_id: str, environment_
         environment_id=environment_id,
         script=wf.script,
         host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+        depth=10,  # #1124: root-budget seed for a directly-inserted run
         script_sha="deadbeef",
     )
     return run.id

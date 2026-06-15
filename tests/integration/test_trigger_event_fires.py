@@ -217,9 +217,12 @@ async def test_two_completions_two_fires_two_runs(trig_runtime: asyncpg.Pool[Any
 async def test_self_fire_cycle_terminates_at_depth_cap(
     trig_runtime: asyncpg.Pool[Any],
 ) -> None:
-    """Obligation 1, the loop bound: a trigger watching the workflow its own
-    action launches terminates at WORKFLOW_RUN_MAX_DEPTH — the depth-11 fire
-    errors BEFORE any run row exists, so no completion ever re-arms the chain."""
+    """Obligation 1, the loop bound: a trigger watching the workflow its own action
+    launches terminates by construction under the #1124 DOWN-counter. The root is the
+    edgeless seed at WORKFLOW_RUN_MAX_DEPTH; each completion fires a child at
+    ``parent.depth - 1`` until a depth-0 run fires — that fire would write a below-floor
+    child, so it errors BEFORE any run row exists and no completion re-arms the chain.
+    The budget IS the cycle bound (no wait-for-graph)."""
     pool = trig_runtime
     _, env, session = await seed_agent_env_session(pool, account_id=ACC, prefix="loop")
     w = await _make_workflow(pool)
@@ -233,7 +236,7 @@ async def test_self_fire_cycle_terminates_at_depth_cap(
         },
     )
 
-    await _complete_run_of(pool, w, env.id)  # the root (depth 1)
+    await _complete_run_of(pool, w, env.id)  # the edgeless root (depth = budget)
     for _ in range(40):  # safety bound far above the expected ~20 iterations
         refs = await _pending_refs(pool)
         for ref in refs:
@@ -251,11 +254,15 @@ async def test_self_fire_cycle_terminates_at_depth_cap(
 
     async with pool.acquire() as conn:
         total_runs = await conn.fetchval("SELECT count(*) FROM wf_runs WHERE workflow_id = $1", w)
-    assert total_runs == service.WORKFLOW_RUN_MAX_DEPTH  # 10 — none past the cap
+    # Runs span depths budget, budget-1, ..., 1, 0 — the root plus budget decrements.
+    # None past the floor (the would-be depth-(-1) child is refused before write).
+    assert total_runs == service.WORKFLOW_RUN_MAX_DEPTH + 1
 
     rows = await _carrier_rows(pool, tid)
-    assert len(rows) == 10  # one fire per completion
-    assert [r["status"] for r in rows] == ["ok"] * 9 + ["error"]
+    # One fire per completion: every run (depths budget..0) completes and fires once.
+    # The depth-0 run's fire is the one that refuses → the last carrier row errors.
+    assert len(rows) == service.WORKFLOW_RUN_MAX_DEPTH + 1
+    assert [r["status"] for r in rows] == ["ok"] * service.WORKFLOW_RUN_MAX_DEPTH + ["error"]
     assert "WorkflowRunDepthExceededError" in rows[-1]["error_summary"]
 
 

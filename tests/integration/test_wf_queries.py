@@ -56,6 +56,7 @@ async def _seed_run(conn: asyncpg.Connection[Any]) -> str:
         environment_id="env_root",
         script=wf.script,
         host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+        depth=10,  # #1124: root-budget seed for a directly-inserted run
         script_sha="deadbeef",
     )
     return run.id
@@ -93,6 +94,7 @@ async def test_insert_run_snapshots_script(wf_conn: asyncpg.Connection[Any]) -> 
         environment_id="env_root",
         script=wf.script,
         host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+        depth=10,  # #1124: root-budget seed for a directly-inserted run
         script_sha="sha-v1",
     )
     assert run.id.startswith("wfr_")
@@ -457,6 +459,7 @@ async def test_list_wf_runs_filters_by_launcher_session(wf_conn: asyncpg.Connect
             script=wf.script,
             script_sha="sha",
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+            depth=10,  # #1124: root-budget seed for a directly-inserted run
             launcher_session_id=launcher,
         )
         return run.id

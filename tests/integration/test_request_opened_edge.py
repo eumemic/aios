@@ -73,6 +73,7 @@ async def _seed_parent_run(pool: asyncpg.Pool[Any], *, account_id: str, environm
             environment_id=environment_id,
             parent_run_id=None,
             launcher_session_id=None,
+            depth=10,  # #1124: root-budget seed for a directly-inserted run
             script=wf.script,
             script_sha="x" * 64,
             host_semantics_epoch=1,
@@ -304,3 +305,110 @@ async def test_create_child_session_rollback_leaves_no_edge(
         )
     assert sess == 0
     assert edges == 0
+
+
+# ─── #1124: cycles bounded by construction (no wait-for-graph) ────────────────
+
+
+class _DepthExceeded(Exception):
+    """Stand-in for ``WorkflowRunDepthExceededError`` at a session→session hop.
+
+    #1124 makes the trusted ``depth`` scalar on the edge the cycle bound: each hop
+    refuses BEFORE writing the child edge when the parent edge has no budget left.
+    The session-invoke builtin (#1127) will raise the real depth-exceeded error; this
+    test models the same refuse-before-write rule against the edge primitive so the
+    bound is proven independently of that future call site.
+    """
+
+
+async def _invoke_session_hop(
+    pool: asyncpg.Pool[Any],
+    *,
+    target_session_id: str,
+    caller_session_id: str,
+    request_id: str,
+    parent_depth: int,
+    account_id: str,
+    environment_id: str,
+) -> int:
+    """Model ONE trusted session→session hop: refuse-before-write at the floor, else
+    decrement and stamp ``parent_depth - 1`` onto the target's ``request_opened`` edge.
+
+    This is exactly the rule #1124 applies at every trusted-invocation hop — no
+    wait-for-graph, no cycle detection: the decrement IS the bound. Returns the
+    child edge's depth.
+    """
+    child_depth = parent_depth - 1
+    if child_depth < 0:
+        # Refuse BEFORE writing the edge — no over-budget edge ever lands.
+        raise _DepthExceeded
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.append_request_opened(
+            conn,
+            session_id=target_session_id,
+            account_id=account_id,
+            request_id=request_id,
+            caller={"kind": "session", "id": caller_session_id},
+            depth=child_depth,
+            environment_id=environment_id,
+            frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+            vault_ids=[],
+        )
+    return child_depth
+
+
+async def test_session_to_session_cycle_terminates_at_budget_by_construction(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A session→session A↔B cycle bottoms out at the budget BY CONSTRUCTION.
+
+    Two sessions A and B invoke each other in a loop — the classic wait-for-graph
+    cycle a run-only up-walk could never bound. #1124's DOWN-counter alone terminates
+    it: each hop stamps ``parent_depth - 1`` onto the callee's edge and refuses before
+    write at the floor. The cycle runs for exactly ``WORKFLOW_RUN_MAX_DEPTH`` edges
+    (depths budget-1 .. 0) and then the next hop refuses — with NO cycle-detection
+    code anywhere. The depth budget IS the cycle bound.
+    """
+    from aios.workflows.service import WORKFLOW_RUN_MAX_DEPTH
+
+    pool, account_id, _agent_id, env_id = pool_env
+    _aa, _ae, sess_a = await seed_agent_env_session(pool, account_id=account_id, prefix="cycle-a")
+    _ba, _be, sess_b = await seed_agent_env_session(pool, account_id=account_id, prefix="cycle-b")
+    ids = [sess_a.id, sess_b.id]
+
+    # A is the edgeless root (a foreground session) seeded at the full budget; it
+    # invokes B, which invokes A, which invokes B... alternating endpoints forever.
+    depth = WORKFLOW_RUN_MAX_DEPTH
+    hops = 0
+    with pytest.raises(_DepthExceeded):
+        while True:
+            caller = ids[hops % 2]
+            target = ids[(hops + 1) % 2]
+            depth = await _invoke_session_hop(
+                pool,
+                target_session_id=target,
+                caller_session_id=caller,
+                request_id=f"cycle-req-{hops}",
+                parent_depth=depth,
+                account_id=account_id,
+                environment_id=env_id,
+            )
+            hops += 1
+            assert hops <= WORKFLOW_RUN_MAX_DEPTH + 1  # bounded — never an infinite loop
+
+    # Exactly WORKFLOW_RUN_MAX_DEPTH edges were written (depths budget-1 down to 0);
+    # the (budget+1)-th hop refused before writing. The A↔B cycle is bounded.
+    assert hops == WORKFLOW_RUN_MAX_DEPTH
+    async with pool.acquire() as conn:
+        total_edges = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = ANY($1::text[]) "
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_opened'",
+            ids,
+        )
+        min_depth = await conn.fetchval(
+            "SELECT min((data->>'depth')::int) FROM events WHERE session_id = ANY($1::text[]) "
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_opened'",
+            ids,
+        )
+    assert total_edges == WORKFLOW_RUN_MAX_DEPTH
+    assert min_depth == 0  # the floor — the deepest edge carries depth 0, then refusal
