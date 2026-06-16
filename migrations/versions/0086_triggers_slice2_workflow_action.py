@@ -291,6 +291,5 @@ def downgrade() -> None:
     )
     op.execute("ALTER TABLE triggers DROP CONSTRAINT triggers_action_shape")
     op.execute(
-        f"ALTER TABLE triggers ADD CONSTRAINT triggers_action_shape "
-        f"CHECK ({ACTION_PREDICATE_0083})"
+        f"ALTER TABLE triggers ADD CONSTRAINT triggers_action_shape CHECK ({ACTION_PREDICATE_0083})"
     )

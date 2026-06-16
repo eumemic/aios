@@ -50,6 +50,5 @@ def downgrade() -> None:
     for table, index_name, column in _INDEXES:
         op.execute(f"DROP INDEX IF EXISTS {index_name}")
         op.execute(
-            f"CREATE UNIQUE INDEX {index_name} "
-            f"ON {table} ({column}) WHERE archived_at IS NULL"
+            f"CREATE UNIQUE INDEX {index_name} ON {table} ({column}) WHERE archived_at IS NULL"
         )

@@ -45,8 +45,7 @@ def upgrade() -> None:
         """
     )
     op.execute(
-        "CREATE UNIQUE INDEX credentials_name_uniq "
-        "ON credentials (name) WHERE archived_at IS NULL;"
+        "CREATE UNIQUE INDEX credentials_name_uniq ON credentials (name) WHERE archived_at IS NULL;"
     )
 
     op.execute(
@@ -86,10 +85,7 @@ def upgrade() -> None:
         );
         """
     )
-    op.execute(
-        "CREATE UNIQUE INDEX agents_name_uniq "
-        "ON agents (name) WHERE archived_at IS NULL;"
-    )
+    op.execute("CREATE UNIQUE INDEX agents_name_uniq ON agents (name) WHERE archived_at IS NULL;")
 
     op.execute(
         """
@@ -113,14 +109,8 @@ def upgrade() -> None:
         );
         """
     )
-    op.execute(
-        "CREATE INDEX sessions_agent_idx "
-        "ON sessions (agent_id, created_at DESC);"
-    )
-    op.execute(
-        "CREATE INDEX sessions_status_idx "
-        "ON sessions (status) WHERE archived_at IS NULL;"
-    )
+    op.execute("CREATE INDEX sessions_agent_idx ON sessions (agent_id, created_at DESC);")
+    op.execute("CREATE INDEX sessions_status_idx ON sessions (status) WHERE archived_at IS NULL;")
     op.execute(
         "CREATE INDEX sessions_lease_idx "
         "ON sessions (lease_expires_at) WHERE lease_worker_id IS NOT NULL;"

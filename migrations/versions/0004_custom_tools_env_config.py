@@ -41,9 +41,7 @@ def upgrade() -> None:
     )
 
     # 2. Add config column to environments.
-    op.execute(
-        "ALTER TABLE environments ADD COLUMN config jsonb NOT NULL DEFAULT '{}'::jsonb;"
-    )
+    op.execute("ALTER TABLE environments ADD COLUMN config jsonb NOT NULL DEFAULT '{}'::jsonb;")
 
 
 def downgrade() -> None:

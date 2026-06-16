@@ -49,9 +49,7 @@ def upgrade() -> None:
     # event_id)`` becomes ``(connector, external_account_id, event_id)``
     # — the PK constraint name (``connector_inbound_acks_pkey``) is
     # column-list-bound, not column-name-bound, so no rename needed.
-    op.execute(
-        "ALTER TABLE connector_inbound_acks RENAME COLUMN account TO external_account_id"
-    )
+    op.execute("ALTER TABLE connector_inbound_acks RENAME COLUMN account TO external_account_id")
 
 
 def downgrade() -> None:
@@ -66,6 +64,4 @@ def downgrade() -> None:
         "CREATE UNIQUE INDEX connections_active_account_uniq "
         "ON connections (connector, account) WHERE archived_at IS NULL"
     )
-    op.execute(
-        "ALTER TABLE connector_inbound_acks RENAME COLUMN external_account_id TO account"
-    )
+    op.execute("ALTER TABLE connector_inbound_acks RENAME COLUMN external_account_id TO account")

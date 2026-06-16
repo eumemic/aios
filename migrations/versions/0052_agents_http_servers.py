@@ -26,13 +26,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.execute("ALTER TABLE agents ADD COLUMN http_servers jsonb NOT NULL DEFAULT '[]'::jsonb;")
     op.execute(
-        "ALTER TABLE agents "
-        "ADD COLUMN http_servers jsonb NOT NULL DEFAULT '[]'::jsonb;"
-    )
-    op.execute(
-        "ALTER TABLE agent_versions "
-        "ADD COLUMN http_servers jsonb NOT NULL DEFAULT '[]'::jsonb;"
+        "ALTER TABLE agent_versions ADD COLUMN http_servers jsonb NOT NULL DEFAULT '[]'::jsonb;"
     )
 
 

@@ -57,9 +57,7 @@ def upgrade() -> None:
          WHERE account_id IS NULL
         """
     )
-    op.execute(
-        "ALTER TABLE pending_management_calls ALTER COLUMN account_id SET NOT NULL"
-    )
+    op.execute("ALTER TABLE pending_management_calls ALTER COLUMN account_id SET NOT NULL")
     op.execute(
         """
         ALTER TABLE pending_management_calls
@@ -83,9 +81,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "DROP INDEX IF EXISTS pending_management_calls_connector_account_pending_idx"
-    )
+    op.execute("DROP INDEX IF EXISTS pending_management_calls_connector_account_pending_idx")
     op.execute(
         """
         CREATE INDEX pending_management_calls_connector_pending_idx

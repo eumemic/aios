@@ -26,15 +26,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE sessions ADD COLUMN input_tokens bigint NOT NULL DEFAULT 0;"
-    )
-    op.execute(
-        "ALTER TABLE sessions ADD COLUMN output_tokens bigint NOT NULL DEFAULT 0;"
-    )
-    op.execute(
-        "ALTER TABLE sessions ADD COLUMN cache_read_input_tokens bigint NOT NULL DEFAULT 0;"
-    )
+    op.execute("ALTER TABLE sessions ADD COLUMN input_tokens bigint NOT NULL DEFAULT 0;")
+    op.execute("ALTER TABLE sessions ADD COLUMN output_tokens bigint NOT NULL DEFAULT 0;")
+    op.execute("ALTER TABLE sessions ADD COLUMN cache_read_input_tokens bigint NOT NULL DEFAULT 0;")
     op.execute(
         "ALTER TABLE sessions ADD COLUMN cache_creation_input_tokens bigint NOT NULL DEFAULT 0;"
     )

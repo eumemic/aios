@@ -296,7 +296,9 @@ def downgrade() -> None:
     # be a silent lie. Sandbox-only data is fully reconstructible.
     n = (
         op.get_bind()
-        .execute(sa.text("SELECT count(*) FROM triggers WHERE action->>'kind' <> 'sandbox_command'"))
+        .execute(
+            sa.text("SELECT count(*) FROM triggers WHERE action->>'kind' <> 'sandbox_command'")
+        )
         .scalar()
     )
     if n:
@@ -341,8 +343,7 @@ def downgrade() -> None:
     op.execute("ALTER TABLE triggers DROP CONSTRAINT triggers_source_spec_shape")
     op.execute("ALTER TABLE triggers DROP CONSTRAINT triggers_action_shape")
     op.execute(
-        "ALTER TABLE triggers "
-        "DROP COLUMN source, DROP COLUMN source_spec, DROP COLUMN action"
+        "ALTER TABLE triggers DROP COLUMN source, DROP COLUMN source_spec, DROP COLUMN action"
     )
 
     # Reverse the trigger + hygiene renames + table/column renames.

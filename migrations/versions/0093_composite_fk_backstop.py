@@ -66,17 +66,13 @@ _COMPOSITE_FKS: Sequence[tuple[str, str, str]] = (
 
 def upgrade() -> None:
     for table, constraint in _PARENT_UNIQUES:
-        op.execute(
-            f"ALTER TABLE {table} ADD CONSTRAINT {constraint} UNIQUE (id, account_id)"
-        )
+        op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {constraint} UNIQUE (id, account_id)")
 
     for table, constraint in _BARE_FKS:
         op.execute(f"ALTER TABLE {table} DROP CONSTRAINT {constraint}")
 
     for table, constraint, definition in _COMPOSITE_FKS:
-        op.execute(
-            f"ALTER TABLE {table} ADD CONSTRAINT {constraint} {definition} NOT VALID"
-        )
+        op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {constraint} {definition} NOT VALID")
 
     for table, constraint, _definition in _COMPOSITE_FKS:
         op.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")

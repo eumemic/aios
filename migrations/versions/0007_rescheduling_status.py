@@ -22,9 +22,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_status_check;"
-    )
+    op.execute("ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_status_check;")
     op.execute(
         "ALTER TABLE sessions ADD CONSTRAINT sessions_status_check "
         "CHECK (status IN ('running', 'idle', 'rescheduling', 'terminated'));"
@@ -32,9 +30,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_status_check;"
-    )
+    op.execute("ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_status_check;")
     op.execute(
         "ALTER TABLE sessions ADD CONSTRAINT sessions_status_check "
         "CHECK (status IN ('running', 'idle', 'terminated'));"
