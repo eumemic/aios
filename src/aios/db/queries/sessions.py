@@ -57,21 +57,50 @@ from aios.models.sessions import Session, SessionStatus, SessionUsage
 # last_reacted_seq`` and the session would read wrongly as ``active`` — driving
 # one extra model step (#749). This expr is exactly the pre-#732 derivation
 # ``EXISTS(non-assistant message with seq > last_reacted_seq)``, as a scalar.
-# Must stay byte-for-byte in sync with ``CANDIDATE_ROWS_SQL`` in
-# ``harness/sweep.py`` — the sweep candidate filter and the read-path status
-# predicate MUST agree, or the worker wakes with no progress / vice-versa.
 #
-# ``_SESSION_ERRORED_EXPR`` is also reused by ``lock_active_session_for_update``
-# and the clone gate.
-_SESSION_ERRORED_EXPR = (
-    "(sessions.last_error_seq > 0 AND sessions.last_error_seq > sessions.last_user_seq)"
-)
+# The active/errored booleans have ONE source each — the alias-parameterized
+# generators below. The read path binds them at the ``sessions`` alias
+# (``_SESSION_ACTIVE_EXPR`` / ``_SESSION_ERRORED_EXPR``); the sweep's
+# ``CANDIDATE_ROWS_SQL`` / ``ERRORED_SESSIONS_SQL`` compose the SAME generator
+# at its ``s`` alias. The sweep candidate filter and the read-path status
+# predicate therefore agree by construction — divergence (the worker waking
+# with no progress, or skipping a session that needs inference) is impossible.
 
-_SESSION_ACTIVE_EXPR = (
-    "((sessions.last_stimulus_seq > sessions.last_reacted_seq"
-    " OR sessions.open_tool_call_count > 0)"
-    f" AND NOT {_SESSION_ERRORED_EXPR})"
-)
+
+def session_errored_predicate(alias: str) -> str:
+    """SQL boolean fragment: is the session in the terminal ``errored`` state?
+
+    One source for the errored predicate, alias-parameterized so both the
+    read path (``sessions`` alias) and the sweep's ``ERRORED_SESSIONS_SQL``
+    (``s`` alias) compose the IDENTICAL boolean. A session is errored when its
+    latest error post-dates the latest user message; a later user message bumps
+    ``last_user_seq`` and flips the inequality (the recovery semantics).
+
+    Also reused by ``lock_active_session_for_update`` and the clone gate.
+    """
+    return (
+        f"({alias}.last_error_seq > 0 AND {alias}.last_error_seq > {alias}.last_user_seq)"
+    )
+
+
+def session_active_predicate(alias: str) -> str:
+    """SQL boolean fragment: does the session have work the model must react to?
+
+    One source for the active predicate, alias-parameterized so the read-path
+    status derivation (``sessions`` alias) and the sweep's wake candidate filter
+    (``CANDIDATE_ROWS_SQL``, ``s`` alias) compose the IDENTICAL boolean — they
+    MUST agree or the worker wakes with no progress (#155) / skips inference.
+    """
+    return (
+        f"(({alias}.last_stimulus_seq > {alias}.last_reacted_seq"
+        f" OR {alias}.open_tool_call_count > 0)"
+        f" AND NOT {session_errored_predicate(alias)})"
+    )
+
+
+_SESSION_ERRORED_EXPR = session_errored_predicate("sessions")
+
+_SESSION_ACTIVE_EXPR = session_active_predicate("sessions")
 
 # Read-path status label ({active, idle, archived}). ``archived`` is terminal
 # and DOMINATES the active/idle derivation: a soft-archived session
