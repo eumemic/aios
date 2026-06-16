@@ -139,6 +139,38 @@ def test_orphan_agent_call_is_kept() -> None:
     assert "ghost" in orphans[0].summary
 
 
+def test_truncated_walk_does_not_mislabel_cut_child_as_orphan() -> None:
+    # The walk truncated, so a child cut by the ceiling is absent from the node
+    # set — but its parent's call_started frame remains. That child must NOT be
+    # emitted as a never-spawned "orphan" (it WAS spawned; it was merely cut).
+    nodes = [_node("run", "wfr_root", depth=0)]
+    run_journals = {
+        "wfr_root": [
+            {
+                "seq": 7,
+                "type": "call_started",
+                "created_at": None,
+                "payload": {
+                    "capability": "agent",
+                    "child_session_id": "sess_cut",  # spawned, but cut by ceiling
+                    "label": "cut-child",
+                },
+            }
+        ]
+    }
+    entries = svc.build_entries(
+        nodes,
+        session_meta={},
+        run_meta={"wfr_root": {"status": "running"}},
+        session_journals={},
+        run_journals=run_journals,
+        responses={},
+        verbose=False,
+        truncated=True,
+    )
+    assert not any(e.kind == "agent_call" for e in entries)
+
+
 # ─── abbreviated vs verbose filtering ────────────────────────────────────────
 
 

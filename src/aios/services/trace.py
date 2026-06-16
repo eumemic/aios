@@ -130,6 +130,7 @@ async def get_trace(
         run_journals=run_journals,
         responses=responses,
         verbose=verbose,
+        truncated=truncated,
     )
     return TraceResponse(
         root_kind=root_kind,
@@ -209,6 +210,7 @@ def build_entries(
     run_journals: dict[str, list[dict[str, Any]]],
     responses: dict[str, dict[str, Any] | None],
     verbose: bool,
+    truncated: bool = False,
 ) -> list[TraceEntry]:
     """Assemble the flat DFS-pre-order entry list — pure, no I/O.
 
@@ -218,6 +220,12 @@ def build_entries(
     are NOT emitted as frames — they are merged into their child node (the
     child's ``label`` already came from that frame), so a spawned child is never
     double-listed.
+
+    ``truncated`` is the walk's ceiling flag. It MUST be threaded through:
+    ``walked_ids`` is derived post-truncation, so a child cut by the ceiling is
+    absent from it and would otherwise be mislabelled a never-spawned "orphan".
+    When the walk truncated we suppress that orphan emission — an "orphan" must
+    mean *provably never spawned*, not *merely cut from this view*.
     """
     entries: list[TraceEntry] = []
     # The set of child ids each run spawned via a journal frame — so the merge
@@ -238,6 +246,7 @@ def build_entries(
                     node,
                     run_journals.get(node.id, []),
                     walked_ids=walked_ids,
+                    truncated=truncated,
                     verbose=verbose,
                 )
             )
@@ -259,6 +268,7 @@ def _session_node_entry(
         state, error_kind = trace_normalizer.normalize_session_root(
             meta.get("stop_reason"),
             owes_open_request=bool(open_ids),
+            owed_request_response=meta.get("owed_request_response"),
             is_archived=meta.get("archived_at") is not None,
         )
     summary = node_summary_for_session(
@@ -370,6 +380,7 @@ def _run_frames(
     journal: list[dict[str, Any]],
     *,
     walked_ids: set[str],
+    truncated: bool = False,
     verbose: bool,
 ) -> list[TraceEntry]:
     out: list[TraceEntry] = []
@@ -385,6 +396,13 @@ def _run_frames(
             if cap in ("agent", "invoke_workflow"):
                 if child_id in walked_ids:
                     continue  # merged into the child node
+                # A child absent from ``walked_ids`` is an orphan ONLY when the
+                # walk was complete. If the ceiling truncated the walk, the child
+                # may simply have been cut from this view — emitting "orphan {cap}"
+                # would falsely assert it was never spawned. Suppress it; the
+                # response carries the ``truncated`` marker for the cut frontier.
+                if truncated:
+                    continue
                 # Orphan: child never spawned / rejected pre-spawn.
                 out.append(
                     TraceEntry(
