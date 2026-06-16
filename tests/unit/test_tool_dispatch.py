@@ -430,10 +430,13 @@ class TestAppendToolResultUniqueFloor:
         monkeypatch.setattr(
             queries, "lookup_tool_name_by_call_id", AsyncMock(return_value=("demo", None))
         )
-        # No spill capping in unit tests.
+        # No spill capping in unit tests: return the content unchanged with
+        # no attachment record (the within-cap shape).
+        from aios.sandbox.tool_result_spill import CappedToolResult
+
         monkeypatch.setattr(
             "aios.sandbox.tool_result_spill.cap_tool_result_content",
-            AsyncMock(side_effect=lambda *a, **k: a[2]),
+            AsyncMock(side_effect=lambda *a, **k: CappedToolResult(content=a[2], attachment=None)),
         )
 
     @staticmethod

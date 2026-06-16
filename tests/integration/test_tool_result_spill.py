@@ -97,13 +97,19 @@ async def spill_session(
             get_settings.cache_clear()
 
 
-async def _stored_tool_content(pool: asyncpg.Pool[Any], session_id: str, tool_call_id: str) -> str:
+async def _stored_tool_event(
+    pool: asyncpg.Pool[Any], session_id: str, tool_call_id: str
+) -> dict[str, Any]:
     async with pool.acquire() as conn:
         event = await queries.find_tool_result_event(
             conn, session_id, tool_call_id, account_id="acc_spill"
         )
     assert event is not None
-    content = event.data["content"]
+    return event.data
+
+
+async def _stored_tool_content(pool: asyncpg.Pool[Any], session_id: str, tool_call_id: str) -> str:
+    content = (await _stored_tool_event(pool, session_id, tool_call_id))["content"]
     assert isinstance(content, str)
     return content
 
@@ -136,6 +142,46 @@ class TestToolResultSpill:
         )
         assert spill_file.exists()
         assert spill_file.read_text(encoding="utf-8") == original
+
+        # #1093: the spill file must be recorded under the tool event's
+        # ``metadata.attachments`` (the single convention staged inbounds use)
+        # so the attachment GC's referenced-set protects it. Its
+        # ``in_sandbox_path`` must match the path the GC walk reconstructs for
+        # the on-disk file.
+        data = await _stored_tool_event(pool, session_id, tool_call_id)
+        attachments = data["metadata"]["attachments"]
+        assert isinstance(attachments, list) and len(attachments) == 1
+        assert (
+            attachments[0]["in_sandbox_path"] == f"/mnt/attachments/tool_results/{tool_call_id}.txt"
+        )
+
+    async def test_spill_path_is_in_gc_referenced_set(
+        self,
+        spill_session: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """End-to-end #1093 guard: after an oversized result spills, the
+        attachment GC's referenced-set query (``list_attachment_paths_for_sessions``)
+        — built exclusively from ``data->'metadata'->'attachments'`` — must
+        return the spill file's sandbox path. Pre-fix the spill reference lived
+        only in the result content stub, so this query returned an empty set
+        and the orphan sweep deleted the file on the next worker boot.
+        """
+        pool, session_id, tool_call_id = spill_session
+        original = "Z" * 300_000
+
+        async with pool.acquire() as conn:
+            await sessions_service.append_tool_result(
+                conn,
+                account_id="acc_spill",
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                content=original,
+            )
+
+        async with pool.acquire() as conn:
+            referenced = await queries.list_attachment_paths_for_sessions(conn, [session_id])
+
+        assert f"/mnt/attachments/tool_results/{tool_call_id}.txt" in referenced[session_id]
 
     async def test_within_cap_result_stored_verbatim(
         self,
