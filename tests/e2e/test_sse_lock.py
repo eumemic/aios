@@ -2,24 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import Any
 
 import asyncpg
-import pytest
 
 from tests.e2e.conftest import wait_for_predicate
-
-
-@pytest.fixture
-async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
-    from aios.config import get_settings
-    from aios.db.pool import create_pool
-
-    settings = get_settings()
-    p = await create_pool(settings.db_url, min_size=1, max_size=4)
-    yield p
-    await p.close()
 
 
 class TestSubscriberLockRoundTrip:

@@ -15,17 +15,6 @@ from aios.models.vaults import VaultCredentialCreate, VaultCredentialUpdate
 
 
 @pytest.fixture
-async def pool(aios_env: dict[str, str]) -> Any:
-    from aios.config import get_settings
-    from aios.db.pool import create_pool
-
-    settings = get_settings()
-    p = await create_pool(settings.db_url, min_size=1, max_size=4)
-    yield p
-    await p.close()
-
-
-@pytest.fixture
 def crypto_box(aios_env: dict[str, str]) -> Any:
     from aios.config import get_settings
     from aios.crypto.vault import CryptoBox

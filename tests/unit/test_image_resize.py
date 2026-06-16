@@ -9,7 +9,9 @@ deterministically.
 
 from __future__ import annotations
 
+import functools
 import io
+import random
 
 import pytest
 from PIL import Image
@@ -32,23 +34,23 @@ def _encode(img: Image.Image, fmt: str, **save_kwargs: object) -> bytes:
     return buf.getvalue()
 
 
+@functools.cache
 def _noisy_rgb(width: int, height: int) -> Image.Image:
     """Return an RGB image whose pixel data resists JPEG compression.
 
     Solid colors compress to a few bytes regardless of quality, which
-    makes it impossible to test the quality ladder.  Random-ish pixels
-    keep the encoded size proportional to dimensions.
+    makes it impossible to test the quality ladder.  Seeded random
+    bytes keep the encoded size proportional to dimensions.
+
+    The old per-pixel Python loop wrote every channel by hand (12.25M
+    ``PixelAccess`` writes for the 3500x3500 case, regenerated per
+    test).  ``Random(seed).randbytes`` + :meth:`Image.frombytes` builds
+    the same noise in one buffer, and ``functools.cache`` memoizes the
+    result so identical (width, height) requests reuse it.  Callers
+    must treat the returned image as read-only — copy before mutating.
     """
-    # Deterministic pseudo-random via a hash — keeps tests reproducible
-    # without seeding the RNG and without adding a numpy dep.
-    img = Image.new("RGB", (width, height))
-    pixels = img.load()
-    assert pixels is not None
-    for y in range(height):
-        for x in range(width):
-            v = (x * 2654435761 + y * 40503) & 0xFFFFFF
-            pixels[x, y] = (v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF)
-    return img
+    data = random.Random(f"{width}x{height}").randbytes(width * height * 3)
+    return Image.frombytes("RGB", (width, height), data)
 
 
 class TestNoOp:

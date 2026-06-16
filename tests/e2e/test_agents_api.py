@@ -21,17 +21,6 @@ def _uniq() -> str:
 
 
 @pytest.fixture
-async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
-    from aios.config import get_settings
-    from aios.db.pool import create_pool
-
-    settings = get_settings()
-    p = await create_pool(settings.db_url, min_size=1, max_size=4)
-    yield p
-    await p.close()
-
-
-@pytest.fixture
 async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=wired_app(pool))
     async with authed_client(
