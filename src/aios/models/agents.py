@@ -192,7 +192,16 @@ class McpToolsetConfig(BaseModel):
 
 
 class McpToolConfig(BaseModel):
-    """Per-tool override within an ``mcp_toolset`` entry."""
+    """Per-tool override within an ``mcp_toolset`` entry.
+
+    ``read_allow`` opts a single discovered tool into the outbound-suppression
+    read allowlist (#710): MCP has no HTTP-method convention, so when a session
+    runs with ``outbound_suppression == "on"`` every MCP call is *default-deny*
+    (suppressed with a synthesized success) UNLESS the operator marked the
+    specific tool ``read_allow=True`` at config time. A read-allowed tool runs
+    for real even under suppression. Default ``False`` — the safe choice for a
+    protocol that can't self-describe side effects.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -200,6 +209,7 @@ class McpToolConfig(BaseModel):
     enabled: bool = True
     permission_policy: McpPermissionPolicy | None = None
     transport: ToolTransport | None = None
+    read_allow: bool = False
 
 
 # ── HTTP server declaration ──────────────────────────────────────────────────
@@ -271,6 +281,17 @@ class HttpRouteSpec(BaseModel):
     permission_policy: HttpPermissionPolicy | None = None
     methods: list[HttpMethod] | None = None
     allow_query: bool = False
+    # Outbound-suppression override (#710). When a session runs with
+    # ``outbound_suppression == "on"`` the broker classifies each matched call
+    # as read (passes through) or write (suppressed with a synthesized success
+    # + audit event). The default classifier is the HTTP method: ``GET`` is a
+    # read, ``POST``/``PUT``/``PATCH``/``DELETE`` are writes. ``suppress`` is the
+    # per-route escape hatch for the cases the method doesn't predict: set it
+    # ``True`` to suppress a side-effecting ``GET``, ``False`` to let a
+    # read-only ``POST`` (a GraphQL/JSON-RPC query, a search endpoint) pass.
+    # ``None`` (default) defers to the method classifier. Off when suppression
+    # is off — this never gates a normal request.
+    suppress: bool | None = None
 
 
 class HttpServerSpec(BaseModel):
@@ -291,6 +312,12 @@ class HttpServerSpec(BaseModel):
     base_url: str = Field(min_length=1)
     description: str | None = None
     routes: list[HttpRouteSpec] = Field(default_factory=list)
+    # Status code returned on a suppressed call's synthesized success response
+    # (#710). The synthesized body is empty (``""``) so a JSON parse yields
+    # nothing surprising; the status defaults to ``200``. Configurable per
+    # http_server for surfaces whose success contract is e.g. ``201 Created`` —
+    # the agent must observe a plausible success so its behavior validates.
+    suppressed_response_status: int = Field(default=200, ge=100, le=599)
 
 
 def validate_http_servers(servers: list[HttpServerSpec]) -> None:
@@ -493,6 +520,54 @@ class AgentVersion(BaseModel):
 def is_mcp_tool_name(name: str) -> bool:
     """True if ``name`` is the namespaced form ``mcp__<server>__<tool>``."""
     return name.startswith("mcp__")
+
+
+# ── Outbound-suppression classification (#710) ───────────────────────────────
+
+# HTTP methods that pass through unchanged under outbound suppression by
+# default (reads). Everything else (POST/PUT/PATCH/DELETE) is a write and is
+# suppressed. A per-route ``suppress`` override flips either direction.
+_SUPPRESSION_READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def http_route_suppressed(route: HttpRouteSpec, method: str) -> bool:
+    """Decide whether a matched HTTP route is suppressed for ``method``.
+
+    The default classifier is the HTTP method — ``GET`` (and the other safe
+    verbs) read and pass through; ``POST``/``PUT``/``PATCH``/``DELETE`` write
+    and are suppressed. The route's optional ``suppress`` override wins when
+    set: ``True`` suppresses a side-effecting read, ``False`` lets a read-only
+    write through. This is *only* consulted when the session's
+    ``outbound_suppression`` is ``"on"`` — callers gate on that first.
+    """
+    if route.suppress is not None:
+        return route.suppress
+    return method.upper() not in _SUPPRESSION_READ_METHODS
+
+
+def mcp_tool_suppressed(name: str, agent_tools: list[ToolSpec]) -> bool:
+    """Decide whether an MCP tool call is suppressed under outbound suppression.
+
+    MCP has no method convention, so the policy is *default-deny*: every MCP
+    call is suppressed UNLESS its per-tool ``McpToolConfig.read_allow`` is set
+    (an operator opt-in for a known-safe read). Resolution mirrors
+    :func:`resolve_mcp_enabled`: a matching ``configs[]`` entry decides; absent
+    one, the tool is suppressed. An undeclared/unmatched tool is suppressed
+    (the safe default). Callers gate on ``outbound_suppression == "on"`` first.
+    """
+    parts = name.split("__", 2)
+    if len(parts) < 3:
+        return True
+    server_name = parts[1]
+    tool_name = parts[2]
+    for spec in agent_tools:
+        if spec.type == "mcp_toolset" and spec.mcp_server_name == server_name:
+            if spec.configs:
+                for cfg in spec.configs:
+                    if cfg.name == tool_name:
+                        return not cfg.read_allow
+            return True
+    return True
 
 
 def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPolicy | None:

@@ -99,6 +99,27 @@ connector. ``background`` — spawned by a workflow run's ``agent()`` (carries a
 ``parent_run_id``); the completion tools (``return``/``error``) are injected only
 into background children, and the totality backstop supervises them."""
 
+OutboundSuppression = Literal["off", "on"]
+"""Per-session outbound-suppression mode (#710).
+
+``off`` (default) — normal behavior; outbound side-effecting tool calls fire.
+``on`` — the broker classifies each bound ``http_server`` / ``mcp_server``
+call: reads pass through against real credentials, writes are intercepted and
+return a synthesized success (no external request leaves the broker) plus a
+``tool_call_suppressed`` audit span on the session log. The agent is NOT told
+it's suppressed — synthesized responses look like real successes, because
+behavior validation requires the agent to act as it would in production.
+
+Two migration uses (jarbot v1→v2 shard cutover): tier-3 safe testing (run with
+real vaults + memory but no real sends) and live-cutover parallel runs (v2 runs
+suppressed alongside v1, operators compare, then flip outbound atomically).
+
+Out of scope here: connector tools (``signal_send`` etc.) are NOT suppressed —
+a test session's account boundary (fresh ExternalIdentity) isolates them. And
+GET responses are real (no shadow-state); the read/write consistency window is
+acceptable for short test/cutover windows.
+"""
+
 MAX_USER_MESSAGE_CHARS = 1_000_000
 
 
@@ -175,6 +196,19 @@ class SessionCreate(BaseModel):
             "When true, the session is soft-archived the first time it goes idle "
             "owing nothing — a self-reclaiming, one-shot session. Immutable after "
             "launch. Workflow agent() children launch with this set."
+        ),
+    )
+    outbound_suppression: OutboundSuppression = Field(
+        default="off",
+        description=(
+            "Outbound-suppression mode (#710). 'off' (default) — normal "
+            "behavior. 'on' — bound http_server writes (POST/PUT/PATCH/DELETE "
+            "by default, per-route overridable) and ALL bound mcp_server calls "
+            "(default-deny; opt known-safe reads in via McpToolConfig.read_allow) "
+            "are intercepted: they return a synthesized success and append a "
+            "tool_call_suppressed audit event instead of leaving the broker. Used "
+            "for safe rehydration testing and parallel-run cutover. Mutable via "
+            "PUT /sessions/{id}."
         ),
     )
 
@@ -279,6 +313,15 @@ class SessionUpdate(BaseModel):
     metadata: dict[str, Any] | None = None
     vault_ids: list[str] | None = None
     resources: list[SessionResource] | None = None
+    outbound_suppression: OutboundSuppression | None = Field(
+        default=None,
+        description=(
+            "Flip outbound-suppression mode (#710). None (default) preserves the "
+            "current mode; 'on'/'off' sets it. Changing it recycles the session's "
+            "cached sandbox so the next step re-reads the flag. This is the "
+            "atomic 'flip outbound from v1 to v2' lever in a parallel-run cutover."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_resources(self) -> SessionUpdate:
@@ -321,6 +364,7 @@ class Session(BaseModel):
     origin: SessionOrigin = "foreground"
     parent_run_id: str | None = None  # set for a workflow-spawned (background) child
     archive_when_idle: bool = False  # self-archive on first idle (immutable launch property)
+    outbound_suppression: OutboundSuppression = "off"  # #710 — intercept side-effecting outbound
     last_event_at: datetime | None = None
     total_events: int = 0
 

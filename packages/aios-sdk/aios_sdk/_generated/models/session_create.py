@@ -5,6 +5,9 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
+from ..models.session_create_outbound_suppression import (
+    SessionCreateOutboundSuppression,
+)
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -33,6 +36,12 @@ class SessionCreate:
         archive_when_idle (bool | Unset): When true, the session is soft-archived the first time it goes idle owing
             nothing — a self-reclaiming, one-shot session. Immutable after launch. Workflow agent() children launch with
             this set. Default: False.
+        outbound_suppression (SessionCreateOutboundSuppression | Unset): Outbound-suppression mode (#710). 'off'
+            (default) — normal behavior. 'on' — bound http_server writes (POST/PUT/PATCH/DELETE by default, per-route
+            overridable) and ALL bound mcp_server calls (default-deny; opt known-safe reads in via McpToolConfig.read_allow)
+            are intercepted: they return a synthesized success and append a tool_call_suppressed audit event instead of
+            leaving the broker. Used for safe rehydration testing and parallel-run cutover. Mutable via PUT /sessions/{id}.
+            Default: SessionCreateOutboundSuppression.OFF.
         workspace_path (None | str | Unset): Absolute host path to use as the session workspace. If omitted, defaults to
             workspace_root/<account_id>/<session_id>. Must resolve within the account's workspace subdirectory. The
             directory must exist; aios will not create it.
@@ -62,6 +71,9 @@ class SessionCreate:
     metadata: SessionCreateMetadata | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
     archive_when_idle: bool | Unset = False
+    outbound_suppression: SessionCreateOutboundSuppression | Unset = (
+        SessionCreateOutboundSuppression.OFF
+    )
     workspace_path: None | str | Unset = UNSET
     env: SessionCreateEnv | Unset = UNSET
     initial_message: None | str | Unset = UNSET
@@ -96,6 +108,10 @@ class SessionCreate:
             vault_ids = self.vault_ids
 
         archive_when_idle = self.archive_when_idle
+
+        outbound_suppression: str | Unset = UNSET
+        if not isinstance(self.outbound_suppression, Unset):
+            outbound_suppression = self.outbound_suppression.value
 
         workspace_path: None | str | Unset
         if isinstance(self.workspace_path, Unset):
@@ -150,6 +166,8 @@ class SessionCreate:
             field_dict["vault_ids"] = vault_ids
         if archive_when_idle is not UNSET:
             field_dict["archive_when_idle"] = archive_when_idle
+        if outbound_suppression is not UNSET:
+            field_dict["outbound_suppression"] = outbound_suppression
         if workspace_path is not UNSET:
             field_dict["workspace_path"] = workspace_path
         if env is not UNSET:
@@ -204,6 +222,15 @@ class SessionCreate:
         vault_ids = cast(list[str], d.pop("vault_ids", UNSET))
 
         archive_when_idle = d.pop("archive_when_idle", UNSET)
+
+        _outbound_suppression = d.pop("outbound_suppression", UNSET)
+        outbound_suppression: SessionCreateOutboundSuppression | Unset
+        if isinstance(_outbound_suppression, Unset):
+            outbound_suppression = UNSET
+        else:
+            outbound_suppression = SessionCreateOutboundSuppression(
+                _outbound_suppression
+            )
 
         def _parse_workspace_path(data: object) -> None | str | Unset:
             if data is None:
@@ -274,6 +301,7 @@ class SessionCreate:
             metadata=metadata,
             vault_ids=vault_ids,
             archive_when_idle=archive_when_idle,
+            outbound_suppression=outbound_suppression,
             workspace_path=workspace_path,
             env=env,
             initial_message=initial_message,

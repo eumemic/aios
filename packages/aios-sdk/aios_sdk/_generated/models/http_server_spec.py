@@ -31,12 +31,14 @@ class HttpServerSpec:
             base_url (str):
             description (None | str | Unset):
             routes (list[HttpRouteSpec] | Unset):
+            suppressed_response_status (int | Unset):  Default: 200.
     """
 
     name: str
     base_url: str
     description: None | str | Unset = UNSET
     routes: list[HttpRouteSpec] | Unset = UNSET
+    suppressed_response_status: int | Unset = 200
 
     def to_dict(self) -> dict[str, Any]:
         name = self.name
@@ -56,6 +58,8 @@ class HttpServerSpec:
                 routes_item = routes_item_data.to_dict()
                 routes.append(routes_item)
 
+        suppressed_response_status = self.suppressed_response_status
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -68,6 +72,8 @@ class HttpServerSpec:
             field_dict["description"] = description
         if routes is not UNSET:
             field_dict["routes"] = routes
+        if suppressed_response_status is not UNSET:
+            field_dict["suppressed_response_status"] = suppressed_response_status
 
         return field_dict
 
@@ -98,11 +104,14 @@ class HttpServerSpec:
 
                 routes.append(routes_item)
 
+        suppressed_response_status = d.pop("suppressed_response_status", UNSET)
+
         http_server_spec = cls(
             name=name,
             base_url=base_url,
             description=description,
             routes=routes,
+            suppressed_response_status=suppressed_response_status,
         )
 
         return http_server_spec

@@ -5,6 +5,9 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
+from ..models.session_update_outbound_suppression_type_0 import (
+    SessionUpdateOutboundSuppressionType0,
+)
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -41,6 +44,10 @@ class SessionUpdate:
             metadata (None | SessionUpdateMetadataType0 | Unset):
             vault_ids (list[str] | None | Unset):
             resources (list[GithubRepositoryResource | MemoryStoreResource] | None | Unset):
+            outbound_suppression (None | SessionUpdateOutboundSuppressionType0 | Unset): Flip outbound-suppression mode
+                (#710). None (default) preserves the current mode; 'on'/'off' sets it. Changing it recycles the session's cached
+                sandbox so the next step re-reads the flag. This is the atomic 'flip outbound from v1 to v2' lever in a
+                parallel-run cutover.
     """
 
     agent_id: None | str | Unset = UNSET
@@ -51,6 +58,7 @@ class SessionUpdate:
     resources: list[GithubRepositoryResource | MemoryStoreResource] | None | Unset = (
         UNSET
     )
+    outbound_suppression: None | SessionUpdateOutboundSuppressionType0 | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.memory_store_resource import MemoryStoreResource
@@ -108,6 +116,16 @@ class SessionUpdate:
         else:
             resources = self.resources
 
+        outbound_suppression: None | str | Unset
+        if isinstance(self.outbound_suppression, Unset):
+            outbound_suppression = UNSET
+        elif isinstance(
+            self.outbound_suppression, SessionUpdateOutboundSuppressionType0
+        ):
+            outbound_suppression = self.outbound_suppression.value
+        else:
+            outbound_suppression = self.outbound_suppression
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -123,6 +141,8 @@ class SessionUpdate:
             field_dict["vault_ids"] = vault_ids
         if resources is not UNSET:
             field_dict["resources"] = resources
+        if outbound_suppression is not UNSET:
+            field_dict["outbound_suppression"] = outbound_suppression
 
         return field_dict
 
@@ -246,6 +266,29 @@ class SessionUpdate:
 
         resources = _parse_resources(d.pop("resources", UNSET))
 
+        def _parse_outbound_suppression(
+            data: object,
+        ) -> None | SessionUpdateOutboundSuppressionType0 | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                outbound_suppression_type_0 = SessionUpdateOutboundSuppressionType0(
+                    data
+                )
+
+                return outbound_suppression_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | SessionUpdateOutboundSuppressionType0 | Unset, data)
+
+        outbound_suppression = _parse_outbound_suppression(
+            d.pop("outbound_suppression", UNSET)
+        )
+
         session_update = cls(
             agent_id=agent_id,
             agent_version=agent_version,
@@ -253,6 +296,7 @@ class SessionUpdate:
             metadata=metadata,
             vault_ids=vault_ids,
             resources=resources,
+            outbound_suppression=outbound_suppression,
         )
 
         return session_update

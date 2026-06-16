@@ -534,6 +534,26 @@ def launch_mcp_tool_calls(
     )
 
 
+async def _mcp_call_suppressed(
+    pool: asyncpg.Pool[Any], session_id: str, account_id: str, qualified_name: str
+) -> bool:
+    """Whether this MCP call is intercepted by outbound suppression (#710).
+
+    Returns ``False`` when the session is not in suppression mode (the common
+    case). Otherwise resolves the per-tool ``read_allow`` opt-in against the
+    session's effective agent tools (default-deny). Loaded here so the model
+    dispatch path and the sandbox CLI broker make the identical decision.
+    """
+    from aios.models.agents import mcp_tool_suppressed
+    from aios.services import agents as agents_service
+
+    session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
+    if session.outbound_suppression != "on":
+        return False
+    agent = await agents_service.load_for_session(pool, session, account_id=account_id)
+    return mcp_tool_suppressed(qualified_name, agent.tools)
+
+
 def _parse_mcp_tool_name(name: str) -> tuple[str, str]:
     """Parse ``mcp__<server_name>__<tool_name>`` into ``(server_name, tool_name)``.
 
@@ -596,15 +616,33 @@ async def _execute_mcp_tool_async(
             raise ToolBail(f"MCP server {server_name!r} not found")
         url = spec.url
 
-        from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
+        # Outbound suppression (#710): MCP is default-deny. When the session is
+        # in suppression mode, every MCP call is intercepted (synthesized
+        # success + audit event) unless the per-tool ``read_allow`` opt-in
+        # marks it a known-safe read. Same decision the sandbox CLI broker
+        # makes — both consult ``mcp_tool_suppressed``.
+        from aios.services import outbound_suppression as suppression_service
 
-        crypto_box = runtime.require_crypto_box()
-        vault_id, headers = await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, url, account_id=account_id
-        )
-        result = await call_mcp_tool(
-            url, vault_id, headers, tool_name, arguments, meta=meta, spec_headers=spec.headers
-        )
+        if await _mcp_call_suppressed(pool, session_id, account_id, tc.name):
+            await suppression_service.record_mcp_suppression(
+                pool,
+                session_id,
+                account_id=account_id,
+                server_name=server_name,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+            result = suppression_service.mcp_synthesized_result()
+        else:
+            from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
+
+            crypto_box = runtime.require_crypto_box()
+            vault_id, headers = await resolve_auth_for_target_url(
+                pool, crypto_box, session_id, url, account_id=account_id
+            )
+            result = await call_mcp_tool(
+                url, vault_id, headers, tool_name, arguments, meta=meta, spec_headers=spec.headers
+            )
 
         mcp_is_error = "error" in result
         event_data: dict[str, Any] = {

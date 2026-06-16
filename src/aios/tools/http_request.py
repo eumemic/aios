@@ -25,8 +25,10 @@ from aios.models.agents import (
     HttpRouteSpec,
     HttpServerSpec,
     PermissionPolicy,
+    http_route_suppressed,
 )
 from aios.services import agents as agents_service
+from aios.services import outbound_suppression as outbound_suppression_service
 from aios.services import sessions as sessions_service
 from aios.tools._glob_match import match_glob
 from aios.tools.registry import registry
@@ -226,12 +228,12 @@ def _classify_permission(
     return route.permission_policy.type
 
 
-async def _load_session_agent(session_id: str) -> tuple[Agent | AgentVersion, str]:
+async def _load_session_agent(session_id: str) -> tuple[Agent | AgentVersion, str, str]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
     agent = await agents_service.load_for_session(pool, session, account_id=account_id)
-    return agent, account_id
+    return agent, account_id, session.outbound_suppression
 
 
 def _decode_body(response: httpx.Response) -> str:
@@ -256,11 +258,22 @@ async def _do_http_request(
     servers: list[HttpServerSpec],
     arguments: dict[str, Any],
     resolve_auth: Callable[[str], Awaitable[tuple[str | None, dict[str, str]]]],
+    on_suppress: (
+        Callable[[HttpServerSpec, HttpRouteSpec, dict[str, Any]], Awaitable[dict[str, Any] | None]]
+        | None
+    ) = None,
 ) -> dict[str, Any]:
     """The owner-agnostic core: match a path against ``servers``' route allowlist,
     author the ``Authorization`` header via the injected ``resolve_auth``, and make the
     request. Shared by the session handler (servers = agent's) and the workflow-run
     dispatcher (servers = run's snapshot); the core never learns which principal it serves.
+
+    ``on_suppress`` (outbound suppression, #710) is consulted AFTER the path /
+    method / query gates pass but BEFORE the upstream dispatch. The session
+    handler injects it when ``outbound_suppression == "on"``; it returns a
+    synthesized success (and records the audit event) for a write, or ``None``
+    to let the call proceed normally for a read. The workflow-run dispatcher
+    leaves it ``None`` — suppression is a per-session property.
     """
     server_ref = arguments["server_ref"]
     path = arguments["path"]
@@ -295,6 +308,15 @@ async def _do_http_request(
     reason = _query_rejected_reason(route, path, query)
     if reason is not None:
         return {"error": reason}
+
+    # Outbound suppression (#710): a session in suppression mode short-circuits a
+    # write here — synthesized success, no upstream dispatch — AFTER the gates so
+    # the agent sees the same accept/reject surface it would in production, and
+    # the suppressed call is recorded against a real, allowlisted route.
+    if on_suppress is not None:
+        synthesized = await on_suppress(server, route, arguments)
+        if synthesized is not None:
+            return synthesized
 
     full_url = server.base_url.rstrip("/") + "/" + path.lstrip("/")
     if not is_safe_url(full_url):
@@ -333,7 +355,7 @@ async def _do_http_request(
 
 async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Session entry: resolve the agent's ``http_servers`` + a session-scoped vault resolver."""
-    agent, account_id = await _load_session_agent(session_id)
+    agent, account_id, outbound_suppression = await _load_session_agent(session_id)
     pool = runtime.require_pool()
     crypto_box = runtime.require_crypto_box()
 
@@ -342,8 +364,34 @@ async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> di
             pool, crypto_box, session_id, base_url, account_id=account_id
         )
 
+    on_suppress = None
+    if outbound_suppression == "on":
+
+        async def on_suppress(
+            server: HttpServerSpec, route: HttpRouteSpec, args: dict[str, Any]
+        ) -> dict[str, Any] | None:
+            method = str(args.get("method", ""))
+            if not http_route_suppressed(route, method):
+                return None  # a read — let it through against real credentials
+            status = server.suppressed_response_status
+            await outbound_suppression_service.record_http_suppression(
+                pool,
+                session_id,
+                account_id=account_id,
+                server_ref=server.name,
+                base_url=server.base_url,
+                method=method,
+                path=str(args.get("path", "")),
+                body=args.get("body"),
+                synthesized_status=status,
+            )
+            return outbound_suppression_service.http_synthesized_response(status)
+
     return await _do_http_request(
-        servers=agent.http_servers, arguments=arguments, resolve_auth=resolve_auth
+        servers=agent.http_servers,
+        arguments=arguments,
+        resolve_auth=resolve_auth,
+        on_suppress=on_suppress,
     )
 
 

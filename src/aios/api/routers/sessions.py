@@ -110,6 +110,7 @@ async def create(
         workspace_path=body.workspace_path,
         env=body.env or None,
         archive_when_idle=body.archive_when_idle,
+        outbound_suppression=body.outbound_suppression,
         account_id=account_id,
     )
     if body.initial_message is not None:
@@ -204,6 +205,7 @@ async def update(
         metadata=body.metadata,
         vault_ids=body.vault_ids,
         resources=body.resources,
+        outbound_suppression=body.outbound_suppression,
         crypto_box=crypto_box,
         account_id=account_id,
     )

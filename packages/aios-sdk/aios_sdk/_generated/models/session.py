@@ -9,6 +9,7 @@ from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
 from ..models.session_origin import SessionOrigin
+from ..models.session_outbound_suppression import SessionOutboundSuppression
 from ..models.session_status import SessionStatus
 from ..types import UNSET, Unset
 
@@ -60,6 +61,7 @@ class Session:
             origin (SessionOrigin | Unset):  Default: SessionOrigin.FOREGROUND.
             parent_run_id (None | str | Unset):
             archive_when_idle (bool | Unset):  Default: False.
+            outbound_suppression (SessionOutboundSuppression | Unset):  Default: SessionOutboundSuppression.OFF.
             last_event_at (datetime.datetime | None | Unset):
             total_events (int | Unset):  Default: 0.
     """
@@ -89,6 +91,9 @@ class Session:
     origin: SessionOrigin | Unset = SessionOrigin.FOREGROUND
     parent_run_id: None | str | Unset = UNSET
     archive_when_idle: bool | Unset = False
+    outbound_suppression: SessionOutboundSuppression | Unset = (
+        SessionOutboundSuppression.OFF
+    )
     last_event_at: datetime.datetime | None | Unset = UNSET
     total_events: int | Unset = 0
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -194,6 +199,10 @@ class Session:
 
         archive_when_idle = self.archive_when_idle
 
+        outbound_suppression: str | Unset = UNSET
+        if not isinstance(self.outbound_suppression, Unset):
+            outbound_suppression = self.outbound_suppression.value
+
         last_event_at: None | str | Unset
         if isinstance(self.last_event_at, Unset):
             last_event_at = UNSET
@@ -245,6 +254,8 @@ class Session:
             field_dict["parent_run_id"] = parent_run_id
         if archive_when_idle is not UNSET:
             field_dict["archive_when_idle"] = archive_when_idle
+        if outbound_suppression is not UNSET:
+            field_dict["outbound_suppression"] = outbound_suppression
         if last_event_at is not UNSET:
             field_dict["last_event_at"] = last_event_at
         if total_events is not UNSET:
@@ -426,6 +437,13 @@ class Session:
 
         archive_when_idle = d.pop("archive_when_idle", UNSET)
 
+        _outbound_suppression = d.pop("outbound_suppression", UNSET)
+        outbound_suppression: SessionOutboundSuppression | Unset
+        if isinstance(_outbound_suppression, Unset):
+            outbound_suppression = UNSET
+        else:
+            outbound_suppression = SessionOutboundSuppression(_outbound_suppression)
+
         def _parse_last_event_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -469,6 +487,7 @@ class Session:
             origin=origin,
             parent_run_id=parent_run_id,
             archive_when_idle=archive_when_idle,
+            outbound_suppression=outbound_suppression,
             last_event_at=last_event_at,
             total_events=total_events,
         )

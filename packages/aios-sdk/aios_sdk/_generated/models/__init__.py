@@ -167,9 +167,11 @@ from .session_clone_request import SessionCloneRequest
 from .session_create import SessionCreate
 from .session_create_env import SessionCreateEnv
 from .session_create_metadata import SessionCreateMetadata
+from .session_create_outbound_suppression import SessionCreateOutboundSuppression
 from .session_interrupt_request import SessionInterruptRequest
 from .session_metadata import SessionMetadata
 from .session_origin import SessionOrigin
+from .session_outbound_suppression import SessionOutboundSuppression
 from .session_status import SessionStatus
 from .session_stop_reason_type_0 import SessionStopReasonType0
 from .session_template import SessionTemplate
@@ -180,6 +182,9 @@ from .session_template_update import SessionTemplateUpdate
 from .session_template_update_metadata_type_0 import SessionTemplateUpdateMetadataType0
 from .session_update import SessionUpdate
 from .session_update_metadata_type_0 import SessionUpdateMetadataType0
+from .session_update_outbound_suppression_type_0 import (
+    SessionUpdateOutboundSuppressionType0,
+)
 from .session_usage import SessionUsage
 from .session_user_message import SessionUserMessage
 from .session_user_message_metadata import SessionUserMessageMetadata
@@ -437,9 +442,11 @@ __all__ = (
     "SessionCreate",
     "SessionCreateEnv",
     "SessionCreateMetadata",
+    "SessionCreateOutboundSuppression",
     "SessionInterruptRequest",
     "SessionMetadata",
     "SessionOrigin",
+    "SessionOutboundSuppression",
     "SessionStatus",
     "SessionStopReasonType0",
     "SessionTemplate",
@@ -450,6 +457,7 @@ __all__ = (
     "SessionTemplateUpdateMetadataType0",
     "SessionUpdate",
     "SessionUpdateMetadataType0",
+    "SessionUpdateOutboundSuppressionType0",
     "SessionUsage",
     "SessionUserMessage",
     "SessionUserMessageMetadata",

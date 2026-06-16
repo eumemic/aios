@@ -43,9 +43,14 @@ def _server(
     base_url: str = "https://api.example.com/v1",
     routes: list[HttpRouteSpec] | None = None,
     description: str | None = None,
+    suppressed_response_status: int = 200,
 ) -> HttpServerSpec:
     return HttpServerSpec(
-        name=name, base_url=base_url, routes=routes or [], description=description
+        name=name,
+        base_url=base_url,
+        routes=routes or [],
+        description=description,
+        suppressed_response_status=suppressed_response_status,
     )
 
 
@@ -57,6 +62,7 @@ def _route(
     description: str | None = None,
     methods: list[str] | None = None,
     allow_query: bool = False,
+    suppress: bool | None = None,
 ) -> HttpRouteSpec:
     permission = HttpPermissionPolicy(type=policy) if policy else None
     return HttpRouteSpec(
@@ -66,6 +72,7 @@ def _route(
         description=description,
         methods=cast(Any, methods),
         allow_query=allow_query,
+        suppress=suppress,
     )
 
 
@@ -240,10 +247,12 @@ def _stub_runtime() -> Iterator[SimpleNamespace]:
         yield SimpleNamespace(pool=pool, crypto_box=crypto_box)
 
 
-def _patch_load_agent(agent: Agent | AgentVersion) -> Any:
+def _patch_load_agent(
+    agent: Agent | AgentVersion, outbound_suppression: str = "off"
+) -> Any:
     return patch(
         "aios.tools.http_request._load_session_agent",
-        AsyncMock(return_value=(agent, "acc_test_stub")),
+        AsyncMock(return_value=(agent, "acc_test_stub", outbound_suppression)),
     )
 
 
@@ -792,3 +801,178 @@ class TestDoHttpRequest:
             resolve_auth=resolve_auth,
         )
         assert "error" in out and "unknown server_ref" in out["error"]
+
+
+# ── outbound suppression (#710) ─────────────────────────────────────────────
+
+
+class TestOutboundSuppressionHttp:
+    """When a session runs with ``outbound_suppression == 'on'`` the HTTP broker
+    intercepts writes (synthesized success + audit event, no upstream dispatch)
+    and lets reads through against real credentials."""
+
+    async def test_write_suppressed_no_dispatch_and_records_event(
+        self, _stub_runtime: Any
+    ) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        record = AsyncMock()
+        with (
+            _patch_load_agent(agent, outbound_suppression="on"),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            patch(
+                "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
+                record,
+            ),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {
+                    "server_ref": "hue",
+                    "path": "/lights/1",
+                    "method": "POST",
+                    "body": '{"on": true}',
+                },
+            )
+        # Synthesized success — looks like a real response, no upstream dispatch.
+        assert result == {"status": 200, "headers": {}, "body": ""}
+        assert "url" not in captured
+        # Audit event recorded with the un-suppressed intent.
+        record.assert_awaited_once()
+        kwargs = record.await_args.kwargs
+        assert kwargs["method"] == "POST"
+        assert kwargs["path"] == "/lights/1"
+        assert kwargs["body"] == '{"on": true}'
+        assert kwargs["server_ref"] == "hue"
+
+    async def test_read_passes_through_under_suppression(self, _stub_runtime: Any) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        response = httpx.Response(
+            200, headers={"content-type": "application/json"}, content=b'{"on": true}'
+        )
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=response, capture=captured)
+        record = AsyncMock()
+        with (
+            _patch_load_agent(agent, outbound_suppression="on"),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            patch(
+                "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
+                record,
+            ),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        # Real dispatch, real response; nothing recorded.
+        assert captured["method"] == "GET"
+        assert result["status"] == 200
+        record.assert_not_awaited()
+
+    async def test_per_route_suppress_override_suppresses_get(self, _stub_runtime: Any) -> None:
+        # A GET that the operator marked suppress=True (a side-effecting read).
+        agent = _agent(
+            http_servers=[_server(routes=[_route("/trigger/*", suppress=True)])]
+        )
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        record = AsyncMock()
+        with (
+            _patch_load_agent(agent, outbound_suppression="on"),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            patch(
+                "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
+                record,
+            ),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/trigger/1", "method": "GET"},
+            )
+        assert result == {"status": 200, "headers": {}, "body": ""}
+        assert "url" not in captured
+        record.assert_awaited_once()
+
+    async def test_per_route_suppress_false_lets_post_through(self, _stub_runtime: Any) -> None:
+        # A read-only POST (a query endpoint) the operator marked suppress=False.
+        agent = _agent(
+            http_servers=[_server(routes=[_route("/graphql", suppress=False)])]
+        )
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(
+            response=httpx.Response(200, content=b"{}"), capture=captured
+        )
+        record = AsyncMock()
+        with (
+            _patch_load_agent(agent, outbound_suppression="on"),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            patch(
+                "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
+                record,
+            ),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/graphql", "method": "POST"},
+            )
+        assert captured["method"] == "POST"
+        assert result["status"] == 200
+        record.assert_not_awaited()
+
+    async def test_suppressed_status_is_configurable(self, _stub_runtime: Any) -> None:
+        agent = _agent(
+            http_servers=[
+                _server(
+                    routes=[_route("/things")], suppressed_response_status=201
+                )
+            ]
+        )
+        record = AsyncMock()
+        with (
+            _patch_load_agent(agent, outbound_suppression="on"),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch(
+                "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
+                record,
+            ),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/things", "method": "POST"},
+            )
+        assert result["status"] == 201
+        assert record.await_args.kwargs["synthesized_status"] == 201
+
+    async def test_suppression_off_does_not_gate(self, _stub_runtime: Any) -> None:
+        # The default mode never consults suppression — a write dispatches.
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        record = AsyncMock()
+        with (
+            _patch_load_agent(agent, outbound_suppression="off"),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            patch(
+                "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
+                record,
+            ),
+        ):
+            await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "POST"},
+            )
+        assert captured["method"] == "POST"
+        record.assert_not_awaited()
