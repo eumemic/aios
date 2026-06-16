@@ -1,0 +1,63 @@
+# IaC-sync v1 (issue #1179): deploy-on-merge for the dev-pipeline workflow object.
+#
+# The live `dev-pipeline` workflow is a DB snapshot — a run snapshots
+# `workflows.script` at launch and there is NO startup re-sync, so a merged fix to
+# `build_dev_pipeline_script()` is INERT until someone manually re-registers the
+# workflow (proven live 2026-06-16: #1177 merged but every run kept executing the
+# OLD script until a hand re-register). This Action automates exactly the hand
+# recipe that activated #1177+#1159 (v2→v3): on a push to `master` that touches the
+# builder, it reads the live workflow, re-extracts its configurable constants from
+# the LIVE header (drift-safe — NOT hardcoded), rebuilds the script from the updated
+# builder, validates it, and PUTs it back, bumping the version.
+#
+# This is IaC-sync **v1**: a one-shot reconcile of one known object. The v2
+# evolution — a reconcile loop over manifests for all infra (agents/triggers/envs as
+# source of truth) — is sketched in eumemic-company
+# `architecture/dev-machine-reification.md` § infrastructure-as-code.
+name: Re-register dev-pipeline (IaC-sync v1)
+
+on:
+  push:
+    branches: [master]
+    # Trigger ONLY when the builder changes — a builder-less master push is inert
+    # for the workflow object, so re-registering would be a pointless no-op PUT.
+    paths:
+      - "src/aios/workflows/dev_pipeline.py"
+
+# Never run two re-registers concurrently: a stacked pair of builder merges would
+# race the optimistic-version PUT (the loser hits a 409 and fails loudly). Serialise
+# on master and let the tip win; do NOT cancel an in-flight deploy (a half-applied
+# re-register must finish, not be killed).
+concurrency:
+  group: reregister-dev-pipeline
+  cancel-in-progress: false
+
+env:
+  AIOS_URL: https://api.aios.eumemic.ai
+  DEV_PIPELINE_WORKFLOW_ID: wf_01KV4YGV4PSGP08TJBAY32J2VK
+
+jobs:
+  reregister:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Sync deps (the script imports aios)
+        run: uv sync --dev
+
+      # Harder validation than the script's inline `ast.parse`: exec the emitted
+      # program against the host with simulated returns. Abort the deploy if the
+      # regenerated machine can't even be driven through its state machine.
+      - name: Validate regenerated script (fixture drive)
+        run: uv run pytest tests/integration/test_wf_dev_pipeline_fixture.py -q
+
+      - name: Re-register live workflow from the updated builder
+        env:
+          # Provisioned out-of-band by the maintainer; NEVER inline a key.
+          AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
+        run: uv run python scripts/reregister_dev_pipeline.py
