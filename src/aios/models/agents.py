@@ -245,6 +245,22 @@ class HttpRouteSpec(BaseModel):
     GraphQL surface must place reads and writes behind distinct
     ``base_url`` servers (each with its own credential/route allowlist) or
     accept that granting ``POST`` grants both.
+
+    ``allow_query`` opts the route into permitting a query string on the
+    request ``path``.  The default is ``False``: a ``?...`` is rejected at
+    the route gate (#485) because ``httpx`` parses the query off the URL
+    and an unanticipating allowlist — e.g. a read-only ``/lights/*`` — is
+    bypassed when the upstream interprets ``?action=delete`` as a write.
+    An operator sets ``allow_query=True`` only on routes where the query
+    string cannot escalate beyond what the route already grants and where
+    it is functionally required — e.g. a GitHub ``/repos/**`` route that
+    already permits every verb and must follow cursor/``page`` pagination
+    to read a full comment thread (#1156).  The path portion is still
+    glob-matched against ``path_pattern`` (the query is stripped before
+    the match), and ``.``/``..`` dot-segment rejection still applies, so a
+    query allowance never widens the path-dimension grant.  It is
+    launcher-verbatim under attenuation: a child surface cannot turn it on
+    where the parent left it off.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -254,6 +270,7 @@ class HttpRouteSpec(BaseModel):
     enabled: bool = True
     permission_policy: HttpPermissionPolicy | None = None
     methods: list[HttpMethod] | None = None
+    allow_query: bool = False
 
 
 class HttpServerSpec(BaseModel):

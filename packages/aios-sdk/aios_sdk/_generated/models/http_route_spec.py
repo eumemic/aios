@@ -49,12 +49,29 @@ class HttpRouteSpec:
     ``base_url`` servers (each with its own credential/route allowlist) or
     accept that granting ``POST`` grants both.
 
+    ``allow_query`` opts the route into permitting a query string on the
+    request ``path``.  The default is ``False``: a ``?...`` is rejected at
+    the route gate (#485) because ``httpx`` parses the query off the URL
+    and an unanticipating allowlist — e.g. a read-only ``/lights/*`` — is
+    bypassed when the upstream interprets ``?action=delete`` as a write.
+    An operator sets ``allow_query=True`` only on routes where the query
+    string cannot escalate beyond what the route already grants and where
+    it is functionally required — e.g. a GitHub ``/repos/**`` route that
+    already permits every verb and must follow cursor/``page`` pagination
+    to read a full comment thread (#1156).  The path portion is still
+    glob-matched against ``path_pattern`` (the query is stripped before
+    the match), and ``.``/``..`` dot-segment rejection still applies, so a
+    query allowance never widens the path-dimension grant.  It is
+    launcher-verbatim under attenuation: a child surface cannot turn it on
+    where the parent left it off.
+
         Attributes:
             path_pattern (str):
             description (None | str | Unset):
             enabled (bool | Unset):  Default: True.
             permission_policy (HttpPermissionPolicy | None | Unset):
             methods (list[HttpRouteSpecMethodsType0Item] | None | Unset):
+            allow_query (bool | Unset):  Default: False.
     """
 
     path_pattern: str
@@ -62,6 +79,7 @@ class HttpRouteSpec:
     enabled: bool | Unset = True
     permission_policy: HttpPermissionPolicy | None | Unset = UNSET
     methods: list[HttpRouteSpecMethodsType0Item] | None | Unset = UNSET
+    allow_query: bool | Unset = False
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.http_permission_policy import HttpPermissionPolicy
@@ -96,6 +114,8 @@ class HttpRouteSpec:
         else:
             methods = self.methods
 
+        allow_query = self.allow_query
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -111,6 +131,8 @@ class HttpRouteSpec:
             field_dict["permission_policy"] = permission_policy
         if methods is not UNSET:
             field_dict["methods"] = methods
+        if allow_query is not UNSET:
+            field_dict["allow_query"] = allow_query
 
         return field_dict
 
@@ -177,12 +199,15 @@ class HttpRouteSpec:
 
         methods = _parse_methods(d.pop("methods", UNSET))
 
+        allow_query = d.pop("allow_query", UNSET)
+
         http_route_spec = cls(
             path_pattern=path_pattern,
             description=description,
             enabled=enabled,
             permission_policy=permission_policy,
             methods=methods,
+            allow_query=allow_query,
         )
 
         return http_route_spec

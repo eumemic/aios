@@ -49,9 +49,12 @@ RESILIENCE CONTRACT (the Phase-0 hardening, aios#987; design doc §10):
    (implement/review/fix) so a design pass in the thread reaches the coder. The marker trap
    still scans the BODY (no regression), but a body marker is SUPPRESSED when a later comment
    quotes the offending line AND carries a resolution signal (resolved/settled/answer:/
-   decided/closed) — see ``spec_ok``. Comment pagination is a V1 deferral: the path-only route
-   allowlist forbids ``?page=``, so the clean ``/comments`` path returns GitHub's first page
-   (≤30); the dominant resolve-in-thread case is recent comments.
+   decided/closed) — see ``spec_ok``. The comment thread is read in FULL: ``gh_paginated``
+   requests ``?per_page=100`` and follows ``Link: rel="next"`` until the last page, so a
+   design / spec resolution that lands as comment #31+ still reaches the spec gate and every
+   downstream agent (#1156). The GitHub ``/repos/**`` route opts into ``allow_query`` (the
+   route already grants every verb, so a pagination query cannot escalate it); the path-only
+   ``?``-rejection (#485) still defends every other route by default.
 2. **Retry transient 5xx.** Every scripted GitHub call goes through ``gh_retry`` — a bounded
    (≤3) loop that re-issues the request on a 5xx / transport error / ``{"error":...}`` and
    returns the last result for the caller to branch. Each retry is a fresh ``tool()`` await,
@@ -395,6 +398,71 @@ async def gh(method, path, body=None):
     return resp
 
 
+def _headers(resp):
+    """Lower-cased response header map (the http_request tool returns httpx headers
+    verbatim; GitHub sends ``Link`` capitalised, so normalise the keys)."""
+    if not isinstance(resp, dict):
+        return {}
+    h = resp.get("headers")
+    if not isinstance(h, dict):
+        return {}
+    return {str(k).lower(): v for k, v in h.items()}
+
+
+def _link_next_page(link_header):
+    """The ``page`` number of the ``rel="next"`` URL in a GitHub ``Link`` header, or
+    None when there is no next page. GitHub paginates list endpoints with a ``Link``
+    header like ``<https://api.github.com/...?page=2&per_page=100>; rel="next", ...``.
+    We extract only the integer ``page`` (not the whole URL) and rebuild the next path
+    against the path WE control, so a malformed/host-bearing next URL never reaches the
+    route gate and pagination stays a function of our own path string."""
+    if not isinstance(link_header, str) or not link_header:
+        return None
+    for part in link_header.split(","):
+        seg = part.strip()
+        if 'rel="next"' not in seg:
+            continue
+        m = re.search(r"[?&]page=(\d+)", seg)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _with_query(path, **params):
+    """Append ``params`` as a query string to ``path`` (no existing ``?`` expected —
+    callers pass a clean path). Deterministic key order; values are ints/strs."""
+    qs = "&".join("%s=%s" % (k, params[k]) for k in sorted(params))
+    return path + ("?" if qs else "") + qs
+
+
+async def gh_paginated(path, per_page=100, max_pages=50):
+    """GET every page of a GitHub list endpoint, following ``Link: rel="next"``.
+
+    Requests ``?per_page`` (so each page holds up to 100 rather than the default 30)
+    and walks ``page=2,3,...`` until GitHub stops emitting a ``rel="next"`` link or the
+    bounded ``max_pages`` cap is hit. Concatenates the per-page JSON arrays into one
+    list. A non-2xx / non-list page degrades gracefully: returns whatever was gathered
+    so far (the caller already treats a comments-read failure as body-only). The page
+    number is rebuilt onto OUR path, so no host-bearing next URL crosses the route gate;
+    each request is a distinct ``tool()`` await (per-content-hash call_key), so replay
+    stays stable. Requires the route to allow a query string (``allow_query``)."""
+    items = []
+    page = 1
+    for _ in range(max_pages):
+        resp = await gh("GET", _with_query(path, per_page=per_page, page=page))
+        if _status(resp) != 200:
+            break
+        chunk = _json_body(resp)
+        if not isinstance(chunk, list):
+            break
+        items.extend(chunk)
+        nxt = _link_next_page(_headers(resp).get("link"))
+        if nxt is None:
+            break
+        page = nxt
+    return items
+
+
 def _status(resp):
     return resp.get("status") if isinstance(resp, dict) else None
 
@@ -520,10 +588,13 @@ async def main(input):
         return await _fail(repo, issue_number,
                            {"state": "error", "reason": "could not read issue %d (status %r)"
                             % (issue_number, _status(resp))})
-    comments_resp = await gh("GET", _ipath(repo, "/issues/%d/comments" % issue_number))
-    comments = _json_body(comments_resp)
+    # Read the FULL thread, not just GitHub's first 30: gh_paginated follows
+    # Link: rel="next" so a design/spec resolution posted as comment #31+ is ingested
+    # (#1156). A comments-endpoint failure degrades to whatever pages were gathered
+    # (empty -> body-only, autodev's pattern).
+    comments = await gh_paginated(_ipath(repo, "/issues/%d/comments" % issue_number))
     if not isinstance(comments, list):
-        comments = []  # a comments-endpoint failure degrades to body-only (autodev's pattern)
+        comments = []
     comment_bodies = _comment_texts(comments)
 
     # S2 — scripted pre-flight spec gate (regex/word-count over body+comments; fail-fast).
@@ -913,7 +984,13 @@ def _github_http_server(*, name: str, base_url: str) -> HttpServerSpec:
             HttpRouteSpec(
                 path_pattern="/repos/**",
                 methods=["GET", "POST", "PUT", "DELETE"],
-                description="Issues, PRs, labels, statuses, refs (DELETE removes labels).",
+                # allow_query: GitHub list endpoints paginate via ?per_page/?page, and the
+                # comment-thread read must follow Link: rel="next" past the first 30 to not
+                # silently drop late design/spec comments (#1156). Safe here — the route
+                # already grants every verb, so a query string cannot escalate beyond it.
+                allow_query=True,
+                description="Issues, PRs, labels, statuses, refs (DELETE removes labels); "
+                "list endpoints paginate via ?per_page/?page.",
             ),
             HttpRouteSpec(
                 path_pattern="/graphql",

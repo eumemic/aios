@@ -116,27 +116,38 @@ def _match_route(server: HttpServerSpec, path: str, method: str) -> HttpRouteSpe
     return None
 
 
-def _path_rejected_reason(path: str) -> str | None:
-    """Return the reason ``path`` must be rejected at the route gate, or
-    ``None`` when it's safe to glob-match.
+def _split_query(path: str) -> tuple[str, str]:
+    """Split ``path`` into ``(path_portion, query_portion)`` at the first ``?``.
 
-    The route allowlist is enforced by segment-glob matching on the
-    raw ``path`` string, but the final URL is composed and dispatched
-    via ``httpx``. Any element that ``httpx`` mutates between match
-    and wire is an allowlist bypass: ``?action=delete`` slips past
-    ``/lights/*`` because httpx parses it as a query string; ``.`` /
-    ``..`` segments slip past the glob because ``*`` matches the
-    literal dot-segment, while httpx applies RFC 3986 §5.2.4
-    dot-segment removal — ``/v1/lights/../admin`` collapses to
-    ``/v1/admin`` and ``/lights/./state`` collapses to
-    ``/lights/state`` on the wire. Reject up front so the gate's
-    check equals the gate's effect.
+    ``httpx`` parses the query off the constructed URL, so the route gate must
+    glob-match on the path portion alone. ``query_portion`` is ``""`` when there
+    is no ``?``; it includes everything after the first ``?`` (the leading ``?``
+    is dropped) so the caller can decide, per matched route, whether to allow it.
     """
-    if "?" in path or "#" in path:
+    head, sep, tail = path.partition("?")
+    return head, tail if sep else ""
+
+
+def _path_rejected_reason(path: str) -> str | None:
+    """Return the reason the path PORTION must be rejected at the route gate, or
+    ``None`` when it's safe to glob-match. ``path`` here is already query-stripped
+    (see ``_split_query``); the query allowance is decided per matched route by
+    ``_query_rejected_reason``.
+
+    The route allowlist is enforced by segment-glob matching on the path
+    string, but the final URL is composed and dispatched via ``httpx``. The
+    ``.`` / ``..`` dot-segments slip past the glob because ``*`` matches the
+    literal dot-segment, while httpx applies RFC 3986 §5.2.4 dot-segment
+    removal — ``/v1/lights/../admin`` collapses to ``/v1/admin`` and
+    ``/lights/./state`` collapses to ``/lights/state`` on the wire. A ``#``
+    fragment is similarly stripped by httpx with no route equivalent. Reject up
+    front so the gate's check equals the gate's effect.
+    """
+    if "#" in path:
         return (
-            f"path {path!r} contains a query string or fragment, which is "
-            "not allowed — pass only the path portion. Route allowlists "
-            "do not extend across query parameters."
+            f"path {path!r} contains a fragment, which is not allowed — pass "
+            "only the path portion. Route allowlists do not extend across "
+            "fragments."
         )
     # ``.`` / ``..`` as literal segments: ``foo/../bar`` is normalised by
     # httpx to ``bar``, and ``foo/./bar`` to ``foo/bar`` — escaping any
@@ -154,6 +165,33 @@ def _path_rejected_reason(path: str) -> str | None:
     return None
 
 
+def _query_rejected_reason(route: HttpRouteSpec, path: str, query: str) -> str | None:
+    """Return the reason a query string on ``path`` must be rejected, or ``None``.
+
+    A query is rejected (the #485 default) UNLESS the matched ``route`` opted in
+    with ``allow_query=True``. Default-deny: ``?action=delete`` must not slip past
+    a read-only ``/lights/*`` because httpx sends the query upstream verbatim.
+    A ``#`` fragment is always rejected (handled in ``_path_rejected_reason`` on
+    the path portion); a fragment cannot appear in ``query`` because the split is
+    on the first ``?`` and httpx would carry a ``#`` in the query upstream, so we
+    reject it here too for the allow_query path.
+    """
+    if not query:
+        return None
+    if "#" in query:
+        return (
+            f"path {path!r} contains a fragment, which is not allowed — pass "
+            "only the path and query portions."
+        )
+    if not route.allow_query:
+        return (
+            f"path {path!r} contains a query string, which is not allowed on "
+            "this route — pass only the path portion. Route allowlists do not "
+            "extend across query parameters unless the route sets allow_query."
+        )
+    return None
+
+
 def _classify_permission(
     args: dict[str, Any], agent: Agent | AgentVersion
 ) -> PermissionPolicy | None:
@@ -163,22 +201,27 @@ def _classify_permission(
     leave the call unresolved (pending confirmation via
     ``POST /sessions/:id/tool-confirmations``) if the operator marked it
     ``always_ask``. Returns ``None`` for missing server / no route match
-    (including method-disallowed) / bad args / query-or-fragment-bearing /
-    dot-segment-bearing path — the handler then runs and emits a typed
-    error the model can self-correct from.
+    (including method-disallowed) / bad args / fragment- or
+    disallowed-query-bearing / dot-segment-bearing path — the handler then
+    runs and emits a typed error the model can self-correct from.
     """
     server_ref = args.get("server_ref")
     path = args.get("path")
     method = args.get("method")
     if not isinstance(server_ref, str) or not isinstance(path, str) or not isinstance(method, str):
         return None
-    if _path_rejected_reason(path) is not None:
+    path_only, query = _split_query(path)
+    if _path_rejected_reason(path_only) is not None:
         return None
     server = _find_server(agent.http_servers, server_ref)
     if server is None:
         return None
-    route = _match_route(server, path, method)
-    if route is None or route.permission_policy is None:
+    route = _match_route(server, path_only, method)
+    if route is None:
+        return None
+    if _query_rejected_reason(route, path, query) is not None:
+        return None
+    if route.permission_policy is None:
         return None
     return route.permission_policy.type
 
@@ -226,17 +269,22 @@ async def _do_http_request(
     body = arguments.get("body")
 
     # Route allowlists are path-only gates. Reject any path element that
-    # ``httpx`` would mutate between match and wire (query/fragment,
-    # ``.`` / ``..`` dot-segments) so the gate's check equals the gate's
-    # effect — see ``_path_rejected_reason``.
-    reason = _path_rejected_reason(path)
+    # ``httpx`` would mutate between match and wire (fragment, ``.`` / ``..``
+    # dot-segments) so the gate's check equals the gate's effect. The query
+    # string is split off and matched on the path portion alone, then the
+    # query allowance is decided against the matched route (default-deny;
+    # ``allow_query`` opt-in) — see ``_path_rejected_reason`` /
+    # ``_query_rejected_reason``.
+    path_only, query = _split_query(path)
+    reason = _path_rejected_reason(path_only)
     if reason is not None:
         return {"error": reason}
 
     server = _find_server(servers, server_ref)
     if server is None:
         return {"error": (f"unknown server_ref {server_ref!r}; not declared on http_servers")}
-    if _match_route(server, path, method) is None:
+    route = _match_route(server, path_only, method)
+    if route is None:
         return {
             "error": (
                 f"{method} {path!r} does not match any enabled route on "
@@ -244,6 +292,9 @@ async def _do_http_request(
                 f"route's allowed methods may not include this verb"
             )
         }
+    reason = _query_rejected_reason(route, path, query)
+    if reason is not None:
+        return {"error": reason}
 
     full_url = server.base_url.rstrip("/") + "/" + path.lstrip("/")
     if not is_safe_url(full_url):
