@@ -226,6 +226,16 @@ def validate_workspace_path(
 _RUNS_ROOT = "_runs"
 
 
+def runs_root() -> Path:
+    """Return ``<workspace_root>/_runs`` — the parent of all per-run scratch dirs.
+
+    Each per-run workspace dir (one per ``run_id``) lives as a child here. Used
+    by the idle clone-dir reaper (#1192) to enumerate run scratch dirs whose run
+    no longer has a live sandbox container. Pure — does not touch the filesystem.
+    """
+    return (get_settings().workspace_root / _RUNS_ROOT).resolve()
+
+
 def run_workspace_dir(run_id: str) -> Path:
     """Per-run host workspace directory backing ``/workspace`` in a run sandbox (#988).
 
@@ -310,6 +320,18 @@ def github_repo_cache_lock_path(url_hash: str) -> Path:
 
 
 _SESSION_REPOS_ROOT = "_session_repos"
+
+
+def session_repos_gc_root() -> Path:
+    """Return ``<workspace_root>/_session_repos`` — the parent of every
+    per-session github-clone working-tree directory.
+
+    Each per-session subdir (one per ``session_id``) holds that session's
+    github_repository working trees. Used by the idle clone-dir reaper (#1192)
+    to enumerate per-session clone dirs whose session no longer has a live
+    sandbox container. Pure — does not touch the filesystem.
+    """
+    return (get_settings().workspace_root / _SESSION_REPOS_ROOT).resolve()
 
 
 def session_repos_root(session_id: str) -> Path:

@@ -39,6 +39,7 @@ from aios.db.listen import listen_for_mcp_evict_vault, listen_for_session_interr
 from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, create_pool, normalize_dsn
 from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
+from aios.harness.clone_dir_gc import reap_idle_clone_dirs
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
@@ -226,7 +227,8 @@ async def worker_main() -> None:
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-        sandbox_registry = SandboxRegistry(backend=DockerBackend())
+        sandbox_backend = DockerBackend()
+        sandbox_registry = SandboxRegistry(backend=sandbox_backend)
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
         await ensure_sandbox_network()
@@ -270,6 +272,29 @@ async def worker_main() -> None:
         deleted_attachments = await sweep_orphan_attachments(pool)
         if deleted_attachments:
             log.info("worker.reaped_orphan_attachments", count=deleted_attachments)
+
+        # Reap idle host-side per-session clone dirs (_session_repos) and
+        # per-run scratch dirs (_runs) with no live sandbox container (#1192).
+        # These are pure reconstructible cache — the github-clone provisioner
+        # rmtree+re-clones on every wake — but nothing collected them, so they
+        # grew monotonically with session count until / filled to 100% and
+        # took postgres + the whole runtime down (2026-06-16). The keep-set is
+        # re-derived from the live sandbox registry, so a running session is
+        # never reclaimed. A failed docker-ps fails closed (deletes nothing).
+        try:
+            clone_gc = await reap_idle_clone_dirs(sandbox_backend)
+            if clone_gc.total_removed or clone_gc.failures:
+                log.info(
+                    "worker.reaped_idle_clone_dirs",
+                    session_repos=clone_gc.session_repos_removed,
+                    runs=clone_gc.runs_removed,
+                    failures=clone_gc.failures,
+                )
+        except Exception:
+            # A startup clone-dir reap failure must not block worker boot — the
+            # periodic sweep retries, and the orphan-container reaper / GC are
+            # independent. Surface it (no silent swallow) and continue.
+            log.exception("worker.reap_idle_clone_dirs_failed")
 
         log.info(
             "worker.startup",
@@ -324,6 +349,19 @@ async def worker_main() -> None:
             name="periodic_sweep",
         )
         _supervise(sweep_task, latch=supervised_latch, fatal=supervised_failure)
+
+        # Periodic idle-clone-dir GC (#1192): sweeps _session_repos/_runs host
+        # dirs whose owner has no live container, mirroring the orphan-container
+        # reaper. The startup reap above ran the first pass; this keeps disk
+        # from growing monotonically while the worker stays up.
+        clone_dir_gc_task = asyncio.create_task(
+            _periodic_clone_dir_gc(
+                sandbox_backend,
+                interval=settings.clone_dir_gc_interval_seconds,
+            ),
+            name="clone_dir_gc",
+        )
+        _supervise(clone_dir_gc_task, latch=supervised_latch, fatal=supervised_failure)
 
         interrupt_task = asyncio.create_task(
             _run_interrupt_listener(settings.db_url, task_registry),
@@ -553,6 +591,38 @@ async def _periodic_sweep(
             await sweep_trigger_fires(pool)
         except Exception:
             log.exception("periodic_sweep.failed")
+
+
+async def _periodic_clone_dir_gc(
+    backend: Any,
+    *,
+    interval: int,
+) -> None:
+    """Background task: reap idle ``_session_repos`` / ``_runs`` host dirs (#1192).
+
+    Mirrors the orphan-container reaper's survivability contract — the
+    try/except is nested INSIDE ``while True`` so a transient docker-ps hiccup
+    (which ``reap_idle_clone_dirs`` raises rather than guessing an empty
+    keep-set) doesn't disable the GC for the worker's lifetime. The keep-set is
+    re-derived each tick from the live sandbox registry at delete time, so a
+    session that re-provisioned a container since the last tick is spared.
+    ``CancelledError`` is not an ``Exception`` subclass, so worker shutdown
+    cancels the loop cleanly.
+    """
+    log = get_logger("aios.worker.clone_dir_gc")
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            result = await reap_idle_clone_dirs(backend)
+            if result.total_removed or result.failures:
+                log.info(
+                    "periodic_clone_dir_gc.reaped",
+                    session_repos=result.session_repos_removed,
+                    runs=result.runs_removed,
+                    failures=result.failures,
+                )
+        except Exception:
+            log.exception("periodic_clone_dir_gc.failed")
 
 
 async def _run_interrupt_listener(

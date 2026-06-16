@@ -328,6 +328,26 @@ class Settings(BaseSettings):
         "closed. An OAuth token refresh rotates the bearer, orphaning the "
         "old keyed entry; the idle reaper (checks every 60s) reclaims it.",
     )
+    clone_dir_gc_idle_age_seconds: int = Field(
+        default=3600,
+        ge=60,
+        description="Minimum age (seconds since last modification) before an idle "
+        "host-side per-session clone dir (``<workspace_root>/_session_repos/<sess>``) "
+        "or per-run scratch dir (``<workspace_root>/_runs/<wfr>``) becomes eligible "
+        "for reaping. A dir whose owner (session/run) has a LIVE sandbox container is "
+        "NEVER reclaimed regardless of age — the age floor only guards against "
+        "reaping a dir for a session that is between containers but about to wake. "
+        "The github-clone provisioner rmtree+re-clones the working tree on every "
+        "provision, so a reaped idle clone is recreated on the next wake (#1192).",
+    )
+    clone_dir_gc_interval_seconds: int = Field(
+        default=600,
+        ge=30,
+        description="Interval between periodic sweeps of idle ``_session_repos`` / "
+        "``_runs`` host dirs (#1192). The first sweep also runs at worker startup. "
+        "Mirrors the orphan-container reaper: keep-set is re-derived from the live "
+        "sandbox registry at delete time so a session that woke mid-sweep is spared.",
+    )
     tool_broker_socket_path: Path | None = Field(
         default=None,
         description="Host path for the tool broker's Unix-domain socket. "
