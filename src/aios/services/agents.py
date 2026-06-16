@@ -205,10 +205,18 @@ async def _load_for_session_conn(
         version = await queries.get_agent_version(
             conn, session.agent_id, session.agent_version, account_id=account_id
         )
+        # #823: read the model identity (litellm_extra, api_base foremost) frozen +
+        # clamped at spawn, NOT the live agent version's — replay-sound against a later
+        # update_agent, and the spawn-edge clamp's persisted result. The surface
+        # (tools/mcp/http) is overlaid from #794's snapshot; both are frozen-once.
+        frozen_litellm_extra = await queries.get_session_frozen_litellm_extra(
+            conn, session.id, account_id=account_id
+        )
         updates: dict[str, Any] = {
             "tools": frozen.tools,
             "mcp_servers": frozen.mcp_servers,
             "http_servers": frozen.http_servers,
+            "litellm_extra": frozen_litellm_extra,
         }
         if session.model is not None:
             updates["model"] = session.model

@@ -404,6 +404,23 @@ class Settings(BaseSettings):
         "for unmounted servers.",
     )
 
+    trusted_inference_api_bases: list[str] = Field(
+        default_factory=list,
+        description="Operator allowlist of trusted inference endpoints for the "
+        "model-identity clamp at the workflow ``agent()`` spawn edge (#823). A "
+        "named-agent child's effective ``api_base`` (from its ``litellm_extra``) "
+        "must equal the launcher's (a workflow run has none — i.e. the default "
+        "operator endpoint, so ``api_base`` must be unset) OR appear in this "
+        "allowlist; otherwise the spawn fails closed with an "
+        "``untrusted_api_base`` rejection. Empty (the default) means *no* "
+        "redirected endpoint is trusted: a child may only run on the default "
+        "endpoint. This is sound today (``create_agent`` is operator-only, so no "
+        "runtime principal can mint a hostile ``api_base``); the clamp makes the "
+        "boundary real and frozen ahead of native self-management, where the "
+        "trusted-catalog precondition lapses. Values are matched verbatim against "
+        "the agent's ``litellm_extra['api_base']`` string.",
+    )
+
     # ── triggers ───────────────────────────────────────────────────────────
     triggers_per_account_max: int = Field(
         default=100,

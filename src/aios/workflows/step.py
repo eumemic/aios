@@ -45,7 +45,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.harness import runtime
 from aios.logging import get_logger
-from aios.models.attenuation import surface_of
+from aios.models.attenuation import api_base_of, surface_of
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
 from aios.services import attenuation as attenuation_service
 from aios.services.sessions import (
@@ -929,6 +929,10 @@ async def _open_agent_capability(
     child_id = child_session_id(run.id, cap.call_key)
     pinned: int | None
     stamped_model: str | None = model
+    # #823: the child's model identity (litellm_extra, api_base foremost) — the SECOND
+    # authority axis. A generic agentless child carries none (the run's model on the
+    # default endpoint); a named child inherits the agent's, clamped + frozen below.
+    child_litellm_extra: dict[str, Any] = {}
     if agent_id is None:
         pinned = None
         stamped_model = model or run.default_child_model
@@ -948,6 +952,24 @@ async def _open_agent_capability(
         pinned = agent.version
         # #794: named children wield agent ∩ run, frozen at spawn; vaults are the run's.
         child_surface = attenuation_service.clamp(surface_of(agent), surface_of(run))
+        # #823: model-identity clamp at the spawn edge. The agent's litellm_extra can
+        # carry api_base, which redirects the child's model call — sending its entire
+        # prompt context to that endpoint on the first inference, no tool call required.
+        # The surface meet (#794) does nothing about this orthogonal axis. Admit the
+        # child's effective api_base iff it equals the launcher's (a workflow run has
+        # none → the default operator endpoint) OR sits in the operator trusted-endpoint
+        # allowlist; else FAIL CLOSED with a catchable rejection, before any child row
+        # exists. Sound-by-precondition today (create_agent is operator-only); the clamp
+        # makes the boundary real + frozen ahead of native self-management.
+        child_litellm_extra = agent.litellm_extra or {}
+        if not attenuation_service.model_identity_trusted(child_litellm_extra, None):
+            redirect = api_base_of(child_litellm_extra)
+            return await _reject(
+                "untrusted_api_base",
+                f"agent {agent_id!r} routes model calls to an untrusted inference "
+                f"endpoint ({redirect!r}); add it to the operator "
+                f"trusted_inference_api_bases allowlist to permit this spawn",
+            )
     # Lifetime cap (H1) enforced HERE — past every rejection gate, before the child is
     # created — so only caps that genuinely spawn count. ``agent_spawns`` already excludes
     # rejected caps; this child would be the (agent_spawns + 1)-th, so cap it on strict ``>``.
@@ -984,6 +1006,7 @@ async def _open_agent_capability(
         input=spec.get("input"),
         output_schema=output_schema,
         depth=run.depth - 1,
+        litellm_extra=child_litellm_extra,  # #823: frozen, clamped model identity
     )
     # On replay the row already carries its first-spawn version — journal THAT, so
     # call_started.child_agent_version always matches the version the child runs under.

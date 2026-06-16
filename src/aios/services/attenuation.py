@@ -10,9 +10,17 @@ keeping the ``or "always_ask"`` / ``transport_defaults()`` plumbing in one place
 
 from __future__ import annotations
 
+from typing import Any
+
 from aios.config import get_settings
 from aios.models.agents import PermissionPolicy, ToolTransport
-from aios.models.attenuation import Surface, attenuate, canonicalize
+from aios.models.attenuation import (
+    Surface,
+    api_base_of,
+    api_base_trusted,
+    attenuate,
+    canonicalize,
+)
 from aios.tools.registry import transport_defaults
 
 
@@ -37,4 +45,30 @@ def normalize(declared: Surface) -> Surface:
     default_mcp, builtin_transports = _defaults()
     return canonicalize(
         declared, default_mcp_permission=default_mcp, builtin_transports=builtin_transports
+    )
+
+
+def model_identity_trusted(
+    child_litellm_extra: dict[str, Any] | None,
+    launcher_litellm_extra: dict[str, Any] | None,
+) -> bool:
+    """The model-identity clamp (#823) bound to this process's operator allowlist.
+
+    Admits a child's model identity iff its effective ``api_base`` equals the
+    launcher's or sits in the operator ``trusted_inference_api_bases`` allowlist. The
+    spawn edge (``workflows/step.py`` ``_open_agent_capability``) calls this before
+    writing a named-agent child and **fails closed** — journaling a catchable
+    ``untrusted_api_base`` rejection — when it returns ``False``, so the child's
+    context is never sent to an untrusted endpoint.
+
+    A workflow run (the launcher) carries no ``litellm_extra`` of its own, so
+    ``launcher_litellm_extra`` is ``None`` in the run→agent() case and the equality
+    arm reduces to "the child must not redirect" — the allowlist is the only way to
+    admit a redirected endpoint.
+    """
+    allowlist = get_settings().trusted_inference_api_bases
+    return api_base_trusted(
+        api_base_of(child_litellm_extra),
+        launcher_api_base=api_base_of(launcher_litellm_extra),
+        allowlist=allowlist,
     )

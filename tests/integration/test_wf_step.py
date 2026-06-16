@@ -779,6 +779,163 @@ async def test_agent_spawn_refused_when_run_depth_exhausted(
         )
 
 
+async def _make_agent_with_litellm_extra(
+    pool: asyncpg.Pool[Any], litellm_extra: dict[str, Any]
+) -> str:
+    """An agent whose model identity (litellm_extra, api_base) is under test (#823)."""
+    agent = await agents_service.create_agent(
+        pool,
+        account_id="acc_wf",
+        name="endpoint-agent",
+        model="test/dummy",
+        system="test child agent",
+        tools=[],
+        description=None,
+        metadata={},
+        litellm_extra=litellm_extra,
+        window_min=1000,
+        window_max=100000,
+    )
+    return agent.id
+
+
+def _allow_api_bases(monkeypatch: Any, *bases: str) -> None:
+    """Bind the operator trusted-endpoint allowlist for the model-identity clamp."""
+    from aios.config import get_settings
+
+    allowed = get_settings().model_copy(update={"trusted_inference_api_bases": list(bases)})
+    monkeypatch.setattr("aios.services.attenuation.get_settings", lambda: allowed)
+
+
+async def test_named_agent_spawn_freezes_clamped_litellm_extra(
+    wf_runtime: asyncpg.Pool[Any], monkeypatch: Any
+) -> None:
+    """#823: a named-agent child's model identity (litellm_extra, api_base foremost) is
+    frozen onto its session row at spawn, mirroring the #794 surface snapshot — so a
+    later ``update_agent`` can't shift where the child's mind runs on replay."""
+    pool = wf_runtime
+    extra = {"api_base": "https://trusted.example", "temperature": 0.1}
+    _allow_api_bases(monkeypatch, "https://trusted.example")
+    agent_id = await _make_agent_with_litellm_extra(pool, extra)
+    script = f"async def main(input):\n    return await agent('go', agent_id={agent_id!r})\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+        started = next(e for e in events if e.type == "call_started")
+        cid = started.payload["child_session_id"]
+        frozen = await db_queries.get_session_frozen_litellm_extra(conn, cid, account_id="acc_wf")
+    assert frozen == extra  # the clamped model identity is frozen verbatim
+
+
+async def test_frozen_litellm_extra_is_replay_sound_against_agent_update(
+    wf_runtime: asyncpg.Pool[Any], monkeypatch: Any
+) -> None:
+    """The frozen model identity is read by ``load_for_session`` — NOT the live agent —
+    so re-pointing the agent's ``api_base`` after spawn does not move the child's
+    inference endpoint. Mirrors the surface snapshot's replay-soundness."""
+    pool = wf_runtime
+    extra = {"api_base": "https://trusted.example"}
+    _allow_api_bases(monkeypatch, "https://trusted.example", "https://elsewhere.example")
+    agent_id = await _make_agent_with_litellm_extra(pool, extra)
+    script = f"async def main(input):\n    return await agent('go', agent_id={agent_id!r})\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+        cid = next(e for e in events if e.type == "call_started").payload["child_session_id"]
+
+    # Operator re-points the agent's endpoint AFTER the child was spawned.
+    current = await agents_service.get_agent(pool, agent_id, account_id="acc_wf")
+    await agents_service.update_agent(
+        pool,
+        agent_id,
+        account_id="acc_wf",
+        expected_version=current.version,
+        litellm_extra={"api_base": "https://elsewhere.example"},
+    )
+
+    # load_for_session resolves the FROZEN identity, not the shifted live one.
+    async with pool.acquire() as conn:
+        child = await db_queries.get_session_bare(conn, cid, account_id="acc_wf")
+        effective = await agents_service.load_for_session(
+            pool, child, account_id="acc_wf", conn=conn
+        )
+    assert effective.litellm_extra == {"api_base": "https://trusted.example"}
+
+
+async def test_named_agent_spawn_refused_when_api_base_untrusted(
+    wf_runtime: asyncpg.Pool[Any], monkeypatch: Any
+) -> None:
+    """#823: the model-identity clamp FAILS CLOSED at the spawn edge — an agent routing
+    to an endpoint that is neither the launcher's (a run has none) nor on the operator
+    allowlist is refused with a catchable ``untrusted_api_base`` rejection, BEFORE any
+    child row exists. The attacker never receives the child's context."""
+    from aios.workflows.host_launcher import EmittedCapability
+    from aios.workflows.step import _open_agent_capability
+
+    pool = wf_runtime
+    _allow_api_bases(monkeypatch)  # empty allowlist → no redirect is trusted
+    agent_id = await _make_agent_with_litellm_extra(pool, {"api_base": "https://hostile.example"})
+    script = f"async def main(input):\n    return await agent('go', agent_id={agent_id!r})\n"
+    run_id = await _make_run(pool, script)
+
+    spec = {"agent_id": agent_id, "input": "go", "output_schema": None}
+    call_key = CallKeyer().next("agent", spec)
+    cap = EmittedCapability(capability_id="agent", call_key=call_key, spec=spec)
+    cid = child_session_id(run_id, call_key)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        assert run is not None
+        with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()) as w:
+            result = await _open_agent_capability(
+                conn, pool, run, cap, agent_spawns=0, max_agent_calls=1000
+            )
+        assert result.rejected  # catchable rejection journaled, not a crash
+        w.assert_not_awaited()  # no child -> no wake
+        # Fail-closed BEFORE write: neither the child row nor its request edge exists.
+        assert await conn.fetchval("SELECT count(*) FROM sessions WHERE id = $1", cid) == 0
+        events = await wf_queries.list_run_events(conn, run_id)
+    result_evt = next(e for e in events if e.type == "call_result")
+    assert result_evt.payload["error"]["kind"] == "untrusted_api_base"
+
+
+async def test_named_agent_spawn_admits_allowlisted_api_base(
+    wf_runtime: asyncpg.Pool[Any], monkeypatch: Any
+) -> None:
+    """The allowlist arm: an operator-trusted endpoint is admitted (the child spawns)."""
+    pool = wf_runtime
+    _allow_api_bases(monkeypatch, "https://trusted.example")
+    agent_id = await _make_agent_with_litellm_extra(pool, {"api_base": "https://trusted.example"})
+    script = f"async def main(input):\n    return await agent('go', agent_id={agent_id!r})\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    assert children == 1  # admitted → exactly one child spawned
+
+
+async def test_named_agent_spawn_admits_when_no_api_base(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The default case: an agent with no ``api_base`` runs on the default operator
+    endpoint (== the launcher's None) and is admitted with an EMPTY allowlist — the
+    clamp is a no-op for the trusted-catalog model that holds today."""
+    pool = wf_runtime
+    script = f"async def main(input):\n    return await agent('go', agent_id={wf_agent_id!r})\n"
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+        cid = next(e for e in events if e.type == "call_started").payload["child_session_id"]
+        frozen = await db_queries.get_session_frozen_litellm_extra(conn, cid, account_id="acc_wf")
+    assert frozen == {}  # no redirect frozen → default endpoint
+
+
 async def test_generic_agent_spawn_creates_agentless_child_with_run_surface(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
