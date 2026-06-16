@@ -230,6 +230,14 @@ class Scenario:
             else:
                 body = "{}"
             return {"status": self.merge_status, "body": body}
+        if (
+            method == "GET" and path == "/repos/o/r/pulls/42/files"
+        ):  # risk-floor changed-files probe (#1187)
+            # The deterministic secret-CI risk floor fetches the PR's changed files and
+            # FAILS CLOSED on a non-list (#1187). These scenarios are not secret-workflow
+            # changes, so return an empty list: a valid list with no `.github/workflows`
+            # file → the floor does not fire and the run completes normally.
+            return {"status": 200, "body": "[]"}
         return {"status": 200, "body": "{}"}  # comments / labels / graphql
 
     def outcome(self, cap: Any) -> dict[str, Any]:
