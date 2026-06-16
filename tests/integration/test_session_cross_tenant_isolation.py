@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
+from unittest import mock
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
@@ -38,8 +40,11 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import NotFoundError
+from aios.harness import runtime
 from aios.services import agents as agents_service
 from aios.services import environments as environments_service
+from aios.services import sessions as sessions_service
+from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
@@ -146,3 +151,116 @@ class TestSessionCrossTenantIsolation:
         async with pool.acquire() as conn:
             with pytest.raises(NotFoundError):
                 await queries.get_session_model(conn, session_id, account_id="acc_a")
+
+
+# ─── api->session invoke edge: caller-supplied environment_id ownership gate ───
+# (#1130, ships with #1128's POST /v1/invocations.)
+#
+# Unlike session-> / run-> callers (which inherit the launcher's env), the API
+# caller has no launcher to inherit from, so it supplies ``environment_id``
+# directly — re-opening the caller-chosen-env surface ``create_run`` forecloses.
+# #1130 gates that supply with the SAME ownership check ``create_session`` /
+# ``create_run`` already enforce (#755): the supplied env must be owned by the
+# *authenticated caller's* account (``get_environment(..., account_id=<caller>)``),
+# never a body-supplied account. These tests pin that gate on the invoke path.
+
+
+_API_ROOT = "acc_invoke_gate_root"
+_CALLER = "acc_invoke_gate_caller"
+_OTHER = "acc_invoke_gate_other"
+
+
+@pytest.fixture
+async def pool_invoke_gate(
+    migrated_db_url: str, _reset_db_state: None
+) -> AsyncIterator[tuple[asyncpg.Pool[Any], str, str]]:
+    """Yield ``(pool, agent_id, caller_account_id)`` for the invoke ownership gate.
+
+    Two sibling tenants under one root: ``_CALLER`` (the authenticated caller,
+    owns an agent) and ``_OTHER`` (owns the env the gate must refuse). The
+    session-wake defer is patched out — the gate fires before any wake, and
+    these tests cover the ownership refusal, not the worker stepping.
+    """
+    pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
+    prev = runtime.pool
+    runtime.pool = pool
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
+                VALUES ($1, NULL, TRUE,  'invoke-gate-root'),
+                       ($2, $1,   FALSE, 'invoke-gate-caller'),
+                       ($3, $1,   FALSE, 'invoke-gate-other')
+                """,
+                _API_ROOT,
+                _CALLER,
+                _OTHER,
+            )
+        agent, _env, _session = await seed_agent_env_session(
+            pool, account_id=_CALLER, prefix="invoke-gate"
+        )
+        with mock.patch("aios.services.wake.defer_wake", new=AsyncMock()):
+            yield pool, agent.id, _CALLER
+    finally:
+        runtime.pool = prev
+        await pool.close()
+
+
+class TestInvokeEnvironmentOwnershipGate:
+    async def test_invoke_refuses_cross_tenant_environment_id(
+        self,
+        pool_invoke_gate: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """``invoke`` (POST /v1/invocations) must refuse a foreign ``environment_id``.
+
+        The caller authenticates as ``_CALLER`` but supplies an env owned by
+        ``_OTHER``. The ownership gate (``get_environment(..., account_id=_CALLER)``
+        inside ``create_session``) raises :class:`NotFoundError` — the env
+        "doesn't exist" from the caller's vantage — and NO session is created.
+        Without the gate, a bare FK would accept the foreign id and leak its
+        image / env-vars / networking into the caller's servicer session.
+        """
+        pool, agent_id, caller = pool_invoke_gate
+        other_env = await environments_service.create_environment(
+            pool, account_id=_OTHER, name="invoke-gate-foreign-env"
+        )
+        before = {s.id for s in await sessions_service.list_sessions(pool, account_id=caller)}
+        with pytest.raises(NotFoundError):
+            await sessions_service.invoke(
+                pool,
+                account_id=caller,
+                target_kind="agent",
+                target=agent_id,
+                input="x",
+                environment_id=other_env.id,
+            )
+        # Fail-closed: the refused invoke spawned NO new servicer session (the
+        # gate raises inside create_session's transaction, before any insert).
+        after = {s.id for s in await sessions_service.list_sessions(pool, account_id=caller)}
+        assert after == before
+
+    async def test_invoke_accepts_self_owned_environment_id(
+        self,
+        pool_invoke_gate: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """A self-owned ``environment_id`` passes the gate and binds the servicer.
+
+        The caller supplies an env it owns; the ownership gate accepts it and
+        the servicer session is created bound to that env.
+        """
+        pool, agent_id, caller = pool_invoke_gate
+        own_env = await environments_service.create_environment(
+            pool, account_id=caller, name="invoke-gate-own-env"
+        )
+        handle = await sessions_service.invoke(
+            pool,
+            account_id=caller,
+            target_kind="agent",
+            target=agent_id,
+            input="x",
+            environment_id=own_env.id,
+        )
+        assert handle.servicer_kind == "session"
+        session = await sessions_service.get_session(pool, handle.servicer_id, account_id=caller)
+        assert session.environment_id == own_env.id
