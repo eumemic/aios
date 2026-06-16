@@ -501,6 +501,34 @@ def _pr_head_sha(pr):
     return (pr.get("head") or {}).get("sha", "") if isinstance(pr, dict) else ""
 
 
+_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _is_sha1(value):
+    """True iff ``value`` is a 40-char (SHA-1) hex commit id — the only thing GitHub's
+    REST commit/check-runs endpoints can resolve. A 64-char SHA-256 object id (issue #1178)
+    returns False, so we never hand one to a GitHub REST endpoint."""
+    return isinstance(value, str) and bool(_SHA1_RE.match(value))
+
+
+async def _resolve_sha1(repo, ref):
+    """Resolve a git ref (branch name OR sha) to the GitHub-canonical SHA-1 commit id.
+
+    The post-merge master-CI watch is handed a BRANCH NAME (``BASE_BRANCH``); a watch agent
+    that re-resolves it via a local clone in SHA-256 object format yields a 64-char id the
+    GitHub REST API rejects (issue #1178). Ask GitHub itself — ``GET /repos/{repo}/commits/{ref}``
+    canonicalises any ref to the SHA-1 GitHub recognises. Returns the SHA-1 string, or ``None``
+    if it can't be resolved to a valid 40-char SHA-1 (caller decides what to do with that)."""
+    if _is_sha1(ref):
+        return ref
+    resp = await gh("GET", _ipath(repo, "/commits/%s" % ref))
+    if _status(resp) != 200:
+        return None
+    body = _json_body(resp)
+    sha = body.get("sha") if isinstance(body, dict) else None
+    return sha if _is_sha1(sha) else None
+
+
 def _find_open_pr(prs, branch):
     """Client-side filter of an open-PRs list for the one whose head ref is ``branch``
     (http_request forbids a ?head= query, so we list clean and match here)."""
@@ -935,12 +963,20 @@ async def main(input):
     merge_resp = await gh("PUT", _ipath(repo, "/pulls/%d/merge" % pr_number),
                           {"merge_method": MERGE_METHOD})
     merged = _status(merge_resp) == 200
+    # The merge PUT returns the merge commit's GitHub-canonical SHA-1 (issue #1178). Capture
+    # it here so the post-merge master-CI watch can be handed a known-good SHA-1 instead of a
+    # bare branch name (which a SHA-256 clone re-resolves to a 64-char id GitHub's REST API
+    # rejects). On a confirm-only re-drive the merge body is absent, so fall back to merge_sha.
+    _merge_body = _json_body(merge_resp)
+    merge_sha = _merge_body.get("sha") if isinstance(_merge_body, dict) else None
     if not merged:
         # At-least-once: a crash-re-driven PUT against an already-merged PR returns 405/409.
         # Confirm against GitHub before declaring failure, so a real merge is never lost.
         confirm = _json_body(await gh("GET", _ipath(repo, "/pulls/%d" % pr_number)))
         if isinstance(confirm, dict) and confirm.get("merged"):
             merged = True
+            if not merge_sha:
+                merge_sha = confirm.get("merge_commit_sha")
         else:
             return await _fail(repo, issue_number,
                                {"state": "merge_failed", "pr_url": pr_url, "pr_number": pr_number,
@@ -965,20 +1001,37 @@ async def main(input):
     # result["advisories"] (telemetry that is provably distinct from a blocking gate-park in
     # result["escalations"]) — agent flakiness is NEVER coerced to the most-blocking outcome.
     phase("post-merge")
+    # Resolve BASE_BRANCH to the GitHub-canonical SHA-1 ONCE, here in the workflow, and hand
+    # that sha to the watch — never the bare branch name (issue #1178). The merge PUT already
+    # returned the merge commit's SHA-1, so prefer it; otherwise ask GitHub to canonicalise
+    # the branch. A SHA-256 clone re-resolving `master` locally yields a 64-char id GitHub's
+    # REST check-runs endpoint rejects, hard-erroring the watch on a perfectly green master.
+    master_sha = merge_sha if _is_sha1(merge_sha) else None
+    if master_sha is None:
+        master_sha = await _resolve_sha1(repo, BASE_BRANCH)
     master_status = None
     master_detail = ""
-    for i in range(MAX_MASTER_CI_ITERS):
-        try:
-            master = await agent(
-                {"task": "watch_ci", "repo": repo, "ref": BASE_BRANCH},
-                agent_id=CI_AGENT_ID, output_schema=CI_SCHEMA, model=model,
-                label="master-ci-%d" % i)
-            master_status = master["status"]
-            master_detail = master.get("detail", "")
-            break  # a well-formed verdict (green/red/no_ci) — no retry needed
-        except (AgentError, KeyError, TypeError) as exc:
-            master_detail = "master-CI watch failed: %s" % exc
-            log("master-CI watch attempt %d indeterminate (non-blocking):" % i, exc)
+    if not _is_sha1(master_sha):
+        # Regression guard: we could not obtain a SHA-1 for master, so we DO NOT dispatch the
+        # watch with a branch name (the path that produced the SHA-256 error). Treat as a
+        # non-blocking indeterminate — same advisory the retry-exhaustion path below files.
+        master_detail = ("master-CI watch skipped: could not resolve %r to a GitHub SHA-1 "
+                         "commit (merge_sha=%r)" % (BASE_BRANCH, merge_sha))
+        log("master-CI watch indeterminate (non-blocking):", master_detail)
+    else:
+        for i in range(MAX_MASTER_CI_ITERS):
+            try:
+                master = await agent(
+                    {"task": "watch_ci", "repo": repo, "ref": BASE_BRANCH,
+                     "head_sha": master_sha},
+                    agent_id=CI_AGENT_ID, output_schema=CI_SCHEMA, model=model,
+                    label="master-ci-%d" % i)
+                master_status = master["status"]
+                master_detail = master.get("detail", "")
+                break  # a well-formed verdict (green/red/no_ci) — no retry needed
+            except (AgentError, KeyError, TypeError) as exc:
+                master_detail = "master-CI watch failed: %s" % exc
+                log("master-CI watch attempt %d indeterminate (non-blocking):" % i, exc)
 
     advisories = []
     if master_status == "red":

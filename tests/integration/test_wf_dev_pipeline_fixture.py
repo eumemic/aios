@@ -32,6 +32,11 @@ pytestmark = pytest.mark.integration
 REPO = "o/r"
 ISSUE = 5
 BRANCH = "issue-5"
+# The merge PUT returns the merge commit's GitHub-canonical SHA-1 (40-char hex). The
+# post-merge master-CI watch threads THIS into the watch instead of re-resolving the branch
+# name (issue #1178) — a SHA-256 clone would re-resolve `master` to a 64-char id GitHub's
+# REST API rejects, hard-erroring the watch on a green master.
+MERGE_SHA = "f823360f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
 # A concrete, >50-word spec body that clears the scripted spec gate.
 LONG_BODY = (
     "Add a durable retry wrapper around the outbound webhook dispatcher so that transient "
@@ -90,6 +95,8 @@ class Scenario:
         master_ci: str = "green",
         master_ci_error: bool = False,
         master_ci_results: list[dict[str, Any] | str] | None = None,
+        merge_returns_sha: bool = True,
+        commit_sha: str | None = MERGE_SHA,
         transient_5xx: dict[tuple[str, str], int] | None = None,
     ) -> None:
         self.body = body
@@ -119,6 +126,12 @@ class Scenario:
         # or the string "error" (the watch agent raises AgentError that attempt). When set, this
         # overrides master_ci/master_ci_error. The last item is reused for any later attempt.
         self.master_ci_results = master_ci_results
+        # issue #1178: whether the merge PUT body carries the merge commit's SHA-1. When False,
+        # the workflow falls back to resolving BASE_BRANCH via GET /repos/{repo}/commits/master.
+        self.merge_returns_sha = merge_returns_sha
+        # The SHA-1 the GET /commits/master canonicalisation returns. Set to None to model a ref
+        # that can't be resolved to a SHA-1 (the watch must then NOT be dispatched at all).
+        self.commit_sha = commit_sha
         # {(method, path): N} — return a transient 5xx for the FIRST N attempts of that call,
         # then the real response. Counts are mutated as attempts arrive (replay-stable because
         # each retry is a distinct call_key, so a replay re-asks each attempt exactly once).
@@ -201,9 +214,22 @@ class Scenario:
             self.followups.append(json.loads(raw) if isinstance(raw, str) else {})
             return {"status": 201, "body": json.dumps({"number": 99})}
         if method == "GET" and path == "/repos/o/r/pulls/42":  # merge-confirm read
-            return {"status": 200, "body": _pr_json(merged=self.pr_merged_on_confirm)}
+            body = json.loads(_pr_json(merged=self.pr_merged_on_confirm))
+            body["merge_commit_sha"] = self.commit_sha  # confirm-read fallback for master sha
+            return {"status": 200, "body": json.dumps(body)}
+        if method == "GET" and path == "/repos/o/r/commits/master":  # ref->SHA-1 canonicalise
+            # GitHub canonicalises any ref to its SHA-1 commit id. The watch must use THIS,
+            # never a 64-char SHA-256 a local clone might produce (issue #1178).
+            if self.commit_sha is None:  # ref can't be resolved to a SHA-1
+                return {"status": 422, "body": "{}"}
+            return {"status": 200, "body": json.dumps({"sha": self.commit_sha})}
         if method == "PUT" and path.endswith("/merge"):
-            return {"status": self.merge_status, "body": "{}"}
+            # The merge PUT returns the merge commit's SHA-1 (issue #1178).
+            if self.merge_status == 200 and self.merge_returns_sha:
+                body = json.dumps({"sha": MERGE_SHA, "merged": True})
+            else:
+                body = "{}"
+            return {"status": self.merge_status, "body": body}
         return {"status": 200, "body": "{}"}  # comments / labels / graphql
 
     def outcome(self, cap: Any) -> dict[str, Any]:
@@ -638,6 +664,68 @@ async def test_post_merge_watch_error_then_success_recovers_to_green() -> None:
     assert scn.followups == []
     assert "master-ci-0" in scn.tasks and "master-ci-1" in scn.tasks
     assert "master-ci-2" not in scn.tasks  # stopped retrying once a verdict arrived
+
+
+def _sha1_re() -> re.Pattern[str]:
+    import re as _re
+
+    return _re.compile(r"^[0-9a-f]{40}$")
+
+
+async def test_post_merge_watch_is_handed_the_merge_sha1_not_the_branch_name() -> None:
+    # issue #1178: the post-merge master-CI watch must be handed the merge commit's
+    # GitHub-canonical SHA-1 (the merge PUT already returned it) — NOT a bare branch name a
+    # SHA-256 clone would re-resolve to a 64-char id GitHub's REST API rejects. On a green
+    # master this yields a real green verdict with no error and no advisory.
+    scn = Scenario()  # merge PUT returns MERGE_SHA, master_ci defaults to green
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["master_ci"] == "green"
+    assert "advisories" not in value  # green master raises no advisory
+    assert scn.followups == []
+    # the watch input carries a 40-char SHA-1 head_sha, not just a branch name
+    watch_in = [i for i in scn.agent_inputs if i.get("task") == "watch_ci" and i.get("ref")]
+    assert watch_in, "post-merge master-CI watch was never dispatched"
+    for w in watch_in:
+        assert w["head_sha"] == MERGE_SHA
+        assert _sha1_re().match(w["head_sha"]), "watch head_sha must be a SHA-1"
+
+
+async def test_post_merge_watch_never_passes_a_sha256_to_a_github_endpoint() -> None:
+    # Regression guard (issue #1178): the watch must NEVER be handed a 64-char SHA-256 object
+    # id. Even when the merge PUT carries no sha (confirm-only re-drive), the workflow
+    # canonicalises the branch via GitHub and threads the resulting SHA-1 — and any head_sha
+    # it ever passes is provably 40-char SHA-1, never 64-char.
+    scn = Scenario(merge_returns_sha=False)  # force the GET /commits/master fallback
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["master_ci"] == "green"
+    watch_in = [i for i in scn.agent_inputs if i.get("task") == "watch_ci" and i.get("ref")]
+    assert watch_in, "post-merge master-CI watch was never dispatched"
+    for w in watch_in:
+        sha = w["head_sha"]
+        assert len(sha) != 64, "a 64-char SHA-256 id must never reach the watch"
+        assert _sha1_re().match(sha), "watch head_sha must be a SHA-1"
+    # the fallback actually went to GitHub's canonicalising endpoint
+    assert ("GET", "/repos/o/r/commits/master") in scn.http
+
+
+async def test_post_merge_watch_unresolvable_sha_degrades_to_indeterminate() -> None:
+    # issue #1178 regression guard: if BASE_BRANCH cannot be resolved to a SHA-1 at all, the
+    # workflow must NOT fall back to dispatching the watch with a branch name (the very path
+    # that produced the SHA-256 error). It degrades to the non-blocking indeterminate advisory
+    # and the watch agent is never invoked.
+    scn = Scenario(merge_returns_sha=False, commit_sha=None)
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["merged"] is True
+    assert value["escalations"] == []  # never coerced to a blocking outcome
+    assert value["master_ci"] == "indeterminate"
+    assert value["advisories"] == ["master_ci_indeterminate"]
+    # the watch agent was NOT dispatched with an unresolved ref
+    assert not any(t.startswith("master-ci-") for t in scn.tasks)
+    assert len(scn.followups) == 1
+    assert "INDETERMINATE" in scn.followups[0]["title"]
 
 
 async def test_post_merge_advisory_never_marks_failed_and_releases_in_progress() -> None:
