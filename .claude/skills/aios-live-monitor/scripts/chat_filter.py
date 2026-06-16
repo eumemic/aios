@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Filter aios sessions stream output to a one-line-per-message chat view."""
+
 from __future__ import annotations
 
 import json
@@ -53,9 +54,7 @@ for raw in sys.stdin:
         sender = md.get("sender_name") or md.get("sender") or "?"
         channel = md.get("channel", "?")
         if isinstance(content, list):
-            text = next(
-                (p.get("text", "") for p in content if p.get("type") == "text"), ""
-            )
+            text = next((p.get("text", "") for p in content if p.get("type") == "text"), "")
             kinds = ",".join(p.get("type", "?") for p in content)
             print(f"[{seq}] USER<{sender}@{channel}> [{kinds}] {text[:200]}", flush=True)
         else:
@@ -75,9 +74,7 @@ for raw in sys.stdin:
             args_str = f.get("arguments", "")
             try:
                 args = json.loads(args_str)
-                args_summary = ", ".join(
-                    f"{k}={str(v)[:80]!r}" for k, v in list(args.items())[:3]
-                )
+                args_summary = ", ".join(f"{k}={str(v)[:80]!r}" for k, v in list(args.items())[:3])
             except json.JSONDecodeError:
                 args_summary = args_str[:200]
             print(

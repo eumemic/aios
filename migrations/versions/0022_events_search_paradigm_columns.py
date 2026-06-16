@@ -93,10 +93,7 @@ def upgrade() -> None:
         "ON events (session_id, channel, seq) "
         "WHERE channel IS NOT NULL"
     )
-    op.execute(
-        "CREATE INDEX events_session_created_at_idx "
-        "ON events (session_id, created_at)"
-    )
+    op.execute("CREATE INDEX events_session_created_at_idx ON events (session_id, created_at)")
     op.execute(
         "CREATE INDEX events_session_tool_name_seq_idx "
         "ON events (session_id, tool_name, seq) "

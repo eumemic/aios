@@ -40,6 +40,7 @@ from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, create_pool, normalize
 from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
+from aios.harness.host_dir_reaper import sweep_host_dirs
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
 from aios.harness.sweep import (
@@ -318,6 +319,17 @@ async def worker_main() -> None:
         )
         _supervise(mcp_reaper_task, latch=supervised_latch, fatal=supervised_failure)
 
+        # Start the idle host scratch-dir reaper (#1192): GC the
+        # ``_session_repos`` working-tree clones and ``_runs`` per-run scratch
+        # that otherwise grow monotonically with session/run count (the
+        # 2026-06-16 floodgates disk-fill). Immediate first sweep at boot, then
+        # periodic; honours the ``host_dir_reaper_enabled`` kill-switch.
+        host_dir_reaper_task = asyncio.create_task(
+            _host_dir_reaper_loop(pool),
+            name="host_dir_reaper",
+        )
+        _supervise(host_dir_reaper_task, latch=supervised_latch, fatal=supervised_failure)
+
         # Start periodic sweep (every 30s).
         sweep_task = asyncio.create_task(
             _periodic_sweep(pool, task_registry, interval=30),
@@ -553,6 +565,30 @@ async def _periodic_sweep(
             await sweep_trigger_fires(pool)
         except Exception:
             log.exception("periodic_sweep.failed")
+
+
+async def _host_dir_reaper_loop(pool: asyncpg.Pool[Any]) -> None:
+    """Background loop: immediate first sweep, then every configured interval.
+
+    Mirrors the snapshot GC reconciler (``SandboxRegistry._gc_loop``): the
+    try/except is INSIDE the loop so one DB/FS hiccup never silently disables
+    the reaper for the worker's lifetime, and the first sweep runs at boot to
+    reclaim the predecessor's idle scratch immediately. ``sweep_host_dirs``
+    itself honours the ``host_dir_reaper_enabled`` kill-switch.
+    """
+    log = get_logger("aios.worker.host_dir_reaper")
+    interval = get_settings().host_dir_reaper_interval_seconds
+    first = True
+    while True:
+        try:
+            if not first:
+                await asyncio.sleep(interval)
+            first = False
+            removed = await sweep_host_dirs(pool)
+            if removed:
+                log.info("host_dir_reaper.swept", removed=removed)
+        except Exception:
+            log.exception("host_dir_reaper.tick_failed")
 
 
 async def _run_interrupt_listener(

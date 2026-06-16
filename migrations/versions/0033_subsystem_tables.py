@@ -93,8 +93,7 @@ def upgrade() -> None:
         "ON bindings (connection_id) WHERE archived_at IS NULL"
     )
     op.execute(
-        "CREATE INDEX bindings_session_id_idx "
-        "ON bindings (session_id) WHERE archived_at IS NULL"
+        "CREATE INDEX bindings_session_id_idx ON bindings (session_id) WHERE archived_at IS NULL"
     )
     op.execute(
         "CREATE INDEX bindings_session_template_id_idx "
@@ -136,9 +135,7 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute(
-        "CREATE INDEX chat_sessions_session_idx ON chat_sessions (session_id)"
-    )
+    op.execute("CREATE INDEX chat_sessions_session_idx ON chat_sessions (session_id)")
     op.execute(
         """
         INSERT INTO chat_sessions (connection_id, chat_id, session_id, created_at)
@@ -166,9 +163,7 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute(
-        "CREATE INDEX routing_rules_binding_id_idx ON routing_rules (binding_id)"
-    )
+    op.execute("CREATE INDEX routing_rules_binding_id_idx ON routing_rules (binding_id)")
 
     # ---- runtimes: container liveness ------------------------------------
     op.execute(
@@ -182,9 +177,7 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute(
-        "CREATE INDEX runtimes_connector_idx ON runtimes (connector)"
-    )
+    op.execute("CREATE INDEX runtimes_connector_idx ON runtimes (connector)")
 
     # ---- runtime_tokens: per-connector-type bearer auth ------------------
     # No ``connection_id`` FK: one bearer scopes N connections of one type,

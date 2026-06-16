@@ -45,12 +45,10 @@ def upgrade() -> None:
     # Drop the old CHECK so the data-migration UPDATEs aren't rejected.
     op.execute("ALTER TABLE vault_credentials DROP CONSTRAINT vault_credentials_auth_type_check")
     op.execute(
-        "UPDATE vault_credentials SET auth_type = 'bearer_header' "
-        "WHERE auth_type = 'static_bearer'"
+        "UPDATE vault_credentials SET auth_type = 'bearer_header' WHERE auth_type = 'static_bearer'"
     )
     op.execute(
-        "UPDATE vault_credentials SET auth_type = 'oauth2_refresh' "
-        "WHERE auth_type = 'mcp_oauth'"
+        "UPDATE vault_credentials SET auth_type = 'oauth2_refresh' WHERE auth_type = 'mcp_oauth'"
     )
     op.execute(
         "ALTER TABLE vault_credentials "
@@ -66,12 +64,10 @@ def downgrade() -> None:
 
     op.execute("ALTER TABLE vault_credentials DROP CONSTRAINT vault_credentials_auth_type_check")
     op.execute(
-        "UPDATE vault_credentials SET auth_type = 'static_bearer' "
-        "WHERE auth_type = 'bearer_header'"
+        "UPDATE vault_credentials SET auth_type = 'static_bearer' WHERE auth_type = 'bearer_header'"
     )
     op.execute(
-        "UPDATE vault_credentials SET auth_type = 'mcp_oauth' "
-        "WHERE auth_type = 'oauth2_refresh'"
+        "UPDATE vault_credentials SET auth_type = 'mcp_oauth' WHERE auth_type = 'oauth2_refresh'"
     )
     # Narrowing CHECK fails loud if any ``basic`` row remains.
     op.execute(

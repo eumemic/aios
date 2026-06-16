@@ -39,14 +39,13 @@ import os
 from collections.abc import Callable, Sequence
 from typing import Any
 
+import sqlalchemy as sa
+from alembic import op
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from nacl.exceptions import CryptoError
 from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
-import sqlalchemy as sa
-from alembic import op
-
 
 KEY_BYTES = SecretBox.KEY_SIZE
 NONCE_BYTES = SecretBox.NONCE_SIZE
@@ -74,7 +73,7 @@ class CryptoBox:
             info=info.encode(),
         ).derive(self._key)
 
-    def derive_account_subkey(self, account_id: str) -> "CryptoBox":
+    def derive_account_subkey(self, account_id: str) -> CryptoBox:
         if not account_id:
             raise ValueError("account_id must be non-empty")
         return CryptoBox(self.derive_subkey_bytes(f"aios-account-{account_id}"))
@@ -102,6 +101,7 @@ class CryptoBox:
         if not isinstance(decoded, dict):
             raise ValueError("decrypted blob did not decode to a dict")
         return decoded
+
 
 revision: str = "0046"
 down_revision: str = "0045"

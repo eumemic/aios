@@ -29,8 +29,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.execute("ALTER TABLE sessions ADD COLUMN archive_when_idle boolean NOT NULL DEFAULT false")
     op.execute(
-        "ALTER TABLE session_templates "
-        "ADD COLUMN archive_when_idle boolean NOT NULL DEFAULT false"
+        "ALTER TABLE session_templates ADD COLUMN archive_when_idle boolean NOT NULL DEFAULT false"
     )
 
 

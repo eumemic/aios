@@ -80,8 +80,7 @@ def downgrade() -> None:
         "ON session_github_repositories"
     )
     op.execute(
-        "DROP TRIGGER IF EXISTS session_memory_stores_bump_spec_version "
-        "ON session_memory_stores"
+        "DROP TRIGGER IF EXISTS session_memory_stores_bump_spec_version ON session_memory_stores"
     )
     op.execute("DROP FUNCTION IF EXISTS bump_session_spec_version()")
     op.execute("ALTER TABLE sessions DROP COLUMN IF EXISTS spec_version")

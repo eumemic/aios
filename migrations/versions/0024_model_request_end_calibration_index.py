@@ -44,7 +44,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     with op.get_context().autocommit_block():
-        op.execute(
-            "DROP INDEX CONCURRENTLY IF EXISTS "
-            "events_model_request_end_calibration_idx"
-        )
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS events_model_request_end_calibration_idx")

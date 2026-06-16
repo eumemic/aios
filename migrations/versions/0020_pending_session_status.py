@@ -31,9 +31,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "UPDATE sessions SET status = 'idle' WHERE status = 'pending';"
-    )
+    op.execute("UPDATE sessions SET status = 'idle' WHERE status = 'pending';")
     op.execute("ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_status_check;")
     op.execute(
         "ALTER TABLE sessions ADD CONSTRAINT sessions_status_check "

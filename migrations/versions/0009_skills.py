@@ -55,12 +55,8 @@ def upgrade() -> None:
     """)
 
     # ── skills JSONB on agents ──────────────────────────────────────────
-    op.execute(
-        "ALTER TABLE agents ADD COLUMN skills jsonb NOT NULL DEFAULT '[]'::jsonb"
-    )
-    op.execute(
-        "ALTER TABLE agent_versions ADD COLUMN skills jsonb NOT NULL DEFAULT '[]'::jsonb"
-    )
+    op.execute("ALTER TABLE agents ADD COLUMN skills jsonb NOT NULL DEFAULT '[]'::jsonb")
+    op.execute("ALTER TABLE agent_versions ADD COLUMN skills jsonb NOT NULL DEFAULT '[]'::jsonb")
 
 
 def downgrade() -> None:

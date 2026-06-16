@@ -105,8 +105,7 @@ def upgrade() -> None:
         )
     """)
     op.execute(
-        "CREATE INDEX connection_chat_sessions_session_idx "
-        "ON connection_chat_sessions (session_id)"
+        "CREATE INDEX connection_chat_sessions_session_idx ON connection_chat_sessions (session_id)"
     )
 
     # Origin pointer for per_chat-spawned sessions.  Doubles as the
@@ -114,8 +113,7 @@ def upgrade() -> None:
     # can validate against either a connection attached to the calling
     # session OR the connection that spawned the session.
     op.execute(
-        "ALTER TABLE sessions ADD COLUMN spawned_from_connection_id text "
-        "REFERENCES connections(id)"
+        "ALTER TABLE sessions ADD COLUMN spawned_from_connection_id text REFERENCES connections(id)"
     )
 
     # Inbound dedup ledger.  Written in the same txn as ``append_event`` —
