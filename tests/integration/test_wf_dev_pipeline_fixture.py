@@ -218,9 +218,7 @@ class Scenario:
                 if spec["input"].get("ref"):  # post-merge master watch (advisory, retried)
                     if self.master_ci_results is not None:
                         idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
-                        item = self.master_ci_results[
-                            min(idx, len(self.master_ci_results) - 1)
-                        ]
+                        item = self.master_ci_results[min(idx, len(self.master_ci_results) - 1)]
                         if item == "error":
                             return {"error": {"kind": "child_errored"}}
                         return {"ok": item}
