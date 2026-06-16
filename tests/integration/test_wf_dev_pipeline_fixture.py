@@ -142,6 +142,7 @@ class Scenario:
         self.http: list[tuple[str, str]] = []
         self.labels_added: list[str] = []  # every label name POSTed to /labels (item 3)
         self.labels_removed: list[str] = []  # every label name DELETEd from /labels
+        self.issue_patches: list[dict[str, Any]] = []  # every PATCH body to /issues/5 (#1188)
         self.followups: list[dict[str, Any]] = []  # advisory follow-up issues created (#1176)
 
     # GitHub's per-page cap for the comments endpoint in this fixture. The script asks for
@@ -197,6 +198,10 @@ class Scenario:
         if method == "DELETE" and "/labels/" in path:  # remove one label — capture decoded name
             self.labels_removed.append(path.rsplit("/labels/", 1)[1].replace("%3A", ":"))
             return {"status": 200, "body": "[]"}
+        if method == "PATCH" and path == "/repos/o/r/issues/5":  # close source issue (#1188)
+            raw = args.get("body")
+            self.issue_patches.append(json.loads(raw) if isinstance(raw, str) else {})
+            return {"status": 200, "body": _issue_json(self.body)}
         is_issue_get = (
             method == "GET"
             and "/issues/5" in path
@@ -381,6 +386,10 @@ async def test_happy_path_merges_and_completes() -> None:
     assert "autodev:in-progress" in scn.labels_added
     assert "autodev:in-progress" in scn.labels_removed
     assert "autodev:failed" not in scn.labels_added
+    # #1188: a merged PR closes the source issue and strips BOTH in-flight claim labels so
+    # the completed issue leaves the open working set (no merged-but-open residue).
+    assert "dispatched" in scn.labels_removed
+    assert scn.issue_patches == [{"state": "closed", "state_reason": "completed"}]
 
 
 async def test_adopts_existing_open_pr_instead_of_creating() -> None:

@@ -186,6 +186,13 @@ RESOLUTION_SIGNALS: tuple[str, ...] = (
 LABEL_IN_PROGRESS = "autodev:in-progress"
 LABEL_FAILED = "autodev:failed"
 
+# Dispatch-claim label (#1188): the cron-scanner / dev-conveyor stamps an issue ``dispatched``
+# when it launches a run for it. Like ``IN_PROGRESS`` it is an IN-FLIGHT claim that must be
+# stripped at the terminal post-merge cleanup — otherwise a merged-but-open issue reads as
+# live to a dispatch-gate sweep or a rank-6 staleness reaper. It is NOT applied by this
+# script (the conveyor owns the stamp); the post-merge node only REMOVES it, best-effort.
+LABEL_DISPATCHED = "dispatched"
+
 # Auto-recovery (item 4): a re-launched run carries ``retry_count`` in its input envelope;
 # the deploy-time ``run_completion`` trigger (Phase 2) re-launches an ``errored`` run with
 # ``retry_count + 1``. The script-level guard bounds that loop: a run that arrives with
@@ -256,6 +263,7 @@ def _render_constants(
         _py("RESOLUTION_SIGNALS", list(RESOLUTION_SIGNALS)),
         _py("LABEL_IN_PROGRESS", LABEL_IN_PROGRESS),
         _py("LABEL_FAILED", LABEL_FAILED),
+        _py("LABEL_DISPATCHED", LABEL_DISPATCHED),
         _py("MAX_RUN_RETRIES", MAX_RUN_RETRIES),
         _py("MAX_MASTER_CI_ITERS", MAX_MASTER_CI_ITERS),
         _py("FIX_CI_LINT_HINT", FIX_CI_LINT_HINT),
@@ -701,9 +709,19 @@ async def _label(repo, issue_number, name):
 
 
 async def _unlabel(repo, issue_number, name):
-    """Remove one label by name (URL-encoded). A 404 (label absent) is a value gh ignores."""
-    await gh("DELETE", _ipath(repo, "/issues/%d/labels/%s"
-                              % (issue_number, name.replace(":", "%3A"))))
+    """Remove one label by name (URL-encoded), best-effort. A 404/410 (label absent) is the
+    idempotent no-op a re-drive expects, NOT a failure. Per rank-6 (label-write visibility),
+    the gh() response is LOGGED so a strip that GitHub rejected is visible, not silently
+    swallowed: 200 (removed) / 404 (already absent) are benign; any other status is surfaced.
+    Returns the gh() response so a caller can branch on it."""
+    resp = await gh("DELETE", _ipath(repo, "/issues/%d/labels/%s"
+                                     % (issue_number, name.replace(":", "%3A"))))
+    st = _status(resp)
+    if st in (200, 204, 404, 410):
+        log("unlabel %r on #%d -> %r (ok)" % (name, issue_number, st))
+    else:
+        log("unlabel %r on #%d FAILED -> %r %r" % (name, issue_number, st, resp))
+    return resp
 
 
 async def _fail(repo, issue_number, result):
@@ -712,6 +730,36 @@ async def _fail(repo, issue_number, result):
     await _unlabel(repo, issue_number, LABEL_IN_PROGRESS)
     await _label(repo, issue_number, LABEL_FAILED)
     return result
+
+
+async def _close_source_issue(repo, issue_number):
+    """Terminal post-merge cleanup (#1188): a confirmed merge is the issue's resolution, so
+    close the source issue and strip its in-flight CLAIM labels so it leaves the open-issue
+    working set instead of reading as live to a dispatch-gate sweep / rank-6 staleness reaper.
+
+    Three idempotent, best-effort steps:
+      1. DELETE ``autodev:in-progress`` AND ``dispatched`` (each via ``_unlabel``, which logs
+         its gh() response per rank-6 — a strip GitHub rejected is visible, not silent). A
+         label already gone is a 404 no-op, exactly what a re-drive wants.
+      2. PATCH ``/issues/{n}`` to ``state:closed`` + ``state_reason:completed`` — closing the
+         issue on its OWN merge (the pipeline's PR bodies carry no ``Closes #N`` linkage, so
+         GitHub never auto-closes). Re-closing an already-closed issue is a GitHub no-op (200).
+      3. Log the close response: a non-2xx close is surfaced (visible), never swallowed.
+
+    Returns the close (PATCH) gh() response. Pure of LLM/time/random; only GitHub I/O."""
+    # Step 1 — strip BOTH in-flight claim labels (best-effort, idempotent, logged).
+    await _unlabel(repo, issue_number, LABEL_IN_PROGRESS)
+    await _unlabel(repo, issue_number, LABEL_DISPATCHED)
+    # Step 2 — close the issue (re-close of an already-closed issue is a 200 no-op).
+    close_resp = await gh("PATCH", _ipath(repo, "/issues/%d" % issue_number),
+                          {"state": "closed", "state_reason": "completed"})
+    # Step 3 — surface the outcome (rank-6): a failed close is visible, not silently swallowed.
+    st = _status(close_resp)
+    if st == 200:
+        log("closed source issue #%d (state=closed, reason=completed)" % issue_number)
+    else:
+        log("close source issue #%d FAILED -> %r %r" % (issue_number, st, close_resp))
+    return close_resp
 
 
 async def _file_followup(repo, title, body):
@@ -1061,7 +1109,14 @@ async def main(input):
     # outcome to done HERE — before the advisory master-CI watch runs. Nothing the watch does
     # below can re-suspend or fail this completed run; a flaky watch agent can no longer
     # manufacture a false human gate that parks a finished run indefinitely.
-    await _unlabel(repo, issue_number, LABEL_IN_PROGRESS)
+    #
+    # #1188 — the pipeline's PR bodies carry no `Closes #N` linkage, so GitHub never
+    # auto-closes the source issue on merge: it would otherwise sit OPEN with stale
+    # `autodev:in-progress` + `dispatched` claim labels, reading as in-flight to a
+    # dispatch-gate sweep / rank-6 staleness reaper. Make the terminal cleanup explicit and
+    # idempotent: strip BOTH claim labels (logged) and close the issue (state_reason:completed).
+    # A re-drive that finds it already closed / labels already gone is a no-op, not an error.
+    await _close_source_issue(repo, issue_number)
     result = {"state": "done", "pr_url": pr_url, "pr_number": pr_number, "merged": merged,
               "risk_tier": tier, "escalations": escalations}
 
