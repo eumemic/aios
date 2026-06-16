@@ -24,13 +24,23 @@ on:
     paths:
       - "src/aios/workflows/dev_pipeline.py"
 
-# Never run two re-registers concurrently: a stacked pair of builder merges would
-# race the optimistic-version PUT (the loser hits a 409 and fails loudly). Serialise
-# on master and let the tip win; do NOT cancel an in-flight deploy (a half-applied
-# re-register must finish, not be killed).
+# Never run two re-registers concurrently. With cancel-in-progress: false a
+# stacked pair of builder merges queues on this group: GitHub cancels the older
+# PENDING (queued) run when a newer one arrives, so the tip run wins and applies
+# last. We do NOT cancel an in-flight (already-running) deploy — a half-applied
+# re-register must finish, not be killed. The script's 409 version-mismatch guard
+# stays as defence-in-depth against a manual PUT racing the Action, not as the
+# serialisation mechanism here.
 concurrency:
   group: reregister-dev-pipeline
   cancel-in-progress: false
+
+# Least-privilege: this job only checks out the repo and calls an external API —
+# it makes NO GitHub writes. Keep the GITHUB_TOKEN read-only so it can't be abused
+# (e.g. by a compromised freshly-resolved third-party dep) for a free write token
+# sitting next to the prod-mutating AIOS_API_KEY.
+permissions:
+  contents: read
 
 env:
   AIOS_URL: https://api.aios.eumemic.ai

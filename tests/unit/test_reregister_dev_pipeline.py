@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import urllib.error
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 import pytest
 
@@ -169,3 +171,91 @@ def test_no_hardcoded_api_key() -> None:
     for path in (_WORKFLOW_PATH, _SCRIPT_PATH):
         text = path.read_text()
         assert not re.search(r"AIOS_API_KEY\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}", text)
+
+
+# ─── #1183: least-privilege + hardening guards ───────────────────────────────
+
+
+def test_workflow_declares_least_privilege_permissions() -> None:
+    """The job performs NO GitHub writes, so the GITHUB_TOKEN must be read-only
+    (#1183 item 1): a compromised freshly-resolved dep must not get a write token
+    for free next to the prod-mutating AIOS_API_KEY."""
+    text = _WORKFLOW_PATH.read_text()
+    assert re.search(r"permissions:\s*\n\s*contents:\s*read", text), (
+        "workflow must declare least-privilege `permissions: contents: read`"
+    )
+
+
+def test_api_key_is_env_only_no_cli_flag() -> None:
+    """The API key must be read from os.environ only — no --api-key argv path
+    (#1183 item 2): an argv flag is a /proc/<pid>/cmdline exposure footgun."""
+    text = _SCRIPT_PATH.read_text()
+    assert "--api-key" not in text, "the --api-key CLI flag must be removed (env-only)"
+    assert 'os.environ.get("AIOS_API_KEY")' in text or 'os.environ["AIOS_API_KEY"]' in text
+
+
+def test_request_catches_urlerror_cleanly() -> None:
+    """A DNS/connection/timeout failure (URLError) must surface as the clean
+    ReregisterError path, not an uncaught traceback (#1183 item 4)."""
+    with (
+        mock.patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("name resolution failed"),
+        ),
+        pytest.raises(rr.ReregisterError),
+    ):
+        rr._request("GET", "https://example.invalid/v1/workflows/wf_x", "k")
+
+
+def test_request_passes_timeout_to_urlopen() -> None:
+    """urlopen must be called with a timeout so a hung connection fails fast
+    rather than waiting out the GitHub job timeout (#1183 item 5)."""
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        status = 200
+
+        def read(self) -> bytes:
+            return b"{}"
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def _fake_urlopen(req: object, *args: object, **kwargs: object) -> _Resp:
+        captured.update(kwargs)
+        if args:
+            captured["positional_timeout"] = args[0]
+        return _Resp()
+
+    with mock.patch("urllib.request.urlopen", _fake_urlopen):
+        rr._request("GET", "https://example.test/v1/workflows/wf_x", "k")
+
+    timeout = captured.get("timeout", captured.get("positional_timeout"))
+    assert isinstance(timeout, (int, float)) and timeout > 0, (
+        "urlopen must be called with a positive timeout"
+    )
+
+
+def test_constants_print_is_verbose_gated() -> None:
+    """The 'Extracted live constants' dump of prod workflow config must be
+    trimmed/gated so it does not unconditionally write agent ids / sentinels /
+    tiers / model to CI logs (#1183 item 3)."""
+    text = _SCRIPT_PATH.read_text()
+    if "Extracted live constants" in text:
+        # If the verbose dump remains, it must be gated behind a --verbose flag.
+        assert "--verbose" in text or "args.verbose" in text, (
+            "the 'Extracted live constants' dump must be --verbose-gated, not "
+            "unconditionally printed to CI logs"
+        )
+
+
+def test_concurrency_comment_is_accurate() -> None:
+    """The concurrency rationale must not claim stacked merges race the
+    optimistic-version PUT (the loser hits 409); the actual mechanism is GitHub
+    cancelling the older PENDING run so the tip wins (#1183 item 6)."""
+    text = _WORKFLOW_PATH.read_text()
+    assert "race the optimistic-version PUT" not in text
+    assert "loser hits a 409" not in text
