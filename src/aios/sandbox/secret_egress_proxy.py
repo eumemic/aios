@@ -75,7 +75,13 @@ from aios.logging import get_logger
 from aios.models.vaults import parse_allowed_host_entry
 from aios.sandbox.egress_ca import EgressCA, get_egress_ca, mint_server_leaf
 from aios.services.vaults import ResolvedEnvVarCredential
-from aios.tools import url_safety
+
+# NOTE: ``aios.tools.url_safety`` is imported lazily inside ``_resolve_pinned_ip``
+# (the only user) — not here. A module-level ``from aios.tools import ...`` makes
+# the ``aios.tools`` package (whose ``__init__`` imports ``bash`` → ``sandbox.spec``,
+# which binds ``SecretEgressProxy`` back from this module) part of this module's
+# import graph, so a standalone ``import aios.sandbox.secret_egress_proxy`` cycles
+# and ImportErrors. Deferring to call time keeps the import graph acyclic.
 
 log = get_logger("aios.sandbox.secret_egress_proxy")
 
@@ -242,6 +248,8 @@ async def _resolve_pinned_ip(host: str, port: int) -> str | None:
     worker is IPv4-only; a first-returned global IPv6 with no route would
     502 a reachable host otherwise).
     """
+    from aios.tools import url_safety  # deferred — see the import-graph note at module top
+
     if url_safety.is_blocked_hostname(host):
         return None
     try:
