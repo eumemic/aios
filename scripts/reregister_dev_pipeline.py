@@ -145,6 +145,10 @@ def needs_update(new_script: str, live_script: str) -> bool:
 
 # ─── HTTP I/O (the thin, network-touching shell) ─────────────────────────────
 
+# Hard ceiling on any single HTTP call so a hung connection fails fast instead of
+# stalling until the GitHub job's own timeout.
+_REQUEST_TIMEOUT_S = 30
+
 
 def _request(
     method: str, url: str, api_key: str, body: dict[str, Any] | None = None
@@ -156,7 +160,9 @@ def _request(
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req) as resp:
+        # timeout: a hung connection must fail fast (≈30s) rather than wait out
+        # the GitHub job timeout.
+        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:
             raw = resp.read().decode()
             return resp.status, (json.loads(raw) if raw else {})
     except urllib.error.HTTPError as exc:
@@ -166,6 +172,11 @@ def _request(
         except json.JSONDecodeError:
             payload = {"raw": raw}
         return exc.code, payload
+    except urllib.error.URLError as exc:
+        # DNS / connection refused / timeout: surface as the clean fatal path
+        # (ReregisterError → FATAL:, non-zero exit) instead of an uncaught
+        # traceback. (HTTPError is a URLError subclass but is handled above.)
+        raise ReregisterError(f"{method} {url} failed: {exc.reason}") from exc
 
 
 def get_workflow(base_url: str, workflow_id: str, api_key: str) -> dict[str, Any]:
@@ -195,28 +206,36 @@ def put_workflow(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-key", default=os.environ.get("AIOS_API_KEY"), help="AIOS API key")
-    parser.add_argument("--url", default=os.environ.get("AIOS_URL"), help="AIOS base URL")
+    # Config is read from the environment only. In particular AIOS_API_KEY is
+    # NEVER a CLI flag: an argv-borne secret is exposed via `ps` /
+    # /proc/<pid>/cmdline on a manual run. The Action passes it solely via `env:`.
     parser.add_argument(
-        "--workflow-id",
-        default=os.environ.get("DEV_PIPELINE_WORKFLOW_ID"),
-        help="dev-pipeline workflow id",
+        "--verbose",
+        action="store_true",
+        help=(
+            "log the extracted live workflow constants (agent ids, sentinels, "
+            "tiers, model). Off by default to avoid writing prod config to CI logs."
+        ),
     )
     args = parser.parse_args(argv)
 
-    if not args.api_key:
+    api_key = os.environ.get("AIOS_API_KEY")
+    url = os.environ.get("AIOS_URL")
+    workflow_id = os.environ.get("DEV_PIPELINE_WORKFLOW_ID")
+
+    if not api_key:
         print("FATAL: AIOS_API_KEY is not set", file=sys.stderr)
         return 2
-    if not args.url:
+    if not url:
         print("FATAL: AIOS_URL is not set", file=sys.stderr)
         return 2
-    if not args.workflow_id:
+    if not workflow_id:
         print("FATAL: DEV_PIPELINE_WORKFLOW_ID is not set", file=sys.stderr)
         return 2
 
     try:
         # 1. Read the live workflow → current version + script.
-        live = get_workflow(args.url, args.workflow_id, args.api_key)
+        live = get_workflow(url, workflow_id, api_key)
         live_script = live.get("script")
         live_version = live.get("version")
         if not isinstance(live_script, str) or live_version is None:
@@ -227,9 +246,16 @@ def main(argv: list[str] | None = None) -> int:
 
         # 2. Extract configurable constants from the LIVE header (drift-safe).
         constants = extract_constants(live_script)
-        print(
-            "Extracted live constants: " + json.dumps({k: constants[k] for k in sorted(constants)})
-        )
+        # The constants are prod workflow config (agent ids, sentinels, tiers,
+        # model). Not secret, but don't dump them to CI logs by default — only
+        # under --verbose for local debugging.
+        if args.verbose:
+            print(
+                "Extracted live constants: "
+                + json.dumps({k: constants[k] for k in sorted(constants)})
+            )
+        else:
+            print(f"Extracted {len(constants)} live constants from the workflow header.")
 
         # 3. Rebuild from the UPDATED builder.
         new_script = regenerate_script(constants)
@@ -248,9 +274,9 @@ def main(argv: list[str] | None = None) -> int:
         # 6. PUT (version bumps; omitted tools/http_servers preserved).
         print(f"Script changed — re-registering (PUT with version={live_version})…")
         updated = put_workflow(
-            args.url,
-            args.workflow_id,
-            args.api_key,
+            url,
+            workflow_id,
+            api_key,
             version=live_version,
             script=new_script,
         )
