@@ -666,7 +666,7 @@ async def test_post_merge_watch_error_then_success_recovers_to_green() -> None:
     assert "master-ci-2" not in scn.tasks  # stopped retrying once a verdict arrived
 
 
-def _sha1_re():
+def _sha1_re() -> re.Pattern[str]:
     import re as _re
 
     return _re.compile(r"^[0-9a-f]{40}$")
