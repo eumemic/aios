@@ -207,7 +207,10 @@ def _swap_header_value(name: str, value: str, swaps: list[tuple[str, str]]) -> s
         decoded = _decode_basic_credential(value)
         if decoded is not None:
             swapped = _apply_swaps_str(decoded, swaps)
-            reencoded = base64.b64encode(swapped.encode("latin-1")).decode("ascii")
+            # UTF-8 per RFC 7617's default charset: a vault secret may hold any
+            # Unicode codepoint, and ``latin-1`` would ``UnicodeEncodeError`` on one
+            # outside U+00FF — crashing the request into a TLS reset.
+            reencoded = base64.b64encode(swapped.encode("utf-8")).decode("ascii")
             return f"Basic {reencoded}"
     return _apply_swaps_str(value, swaps)
 
@@ -225,7 +228,7 @@ def _decode_basic_credential(value: str) -> str | None:
         return None
     try:
         raw = base64.b64decode(parts[1].strip(), validate=True)
-        return raw.decode("latin-1")
+        return raw.decode("utf-8")  # RFC 7617 default; symmetric with the re-encode
     except (binascii.Error, ValueError):
         return None
 

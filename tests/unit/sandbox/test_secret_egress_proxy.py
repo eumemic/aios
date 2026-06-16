@@ -259,16 +259,20 @@ class TestSwapForwarding:
 
 
 def _basic(user: str, password: str) -> str:
-    """An ``Authorization: Basic <b64>`` header value for ``user:password``."""
-    token = base64.b64encode(f"{user}:{password}".encode("latin-1")).decode("ascii")
+    """An ``Authorization: Basic <b64>`` header value for ``user:password``.
+
+    UTF-8 per RFC 7617 (the proxy's charset), so a non-ASCII credential survives
+    the encode/decode round-trip.
+    """
+    token = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
     return f"Basic {token}"
 
 
 def _decode_basic(value: str) -> str:
-    """Decode an ``Authorization: Basic <b64>`` header to its ``user:pass``."""
+    """Decode an ``Authorization: Basic <b64>`` header to its ``user:pass`` (UTF-8)."""
     scheme, token = value.split(" ", 1)
     assert scheme == "Basic"
-    return base64.b64decode(token).decode("latin-1")
+    return base64.b64decode(token).decode()
 
 
 class TestBasicAuthSwap:
@@ -293,6 +297,20 @@ class TestBasicAuthSwap:
         assert _decode_basic(out) == "x-access-token:ghp_REALSECRET"
         # The real secret must never leave as a placeholder.
         assert PH_GH not in _decode_basic(out)
+
+    async def test_basic_auth_non_latin1_secret_round_trips(self, make_proxy: MakeProxy) -> None:
+        # A vault secret accepts any UTF-8 string, but the Basic-auth re-encode used
+        # latin-1 — which raises UnicodeEncodeError on any non-Latin-1 codepoint,
+        # crashing the request into a TLS reset. RFC 7617's default charset is UTF-8;
+        # the swap must round-trip a Unicode secret unharmed.
+        secret = "ghp_\U0001f511_secret"  # 🔑 — outside latin-1 (U+1F511)
+        proxy, captured = await make_proxy(
+            [_cred("GH_TOKEN", secret, ("api.allowed.test",), PH_GH)]
+        )
+        header = _basic("x-access-token", PH_GH)
+        r = await _request(proxy, "api.allowed.test", "/x", headers={"Authorization": header})
+        assert r.status_code == 200
+        assert _decode_basic(captured[0].headers["authorization"]) == f"x-access-token:{secret}"
 
     async def test_basic_auth_placeholder_in_username(
         self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
