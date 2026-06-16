@@ -36,7 +36,7 @@ from aios.logging import get_logger
 from aios.mcp.client import resolve_auth_for_target_url_run
 from aios.models.workflows import WfRun
 from aios.services.wake import defer_run_wake
-from aios.tools.http_request import _do_http_request, _find_server, _match_route
+from aios.tools.http_request import _do_http_request, _find_server, _match_route, _split_query
 from aios.tools.invoke import validate_arguments
 from aios.tools.registry import registry
 from aios.tools.web_fetch import web_fetch_handler
@@ -193,8 +193,12 @@ async def invoke_run_tool(
         # which a run has no channel for. Deny rather than execute unconfirmed, so a run is
         # never *more* privileged than a session on the identical declared surface.
         server = _find_server(run.http_servers, str(args.get("server_ref", "")))
+        # Match on the path PORTION (a query string is matched/decided inside
+        # _do_http_request); a query-bearing path must not slip past the always_ask
+        # pre-check by glob-mismatching the route it actually targets.
+        path_only = _split_query(str(args.get("path", "")))[0]
         route = (
-            _match_route(server, str(args.get("path", "")), str(args.get("method", "")))
+            _match_route(server, path_only, str(args.get("method", "")))
             if server is not None
             else None
         )

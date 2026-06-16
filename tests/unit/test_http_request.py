@@ -56,6 +56,7 @@ def _route(
     policy: str | None = None,
     description: str | None = None,
     methods: list[str] | None = None,
+    allow_query: bool = False,
 ) -> HttpRouteSpec:
     permission = HttpPermissionPolicy(type=policy) if policy else None
     return HttpRouteSpec(
@@ -64,6 +65,7 @@ def _route(
         permission_policy=permission,
         description=description,
         methods=cast(Any, methods),
+        allow_query=allow_query,
     )
 
 
@@ -406,6 +408,78 @@ class TestHttpRequestHandler:
             result = await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/lights/1#frag", "method": "GET"},
+            )
+        assert "error" in result
+
+    async def test_query_string_allowed_when_route_opts_in(self, _stub_runtime: Any) -> None:
+        """#1156: a route with ``allow_query=True`` permits a query string and
+        dispatches it upstream verbatim. The GitHub ``/repos/**`` route opts in so
+        the dev-pipeline can follow ``?per_page``/``?page`` pagination to read a full
+        comment thread. The path portion is still glob-matched (query stripped first)."""
+        agent = _agent(http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b"[]"), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {
+                    "server_ref": "hue",
+                    "path": "/repos/o/r/issues/5/comments?per_page=100&page=2",
+                    "method": "GET",
+                },
+            )
+        assert result["status"] == 200, result
+        # The query string reached the upstream URL (httpx parses it off the path).
+        assert "per_page=100" in captured["url"] and "page=2" in captured["url"], captured
+
+    async def test_query_string_rejected_when_route_does_not_opt_in(
+        self, _stub_runtime: Any
+    ) -> None:
+        """The #485 default holds for every route that does NOT set ``allow_query``:
+        a ``?action=delete`` must not slip past a read-only ``/lights/*`` allowlist,
+        and the upstream request must never be dispatched."""
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1?action=delete", "method": "GET"},
+            )
+        assert "error" in result, result
+        assert "url" not in captured, captured
+
+    async def test_query_does_not_let_unmatched_path_through(self, _stub_runtime: Any) -> None:
+        """Even with ``allow_query=True``, the query is stripped before the glob-match,
+        so a path the route pattern does not cover is still refused (the query never
+        widens the path-dimension grant)."""
+        agent = _agent(http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])])
+        with _patch_load_agent(agent):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/orgs/o/members?per_page=100", "method": "GET"},
+            )
+        assert "error" in result
+        assert "does not match any enabled route" in result["error"]
+
+    async def test_fragment_rejected_even_when_query_allowed(self, _stub_runtime: Any) -> None:
+        """``allow_query`` opts into a query string only — a ``#fragment`` is still
+        rejected (httpx strips it with no route equivalent)."""
+        agent = _agent(http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])])
+        with _patch_load_agent(agent):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/repos/o/r/issues/5#frag", "method": "GET"},
             )
         assert "error" in result
 

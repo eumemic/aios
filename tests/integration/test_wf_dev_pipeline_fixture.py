@@ -19,6 +19,7 @@ real tool surface (the deep_research "live demo" analog).
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -130,8 +131,32 @@ class Scenario:
         self.labels_removed: list[str] = []  # every label name DELETEd from /labels
         self.followups: list[dict[str, Any]] = []  # advisory follow-up issues created (#1176)
 
-    def _comments_json(self) -> str:
-        return json.dumps([{"id": i, "body": c} for i, c in enumerate(self.comments)])
+    # GitHub's per-page cap for the comments endpoint in this fixture. The script asks for
+    # per_page=100; we paginate ``self.comments`` at this size and emit Link: rel="next"
+    # until the final page so a >COMMENTS_PER_PAGE thread exercises the pagination walk.
+    COMMENTS_PER_PAGE = 100
+
+    def _comments_page(self, page: int) -> dict[str, Any]:
+        """One page of the comment thread + a GitHub-shaped Link header for rel=next.
+
+        Mirrors GitHub's pagination: page 1 of N carries Link: rel="next" (and rel="last");
+        the last page carries no rel="next". The script follows the parsed ``page`` number,
+        rebuilding the path itself — so the Link URL host here is illustrative only.
+        """
+        per = self.COMMENTS_PER_PAGE
+        start = (page - 1) * per
+        chunk = self.comments[start : start + per]
+        global_ids = list(range(start, start + len(chunk)))
+        body = json.dumps([{"id": i, "body": c} for i, c in zip(global_ids, chunk, strict=True)])
+        total_pages = max(1, (len(self.comments) + per - 1) // per)
+        headers: dict[str, str] = {}
+        if page < total_pages:
+            base = "https://api.github.com/repos/o/r/issues/5/comments"
+            headers["Link"] = (
+                f'<{base}?per_page={per}&page={page + 1}>; rel="next", '
+                f'<{base}?per_page={per}&page={total_pages}>; rel="last"'
+            )
+        return {"status": 200, "headers": headers, "body": body}
 
     def _http(self, args: dict[str, Any]) -> dict[str, Any]:
         path, method = args["path"], args["method"]
@@ -141,6 +166,15 @@ class Scenario:
             self.http.append((method, path))
             return {"status": 503, "body": ""}  # transient -> gh_retry re-issues
         self.http.append((method, path))
+        # The comment-thread read is the one route that carries a query string (per_page/page);
+        # the GitHub /repos/** route opts into allow_query (#1156). Split it off, serve the page.
+        clean, _, query = path.partition("?")
+        if method == "GET" and clean == "/repos/o/r/issues/5/comments":  # the item-1 thread read
+            page = 1
+            m = re.search(r"[?&]page=(\d+)", "?" + query)
+            if m:
+                page = int(m.group(1))
+            return self._comments_page(page)
         assert "?" not in path, f"query string in path is rejected by http_request: {path!r}"
         if method == "POST" and path.endswith("/labels"):  # add label(s) — capture names
             raw = args.get("body")
@@ -150,8 +184,6 @@ class Scenario:
         if method == "DELETE" and "/labels/" in path:  # remove one label — capture decoded name
             self.labels_removed.append(path.rsplit("/labels/", 1)[1].replace("%3A", ":"))
             return {"status": 200, "body": "[]"}
-        if method == "GET" and path == "/repos/o/r/issues/5/comments":  # the item-1 thread read
-            return {"status": 200, "body": self._comments_json()}
         is_issue_get = (
             method == "GET"
             and "/issues/5" in path
@@ -302,10 +334,15 @@ async def test_happy_path_merges_and_completes() -> None:
     ]
     assert scn.gates == []  # tier-1 auto-merges; no gate opened
     assert scn.tasks == ["implement", "review-0", "ci-0", "risk", "master-ci-0"]
-    # never used a query string (the production-path bug the review caught)
-    assert all("?" not in path for _, path in scn.http)
-    # item 1: the comment thread is read at ingest
-    assert ("GET", "/repos/o/r/issues/5/comments") in scn.http
+    # never used a query string EXCEPT on the allow_query comments-pagination path
+    # (#1156); every other GitHub call stays clean-path (the production-path bug review caught)
+    assert all(
+        "?" not in path
+        for _, path in scn.http
+        if not path.startswith("/repos/o/r/issues/5/comments")
+    )
+    # item 1: the comment thread is read at ingest (paginated -> ?per_page/?page carried)
+    assert any(m == "GET" and p.startswith("/repos/o/r/issues/5/comments") for m, p in scn.http)
     # item 3: in-progress claimed at ingest, released on success, never marked failed
     assert "autodev:in-progress" in scn.labels_added
     assert "autodev:in-progress" in scn.labels_removed
@@ -404,6 +441,47 @@ async def test_comments_threaded_into_every_agent_node() -> None:
     assert implement_in and all(threaded in i.get("comments", []) for i in implement_in)
     assert review_in and all(threaded in i.get("comments", []) for i in review_in)
     assert fix_in and all(threaded in i.get("comments", []) for i in fix_in)
+
+
+async def test_comment_thread_past_first_page_fully_ingested() -> None:
+    # #1156: a heavily-discussed issue whose AUTHORITATIVE spec resolution lands as the LAST
+    # comment, well past GitHub's first page. The pre-fix single GET returned only page 1 (the
+    # first COMMENTS_PER_PAGE comments) and silently dropped the rest, so the resolving comment
+    # never reached the spec gate or the coder. gh_paginated must follow Link: rel="next" and
+    # ingest the WHOLE thread.
+    n = Scenario.COMMENTS_PER_PAGE * 2 + 7  # spans three pages (2 full + a partial last)
+    last = "design resolved: the interface is a typed Verdict enum — shovel-ready."
+    thread = [f"chatter comment number {i}" for i in range(n - 1)] + [last]
+    scn = Scenario(comments=thread)
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+
+    # The final comment (page 3) is threaded into the implement agent — not dropped.
+    implement_in = [i for i in scn.agent_inputs if i.get("task") == "implement"]
+    assert implement_in
+    assert all(last in i.get("comments", []) for i in implement_in), (
+        "the last comment (past the first page) must be ingested and threaded to the coder"
+    )
+    # The full thread (every page) reached the agent, not just page 1.
+    assert all(len(i.get("comments", [])) == n for i in implement_in)
+
+    # Pagination walked every page: page 1, 2, and the final page 3 were each fetched.
+    comment_pages = sorted(
+        int(re.search(r"[?&]page=(\d+)", p).group(1))  # type: ignore[union-attr]
+        for m, p in scn.http
+        if m == "GET" and p.startswith("/repos/o/r/issues/5/comments?")
+    )
+    assert comment_pages == [1, 2, 3], comment_pages
+
+
+async def test_comment_thread_single_page_does_not_over_fetch() -> None:
+    # A short thread (one page) must stop after page 1 — no rel="next" => no page-2 request.
+    scn = Scenario(comments=["only design note: prefer a typed enum"])
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    pages = [p for m, p in scn.http if m == "GET" and p.startswith("/repos/o/r/issues/5/comments?")]
+    assert len(pages) == 1, f"single page must not over-fetch; fetched {pages!r}"
+    assert "page=1" in pages[0]
 
 
 # ─── escalations park at a gate (the durable-workflow upgrade of awaiting_triage) ─

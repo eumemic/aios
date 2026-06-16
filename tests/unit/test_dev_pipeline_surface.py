@@ -78,11 +78,21 @@ def test_repos_route_allows_delete() -> None:
     assert set(methods) == {"GET", "POST", "PUT", "DELETE"}
 
 
+def test_repos_route_allows_query_for_pagination() -> None:
+    # #1156: the comment-thread read must follow ?per_page/?page pagination past the first
+    # 30 comments; the /repos/** route opts into allow_query so the query reaches GitHub.
+    server = REQUIRED_HTTP_SERVERS[0]
+    repos = [r for r in server.routes if r.path_pattern == "/repos/**"]
+    assert repos[0].allow_query is True
+
+
 def test_graphql_route_is_separate_and_post_only() -> None:
     server = REQUIRED_HTTP_SERVERS[0]
     graphql = [r for r in server.routes if r.path_pattern == "/graphql"]
     assert len(graphql) == 1
     assert graphql[0].methods == ["POST"]
+    # GraphQL takes its query in the POST body, not the URL — it does not opt into allow_query.
+    assert graphql[0].allow_query is False
 
 
 def test_two_distinct_routes() -> None:
