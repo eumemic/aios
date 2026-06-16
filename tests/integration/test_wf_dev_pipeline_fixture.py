@@ -88,6 +88,7 @@ class Scenario:
         gate_results: dict[str, Any] | None = None,
         master_ci: str = "green",
         master_ci_error: bool = False,
+        master_ci_results: list[dict[str, Any] | str] | None = None,
         transient_5xx: dict[tuple[str, str], int] | None = None,
     ) -> None:
         self.body = body
@@ -112,6 +113,11 @@ class Scenario:
         self.gate_results = gate_results or {}
         self.master_ci = master_ci
         self.master_ci_error = master_ci_error
+        # Per-attempt post-merge master-CI verdicts, indexed by the watch's per-retry label
+        # ("master-ci-{i}"). Each item is either a verdict dict ({"status": ..., "detail": ...})
+        # or the string "error" (the watch agent raises AgentError that attempt). When set, this
+        # overrides master_ci/master_ci_error. The last item is reused for any later attempt.
+        self.master_ci_results = master_ci_results
         # {(method, path): N} — return a transient 5xx for the FIRST N attempts of that call,
         # then the real response. Counts are mutated as attempts arrive (replay-stable because
         # each retry is a distinct call_key, so a replay re-asks each attempt exactly once).
@@ -122,6 +128,7 @@ class Scenario:
         self.http: list[tuple[str, str]] = []
         self.labels_added: list[str] = []  # every label name POSTed to /labels (item 3)
         self.labels_removed: list[str] = []  # every label name DELETEd from /labels
+        self.followups: list[dict[str, Any]] = []  # advisory follow-up issues created (#1176)
 
     def _comments_json(self) -> str:
         return json.dumps([{"id": i, "body": c} for i, c in enumerate(self.comments)])
@@ -157,6 +164,10 @@ class Scenario:
             return {"status": 200, "body": "[" + _pr_json() + "]" if self.existing_pr else "[]"}
         if method == "POST" and path == "/repos/o/r/pulls":
             return {"status": 201, "body": _pr_json()}
+        if method == "POST" and path == "/repos/o/r/issues":  # advisory follow-up issue (#1176)
+            raw = args.get("body")
+            self.followups.append(json.loads(raw) if isinstance(raw, str) else {})
+            return {"status": 201, "body": json.dumps({"number": 99})}
         if method == "GET" and path == "/repos/o/r/pulls/42":  # merge-confirm read
             return {"status": 200, "body": _pr_json(merged=self.pr_merged_on_confirm)}
         if method == "PUT" and path.endswith("/merge"):
@@ -204,7 +215,13 @@ class Scenario:
                 idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
                 return {"ok": self.review_results[min(idx, len(self.review_results) - 1)]}
             if task == "watch_ci":
-                if spec["input"].get("ref"):  # post-merge master watch
+                if spec["input"].get("ref"):  # post-merge master watch (advisory, retried)
+                    if self.master_ci_results is not None:
+                        idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
+                        item = self.master_ci_results[min(idx, len(self.master_ci_results) - 1)]
+                        if item == "error":
+                            return {"error": {"kind": "child_errored"}}
+                        return {"ok": item}
                     if self.master_ci_error:
                         return {"error": {"kind": "child_errored"}}
                     return {"ok": {"status": self.master_ci, "detail": ""}}
@@ -266,7 +283,11 @@ async def test_happy_path_merges_and_completes() -> None:
         "merged": True,
         "risk_tier": 1,
         "escalations": [],
+        "master_ci": "green",
     }
+    # a green master-CI watch raises no advisory and files no follow-up issue
+    assert "advisories" not in value
+    assert scn.followups == []
     assert phases == [
         "ingest",
         "spec-gate",
@@ -280,7 +301,7 @@ async def test_happy_path_merges_and_completes() -> None:
         "post-merge",
     ]
     assert scn.gates == []  # tier-1 auto-merges; no gate opened
-    assert scn.tasks == ["implement", "review-0", "ci-0", "risk", "master-ci"]
+    assert scn.tasks == ["implement", "review-0", "ci-0", "risk", "master-ci-0"]
     # never used a query string (the production-path bug the review caught)
     assert all("?" not in path for _, path in scn.http)
     # item 1: the comment thread is read at ingest
@@ -475,22 +496,81 @@ async def test_merge_failure_not_confirmed_reports_merge_failed() -> None:
     assert value["state"] == "merge_failed"
 
 
-async def test_post_merge_master_ci_agent_error_parks_master_red_not_lost_merge() -> None:
-    # If the post-merge master-CI agent ERRORS, the merge (a committed fact) must not be
-    # discarded: the run parks at master_red and still reports merged on resume.
+async def test_post_merge_master_ci_agent_error_returns_done_without_parking() -> None:
+    # #1176: a persistently-erroring post-merge master-CI watch must NOT park the completed
+    # run at a (false) human gate. The merge is a committed fact, so the run returns done; the
+    # erroring watch degrades to a DISTINCT, non-blocking "indeterminate" advisory (NOT
+    # master_red) recorded in result["advisories"], leaving the blocking escalations clean.
     scn = Scenario(master_ci_error=True)
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
     assert value["merged"] is True
-    assert "master_red" in value["escalations"]
-    assert any(g["kind"] == "master_red" for g in scn.gates)
+    # agent flakiness is never coerced to the most-blocking outcome: no gate, no blocking escalation
+    assert scn.gates == []
+    assert value["escalations"] == []
+    assert "master_red" not in value["escalations"]
+    # the distinct "could not determine master state" signal, kept apart from "master is red"
+    assert value["master_ci"] == "indeterminate"
+    assert value["advisories"] == ["master_ci_indeterminate"]
+    # the watch was RETRIED a bounded number of times before being declared indeterminate
+    assert scn.tasks.count("master-ci-0") == 1
+    assert "master-ci-1" in scn.tasks
+    assert "master-ci-2" in scn.tasks
+    assert "master-ci-3" not in scn.tasks  # bounded at MAX_MASTER_CI_ITERS=3
+    # a best-effort follow-up issue is filed for the indeterminate state (non-blocking alert)
+    assert len(scn.followups) == 1
+    assert "INDETERMINATE" in scn.followups[0]["title"]
 
 
-async def test_red_master_ci_parks_at_gate() -> None:
+async def test_red_master_ci_files_advisory_and_returns_done_without_parking() -> None:
+    # #1176: a genuinely-RED master is a SEPARATE non-blocking signal, not a gate-park. The run
+    # returns done (the merge happened), files a follow-up issue, and records the distinct
+    # "master_red" advisory — never re-suspending the completed run.
     scn = Scenario(master_ci="red")
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "done"  # merge happened; parked then resumed
-    assert "master_red" in value["escalations"]
+    assert value["state"] == "done"
+    assert scn.gates == []  # not a gate-park
+    assert value["escalations"] == []  # not coerced into the blocking escalations list
+    assert value["master_ci"] == "red"
+    assert value["advisories"] == ["master_red"]
+    assert len(scn.followups) == 1
+    assert "RED" in scn.followups[0]["title"]
+
+
+async def test_red_and_indeterminate_are_distinct_advisory_reasons() -> None:
+    # Acceptance: "master is red" and "could not determine master state" are DISTINCT reasons.
+    red = Scenario(master_ci="red")
+    red_value, _, _ = await _drive(red, max_review_iters=2, max_ci_iters=2)
+    indet = Scenario(master_ci_error=True)
+    indet_value, _, _ = await _drive(indet, max_review_iters=2, max_ci_iters=2)
+    assert red_value["advisories"] == ["master_red"]
+    assert indet_value["advisories"] == ["master_ci_indeterminate"]
+    assert red_value["advisories"] != indet_value["advisories"]
+    assert red_value["master_ci"] != indet_value["master_ci"]
+
+
+async def test_post_merge_watch_error_then_success_recovers_to_green() -> None:
+    # #1176: a TRANSIENTLY-flaky watch (errors once, then returns green) is retried within the
+    # bound and recovers — no advisory, no follow-up issue, run done.
+    scn = Scenario(master_ci_results=["error", {"status": "green", "detail": ""}])
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["master_ci"] == "green"
+    assert "advisories" not in value
+    assert scn.followups == []
+    assert "master-ci-0" in scn.tasks and "master-ci-1" in scn.tasks
+    assert "master-ci-2" not in scn.tasks  # stopped retrying once a verdict arrived
+
+
+async def test_post_merge_advisory_never_marks_failed_and_releases_in_progress() -> None:
+    # Telemetry must distinguish an advisory post-merge signal from genuinely-blocked work: an
+    # indeterminate/red watch must not label the issue failed, and the in-progress claim is
+    # released on merge (the issue is done).
+    scn = Scenario(master_ci="red")
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert "autodev:failed" not in scn.labels_added
+    assert "autodev:in-progress" in scn.labels_removed
 
 
 # ─── bounded self-repair loops ────────────────────────────────────────────────
