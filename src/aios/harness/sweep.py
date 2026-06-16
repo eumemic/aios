@@ -29,13 +29,33 @@ if TYPE_CHECKING:
     from aios.models.agents import ToolSpec
 
 from aios.config import get_settings
-from aios.db.queries import parse_jsonb
+from aios.db.queries import (
+    confirmed_unresolved_predicate,
+    parse_jsonb,
+    session_active_predicate,
+    session_errored_predicate,
+)
 from aios.harness.task_registry import TaskRegistry
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
 from aios.services.wake import defer_wake
 
 log = get_logger("aios.harness.sweep")
+
+# The three shared wake-decision predicate generators are imported (not
+# redefined) from ``aios.db.queries`` and composed into the sweep's detector
+# SQL below — re-exported here by identity so the structural sync guard
+# (``tests/unit/test_wake_predicate_single_source.py``) can assert that the
+# sweep consumes the SAME source objects as the read/dispatch path. Listing
+# them in ``__all__`` marks them as explicit re-exports under ``strict`` mypy
+# (``no_implicit_reexport``), which would otherwise flag attribute access on
+# the module as ``attr-defined``.
+__all__ = [
+    "confirmed_unresolved_predicate",
+    "session_active_predicate",
+    "session_errored_predicate",
+    "wake_sessions_needing_inference",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,28 +109,28 @@ class _Candidate:
 # assistant-with-tool_calls events, so the per-tcid candidate loop downstream is
 # behaviorally unchanged.
 #
-# Also bounded by the errored-session predicate ``NOT (s.last_error_seq > 0 AND
-# s.last_error_seq > s.last_user_seq)`` (#897): an errored session is parked
-# until a user message recovers it, so its open tool_calls are part of the
-# terminal landing pad and must NOT be reaped.  ``find_and_repair_ghosts``
+# Also bounded by the errored-session predicate (#897): an errored session is
+# parked until a user message recovers it, so its open tool_calls are part of
+# the terminal landing pad and must NOT be reaped.  ``find_and_repair_ghosts``
 # already drops these via the Python ``_errored_session_ids`` post-filter;
 # pushing the same predicate here stops the wasted event-log fetch on every 30s
-# sweep for the small set of errored sessions that still carry open calls.  The
-# predicate is byte-for-byte identical (modulo table alias) to
-# ``ERRORED_SESSIONS_SQL``'s ``WHERE`` — both consume the same maintained scalar
-# columns (migration 0066), so the SQL pre-filter's errored set EQUALS the
-# Python post-filter's; the post-filter is retained as defense in depth.
-GHOST_ASST_SQL = """
+# sweep for the small set of errored sessions that still carry open calls.  This
+# ``NOT`` is composed from the SAME single source ``session_errored_predicate``
+# that backs ``ERRORED_SESSIONS_SQL`` (and the read path) — both consume the
+# maintained scalar columns (migration 0066), so the SQL pre-filter's errored
+# set EQUALS the Python post-filter's; the post-filter is retained as defense in
+# depth.
+GHOST_ASST_SQL = f"""
     SELECT e.session_id, e.data, e.created_at
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE s.archived_at IS NULL
        AND s.open_tool_call_count > 0
-       AND NOT (s.last_error_seq > 0 AND s.last_error_seq > s.last_user_seq)
+       AND NOT {session_errored_predicate("s")}
        AND e.kind = 'message'
        AND e.role = 'assistant'
        AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
-       {scope_clause}
+       {{scope_clause}}
 """
 
 GHOST_LIFECYCLE_SQL = """
@@ -140,55 +160,47 @@ GHOST_SPAN_START_SQL = """
        AND e.data->>'tool_call_id' = ANY($2::text[])
 """
 
-# Candidate filter — MUST stay byte-for-byte in sync (modulo table alias) with
-# ``queries._SESSION_ACTIVE_EXPR``: the read-path status predicate and this wake
-# predicate have to agree, or the worker either wakes a session with no progress
-# to make (#155 symptom) or skips one that needs inference. ``last_stimulus_seq``
+# Candidate filter — the wake predicate composed from the SINGLE source
+# ``queries.session_active_predicate`` (bound at the ``s`` alias here, at the
+# ``sessions`` alias for the read-path status derivation). The read-path status
+# predicate and this wake predicate therefore agree BY CONSTRUCTION — they
+# cannot drift, so the worker can no longer wake a session with no progress to
+# make (#155 symptom) or skip one that needs inference. ``last_stimulus_seq``
 # (non-assistant messages — user + tool), NOT ``last_event_seq`` (which includes
 # the session's own assistant replies): the latter classifies an idle turn
 # (user → assistant reply) as a candidate and drives one extra model step (#749).
-CANDIDATE_ROWS_SQL = """
+# Kept as full standalone SQL (composed from, not replaced by, the fragment) so
+# the perf guard can EXPLAIN the exact production text.
+CANDIDATE_ROWS_SQL = f"""
     SELECT s.id AS session_id
       FROM sessions s
      WHERE s.archived_at IS NULL
-       AND (s.last_stimulus_seq > s.last_reacted_seq
-            OR s.open_tool_call_count > 0)
-       AND NOT (s.last_error_seq > 0 AND s.last_error_seq > s.last_user_seq)
-       {scope_clause}
+       AND {session_active_predicate("s")}
+       {{scope_clause}}
 """
 
 # Cross-session detection of confirmed-but-unresolved tools, for the wake
 # decision (case (c)).  The dispatch-side counterpart that resolves these same
 # confirmed-allow, result-less tool_calls into the actual tool_call dicts to
-# launch is ``queries.list_confirmed_unresolved_tool_calls`` (per-session) —
-# keep the predicate (``tool_confirmed``/``allow`` ∧ no ``role='tool'`` result
-# ∧ confirm event within ``confirmed_dispatch_max_age_seconds``) in sync.  The
-# age bound is on ``lc.created_at`` (the CONFIRM event), NOT the assistant
-# turn: a fresh confirm of an old proposal is a fresh intent to dispatch
-# (#746).  CRITICAL: this age clause MUST stay byte-for-byte identical to the
-# dispatch resolver's — if detection surfaces a session for wake that dispatch
-# then can't resolve (or vice-versa), the worker wakes with no progress, the
-# #155 symptom.  Both are served by ``events_tool_confirmed_allow_idx`` (0065).
-CONFIRMED_ROWS_SQL = """
+# launch is ``queries.list_confirmed_unresolved_tool_calls`` (per-session).
+# Both compose the ``lc`` WHERE sub-predicate from the SINGLE source
+# ``queries.confirmed_unresolved_predicate`` (``tool_confirmed``/``allow`` ∧
+# no ``role='tool'`` result ∧ confirm event within
+# ``confirmed_dispatch_max_age_seconds``), so detection and dispatch resolve the
+# IDENTICAL condition by construction — they cannot drift.  The age bound is on
+# ``lc.created_at`` (the CONFIRM event), NOT the assistant turn: a fresh confirm
+# of an old proposal is a fresh intent to dispatch (#746).  Both are served by
+# ``events_tool_confirmed_allow_idx`` (0065).  Kept as full standalone SQL
+# (composed from, not replaced by, the fragment) so the perf guard can EXPLAIN
+# the exact production text.  ``{age_param}`` survives the fragment to remain a
+# ``str.format`` placeholder bound to the positional ``$N`` at call time.
+CONFIRMED_ROWS_SQL = f"""
     SELECT DISTINCT lc.session_id
       FROM events lc
       JOIN sessions s ON s.id = lc.session_id
      WHERE s.archived_at IS NULL
-       AND lc.kind = 'lifecycle'
-       AND lc.data->>'event' = 'tool_confirmed'
-       AND lc.data->>'result' = 'allow'
-       AND (
-             {age_param}::bigint IS NULL
-             OR lc.created_at >= now() - make_interval(secs => {age_param}::bigint)
-           )
-       AND NOT EXISTS (
-           SELECT 1 FROM events tr
-            WHERE tr.session_id = lc.session_id
-              AND tr.kind = 'message'
-              AND tr.role = 'tool'
-              AND tr.data->>'tool_call_id' = lc.data->>'tool_call_id'
-       )
-       {scope_clause}
+       AND {confirmed_unresolved_predicate("lc", "{age_param}")}
+       {{scope_clause}}
 """
 
 # The reaction watermark — ``MAX(COALESCE(reacting_to, seq))`` over assistant
@@ -226,17 +238,21 @@ ALL_ASST_ROWS_SQL = """
 """
 
 # Sessions currently in the terminal "errored" state, derived from the
-# maintained scalar columns on ``sessions`` (migration 0066). A session is
-# errored when ``last_error_seq > 0 AND last_error_seq > last_user_seq``.
-# A later user message bumps ``last_user_seq``, flipping the inequality —
-# exactly the recovery semantics the pre-derivation status flip provided.
-ERRORED_SESSIONS_SQL = """
+# maintained scalar columns on ``sessions`` (migration 0066). The errored
+# boolean is composed from the SINGLE source ``queries.session_errored_predicate``
+# (bound at the ``s`` alias here, at the ``sessions`` alias for the read path),
+# so the sweep's errored filter and the read-path ``errored`` derivation agree
+# by construction. A session is errored when ``last_error_seq > 0 AND
+# last_error_seq > last_user_seq``; a later user message bumps ``last_user_seq``,
+# flipping the inequality — exactly the recovery semantics the pre-derivation
+# status flip provided. Kept as full standalone SQL (composed from, not replaced
+# by, the fragment) so the perf guard can EXPLAIN the exact production text.
+ERRORED_SESSIONS_SQL = f"""
     SELECT s.id AS session_id
       FROM sessions s
      WHERE s.archived_at IS NULL
-       AND s.last_error_seq > 0
-       AND s.last_error_seq > s.last_user_seq
-       {scope_clause}
+       AND {session_errored_predicate("s")}
+       {{scope_clause}}
 """
 
 # ─── ghost repair ────────────────────────────────────────────────────────────
