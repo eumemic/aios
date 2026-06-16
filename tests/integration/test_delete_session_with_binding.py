@@ -1,23 +1,26 @@
 """Integration test: ``delete_session`` must succeed when the session
-was ever attached to a connection (or otherwise had a ``bindings`` row).
+was ever attached to a connection (or otherwise had a ``bindings`` row),
+and its ``bindings`` rows must be cleaned up — by the DB cascade, with no
+help from any application-side hand-DELETE.
 
-``bindings.session_id REFERENCES sessions(id)`` carries NO ``ON DELETE
-CASCADE`` (migration 0033). Every other session-children FK (in
-``session_vaults``, ``session_memory_stores``, ``session_github_repositories``,
-``files``, ``events``, ``chat_sessions``) has the cascade — ``bindings``
-is the lone outlier. ``delete_session`` pre-deletes from ``session_vaults``
-and ``events`` (redundant given the cascades, but explicit-as-intent
-style), then runs ``DELETE FROM sessions`` — which trips the FK
-constraint and raises ``asyncpg.ForeignKeyViolationError`` whenever a
-binding row references the session.
+``bindings.session_id`` now carries ``ON DELETE CASCADE`` (migration 0105,
+composite tenant FK ``(session_id, account_id) REFERENCES
+sessions(id, account_id)`` per the 0093 precedent), uniform with every
+other session-children FK (``session_vaults``, ``session_memory_stores``,
+``session_github_repositories``, ``files``, ``events``, ``chat_sessions``).
+The 0033 connector redesign had recreated ``bindings`` with a bare
+``REFERENCES sessions(id)`` and regressed the cascade the original 0015
+table carried; ``delete_session`` papered over it with an explicit
+``DELETE FROM bindings``.
 
-The operator-curated single_session attach flow leaves a row even
-after detach (archived bindings stay in the table), so any session
-that's been bound via the connector tools is undeletable. Surfaces as
-500 from ``DELETE /v1/sessions/{id}``.
-
-Fix: pre-delete from ``bindings`` in ``delete_session``, mirroring
-the explicit-deletes pattern for the other session children.
+Before the cascade was restored, ``DELETE FROM sessions`` tripped the FK
+and raised ``asyncpg.ForeignKeyViolationError`` whenever a binding row
+referenced the session (the operator-curated single_session attach flow
+leaves an archived row even after detach, so any session ever bound via
+the connector tools was undeletable — surfacing as a 500 from
+``DELETE /v1/sessions/{id}``). The cascade makes that correct-by-
+construction: this test guards that ``delete_session`` succeeds and the
+binding is gone, so it keeps passing without the removed hand-DELETE.
 """
 
 from __future__ import annotations
@@ -107,23 +110,58 @@ class TestDeleteSessionWithBinding:
         """``delete_session`` must succeed and clean up the binding row
         even when the session has been attached to a connection.
 
-        Pre-fix: ``asyncpg.ForeignKeyViolationError`` propagates from
-        ``DELETE FROM sessions`` because ``bindings.session_id`` has no
-        ``ON DELETE CASCADE`` and ``delete_session`` doesn't pre-delete
-        from ``bindings`` (it pre-deletes from ``session_vaults`` and
-        ``events``, but missed ``bindings``).
+        Before the cascade was restored, ``asyncpg.ForeignKeyViolationError``
+        propagated from ``DELETE FROM sessions`` because
+        ``bindings.session_id`` had no ``ON DELETE CASCADE`` and
+        ``delete_session`` no longer carries a compensating
+        ``DELETE FROM bindings``. The 0105 cascade makes the row deletion
+        cascade in Postgres, so this passes purely on the constraint.
         """
         pool, session_id = pool_session_with_binding
         async with pool.acquire() as conn:
-            # Today: raises asyncpg.ForeignKeyViolationError.
+            # Without the 0105 cascade this raises ForeignKeyViolationError,
+            # since delete_session no longer pre-deletes from bindings.
             await queries.delete_session(conn, session_id, account_id="acc_a")
-            # Bindings for this session must be gone.
+            # Bindings for this session must be gone — cascaded by Postgres.
             remaining = await conn.fetchval(
                 "SELECT COUNT(*) FROM bindings WHERE session_id = $1",
                 session_id,
             )
         assert remaining == 0, (
             f"delete_session left {remaining} binding row(s) referencing "
-            f"the deleted session — bindings.session_id has no ON DELETE "
-            f"CASCADE and delete_session must pre-delete from bindings."
+            f"the deleted session — bindings.session_id must carry ON DELETE "
+            f"CASCADE so the row deletion cascades."
+        )
+
+    async def test_raw_delete_from_sessions_cascades_bindings(
+        self,
+        pool_session_with_binding: tuple[asyncpg.Pool[Any], str],
+    ) -> None:
+        """A session-deletion path that knows *nothing* about bindings —
+        a raw ``DELETE FROM sessions`` — must still succeed and leave no
+        stranded binding row.
+
+        This is the foreclosure guarantee of #1095: the invariant is held
+        by the DB constraint, not by application-code vigilance, so any new
+        delete path (bulk-purge, admin DELETE, a ``delete_session`` variant)
+        cannot strand a binding or trip the FK. Before the 0105 cascade this
+        raw ``DELETE`` tripped ``bindings_session_id_fkey`` and raised
+        ``asyncpg.ForeignKeyViolationError``.
+        """
+        pool, session_id = pool_session_with_binding
+        async with pool.acquire() as conn:
+            # Without the cascade this raises ForeignKeyViolationError.
+            await conn.execute(
+                "DELETE FROM sessions WHERE id = $1 AND account_id = $2",
+                session_id,
+                "acc_a",
+            )
+            remaining = await conn.fetchval(
+                "SELECT COUNT(*) FROM bindings WHERE session_id = $1",
+                session_id,
+            )
+        assert remaining == 0, (
+            f"raw DELETE FROM sessions left {remaining} binding row(s) — "
+            f"bindings.session_id ON DELETE CASCADE must clear them at "
+            f"delete time regardless of application code."
         )
