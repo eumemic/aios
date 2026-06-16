@@ -30,12 +30,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from aios.db import queries
+from aios.db.queries import workflows as wf_queries
 from aios.harness import host_dir_reaper
 from aios.harness.host_dir_reaper import sweep_host_dirs
 
 
 @pytest.fixture
-def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Point both reserved roots at tmpdirs and drop the age floor to 0.
 
     ``session_repos_root(id)`` / ``run_workspace_dir(id)`` are patched to
@@ -86,7 +88,7 @@ def _fake_pool() -> MagicMock:
 
 
 async def test_suspended_run_dir_survives_terminal_is_reaped(
-    roots: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A non-terminal (``suspended``) run keeps its scratch; a terminal one loses it.
 
@@ -99,13 +101,13 @@ async def test_suspended_run_dir_survives_terminal_is_reaped(
 
     # Only the terminal run id comes back from the terminal-status query.
     monkeypatch.setattr(
-        host_dir_reaper.wf_queries,
+        wf_queries,
         "unscoped_terminal_run_ids",
         AsyncMock(return_value={"wfr_done"}),
     )
     # No session repos present; the session liveness query is irrelevant here.
     monkeypatch.setattr(
-        host_dir_reaper.queries,
+        queries,
         "unscoped_live_session_ids",
         AsyncMock(return_value=set()),
     )
@@ -118,7 +120,7 @@ async def test_suspended_run_dir_survives_terminal_is_reaped(
 
 
 async def test_runs_absent_from_db_is_kept(
-    roots: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An ``_runs`` dir whose run row is absent (not positively terminal) is KEPT.
 
@@ -127,12 +129,12 @@ async def test_runs_absent_from_db_is_kept(
     """
     orphan = _mkdir_aged(roots["runs"], "wfr_unknown")
     monkeypatch.setattr(
-        host_dir_reaper.wf_queries,
+        wf_queries,
         "unscoped_terminal_run_ids",
         AsyncMock(return_value=set()),
     )
     monkeypatch.setattr(
-        host_dir_reaper.queries,
+        queries,
         "unscoped_live_session_ids",
         AsyncMock(return_value=set()),
     )
@@ -144,19 +146,19 @@ async def test_runs_absent_from_db_is_kept(
 
 
 async def test_session_repos_live_survives_dead_reaped(
-    roots: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Reconstructible ``_session_repos`` reaps on the positive DB-liveness keep-set."""
     live = _mkdir_aged(roots["repos"], "sess_live")
     dead = _mkdir_aged(roots["repos"], "sess_dead")
 
     monkeypatch.setattr(
-        host_dir_reaper.queries,
+        queries,
         "unscoped_live_session_ids",
         AsyncMock(return_value={"sess_live"}),
     )
     monkeypatch.setattr(
-        host_dir_reaper.wf_queries,
+        wf_queries,
         "unscoped_terminal_run_ids",
         AsyncMock(return_value=set()),
     )
@@ -169,7 +171,7 @@ async def test_session_repos_live_survives_dead_reaped(
 
 
 async def test_kill_switch_disables_all_deletion(
-    roots: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``host_dir_reaper_enabled=False`` deletes nothing without a redeploy."""
     roots["settings"].host_dir_reaper_enabled = False
@@ -178,8 +180,8 @@ async def test_kill_switch_disables_all_deletion(
 
     term = AsyncMock(return_value={"wfr_done"})
     live = AsyncMock(return_value=set())
-    monkeypatch.setattr(host_dir_reaper.wf_queries, "unscoped_terminal_run_ids", term)
-    monkeypatch.setattr(host_dir_reaper.queries, "unscoped_live_session_ids", live)
+    monkeypatch.setattr(wf_queries, "unscoped_terminal_run_ids", term)
+    monkeypatch.setattr(queries, "unscoped_live_session_ids", live)
 
     removed = await sweep_host_dirs(_fake_pool())
 
@@ -192,7 +194,7 @@ async def test_kill_switch_disables_all_deletion(
 
 
 async def test_db_error_fails_closed(
-    roots: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A liveness-query failure reaps NOTHING for that tree (fail-closed)."""
     import asyncpg
@@ -201,12 +203,12 @@ async def test_db_error_fails_closed(
     dead_sess = _mkdir_aged(roots["repos"], "sess_dead")
 
     monkeypatch.setattr(
-        host_dir_reaper.wf_queries,
+        wf_queries,
         "unscoped_terminal_run_ids",
         AsyncMock(side_effect=asyncpg.PostgresError("boom")),
     )
     monkeypatch.setattr(
-        host_dir_reaper.queries,
+        queries,
         "unscoped_live_session_ids",
         AsyncMock(side_effect=asyncpg.PostgresError("boom")),
     )
@@ -219,7 +221,7 @@ async def test_db_error_fails_closed(
 
 
 async def test_fresh_dir_below_age_floor_is_kept(
-    roots: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A dir younger than the age floor is skipped (provision/commit race guard)."""
     roots["settings"].host_dir_reaper_min_age_seconds = 3600
@@ -227,12 +229,12 @@ async def test_fresh_dir_below_age_floor_is_kept(
     fresh.mkdir()  # mtime ~= now, well under the 1h floor
 
     monkeypatch.setattr(
-        host_dir_reaper.wf_queries,
+        wf_queries,
         "unscoped_terminal_run_ids",
         AsyncMock(return_value={"wfr_done"}),
     )
     monkeypatch.setattr(
-        host_dir_reaper.queries,
+        queries,
         "unscoped_live_session_ids",
         AsyncMock(return_value=set()),
     )
@@ -244,7 +246,7 @@ async def test_fresh_dir_below_age_floor_is_kept(
 
 
 async def test_symlink_child_is_never_followed(
-    roots: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A symlink entry in a reserved root is skipped — its target may escape."""
     outside = tmp_path / "outside_target"
@@ -254,12 +256,12 @@ async def test_symlink_child_is_never_followed(
     link.symlink_to(outside)
 
     monkeypatch.setattr(
-        host_dir_reaper.wf_queries,
+        wf_queries,
         "unscoped_terminal_run_ids",
         AsyncMock(return_value={"wfr_done"}),
     )
     monkeypatch.setattr(
-        host_dir_reaper.queries,
+        queries,
         "unscoped_live_session_ids",
         AsyncMock(return_value=set()),
     )
@@ -272,18 +274,18 @@ async def test_symlink_child_is_never_followed(
 
 
 async def test_root_itself_is_never_removed(
-    roots: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Even with everything reaped, the reserved roots survive for the next mount."""
     _mkdir_aged(roots["runs"], "wfr_done")
     _mkdir_aged(roots["repos"], "sess_dead")
     monkeypatch.setattr(
-        host_dir_reaper.wf_queries,
+        wf_queries,
         "unscoped_terminal_run_ids",
         AsyncMock(return_value={"wfr_done"}),
     )
     monkeypatch.setattr(
-        host_dir_reaper.queries,
+        queries,
         "unscoped_live_session_ids",
         AsyncMock(return_value=set()),
     )
@@ -295,7 +297,7 @@ async def test_root_itself_is_never_removed(
 
 
 async def test_missing_root_is_a_noop(
-    roots: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No reserved root on disk ⇒ zero work, no crash."""
     import shutil
@@ -303,12 +305,12 @@ async def test_missing_root_is_a_noop(
     shutil.rmtree(roots["runs"])
     shutil.rmtree(roots["repos"])
     monkeypatch.setattr(
-        host_dir_reaper.wf_queries,
+        wf_queries,
         "unscoped_terminal_run_ids",
         AsyncMock(return_value=set()),
     )
     monkeypatch.setattr(
-        host_dir_reaper.queries,
+        queries,
         "unscoped_live_session_ids",
         AsyncMock(return_value=set()),
     )
