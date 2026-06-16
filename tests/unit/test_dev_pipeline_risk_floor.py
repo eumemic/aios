@@ -47,17 +47,20 @@ def _ns() -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def risk_floor() -> Callable[[int, Any], tuple[int, list[str]]]:
-    return _ns()["_risk_floor"]
+    fn: Callable[[int, Any], tuple[int, list[str]]] = _ns()["_risk_floor"]
+    return fn
 
 
 @pytest.fixture(scope="module")
 def is_workflow_path() -> Callable[[Any], bool]:
-    return _ns()["_is_workflow_path"]
+    fn: Callable[[Any], bool] = _ns()["_is_workflow_path"]
+    return fn
 
 
 @pytest.fixture(scope="module")
 def secret_files() -> Callable[[Any], list[str]]:
-    return _ns()["_secret_referencing_workflow_files"]
+    fn: Callable[[Any], list[str]] = _ns()["_secret_referencing_workflow_files"]
+    return fn
 
 
 # A fixture diff matching #1184's shape: an EDIT to the secret-referencing re-register
@@ -150,7 +153,7 @@ def test_mixed_diff_floors_when_any_secret_workflow_present(
     assert floored == [".github/workflows/reregister-dev-pipeline.yml"]
 
 
-# ─── fail-safe edge cases ──────────────────────────────────────────────────────
+# ─── fail-safe edge cases ──────────────────────────────────────────────────
 
 
 def test_workflow_without_textual_patch_is_floored(
@@ -169,6 +172,7 @@ def test_malformed_files_payload_does_not_raise(
 ) -> None:
     # A None / non-list payload (e.g. a failed files fetch) must not floor and must not
     # raise — the floor can only RAISE the tier on positive evidence, never on garbage.
+    bad: Any
     for bad in (None, {}, "oops", [None, 5, {"no": "filename"}]):
         tier, floored = risk_floor(2, bad)
         assert tier == 2
