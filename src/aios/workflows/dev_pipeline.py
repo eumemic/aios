@@ -198,6 +198,20 @@ MAX_RUN_RETRIES = 2
 # before the watch is declared indeterminate (a signal distinct from a genuinely-red master).
 MAX_MASTER_CI_ITERS = 3
 
+# CI-fix lint guidance (#1182): the GitHub CI ``lint`` job runs BOTH ``ruff check`` AND
+# ``ruff format --check``. A format-only failure (``Would reformat: …``) is NOT fixed by
+# ``ruff check --fix`` — it needs ``ruff format``. PR #1173 parked at the verify gate because
+# the CI-fix loop ran only ``ruff check --fix`` and exhausted all 3 iterations on a trivially
+# fixable format-only failure. This hint rides the ``fix_ci`` task so the fix agent knows to
+# run ``ruff format`` (write mode) for a formatting failure, making it auto-fixable.
+FIX_CI_LINT_HINT = (
+    "The CI `lint` job runs BOTH `ruff check` AND `ruff format --check`. If the failure is "
+    "formatting-only (e.g. `Would reformat: <file>`), `ruff check --fix` will NOT resolve it "
+    "— you MUST run `ruff format` (write mode, not --check) over the affected paths and "
+    "commit the result. Run both `ruff check --fix` and `ruff format` so a combined "
+    "lint+format failure is fully resolved before re-pushing."
+)
+
 
 def _py(name: str, value: Any) -> str:
     """One ``NAME = <repr>`` constant line for the prepended header. ``repr`` over the
@@ -244,6 +258,7 @@ def _render_constants(
         _py("LABEL_FAILED", LABEL_FAILED),
         _py("MAX_RUN_RETRIES", MAX_RUN_RETRIES),
         _py("MAX_MASTER_CI_ITERS", MAX_MASTER_CI_ITERS),
+        _py("FIX_CI_LINT_HINT", FIX_CI_LINT_HINT),
         _py("IMPLEMENT_SCHEMA", IMPLEMENT_SCHEMA),
         _py("REVIEW_SCHEMA", REVIEW_SCHEMA),
         _py("FIX_SCHEMA", FIX_SCHEMA),
@@ -541,6 +556,37 @@ def _find_open_pr(prs, branch):
     return None
 
 
+def _ruff_format_parity_sentinels(sentinels):
+    """Derive a ``ruff format --check <targets>`` command for every ``ruff check <targets>``
+    sentinel, so the merge guard's lint matches the GitHub CI ``lint`` job EXACTLY (which
+    runs BOTH ``ruff check`` AND ``ruff format --check`` over the same targets) — one source
+    of lint truth (#1182).
+
+    Without this the guard's lint is WEAKER than CI's: a format-only-broken PR passes the
+    guard while CI's ``ruff format --check`` rejects it, so the guard's signal is
+    misleadingly clean. We derive the format check from the deployed ``MERGE_SENTINELS``
+    (rather than hardcoding the target list) so prod config stays the single source of
+    targets through the reregister round-trip. A sentinel that already carries
+    ``ruff format`` is left alone — no duplicate is added. Returns the derived commands in
+    sentinel order; the caller appends them after the originals so the existing
+    ``ruff check`` still runs first."""
+    derived = []
+    have_format = any("ruff format" in cmd for cmd in sentinels)
+    for cmd in sentinels:
+        stripped = cmd.strip()
+        prefix = "ruff check "
+        if not stripped.startswith(prefix):
+            continue
+        targets = stripped[len(prefix):].strip()
+        if not targets:
+            continue
+        format_cmd = "ruff format --check " + targets
+        if have_format or format_cmd in derived:
+            continue
+        derived.append(format_cmd)
+    return derived
+
+
 def _merge_guard_command(repo, pr_number):
     """The merge-ref guard (autodev merge_guard.py, issue #177), preserving the load-bearing
     properties: validate the commit GitHub would ACTUALLY produce on merge — the live
@@ -550,7 +596,11 @@ def _merge_guard_command(repo, pr_number):
     refusing on the first nonzero (path-prefix sentinel *selection* is a deferred v1
     optimisation — running all is strictly safer). `set -eu -o pipefail` makes fail-closed
     structural, not dependent on guarding each line. Re-run-tolerant (rm -rf then clone) per
-    the at-least-once bash contract."""
+    the at-least-once bash contract.
+
+    Lint parity (#1182): for every ``ruff check`` sentinel we ALSO run the matching
+    ``ruff format --check`` so the guard's lint matches CI's ``lint`` job exactly — a
+    format-only-broken merge ref is refused here, not waved through."""
     lines = [
         "set -eu -o pipefail",
         "D=/workspace/mg-%d" % pr_number,
@@ -566,7 +616,8 @@ def _merge_guard_command(repo, pr_number):
         "git diff --name-only mgref^1 mgref > /tmp/mg-changed.txt || exit 74",
         "git checkout --quiet --detach mgref",
     ]
-    for cmd in MERGE_SENTINELS:
+    sentinels = list(MERGE_SENTINELS) + _ruff_format_parity_sentinels(MERGE_SENTINELS)
+    for cmd in sentinels:
         lines.append("( %s ) || exit 73" % cmd)
     lines.append("echo MERGE_GUARD_OK")
     return "\n".join(lines)
@@ -871,7 +922,8 @@ async def main(input):
         try:
             fix = await agent(
                 {"task": "fix_ci", "repo": repo, "pr_number": pr_number,
-                 "detail": ci.get("detail", ""), "comments": comment_bodies},
+                 "detail": ci.get("detail", ""), "comments": comment_bodies,
+                 "lint_hint": FIX_CI_LINT_HINT},
                 agent_id=FIX_AGENT_ID, output_schema=FIX_SCHEMA, model=model,
                 label="ci-fix-%d" % i)
             head_sha = fix["head_sha"]
