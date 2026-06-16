@@ -519,3 +519,24 @@ class TestMcpGate:
                 )
         assert r.status_code == 403
         assert "always_ask" in r.json()["error"]
+
+
+# ── retired self-wake route (#1164) ──────────────────────────────────────────
+
+
+class TestRetiredSessionsMessages:
+    """The in-sandbox ``POST /sessions/messages`` self-wake route (#636)
+    is retired — timing belongs to triggers; an in-fire ``sandbox_command``
+    escalates via ``tool wake_self``. The broker must no longer route it.
+    """
+
+    async def test_sessions_messages_not_routed(self, broker: ToolBroker) -> None:
+        broker.register_session("sess_X", "s")
+        async with httpx.AsyncClient() as c:
+            r = await c.post(
+                _url(broker, "s", "sessions", "messages"),
+                json={"content": "wake up"},
+            )
+        # Starlette returns 404 for an unmatched path (405 only when the
+        # path matches but the method doesn't). The route is gone entirely.
+        assert r.status_code in (404, 405)
