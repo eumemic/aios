@@ -378,18 +378,28 @@ class ToolBroker:
             # Graceful drain only matters once the server actually
             # bound — ``should_exit`` is checked inside the uvicorn
             # main loop, which never runs on a failed-bind path, so
-            # without this gate the failed-bind cleanup pays a
-            # pointless 5s wait on every retry.
+            # without the ``started`` gate the failed-bind cleanup pays
+            # a pointless 5s wait on every retry.
+            #
+            # Flip ``should_exit`` on *both* servers before awaiting
+            # either drain: uvicorn pays a ~150-200 ms fixed shutdown
+            # floor once the flag is set, so serializing the two waits
+            # doubles it. Setting both flags first lets the two floors
+            # overlap; ``gather`` then waits out the slower of the two.
+            drains: list[asyncio.Task[None]] = []
             if self._server is not None and self._server.started:
                 self._server.should_exit = True
                 if self._serve_task is not None:
-                    with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-                        await asyncio.wait_for(self._serve_task, timeout=5.0)
+                    drains.append(self._serve_task)
             if self._uds_server is not None and self._uds_server.started:
                 self._uds_server.should_exit = True
                 if self._uds_serve_task is not None:
-                    with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-                        await asyncio.wait_for(self._uds_serve_task, timeout=5.0)
+                    drains.append(self._uds_serve_task)
+            if drains:
+                with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                    await asyncio.wait_for(
+                        asyncio.gather(*drains, return_exceptions=True), timeout=5.0
+                    )
         finally:
             if self._serve_task is not None and not self._serve_task.done():
                 self._serve_task.cancel()

@@ -35,6 +35,25 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
+async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
+    """A function-scoped asyncpg pool against the testcontainer DB.
+
+    Promoted here from ~20 byte-identical per-file copies. Tests that
+    need a pre-bootstrap (no seeded root account) DB define their own
+    ``pool`` over ``aios_env_minimal`` — that local fixture overrides
+    this one via standard pytest resolution (see
+    ``test_accounts_bootstrap.py``).
+    """
+    from aios.config import get_settings
+    from aios.db.pool import create_pool
+
+    settings = get_settings()
+    p = await create_pool(settings.db_url, min_size=1, max_size=4)
+    yield p
+    await p.close()
+
+
+@pytest.fixture
 async def daemon(tmp_path: Path) -> AsyncIterator[tuple[DockerBackend, str, str, Path]]:
     """A real :class:`DockerBackend` + a unique (instance, session, workspace)
     plus container/snapshot-image cleanup.

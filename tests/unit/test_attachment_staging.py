@@ -8,7 +8,9 @@ matches the :class:`aios.services.files.UploadStream` Protocol.
 
 from __future__ import annotations
 
+import functools
 import io
+import random
 from pathlib import Path
 
 import pytest
@@ -24,18 +26,23 @@ from aios.services.attachment_staging import (
 )
 
 
+@functools.cache
 def _real_jpeg_bytes(width: int, height: int, *, quality: int = 95) -> bytes:
     """Return real JPEG bytes Pillow can decode (the staging downsample
     path actually opens the file, so opaque ``b"\\0"`` payloads aren't
     enough to exercise it).
+
+    The pixel data is genuine seeded noise so the JPEG re-encode in the
+    staging path really shrinks the multi-megapixel cases below
+    ``INLINE_SIZE_CAP_BYTES`` (solid fills would compress to nothing and
+    defeat the test). ``Random(seed).randbytes`` + :meth:`Image.frombytes`
+    replaces the old per-pixel Python loop (12.25M writes for the
+    3500x3500 case, regenerated identically per test); ``functools.cache``
+    memoizes the immutable ``bytes`` result so repeated identical
+    requests are free.
     """
-    img = Image.new("RGB", (width, height))
-    pixels = img.load()
-    assert pixels is not None
-    for y in range(height):
-        for x in range(width):
-            v = (x * 2654435761 + y * 40503) & 0xFFFFFF
-            pixels[x, y] = (v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF)
+    data = random.Random(f"{width}x{height}q{quality}").randbytes(width * height * 3)
+    img = Image.frombytes("RGB", (width, height), data)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality)
     return buf.getvalue()

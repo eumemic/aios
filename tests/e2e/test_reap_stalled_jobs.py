@@ -25,16 +25,6 @@ pytestmark = pytest.mark.docker
 
 
 @pytest.fixture
-async def pool(aios_env: dict[str, str]) -> AsyncIterator[Any]:
-    from aios.config import get_settings
-    from aios.db.pool import create_pool
-
-    p = await create_pool(get_settings().db_url, min_size=1, max_size=4)
-    yield p
-    await p.close()
-
-
-@pytest.fixture
 async def job_manager(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[Any]:
     """A fresh ``JobManager`` pointed at the testcontainer DB.
 
