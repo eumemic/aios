@@ -78,9 +78,7 @@ def session_errored_predicate(alias: str) -> str:
 
     Also reused by ``lock_active_session_for_update`` and the clone gate.
     """
-    return (
-        f"({alias}.last_error_seq > 0 AND {alias}.last_error_seq > {alias}.last_user_seq)"
-    )
+    return f"({alias}.last_error_seq > 0 AND {alias}.last_error_seq > {alias}.last_user_seq)"
 
 
 def session_active_predicate(alias: str) -> str:
