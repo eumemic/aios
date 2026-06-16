@@ -82,6 +82,38 @@ async def unscoped_clear_session_snapshot(conn: asyncpg.Connection[Any], session
     )
 
 
+async def unscoped_live_session_ids(
+    conn: asyncpg.Connection[Any], session_ids: Sequence[str]
+) -> set[str]:
+    """Return the subset of ``session_ids`` that are DB-live (#1192).
+
+    DB-live = the session row exists and is NOT soft-archived
+    (``archived_at IS NULL``). This is the keep-set for the
+    ``_session_repos`` host scratch reaper: a session container released by
+    the idle reaper (container-absent) is still live in the DB, and its
+    per-session working-tree clones must be preserved.
+
+    The clones are *reconstructible* (github-clone rmtree+re-clones on the
+    next provision), so an archived/deleted session being absent here — and
+    hence its clones reaped — is at worst a re-clone on a (rare) unarchive,
+    never data loss. A session id absent from this set means "not live ⇒
+    eligible to reap".
+
+    Worker-side and unscoped (per the ``unscoped_`` convention): the reaper
+    holds only the session ids it scraped off disk, across all accounts.
+    """
+    if not session_ids:
+        return set()
+    rows = await conn.fetch(
+        """
+        SELECT id FROM sessions
+         WHERE id = ANY($1::text[]) AND archived_at IS NULL
+        """,
+        list(session_ids),
+    )
+    return {row["id"] for row in rows}
+
+
 async def gc_snapshot_session_states(
     conn: asyncpg.Connection[Any], session_ids: Sequence[str]
 ) -> list[asyncpg.Record]:

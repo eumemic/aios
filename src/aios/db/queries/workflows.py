@@ -557,6 +557,37 @@ async def run_children_usage(
     )
 
 
+async def unscoped_terminal_run_ids(conn: asyncpg.Connection[Any], run_ids: list[str]) -> set[str]:
+    """Return the subset of ``run_ids`` whose ``status`` is TERMINAL (#1192).
+
+    TERMINAL = ``status IN ('completed','errored','cancelled')`` (the exact
+    members of ``models.workflows.TERMINAL_RUN_STATUSES``). This is the
+    reap-set for the ``_runs/<wfr>`` per-run scratch reaper.
+
+    ``_runs`` scratch is **NOT reconstructible** (unlike ``_session_repos``),
+    so the reaper deletes ONLY on a *positively observed* terminal status. A
+    run that is ``suspended`` (gate-paused, container idle-released) stays
+    live in the DB and is absent here — its dir survives. A run id absent
+    from the ``wf_runs`` table entirely is likewise absent here and is kept:
+    we never delete non-reconstructible scratch on the mere *absence* of
+    confirmation. Inverting that would be the data-loss bug PR #1193 shipped.
+
+    Worker-side / unscoped: the reaper holds only the run ids it scraped off
+    disk, across all accounts.
+    """
+    if not run_ids:
+        return set()
+    rows = await conn.fetch(
+        """
+        SELECT id FROM wf_runs
+         WHERE id = ANY($1::text[])
+           AND status IN ('completed','errored','cancelled')
+        """,
+        run_ids,
+    )
+    return {row["id"] for row in rows}
+
+
 async def count_active_runs(
     conn: asyncpg.Connection[Any], *, account_id: str, launcher_session_id: str | None = None
 ) -> int:

@@ -328,6 +328,36 @@ class Settings(BaseSettings):
         "closed. An OAuth token refresh rotates the bearer, orphaning the "
         "old keyed entry; the idle reaper (checks every 60s) reclaims it.",
     )
+
+    # ── host scratch-dir reaper (#1192) ────────────────────────────────────
+    host_dir_reaper_enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the idle host scratch-dir reaper "
+        "(``_session_repos`` working-tree clones and ``_runs`` per-run "
+        "scratch). When False the reaper is never started and deletes "
+        "nothing — so the worker that just had a P1 disk-fill can disable "
+        "irreversible host deletion without a redeploy (set "
+        "``AIOS_HOST_DIR_REAPER_ENABLED=false``). Default-on: the missing GC "
+        "is itself the floodgates incident (#1192).",
+    )
+    host_dir_reaper_min_age_seconds: int = Field(
+        default=3600,
+        ge=0,
+        description="Minimum age (by directory mtime) before an idle "
+        "``_session_repos``/``_runs`` host dir is eligible for reaping. A "
+        "race floor: a dir freshly created by an in-flight provision whose "
+        "DB row has not yet committed (or a run whose terminal status is "
+        "about to flip back) is left alone until it ages past this floor. "
+        "The dominant safety check is DB liveness; this is the belt-and-"
+        "suspenders for the provision/commit gap.",
+    )
+    host_dir_reaper_interval_seconds: float = Field(
+        default=3600.0,
+        gt=0.0,
+        description="Interval for the periodic host scratch-dir reaper sweep "
+        "(an immediate first sweep runs at worker startup, then repeats at "
+        "this cadence — mirrors the snapshot GC reconciler).",
+    )
     tool_broker_socket_path: Path | None = Field(
         default=None,
         description="Host path for the tool broker's Unix-domain socket. "
