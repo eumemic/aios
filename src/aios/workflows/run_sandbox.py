@@ -98,9 +98,9 @@ async def _run_sandbox_task(
         except Exception as exc:
             # Backstop — _execute maps gate/validation/provision/exec to their own
             # error values, but its pre-phase setup (require_sandbox_registry /
-            # require_pool / get_settings) raises BEFORE either guarded block. An
-            # uncaught escape would skip the signal write and, with the stale-call
-            # sweep horizon, park the run forever.
+            # get_settings) raises BEFORE either guarded block. An uncaught escape
+            # would skip the signal write and, with the stale-call sweep horizon,
+            # park the run forever.
             log.exception("run_sandbox.unexpected", run_id=run.id, call_key=call_key)
             result = {"error": f"sandbox task failed: {type(exc).__name__}: {exc}"}
         try:
@@ -174,10 +174,9 @@ async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any
 
     settings = get_settings()
     registry = runtime.require_sandbox_registry()
-    pool = runtime.require_pool()
 
     try:
-        handle = await registry.get_or_provision_run(run.id, pool=pool)
+        handle = await registry.get_or_provision_run(run.id)
     except Exception as exc:
         log.warning("run_sandbox.provision_failed", run_id=run.id, error=str(exc))
         return {"error": f"sandbox provisioning failed: {exc}"}

@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import pytest
 
-from aios.ids import AGENT, CREDENTIAL, ENVIRONMENT, EVENT, SESSION, make_id, split_id
+from aios.ids import (
+    AGENT,
+    CREDENTIAL,
+    ENVIRONMENT,
+    EVENT,
+    SESSION,
+    WORKFLOW_RUN,
+    is_run_owner_id,
+    make_id,
+    split_id,
+)
 
 
 class TestMakeId:
@@ -53,6 +63,27 @@ class TestMakeIdDeterministic:
     def test_body_must_be_16_bytes(self) -> None:
         with pytest.raises(ValueError, match="must be exactly 16 bytes"):
             make_id(SESSION, body=b"too short")
+
+
+class TestIsRunOwnerId:
+    """The intrinsic owner-kind discriminator the sandbox registry routes teardown
+    on (issue #995): a single source of truth for "is this owner a workflow run?"
+    so a future owner prefix can't silently fall through the run-vs-session fork."""
+
+    def test_true_for_a_workflow_run_id(self) -> None:
+        assert is_run_owner_id(make_id(WORKFLOW_RUN)) is True
+
+    def test_false_for_a_session_id(self) -> None:
+        assert is_run_owner_id(make_id(SESSION)) is False
+
+    def test_false_for_other_prefixes(self) -> None:
+        # An unrelated owner-shaped id must NOT be misclassified as a run.
+        for prefix in (AGENT, ENVIRONMENT, EVENT):
+            assert is_run_owner_id(make_id(prefix)) is False
+
+    def test_requires_the_separator_not_just_the_prefix_chars(self) -> None:
+        # A literal ``wfr`` substring without the ``wfr_`` boundary is not a run id.
+        assert is_run_owner_id("wfrog_01HQR2K7VXBZ9MNPL3WYCT8F") is False
 
 
 class TestSplitId:

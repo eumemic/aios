@@ -67,7 +67,7 @@ class _FakeRegistry:
         self.exec_calls: list[dict[str, Any]] = []
         self.provision_count = 0
 
-    async def get_or_provision_run(self, run_id: str, *, pool: Any = None) -> SandboxHandle:
+    async def get_or_provision_run(self, run_id: str) -> SandboxHandle:
         self.provision_count += 1
         if self.provision_exc is not None:
             raise self.provision_exc
@@ -371,3 +371,45 @@ def test_launch_is_inflight_guarded() -> None:
             await task
 
     asyncio.run(_go())
+
+
+async def test_teardown_schedules_release_run_and_swallows_no_registry() -> None:
+    """``teardown_run_sandbox`` is best-effort fire-and-forget (#988):
+
+    - with a registry wired, it schedules ``registry.release_run(run_id)`` as a
+      detached task (held in the strong-ref set so it isn't GC'd mid-destroy);
+    - with NO registry on this worker (``require_sandbox_registry`` raises), it is
+      a silent no-op — a terminal-commit teardown must never raise.
+
+    Pins the dedicated assertion the run teardown path previously lacked (#995).
+    """
+    import asyncio
+
+    released: list[str] = []
+
+    class _Registry:
+        async def release_run(self, run_id: str) -> None:
+            released.append(run_id)
+
+    # No registry: silent no-op, nothing scheduled.
+    with patch(
+        "aios.workflows.run_sandbox.runtime.require_sandbox_registry",
+        side_effect=RuntimeError("no registry"),
+    ):
+        run_sandbox.teardown_run_sandbox("wfr_1")
+    assert not run_sandbox._TEARDOWN_TASKS
+
+    # Registry wired: a detached release task is scheduled and tracked.
+    with patch(
+        "aios.workflows.run_sandbox.runtime.require_sandbox_registry",
+        return_value=_Registry(),
+    ):
+        run_sandbox.teardown_run_sandbox("wfr_1")
+        assert len(run_sandbox._TEARDOWN_TASKS) == 1
+        task = next(iter(run_sandbox._TEARDOWN_TASKS))
+        await task
+        # The done-callback discards the task from the strong-ref set on completion.
+        await asyncio.sleep(0)
+
+    assert released == ["wfr_1"]
+    assert not run_sandbox._TEARDOWN_TASKS

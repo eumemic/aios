@@ -129,6 +129,20 @@ def make_id(prefix: str, *, body: bytes | None = None) -> str:
     return f"{prefix}_{ULID()}"
 
 
+def is_run_owner_id(owner_id: str) -> bool:
+    """Is ``owner_id`` a workflow-run sandbox owner (``wfr_…``)?
+
+    The intrinsic owner-kind discriminator the sandbox registry routes teardown
+    on (#995): its ``_handles`` map holds both session (``sess_…``) and
+    workflow-run (``wfr_…``) owners, whose teardowns differ (a session snapshots
+    its rootfs + stops proxies; a run is a bare ephemeral destroy). Centralizing
+    the prefix test here keeps the run-vs-session fork a single source of truth —
+    so a future owner prefix added to the map can't silently inherit the session
+    path by an inlined ``startswith`` going stale at one call site.
+    """
+    return owner_id.startswith(f"{WORKFLOW_RUN}_")
+
+
 def split_id(value: str) -> tuple[str, str]:
     """Split a prefixed id into ``(prefix, ulid)``.
 

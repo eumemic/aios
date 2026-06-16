@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from aios.config import get_settings
 from aios.db import queries
-from aios.ids import WORKFLOW_RUN
+from aios.ids import is_run_owner_id
 from aios.logging import get_logger
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
@@ -487,9 +487,7 @@ class SandboxRegistry:
 
     # ── workflow-run sandboxes (#988) ────────────────────────────────────────
 
-    async def get_or_provision_run(
-        self, run_id: str, *, pool: asyncpg.Pool[Any] | None = None
-    ) -> SandboxHandle:
+    async def get_or_provision_run(self, run_id: str) -> SandboxHandle:
         """Return the cached run sandbox handle, or provision a fresh one.
 
         The run-side analog of :meth:`get_or_provision`, owner-keyed on ``run_id``
@@ -505,8 +503,9 @@ class SandboxRegistry:
           the env image every time (no salvage preamble, no snapshot resume) — the
           run sandbox carries no durable rootfs.
 
-        ``pool`` is accepted for signature parity with the session path but is
-        currently unused (the run path emits no provision span).
+        Unlike the session path it takes no ``pool``: the run path reads no
+        ``sessions.*`` row on either the warm probe or the cold provision and
+        emits no provision span, so there is nothing to hand a connection to.
         """
         handle = self._handles.get(run_id)
         if handle is not None and await self._backend.is_alive(handle):
@@ -1323,13 +1322,16 @@ class SandboxRegistry:
 
         The ``_handles`` map holds both session (``sess_…``) and workflow-run
         (``wfr_…``) sandboxes; their teardowns differ (a session snapshots its
-        rootfs + stops proxies, a run is a bare ephemeral destroy). The prefix is
-        the discriminator — the same id the owner was provisioned under. An
-        unrecognized prefix falls through to the session path (the historical
-        default; a malformed owner id is a bug worth surfacing via that path's
-        logging rather than silently skipping the teardown).
+        rootfs + stops proxies, a run is a bare ephemeral destroy). The owner-kind
+        discriminator is :func:`aios.ids.is_run_owner_id` — the single source of
+        truth for the run-vs-session fork (#995), keyed on the same id the owner
+        was provisioned under, so a future owner prefix can't silently inherit the
+        session path by an inlined prefix test going stale here. A non-run owner
+        falls through to the session path (the historical default; a malformed
+        owner id is a bug worth surfacing via that path's logging rather than
+        silently skipping the teardown).
         """
-        if owner_id.startswith(f"{WORKFLOW_RUN}_"):
+        if is_run_owner_id(owner_id):
             await self.release_run(owner_id)
         else:
             await self.release(owner_id)
@@ -1552,6 +1554,15 @@ class SandboxRegistry:
         the next tick (the GC never raises). Each corpse is handled under the
         per-session lock with the cached-handle re-check.
         """
+        # NOTE (#995): this pass is NOT run-aware. ``ref.session_id`` carries the
+        # owner label, which for a workflow-run sandbox is a ``wfr_…`` id (#988) —
+        # never present in the ``sessions`` table, so its ``states`` lookup below is
+        # always ``None`` ⇒ ``keep_fs`` False ⇒ ``force_remove`` with NO snapshot.
+        # That is correct-by-coincidence today because a run sandbox is ephemeral
+        # scratch with no durable rootfs to salvage, but it is a latent footgun: if
+        # M2 ever gives run sandboxes a durable rootfs, a ``wfr_`` corpse would be
+        # dropped here without a commit. Make this owner-kind aware
+        # (:func:`aios.ids.is_run_owner_id`) before that lands.
         for ref in containers:
             sid = ref.session_id
             if sid is None:
