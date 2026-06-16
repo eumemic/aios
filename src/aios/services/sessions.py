@@ -1268,12 +1268,18 @@ async def append_tool_result(
     in the connector-facing endpoint).  The caller is responsible for
     deferring the wake afterwards.
     """
-    from aios.sandbox.tool_result_spill import cap_tool_result_content
+    from aios.sandbox.tool_result_spill import (
+        cap_tool_result_content,
+        record_spill_attachment,
+    )
 
+    spill_attachment: dict[str, Any] | None = None
     if isinstance(content, str):
-        content = await cap_tool_result_content(
+        capped = await cap_tool_result_content(
             session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
         )
+        content = capped.content
+        spill_attachment = capped.attachment
 
     # ── Pre-lock precompute (issue #991, Parts 1 + 2) ─────────────────────
     # Resolve the parent assistant's name AND ``focal_channel_at_arrival`` in a
@@ -1296,6 +1302,10 @@ async def append_tool_result(
     }
     if is_error:
         data["is_error"] = True
+    # Register any spill file under ``metadata.attachments`` so the attachment
+    # GC's referenced-set sees it as live (#1093).  Done before the precompute
+    # so the stored event and its token estimate reflect the same shape.
+    record_spill_attachment(data, spill_attachment)
     precomputed = await queries.precompute_event_append(
         conn,
         account_id=account_id,

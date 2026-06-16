@@ -204,3 +204,95 @@ async def test_sweep_reaps_inline_sibling_when_event_predates_feature(
     assert original.exists()
     assert not inline.exists()
     assert deleted == 1
+
+
+def _seed_spill(root: Path, session_id: str, filename: str) -> Path:
+    """Create a tool-result spill file at ``_attachments/<sid>/tool_results/<filename>``.
+
+    Mirrors ``cap_tool_result_content`` (#735): oversized tool output spills
+    to the ``tool_results`` subdir of the session's attachments dir, recorded
+    (post-#1093) in the tool-role event's ``metadata.attachments`` like any
+    staged inbound so the GC's referenced-set query protects it.
+    """
+    target = root / session_id / "tool_results" / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x" * 4096, encoding="utf-8")
+    return target
+
+
+async def test_sweep_retains_spill_file_recorded_in_metadata_attachments(
+    attachments_root: Path,
+    fake_pool: MagicMock,
+) -> None:
+    """#1093: a tool-result spill file whose reference is recorded in the
+    tool event's ``metadata.attachments`` (the single, unified convention)
+    must be retained by the sweep.
+
+    Pre-fix the spill writer recorded its path ONLY in the result-content
+    stub, never in ``metadata.attachments``; ``list_attachment_paths_for_sessions``
+    is built exclusively from ``data->'metadata'->'attachments'``, so the
+    spill file was invisible to the referenced-set and reaped on the next
+    worker boot — after which the event log still told the model to ``read``
+    a now-missing file. With the spill recorded under the same convention
+    every staged inbound uses, the EXISTING query returns its sandbox path
+    and the sweep keeps it.
+    """
+    import os
+    import time
+
+    session_id = "sess_01SPILL00000000000000001"
+    spill = _seed_spill(attachments_root, session_id, "tc_spill_1.txt")
+    # Older than the in-flight window so the recent-file protection isn't
+    # what's saving it — only the referenced-set membership is.
+    old = time.time() - 3600
+    os.utime(spill, (old, old))
+    assert spill.exists()
+
+    # The fixed spill writer records this path in metadata.attachments, so
+    # the referenced-set query surfaces it exactly as the GC walk reconstructs
+    # it: /mnt/attachments/tool_results/<file>.
+    referenced = {session_id: {"/mnt/attachments/tool_results/tc_spill_1.txt"}}
+    with patch(
+        "aios.harness.attachment_gc.queries.list_attachment_paths_for_sessions",
+        AsyncMock(return_value=referenced),
+    ):
+        deleted = await sweep_orphan_attachments(fake_pool)
+
+    assert spill.exists(), (
+        "a spill file recorded in metadata.attachments must be retained by "
+        "the sweep — pre-#1093 the spill reference lived only in the result "
+        "content stub, invisible to the referenced-set, and was reaped on "
+        "the next worker boot, leaving the model pointed at a deleted file "
+        "it was told to read."
+    )
+    assert deleted == 0
+
+
+async def test_sweep_reaps_orphaned_spill_file_with_no_reference(
+    attachments_root: Path,
+    fake_pool: MagicMock,
+) -> None:
+    """The complement of the retain case (and the self-heal path in #1093's
+    migration plan): a spill file under ``tool_results/`` that NO event
+    references — e.g. an already-orphaned file written before the fix, or a
+    spill whose tool-result append rolled back — must still be reaped. The
+    sweep treats the ``tool_results`` subdir like any connector dir; only
+    membership in the referenced-set keeps a file alive.
+    """
+    import os
+    import time
+
+    session_id = "sess_01SPILL00000000000000002"
+    spill = _seed_spill(attachments_root, session_id, "tc_orphan.txt")
+    old = time.time() - 3600
+    os.utime(spill, (old, old))
+    assert spill.exists()
+
+    with patch(
+        "aios.harness.attachment_gc.queries.list_attachment_paths_for_sessions",
+        AsyncMock(return_value={}),
+    ):
+        deleted = await sweep_orphan_attachments(fake_pool)
+
+    assert not spill.exists()
+    assert deleted == 1
