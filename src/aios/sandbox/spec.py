@@ -80,12 +80,11 @@ if TYPE_CHECKING:
     # new dependency edge regardless.)
     from aios.db.queries import EnvVarCredentialEcho
 
-    # Imported for typing only at module level: a runtime top-level import
-    # would pull in ``aios.tools`` (via ``secret_egress_proxy`` →
-    # ``url_safety``) whose package ``__init__`` imports ``bash``, which
-    # imports back from this module — a cycle. The concrete class is bound
-    # at module bottom (after every def runs) so it's still a patchable
-    # ``aios.sandbox.spec.SecretEgressProxy`` attribute.
+    # Typing-only here; the concrete class is bound at module bottom (after every
+    # def runs) so it stays a patchable ``aios.sandbox.spec.SecretEgressProxy``
+    # attribute for unit tests, with a placement robust against import ordering.
+    # The spec↔tools cycle is broken upstream: ``secret_egress_proxy`` defers its
+    # own ``aios.tools`` import (see that module's import-graph note).
     from aios.sandbox.secret_egress_proxy import SecretEgressProxy
 
 log = get_logger("aios.sandbox.spec")
@@ -1030,7 +1029,8 @@ def _assemble_plan(
 
 
 # Runtime binding for ``SecretEgressProxy`` (see the TYPE_CHECKING note at the
-# top). Imported at module bottom — after every def has run — so it resolves
-# the spec↔tools cycle while still exposing a patchable
-# ``aios.sandbox.spec.SecretEgressProxy`` attribute for unit tests.
+# top). Bound at module bottom — after every def has run — for an
+# ordering-robust, patchable ``aios.sandbox.spec.SecretEgressProxy`` attribute
+# (unit tests patch it). The spec↔tools cycle itself is broken upstream:
+# ``secret_egress_proxy`` defers its ``aios.tools`` import.
 from aios.sandbox.secret_egress_proxy import SecretEgressProxy  # noqa: E402
