@@ -107,6 +107,7 @@ from aios.cli.commands import signal as _signal  # noqa: E402
 from aios.cli.commands import skills as _skills  # noqa: E402
 from aios.cli.commands import status as _status  # noqa: E402
 from aios.cli.commands import tail as _tail  # noqa: E402
+from aios.cli.commands import trace as _trace  # noqa: E402
 from aios.cli.commands import vaults as _vaults  # noqa: E402
 from aios.cli.commands import whatsapp as _whatsapp  # noqa: E402
 from aios.cli.commands import workflows as _workflows  # noqa: E402
@@ -130,3 +131,4 @@ _ops.register(app)
 _status.register(app)
 _chat.register(app)
 _tail.register(app)
+_trace.register(app)

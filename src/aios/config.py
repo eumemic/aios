@@ -450,6 +450,19 @@ class Settings(BaseSettings):
         "— a child doing real model+tool work can legitimately run for minutes; "
         "this is the never-resolves backstop, not a tight SLA.",
     )
+    trace_max_nodes: int = Field(
+        default=2000,
+        ge=1,
+        description="Node-count ceiling for a single ``/trace`` walk (#1149). "
+        "#1124's depth counter bounds path length (≤10 by construction) but NOT "
+        "the node count — ``workflow_max_agent_calls`` defaults to 1000 lifetime "
+        "``agent()`` children per run, and fan-out caps are concurrency, not "
+        "totals. So the trace walk carries this explicit ceiling: once this many "
+        "nodes have been emitted, the frontier is cut and the response carries a "
+        "typed ``truncated: {at_nodes}`` marker rather than silently dropping "
+        "tail subtrees or running unbounded. Tunable upward for deliberately "
+        "deep-audit traces.",
+    )
     workflow_runs_per_launcher_max: int = Field(
         default=20,
         ge=1,
