@@ -1,5 +1,5 @@
 """Integration test: the ``outbound_suppression`` session field round-trips
-through the DB column added in migration 0105 (#710).
+through the DB column added in migration 0106 (#710).
 
 Exercises the create-with-mode, the default, the PUT flip (and that the flip
 recycles the cached sandbox), and the idempotent re-PUT (same mode → no
@@ -71,9 +71,7 @@ async def test_default_is_off(
     )
     assert session.outbound_suppression == "off"
     # Round-trips on a fresh read, too.
-    fetched = await sessions_service.get_session_basic(
-        pool, session.id, account_id=account_id
-    )
+    fetched = await sessions_service.get_session_basic(pool, session.id, account_id=account_id)
     assert fetched.outbound_suppression == "off"
 
 

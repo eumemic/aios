@@ -247,9 +247,7 @@ def _stub_runtime() -> Iterator[SimpleNamespace]:
         yield SimpleNamespace(pool=pool, crypto_box=crypto_box)
 
 
-def _patch_load_agent(
-    agent: Agent | AgentVersion, outbound_suppression: str = "off"
-) -> Any:
+def _patch_load_agent(agent: Agent | AgentVersion, outbound_suppression: str = "off") -> Any:
     return patch(
         "aios.tools.http_request._load_session_agent",
         AsyncMock(return_value=(agent, "acc_test_stub", outbound_suppression)),
@@ -811,9 +809,7 @@ class TestOutboundSuppressionHttp:
     intercepts writes (synthesized success + audit event, no upstream dispatch)
     and lets reads through against real credentials."""
 
-    async def test_write_suppressed_no_dispatch_and_records_event(
-        self, _stub_runtime: Any
-    ) -> None:
+    async def test_write_suppressed_no_dispatch_and_records_event(self, _stub_runtime: Any) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
         captured: dict[str, Any] = {}
         stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
@@ -877,9 +873,7 @@ class TestOutboundSuppressionHttp:
 
     async def test_per_route_suppress_override_suppresses_get(self, _stub_runtime: Any) -> None:
         # A GET that the operator marked suppress=True (a side-effecting read).
-        agent = _agent(
-            http_servers=[_server(routes=[_route("/trigger/*", suppress=True)])]
-        )
+        agent = _agent(http_servers=[_server(routes=[_route("/trigger/*", suppress=True)])])
         captured: dict[str, Any] = {}
         stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
         record = AsyncMock()
@@ -903,13 +897,9 @@ class TestOutboundSuppressionHttp:
 
     async def test_per_route_suppress_false_lets_post_through(self, _stub_runtime: Any) -> None:
         # A read-only POST (a query endpoint) the operator marked suppress=False.
-        agent = _agent(
-            http_servers=[_server(routes=[_route("/graphql", suppress=False)])]
-        )
+        agent = _agent(http_servers=[_server(routes=[_route("/graphql", suppress=False)])])
         captured: dict[str, Any] = {}
-        stub = _make_stub_client(
-            response=httpx.Response(200, content=b"{}"), capture=captured
-        )
+        stub = _make_stub_client(response=httpx.Response(200, content=b"{}"), capture=captured)
         record = AsyncMock()
         with (
             _patch_load_agent(agent, outbound_suppression="on"),
@@ -931,11 +921,7 @@ class TestOutboundSuppressionHttp:
 
     async def test_suppressed_status_is_configurable(self, _stub_runtime: Any) -> None:
         agent = _agent(
-            http_servers=[
-                _server(
-                    routes=[_route("/things")], suppressed_response_status=201
-                )
-            ]
+            http_servers=[_server(routes=[_route("/things")], suppressed_response_status=201)]
         )
         record = AsyncMock()
         with (

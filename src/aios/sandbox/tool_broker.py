@@ -719,9 +719,7 @@ class ToolBroker:
         from aios.services import agents as agents_service
         from aios.services import sessions as sessions_service
 
-        session = await sessions_service.get_session_basic(
-            pool, session_id, account_id=account_id
-        )
+        session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
         if session.outbound_suppression != "on":
             return False
         agent = await agents_service.load_for_session(pool, session, account_id=account_id)

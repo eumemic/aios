@@ -154,9 +154,7 @@ async def _append_suppressed_event(
     data: dict[str, Any],
 ) -> None:
     payload = {"event": SUPPRESSED_EVENT, **data}
-    await sessions_service.append_event(
-        pool, session_id, "span", payload, account_id=account_id
-    )
+    await sessions_service.append_event(pool, session_id, "span", payload, account_id=account_id)
     log.info(
         "outbound_suppression.suppressed",
         session_id=session_id,
