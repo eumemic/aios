@@ -509,3 +509,61 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
         out["http_servers"] = bad_http
 
     return out
+
+
+# ── the second authority axis: model identity (#823) ──────────────────────────
+#
+# The capability meet above clamps *what a principal can do*. It deliberately does
+# not clamp *where a principal's mind runs* — the inference endpoint a model request
+# is sent to. That lives in ``litellm_extra['api_base']`` on the agent, merged into
+# every model call (``harness/loop.py`` → ``harness/completion.py``). ``api_base``
+# redirects the call: a child spawned as an agent whose ``api_base`` points at a
+# hostile endpoint ships its *entire* prompt context to the attacker on the first
+# inference — no tool call required — and the attacker then *is* the model. This is
+# an orthogonal freeze axis to the surface meet (#794), clamped not by a lattice meet
+# (there is no capability lattice for an endpoint) but by an **identity check** at the
+# spawn edge: the child's effective ``api_base`` must equal the launcher's or sit in
+# an operator allowlist of trusted endpoints. Pure here; the runtime binding (the
+# allowlist source) lives in ``services.attenuation``.
+#
+# The clamp keys on ``api_base`` (and its ``base_url`` alias) — the sharpest edge,
+# which redirects the *whole* model request to a chosen endpoint. Sampling knobs
+# (``temperature`` etc.) are deliberately out of scope: they don't move where the
+# child's context goes. Other endpoint-shaping keys (e.g. ``custom_llm_provider``)
+# only retarget *within* an ``api_base`` LiteLLM already resolves, so pinning the
+# endpoint is the load-bearing check.
+
+
+def api_base_of(litellm_extra: dict[str, object] | None) -> str | None:
+    """The effective inference endpoint a ``litellm_extra`` redirects model calls to.
+
+    ``None`` means "no redirect" — the default operator-trusted endpoint for the model
+    string. LiteLLM accepts both ``api_base`` and the ``base_url`` alias; either pins
+    the endpoint, so both are read here (``api_base`` wins when both are present).
+    """
+    if not litellm_extra:
+        return None
+    raw = litellm_extra.get("api_base")
+    if raw is None:
+        raw = litellm_extra.get("base_url")
+    return raw if isinstance(raw, str) else None
+
+
+def api_base_trusted(
+    child_api_base: str | None,
+    *,
+    launcher_api_base: str | None,
+    allowlist: frozenset[str] | set[str] | list[str],
+) -> bool:
+    """Is a child's effective ``api_base`` admissible at the spawn edge (#823)?
+
+    Admissible iff it equals the launcher's effective ``api_base`` (the equality arm —
+    the child runs where its launcher already runs) OR appears in the operator
+    allowlist of trusted inference endpoints. ``None`` (no redirect → the default
+    operator endpoint) trivially equals a launcher that also did not redirect, so the
+    common case (no ``api_base`` anywhere) is always admitted. Fail-closed by default:
+    an unknown redirected endpoint with an empty allowlist is refused.
+    """
+    if child_api_base == launcher_api_base:
+        return True
+    return child_api_base is not None and child_api_base in set(allowlist)

@@ -223,6 +223,7 @@ async def insert_child_session(
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerSpec],
+    litellm_extra: dict[str, Any] | None = None,
 ) -> Session | None:
     """Insert a workflow ``agent()`` child under a deterministic ``session_id``.
 
@@ -236,6 +237,10 @@ async def insert_child_session(
     surface** (the ``attenuate(agent, run)`` meet result) and ``surface_frozen`` is set
     ``TRUE`` — read back by ``load_for_session`` instead of the live agent, and pinned
     under ``ON CONFLICT DO NOTHING`` so a replay can never re-freeze a shifted surface.
+    ``litellm_extra`` is the child's **frozen, clamped model identity** (#823 — the
+    second authority axis: ``api_base`` foremost), likewise read back by
+    ``load_for_session`` and pinned so a later ``update_agent`` can't shift the child's
+    inference endpoint on replay.
     The caller delivers the agent input and copies the run's vaults in the same
     transaction.
     """
@@ -247,11 +252,11 @@ async def insert_child_session(
                 id, agent_id, environment_id, agent_version, model, title, metadata,
                 workspace_volume_path, env, focal_channel, focal_locked,
                 account_id, parent_run_id, origin, archive_when_idle,
-                tools, mcp_servers, http_servers, surface_frozen
+                tools, mcp_servers, http_servers, surface_frozen, litellm_extra
             )
             VALUES ($1, $2, $3, $4, $5, NULL, '{}'::jsonb, $6, '{}'::jsonb,
                     NULL, FALSE, $7, $8, 'background', TRUE,
-                    $9::jsonb, $10::jsonb, $11::jsonb, TRUE)
+                    $9::jsonb, $10::jsonb, $11::jsonb, TRUE, $12::jsonb)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -266,6 +271,7 @@ async def insert_child_session(
             json.dumps([t.model_dump() for t in tools]),
             json.dumps([s.model_dump() for s in mcp_servers]),
             json.dumps([s.model_dump() for s in http_servers]),
+            json.dumps(litellm_extra or {}),
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -299,6 +305,30 @@ async def get_session_frozen_surface(
         mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
         http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
     )
+
+
+async def get_session_frozen_litellm_extra(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> dict[str, Any]:
+    """A workflow child's frozen model identity (``litellm_extra``), or ``{}`` (#823).
+
+    The model-identity dual of :func:`get_session_frozen_surface`: a named-agent
+    child's ``litellm_extra`` (``api_base`` foremost) clamped + frozen at spawn, read
+    back verbatim every wake so replay never re-resolves a since-changed agent's
+    endpoint. ``{}`` covers an agentless generic child, a child whose agent carried no
+    ``litellm_extra``, and a grandfathered pre-column child (``NULL`` only when its
+    ``agent_versions`` row was missing) — all "no redirect, default endpoint", the safe
+    reading. Raises ``NotFoundError`` if the session is absent.
+    """
+    row = await conn.fetchrow(
+        "SELECT litellm_extra FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError("session not found", detail={"session_id": session_id})
+    raw = row["litellm_extra"]
+    return parse_jsonb(raw) if raw is not None else {}
 
 
 async def get_session_workflow_context(

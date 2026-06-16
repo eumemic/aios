@@ -542,3 +542,98 @@ def test_no_registered_tool_exposes_litellm_extra() -> None:
     for name in registry.names():
         schema = json.dumps(registry.get(name).parameters_schema)
         assert "litellm_extra" not in schema, f"tool {name!r} exposes litellm_extra (see #823)"
+
+
+# ── the model-identity clamp: pure api_base check (#823) ──────────────────────
+
+
+class TestApiBaseExtraction:
+    """``api_base_of`` — the effective inference endpoint a litellm_extra redirects to."""
+
+    def test_none_and_empty_are_no_redirect(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        assert api_base_of(None) is None
+        assert api_base_of({}) is None
+        assert api_base_of({"temperature": 0.2}) is None  # a non-routing knob
+
+    def test_api_base_key(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        assert api_base_of({"api_base": "https://hostile.example"}) == "https://hostile.example"
+
+    def test_base_url_alias(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # LiteLLM accepts base_url as an alias for api_base — both pin the endpoint.
+        assert api_base_of({"base_url": "https://alias.example"}) == "https://alias.example"
+
+    def test_api_base_wins_over_base_url(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        out = api_base_of({"api_base": "https://a", "base_url": "https://b"})
+        assert out == "https://a"
+
+    def test_non_string_is_no_redirect(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # A garbage non-string value can't pin a real endpoint; treat as no redirect.
+        assert api_base_of({"api_base": 1234}) is None
+
+
+class TestApiBaseTrusted:
+    """``api_base_trusted`` — the spawn-edge identity check (equality OR allowlist)."""
+
+    def test_no_redirect_matches_no_redirect_launcher(self) -> None:
+        from aios.models.attenuation import api_base_trusted
+
+        # The common case: neither child nor launcher redirects → admitted, empty allowlist.
+        assert api_base_trusted(None, launcher_api_base=None, allowlist=[]) is True
+
+    def test_equality_arm_admits_matching_redirect(self) -> None:
+        from aios.models.attenuation import api_base_trusted
+
+        # Child runs where its launcher already runs → admitted even with empty allowlist.
+        assert api_base_trusted("https://x", launcher_api_base="https://x", allowlist=[]) is True
+
+    def test_redirect_with_empty_allowlist_fails_closed(self) -> None:
+        from aios.models.attenuation import api_base_trusted
+
+        # A redirected endpoint the launcher doesn't share + empty allowlist → refused.
+        assert api_base_trusted("https://x", launcher_api_base=None, allowlist=[]) is False
+
+    def test_allowlist_arm_admits(self) -> None:
+        from aios.models.attenuation import api_base_trusted
+
+        assert (
+            api_base_trusted("https://x", launcher_api_base=None, allowlist=["https://x"]) is True
+        )
+
+    def test_allowlist_miss_fails_closed(self) -> None:
+        from aios.models.attenuation import api_base_trusted
+
+        assert (
+            api_base_trusted("https://x", launcher_api_base=None, allowlist=["https://y"]) is False
+        )
+
+
+def test_model_identity_trusted_binds_settings_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The service binding reads the operator ``trusted_inference_api_bases`` allowlist."""
+    from aios.config import get_settings
+    from aios.services import attenuation as attenuation_service
+
+    # No redirect is always fine (default endpoint == launcher's None).
+    assert attenuation_service.model_identity_trusted(None, None) is True
+    # A redirect fails closed by default (empty allowlist).
+    assert attenuation_service.model_identity_trusted({"api_base": "https://x"}, None) is False
+
+    monkeypatch.setenv("AIOS_TRUSTED_INFERENCE_API_BASES", '["https://x"]')
+    get_settings.cache_clear()
+    try:
+        assert attenuation_service.model_identity_trusted({"api_base": "https://x"}, None) is True
+        assert (
+            attenuation_service.model_identity_trusted({"api_base": "https://other"}, None) is False
+        )
+    finally:
+        monkeypatch.delenv("AIOS_TRUSTED_INFERENCE_API_BASES", raising=False)
+        get_settings.cache_clear()

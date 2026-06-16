@@ -396,6 +396,7 @@ async def create_child_session(
     input: Any,
     output_schema: dict[str, Any] | None = None,
     depth: int = 0,
+    litellm_extra: dict[str, Any] | None = None,
 ) -> bool:
     """Idempotently spawn a workflow ``agent()`` child and inject the first request.
 
@@ -413,10 +414,14 @@ async def create_child_session(
     the model alongside the request and enforced when it calls ``return``.
 
     ``surface`` is the child's **frozen, run-attenuated** capability surface
-    (``attenuate(agent, run)`` — #794); ``vault_ids`` is the run's vault bindings,
-    copied into the child's ``session_vaults`` so it resolves credentials off its own
-    (subset) table. Both are written **only on a real insert**, inside the one
-    transaction, so a replay never re-freezes a shifted surface or re-binds vaults.
+    (``attenuate(agent, run)`` — #794); ``litellm_extra`` is the child's **frozen,
+    clamped model identity** (``api_base`` foremost — #823), validated against the
+    operator trusted-endpoint allowlist at the spawn edge before this call.
+    ``vault_ids`` is the run's vault bindings, copied into the child's
+    ``session_vaults`` so it resolves credentials off its own (subset) table. All
+    three are written **only on a real insert**, inside the one transaction and pinned
+    under ``ON CONFLICT (id) DO NOTHING``, so a replay never re-freezes a shifted
+    surface, re-points a since-changed endpoint, or re-binds vaults.
 
     One transaction: insert the child row (``ON CONFLICT (id) DO NOTHING``) and,
     **only on a real insert**, freeze the surface, bind the vaults, and deliver the
@@ -439,6 +444,7 @@ async def create_child_session(
             tools=surface.tools,
             mcp_servers=surface.mcp_servers,
             http_servers=surface.http_servers,
+            litellm_extra=litellm_extra or {},
         )
         if child is None:
             return False  # replay: row exists — do NOT re-deliver the request
