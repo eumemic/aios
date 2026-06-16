@@ -195,6 +195,31 @@ _IPTABLES_BACKEND_SELECT = (
 )
 
 
+# Emitted shell helper that resolves a hostname to its **IPv4 addresses only**,
+# one per line. Centralizes the IPv4-only resolution shared by every host
+# lookup in the lockdown scripts (the allowed-host loops, the extra-host-ports
+# loop, the credential-host DNAT loop, and the proxy-alias lookup), so the
+# IPv4-only invariant lives in exactly one place (#978).
+#
+# Why IPv4-only: every rule emitted by these scripts is an IPv4 ``iptables``
+# command, and the secret-egress proxy binds the IPv4 ``WORKER_NETWORK_ALIAS``
+# (it cannot intercept IPv6). ``getent ahosts`` returns BOTH A and AAAA
+# records; feeding an AAAA literal to an IPv4-only ``iptables -d`` would error,
+# and under ``set -e`` abort the whole apply. The sandbox network is currently
+# IPv4-only so this is latent today, but if an IPv6-capable network is ever
+# enabled it would break Limited networking on every IPv6-resolving host. Using
+# ``getent ahostsv4`` makes only A records reach the rules; any AAAA/IPv6
+# egress is simply dropped by the default policy (fail-closed) — which is the
+# correct semantics for credential hosts too (IPv6 must never be sent
+# un-proxied).
+#
+# A resolution miss prints nothing (the caller's ``for`` loop / ``$()`` capture
+# sees no IPs), so the host gets no rule — fail-closed, never a bypass.
+_RESOLVE_IPV4_FN = (
+    "resolve_ipv4() { getent ahostsv4 \"$1\" 2>/dev/null | awk '{print $1}' | sort -u; }"
+)
+
+
 def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> list[str]:
     """The nat-OUTPUT DNAT block: credential-host :443 → secret-egress proxy.
 
@@ -230,14 +255,11 @@ def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> 
         # real secret never enters the container. (In practice the alias is the
         # load-bearing WORKER_NETWORK_ALIAS, so a miss already means a
         # non-functional sandbox.)
-        f"PROXY_IP=$(getent ahosts {proxy_alias} 2>/dev/null "
-        "| awk '{print $1}' | sort -u | head -n1)",
+        f"PROXY_IP=$(resolve_ipv4 {proxy_alias} | head -n1)",
         'if [ -n "$PROXY_IP" ]; then',
     ]
     for host in sorted(dnat_hosts):
-        lines.append(
-            f"  for ip in $(getent ahosts {host} 2>/dev/null | awk '{{print $1}}' | sort -u); do"
-        )
+        lines.append(f"  for ip in $(resolve_ipv4 {host}); do")
         lines.append(
             '    "$IPT" -t nat -A OUTPUT -d "$ip" -p tcp --dport 443 '
             f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"'
@@ -290,6 +312,9 @@ def build_iptables_script(
         "",
         _IPTABLES_BACKEND_SELECT,
         "",
+        "# Resolve hosts IPv4-only so AAAA records never reach the IPv4 rules (#978)",
+        _RESOLVE_IPV4_FN,
+        "",
         "# Flush existing OUTPUT rules (filter + nat) for idempotent re-apply",
         '"$IPT" -F OUTPUT',
         '"$IPT" -t nat -F OUTPUT',
@@ -308,9 +333,7 @@ def build_iptables_script(
     for host in sorted(allowed_hosts):
         lines.append("")
         lines.append(f"# Allow {host}")
-        lines.append(
-            f"for ip in $(getent ahosts {host} 2>/dev/null | awk '{{print $1}}' | sort -u); do"
-        )
+        lines.append(f"for ip in $(resolve_ipv4 {host}); do")
         lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 80 -j ACCEPT')
         lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
         lines.append("done")
@@ -318,9 +341,7 @@ def build_iptables_script(
     for host, port in extra_host_ports:
         lines.append("")
         lines.append(f"# Allow {host}:{port}")
-        lines.append(
-            f"for ip in $(getent ahosts {host} 2>/dev/null | awk '{{print $1}}' | sort -u); do"
-        )
+        lines.append(f"for ip in $(resolve_ipv4 {host}); do")
         lines.append(f'  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport {port} -j ACCEPT')
         lines.append("done")
 
@@ -362,6 +383,9 @@ def build_secret_egress_dnat_script(dnat_hosts: Sequence[str], dnat_target: tupl
             "set -e",
             "",
             _IPTABLES_BACKEND_SELECT,
+            "",
+            "# Resolve hosts IPv4-only so AAAA records never reach the IPv4 rules (#978)",
+            _RESOLVE_IPV4_FN,
             "",
             "# Flush nat OUTPUT for idempotent re-apply (do NOT touch filter OUTPUT)",
             '"$IPT" -t nat -F OUTPUT',

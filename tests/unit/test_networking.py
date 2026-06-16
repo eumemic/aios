@@ -128,8 +128,8 @@ class TestBuildIptablesScript:
 
     def test_includes_each_allowed_host(self) -> None:
         script = build_iptables_script(allowed_hosts={"api.example.com", "cdn.example.com"})
-        assert "getent ahosts api.example.com" in script
-        assert "getent ahosts cdn.example.com" in script
+        assert "resolve_ipv4 api.example.com" in script
+        assert "resolve_ipv4 cdn.example.com" in script
 
     def test_flushes_filter_output_chain(self) -> None:
         script = build_iptables_script(allowed_hosts={"api.example.com"})
@@ -208,9 +208,9 @@ class TestBuildIptablesScript:
         )
         assert '"$IPT" -t nat -A OUTPUT' in script
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
-        assert "getent ahosts api.secret.com" in script
-        assert "getent ahosts data.secret.com" in script
-        assert "PROXY_IP=$(getent ahosts aios-worker" in script
+        assert "resolve_ipv4 api.secret.com" in script
+        assert "resolve_ipv4 data.secret.com" in script
+        assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
 
     def test_dnat_not_redirect(self) -> None:
         script = build_iptables_script(
@@ -254,7 +254,7 @@ class TestBuildIptablesScript:
             dnat_target=("aios-worker", 49152),
         )
         assert '"$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT' in script
-        assert "getent ahosts plain.example.com" in script
+        assert "resolve_ipv4 plain.example.com" in script
         # Only the credential host is DNAT'd; the plain allowed host is not.
         assert script.count("-j DNAT --to-destination") == 1
 
@@ -265,6 +265,103 @@ class TestBuildIptablesScript:
             dnat_target=("aios-worker", 49152),
         )
         assert "--dport 80 -j DNAT" not in script
+
+
+# ── IPv4-only host resolution (#978) ──────────────────────────────────────────
+
+
+class TestIPv4OnlyResolution:
+    """Every host lookup in the lockdown scripts must resolve IPv4-only.
+
+    ``getent ahosts`` returns BOTH A and AAAA records; the emitted rules are
+    all IPv4 ``iptables`` commands and the script runs under ``set -e``, so an
+    AAAA literal fed to ``iptables -d`` would error and abort the whole apply
+    the moment an IPv6-capable sandbox network is enabled. Resolving with
+    ``getent ahostsv4`` keeps only A records flowing into the IPv4 rules; IPv6
+    egress is left to the default DROP policy (fail-closed). The proxy binds the
+    IPv4 ``WORKER_NETWORK_ALIAS`` and cannot intercept IPv6, so IPv4-only DNAT
+    is also the correct credential-host semantics.
+    """
+
+    def _all_scripts(self) -> dict[str, str]:
+        return {
+            "lockdown_plain": build_iptables_script(allowed_hosts={"api.example.com"}),
+            "lockdown_extra_ports": build_iptables_script(
+                allowed_hosts=set(), extra_host_ports=[("aios-worker", 8765)]
+            ),
+            "lockdown_dnat": build_iptables_script(
+                allowed_hosts={"plain.example.com"},
+                extra_host_ports=[("aios-worker", 8765)],
+                dnat_hosts=["api.secret.com"],
+                dnat_target=("aios-worker", 49152),
+            ),
+            "dnat_only": build_secret_egress_dnat_script(
+                dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            ),
+        }
+
+    def test_no_dual_stack_getent_ahosts(self) -> None:
+        """No script may use the dual-stack ``getent ahosts`` (which also
+        returns AAAA); every lookup must use the IPv4-only ``getent ahostsv4``.
+        """
+        for name, script in self._all_scripts().items():
+            for line in script.splitlines():
+                # ``ahostsv4`` contains ``ahosts`` as a substring, so match the
+                # exact dual-stack token (``ahosts`` followed by a space).
+                assert "getent ahosts " not in line, (
+                    f"{name}: dual-stack getent leaks AAAA into IPv4 rules: {line!r}"
+                )
+
+    def test_helper_resolves_ipv4_only(self) -> None:
+        """The shared helper is defined and uses ``getent ahostsv4``."""
+        for name, script in self._all_scripts().items():
+            if "resolve_ipv4 " not in script:
+                continue
+            assert "resolve_ipv4()" in script, f"{name}: helper used but not defined"
+            assert "getent ahostsv4" in script, f"{name}: helper is not IPv4-only"
+
+    def test_allowed_host_loop_uses_helper(self) -> None:
+        script = build_iptables_script(allowed_hosts={"api.example.com"})
+        assert "for ip in $(resolve_ipv4 api.example.com); do" in script
+        assert "getent ahostsv4" in script
+
+    def test_extra_host_ports_loop_uses_helper(self) -> None:
+        script = build_iptables_script(
+            allowed_hosts=set(), extra_host_ports=[("aios-worker", 8765)]
+        )
+        assert "for ip in $(resolve_ipv4 aios-worker); do" in script
+
+    def test_dnat_loop_and_proxy_alias_use_helper(self) -> None:
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        assert "PROXY_IP=$(resolve_ipv4 aios-worker | head -n1)" in script
+        assert "for ip in $(resolve_ipv4 api.secret.com); do" in script
+
+    def test_dnat_only_script_defines_and_uses_helper(self) -> None:
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        assert "resolve_ipv4()" in script
+        assert "getent ahostsv4" in script
+        assert "for ip in $(resolve_ipv4 api.secret.com); do" in script
+
+    def test_helper_defined_before_first_use(self) -> None:
+        """The helper definition must precede every call so the script runs
+        under ``set -e`` without a 'command not found'."""
+        for name, script in self._all_scripts().items():
+            if "resolve_ipv4 " not in script:
+                continue
+            assert script.index("resolve_ipv4()") < script.index("$(resolve_ipv4 "), (
+                f"{name}: helper called before it is defined"
+            )
+
+    def test_helper_emitted_once_per_script(self) -> None:
+        """The dedup'd helper is emitted exactly once (centralizes the fix)."""
+        for name, script in self._all_scripts().items():
+            assert script.count("resolve_ipv4()") <= 1, f"{name}: helper defined twice"
 
 
 # ── DNAT-only Unrestricted swap chokepoint (no lockdown, #1153) ───────────────
@@ -281,9 +378,9 @@ class TestBuildSecretEgressDnatScript:
         )
         assert '"$IPT" -t nat -A OUTPUT' in script
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
-        assert "getent ahosts api.secret.com" in script
-        assert "getent ahosts data.secret.com" in script
-        assert "PROXY_IP=$(getent ahosts aios-worker" in script
+        assert "resolve_ipv4 api.secret.com" in script
+        assert "resolve_ipv4 data.secret.com" in script
+        assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
 
     def test_no_drop_policy(self) -> None:
         # The whole point: general egress stays open under Unrestricted.
@@ -577,7 +674,7 @@ class TestApplyNetworkLockdown:
         assert len(scripts) == 2
         apply_script, verify_script = scripts
         assert '"$IPT" -P OUTPUT DROP' in apply_script
-        assert "getent ahosts api.example.com" in apply_script
+        assert "resolve_ipv4 api.example.com" in apply_script
         # The sidecar inherits the operator image's (empty) resolv.conf, so the
         # apply script points itself at the netns embedded DNS before getent.
         assert "127.0.0.11" in apply_script
@@ -654,7 +751,7 @@ class TestApplyNetworkLockdown:
         apply_script, verify_script = self._sidecar_scripts(backend)
         assert '"$IPT" -t nat -A OUTPUT' in apply_script
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in apply_script
-        assert "getent ahosts api.secret.com" in apply_script
+        assert "resolve_ipv4 api.secret.com" in apply_script
         # #984: with dnat_hosts present, the read-back verify also asserts the
         # nat table carries a DNAT rule — a zero-IP host fails closed.
         assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in verify_script
@@ -829,7 +926,7 @@ class TestApplySecretEgressDnat:
         apply_script, verify_script = self._sidecar_scripts(backend)
         # DNAT installed, but general egress stays open (no DROP, no per-host ACCEPT).
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in apply_script
-        assert "getent ahosts api.secret.com" in apply_script
+        assert "resolve_ipv4 api.secret.com" in apply_script
         assert "-P OUTPUT DROP" not in apply_script
         # The verify asserts nat DNAT coverage but NOT a DROP policy.
         assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in verify_script
