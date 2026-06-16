@@ -390,6 +390,12 @@ async def test_happy_path_merges_and_completes() -> None:
     # the completed issue leaves the open working set (no merged-but-open residue).
     assert "dispatched" in scn.labels_removed
     assert scn.issue_patches == [{"state": "closed", "state_reason": "completed"}]
+    # #1208: the close (PATCH /issues/5) is the GATE for the `dispatched` strip — it MUST come
+    # before the DELETE of the `dispatched` label, so a close-failure fails safe to
+    # OPEN ∧ dispatched (not the re-dispatch loop). Assert the ordering at the HTTP-trace level.
+    close_i = scn.http.index(("PATCH", "/repos/o/r/issues/5"))
+    strip_i = scn.http.index(("DELETE", "/repos/o/r/issues/5/labels/dispatched"))
+    assert close_i < strip_i, "the issue close must precede the `dispatched` strip (#1208)"
 
 
 async def test_adopts_existing_open_pr_instead_of_creating() -> None:

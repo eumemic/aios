@@ -166,3 +166,48 @@ def test_unlabel_returns_and_logs_response() -> None:
     resp = _run(ns["_unlabel"](REPO, ISSUE, "dispatched"))
     assert resp == {"status": 200, "body": ""}
     assert any("unlabel" in line for line in ns["_LOGS"])
+
+
+# ─── #1208: fail-safe ordering — strip `dispatched` ONLY after the close succeeds ──
+
+
+def test_dispatched_stripped_only_after_a_successful_close() -> None:
+    # On a real merge the close PATCH succeeds (200), so `dispatched` IS stripped — the
+    # issue ends up CLOSED ∧ ¬dispatched and leaves the dispatch gate. The close must come
+    # at-or-before the dispatched strip so the strip is gated on it.
+    gh = _FakeGH({("PATCH", ISSUE_PATH): {"status": 200, "body": '{"state": "closed"}'}})
+    ns = _ns(gh)
+    _run(ns["_close_source_issue"](REPO, ISSUE))
+
+    methods_paths = [(m, p) for (m, p, _b) in gh.calls]
+    assert ("PATCH", ISSUE_PATH) in methods_paths
+    assert ("DELETE", DISPATCHED_PATH) in methods_paths
+    # The close must not happen AFTER the dispatched strip (else a failed close leaves the
+    # issue OPEN ∧ ¬dispatched — the #1208 re-dispatch loop). Assert PATCH precedes the
+    # dispatched DELETE.
+    patch_i = methods_paths.index(("PATCH", ISSUE_PATH))
+    strip_i = methods_paths.index(("DELETE", DISPATCHED_PATH))
+    assert patch_i < strip_i, "dispatched must only be stripped after the close fires"
+
+
+def test_dispatched_not_stripped_when_close_fails() -> None:
+    # #1208 guard: if the close PATCH fails (non-2xx), `dispatched` must NOT be stripped, so
+    # the issue fails SAFE to OPEN ∧ dispatched (still claimed, never re-dispatched) rather
+    # than OPEN ∧ ¬dispatched (re-enters the dispatch gate → duplicate build of merged work).
+    gh = _FakeGH({("PATCH", ISSUE_PATH): {"status": 422, "body": "unprocessable"}})
+    ns = _ns(gh)
+    _run(ns["_close_source_issue"](REPO, ISSUE))
+
+    methods_paths = [(m, p) for (m, p, _b) in gh.calls]
+    assert ("DELETE", DISPATCHED_PATH) not in methods_paths, (
+        "dispatched was stripped despite a failed close — fails UNSAFE to the re-dispatch loop"
+    )
+
+
+def test_close_failure_is_surfaced_when_dispatched_kept() -> None:
+    # A failed close that (correctly) keeps `dispatched` must still be visible in the log.
+    gh = _FakeGH({("PATCH", ISSUE_PATH): {"status": 500, "body": "server error"}})
+    ns = _ns(gh)
+    _run(ns["_close_source_issue"](REPO, ISSUE))
+    logs = "\n".join(ns["_LOGS"])
+    assert "FAILED" in logs and "close source issue" in logs

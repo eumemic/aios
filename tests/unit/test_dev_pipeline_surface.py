@@ -13,8 +13,9 @@ needs it:
   child-agent surface is ``agent ∩ run``, so declaring only ``[bash, http_request]``
   on the workflow would strip the editing tools from the implement/fix agents.
 - ``REQUIRED_HTTP_SERVERS`` — the two-route ``github`` spec: ``/repos/**`` with
-  ``GET,POST,PUT,DELETE`` (DELETE is load-bearing for the success-path unlabel) and a
-  separate ``/graphql`` POST route (mark-ready mutation).
+  ``GET,POST,PUT,DELETE,PATCH`` (DELETE is load-bearing for the success-path unlabel;
+  PATCH is load-bearing for the post-merge issue-close, #1208) and a separate
+  ``/graphql`` POST route (mark-ready mutation).
 - ``build_dev_pipeline_workflow_create(...)`` — the complete ``WorkflowCreate`` payload
   (script + tools + http_servers) so the surface can't drift from the script.
 """
@@ -75,7 +76,21 @@ def test_repos_route_allows_delete() -> None:
     assert methods is not None
     # DELETE is load-bearing: the success-path _unlabel(autodev:in-progress) issues
     # DELETE /repos/.../labels/...; omitting it silently failed every unlabel.
-    assert set(methods) == {"GET", "POST", "PUT", "DELETE"}
+    # PATCH is load-bearing too: _close_source_issue (#1188) closes the source issue on
+    # merge with PATCH /repos/.../issues/{n}. Omitting PATCH made the broker reject the
+    # close as a route-allowlist mismatch (a deterministic {"error": ...}), so the close
+    # never fired — the merged issue stayed OPEN with `dispatched` stripped → re-dispatch
+    # loop (#1208). The strip (DELETE) succeeded while the close (PATCH) was silently denied.
+    assert set(methods) == {"GET", "POST", "PUT", "DELETE", "PATCH"}
+
+
+def test_repos_route_allows_patch_for_issue_close() -> None:
+    # #1208: closing the source issue on merge is a PATCH /repos/.../issues/{n}. If the
+    # route omits PATCH the broker denies the call before it reaches GitHub, so the issue
+    # is never closed (regression from #1188 — strip fired, close did not).
+    server = REQUIRED_HTTP_SERVERS[0]
+    repos = [r for r in server.routes if r.path_pattern == "/repos/**"]
+    assert "PATCH" in (repos[0].methods or [])
 
 
 def test_repos_route_allows_query_for_pagination() -> None:

@@ -733,32 +733,54 @@ async def _fail(repo, issue_number, result):
 
 
 async def _close_source_issue(repo, issue_number):
-    """Terminal post-merge cleanup (#1188): a confirmed merge is the issue's resolution, so
-    close the source issue and strip its in-flight CLAIM labels so it leaves the open-issue
-    working set instead of reading as live to a dispatch-gate sweep / rank-6 staleness reaper.
+    """Terminal post-merge cleanup (#1188, #1208): a confirmed merge is the issue's
+    resolution, so close the source issue and strip its in-flight CLAIM labels so it leaves
+    the open-issue working set instead of reading as live to a dispatch-gate sweep / rank-6
+    staleness reaper.
 
-    Three idempotent, best-effort steps:
-      1. DELETE ``autodev:in-progress`` AND ``dispatched`` (each via ``_unlabel``, which logs
-         its gh() response per rank-6 — a strip GitHub rejected is visible, not silent). A
-         label already gone is a 404 no-op, exactly what a re-drive wants.
-      2. PATCH ``/issues/{n}`` to ``state:closed`` + ``state_reason:completed`` — closing the
+    **CLOSE-BEFORE-STRIP ordering (#1208 fail-safe).** ``dispatched`` is the claim that keeps
+    a merged issue OUT of the dispatch gate (``approved ∧ shovel-ready ∧ ¬dispatched``). If we
+    stripped it BEFORE the close and the close then failed, the issue would be left
+    OPEN ∧ ¬``dispatched`` — RE-ARMED for a duplicate build of already-merged work (strictly
+    worse than pre-#1188, where a merged issue stayed OPEN ∧ ``dispatched`` and was safe). So
+    the ``dispatched`` strip is GATED on a confirmed close: never strip it unless the issue is
+    actually closed, so a close-failure fails SAFE to OPEN ∧ ``dispatched``.
+
+    Idempotent, best-effort steps, in this order:
+      1. PATCH ``/issues/{n}`` to ``state:closed`` + ``state_reason:completed`` — closing the
          issue on its OWN merge (the pipeline's PR bodies carry no ``Closes #N`` linkage, so
          GitHub never auto-closes). Re-closing an already-closed issue is a GitHub no-op (200).
-      3. Log the close response: a non-2xx close is surfaced (visible), never swallowed.
+         (Before #1208 the route allowlist omitted PATCH, so this call was rejected by the
+         broker before it reached GitHub and the close silently never fired.)
+      2. Log the close response (rank-6): a non-2xx close is surfaced, never swallowed.
+      3. ONLY IF the close confirmed (200), DELETE ``dispatched`` — the dispatch-gate claim is
+         safe to drop precisely because the issue is now closed. A label already gone is a 404
+         no-op, exactly what a re-drive wants.
+      4. DELETE ``autodev:in-progress`` regardless — it is NOT a dispatch-gate predicate, so
+         dropping it on a failed close cannot re-arm a re-dispatch; stripping it best-effort
+         keeps the in-flight surface clean.
 
     Returns the close (PATCH) gh() response. Pure of LLM/time/random; only GitHub I/O."""
-    # Step 1 — strip BOTH in-flight claim labels (best-effort, idempotent, logged).
-    await _unlabel(repo, issue_number, LABEL_IN_PROGRESS)
-    await _unlabel(repo, issue_number, LABEL_DISPATCHED)
-    # Step 2 — close the issue (re-close of an already-closed issue is a 200 no-op).
+    # Step 1 — close the issue FIRST (re-close of an already-closed issue is a 200 no-op).
     close_resp = await gh("PATCH", _ipath(repo, "/issues/%d" % issue_number),
                           {"state": "closed", "state_reason": "completed"})
-    # Step 3 — surface the outcome (rank-6): a failed close is visible, not silently swallowed.
+    # Step 2 — surface the outcome (rank-6): a failed close is visible, not silently swallowed.
     st = _status(close_resp)
-    if st == 200:
+    closed = st == 200
+    if closed:
         log("closed source issue #%d (state=closed, reason=completed)" % issue_number)
     else:
         log("close source issue #%d FAILED -> %r %r" % (issue_number, st, close_resp))
+    # Step 3 — strip `dispatched` ONLY on a confirmed close (#1208 fail-safe). A close-failure
+    # leaves the issue OPEN ∧ `dispatched` (still claimed, never re-dispatched), NOT
+    # OPEN ∧ ¬`dispatched` (which re-arms the dispatch gate for already-merged work).
+    if closed:
+        await _unlabel(repo, issue_number, LABEL_DISPATCHED)
+    else:
+        log("keeping `dispatched` on #%d — close did not confirm, failing safe to "
+            "OPEN+dispatched (not the #1208 re-dispatch loop)" % issue_number)
+    # Step 4 — strip in-progress regardless (not a dispatch-gate predicate; best-effort).
+    await _unlabel(repo, issue_number, LABEL_IN_PROGRESS)
     return close_resp
 
 
@@ -1285,9 +1307,13 @@ REQUIRED_TOOLS: list[ToolSpec] = [
 
 # The GitHub http_server the scripted nodes reach via ``tool('http_request', ...)``.
 # Two routes, because GraphQL and REST need distinct method scoping:
-#   - ``/repos/**`` REST: GET·POST·PUT·DELETE. DELETE is load-bearing — the success-path
-#     ``_unlabel(autodev:in-progress)`` issues ``DELETE /repos/.../labels/...``; omitting
-#     it silently fails every unlabel (route-mismatch, then 3 pointless retries).
+#   - ``/repos/**`` REST: GET·POST·PUT·DELETE·PATCH. DELETE is load-bearing — the
+#     success-path ``_unlabel(autodev:in-progress)`` issues ``DELETE /repos/.../labels/...``;
+#     omitting it silently fails every unlabel (route-mismatch, then 3 pointless retries).
+#     PATCH is load-bearing too (#1208) — the post-merge ``_close_source_issue`` issues
+#     ``PATCH /repos/.../issues/{n}`` to close the source issue; omitting it made the broker
+#     reject the close (route-mismatch), so a merged issue stayed OPEN while its ``dispatched``
+#     strip succeeded → re-armed the dispatch gate (a re-dispatch of already-merged work).
 #   - ``/graphql`` POST: the mark-ready mutation (``_mark_ready_query``). GraphQL serves
 #     reads and writes over one POST path, so it lives on its own route.
 
@@ -1299,8 +1325,14 @@ def _github_http_server(*, name: str, base_url: str) -> HttpServerSpec:
         description="GitHub REST + GraphQL API (auth resolved from the bound vault's GITHUB_TOKEN).",
         routes=[
             HttpRouteSpec(
+                # PATCH is load-bearing (#1208): the post-merge cleanup closes the source
+                # issue with PATCH /repos/.../issues/{n}. Omitting it made the broker reject
+                # the close as a route-allowlist mismatch (a deterministic {"error": ...}) so
+                # the close NEVER fired — the merged issue stayed OPEN while its `dispatched`
+                # strip (a DELETE, which IS allowed) succeeded, re-arming the dispatch gate
+                # (approved ∧ shovel-ready ∧ ¬dispatched) → a re-dispatch of already-merged work.
                 path_pattern="/repos/**",
-                methods=["GET", "POST", "PUT", "DELETE"],
+                methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
                 # allow_query: GitHub list endpoints paginate via ?per_page/?page, and the
                 # comment-thread read must follow Link: rel="next" past the first 30 to not
                 # silently drop late design/spec comments (#1156). Safe here — the route
