@@ -42,6 +42,21 @@ from aios.services.wake import defer_wake
 
 log = get_logger("aios.harness.sweep")
 
+# The three shared wake-decision predicate generators are imported (not
+# redefined) from ``aios.db.queries`` and composed into the sweep's detector
+# SQL below — re-exported here by identity so the structural sync guard
+# (``tests/unit/test_wake_predicate_single_source.py``) can assert that the
+# sweep consumes the SAME source objects as the read/dispatch path. Listing
+# them in ``__all__`` marks them as explicit re-exports under ``strict`` mypy
+# (``no_implicit_reexport``), which would otherwise flag attribute access on
+# the module as ``attr-defined``.
+__all__ = [
+    "confirmed_unresolved_predicate",
+    "session_active_predicate",
+    "session_errored_predicate",
+    "wake_sessions_needing_inference",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class SweepResult:
