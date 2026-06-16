@@ -1289,3 +1289,118 @@ class TestEnvVarCredentialDrift:
         else:
             assert destroys == [], f"{description!r} must not recycle the sandbox"
             assert registry.peek("sess_X") is not None
+
+
+class TestRunSandboxLifecycle:
+    """Dedicated unit assertions for the workflow-run (#988) sandbox lifecycle:
+    warm-hit container reuse, ``release_run``, and the ``_release_owner`` owner-kind
+    routing — paths exercised by integration tests but not previously pinned by
+    dedicated unit assertions (issue #995, "test coverage breadth").
+    """
+
+    @staticmethod
+    def _run_provision_patches(plan: ProvisioningPlan) -> ExitStack:
+        """Patch the run cold-path's external collaborators so ``_provision_run``
+        runs against the in-memory backend only. The Unrestricted, no-credential
+        plan makes ``_apply_egress_rules`` a no-op, so no lockdown sidecar fires."""
+        stack = ExitStack()
+        for cm in (
+            patch("aios.sandbox.registry.build_spec_from_run", AsyncMock(return_value=plan)),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+        ):
+            stack.enter_context(cm)
+        return stack
+
+    async def test_warm_hit_reuses_container_create_count_stays_one(self) -> None:
+        """Two ``get_or_provision_run`` calls in one run provision the container
+        ONCE: the second is a warm hit (liveness probe only, no re-create). This
+        pins the #988 e2e warm-hit-reuse strategy item — ``create_count == 1``
+        across two ``sandbox()`` calls in one run."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        plan = _provisioning_plan("wfr_X")  # Unrestricted, no creds → no egress wiring
+
+        with self._run_provision_patches(plan):
+            h1 = await registry.get_or_provision_run("wfr_X")
+            h2 = await registry.get_or_provision_run("wfr_X")
+
+        assert h1 is h2  # same cached handle
+        creates = [c for c in backend.calls if c[0] == "create"]
+        assert len(creates) == 1, "warm hit must NOT re-create the container"
+        # The warm call took the liveness-probe path, not a second provision.
+        assert any(c[0] == "is_alive" for c in backend.calls)
+
+    async def test_warm_hit_after_dead_container_reprovisions(self) -> None:
+        """If the cached container died between calls, the warm probe fails and the
+        run cold-reprovisions (a fresh ``create``) — the run sandbox is snapshot-free
+        so the dead handle is dropped without salvage."""
+        backend = FakeBackend(next_handle_id="run_sandbox_1")
+        registry = SandboxRegistry(backend=backend)
+        plan = _provisioning_plan("wfr_X")
+
+        with self._run_provision_patches(plan):
+            await registry.get_or_provision_run("wfr_X")
+            # Mark the cached container dead so the next warm probe fails.
+            backend.dead_sandbox_ids.add("run_sandbox_1")
+            backend.next_handle_id = "run_sandbox_2"
+            h2 = await registry.get_or_provision_run("wfr_X")
+
+        assert h2.sandbox_id == "run_sandbox_2"
+        creates = [c for c in backend.calls if c[0] == "create"]
+        assert len(creates) == 2  # cold start + reprovision after death
+        # The dead container was destroyed (no snapshot — run sandboxes are scratch).
+        assert any(c[0] == "destroy" for c in backend.calls)
+        assert not any(c[0] == "snapshot" for c in backend.calls)
+
+    async def test_release_run_destroys_cached_container_no_snapshot(self) -> None:
+        """``release_run`` is a bare destroy + cache eviction — no snapshot/pointer
+        machinery (a run sandbox has no durable rootfs)."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        plan = _provisioning_plan("wfr_X")
+
+        with self._run_provision_patches(plan):
+            handle = await registry.get_or_provision_run("wfr_X")
+
+        await registry.release_run("wfr_X")
+
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        assert len(destroys) == 1
+        assert destroys[0][1]["sandbox_id"] == handle.sandbox_id
+        assert not any(c[0] == "snapshot" for c in backend.calls)
+        assert registry.peek("wfr_X") is None
+
+    async def test_release_run_is_noop_when_not_cached(self) -> None:
+        """``release_run`` for an unknown run never touches the backend."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        await registry.release_run("wfr_unknown")
+
+        assert not any(c[0] == "destroy" for c in backend.calls)
+
+    async def test_release_owner_routes_run_id_to_release_run(self) -> None:
+        """A ``wfr_`` owner routes to ``release_run`` (the ephemeral-destroy path),
+        NOT the session ``release`` path."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        registry.release_run = AsyncMock()  # type: ignore[method-assign]
+        registry.release = AsyncMock()  # type: ignore[method-assign]
+
+        await registry._release_owner("wfr_01TEST")
+
+        registry.release_run.assert_awaited_once_with("wfr_01TEST")
+        registry.release.assert_not_awaited()
+
+    async def test_release_owner_routes_session_id_to_release(self) -> None:
+        """A ``sess_`` owner falls through to the session ``release`` path."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        registry.release_run = AsyncMock()  # type: ignore[method-assign]
+        registry.release = AsyncMock()  # type: ignore[method-assign]
+
+        await registry._release_owner("sess_01TEST")
+
+        registry.release.assert_awaited_once_with("sess_01TEST")
+        registry.release_run.assert_not_awaited()
