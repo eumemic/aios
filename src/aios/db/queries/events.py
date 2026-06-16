@@ -492,6 +492,50 @@ async def lookup_tool_name_by_call_id(
     return None, focal
 
 
+def confirmed_unresolved_predicate(alias: str, age_param: str) -> str:
+    """SQL boolean fragment selecting a *confirmed-but-unresolved* dispatch.
+
+    One source for the confirmed-dispatch boolean, consumed by BOTH the sweep's
+    cross-session wake detector (``sweep.CONFIRMED_ROWS_SQL``, which projects
+    ``DISTINCT session_id``) and the per-session dispatch resolver
+    :func:`list_confirmed_unresolved_tool_calls` (which projects the actual
+    ``tool_call`` dicts). The two queries differ only in their SELECT/JOIN; the
+    WHERE sub-predicate on the ``tool_confirmed`` lifecycle row is THIS shared
+    boolean, so detection and dispatch resolve the identical condition by
+    construction — no wake-with-no-progress (#155 symptom).
+
+    ``alias`` binds the ``tool_confirmed`` lifecycle row (``lc``). ``age_param``
+    is the caller's SQL placeholder for the OPTIONAL confirm-event age bound (a
+    ``bigint`` seconds value, or ``NULL`` for unbounded): ``$N`` positional for
+    the resolver, a ``{...}``-substituted ``$N`` for the sweep's ``.format``-d
+    text. The bound is keyed on ``lc.created_at`` (the CONFIRM event), NOT the
+    assistant turn: a fresh confirm of an old proposal is a fresh intent to
+    dispatch (#746).
+
+    The ``NOT EXISTS`` unresolved guard is tenant-scoped
+    (``tr.account_id = {alias}.account_id``) — the resolver's correct form;
+    the pre-unification sweep copy omitted it (benign, masked by the outer
+    ``scope_clause``, but exactly the silent drift two hand-kept copies accrue).
+    """
+    return (
+        f"{alias}.kind = 'lifecycle'\n"
+        f"       AND {alias}.data->>'event' = 'tool_confirmed'\n"
+        f"       AND {alias}.data->>'result' = 'allow'\n"
+        f"       AND (\n"
+        f"             {age_param}::bigint IS NULL\n"
+        f"             OR {alias}.created_at >= now() - make_interval(secs => {age_param}::bigint)\n"
+        f"           )\n"
+        f"       AND NOT EXISTS (\n"
+        f"           SELECT 1 FROM events tr\n"
+        f"            WHERE tr.session_id = {alias}.session_id\n"
+        f"              AND tr.account_id = {alias}.account_id\n"
+        f"              AND tr.kind = 'message'\n"
+        f"              AND tr.role = 'tool'\n"
+        f"              AND tr.data->>'tool_call_id' = {alias}.data->>'tool_call_id'\n"
+        f"       )"
+    )
+
+
 async def list_confirmed_unresolved_tool_calls(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -510,11 +554,10 @@ async def list_confirmed_unresolved_tool_calls(
     ``role='tool'`` result, AND (when bounded) whose confirmation is within
     ``max_age_seconds``.  Detection (the sweep, cross-session, projecting
     only ``session_id``) and dispatch (here, per-session, projecting the
-    ``tool_call`` dicts) therefore agree by construction; re-resolving per step
-    is load-bearing against the wake→step TOCTOU window.  CRITICAL: the age
-    clause here MUST stay byte-for-byte identical to ``CONFIRMED_ROWS_SQL`` —
-    a mismatch surfaces a session for wake that then yields no dispatchable
-    call, the wake-with-no-progress loop (#155 symptom).
+    ``tool_call`` dicts) agree BY CONSTRUCTION: both compose the WHERE
+    sub-predicate on ``lc`` from the single source
+    :func:`confirmed_unresolved_predicate` — they cannot drift.  Re-resolving
+    per step is load-bearing against the wake→step TOCTOU window.
 
     ``max_age_seconds`` is an OPTIONAL age bound on the ``tool_confirmed``
     lifecycle event's (``lc``) ``created_at`` — when set, calls whose
@@ -538,7 +581,7 @@ async def list_confirmed_unresolved_tool_calls(
     the result check reuses ``events_tool_result_idx``.
     """
     rows = await conn.fetch(
-        """
+        f"""
         SELECT a.seq AS asst_seq,
                lc.data->>'tool_call_id' AS tool_call_id,
                a.data->'tool_calls' AS tool_calls
@@ -553,21 +596,7 @@ async def list_confirmed_unresolved_tool_calls(
                  jsonb_build_object('id', lc.data->>'tool_call_id'))
          WHERE lc.session_id = $1
            AND lc.account_id = $2
-           AND lc.kind = 'lifecycle'
-           AND lc.data->>'event' = 'tool_confirmed'
-           AND lc.data->>'result' = 'allow'
-           AND (
-                 $3::bigint IS NULL
-                 OR lc.created_at >= now() - make_interval(secs => $3::bigint)
-               )
-           AND NOT EXISTS (
-               SELECT 1 FROM events tr
-                WHERE tr.session_id = lc.session_id
-                  AND tr.account_id = lc.account_id
-                  AND tr.kind = 'message'
-                  AND tr.role = 'tool'
-                  AND tr.data->>'tool_call_id' = lc.data->>'tool_call_id'
-           )
+           AND {confirmed_unresolved_predicate("lc", "$3")}
          ORDER BY a.seq ASC
         """,
         session_id,
