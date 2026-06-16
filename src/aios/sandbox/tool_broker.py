@@ -235,57 +235,8 @@ class ToolBroker:
                     self._mcp_invoke,
                     methods=["POST"],
                 ),
-                # Scheduled-tasks escalation (#636): bash inside a cron
-                # sandbox POSTs here to wake its session with a user-role
-                # message. Same per-session secret authn as the tool
-                # routes above.
-                Route(
-                    "/v1/{secret}/sessions/messages",
-                    self._post_session_message,
-                    methods=["POST"],
-                ),
             ]
         )
-
-    async def _post_session_message(self, request: Request) -> Response:
-        """Append a user-role message to the owning session and wake it.
-
-        Escalation primitive used by a trigger's ``sandbox_command``: a
-        bash script POSTs here to deliver a user-role event back into
-        its session, which causes the next step to run with the model
-        seeing the new message. The per-session secret in the URL path
-        binds the call to one specific session; the body is JSON
-        ``{"content": "..."}``.
-        """
-        from aios.harness import runtime
-        from aios.services import sessions as sessions_service
-        from aios.services.wake import defer_wake
-
-        resolved = await self._resolve_session(request)
-        if isinstance(resolved, Response):
-            return resolved
-        session_id = resolved
-
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError):
-            return _err(400, "invalid JSON body")
-        if not isinstance(body, dict):
-            return _err(400, 'body must be {"content": "..."}')
-        content = body.get("content")
-        if not isinstance(content, str) or not content:
-            return _err(400, "body.content must be a non-empty string")
-        metadata = body.get("metadata")
-        if metadata is not None and not isinstance(metadata, dict):
-            return _err(400, "body.metadata must be an object")
-
-        pool = runtime.require_pool()
-        account_id = await sessions_service.load_session_account_id(pool, session_id)
-        event = await sessions_service.append_user_message(
-            pool, session_id, content, metadata=metadata, account_id=account_id
-        )
-        await defer_wake(pool, session_id, cause="message", account_id=account_id)
-        return JSONResponse({"event_id": event.id, "session_id": session_id}, status_code=201)
 
     async def start(self) -> None:
         """Bind ``0.0.0.0:0`` and begin serving.

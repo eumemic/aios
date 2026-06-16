@@ -871,10 +871,10 @@ def _assemble_plan(
         # them anyway (secret_name can't be a reserved key, models/vaults.py).
         "TOOL_BROKER_URL": tool_broker_url,
         "TOOL_BROKER_SECRET": tool_broker_secret,
-        # Scheduled-tasks escalation (#636): bash inside a cron sandbox
-        # POSTs to ``$TOOL_BROKER_URL/v1/$TOOL_BROKER_SECRET/sessions/messages``
-        # to wake the session. AIOS_SESSION_ID is also exposed so the
-        # bash can name its own session in logs / messages.
+        # A ``sandbox_command`` fire escalates back into its session via
+        # ``tool wake_self '{"content": "..."}'`` (timing lives in the
+        # trigger primitive, not inside the sandbox). AIOS_SESSION_ID is
+        # exposed so the bash can name its own session in logs / messages.
         "AIOS_SESSION_ID": session_id,
     }
 
