@@ -467,6 +467,14 @@ from .skills import (  # noqa: E402
     list_skills,
     resolve_skill_refs,
 )
+from .trace import (  # noqa: E402
+    ChildNode,
+    children_of,
+    read_run_journal_batched,
+    read_run_meta_batched,
+    read_session_journal_batched,
+    read_session_meta_batched,
+)
 from .triggers import (  # noqa: E402
     TriggerFireRef,
     TriggerRow,
@@ -534,6 +542,7 @@ __all__ = [
     "_SESSION_ERRORED_EXPR",
     "_SESSION_STATUS_EXPR",
     "ActiveBinding",
+    "ChildNode",
     "EnvVarCredentialEcho",
     "EnvVarCredentialRow",
     "TriggerFireRef",
@@ -579,6 +588,7 @@ __all__ = [
     "batch_list_session_memory_store_echoes",
     "batch_list_session_triggers",
     "bootstrap_root_account",
+    "children_of",
     "claim_trigger_run",
     "clone_session",
     "count_account_resources",
@@ -737,6 +747,10 @@ __all__ = [
     "read_events",
     "read_message_events",
     "read_request_response",
+    "read_run_journal_batched",
+    "read_run_meta_batched",
+    "read_session_journal_batched",
+    "read_session_meta_batched",
     "read_session_watermarks",
     "read_windowed_context_events",
     "read_windowed_events",

@@ -3320,6 +3320,75 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/trace": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get Session Trace",
+        "description": "One-call linear trace rooted at a session + all nested sub-runs/sessions (#1149).\n\nThe session-root counterpart of ``GET /v1/runs/{id}/trace``: walks the\nparent\u2192child invocation-edge tree from this session (its ``agent()`` peer\nsessions and any runs it launched via the still-live ``launcher_session_id``\nFK), normalizes each node to ``terminal_state`` + raw ``error_kind``, and\ninterleaves journals into a flat DFS-pre-order list. See the run-trace\nendpoint for the verbosity / ordering / scope caveats. A cross-tenant session\n404s.",
+        "operationId": "get_session_trace",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "verbose",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Verbose"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sessions/{session_id}/events/{event_id}": {
       "get": {
         "tags": [
@@ -9352,6 +9421,75 @@
         }
       }
     },
+    "/v1/runs/{run_id}/trace": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Get Run Trace",
+        "description": "One-call linear trace of a run + all nested sessions and sub-runs (#1149).\n\nA read-projection over the invocation-edge tree: walks the parent\u2192child edge\ntree from this run, normalizes each node's outcome to\n``terminal_state \u2208 {ok,errored,cancelled,suspended,running}`` (+ raw\n``error_kind``), and interleaves the nodes' journals into a flat\n**DFS-pre-order** list (a CLI renders ``depth`` as indentation). A\ndeliberately-failed nested session's death cause is visible at a glance \u2014 the\nnode carries ``terminal_state`` + ``error_kind`` (e.g. ``no_return``) and the\nabbreviated default co-locates the proximate ``is_error`` frame.\n\n``verbose=false`` (default) keeps only the load-bearing frames per node\n(request/response/turn lifecycle, gates, errors); ``verbose=true`` lifts the\nfilter to the full per-node firehose. The walk runs in one ``REPEATABLE\nREAD`` snapshot with a node-count ceiling; a tree past the ceiling returns a\ntyped ``truncated: {at_nodes}`` marker.\n\nOrdering caveat: cross-subtree time-ordering is best-effort to transaction\ngranularity; only the causal parent\u2192child edge is exact. ``wake_session``\npeer-pokes are out of scope (a peer stimulus, not a spawn). A cross-tenant\nrun 404s.",
+        "operationId": "get_run_trace",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "verbose",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Verbose"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/runs/{run_id}/resume": {
       "post": {
         "tags": [
@@ -15224,6 +15362,154 @@
         ],
         "title": "ToolsSchemaUpdate",
         "description": "Body for ``PUT /v1/connectors/{connector}/tools_schema``."
+      },
+      "TraceEntry": {
+        "properties": {
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "run",
+              "session",
+              "request",
+              "response",
+              "tool_call",
+              "gate",
+              "annotation",
+              "error",
+              "message",
+              "agent_call"
+            ],
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "terminal_state": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "errored",
+                  "cancelled",
+                  "suspended",
+                  "running"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal State"
+          },
+          "error_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Kind"
+          }
+        },
+        "type": "object",
+        "required": [
+          "depth",
+          "kind",
+          "id"
+        ],
+        "title": "TraceEntry",
+        "description": "One line of a flattened trace.\n\n``depth`` is the node's DFS depth (0 = root); a CLI renders it as\nindentation. ``parent_id`` is the enclosing node's id (``None`` for the\nroot). For **node** entries ``terminal_state`` / ``error_kind`` carry the\nnormalized outcome; for **frame** entries they are ``None`` and ``summary``\ncarries the per-kind digest. ``timestamp`` is the entry's ``created_at``\n(``transaction_timestamp()`` for journal frames) \u2014 exposed as a column for\nchronology, NOT the canonical order (see the module docstring)."
+      },
+      "TraceResponse": {
+        "properties": {
+          "root_kind": {
+            "type": "string",
+            "enum": [
+              "run",
+              "session"
+            ],
+            "title": "Root Kind"
+          },
+          "root_id": {
+            "type": "string",
+            "title": "Root Id"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/TraceEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "truncated": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TraceTruncated"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "root_kind",
+          "root_id"
+        ],
+        "title": "TraceResponse",
+        "description": "A one-call flat trace for a run-root or session-root.\n\n``root_kind`` / ``root_id`` name the tree's root. ``entries`` is the flat\nDFS-pre-order list (nodes interleaved with their journal frames).\n``truncated`` is non-``None`` iff the node-count ceiling cut the walk.\n\nOrdering caveat (documented per #1149): cross-subtree time-ordering is\nbest-effort to **transaction granularity** \u2014 ``created_at`` is\n``transaction_timestamp()`` (constant for a whole run-step's journal; it can\ntie or invert across concurrent transactions on separate pooled\nconnections), and the two journals share no global sequence. Only the causal\nparent\u2192child edge is exact, so DFS pre-order is canonical; chronological is a\nclient-side re-sort.\n\nScope caveat: ``wake_session`` peer-pokes are out of scope (a peer stimulus,\nnot a spawn \u2014 no ``request_opened`` edge); they do not appear as nodes."
+      },
+      "TraceTruncated": {
+        "properties": {
+          "at_nodes": {
+            "type": "integer",
+            "title": "At Nodes",
+            "description": "Number of nodes emitted before the ceiling cut the walk."
+          }
+        },
+        "type": "object",
+        "required": [
+          "at_nodes"
+        ],
+        "title": "TraceTruncated",
+        "description": "The typed marker that the walk hit its node-count ceiling.\n\n``#1124``'s depth counter bounds path length (\u226410 by construction), but it\ndoes NOT bound the node count: ``workflow_max_agent_calls`` defaults to 1000\nlifetime ``agent()`` children per run. So the walk carries an explicit\nconfig-tunable node-count ceiling; when it trips, ``at_nodes`` records how\nmany nodes were emitted before the frontier was cut. The response stays\nwell-formed (a partial-but-honest tree), never a silent truncation."
       },
       "TriggerCreate": {
         "properties": {

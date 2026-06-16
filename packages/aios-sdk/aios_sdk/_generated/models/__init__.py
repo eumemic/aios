@@ -211,6 +211,12 @@ from .tool_spec_type_type_0 import ToolSpecTypeType0
 from .tool_spec_type_type_1 import ToolSpecTypeType1
 from .tools_schema_update import ToolsSchemaUpdate
 from .tools_schema_update_tools_item import ToolsSchemaUpdateToolsItem
+from .trace_entry import TraceEntry
+from .trace_entry_kind import TraceEntryKind
+from .trace_entry_terminal_state_type_0 import TraceEntryTerminalStateType0
+from .trace_response import TraceResponse
+from .trace_response_root_kind import TraceResponseRootKind
+from .trace_truncated import TraceTruncated
 from .trigger_create import TriggerCreate
 from .trigger_create_metadata import TriggerCreateMetadata
 from .trigger_echo import TriggerEcho
@@ -475,6 +481,12 @@ __all__ = (
     "ToolSpecTypeType1",
     "ToolsSchemaUpdate",
     "ToolsSchemaUpdateToolsItem",
+    "TraceEntry",
+    "TraceEntryKind",
+    "TraceEntryTerminalStateType0",
+    "TraceResponse",
+    "TraceResponseRootKind",
+    "TraceTruncated",
     "TriggerCreate",
     "TriggerCreateMetadata",
     "TriggerEcho",

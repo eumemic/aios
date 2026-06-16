@@ -26,9 +26,9 @@ def _script_directory() -> ScriptDirectory:
 
 
 def test_single_head() -> None:
-    """The migration ladder has exactly one head: ``0102``."""
+    """The migration ladder has exactly one head: ``0103``."""
     script = _script_directory()
-    assert script.get_heads() == ["0102"]
+    assert script.get_heads() == ["0103"]
 
 
 def test_chain_is_linear() -> None:
