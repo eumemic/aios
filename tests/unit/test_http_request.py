@@ -416,9 +416,7 @@ class TestHttpRequestHandler:
         dispatches it upstream verbatim. The GitHub ``/repos/**`` route opts in so
         the dev-pipeline can follow ``?per_page``/``?page`` pagination to read a full
         comment thread. The path portion is still glob-matched (query stripped first)."""
-        agent = _agent(
-            http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])]
-        )
+        agent = _agent(http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])])
         captured: dict[str, Any] = {}
         stub = _make_stub_client(response=httpx.Response(200, content=b"[]"), capture=captured)
         with (
@@ -465,9 +463,7 @@ class TestHttpRequestHandler:
         """Even with ``allow_query=True``, the query is stripped before the glob-match,
         so a path the route pattern does not cover is still refused (the query never
         widens the path-dimension grant)."""
-        agent = _agent(
-            http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])]
-        )
+        agent = _agent(http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])])
         with _patch_load_agent(agent):
             result = await http_request_handler(
                 "sess_x",
@@ -479,9 +475,7 @@ class TestHttpRequestHandler:
     async def test_fragment_rejected_even_when_query_allowed(self, _stub_runtime: Any) -> None:
         """``allow_query`` opts into a query string only — a ``#fragment`` is still
         rejected (httpx strips it with no route equivalent)."""
-        agent = _agent(
-            http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])]
-        )
+        agent = _agent(http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])])
         with _patch_load_agent(agent):
             result = await http_request_handler(
                 "sess_x",

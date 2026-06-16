@@ -321,9 +321,7 @@ async def test_happy_path_merges_and_completes() -> None:
         if not path.startswith("/repos/o/r/issues/5/comments")
     )
     # item 1: the comment thread is read at ingest (paginated -> ?per_page/?page carried)
-    assert any(
-        m == "GET" and p.startswith("/repos/o/r/issues/5/comments") for m, p in scn.http
-    )
+    assert any(m == "GET" and p.startswith("/repos/o/r/issues/5/comments") for m, p in scn.http)
     # item 3: in-progress claimed at ingest, released on success, never marked failed
     assert "autodev:in-progress" in scn.labels_added
     assert "autodev:in-progress" in scn.labels_removed
@@ -460,9 +458,7 @@ async def test_comment_thread_single_page_does_not_over_fetch() -> None:
     scn = Scenario(comments=["only design note: prefer a typed enum"])
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
-    pages = [
-        p for m, p in scn.http if m == "GET" and p.startswith("/repos/o/r/issues/5/comments?")
-    ]
+    pages = [p for m, p in scn.http if m == "GET" and p.startswith("/repos/o/r/issues/5/comments?")]
     assert len(pages) == 1, f"single page must not over-fetch; fetched {pages!r}"
     assert "page=1" in pages[0]
 
