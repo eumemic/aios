@@ -668,6 +668,7 @@ async def test_post_merge_watch_error_then_success_recovers_to_green() -> None:
 
 def _sha1_re():
     import re as _re
+
     return _re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -683,8 +684,7 @@ async def test_post_merge_watch_is_handed_the_merge_sha1_not_the_branch_name() -
     assert "advisories" not in value  # green master raises no advisory
     assert scn.followups == []
     # the watch input carries a 40-char SHA-1 head_sha, not just a branch name
-    watch_in = [i for i in scn.agent_inputs
-                if i.get("task") == "watch_ci" and i.get("ref")]
+    watch_in = [i for i in scn.agent_inputs if i.get("task") == "watch_ci" and i.get("ref")]
     assert watch_in, "post-merge master-CI watch was never dispatched"
     for w in watch_in:
         assert w["head_sha"] == MERGE_SHA
@@ -700,8 +700,7 @@ async def test_post_merge_watch_never_passes_a_sha256_to_a_github_endpoint() -> 
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
     assert value["master_ci"] == "green"
-    watch_in = [i for i in scn.agent_inputs
-                if i.get("task") == "watch_ci" and i.get("ref")]
+    watch_in = [i for i in scn.agent_inputs if i.get("task") == "watch_ci" and i.get("ref")]
     assert watch_in, "post-merge master-CI watch was never dispatched"
     for w in watch_in:
         sha = w["head_sha"]
