@@ -124,3 +124,51 @@ def test_health_still_200_and_pool_untouched() -> None:
     body = resp.json()
     assert body["status"] == "ok"
     assert "version" in body
+
+
+# ─── /health build_sha (aios#1327, Unit A2) ──────────────────────────────────
+
+
+def test_health_shape_build_sha_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/health` returns EXACTLY {"status","version","build_sha"}; ``build_sha`` is
+    ``None`` when ``AIOS_BUILD_SHA`` is unset (an un-instrumented build) — the
+    reconciler reads that as ``cannot-determine``, never a false match."""
+    monkeypatch.delenv("AIOS_BUILD_SHA", raising=False)
+    client = TestClient(_app_with_pool(_FakePool()))
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    # The must-fix shape assertion: exactly these three keys, no more, no less.
+    assert set(body.keys()) == {"status", "version", "build_sha"}
+    assert body["status"] == "ok"
+    assert body["build_sha"] is None
+
+
+def test_health_shape_build_sha_reports_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When ``AIOS_BUILD_SHA`` is set (Coolify build-arg baked into the image),
+    `/health` reports it verbatim. ``version`` stays the static package string,
+    UNCHANGED — ``build_sha`` is the new source of truth."""
+    from aios import __version__
+
+    monkeypatch.setenv("AIOS_BUILD_SHA", "abc1234deadbeef")
+    client = TestClient(_app_with_pool(_FakePool()))
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"status", "version", "build_sha"}
+    assert body["build_sha"] == "abc1234deadbeef"
+    assert body["version"] == __version__  # version field unchanged
+
+
+def test_health_build_sha_does_not_touch_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding ``build_sha`` must not break the liveness contract: still no DB touch."""
+    monkeypatch.setenv("AIOS_BUILD_SHA", "feed")
+
+    class _ExplodingPool:
+        def acquire(self) -> Any:
+            raise AssertionError("/health must not touch the pool")
+
+    client = TestClient(_app_with_pool(_ExplodingPool()))
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["build_sha"] == "feed"

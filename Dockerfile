@@ -56,6 +56,28 @@ COPY migrations ./migrations
 # worker image; the worker resolves it via ``Path(__file__).parents[3]``.
 COPY bin ./bin
 COPY src ./src
+
+# Build-SHA-in-image (aios#1327, plane B2 of the substrate-different-verdict
+# invariant). Bake the git commit being built INTO the image so a genuinely
+# uncorrelated substrate (the live container) can report which commit it is
+# running — the deploy-ledger says only what the deploy actor INTENDED, never
+# what is running. The build-arg is injected by the eumemic-ops deploy step
+# (Coolify build-time env -> docker build --build-arg) immediately before each
+# deploy; an un-instrumented build leaves the `unknown` fallback so the
+# running==merged reconciler reads `cannot-determine` (never a false match).
+#
+#   * ENV   -> readable in-process by /health (Unit A2: os.environ["AIOS_BUILD_SHA"]).
+#   * LABEL -> readable by `docker inspect` over SSH without an HTTP call — the
+#     worker has no HTTP server, so the reconciler reads its running SHA off the
+#     running container's image label (Unit B step 2).
+#
+# Placed AFTER `COPY src ./src` so the SHA flips on the same layer the source
+# does (a source change is a new SHA); the cheap ARG/ENV/LABEL re-eval does not
+# bust the expensive `uv sync` layers above.
+ARG AIOS_BUILD_SHA=unknown
+ENV AIOS_BUILD_SHA=${AIOS_BUILD_SHA}
+LABEL org.eumemic.build_sha=${AIOS_BUILD_SHA}
+
 # Authored seccomp profile for sandbox containers (#807). The worker's docker
 # CLI reads this from its OWN filesystem and ships the JSON to the daemon (the
 # daemon never reads the worker's FS). Must match the default resolved by

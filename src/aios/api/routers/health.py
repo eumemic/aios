@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
@@ -13,16 +14,31 @@ router = APIRouter()
 
 
 @router.get("/health", operation_id="get_health")
-async def health() -> dict[str, str]:
-    """Liveness probe. Unauthenticated; returns the running aios version.
+async def health() -> dict[str, str | None]:
+    """Liveness probe. Unauthenticated; returns the running aios version + build SHA.
 
     Suitable for load balancer health checks and monitoring probes. Always
-    returns 200 with ``{"status": "ok", "version": <version>}`` if the
-    process is up. Deliberately does NOT touch the DB pool — a post-startup
+    returns 200 with ``{"status": "ok", "version": <version>, "build_sha": <sha-or-None>}``
+    if the process is up. Deliberately does NOT touch the DB pool — a post-startup
     Postgres outage must not flip liveness (that's ``/ready``'s job), or an
     orchestrator would kill an otherwise-healthy process during a DB blip.
+
+    ``build_sha`` (aios#1327, Unit A2) is the git commit baked into THIS image at
+    build time (``ENV AIOS_BUILD_SHA`` in the Dockerfile ``base`` stage). It is the
+    in-process running-truth read: unlike ``version`` (a static package string that
+    never changes between builds), it tells you which commit is actually running.
+    ``None`` when ``AIOS_BUILD_SHA`` is unset — an un-instrumented build — which the
+    running==merged reconciler reads as ``cannot-determine``, never a false match.
+    ``version`` stays the static package string, untouched.
+
+    The return type is ``dict[str, str | None]`` (not ``dict[str, str]``): ``build_sha``
+    is genuinely nullable because ``os.environ.get`` returns ``str | None``.
     """
-    return {"status": "ok", "version": __version__}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "build_sha": os.environ.get("AIOS_BUILD_SHA"),
+    }
 
 
 @router.get("/ready", operation_id="get_ready")
