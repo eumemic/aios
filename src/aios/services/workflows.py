@@ -40,6 +40,11 @@ from aios.services import attenuation as attenuation_service
 from aios.services import sessions as sessions_service
 from aios.services.await_completion import await_completion
 from aios.services.wake import defer_run_wake
+from aios.workflows.script_validation import (
+    _declared_tool_names,
+    extract_literal_agent_ids,
+    validate_workflow_script,
+)
 from aios.workflows.service import create_run, resume_gate
 
 __all__ = [
@@ -146,6 +151,48 @@ def _reject_operator_path_names_only(
     return [s for s in http_servers if isinstance(s, HttpServerSpec)]
 
 
+async def _validate_script_at_authoring(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    script: str,
+    tools: list[ToolSpec],
+) -> None:
+    """Create/update-time validation of a workflow ``script`` (#1286): compile, assert a
+    top-level ``async def main(input)``, and check the declared tool surface is a superset
+    of the AST-extracted ``tool("…")`` / ``agent(agent_id="…")`` required union. Raises
+    :class:`ValidationError` with a precise message; a no-op when the script is admissible.
+
+    **Chosen ``agent_id`` depth.** A literal ``agent(agent_id="A")`` resolves the named
+    agent's *declared tool surface* (by the same ``type``/``name`` identity keys used for
+    ``tool("…")``) and requires the workflow's declared ``tools`` to cover it — the #794
+    clamp ``child = agent ∩ run`` silently strips any tool the workflow under-declares, so
+    an under-declaration is exactly the surface-drift bug this closes. A literal id naming
+    an agent that does not resolve (cross-account / archived / absent) is excluded from the
+    union — un-resolvable, never a false rejection — mirroring an un-AST-able name.
+    """
+
+    async def resolve_one(agent_id: str) -> frozenset[str] | None:
+        try:
+            agent = await agents_service.get_agent(pool, agent_id, account_id=account_id)
+        except NotFoundError:
+            return None
+        return frozenset(_declared_tool_names(list(agent.tools)))
+
+    # ``validate_workflow_script`` takes a *sync* resolver; pre-resolve the (tiny) set of
+    # literal agent ids here so the validator core stays pure/sync and DB-free. An
+    # unparsable script yields no ids — the compile step inside the validator reports it.
+    resolved: dict[str, frozenset[str] | None] = {
+        aid: await resolve_one(aid) for aid in extract_literal_agent_ids(script)
+    }
+
+    validate_workflow_script(
+        script,
+        tools=tools,
+        resolve_agent_tools=lambda aid: resolved.get(aid),
+    )
+
+
 async def create_workflow(
     pool: asyncpg.Pool[Any],
     *,
@@ -171,7 +218,15 @@ async def create_workflow(
     creating agent first. With no creator (the HTTP/operator path) any surface may be
     declared verbatim, account-scoped — but names-only sugar is unavailable there (no
     acting agent to resolve against).
+
+    **Create-time script validation (#1286):** the ``script`` is compiled and structurally
+    checked (top-level ``async def main(input)`` + declared-surface ⊇ AST-required union)
+    before anything is written; a breach raises :class:`ValidationError` and nothing is
+    created. This runs on both the agent (creator) and the HTTP/operator path.
     """
+    await _validate_script_at_authoring(
+        pool, account_id=account_id, script=script, tools=tools or []
+    )
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
     if creator_session_id is not None:
@@ -238,6 +293,7 @@ async def update_workflow(
     """
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
+    current: Workflow | None = None
     if actor_session_id is None:
         operator_http = _reject_operator_path_names_only(http_servers)
     if actor_session_id is not None:
@@ -269,6 +325,20 @@ async def update_workflow(
             tools=tools if tools is not None else current.tools,
             mcp_servers=mcp_servers if mcp_servers is not None else current.mcp_servers,
             http_servers=merged_http,
+        )
+    # Update-time script validation (#1286): validate the EFFECTIVE script + tools — the
+    # update merges with the stored definition (an omitted ``script``/``tools`` preserves
+    # current), so a rewrite that touches only one side must still satisfy the other. Read
+    # current on the operator path too (the actor path already fetched it above; reuse it).
+    if script is not None or tools is not None:
+        current_for_validation = current or await get_workflow(
+            pool, workflow_id, account_id=account_id
+        )
+        await _validate_script_at_authoring(
+            pool,
+            account_id=account_id,
+            script=script if script is not None else current_for_validation.script,
+            tools=tools if tools is not None else list(current_for_validation.tools),
         )
     # Agent-actor touching http: store the inherited launcher-frozen routes. Operator path,
     # or an edit that didn't touch http (``http_servers is None`` → query preserves current):

@@ -61,7 +61,7 @@ async def _seed_parent_run(pool: asyncpg.Pool[Any], *, account_id: str, environm
         pool,
         account_id=account_id,
         name="request-opened-wf",
-        script="def main(ctx):\n    return None\n",
+        script="async def main(input):\n    return None\n",
         description=None,
         tools=[],
     )

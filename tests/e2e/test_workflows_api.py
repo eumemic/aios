@@ -260,6 +260,97 @@ async def test_requires_auth(http_client: httpx.AsyncClient) -> None:
     assert r.status_code == 401, r.text
 
 
+async def test_create_workflow_script_validation_rejections(
+    http_client: httpx.AsyncClient,
+) -> None:
+    """Create-time script validation (#1286) over the HTTP surface: a non-compiling
+    script, a missing/mis-signatured `main`, and an under-declared `tool(...)` surface
+    are all rejected 422 and NOT created; a valid script still creates 201."""
+    # 1. Syntax error → 422, names a compile failure.
+    r = await http_client.post(
+        "/v1/workflows",
+        json={"name": f"bad-syn-{_uniq()}", "script": "async def main(input):\n    return (1\n"},
+    )
+    assert r.status_code == 422, r.text
+    assert "compile" in r.json()["error"]["message"]
+
+    # 2. Missing top-level main → 422.
+    r = await http_client.post(
+        "/v1/workflows", json={"name": f"bad-nomain-{_uniq()}", "script": "x = 1\n"}
+    )
+    assert r.status_code == 422, r.text
+    assert "main" in r.json()["error"]["message"]
+
+    # 3. Non-async main → 422.
+    r = await http_client.post(
+        "/v1/workflows",
+        json={"name": f"bad-sync-{_uniq()}", "script": "def main(input):\n    return input\n"},
+    )
+    assert r.status_code == 422, r.text
+    assert "async" in r.json()["error"]["message"]
+
+    # 4. Under-declared tool surface → 422, names the missing tool.
+    r = await http_client.post(
+        "/v1/workflows",
+        json={
+            "name": f"bad-tool-{_uniq()}",
+            "script": "async def main(input):\n    return await tool('bash', {})\n",
+            "tools": [],
+        },
+    )
+    assert r.status_code == 422, r.text
+    assert "bash" in r.json()["error"]["message"]
+
+    # 5. The same script WITH the tool declared → 201 (covered surface succeeds).
+    r = await http_client.post(
+        "/v1/workflows",
+        json={
+            "name": f"ok-tool-{_uniq()}",
+            "script": "async def main(input):\n    return await tool('bash', {})\n",
+            "tools": [{"type": "bash"}],
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    # 6. A computed (un-AST-able) tool name does NOT cause a false rejection.
+    r = await http_client.post(
+        "/v1/workflows",
+        json={
+            "name": f"ok-dyn-{_uniq()}",
+            "script": (
+                "async def main(input):\n"
+                "    name = input['tool']\n"
+                "    return await tool(name, {})\n"
+            ),
+            "tools": [],
+        },
+    )
+    assert r.status_code == 201, r.text
+
+
+async def test_update_workflow_script_validation_rejected(
+    http_client: httpx.AsyncClient,
+) -> None:
+    """Validation is enforced on update too (criterion 8): a structurally-bad script
+    update is rejected 422 and the stored definition is unchanged."""
+    name = f"upd-val-{_uniq()}"
+    r = await http_client.post("/v1/workflows", json={"name": name, "script": _SCRIPT})
+    assert r.status_code == 201
+    wf = r.json()
+
+    r = await http_client.put(
+        f"/v1/workflows/{wf['id']}",
+        json={"version": 1, "script": "def main(input):\n    return input\n"},
+    )
+    assert r.status_code == 422, r.text
+    assert "async" in r.json()["error"]["message"]
+
+    # Unchanged: still v1 with the original script.
+    r = await http_client.get(f"/v1/workflows/{wf['id']}")
+    assert r.status_code == 200
+    assert r.json()["version"] == 1
+
+
 async def test_update_workflow_roundtrip_and_stale_409(http_client: httpx.AsyncClient) -> None:
     name = f"upd-{_uniq()}"
     r = await http_client.post("/v1/workflows", json={"name": name, "script": _SCRIPT})
@@ -278,8 +369,10 @@ async def test_update_workflow_roundtrip_and_stale_409(http_client: httpx.AsyncC
     assert "v2" in updated["script"]
     assert updated["name"] == name
 
-    # Stale token → 409; unknown id → 404.
-    r = await http_client.put(f"/v1/workflows/{wf['id']}", json={"version": 1, "script": "x"})
+    # Stale token → 409; unknown id → 404. (Use a valid script: create-time validation
+    # (#1286) runs before the optimistic-version write, so a structurally-bad script
+    # would 422 first and mask the 409/404 this case is asserting.)
+    r = await http_client.put(f"/v1/workflows/{wf['id']}", json={"version": 1, "script": _SCRIPT})
     assert r.status_code == 409
-    r = await http_client.put("/v1/workflows/wf_nope", json={"version": 1, "script": "x"})
+    r = await http_client.put("/v1/workflows/wf_nope", json={"version": 1, "script": _SCRIPT})
     assert r.status_code == 404

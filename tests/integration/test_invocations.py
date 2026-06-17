@@ -89,7 +89,7 @@ async def _seed_workflow(pool: asyncpg.Pool[Any], *, account_id: str) -> str:
         pool,
         account_id=account_id,
         name="invocations-wf",
-        script="def main(ctx):\n    return None\n",
+        script="async def main(input):\n    return None\n",
         description=None,
         tools=[],
     )
