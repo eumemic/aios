@@ -193,6 +193,17 @@ module = [
 ]
 ignore_missing_imports = true
 
+# slack-sdk's async Socket-Mode surface is only partially typed (its
+# ``connect``/``disconnect``/``close`` come back as untyped functions and
+# its listener-list element type is the abstract base client).  Treat the
+# whole package as untyped at the import boundary so strict mypy doesn't
+# flag every call into it; the connector wraps the seam thinly.
+[[tool.mypy.overrides]]
+module = ["slack_sdk.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
