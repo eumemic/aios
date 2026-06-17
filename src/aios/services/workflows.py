@@ -40,6 +40,7 @@ from aios.services import attenuation as attenuation_service
 from aios.services import sessions as sessions_service
 from aios.services.await_completion import await_completion
 from aios.services.wake import defer_run_wake
+from aios.workflows.script_validation import validate_workflow_script
 from aios.workflows.service import create_run, resume_gate
 
 __all__ = [
@@ -172,6 +173,17 @@ async def create_workflow(
     declared verbatim, account-scoped — but names-only sugar is unavailable there (no
     acting agent to resolve against).
     """
+    # Create-time validation (#1284): compile + assert async def main(input) +
+    # AST-derived required-surface union ⊆ the DECLARED surface. Runs before any DB
+    # read so a malformed script / under-declared surface is rejected at author time
+    # with a precise error, not as a failed run read back from the journal. The
+    # declared (not clamped) surface is checked — that is what the author wrote.
+    validate_workflow_script(
+        script,
+        tools=tools or [],
+        mcp_servers=mcp_servers or [],
+        http_servers=http_servers or [],
+    )
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
     if creator_session_id is not None:
@@ -238,25 +250,43 @@ async def update_workflow(
     """
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
+    # Fetch current up front (one read, reused below). It 404s an absent/foreign id and
+    # gives the preserved (omitted-field) values the effective-shape validation merges in.
+    current = await get_workflow(pool, workflow_id, account_id=account_id)
+
+    # Order the cheap existence/conflict gates BEFORE validation so an unknown id (404)
+    # and a stale optimistic token (409) keep precedence over a 422 script-validation
+    # error — the contract a caller probing the version token relies on. (The query's
+    # ``WHERE version`` stays the authoritative write-time serializer; this pre-check is
+    # purely for deterministic ordering, mirroring the query's own up-front token check.)
+    if current.archived_at is not None:
+        raise ConflictError(f"workflow {workflow_id} is archived", detail={"id": workflow_id})
+    if current.version != expected_version:
+        raise ConflictError(
+            f"version mismatch: expected {expected_version}, current is {current.version}",
+            detail={
+                "expected": expected_version,
+                "current": current.version,
+                "id": workflow_id,
+            },
+        )
+
+    # Create-time validation also runs on UPDATE (#1284, criteria 1-7 apply on update):
+    # validate the EFFECTIVE script + declared surface — the new value where provided,
+    # the preserved current value where omitted — so an under-declared surface can't be
+    # introduced by narrowing ``tools`` while leaving a tool("X") call in the script.
+    validate_workflow_script(
+        script if script is not None else current.script,
+        tools=tools if tools is not None else current.tools,
+        mcp_servers=mcp_servers if mcp_servers is not None else current.mcp_servers,
+        http_servers=http_servers if http_servers is not None else list(current.http_servers),
+    )
+
     if actor_session_id is None:
         operator_http = _reject_operator_path_names_only(http_servers)
     if actor_session_id is not None:
-        current = await get_workflow(pool, workflow_id, account_id=account_id)
-        if current.version != expected_version:
-            # Pin the attenuation read to the caller's token. Without this, an actor
-            # could send a FUTURE token: attenuation passes against today's surface,
-            # a concurrent update broadens it and bumps to exactly that token, and the
-            # optimistic UPDATE then matches — landing the actor's script on a surface
-            # that was never checked. With the pin, the UPDATE's ``WHERE version``
-            # guarantees nothing changed between this read and the write.
-            raise ConflictError(
-                f"version mismatch: expected {expected_version}, current is {current.version}",
-                detail={
-                    "expected": expected_version,
-                    "current": current.version,
-                    "id": workflow_id,
-                },
-            )
+        # The version match was pinned above (current was read at this consistency
+        # point); the UPDATE's ``WHERE version`` remains the authoritative serializer.
         # ``current.http_servers`` is the already-resolved stored spec; ``list(...)``
         # widens it to ``list[HttpServerRef]`` for the (str | spec)-typed parameter.
         merged_http: list[HttpServerRef] = (
