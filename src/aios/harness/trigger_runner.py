@@ -86,6 +86,7 @@ def compose_workflow_run_input(
     source: str,
     fired_at: datetime,
     input_template: Any,
+    event: dict[str, Any] | None = None,
     completed_run: WfRun | None = None,
     completed_error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -99,7 +100,9 @@ def compose_workflow_run_input(
     ``trigger.run`` — a workflow script has no capability to read another run,
     so by-reference would strand the data. ``trigger.run.error`` mirrors the
     ``WfRunWaitResponse`` shape: the ``{'kind': …}`` from the run_completed
-    journal event, ``None`` unless the watched run errored.
+    journal event, ``None`` unless the watched run errored. For external_event
+    fires the inbound webhook body rides verbatim under ``trigger.event`` so
+    the workflow reads ``input["trigger"]["event"]``.
     """
     trigger: dict[str, Any] = {
         "id": trigger_id,
@@ -115,6 +118,8 @@ def compose_workflow_run_input(
             "output": completed_run.output,  # row value: non-null only on completed
             "error": completed_error,
         }
+    if event is not None:
+        trigger["event"] = event
     return {"trigger": trigger, "input": input_template}
 
 
@@ -139,14 +144,22 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
     started_at = datetime.now(UTC)
 
     event: dict[str, Any] | None = None
+    # The carrier row's originating context (``run_completion`` vs
+    # ``external_event``) — the load-bearing discriminator passed to
+    # ``_run_workflow`` so it derives lineage/envelope source from the FIRE'S
+    # ORIGIN, never from ``event is not None`` (both carrier kinds carry a
+    # dict event). ``None`` for tick fires (no carrier row).
+    carrier_context: str | None = None
     async with pool.acquire() as conn:
         if trigger_run_id is not None:
-            event = await queries.claim_trigger_run(conn, trigger_run_id, started_at=started_at)
-            if event is None:
+            claimed = await queries.claim_trigger_run(conn, trigger_run_id, started_at=started_at)
+            if claimed is None:
                 # Already claimed: a sweep re-defer raced the live job. The
                 # claim, not queue dedup, is what makes that race safe.
                 log.info("trigger.fire_already_claimed", trigger_run_id=trigger_run_id)
                 return
+            event = claimed.event
+            carrier_context = claimed.trigger_context
         try:
             trigger = await queries.unscoped_get_trigger_row(conn, trigger_id)
         except NotFoundError:
@@ -217,8 +230,12 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
     elif isinstance(action, WakeSessionAction):
         status, error_summary, result_id = await _run_wake_session(trigger, action)
     else:
+        # trigger_context derives from the FIRE'S ORIGIN: a carrier fire carries
+        # its stamped context (run_completion / external_event); a tick fire has
+        # no carrier, so it is the (origin-fixed) cron / one_shot lifecycle.
+        trigger_context = carrier_context if carrier_context is not None else trigger.source
         status, error_summary, result_id = await _run_workflow(
-            trigger, action, event=event, started_at=started_at
+            trigger, action, event=event, trigger_context=trigger_context, started_at=started_at
         )
 
     if is_one_shot:
@@ -565,6 +582,7 @@ async def _run_workflow(
     action: WorkflowAction,
     *,
     event: dict[str, Any] | None,
+    trigger_context: str,
     started_at: datetime,
 ) -> tuple[TriggerFireStatus, str | None, str | None]:
     """Run a ``workflow`` action — launch a run, deterministic, no model wake.
@@ -602,7 +620,13 @@ async def _run_workflow(
         completed_run: WfRun | None = None
         completed_error: dict[str, Any] | None = None
         parent_run_id: str | None
-        if event is not None:
+        # Branch on the FIRE'S ORIGIN, NEVER on ``event is not None``: an
+        # external_event carrier ALSO carries a dict ``event`` (the inbound
+        # body), but it has NO ``run_id`` to read a completing run from. The
+        # run_completion arm's ``event["run_id"]`` read is the trap this guard
+        # exists to avoid for external_event fires.
+        if trigger_context == "run_completion":
+            assert event is not None
             # Read the watched run at fire time, ACCOUNT-SCOPED (never the
             # unscoped step-getter): if the carrier's run id were ever
             # mismatched to a foreign run, the fire fails NotFound instead of
@@ -621,24 +645,33 @@ async def _run_workflow(
             # at the shared budget (INVOKE_MAX_DEPTH) BY CONSTRUCTION — the
             # decrement IS the cycle bound.
             parent_run_id = completed_run.id
+        elif trigger_context == "external_event":
+            # An external stimulus is not a continuation of any run — it is a
+            # FRESH LINEAGE ROOT. ``parent_run_id = None`` ⇒ root depth, exactly
+            # like a cron WorkflowAction; the body flows verbatim into the
+            # envelope as ``input["trigger"]["event"]``. No ``run_id`` to read.
+            parent_run_id = None
         else:
-            # Timer fires inherit the owner session's own (immutable) lineage
-            # — exactly what the create_run builtin threads, projected onto
-            # the TriggerRow off its sessions JOIN. None for normal sessions
-            # (root run); for a workflow-child owner this closes the
-            # depth-laundering bypass (a past-fire_at one-shot is create_run
+            # Timer fires (cron / one_shot) inherit the owner session's own
+            # (immutable) lineage — exactly what the create_run builtin threads,
+            # projected onto the TriggerRow off its sessions JOIN. None for
+            # normal sessions (root run); for a workflow-child owner this closes
+            # the depth-laundering bypass (a past-fire_at one-shot is create_run
             # with a 0s delay).
             parent_run_id = trigger.session_parent_run_id
         composed = compose_workflow_run_input(
             trigger_id=trigger.id,
             trigger_name=trigger.name,
-            # The envelope's source derives from the FIRE'S ORIGIN, like the
-            # lifecycle arm — the reloaded row's source is user-mutable in the
-            # match→fire window, and the delivered context must agree with the
-            # carrier audit row about what kind of fire this was.
-            source="run_completion" if event is not None else trigger.source,
+            # The envelope's source IS the fire's origin context — the reloaded
+            # row's source is user-mutable in the match→fire window, and the
+            # delivered context must agree with the carrier audit row about what
+            # kind of fire this was. For external_event this stamps
+            # "external_event"; for run_completion, "run_completion"; for a tick
+            # fire it is the (origin-fixed) cron/one_shot source.
+            source=trigger_context,
             fired_at=started_at,
             input_template=action.input_template,
+            event=event if trigger_context == "external_event" else None,
             completed_run=completed_run,
             completed_error=completed_error,
         )

@@ -72,6 +72,7 @@ class TriggerRow(NamedTuple):
     last_fire_status: TriggerFireStatus | None
     consecutive_failures: int
     environment_id: str | None
+    ingest_token_hash: str | None
     session_archived_at: datetime | None
     session_parent_run_id: str | None
 
@@ -115,6 +116,7 @@ async def add_trigger(
     metadata: dict[str, Any],
     next_fire: datetime | None,
     environment_id: str | None,
+    ingest_token_hash: str | None,
     account_id: str,
 ) -> TriggerEcho:
     """Insert a trigger.
@@ -138,8 +140,9 @@ async def add_trigger(
             """
             INSERT INTO triggers
                 (id, owner_session_id, account_id, name, source, source_spec,
-                 action, enabled, next_fire, environment_id, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 action, enabled, next_fire, environment_id, ingest_token_hash,
+                 metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *
             """,
             trigger_id,
@@ -152,6 +155,7 @@ async def add_trigger(
             enabled,
             next_fire,
             environment_id,
+            ingest_token_hash,
             json.dumps(metadata),
         )
     except asyncpg.UniqueViolationError as exc:
@@ -266,6 +270,7 @@ async def update_trigger(
     metadata: dict[str, Any] | None = None,
     next_fire: datetime | None | EllipsisType = ...,
     environment_id: str | None | EllipsisType = ...,
+    ingest_token_hash: str | None | EllipsisType = ...,
     reset_consecutive_failures: bool = False,
     account_id: str,
 ) -> TriggerEcho:
@@ -311,6 +316,8 @@ async def update_trigger(
         add("next_fire", next_fire)
     if not isinstance(environment_id, EllipsisType):
         add("environment_id", environment_id)
+    if not isinstance(ingest_token_hash, EllipsisType):
+        add("ingest_token_hash", ingest_token_hash)
     if reset_consecutive_failures:
         set_clauses.append("consecutive_failures = 0")
 
@@ -351,7 +358,8 @@ async def unscoped_get_trigger_row(
         "SELECT t.id, t.owner_session_id, t.account_id, t.name, t.source, "
         "t.source_spec, t.action, t.enabled, t.next_fire, t.running_since, "
         "t.last_fire_at, t.last_fire_status, t.consecutive_failures, "
-        "t.environment_id, s.archived_at AS session_archived_at, "
+        "t.environment_id, t.ingest_token_hash, "
+        "s.archived_at AS session_archived_at, "
         "s.parent_run_id AS session_parent_run_id "
         "FROM triggers AS t "
         "JOIN sessions AS s ON s.id = t.owner_session_id "
@@ -378,6 +386,7 @@ async def unscoped_get_trigger_row(
         last_fire_status=row["last_fire_status"],
         consecutive_failures=row["consecutive_failures"],
         environment_id=row["environment_id"],
+        ingest_token_hash=row["ingest_token_hash"],
         session_archived_at=row["session_archived_at"],
         session_parent_run_id=row["session_parent_run_id"],
     )
@@ -425,7 +434,8 @@ async def fetch_and_claim_due_triggers(
                t.source_spec, t.source_spec ->> 'schedule' AS schedule,
                t.action, t.enabled, t.next_fire, t.running_since,
                t.last_fire_at, t.last_fire_status, t.consecutive_failures,
-               t.environment_id, s.archived_at AS session_archived_at,
+               t.environment_id, t.ingest_token_hash,
+               s.archived_at AS session_archived_at,
                s.parent_run_id AS session_parent_run_id
         FROM triggers AS t
         JOIN sessions AS s ON s.id = t.owner_session_id
@@ -491,6 +501,7 @@ async def fetch_and_claim_due_triggers(
                 last_fire_status=r["last_fire_status"],
                 consecutive_failures=r["consecutive_failures"],
                 environment_id=r["environment_id"],
+                ingest_token_hash=r["ingest_token_hash"],
                 session_archived_at=r["session_archived_at"],
                 session_parent_run_id=r["session_parent_run_id"],
             )
@@ -758,24 +769,130 @@ async def insert_run_completion_fires(
     return refs
 
 
+class ResolvedExternalEventTrigger(NamedTuple):
+    """The single ``external_event`` trigger an ingest token resolves to.
+
+    The token IS the tenant proof — the matched row's own ``account_id``
+    becomes the authenticated scope for the fire it dispatches, exactly as
+    ``resolve_runtime_token`` makes the matched row's account the auth scope.
+    """
+
+    trigger_id: str
+    account_id: str
+    owner_session_id: str
+    trigger_name: str
+
+
+async def resolve_external_event_trigger(
+    conn: asyncpg.Connection[Any],
+    *,
+    ingest_token_hash: str,
+) -> ResolvedExternalEventTrigger | None:
+    """Resolve an ingest-token hash to the single enabled ``external_event``
+    trigger on a non-archived session, or ``None``.
+
+    No ``account_id`` parameter: this is the account-key-free ingress edge.
+    The matched row's own ``account_id`` is the authenticated scope (the token
+    IS the tenant proof). A unique partial index on ``ingest_token_hash``
+    guarantees at most one match. ``None`` (miss/disabled/archived/revoked)
+    becomes a uniform 404 at the ingress — the ``lookup_account_by_key_hash``
+    no-oracle stance: an attacker cannot distinguish wrong-token from
+    disabled-trigger.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT t.id, t.account_id, t.owner_session_id, t.name
+        FROM triggers AS t
+        JOIN sessions AS s ON s.id = t.owner_session_id
+        WHERE t.source = 'external_event'
+          AND t.ingest_token_hash = $1
+          AND t.enabled
+          AND s.archived_at IS NULL
+        """,
+        ingest_token_hash,
+    )
+    if row is None:
+        return None
+    return ResolvedExternalEventTrigger(
+        trigger_id=row["id"],
+        account_id=row["account_id"],
+        owner_session_id=row["owner_session_id"],
+        trigger_name=row["name"],
+    )
+
+
+async def insert_external_event_fire(
+    conn: asyncpg.Connection[Any],
+    *,
+    trigger_id: str,
+    account_id: str,
+    owner_session_id: str,
+    trigger_name: str,
+    event: dict[str, Any],
+) -> str:
+    """Insert one ``pending`` ``trigger_runs`` carrier for an external event.
+
+    Mirrors :func:`insert_run_completion_fires`' VALUES tuple but is a
+    single-row insert (one ingress call = one fire), so no ``executemany``.
+    ``trigger_context = 'external_event'`` and ``event`` is the inbound body
+    verbatim. Returns the new ``trigger_run_id``.
+    """
+    trigger_run_id = make_id(TRIGGER_RUN)
+    await conn.execute(
+        """
+        INSERT INTO trigger_runs
+            (id, trigger_id, account_id, owner_session_id, trigger_name,
+             trigger_context, event, status)
+        VALUES ($1, $2, $3, $4, $5, 'external_event', $6::jsonb, 'pending')
+        """,
+        trigger_run_id,
+        trigger_id,
+        account_id,
+        owner_session_id,
+        trigger_name,
+        json.dumps(event),
+    )
+    return trigger_run_id
+
+
+class ClaimedTriggerRun(NamedTuple):
+    """A claimed fire-carrier row: its ``event`` body + originating context.
+
+    ``trigger_context`` distinguishes the two reactive carrier kinds at fire
+    time (``run_completion`` vs ``external_event``) — the runner branches on it
+    to derive lineage and the delivered envelope's ``source``, NEVER on
+    ``event is not None`` (both carrier kinds carry a dict ``event``, but an
+    ``external_event`` body has no ``run_id`` to read a completing run from).
+    """
+
+    event: dict[str, Any]
+    trigger_context: str
+
+
 async def claim_trigger_run(
     conn: asyncpg.Connection[Any],
     trigger_run_id: str,
     *,
     started_at: datetime,
-) -> dict[str, Any] | None:
-    """Claim a fire-carrier row (``pending`` → ``running``); return its event.
+) -> ClaimedTriggerRun | None:
+    """Claim a fire-carrier row (``pending`` → ``running``); return its event
+    and originating ``trigger_context``.
 
     ``None`` means the row was already claimed (a duplicate job — the sweep
     re-deferred a fire whose live job won the race) and the caller must exit
     without firing. ``started_at`` is the runner's single fire timestamp.
+
+    The ``assert isinstance(event, dict)`` stays valid for BOTH carrier kinds:
+    run_completion rows carry ``{run_id, workflow_id, status}`` and the
+    external-event ingress rejects any non-object JSON body (422) before the
+    carrier row is ever inserted.
     """
     row = await conn.fetchrow(
         """
         UPDATE trigger_runs
         SET status = 'running', started_at = $2
         WHERE id = $1 AND status = 'pending'
-        RETURNING event
+        RETURNING event, trigger_context
         """,
         trigger_run_id,
         started_at,
@@ -783,8 +900,10 @@ async def claim_trigger_run(
     if row is None:
         return None
     event = parse_jsonb(row["event"])
-    assert isinstance(event, dict)  # run_completion rows always carry an event
-    return event
+    # Both reactive carrier kinds always carry a dict event (run_completion's
+    # synthesized {run_id,…}; external_event's ingress-validated object body).
+    assert isinstance(event, dict)
+    return ClaimedTriggerRun(event=event, trigger_context=row["trigger_context"])
 
 
 async def finalize_trigger_run(

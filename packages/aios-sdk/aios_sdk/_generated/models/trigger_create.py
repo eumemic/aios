@@ -9,6 +9,7 @@ from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.cron_source import CronSource
+    from ..models.external_event_source import ExternalEventSource
     from ..models.one_shot_source import OneShotSource
     from ..models.run_completion_source import RunCompletionSource
     from ..models.sandbox_command_action import SandboxCommandAction
@@ -32,14 +33,14 @@ class TriggerCreate:
 
         Attributes:
             name (str): Stable user-chosen identifier; unique per session.
-            source (CronSource | OneShotSource | RunCompletionSource):
+            source (CronSource | ExternalEventSource | OneShotSource | RunCompletionSource):
             action (SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction):
             enabled (bool | Unset):  Default: True.
             metadata (TriggerCreateMetadata | Unset):
     """
 
     name: str
-    source: CronSource | OneShotSource | RunCompletionSource
+    source: CronSource | ExternalEventSource | OneShotSource | RunCompletionSource
     action: SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction
     enabled: bool | Unset = True
     metadata: TriggerCreateMetadata | Unset = UNSET
@@ -47,6 +48,7 @@ class TriggerCreate:
     def to_dict(self) -> dict[str, Any]:
         from ..models.cron_source import CronSource
         from ..models.one_shot_source import OneShotSource
+        from ..models.run_completion_source import RunCompletionSource
         from ..models.sandbox_command_action import SandboxCommandAction
         from ..models.wake_owner_action import WakeOwnerAction
         from ..models.wake_session_action import WakeSessionAction
@@ -57,6 +59,8 @@ class TriggerCreate:
         if isinstance(self.source, CronSource):
             source = self.source.to_dict()
         elif isinstance(self.source, OneShotSource):
+            source = self.source.to_dict()
+        elif isinstance(self.source, RunCompletionSource):
             source = self.source.to_dict()
         else:
             source = self.source.to_dict()
@@ -96,6 +100,7 @@ class TriggerCreate:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.cron_source import CronSource
+        from ..models.external_event_source import ExternalEventSource
         from ..models.one_shot_source import OneShotSource
         from ..models.run_completion_source import RunCompletionSource
         from ..models.sandbox_command_action import SandboxCommandAction
@@ -109,7 +114,7 @@ class TriggerCreate:
 
         def _parse_source(
             data: object,
-        ) -> CronSource | OneShotSource | RunCompletionSource:
+        ) -> CronSource | ExternalEventSource | OneShotSource | RunCompletionSource:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
@@ -126,11 +131,19 @@ class TriggerCreate:
                 return source_type_1
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                source_type_2 = RunCompletionSource.from_dict(data)
+
+                return source_type_2
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
             if not isinstance(data, dict):
                 raise TypeError()
-            source_type_2 = RunCompletionSource.from_dict(data)
+            source_type_3 = ExternalEventSource.from_dict(data)
 
-            return source_type_2
+            return source_type_3
 
         source = _parse_source(d.pop("source"))
 

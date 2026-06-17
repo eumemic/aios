@@ -31,6 +31,7 @@ from aios.api.routers import (
     session_templates,
     sessions,
     skills,
+    triggers_ingest,
     vaults,
     workflows,
 )
@@ -130,6 +131,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_stores.router)
     app.include_router(connections.router)
     app.include_router(runtime_tokens.router)
+    app.include_router(triggers_ingest.router)
     app.include_router(connectors.router)
     app.include_router(session_templates.router)
     app.include_router(workflows.router)

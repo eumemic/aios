@@ -20,9 +20,11 @@ class TriggerRunEcho:
     """Read view of one ``trigger_runs`` row — a single fire of a trigger.
 
     ``trigger_context`` echoes the firing source (``cron`` / ``one_shot`` /
-    ``run_completion``); ``event`` carries the per-event context for
-    ``run_completion`` fires (``{run_id, workflow_id, status}``) and is
-    ``None`` for timer fires. ``status`` is an open string on read (rows
+    ``run_completion`` / ``external_event``); ``event`` carries the per-event
+    context for ``run_completion`` fires (``{run_id, workflow_id, status}``)
+    and the arbitrary inbound jsonb body for ``external_event`` fires (no shape
+    change — ``event`` is already arbitrary jsonb), and is ``None`` for timer
+    fires. ``status`` is an open string on read (rows
     written by future writers must always read back); the current writer
     vocabulary is ``pending``/``running``/``ok``/``error``/``timeout``/
     ``skipped``. ``result_id`` is the prefixed id of the resource the fire

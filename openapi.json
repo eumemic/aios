@@ -2419,7 +2419,7 @@
           "sessions"
         ],
         "summary": "Create Trigger",
-        "description": "Add a trigger. Granular operation per #270 \u2014 there is no whole-list\n``set`` surface on ``SessionUpdate``.",
+        "description": "Add a trigger. Granular operation per #270 \u2014 there is no whole-list\n``set`` surface on ``SessionUpdate``.\n\nFor an ``external_event`` source the response carries ``ingest_token`` \u2014\nthe plaintext ingest secret, surfaced EXACTLY ONCE (mirrors\n``RuntimeTokenIssued``). The full ingress URL\n(``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side;\nit is never stored and cannot be re-read.",
         "operationId": "create_trigger",
         "parameters": [
           {
@@ -2464,7 +2464,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TriggerEcho"
+                  "$ref": "#/components/schemas/TriggerCreated"
                 }
               }
             }
@@ -2547,7 +2547,7 @@
           "sessions"
         ],
         "summary": "Update Trigger",
-        "description": "Replace a trigger's source/action/enabled/metadata by name. Omitted\nfields unchanged; ``source`` / ``action`` replace wholesale.",
+        "description": "Replace a trigger's source/action/enabled/metadata by name. Omitted\nfields unchanged; ``source`` / ``action`` replace wholesale.\n\nA source-replace TO ``external_event`` (or a re-mint of an already-external\nsource = rotation) surfaces a fresh ``ingest_token`` once; otherwise\n``ingest_token`` is ``null``.",
         "operationId": "update_trigger",
         "parameters": [
           {
@@ -2601,7 +2601,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TriggerEcho"
+                  "$ref": "#/components/schemas/TriggerCreated"
                 }
               }
             }
@@ -7361,6 +7361,53 @@
         }
       }
     },
+    "/v1/triggers/ingest/{ingest_token}": {
+      "post": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Ingest External Event",
+        "description": "Resolve a per-trigger ingest token, record a pending fire, and dispatch.\n\n``PoolDep`` only \u2014 deliberately NO ``AccountIdDep``: this is the sole\naccount-key-free route; the path token authenticates and scopes the call.\n\nReturns ``202 {\"trigger_run_id\": \u2026}``. A lost post-commit defer is recovered\nby the existing ``list_pending_trigger_run_refs`` sweep \u2014 identical\nresilience to run_completion, for free.",
+        "operationId": "ingest_external_event",
+        "parameters": [
+          {
+            "name": "ingest_token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ingest Token"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Ingest External Event"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/{connector}/tools_schema": {
       "put": {
         "tags": [
@@ -11320,6 +11367,20 @@
         ],
         "title": "Event",
         "description": "Read view of a single event from the session log.\n\nSchema (#1140): a session event is ``{kind, data, seq}`` \u2014 a DIFFERENT\nshape from a *run* event (``{type, payload, seq}``, see\n``aios.models.workflows.WfRunEvent``). See module docstring and\n``docs/reference/run-observability.md`` for the split."
+      },
+      "ExternalEventSource": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "external_event",
+            "title": "Kind",
+            "default": "external_event"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ExternalEventSource",
+        "description": "Reactive source: fires from an authenticated inbound webhook ingress.\n\nNo wire fields beyond ``kind`` \u2014 the inbound HTTP body IS the event, and\nthe per-trigger ingest secret is server-minted (NOT a wire field; returned\nplaintext-once on create and stored only as a SHA-256 hash). Like\n``run_completion`` this is unschedulable by the tick (``next_fire``\npermanently NULL); fires are dispatched from the ingress edge instead of\na run-completion transaction. It carries no defaulted fields, so (unlike\n``RunCompletionSource``) it needs no ``*Replace`` subclass."
       },
       "FileUploadResponse": {
         "properties": {
@@ -15589,6 +15650,9 @@
               },
               {
                 "$ref": "#/components/schemas/RunCompletionSource"
+              },
+              {
+                "$ref": "#/components/schemas/ExternalEventSource"
               }
             ],
             "title": "Source",
@@ -15596,6 +15660,7 @@
               "propertyName": "kind",
               "mapping": {
                 "cron": "#/components/schemas/CronSource",
+                "external_event": "#/components/schemas/ExternalEventSource",
                 "one_shot": "#/components/schemas/OneShotSource",
                 "run_completion": "#/components/schemas/RunCompletionSource"
               }
@@ -15648,6 +15713,162 @@
         "title": "TriggerCreate",
         "description": "Request body for adding a trigger to a session.\n\nCarries a ``source`` (cron / one_shot) and an ``action``\n(sandbox_command / wake_owner). Also accepted in\n:class:`SessionCreate.triggers` for initial attachment at session\ncreation."
       },
+      "TriggerCreated": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CronSource"
+              },
+              {
+                "$ref": "#/components/schemas/OneShotSource"
+              },
+              {
+                "$ref": "#/components/schemas/RunCompletionSource"
+              },
+              {
+                "$ref": "#/components/schemas/ExternalEventSource"
+              }
+            ],
+            "title": "Source",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "cron": "#/components/schemas/CronSource",
+                "external_event": "#/components/schemas/ExternalEventSource",
+                "one_shot": "#/components/schemas/OneShotSource",
+                "run_completion": "#/components/schemas/RunCompletionSource"
+              }
+            }
+          },
+          "action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SandboxCommandAction"
+              },
+              {
+                "$ref": "#/components/schemas/WakeOwnerAction"
+              },
+              {
+                "$ref": "#/components/schemas/WakeSessionAction"
+              },
+              {
+                "$ref": "#/components/schemas/WorkflowAction"
+              }
+            ],
+            "title": "Action",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "sandbox_command": "#/components/schemas/SandboxCommandAction",
+                "wake_owner": "#/components/schemas/WakeOwnerAction",
+                "wake_session": "#/components/schemas/WakeSessionAction",
+                "workflow": "#/components/schemas/WorkflowAction"
+              }
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "next_fire": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire"
+          },
+          "last_fire_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire At"
+          },
+          "last_fire_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "error",
+                  "timeout",
+                  "skipped"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire Status"
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "title": "Consecutive Failures"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "ingest_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingest Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "source",
+          "action",
+          "enabled",
+          "next_fire",
+          "last_fire_at",
+          "last_fire_status",
+          "consecutive_failures",
+          "metadata",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TriggerCreated",
+        "description": "Create/update response \u2014 the trigger echo plus a one-time ``ingest_token``.\n\nSubclasses :class:`TriggerEcho` so every existing read-field caller keeps\nworking; adds ``ingest_token``, the plaintext ingest secret surfaced\nEXACTLY ONCE for ``external_event`` sources (mint at create, re-mint on a\nsource-replace TO ``external_event`` = rotation), ``None`` otherwise. The\nplaintext is never persisted and can never be re-read \u2014 losing it means\nrotating via ``update_trigger``. The full ingress URL\n(``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side and\nis deliberately not stored."
+      },
       "TriggerEcho": {
         "properties": {
           "id": {
@@ -15668,6 +15889,9 @@
               },
               {
                 "$ref": "#/components/schemas/RunCompletionSource"
+              },
+              {
+                "$ref": "#/components/schemas/ExternalEventSource"
               }
             ],
             "title": "Source",
@@ -15675,6 +15899,7 @@
               "propertyName": "kind",
               "mapping": {
                 "cron": "#/components/schemas/CronSource",
+                "external_event": "#/components/schemas/ExternalEventSource",
                 "one_shot": "#/components/schemas/OneShotSource",
                 "run_completion": "#/components/schemas/RunCompletionSource"
               }
@@ -15885,7 +16110,7 @@
           "finished_at"
         ],
         "title": "TriggerRunEcho",
-        "description": "Read view of one ``trigger_runs`` row \u2014 a single fire of a trigger.\n\n``trigger_context`` echoes the firing source (``cron`` / ``one_shot`` /\n``run_completion``); ``event`` carries the per-event context for\n``run_completion`` fires (``{run_id, workflow_id, status}``) and is\n``None`` for timer fires. ``status`` is an open string on read (rows\nwritten by future writers must always read back); the current writer\nvocabulary is ``pending``/``running``/``ok``/``error``/``timeout``/\n``skipped``. ``result_id`` is the prefixed id of the resource the fire\ncreated (a ``wfr_\u2026`` run today), or ``None`` when the fire produced no\nresource or failed. ``created_at`` is when the fire INTENT was created\n(the match transaction for event fires; insert time for timer rows);\n``started_at`` is when execution claimed it."
+        "description": "Read view of one ``trigger_runs`` row \u2014 a single fire of a trigger.\n\n``trigger_context`` echoes the firing source (``cron`` / ``one_shot`` /\n``run_completion`` / ``external_event``); ``event`` carries the per-event\ncontext for ``run_completion`` fires (``{run_id, workflow_id, status}``)\nand the arbitrary inbound jsonb body for ``external_event`` fires (no shape\nchange \u2014 ``event`` is already arbitrary jsonb), and is ``None`` for timer\nfires. ``status`` is an open string on read (rows\nwritten by future writers must always read back); the current writer\nvocabulary is ``pending``/``running``/``ok``/``error``/``timeout``/\n``skipped``. ``result_id`` is the prefixed id of the resource the fire\ncreated (a ``wfr_\u2026`` run today), or ``None`` when the fire produced no\nresource or failed. ``created_at`` is when the fire INTENT was created\n(the match transaction for event fires; insert time for timer rows);\n``started_at`` is when execution claimed it."
       },
       "TriggerUpdate": {
         "properties": {
@@ -15901,12 +16126,16 @@
                   },
                   {
                     "$ref": "#/components/schemas/RunCompletionSourceReplace"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ExternalEventSource"
                   }
                 ],
                 "discriminator": {
                   "propertyName": "kind",
                   "mapping": {
                     "cron": "#/components/schemas/CronSource",
+                    "external_event": "#/components/schemas/ExternalEventSource",
                     "one_shot": "#/components/schemas/OneShotSource",
                     "run_completion": "#/components/schemas/RunCompletionSourceReplace"
                   }

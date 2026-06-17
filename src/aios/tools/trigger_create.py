@@ -125,6 +125,22 @@ _SOURCE_SCHEMA: dict[str, Any] = {
             "required": ["kind", "workflow_id"],
             "additionalProperties": False,
         },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"const": "external_event"},
+            },
+            "required": ["kind"],
+            "additionalProperties": False,
+            "description": (
+                "Reactive source fired by an authenticated inbound webhook. The "
+                "POST body becomes input['trigger']['event'] of the fired run. A "
+                "per-trigger ingest secret is minted server-side and returned ONCE "
+                "as `ingest_token` on this create (POST to "
+                "/v1/triggers/ingest/{ingest_token}); it is never re-readable — "
+                "rotate via trigger_update."
+            ),
+        },
     ],
 }
 
@@ -290,8 +306,11 @@ async def trigger_create_handler(session_id: str, arguments: dict[str, Any]) -> 
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     spec = TriggerCreate.model_validate(arguments)
-    echo = await triggers_service.add_trigger(pool, session_id, spec, account_id=account_id)
-    return echo.model_dump(mode="json")
+    created = await triggers_service.add_trigger(pool, session_id, spec, account_id=account_id)
+    # The dump carries ``ingest_token`` (the once-only ingest secret) for an
+    # external_event source, ``None`` otherwise — the agent must see the minted
+    # token to drive the ingress.
+    return created.model_dump(mode="json")
 
 
 def _register() -> None:

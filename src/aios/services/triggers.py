@@ -34,6 +34,8 @@ untouched by service-layer writes other than the gated columns.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 from datetime import UTC, datetime
 from types import EllipsisType
 from typing import Any
@@ -48,10 +50,12 @@ from aios.models.sessions import Session
 from aios.models.triggers import (
     MAX_TRIGGERS_PER_SESSION,
     CronSource,
+    ExternalEventSource,
     OneShotSource,
     RunCompletionSource,
     SandboxCommandAction,
     TriggerCreate,
+    TriggerCreated,
     TriggerEcho,
     TriggerRunEcho,
     TriggerUpdate,
@@ -61,10 +65,33 @@ from aios.models.triggers import (
     compute_initial_next_fire,
 )
 
+# Per-trigger ingest secret (external_event). Mirrors the runtime_tokens
+# precedent: `aios_evt_<32-byte url-safe>` (256 bits of CSPRNG entropy),
+# sha256-at-rest, surfaced plaintext exactly once on create / source-replace.
+_INGEST_TOKEN_PREFIX = "aios_evt_"
+_INGEST_TOKEN_BYTES = 32
+
+
+def _mint_ingest_token() -> tuple[str, str]:
+    """Return ``(plaintext, sha256_hex)`` for a fresh ingest secret."""
+    plaintext = _INGEST_TOKEN_PREFIX + secrets.token_urlsafe(_INGEST_TOKEN_BYTES)
+    return plaintext, hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+
+def mint_ingest_token_hash() -> str:
+    """Mint a fresh ingest secret and return ONLY its hash (plaintext dropped).
+
+    Used by the session-create attach path, whose response carries no
+    per-trigger token surface — the row needs a stored hash to satisfy the
+    iff CHECK, and the owner rotates via ``update_trigger`` to obtain a
+    usable plaintext.
+    """
+    return _mint_ingest_token()[1]
+
 
 async def validate_trigger_spec(
     conn: asyncpg.Connection[Any],
-    source: CronSource | OneShotSource | RunCompletionSource | None,
+    source: CronSource | OneShotSource | RunCompletionSource | ExternalEventSource | None,
     action: SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction | None,
     *,
     session_id: str,
@@ -110,6 +137,11 @@ async def validate_trigger_spec(
         assert session.id == session_id
     if isinstance(source, RunCompletionSource):
         await wf_queries.get_workflow(conn, source.workflow_id, account_id=account_id)
+    if isinstance(source, ExternalEventSource):
+        # Valid standalone: an external_event source references no watched
+        # workflow (the inbound webhook body IS the event). Explicit no-op
+        # branch so a future reviewer sees the case was considered, not missed.
+        pass
     if not isinstance(action, WorkflowAction):
         return None
     workflow = await wf_queries.get_workflow(conn, action.workflow_id, account_id=account_id)
@@ -132,8 +164,14 @@ async def add_trigger(
     spec: TriggerCreate,
     *,
     account_id: str,
-) -> TriggerEcho:
+) -> TriggerCreated:
     """Add a trigger to a session.
+
+    For an ``external_event`` source, mints a per-trigger ingest secret
+    (``aios_evt_…``), stores only its SHA-256 hash, and surfaces the plaintext
+    EXACTLY ONCE on the returned :class:`TriggerCreated` (``ingest_token``);
+    every other source returns ``ingest_token=None``. The plaintext is never
+    persisted — losing it means rotating via ``update_trigger``.
 
     Initial ``next_fire`` is computed from the source (cron: next slot;
     one-shot: ``fire_at``), unless the trigger is disabled — in which case
@@ -151,6 +189,10 @@ async def add_trigger(
     """
     cap = get_settings().triggers_per_account_max
     next_fire = compute_initial_next_fire(spec.source, datetime.now(UTC)) if spec.enabled else None
+    ingest_plaintext: str | None = None
+    ingest_token_hash: str | None = None
+    if isinstance(spec.source, ExternalEventSource):
+        ingest_plaintext, ingest_token_hash = _mint_ingest_token()
     async with pool.acquire() as conn, conn.transaction():
         # Validate the spec's references (and account-scope the session) BEFORE
         # the advisory lock — a doomed spec never serializes other writers.
@@ -176,7 +218,7 @@ async def add_trigger(
                     f"account at active-trigger cap ({existing_account}/{cap}); "
                     "remove or disable an existing trigger to free a slot"
                 )
-        return await queries.add_trigger(
+        echo = await queries.add_trigger(
             conn,
             session_id,
             name=spec.name,
@@ -187,8 +229,10 @@ async def add_trigger(
             metadata=spec.metadata,
             next_fire=next_fire,
             environment_id=environment_id,
+            ingest_token_hash=ingest_token_hash,
             account_id=account_id,
         )
+        return TriggerCreated(**echo.model_dump(), ingest_token=ingest_plaintext)
 
 
 async def remove_trigger(
@@ -209,8 +253,17 @@ async def update_trigger(
     update: TriggerUpdate,
     *,
     account_id: str,
-) -> TriggerEcho:
+) -> TriggerCreated:
     """Update a trigger by name (§2.4 of the design contract).
+
+    Source-replace semantics for the ingest secret (mirrors ``add_trigger``):
+    replacing the source TO ``external_event`` mints a fresh secret + hash and
+    surfaces the plaintext once on the returned :class:`TriggerCreated`
+    (re-minting an already-external_event source = rotation); replacing AWAY
+    from ``external_event`` NULLs the stored hash. A non-source-touching update
+    leaves the hash alone and returns ``ingest_token=None``. external_event
+    stays ``next_fire`` NULL throughout — same heal-path carve-out as
+    run_completion.
 
     ``source`` / ``action`` are replaced WHOLESALE when provided (a
     cron↔one-shot or sandbox↔wake conversion is just a different object —
@@ -327,7 +380,20 @@ async def update_trigger(
                 )
             next_fire = compute_initial_next_fire(merged_source, now)
 
-        return await queries.update_trigger(
+        # Ingest-secret lifecycle keyed on a PROVIDED source replacement only
+        # (a no-op or action/metadata/enabled-only update leaves the column
+        # alone — Ellipsis sentinel). Replace TO external_event mints+surfaces
+        # (re-mint of an already-external_event source is rotation); replace
+        # AWAY NULLs the hash (the iff CHECK would otherwise reject the row).
+        ingest_token_hash: str | None | EllipsisType = ...
+        ingest_plaintext: str | None = None
+        if source_provided:
+            if isinstance(update.source, ExternalEventSource):
+                ingest_plaintext, ingest_token_hash = _mint_ingest_token()
+            else:
+                ingest_token_hash = None
+
+        echo = await queries.update_trigger(
             conn,
             session_id,
             name,
@@ -338,6 +404,7 @@ async def update_trigger(
             metadata=update.metadata,
             next_fire=next_fire,
             environment_id=environment_id,
+            ingest_token_hash=ingest_token_hash,
             # A re-enable is a fresh start for the failure counter — without
             # the reset, a counter parked past MAX_CONSECUTIVE_FAILURES would
             # never EQUAL it again and the auto-disable breaker would be
@@ -345,6 +412,7 @@ async def update_trigger(
             reset_consecutive_failures=reenabled,
             account_id=account_id,
         )
+        return TriggerCreated(**echo.model_dump(), ingest_token=ingest_plaintext)
 
 
 async def list_triggers(

@@ -8,7 +8,10 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
-from ..models.trigger_echo_last_fire_status_type_0 import TriggerEchoLastFireStatusType0
+from ..models.trigger_created_last_fire_status_type_0 import (
+    TriggerCreatedLastFireStatusType0,
+)
+from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.cron_source import CronSource
@@ -16,23 +19,27 @@ if TYPE_CHECKING:
     from ..models.one_shot_source import OneShotSource
     from ..models.run_completion_source import RunCompletionSource
     from ..models.sandbox_command_action import SandboxCommandAction
-    from ..models.trigger_echo_metadata import TriggerEchoMetadata
+    from ..models.trigger_created_metadata import TriggerCreatedMetadata
     from ..models.wake_owner_action import WakeOwnerAction
     from ..models.wake_session_action import WakeSessionAction
     from ..models.workflow_action import WorkflowAction
 
 
-T = TypeVar("T", bound="TriggerEcho")
+T = TypeVar("T", bound="TriggerCreated")
 
 
 @_attrs_define
-class TriggerEcho:
-    """Read view of a trigger as echoed on ``Session.triggers``.
+class TriggerCreated:
+    """Create/update response — the trigger echo plus a one-time ``ingest_token``.
 
-    Runtime fields (``last_fire_at`` / ``last_fire_status`` /
-    ``consecutive_failures``) reflect the most recent fire outcome.
-    ``running_since`` is internal scheduler bookkeeping and is not exposed
-    here.
+    Subclasses :class:`TriggerEcho` so every existing read-field caller keeps
+    working; adds ``ingest_token``, the plaintext ingest secret surfaced
+    EXACTLY ONCE for ``external_event`` sources (mint at create, re-mint on a
+    source-replace TO ``external_event`` = rotation), ``None`` otherwise. The
+    plaintext is never persisted and can never be re-read — losing it means
+    rotating via ``update_trigger``. The full ingress URL
+    (``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side and
+    is deliberately not stored.
 
         Attributes:
             id (str):
@@ -42,11 +49,12 @@ class TriggerEcho:
             enabled (bool):
             next_fire (datetime.datetime | None):
             last_fire_at (datetime.datetime | None):
-            last_fire_status (None | TriggerEchoLastFireStatusType0):
+            last_fire_status (None | TriggerCreatedLastFireStatusType0):
             consecutive_failures (int):
-            metadata (TriggerEchoMetadata):
+            metadata (TriggerCreatedMetadata):
             created_at (datetime.datetime):
             updated_at (datetime.datetime):
+            ingest_token (None | str | Unset):
     """
 
     id: str
@@ -56,11 +64,12 @@ class TriggerEcho:
     enabled: bool
     next_fire: datetime.datetime | None
     last_fire_at: datetime.datetime | None
-    last_fire_status: None | TriggerEchoLastFireStatusType0
+    last_fire_status: None | TriggerCreatedLastFireStatusType0
     consecutive_failures: int
-    metadata: TriggerEchoMetadata
+    metadata: TriggerCreatedMetadata
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    ingest_token: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -110,7 +119,7 @@ class TriggerEcho:
             last_fire_at = self.last_fire_at
 
         last_fire_status: None | str
-        if isinstance(self.last_fire_status, TriggerEchoLastFireStatusType0):
+        if isinstance(self.last_fire_status, TriggerCreatedLastFireStatusType0):
             last_fire_status = self.last_fire_status.value
         else:
             last_fire_status = self.last_fire_status
@@ -122,6 +131,12 @@ class TriggerEcho:
         created_at = self.created_at.isoformat()
 
         updated_at = self.updated_at.isoformat()
+
+        ingest_token: None | str | Unset
+        if isinstance(self.ingest_token, Unset):
+            ingest_token = UNSET
+        else:
+            ingest_token = self.ingest_token
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -141,6 +156,8 @@ class TriggerEcho:
                 "updated_at": updated_at,
             }
         )
+        if ingest_token is not UNSET:
+            field_dict["ingest_token"] = ingest_token
 
         return field_dict
 
@@ -151,7 +168,7 @@ class TriggerEcho:
         from ..models.one_shot_source import OneShotSource
         from ..models.run_completion_source import RunCompletionSource
         from ..models.sandbox_command_action import SandboxCommandAction
-        from ..models.trigger_echo_metadata import TriggerEchoMetadata
+        from ..models.trigger_created_metadata import TriggerCreatedMetadata
         from ..models.wake_owner_action import WakeOwnerAction
         from ..models.wake_session_action import WakeSessionAction
         from ..models.workflow_action import WorkflowAction
@@ -267,30 +284,39 @@ class TriggerEcho:
 
         def _parse_last_fire_status(
             data: object,
-        ) -> None | TriggerEchoLastFireStatusType0:
+        ) -> None | TriggerCreatedLastFireStatusType0:
             if data is None:
                 return data
             try:
                 if not isinstance(data, str):
                     raise TypeError()
-                last_fire_status_type_0 = TriggerEchoLastFireStatusType0(data)
+                last_fire_status_type_0 = TriggerCreatedLastFireStatusType0(data)
 
                 return last_fire_status_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(None | TriggerEchoLastFireStatusType0, data)
+            return cast(None | TriggerCreatedLastFireStatusType0, data)
 
         last_fire_status = _parse_last_fire_status(d.pop("last_fire_status"))
 
         consecutive_failures = d.pop("consecutive_failures")
 
-        metadata = TriggerEchoMetadata.from_dict(d.pop("metadata"))
+        metadata = TriggerCreatedMetadata.from_dict(d.pop("metadata"))
 
         created_at = isoparse(d.pop("created_at"))
 
         updated_at = isoparse(d.pop("updated_at"))
 
-        trigger_echo = cls(
+        def _parse_ingest_token(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        ingest_token = _parse_ingest_token(d.pop("ingest_token", UNSET))
+
+        trigger_created = cls(
             id=id,
             name=name,
             source=source,
@@ -303,10 +329,11 @@ class TriggerEcho:
             metadata=metadata,
             created_at=created_at,
             updated_at=updated_at,
+            ingest_token=ingest_token,
         )
 
-        trigger_echo.additional_properties = d
-        return trigger_echo
+        trigger_created.additional_properties = d
+        return trigger_created
 
     @property
     def additional_keys(self) -> list[str]:

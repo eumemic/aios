@@ -51,6 +51,7 @@ from aios.models.sessions import (
     split_resources_by_type,
 )
 from aios.models.triggers import (
+    ExternalEventSource,
     TriggerCreate,
     compute_initial_next_fire,
 )
@@ -364,6 +365,15 @@ async def create_session(
                     session=session,
                 )
                 next_fire = compute_initial_next_fire(spec.source, now) if spec.enabled else None
+                # external_event attached at session-create needs a stored hash
+                # (the iff CHECK requires it). The plaintext is NOT surfaceable
+                # through the session-create response (it carries no per-trigger
+                # token); the owner rotates via update_trigger to obtain one.
+                ingest_token_hash = (
+                    triggers_service.mint_ingest_token_hash()
+                    if isinstance(spec.source, ExternalEventSource)
+                    else None
+                )
                 await queries.add_trigger(
                     conn,
                     session.id,
@@ -375,6 +385,7 @@ async def create_session(
                     metadata=spec.metadata,
                     next_fire=next_fire,
                     environment_id=trigger_env,
+                    ingest_token_hash=ingest_token_hash,
                     account_id=account_id,
                 )
             trigger_echoes = await queries.list_triggers(conn, session.id, account_id=account_id)

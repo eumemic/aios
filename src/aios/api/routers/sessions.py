@@ -72,6 +72,7 @@ from aios.models.sessions import (
 from aios.models.trace import TraceResponse
 from aios.models.triggers import (
     TriggerCreate,
+    TriggerCreated,
     TriggerEcho,
     TriggerRunEcho,
     TriggerUpdate,
@@ -369,9 +370,15 @@ async def create_trigger(
     body: TriggerCreate,
     pool: PoolDep,
     account_id: AccountIdDep,
-) -> TriggerEcho:
+) -> TriggerCreated:
     """Add a trigger. Granular operation per #270 — there is no whole-list
-    ``set`` surface on ``SessionUpdate``."""
+    ``set`` surface on ``SessionUpdate``.
+
+    For an ``external_event`` source the response carries ``ingest_token`` —
+    the plaintext ingest secret, surfaced EXACTLY ONCE (mirrors
+    ``RuntimeTokenIssued``). The full ingress URL
+    (``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side;
+    it is never stored and cannot be re-read."""
     return await triggers_service.add_trigger(pool, session_id, body, account_id=account_id)
 
 
@@ -400,9 +407,13 @@ async def update_trigger(
     body: TriggerUpdate,
     pool: PoolDep,
     account_id: AccountIdDep,
-) -> TriggerEcho:
+) -> TriggerCreated:
     """Replace a trigger's source/action/enabled/metadata by name. Omitted
-    fields unchanged; ``source`` / ``action`` replace wholesale."""
+    fields unchanged; ``source`` / ``action`` replace wholesale.
+
+    A source-replace TO ``external_event`` (or a re-mint of an already-external
+    source = rotation) surfaces a fresh ``ingest_token`` once; otherwise
+    ``ingest_token`` is ``null``."""
     return await triggers_service.update_trigger(
         pool, session_id, name, body, account_id=account_id
     )

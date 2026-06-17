@@ -46,6 +46,11 @@ MAX_NAME_CHARS = 64
 MAX_WAKE_CONTENT_CHARS = 16_384  # ≈ today's implicit bound (content rode inside command)
 MAX_INPUT_TEMPLATE_BYTES = 16_384  # compact-JSON serialized; enforced WRITE-PATH ONLY (see below)
 
+# External-event ingress: cap on the inbound webhook body, enforced at the
+# ingress before any parse or DB touch (cheapest-first ordering — a malformed
+# or oversized probe must never reach the resolver or the carrier INSERT).
+MAX_INGEST_EVENT_BYTES = 65536
+
 CRON_OCCURRENCE_HORIZON_YEARS = 1
 
 TriggerFireStatus = Literal["ok", "error", "timeout", "skipped"]  # was ScheduledTaskStatus
@@ -145,6 +150,22 @@ class RunCompletionSource(BaseModel):
     )
 
 
+class ExternalEventSource(BaseModel):
+    """Reactive source: fires from an authenticated inbound webhook ingress.
+
+    No wire fields beyond ``kind`` — the inbound HTTP body IS the event, and
+    the per-trigger ingest secret is server-minted (NOT a wire field; returned
+    plaintext-once on create and stored only as a SHA-256 hash). Like
+    ``run_completion`` this is unschedulable by the tick (``next_fire``
+    permanently NULL); fires are dispatched from the ingress edge instead of
+    a run-completion transaction. It carries no defaulted fields, so (unlike
+    ``RunCompletionSource``) it needs no ``*Replace`` subclass.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["external_event"] = "external_event"
+
+
 class RunCompletionSourceReplace(RunCompletionSource):
     """Update-side variant (§2.2 Replace rule): ``statuses`` is REQUIRED, so a
     partial source on update 422s instead of silently resetting a narrowed
@@ -155,10 +176,12 @@ class RunCompletionSourceReplace(RunCompletionSource):
 
 
 TriggerSource = Annotated[
-    CronSource | OneShotSource | RunCompletionSource, Field(discriminator="kind")
+    CronSource | OneShotSource | RunCompletionSource | ExternalEventSource,
+    Field(discriminator="kind"),
 ]
 TriggerSourceReplace = Annotated[
-    CronSource | OneShotSource | RunCompletionSourceReplace, Field(discriminator="kind")
+    CronSource | OneShotSource | RunCompletionSourceReplace | ExternalEventSource,
+    Field(discriminator="kind"),
 ]
 
 
@@ -291,9 +314,9 @@ TriggerActionReplace = Annotated[
 # they must accept every row the write path ever accepted, so they carry NO
 # cron occurrence check and NO input_template byte bound (write-side only;
 # see _validate_input_template_bound).
-TRIGGER_SOURCE_ADAPTER: TypeAdapter[CronSource | OneShotSource | RunCompletionSource] = TypeAdapter(
-    TriggerSource
-)
+TRIGGER_SOURCE_ADAPTER: TypeAdapter[
+    CronSource | OneShotSource | RunCompletionSource | ExternalEventSource
+] = TypeAdapter(TriggerSource)
 TRIGGER_ACTION_ADAPTER: TypeAdapter[
     SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction
 ] = TypeAdapter(TriggerAction)
@@ -399,13 +422,31 @@ class TriggerEcho(BaseModel):
     updated_at: datetime
 
 
+class TriggerCreated(TriggerEcho):
+    """Create/update response — the trigger echo plus a one-time ``ingest_token``.
+
+    Subclasses :class:`TriggerEcho` so every existing read-field caller keeps
+    working; adds ``ingest_token``, the plaintext ingest secret surfaced
+    EXACTLY ONCE for ``external_event`` sources (mint at create, re-mint on a
+    source-replace TO ``external_event`` = rotation), ``None`` otherwise. The
+    plaintext is never persisted and can never be re-read — losing it means
+    rotating via ``update_trigger``. The full ingress URL
+    (``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side and
+    is deliberately not stored.
+    """
+
+    ingest_token: str | None = None
+
+
 class TriggerRunEcho(BaseModel):
     """Read view of one ``trigger_runs`` row — a single fire of a trigger.
 
     ``trigger_context`` echoes the firing source (``cron`` / ``one_shot`` /
-    ``run_completion``); ``event`` carries the per-event context for
-    ``run_completion`` fires (``{run_id, workflow_id, status}``) and is
-    ``None`` for timer fires. ``status`` is an open string on read (rows
+    ``run_completion`` / ``external_event``); ``event`` carries the per-event
+    context for ``run_completion`` fires (``{run_id, workflow_id, status}``)
+    and the arbitrary inbound jsonb body for ``external_event`` fires (no shape
+    change — ``event`` is already arbitrary jsonb), and is ``None`` for timer
+    fires. ``status`` is an open string on read (rows
     written by future writers must always read back); the current writer
     vocabulary is ``pending``/``running``/``ok``/``error``/``timeout``/
     ``skipped``. ``result_id`` is the prefixed id of the resource the fire
@@ -452,7 +493,7 @@ def compute_initial_next_fire(source: TriggerSource, now: datetime) -> datetime 
     ``triggers_run_completion_no_next_fire`` DB guard; their fires dispatch
     from the watched run's completion transaction.
     """
-    if isinstance(source, RunCompletionSource):
+    if isinstance(source, RunCompletionSource | ExternalEventSource):
         return None
     if isinstance(source, OneShotSource):
         return source.fire_at
