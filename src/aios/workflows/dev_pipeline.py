@@ -15,9 +15,15 @@ against the host with simulated agent/tool returns to prove the machine replays,
 suspends on gates, resumes, and completes.
 
 NODE PARTITION (see the design doc):
-- **agentic** (``agent()``): implement, review, fix, ci-watch, risk — the five judgment nodes.
+- **agentic** (``agent()``): implement, review, fix, risk — the judgment nodes. (CI-WATCH is
+  NO LONGER agentic, issue #1316: waiting for a CI run to reach a terminal state is a
+  procedural task — zero judgment, ``architecture/intelligence-vs-computation.md`` — so the
+  watch is now a deterministic poll of the GitHub Checks + combined-status REST API. ``fix_ci``
+  STAYS an agent: diagnosing/repairing a red build is genuine judgment; only the wait/read is
+  de-intelligenced.)
 - **scripted** (``tool('http_request')`` / ``tool('bash')`` / in-script ``re``): the spec
-  gate, PR/label/comment/status API calls, the merge-ref guard, mark-ready, merge.
+  gate, PR/label/comment/status API calls, **the CI watch** (``watch_ci`` /
+  ``watch_ci_advisory``), the merge-ref guard, mark-ready, merge.
 - **gate** (``gate()``): every escalation — unsettled design, review/CI exhaustion, a
   no-commit fix, a fail-closed merge-guard refusal, high-risk merge approval. Each parks the
   run durably instead of dead-ending in autodev's ``awaiting_triage``. NOTE (issue #1176): the
@@ -75,14 +81,17 @@ RESILIENCE CONTRACT (the Phase-0 hardening, aios#987; design doc §10):
    ADOPTS the branch's PR instead of creating a duplicate ("open-pr"; a 422 on create re-lists
    and adopts), and MERGE re-confirms ``GET /pulls/{n}.merged`` before declaring
    ``merge_failed`` so an already-merged PR is never double-merged or lost.
-5. **AgentError guards.** Every agentic node (implement/review/fix/ci-watch/risk) runs under a
+5. **AgentError guards.** Every agentic node (implement/review/fix/risk) runs under a
    defensive guard: an ``agent_not_found`` / transient agent error escalates to the relevant
    gate (design / verify) or, for the best-effort risk node, degrades to the conservative
    default — so a flaky judgment agent parks the run for a human instead of crashing it (an
-   uncaught ``AgentError`` at the root fails the whole run). The post-merge master-CI watch is
-   the one node that does NEITHER (issue #1176): the merge is already committed and the run has
-   already returned done, so a flaky watch is RETRIED (≤ ``MAX_MASTER_CI_ITERS``) and, if still
-   indeterminate, degrades to a distinct non-blocking advisory — never coerced to the
+   uncaught ``AgentError`` at the root fails the whole run). The CI watch is no longer an
+   agent (issue #1316), so it cannot raise ``AgentError``: the PR-CI watch reads the Checks
+   API deterministically (a still-running build that never goes terminal within
+   ``MAX_CI_ITERS`` fails SAFE — a red verdict that escalates to the verify gate, never a
+   silent green). The post-merge master-CI watch (issue #1176) similarly degrades a genuinely
+   indeterminate read (both surfaces unreadable, or never-terminal within
+   ``MAX_MASTER_CI_ITERS``) to a DISTINCT non-blocking advisory — never coerced to the
    most-blocking outcome and never allowed to re-suspend a completed run at a false gate.
 """
 
@@ -548,9 +557,12 @@ async def main(input):
             return {"state": "escalated", "reason": "verify_exhausted",
                     "escalations": escalations}
 
-    # A9 — CI watch (the agent OWNS the durable wait) -> fix -> re-watch, bounded
-    # (N watches, N-1 fixes — matches autodev's CI loop). Factored into _watch_ci so the
-    # post-rebase re-entry below can drive the identical loop with a distinct label prefix.
+    # A9 — CI watch (DETERMINISTIC, issue #1316: the watch is a procedural poll of the GitHub
+    # Checks + combined-status REST API, NO agent/model — waiting for a terminal CI state is
+    # computation, not judgment) -> fix -> re-watch, bounded (N watches, N-1 fixes — matches
+    # autodev's CI loop). `fix_ci` STAYS an agent() inside _watch_ci: repairing a red build IS
+    # judgment. Factored into _watch_ci so the post-rebase re-entry below can drive the
+    # identical loop with a distinct label prefix.
     ci_ok, ci_agent_error, head_sha = await _watch_ci(
         repo, pr_number, head_sha, comment_bodies, model, "ci")
     if not ci_ok:
@@ -724,13 +736,15 @@ async def main(input):
     result = {"state": "done", "pr_url": pr_url, "pr_number": pr_number, "merged": merged,
               "risk_tier": tier, "escalations": escalations}
 
-    # A15b — post-merge master-CI watch, ADVISORY. On a genuinely-RED master we raise a
-    # distinct "master_red" advisory; on an AgentError / malformed return we RETRY up to
-    # MAX_MASTER_CI_ITERS, and only if STILL indeterminate raise a DISTINCT
-    # "master_ci_indeterminate" advisory ("could not determine master state", NOT "master is
-    # red"). Both are NON-blocking: each files a best-effort follow-up issue and is recorded in
-    # result["advisories"] (telemetry that is provably distinct from a blocking gate-park in
-    # result["escalations"]) — agent flakiness is NEVER coerced to the most-blocking outcome.
+    # A15b — post-merge master-CI watch, ADVISORY + DETERMINISTIC (issue #1316: a procedural
+    # read of the GitHub Checks + combined-status API, NO agent/model). On a genuinely-RED
+    # master we raise a distinct "master_red" advisory; if the watch is INDETERMINATE (both CI
+    # surfaces unreadable across all polls, OR CI never reached terminal within
+    # MAX_MASTER_CI_ITERS) we raise a DISTINCT "master_ci_indeterminate" advisory ("could not
+    # determine master state", NOT "master is red"). Both are NON-blocking: each files a
+    # best-effort follow-up issue and is recorded in result["advisories"] (telemetry provably
+    # distinct from a blocking gate-park in result["escalations"]) — an indeterminate read is
+    # NEVER coerced to the most-blocking outcome, and NEVER re-suspends the completed run.
     phase("post-merge")
     # Resolve BASE_BRANCH to the GitHub-canonical SHA-1 ONCE, here in the workflow, and hand
     # that sha to the watch — never the bare branch name (issue #1178). The merge PUT already
@@ -750,19 +764,11 @@ async def main(input):
                          "commit (merge_sha=%r)" % (BASE_BRANCH, merge_sha))
         log("master-CI watch indeterminate (non-blocking):", master_detail)
     else:
-        for i in range(MAX_MASTER_CI_ITERS):
-            try:
-                master = await agent(
-                    {"task": "watch_ci", "repo": repo, "ref": BASE_BRANCH,
-                     "head_sha": master_sha},
-                    agent_id=CI_AGENT_ID, output_schema=CI_SCHEMA, model=model,
-                    label="master-ci-%d" % i)
-                master_status = master["status"]
-                master_detail = master.get("detail", "")
-                break  # a well-formed verdict (green/red/no_ci) — no retry needed
-            except (AgentError, KeyError, TypeError) as exc:
-                master_detail = "master-CI watch failed: %s" % exc
-                log("master-CI watch attempt %d indeterminate (non-blocking):" % i, exc)
+        # Deterministic advisory watch: polls both CI surfaces up to MAX_MASTER_CI_ITERS and
+        # returns (status, detail). status None => INDETERMINATE (distinct from a real verdict),
+        # exactly the signal the old retrying agent loop produced on exhaustion.
+        master_status, master_detail = await watch_ci_advisory(
+            repo, master_sha, MAX_MASTER_CI_ITERS)
 
     advisories = []
     if master_status == "red":
