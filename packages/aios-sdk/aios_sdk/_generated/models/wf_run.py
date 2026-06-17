@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ..models.wf_run_request_output_schema_type_0 import (
         WfRunRequestOutputSchemaType0,
     )
+    from ..models.wf_run_usage import WfRunUsage
 
 
 T = TypeVar("T", bound="WfRun")
@@ -68,6 +69,7 @@ class WfRun:
             budget_usd (float | None | Unset):
             default_child_model (None | str | Unset):
             archived_at (datetime.datetime | None | Unset):
+            usage (None | Unset | WfRunUsage):
     """
 
     id: str
@@ -95,6 +97,7 @@ class WfRun:
     budget_usd: float | None | Unset = UNSET
     default_child_model: None | str | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
+    usage: None | Unset | WfRunUsage = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -102,6 +105,7 @@ class WfRun:
         from ..models.wf_run_request_output_schema_type_0 import (
             WfRunRequestOutputSchemaType0,
         )
+        from ..models.wf_run_usage import WfRunUsage
 
         id = self.id
 
@@ -206,6 +210,14 @@ class WfRun:
         else:
             archived_at = self.archived_at
 
+        usage: dict[str, Any] | None | Unset
+        if isinstance(self.usage, Unset):
+            usage = UNSET
+        elif isinstance(self.usage, WfRunUsage):
+            usage = self.usage.to_dict()
+        else:
+            usage = self.usage
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -251,6 +263,8 @@ class WfRun:
             field_dict["default_child_model"] = default_child_model
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
+        if usage is not UNSET:
+            field_dict["usage"] = usage
 
         return field_dict
 
@@ -263,6 +277,7 @@ class WfRun:
         from ..models.wf_run_request_output_schema_type_0 import (
             WfRunRequestOutputSchemaType0,
         )
+        from ..models.wf_run_usage import WfRunUsage
 
         d = dict(src_dict)
         id = d.pop("id")
@@ -426,6 +441,23 @@ class WfRun:
 
         archived_at = _parse_archived_at(d.pop("archived_at", UNSET))
 
+        def _parse_usage(data: object) -> None | Unset | WfRunUsage:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                usage_type_0 = WfRunUsage.from_dict(data)
+
+                return usage_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | WfRunUsage, data)
+
+        usage = _parse_usage(d.pop("usage", UNSET))
+
         wf_run = cls(
             id=id,
             workflow_id=workflow_id,
@@ -452,6 +484,7 @@ class WfRun:
             budget_usd=budget_usd,
             default_child_model=default_child_model,
             archived_at=archived_at,
+            usage=usage,
         )
 
         wf_run.additional_properties = d

@@ -557,6 +557,57 @@ async def run_children_usage(
     )
 
 
+async def runs_children_usage(
+    conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+) -> dict[str, RunChildrenUsage]:
+    """Batched :func:`run_children_usage` for the read path (#1324).
+
+    Sums each run's direct child sessions' usage in ONE grouped query, so
+    ``list_runs`` enriches a whole page without an N+1 fan-out of point reads.
+    Account-scoped identically to :func:`run_children_usage` (a child session
+    of another tenant never contributes). Per-run semantics are verbatim the
+    single-run query: ``COALESCE(SUM(...), 0)`` — a run with no children
+    *appears in the result* with an all-zero record (a real, observed zero),
+    so the caller can distinguish "summed to zero spend" from "run absent".
+
+    Keep the column list and the ``parent_run_id``/``account_id`` filter in
+    lockstep with :func:`run_children_usage`; the same #1131 ``parent_run_id``
+    point-read note applies.
+    """
+    if not run_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT
+            parent_run_id AS run_id,
+            COALESCE(SUM(input_tokens), 0)::bigint AS input_tokens,
+            COALESCE(SUM(output_tokens), 0)::bigint AS output_tokens,
+            COALESCE(SUM(cache_read_input_tokens), 0)::bigint AS cache_read_input_tokens,
+            COALESCE(SUM(cache_creation_input_tokens), 0)::bigint AS cache_creation_input_tokens,
+            COALESCE(SUM(cost_microusd), 0)::bigint AS cost_microusd
+          FROM sessions
+         WHERE parent_run_id = ANY($1::text[]) AND account_id = $2
+         GROUP BY parent_run_id
+        """,
+        run_ids,
+        account_id,
+    )
+    summed = {
+        row["run_id"]: RunChildrenUsage(
+            input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"],
+            cache_read_input_tokens=row["cache_read_input_tokens"],
+            cache_creation_input_tokens=row["cache_creation_input_tokens"],
+            cost_microusd=row["cost_microusd"],
+        )
+        for row in rows
+    }
+    # A run with zero child sessions has no GROUP BY row; surface it as a real
+    # all-zero record so every requested id is present in the result.
+    zero = RunChildrenUsage(0, 0, 0, 0, 0)
+    return {run_id: summed.get(run_id, zero) for run_id in run_ids}
+
+
 async def unscoped_terminal_run_ids(conn: asyncpg.Connection[Any], run_ids: list[str]) -> set[str]:
     """Return the subset of ``run_ids`` whose ``status`` is TERMINAL (#1192).
 

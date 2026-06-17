@@ -4781,3 +4781,161 @@ async def test_over_budget_agent_refusal_is_catchable(
     cr = next(e for e in events if e.type == "call_result" and e.payload.get("is_error"))
     assert cr.payload["error"]["kind"] == "budget_exceeded"
     assert child_count == 0
+
+
+async def _seed_child_session(
+    pool: asyncpg.Pool[Any],
+    *,
+    sid: str,
+    run_id: str,
+    account_id: str = "acc_wf",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cost_microusd: int = 0,
+) -> None:
+    """Insert a run-child session carrying known usage (#1324 read-path seed)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agents (id, name, model, system, account_id) "
+            "VALUES ($1, $1, 'm', 's', $2) ON CONFLICT (id) DO NOTHING",
+            f"agent_{sid}",
+            account_id,
+        )
+        await conn.execute(
+            "INSERT INTO agent_versions (agent_id, version, model, system, account_id) "
+            "VALUES ($1, 1, 'm', 's', $2) ON CONFLICT DO NOTHING",
+            f"agent_{sid}",
+            account_id,
+        )
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, "
+            "workspace_volume_path, account_id, parent_run_id, input_tokens, output_tokens, "
+            "cache_read_input_tokens, cache_creation_input_tokens, cost_microusd) "
+            "VALUES ($1, $2, 'env_wf', 1, NULL, '{}'::jsonb, $3, $4, $5, $6, $7, $8, $9, $10)",
+            sid,
+            f"agent_{sid}",
+            f"/tmp/{sid}",
+            account_id,
+            run_id,
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            cost_microusd,
+        )
+
+
+async def test_get_run_surfaces_summed_child_usage_on_read_path(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """get_run sums its child sessions' cost/tokens onto WfRun.usage (#1324).
+
+    The keystone of the machine-observer substrate: a run's realized spend is
+    legible from the public read path, summed from the SAME run_children_usage
+    source budget() consumes — not buried in a builtin.
+    """
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1\n")
+    await _seed_child_session(
+        pool,
+        sid="ses_a",
+        run_id=run_id,
+        input_tokens=10,
+        output_tokens=20,
+        cache_read_input_tokens=3,
+        cache_creation_input_tokens=4,
+        cost_microusd=123456,
+    )
+    await _seed_child_session(
+        pool,
+        sid="ses_b",
+        run_id=run_id,
+        input_tokens=1,
+        output_tokens=2,
+        cache_read_input_tokens=5,
+        cache_creation_input_tokens=6,
+        cost_microusd=654321,
+    )
+
+    run = await wf_service.get_run(pool, run_id, account_id="acc_wf")
+    assert run.usage is not None
+    assert run.usage.input_tokens == 11
+    assert run.usage.output_tokens == 22
+    assert run.usage.cache_read_input_tokens == 8
+    assert run.usage.cache_creation_input_tokens == 10
+    assert run.usage.cost_microusd == 777777
+    # The run is still pending (no step driven): wall_clock is cannot-determine,
+    # iteration_count has no substrate — both EXPLICIT null, never silently 0/omitted.
+    assert run.usage.wall_clock_ms is None
+    assert run.usage.iteration_count is None
+    # ``budget_usd`` (ceiling) and ``usage.cost_microusd`` (spend) are both legible now.
+    assert "usage" in run.model_dump()
+
+
+async def test_get_run_usage_zero_is_observed_not_null(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A childless run sums to a REAL zero (distinct from null cannot-determine)."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1\n")
+    run = await wf_service.get_run(pool, run_id, account_id="acc_wf")
+    assert run.usage is not None
+    assert run.usage.cost_microusd == 0
+    assert run.usage.input_tokens == 0
+    assert run.usage.output_tokens == 0
+
+
+async def test_terminal_run_surfaces_wall_clock_ms(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A TERMINAL run surfaces a non-null wall_clock_ms (updated_at - created_at)."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1\n")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_runs SET status = 'completed', "
+            "updated_at = created_at + interval '1500 milliseconds' WHERE id = $1",
+            run_id,
+        )
+    run = await wf_service.get_run(pool, run_id, account_id="acc_wf")
+    assert run.usage is not None
+    assert run.usage.wall_clock_ms == 1500
+    assert run.usage.iteration_count is None  # still no substrate
+
+
+async def test_list_runs_enriches_each_run_with_usage(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """list_runs carries per-run usage too — batched, one aggregate for the page (#1324)."""
+    pool = wf_runtime
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name="w_list",
+            script="async def main(input):\n    return 1\n",
+        )
+    run_a = (
+        await service.create_run(
+            pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+        )
+    ).id
+    run_b = (
+        await service.create_run(
+            pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+        )
+    ).id
+    await _seed_child_session(pool, sid="ses_la", run_id=run_a, cost_microusd=500, input_tokens=7)
+    # run_b has no children → real zero.
+
+    runs = await wf_service.list_runs(pool, account_id="acc_wf")
+    by_id = {r.id: r for r in runs}
+    usage_a = by_id[run_a].usage
+    assert usage_a is not None
+    assert usage_a.cost_microusd == 500
+    assert usage_a.input_tokens == 7
+    usage_b = by_id[run_b].usage
+    assert usage_b is not None
+    assert usage_b.cost_microusd == 0

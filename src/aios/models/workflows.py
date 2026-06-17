@@ -71,6 +71,41 @@ class Workflow(BaseModel):
     archived_at: datetime | None = None
 
 
+class WfRunUsage(BaseModel):
+    """Per-run cost / token / iteration / wall-clock — the machine-observer's substrate.
+
+    The read-path projection of a run's actual spend (#1324). The numbers are summed
+    over the run's direct child sessions via ``run_children_usage`` — the SAME source
+    ``step.py``'s ``budget()`` builtin consumes — so a run's ``budget_usd`` *ceiling*
+    (on ``WfRun``) and its realized ``cost_microusd`` *spend* (here) are finally both
+    legible from the read path.
+
+    EVERY field is ``int | None``, and absence is reported as **explicit null**, never
+    a silent ``0`` or an omitted key (cf. the ``vault_ids:null`` read-path disease this
+    must not inherit — see the substrate-different-verdict invariant). The observer
+    reads null as *cannot-determine* and fails loud, NOT as "zero spend":
+
+    * ``cost_microusd`` / ``*_tokens`` — summed over the run's child sessions. A run
+      with no children sums to ``0`` (a real, observed zero — distinct from null).
+    * ``iteration_count`` — the run's wake/step count. The host keeps **no** per-run
+      iteration counter on any substrate today, so this is reported as ``None``
+      (cannot-determine) rather than fabricated from an unrelated proxy. Reserved for
+      when a real counter lands; surfaced now so the observer's contract is stable.
+    * ``wall_clock_ms`` — wall-clock span ``updated_at - created_at`` in milliseconds,
+      reported ONLY for a TERMINAL run (``updated_at`` is its completion instant). A
+      still-running run's ``updated_at`` is a moving "last touched" stamp, not an end,
+      so it is reported as ``None`` rather than a misleading partial span.
+    """
+
+    cost_microusd: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    iteration_count: int | None = None
+    wall_clock_ms: int | None = None
+
+
 class WfRun(BaseModel):
     """A durable workflow execution instance.
 
@@ -137,6 +172,12 @@ class WfRun(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
+    # The realized per-run usage (#1324) — cost/tokens summed over child sessions,
+    # plus iteration/wall-clock. Populated ONLY on the public read path (get_run /
+    # list_runs); ``None`` on the internal step-loop read (``get_run_for_step``),
+    # which never needs it and must not pay the extra aggregate query. ``budget_usd``
+    # above is the ceiling; ``usage.cost_microusd`` is the spend against it.
+    usage: WfRunUsage | None = None
 
 
 class WfRunEvent(BaseModel):

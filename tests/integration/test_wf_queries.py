@@ -535,3 +535,65 @@ async def test_run_children_usage_zero_and_account_scoped(wf_conn: asyncpg.Conne
     run_id = await _seed_run(wf_conn)
     usage = await wf_queries.run_children_usage(wf_conn, run_id, account_id="acc_root")
     assert usage == wf_queries.RunChildrenUsage(0, 0, 0, 0, 0)
+
+
+async def test_runs_children_usage_batches_and_zero_fills(
+    wf_conn: asyncpg.Connection[Any],
+) -> None:
+    """runs_children_usage sums per-run in one query and zero-fills childless ids (#1324).
+
+    The batched read-path variant of run_children_usage: every requested id is
+    present in the result — a run with children carries its summed usage, a
+    childless run a REAL all-zero record (never absent, never null).
+    """
+    run_with = await _seed_run(wf_conn)
+    # A second run against the SAME workflow (``_seed_run`` would collide on the
+    # unique workflow name); insert_wf_run mints a fresh run id.
+    wf_id = await wf_conn.fetchval("SELECT workflow_id FROM wf_runs WHERE id = $1", run_with)
+    run_without = (
+        await wf_queries.insert_wf_run(
+            wf_conn,
+            account_id="acc_root",
+            workflow_id=wf_id,
+            environment_id="env_root",
+            script="async def main(input):\n    return 1\n",
+            host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+            script_sha="deadbeef",
+            depth=10,
+        )
+    ).id
+    await wf_conn.execute(
+        "INSERT INTO agents (id, name, model, system, account_id) "
+        "VALUES ('agent_batch', 'batch-agent', 'm', 's', 'acc_root')"
+    )
+    await wf_conn.execute(
+        "INSERT INTO agent_versions (agent_id, version, model, system, account_id) "
+        "VALUES ('agent_batch', 1, 'm', 's', 'acc_root')"
+    )
+    await wf_conn.execute(
+        """
+        INSERT INTO sessions (
+            id, agent_id, environment_id, agent_version, title, metadata,
+            workspace_volume_path, account_id, parent_run_id, input_tokens, output_tokens,
+            cache_read_input_tokens, cache_creation_input_tokens, cost_microusd
+        ) VALUES
+            ('ses_bx_a', 'agent_batch', 'env_root', 1, NULL, '{}'::jsonb, '/tmp/bxa', 'acc_root', $1, 10, 20, 3, 4, 100),
+            ('ses_bx_b', 'agent_batch', 'env_root', 1, NULL, '{}'::jsonb, '/tmp/bxb', 'acc_root', $1, 1, 2, 5, 6, 200)
+        """,
+        run_with,
+    )
+    usage = await wf_queries.runs_children_usage(
+        wf_conn, [run_with, run_without], account_id="acc_root"
+    )
+    assert set(usage) == {run_with, run_without}
+    assert usage[run_with] == wf_queries.RunChildrenUsage(11, 22, 8, 10, 300)
+    assert usage[run_without] == wf_queries.RunChildrenUsage(0, 0, 0, 0, 0)
+    # Matches the single-run query exactly for the same run.
+    single = await wf_queries.run_children_usage(wf_conn, run_with, account_id="acc_root")
+    assert usage[run_with] == single
+
+
+async def test_runs_children_usage_empty_input_is_empty(
+    wf_conn: asyncpg.Connection[Any],
+) -> None:
+    assert await wf_queries.runs_children_usage(wf_conn, [], account_id="acc_root") == {}
