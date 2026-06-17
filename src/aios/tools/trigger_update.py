@@ -146,6 +146,31 @@ _ACTION_SCHEMA: dict[str, Any] = {
         {
             "type": "object",
             "properties": {
+                "kind": {"const": "wake_session"},
+                "target_session_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Session id (sess_...) of ANOTHER session in this account to "
+                        "wake at fire time."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_WAKE_CONTENT_CHARS,
+                    "description": (
+                        "Message delivered as a user-role event to the target session, "
+                        "waking it. Delivered verbatim."
+                    ),
+                },
+            },
+            "required": ["kind", "target_session_id", "content"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
                 "kind": {"const": "workflow"},
                 "workflow_id": {
                     "type": "string",

@@ -58,11 +58,21 @@ from aios.models.triggers import (
     SandboxCommandAction,
     TriggerFireStatus,
     WakeOwnerAction,
+    WakeSessionAction,
     WorkflowAction,
 )
 from aios.models.workflows import WfRun
 from aios.services import sessions as sessions_service
-from aios.services.wake import defer_trigger_fire, defer_wake
+from aios.services.wake import (
+    CrossSessionWakeRoot,
+    WakeSessionDepthExceededError,
+    WakeSessionPermissionError,
+    WakeSessionRateLimitedError,
+    WakeSessionTargetUnavailableError,
+    defer_trigger_fire,
+    defer_wake,
+    deliver_cross_session_wake,
+)
 
 log = get_logger("aios.harness.trigger_runner")
 
@@ -204,6 +214,8 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
         status, error_summary, result_id = await _run_sandbox_command(trigger, action)
     elif isinstance(action, WakeOwnerAction):
         status, error_summary, result_id = await _run_wake_owner(trigger, action)
+    elif isinstance(action, WakeSessionAction):
+        status, error_summary, result_id = await _run_wake_session(trigger, action)
     else:
         status, error_summary, result_id = await _run_workflow(
             trigger, action, event=event, started_at=started_at
@@ -226,6 +238,13 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
                     trigger.account_id,
                     f"[Scheduled wake '{trigger.name}' failed to deliver: "
                     f"{error_summary or status}]",
+                )
+            elif isinstance(action, WakeSessionAction):
+                await _surface_failure(
+                    trigger.owner_session_id,
+                    trigger.account_id,
+                    f"[Trigger '{trigger.name}' failed to wake "
+                    f"{action.target_session_id}: {error_summary or status}]",
                 )
             elif isinstance(action, WorkflowAction):
                 await _surface_failure(
@@ -488,6 +507,56 @@ async def _run_wake_owner(
             session_id=trigger.owner_session_id,
             name=trigger.name,
         )
+        return "error", f"wake delivery failed: {type(e).__name__}: {e!s:.200}", None
+
+
+async def _run_wake_session(
+    trigger: queries.TriggerRow, action: WakeSessionAction
+) -> tuple[TriggerFireStatus, str | None, str | None]:
+    """Run a ``wake_session`` action — explicit-target cross-session wake.
+
+    The cross-session twin of ``wake_owner``: routes through
+    ``services.wake.deliver_cross_session_wake`` with the FIRING TRIGGER as the
+    lineage root (``source_id=f"trigger:{trigger.id}"``, ``source_depth=0`` — a
+    trigger has no session log to read a depth from), so the same
+    depth/per-pair-rate caps as the ``wake_session`` tool apply: a
+    fire→wake→fire cascade terminates in bounded steps.
+
+    Account-scope / archived / cap-breach checks live INSIDE
+    ``deliver_cross_session_wake`` (it raises the WakeSession* errors); the
+    runner just maps those to ``status="error"`` — feeding the
+    consecutive-failure counter + auto-disable, never a silent drop (the
+    connector-stuck lesson). Statuses: ok/error (timeout N/A); no resource
+    produced.
+    """
+    pool = runtime.require_pool()
+    try:
+        await deliver_cross_session_wake(
+            pool,
+            target_session_id=action.target_session_id,
+            content=action.content,
+            account_id=trigger.account_id,
+            root=CrossSessionWakeRoot(source_id=f"trigger:{trigger.id}", source_depth=0),
+            cause="trigger_wake",
+        )
+        log.info(
+            "trigger.fired",
+            trigger_id=trigger.id,
+            session_id=trigger.owner_session_id,
+            name=trigger.name,
+            kind="wake_session",
+            status="ok",
+        )
+        return "ok", None, None
+    except (
+        WakeSessionPermissionError,
+        WakeSessionTargetUnavailableError,
+        WakeSessionDepthExceededError,
+        WakeSessionRateLimitedError,
+    ) as e:
+        return "error", f"wake_session failed: {type(e).__name__}: {e!s:.200}", None
+    except Exception as e:
+        log.exception("trigger.wake_session_error", trigger_id=trigger.id)
         return "error", f"wake delivery failed: {type(e).__name__}: {e!s:.200}", None
 
 

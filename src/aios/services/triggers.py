@@ -56,6 +56,7 @@ from aios.models.triggers import (
     TriggerRunEcho,
     TriggerUpdate,
     WakeOwnerAction,
+    WakeSessionAction,
     WorkflowAction,
     compute_initial_next_fire,
 )
@@ -64,7 +65,7 @@ from aios.models.triggers import (
 async def validate_trigger_spec(
     conn: asyncpg.Connection[Any],
     source: CronSource | OneShotSource | RunCompletionSource | None,
-    action: SandboxCommandAction | WakeOwnerAction | WorkflowAction | None,
+    action: SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction | None,
     *,
     session_id: str,
     account_id: str,

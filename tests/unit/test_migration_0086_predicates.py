@@ -65,3 +65,22 @@ def test_embedded_downgrade_constants_match_live_0083() -> None:
     m83, m86 = _load("0083"), _load("0086")
     assert m86.SOURCE_SPEC_PREDICATE_0083 == m83.SOURCE_SPEC_PREDICATE
     assert m86.ACTION_PREDICATE_0083 == m83.ACTION_PREDICATE
+
+
+# ─── 0107: wake_session action kind (#1280) — same byte-identity discipline ──
+
+
+def test_0107_action_predicate_extends_0086_byte_identically() -> None:
+    """0107's ACTION_PREDICATE is 0086's with exactly one new ``wake_session``
+    branch spliced before the tail — every prior branch byte-identical, so the
+    constraint swap can never silently re-shape what slice-2 rows must satisfy.
+    """
+    m86, m107 = _load("0086"), _load("0107")
+    _assert_appended_branch_only(
+        m86.ACTION_PREDICATE, m107.ACTION_PREDICATE, added_branch="wake_session"
+    )
+
+
+def test_0107_embedded_downgrade_constant_matches_live_0086() -> None:
+    m86, m107 = _load("0086"), _load("0107")
+    assert m107.ACTION_PREDICATE_0086 == m86.ACTION_PREDICATE

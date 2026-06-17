@@ -55,6 +55,13 @@ class TestCreateSchemaBranches:
         # input_template is deliberately schemaless (any JSON type, incl. null).
         assert "type" not in branch["properties"]["input_template"]
 
+    def test_wake_session_branch(self) -> None:
+        branch = _branch(TRIGGER_CREATE_PARAMETERS_SCHEMA, "action", "wake_session")
+        assert branch["required"] == ["kind", "target_session_id", "content"]
+        assert branch["properties"]["target_session_id"]["type"] == "string"
+        assert branch["properties"]["content"]["type"] == "string"
+        assert branch["additionalProperties"] is False
+
     def test_existing_branches_untouched(self) -> None:
         assert [
             b["properties"]["kind"]["const"]
@@ -63,7 +70,7 @@ class TestCreateSchemaBranches:
         assert [
             b["properties"]["kind"]["const"]
             for b in TRIGGER_CREATE_PARAMETERS_SCHEMA["properties"]["action"]["oneOf"]
-        ] == ["sandbox_command", "wake_owner", "workflow"]
+        ] == ["sandbox_command", "wake_owner", "wake_session", "workflow"]
 
 
 class TestUpdateSchemaReplaceSemantics:
@@ -82,3 +89,16 @@ class TestUpdateSchemaReplaceSemantics:
             "vault_ids",
         ]
         assert "environment_id" not in branch["properties"]
+
+    def test_wake_session_branch(self) -> None:
+        # No Replace twin: both fields required at create, so the update branch
+        # is identical in required-fields shape.
+        branch = _branch(TRIGGER_UPDATE_PARAMETERS_SCHEMA, "action", "wake_session")
+        assert branch["required"] == ["kind", "target_session_id", "content"]
+        assert branch["additionalProperties"] is False
+
+    def test_existing_action_branches_untouched(self) -> None:
+        assert [
+            b["properties"]["kind"]["const"]
+            for b in TRIGGER_UPDATE_PARAMETERS_SCHEMA["properties"]["action"]["oneOf"]
+        ] == ["sandbox_command", "wake_owner", "wake_session", "workflow"]

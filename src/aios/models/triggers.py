@@ -210,6 +210,26 @@ class WakeOwnerAction(BaseModel):
     content: str = Field(min_length=1, max_length=MAX_WAKE_CONTENT_CHARS)
 
 
+class WakeSessionAction(BaseModel):
+    """Deliver ``content`` as a user-role message to an EXPLICITLY-NAMED
+    same-account session, waking it. The cross-session twin of wake_owner:
+    runs through ``services.wake.deliver_cross_session_wake`` with the FIRING
+    TRIGGER as the lineage root, so the wake_session depth/per-pair-rate caps
+    apply (a fire→wake→fire cascade terminates in bounded steps).
+
+    ``target_session_id`` is NOT resolved in the model — it is account-data,
+    checked at fire time (same as ``workflow_id``). A cross-account / archived
+    / cap-breaching target surfaces as a fire ``error`` (no silent drop), not a
+    write-time rejection. Single named target only: no topics, no
+    competing-consumers, no fan-out (issue #1280).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["wake_session"] = "wake_session"
+    target_session_id: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=MAX_WAKE_CONTENT_CHARS)
+
+
 class WorkflowAction(BaseModel):
     """Launch a run of ``workflow_id`` at fire time — deterministic, no model
     wake.
@@ -259,10 +279,11 @@ class WorkflowActionReplace(WorkflowAction):
 
 
 TriggerAction = Annotated[
-    SandboxCommandAction | WakeOwnerAction | WorkflowAction, Field(discriminator="kind")
+    SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction,
+    Field(discriminator="kind"),
 ]
 TriggerActionReplace = Annotated[
-    SandboxCommandActionReplace | WakeOwnerAction | WorkflowActionReplace,
+    SandboxCommandActionReplace | WakeOwnerAction | WakeSessionAction | WorkflowActionReplace,
     Field(discriminator="kind"),
 ]
 
@@ -273,9 +294,9 @@ TriggerActionReplace = Annotated[
 TRIGGER_SOURCE_ADAPTER: TypeAdapter[CronSource | OneShotSource | RunCompletionSource] = TypeAdapter(
     TriggerSource
 )
-TRIGGER_ACTION_ADAPTER: TypeAdapter[SandboxCommandAction | WakeOwnerAction | WorkflowAction] = (
-    TypeAdapter(TriggerAction)
-)
+TRIGGER_ACTION_ADAPTER: TypeAdapter[
+    SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction
+] = TypeAdapter(TriggerAction)
 
 
 def _validate_input_template_bound(action: Any) -> None:

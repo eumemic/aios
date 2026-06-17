@@ -842,3 +842,155 @@ async def test_numeric_expanded_template_survives_read_and_claim(
     async with pool.acquire() as conn, conn.transaction():
         claimed = await queries.fetch_and_claim_due_triggers(conn, now_utc=datetime.now(UTC))
     assert [t.id for t in claimed] == [tid]
+
+
+# ─── wake_session action (#1280) — explicit-target async wake ────────────────
+
+
+async def _events_of(pool: asyncpg.Pool[Any], session_id: str) -> list[dict[str, Any]]:
+    """Return this session's events as ``{kind, data}`` dicts (role/content live
+    INSIDE ``data`` for message events; spans carry their payload there too)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT kind, data FROM events WHERE session_id = $1 ORDER BY seq",
+            session_id,
+        )
+    return [{"kind": r["kind"], "data": queries.parse_jsonb(r["data"])} for r in rows]
+
+
+async def test_wake_session_fire_delivers_to_named_target(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A ``wake_session`` cron fire delivers ``content`` as a user-role event to
+    an EXPLICITLY-NAMED other same-account session, stamps the non-forgeable
+    ``wake_lineage`` span rooted at the firing trigger (depth 1), and records
+    the owner's carrier row ``ok``. The owner session is untouched — this is the
+    cross-session twin of wake_owner, not a self-wake."""
+    pool = trig_runtime
+    _, _, owner = await seed_agent_env_session(pool, account_id=ACC, prefix="wsowner")
+    _, _, target = await seed_agent_env_session(pool, account_id=ACC, prefix="wstarget")
+
+    tid = await _add_trigger(
+        pool,
+        owner.id,
+        {
+            "name": "poke-peer",
+            "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+            "action": {
+                "kind": "wake_session",
+                "target_session_id": target.id,
+                "content": "go look at the run",
+            },
+        },
+    )
+
+    with mock.patch("aios.services.wake.defer_wake", new=AsyncMock()) as deferred:
+        await run_trigger_step(tid)  # tick-origin fire (no trigger_run_id)
+
+    rows = await _carrier_rows(pool, tid)
+    assert [r["status"] for r in rows] == ["ok"]
+
+    # Delivered to the TARGET: a user message + the trusted lineage span.
+    target_events = await _events_of(pool, target.id)
+    user_msgs = [e for e in target_events if e["data"].get("role") == "user"]
+    assert [e["data"]["content"] for e in user_msgs] == ["go look at the run"]
+    lineage = [
+        e["data"]
+        for e in target_events
+        if e["kind"] == "span" and e["data"].get("event") == "wake_lineage"
+    ]
+    assert len(lineage) == 1
+    assert lineage[0]["wake_depth"] == 1  # trigger root is depth 0
+    assert lineage[0]["wake_source_session_id"] == f"trigger:{tid}"
+
+    # The OWNER session got nothing — not a self-wake.
+    assert await _events_of(pool, owner.id) == []
+    # The wake was actually scheduled on the target.
+    deferred.assert_awaited_once()
+
+
+async def test_wake_session_fire_errors_on_cross_account_target(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A target under a DIFFERENT account surfaces as a fire ``error`` (feeding
+    the consecutive-failure counter), never a silent drop — and never an
+    existence leak (the target gets no event)."""
+    pool = trig_runtime
+    _, _, owner = await seed_agent_env_session(pool, account_id=ACC, prefix="wsxacc")
+
+    # A second account with its own session — the forbidden target.
+    other_acc = "acc_trig_other"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+            f"VALUES ('{other_acc}', NULL, TRUE, 'other')"
+        )
+    _, _, foreign = await seed_agent_env_session(pool, account_id=other_acc, prefix="wsforeign")
+
+    tid = await _add_trigger(
+        pool,
+        owner.id,
+        {
+            "name": "poke-foreign",
+            "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+            "action": {
+                "kind": "wake_session",
+                "target_session_id": foreign.id,
+                "content": "should never arrive",
+            },
+        },
+    )
+
+    with mock.patch("aios.services.wake.defer_wake", new=AsyncMock()):
+        await run_trigger_step(tid)
+
+    rows = await _carrier_rows(pool, tid)
+    assert [r["status"] for r in rows] == ["error"]
+    assert "WakeSessionPermissionError" in rows[-1]["error_summary"]
+    assert await _consecutive_failures(pool, tid) == 1
+    # No event leaked into the foreign session.
+    assert await _events_of(pool, foreign.id) == []
+
+
+async def test_wake_session_fire_loop_terminates_at_rate_cap(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A runaway timer that re-fires the same wake_session is bounded: the
+    per-(trigger, target) rate limit caps it at WAKE_SESSION_MAX_PER_HOUR
+    deliveries, then every further fire errors. A trigger roots at depth 0, so
+    the depth cap can't bound it — the per-pair rate limit is the loop bound for
+    trigger wakes."""
+    from aios.services.wake import WAKE_SESSION_MAX_PER_HOUR
+
+    pool = trig_runtime
+    _, _, owner = await seed_agent_env_session(pool, account_id=ACC, prefix="wsloop")
+    _, _, target = await seed_agent_env_session(pool, account_id=ACC, prefix="wsloopt")
+
+    tid = await _add_trigger(
+        pool,
+        owner.id,
+        {
+            "name": "runaway",
+            "source": {"kind": "cron", "schedule": "* * * * *"},
+            "action": {
+                "kind": "wake_session",
+                "target_session_id": target.id,
+                "content": "tick",
+            },
+        },
+    )
+
+    n = WAKE_SESSION_MAX_PER_HOUR + 3
+    with mock.patch("aios.services.wake.defer_wake", new=AsyncMock()):
+        for _ in range(n):
+            await run_trigger_step(tid)
+
+    rows = await _carrier_rows(pool, tid)
+    statuses = [r["status"] for r in rows]
+    # First MAX deliveries land; the rest error — a bounded, self-limiting loop.
+    assert statuses == ["ok"] * WAKE_SESSION_MAX_PER_HOUR + ["error"] * 3
+    assert "WakeSessionRateLimitedError" in rows[-1]["error_summary"]
+
+    target_events = await _events_of(pool, target.id)
+    user_msgs = [e for e in target_events if e["data"].get("role") == "user"]
+    assert len(user_msgs) == WAKE_SESSION_MAX_PER_HOUR
