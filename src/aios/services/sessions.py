@@ -9,6 +9,7 @@ and inject environment variables at container provisioning time.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import EllipsisType
@@ -393,6 +394,304 @@ async def create_session(
         return session
 
 
+# ─── The `stimulate` spine: Ask | Tell over one edge writer (#1197) ──────────
+#
+# `stimulate` is the single, **service-internal** writer of the request edge /
+# surface / depth. It materializes-or-resolves a servicer, appends the stimulus
+# (the initial `user` message), threads lineage, and opens the `request_opened`
+# edge in one transaction, then wakes. The `Ask | Tell` distinction is carried as
+# an `awaited` bit ON THE EDGE — `Ask ⇒ awaited=true` (a response obligation the
+# target must answer via `return`/`error`); `Tell ⇒ awaited=false` (fire-and-
+# forget — a real edge that still carries lineage/depth/#794-frozen surface, but
+# owes no response).
+#
+# The union is a **type at the (service-internal) spine boundary**, NOT a public
+# bool: each arm is a distinct frozen dataclass, so the illegal combinations are
+# *unrepresentable* rather than runtime-guarded —
+#   * `Ask(ExistingSession)`            — there is no AskExistingSession class
+#                                         (deferred — #1131 + #1127);
+#   * `output_schema` on a `Tell`       — only Ask* arms carry `output_schema`;
+#   * `vault_ids` on a non-creating arm — only the NewSession arms carry vaults.
+#
+# The spine is NOT exposed (no public `deliver()`; the model reaches it only via
+# policy surfaces — the mechanism/policy split). `awaited` is the edge field, not
+# a public API bool.
+
+
+@dataclass(frozen=True)
+class AskNewSession:
+    """`Ask(NewSession)` — spawn a child session and inject an **awaited** request.
+
+    The `invoke_agent` arm: the child's first user message *is a request* it must
+    answer (`return`/`error`). Carries `output_schema` (the response contract) and
+    `vault_ids` (it creates a servicer). `awaited=true`.
+    """
+
+    session_id: str
+    agent_id: str | None
+    environment_id: str
+    agent_version: int | None
+    model: str | None
+    parent_run_id: str
+    surface: Surface
+    vault_ids: list[str]
+    request_id: str
+    input: Any
+    output_schema: dict[str, Any] | None = None
+    depth: int = 0
+    litellm_extra: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class TellNewSession:
+    """`Tell(NewSession)` — fire-and-forget spawn: create + deliver + wake, **no
+    response obligation**.
+
+    Identical materialization to `AskNewSession` (creates a servicer, so it still
+    decrements SPAWN depth and applies the #794 clamp + binds `vault_ids`), but the
+    edge is **unawaited** (`awaited=false`) and no `output_schema` is carried — the
+    target reaches idle owing nothing. The `request_id` still keys the (unawaited)
+    edge so lineage/depth/surface have a carrier.
+    """
+
+    session_id: str
+    agent_id: str | None
+    environment_id: str
+    agent_version: int | None
+    model: str | None
+    parent_run_id: str
+    surface: Surface
+    vault_ids: list[str]
+    request_id: str
+    input: Any
+    depth: int = 0
+    litellm_extra: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AskExistingSession:
+    """`Ask(ExistingSession)` — inject an **awaited** request into an existing
+    same-account session (the API `invoke`/`invoke_session` arm).
+
+    Channel-less (no `orig_channel`) so the injected request never renders to a
+    connector. Carries `output_schema`; no `vault_ids` (a non-creating target binds
+    none). `awaited=true`.
+    """
+
+    session: Session
+    caller: dict[str, Any]
+    request_id: str
+    input: Any
+    output_schema: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class TellExistingSession:
+    """`Tell(ExistingSession)` — channel-less message + wake, **no request edge**.
+
+    The `_run_wake_owner` body generalized to any same-account target: an
+    `append_user_message` (channel-less, so a notify never renders to a human's
+    chat) + `defer_wake`. Opens no `request_opened` row — there is no response
+    obligation and no lineage edge to carry. The wake/notify policy surfaces
+    (`wake_session`/`wake_owner`/`schedule_wake`) recompose over this arm.
+    """
+
+    session_id: str
+    content: str
+    cause: str = "message"
+
+
+# The discriminated union at the spine boundary. Illegal arms are absent by
+# construction (no `AskExistingSession`+`vault_ids`, no `Tell`+`output_schema`).
+Stimulus = AskNewSession | TellNewSession | AskExistingSession | TellExistingSession
+
+
+async def stimulate(pool: asyncpg.Pool[Any], stim: Stimulus, *, account_id: str) -> bool:
+    """The private `stimulate` spine — the single writer of the request edge.
+
+    Dispatches the `Ask | Tell` union to the matching target arm. Each arm
+    materializes-or-resolves its servicer, appends the stimulus, threads lineage,
+    applies the #794 clamp + vault binding (creating arms only), opens the
+    `request_opened` edge with the correct `awaited` bit (`Ask ⇒ true`,
+    `Tell ⇒ false`; the existing-session `Tell` arm opens *no* edge), and wakes.
+
+    Service-internal: not exposed as a public or model-callable function — the
+    model reaches it only via policy surfaces (mechanism/policy split). Returns
+    `True` when the servicer was freshly stimulated, `False` on a spawn conflict
+    (replay — the new-session arms; the existing-session arms always return
+    `True`).
+    """
+    if isinstance(stim, AskNewSession | TellNewSession):
+        return await _stimulate_new_session(pool, stim, account_id=account_id)
+    if isinstance(stim, AskExistingSession):
+        return await _stimulate_existing_ask(pool, stim, account_id=account_id)
+    return await _stimulate_existing_tell(pool, stim, account_id=account_id)
+
+
+async def _stimulate_new_session(
+    pool: asyncpg.Pool[Any],
+    stim: AskNewSession | TellNewSession,
+    *,
+    account_id: str,
+) -> bool:
+    """The NewSession arm of the spine — idempotently spawn a child + deliver.
+
+    Shared by `Ask(NewSession)` (`awaited=true`, carries `output_schema`) and
+    `Tell(NewSession)` (`awaited=false`, no `output_schema`). Behavior-preserving
+    over the legacy `create_child_session`: same `ON CONFLICT (id) DO NOTHING`
+    first-spawn guard (a replayed wake never re-delivers), same one-transaction
+    insert → freeze surface → bind vaults → deliver → open edge.
+    """
+    awaited = isinstance(stim, AskNewSession)
+    output_schema = stim.output_schema if isinstance(stim, AskNewSession) else None
+    content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
+    async with pool.acquire() as conn, conn.transaction():
+        child = await queries.insert_child_session(
+            conn,
+            session_id=stim.session_id,
+            account_id=account_id,
+            agent_id=stim.agent_id,
+            environment_id=stim.environment_id,
+            agent_version=stim.agent_version,
+            model=stim.model,
+            parent_run_id=stim.parent_run_id,
+            tools=stim.surface.tools,
+            mcp_servers=stim.surface.mcp_servers,
+            http_servers=stim.surface.http_servers,
+            litellm_extra=stim.litellm_extra or {},
+        )
+        if child is None:
+            return False  # replay: row exists — do NOT re-deliver the request
+        if stim.vault_ids:
+            await queries.set_session_vaults(
+                conn, stim.session_id, stim.vault_ids, account_id=account_id
+            )
+            # No advisory containment gate here: ``create_child_session`` is an
+            # internal workflow spawn (no console to surface a fast 422), and its
+            # caller in ``workflows/step.py`` only catches ``NotFoundError`` — a
+            # raised ``ValidationError`` would crash the procrastinate job. The
+            # authoritative gate in ``build_spec_from_session`` catches a
+            # mis-scoped child at provision. The advisory 422 stays on the
+            # operator-facing API attach paths (create_session/update_session).
+        request_meta: dict[str, Any] = {
+            "request_id": stim.request_id,
+            "caller": {"kind": "run", "id": stim.parent_run_id},
+        }
+        if output_schema is not None:
+            request_meta["output_schema"] = output_schema
+        await queries.append_event(
+            conn,
+            account_id=account_id,
+            session_id=stim.session_id,
+            kind="message",
+            data={
+                "role": "user",
+                "content": content,
+                "metadata": {"request": request_meta},
+            },
+        )
+        # #1123/#1197: emit the trusted ``request_opened`` lifecycle edge alongside
+        # the legacy ``metadata.request`` blob (dual-write until #1131 retires the
+        # blob). Gated by the ``child is None`` first-spawn check above, so a
+        # replayed wake (ON CONFLICT → ``child is None`` → early return) never
+        # re-opens the edge — exactly-once per request. ``awaited`` carries the
+        # Ask|Tell distinction: an Ask owes a response, a Tell does not.
+        await queries.append_request_opened(
+            conn,
+            session_id=stim.session_id,
+            account_id=account_id,
+            request_id=stim.request_id,
+            caller={"kind": "run", "id": stim.parent_run_id},
+            depth=stim.depth,
+            environment_id=stim.environment_id,
+            frozen_surface={
+                "tools": [t.model_dump() for t in stim.surface.tools],
+                "mcp_servers": [s.model_dump() for s in stim.surface.mcp_servers],
+                "http_servers": [s.model_dump() for s in stim.surface.http_servers],
+            },
+            vault_ids=stim.vault_ids,
+            awaited=awaited,
+        )
+        return True
+
+
+async def _stimulate_existing_ask(
+    pool: asyncpg.Pool[Any],
+    stim: AskExistingSession,
+    *,
+    account_id: str,
+) -> bool:
+    """The `Ask(ExistingSession)` arm — inject a channel-less awaited request.
+
+    One transaction: append the request's ``user`` message (``metadata.request``
+    carries ``{request_id, caller}`` + optional ``output_schema``) and open the
+    trusted ``request_opened`` edge (`awaited=true`). Channel-less (no
+    ``orig_channel``) so the injected request never surfaces to a connector. Then
+    a deferred wake so the target steps and answers it.
+    """
+    from aios.services.wake import defer_wake
+
+    session = stim.session
+    content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
+    request_meta: dict[str, Any] = {"request_id": stim.request_id, "caller": stim.caller}
+    if stim.output_schema is not None:
+        request_meta["output_schema"] = stim.output_schema
+    agent = await agents_service.load_for_session(pool, session, account_id=account_id)
+    frozen_surface = surface_of(agent)
+    async with pool.acquire() as conn, conn.transaction():
+        vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
+        await queries.append_event(
+            conn,
+            account_id=account_id,
+            session_id=session.id,
+            kind="message",
+            data={
+                "role": "user",
+                "content": content,
+                "metadata": {"request": request_meta},
+            },
+        )
+        await queries.append_request_opened(
+            conn,
+            session_id=session.id,
+            account_id=account_id,
+            request_id=stim.request_id,
+            caller=stim.caller,
+            depth=0,
+            environment_id=session.environment_id,
+            frozen_surface={
+                "tools": [t.model_dump() for t in frozen_surface.tools],
+                "mcp_servers": [s.model_dump() for s in frozen_surface.mcp_servers],
+                "http_servers": [s.model_dump() for s in frozen_surface.http_servers],
+            },
+            vault_ids=vault_ids,
+            awaited=True,
+        )
+    await defer_wake(pool, session.id, cause="api_invoke", account_id=account_id)
+    return True
+
+
+async def _stimulate_existing_tell(
+    pool: asyncpg.Pool[Any],
+    stim: TellExistingSession,
+    *,
+    account_id: str,
+) -> bool:
+    """The `Tell(ExistingSession)` arm — channel-less message + wake, **no edge**.
+
+    The `_run_wake_owner` body generalized to any same-account target: an
+    `append_user_message` (channel-less — no ``orig_channel`` — so a notify never
+    renders to a human's chat) + `defer_wake`. Opens no `request_opened` row (no
+    response obligation, no lineage edge). The service-level mechanism the
+    wake/notify policy surfaces call.
+    """
+    from aios.services.wake import defer_wake
+
+    await append_user_message(pool, stim.session_id, stim.content, account_id=account_id)
+    await defer_wake(pool, stim.session_id, cause=stim.cause, account_id=account_id)
+    return True
+
+
 async def create_child_session(
     pool: asyncpg.Pool[Any],
     *,
@@ -405,109 +704,92 @@ async def create_child_session(
     parent_run_id: str,
     surface: Surface,
     vault_ids: list[str],
-    request_id: str,
     input: Any,
+    request_id: str | None = None,
     output_schema: dict[str, Any] | None = None,
     depth: int = 0,
     litellm_extra: dict[str, Any] | None = None,
+    awaited: bool = True,
 ) -> bool:
     """Idempotently spawn a workflow ``agent()`` child and inject the first request.
 
-    `invoke_agent` = create_session + invoke_session: the child's first user
-    message **is a request** — its content is ``input``, and ``metadata.request``
-    carries ``{request_id, caller}`` so the target can correlate its response and
-    the caller (the run) can be resumed. The child must answer this request via
-    ``return``/``error`` (exactly once); the ``request_id`` is surfaced to the model
-    as a render-time marker on the message (see ``render_user_event``) so it knows
-    which id to echo back.
+    A thin caller of the private :func:`stimulate` spine's NewSession arm: it
+    builds the matching ``Ask | Tell`` stimulus and delegates the
+    materialize → deliver → open-edge → (the caller wakes) middle. Both arms share
+    the same ``ON CONFLICT (id) DO NOTHING`` first-spawn guard, so a replayed wake
+    never re-delivers.
 
-    ``output_schema`` (optional) is the JSON Schema the request demands of the
-    response ``value``. It rides ``metadata.request.output_schema`` — per-request, so
-    a child owing several requests can carry a distinct schema for each — surfaced to
-    the model alongside the request and enforced when it calls ``return``.
+    **Ask (``awaited=true``, the default — `invoke_agent`):** the child's first
+    user message **is a request** — its content is ``input``, and
+    ``metadata.request`` carries ``{request_id, caller}`` so the target can
+    correlate its response and the caller (the run) can be resumed. The child must
+    answer this request via ``return``/``error`` (exactly once); the ``request_id``
+    is surfaced to the model as a render-time marker on the message (see
+    ``render_user_event``) so it knows which id to echo back. ``output_schema``
+    (optional) is the JSON Schema the request demands of the response ``value``.
+
+    **Tell (``awaited=false`` — fire-and-forget spawn, #1197):** create + deliver
+    + wake with an **unawaited** edge — still decrements SPAWN depth and applies the
+    #794 clamp (it creates a servicer), only the **response obligation** is dropped.
+    ``output_schema`` is not permitted (a Tell owes no response). When no
+    ``request_id`` is supplied (the natural Tell call shape) one is minted to key
+    the unawaited edge so lineage/depth/surface have a carrier.
 
     ``surface`` is the child's **frozen, run-attenuated** capability surface
     (``attenuate(agent, run)`` — #794); ``litellm_extra`` is the child's **frozen,
     clamped model identity** (``api_base`` foremost — #823), validated against the
     operator trusted-endpoint allowlist at the spawn edge before this call.
     ``vault_ids`` is the run's vault bindings, copied into the child's
-    ``session_vaults`` so it resolves credentials off its own (subset) table. All
-    three are written **only on a real insert**, inside the one transaction and pinned
-    under ``ON CONFLICT (id) DO NOTHING``, so a replay never re-freezes a shifted
-    surface, re-points a since-changed endpoint, or re-binds vaults.
+    ``session_vaults``. All three are written **only on a real insert**, inside the
+    one transaction and pinned under ``ON CONFLICT (id) DO NOTHING``, so a replay
+    never re-freezes a shifted surface, re-points a since-changed endpoint, or
+    re-binds vaults.
 
-    One transaction: insert the child row (``ON CONFLICT (id) DO NOTHING``) and,
-    **only on a real insert**, freeze the surface, bind the vaults, and deliver the
-    request — without a stimulus the child would be born-idle. Atomic, so a crash can
-    never leave a child row without its request. Returns ``True`` on first spawn,
-    ``False`` on conflict (replay → the caller harvests the response instead of
-    re-spawning).
+    Returns ``True`` on first spawn, ``False`` on conflict (replay → the caller
+    harvests the response instead of re-spawning).
     """
-    content = input if isinstance(input, str) else json.dumps(input)
-    async with pool.acquire() as conn, conn.transaction():
-        child = await queries.insert_child_session(
-            conn,
+    if awaited:
+        if request_id is None:
+            raise ValidationError(
+                "Ask(NewSession) requires a request_id (the response obligation key)",
+                detail={"awaited": True},
+            )
+        stim: AskNewSession | TellNewSession = AskNewSession(
             session_id=session_id,
-            account_id=account_id,
             agent_id=agent_id,
             environment_id=environment_id,
             agent_version=agent_version,
             model=model,
             parent_run_id=parent_run_id,
-            tools=surface.tools,
-            mcp_servers=surface.mcp_servers,
-            http_servers=surface.http_servers,
-            litellm_extra=litellm_extra or {},
-        )
-        if child is None:
-            return False  # replay: row exists — do NOT re-deliver the request
-        if vault_ids:
-            await queries.set_session_vaults(conn, session_id, vault_ids, account_id=account_id)
-            # No advisory containment gate here: ``create_child_session`` is an
-            # internal workflow spawn (no console to surface a fast 422), and its
-            # caller in ``workflows/step.py`` only catches ``NotFoundError`` — a
-            # raised ``ValidationError`` would crash the procrastinate job. The
-            # authoritative gate in ``build_spec_from_session`` catches a
-            # mis-scoped child at provision. The advisory 422 stays on the
-            # operator-facing API attach paths (create_session/update_session).
-        request_meta: dict[str, Any] = {
-            "request_id": request_id,
-            "caller": {"kind": "run", "id": parent_run_id},
-        }
-        if output_schema is not None:
-            request_meta["output_schema"] = output_schema
-        await queries.append_event(
-            conn,
-            account_id=account_id,
-            session_id=session_id,
-            kind="message",
-            data={
-                "role": "user",
-                "content": content,
-                "metadata": {"request": request_meta},
-            },
-        )
-        # #1123: emit the trusted ``request_opened`` lifecycle edge alongside the
-        # legacy ``metadata.request`` blob (dual-write until #1131 retires the
-        # blob). Gated by the ``child is None`` first-spawn check above, so a
-        # replayed wake (ON CONFLICT → ``child is None`` → early return) never
-        # re-opens the edge — exactly-once per request.
-        await queries.append_request_opened(
-            conn,
-            session_id=session_id,
-            account_id=account_id,
-            request_id=request_id,
-            caller={"kind": "run", "id": parent_run_id},
-            depth=depth,
-            environment_id=environment_id,
-            frozen_surface={
-                "tools": [t.model_dump() for t in surface.tools],
-                "mcp_servers": [s.model_dump() for s in surface.mcp_servers],
-                "http_servers": [s.model_dump() for s in surface.http_servers],
-            },
+            surface=surface,
             vault_ids=vault_ids,
+            request_id=request_id,
+            input=input,
+            output_schema=output_schema,
+            depth=depth,
+            litellm_extra=litellm_extra,
         )
-        return True
+    else:
+        if output_schema is not None:
+            raise ValidationError(
+                "Tell(NewSession) cannot carry an output_schema (it owes no response)",
+                detail={"awaited": False},
+            )
+        stim = TellNewSession(
+            session_id=session_id,
+            agent_id=agent_id,
+            environment_id=environment_id,
+            agent_version=agent_version,
+            model=model,
+            parent_run_id=parent_run_id,
+            surface=surface,
+            vault_ids=vault_ids,
+            request_id=request_id if request_id is not None else make_id(REQUEST),
+            input=input,
+            depth=depth,
+            litellm_extra=litellm_extra,
+        )
+    return await _stimulate_new_session(pool, stim, account_id=account_id)
 
 
 async def invoke(
@@ -642,58 +924,24 @@ async def _inject_api_request(
 ) -> str:
     """Inject a channel-less request into ``session`` and open the request edge.
 
-    One transaction: append the request's ``user`` message (``metadata.request``
-    carries ``{request_id, caller}`` + optional ``output_schema`` so the target
-    correlates its response and the caller awaits it) and emit the trusted
-    ``request_opened`` lifecycle edge (#1123). Mirrors ``create_child_session``'s
-    dual-write, with ``caller={kind:"api", ...}`` and a **channel-less** message
-    (no ``orig_channel``) so the injected request never surfaces to a connector.
-
-    The request fires a wake so the target steps and answers it.
+    A thin caller of the private :func:`stimulate` spine's `Ask(ExistingSession)`
+    arm: mints the ``request_id``, builds the stimulus, and delegates the
+    append-message → open-edge (`awaited=true`) → wake middle. The injected
+    request is **channel-less** (no ``orig_channel``) so it never surfaces to a
+    connector, with ``caller={kind:"api", ...}``.
     """
-    # Late import: ``services.wake`` imports this module at load time, so a
-    # module-level ``from aios.services.wake import defer_wake`` would be a
-    # circular import (mirrors the ``defer_run_wake`` pattern below).
-    from aios.services.wake import defer_wake
-
     request_id = make_id(REQUEST)
-    content = input if isinstance(input, str) else json.dumps(input)
-    agent = await agents_service.load_for_session(pool, session, account_id=account_id)
-    frozen_surface = surface_of(agent)
-
-    request_meta: dict[str, Any] = {"request_id": request_id, "caller": caller}
-    if output_schema is not None:
-        request_meta["output_schema"] = output_schema
-
-    async with pool.acquire() as conn, conn.transaction():
-        vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
-        await queries.append_event(
-            conn,
-            account_id=account_id,
-            session_id=session.id,
-            kind="message",
-            data={
-                "role": "user",
-                "content": content,
-                "metadata": {"request": request_meta},
-            },
-        )
-        await queries.append_request_opened(
-            conn,
-            session_id=session.id,
-            account_id=account_id,
-            request_id=request_id,
+    await _stimulate_existing_ask(
+        pool,
+        AskExistingSession(
+            session=session,
             caller=caller,
-            depth=0,
-            environment_id=session.environment_id,
-            frozen_surface={
-                "tools": [t.model_dump() for t in frozen_surface.tools],
-                "mcp_servers": [s.model_dump() for s in frozen_surface.mcp_servers],
-                "http_servers": [s.model_dump() for s in frozen_surface.http_servers],
-            },
-            vault_ids=vault_ids,
-        )
-    await defer_wake(pool, session.id, cause="api_invoke", account_id=account_id)
+            request_id=request_id,
+            input=input,
+            output_schema=output_schema,
+        ),
+        account_id=account_id,
+    )
     return request_id
 
 
@@ -1215,6 +1463,15 @@ async def append_assistant_and_guard_quiescence(
     can ever observe the session idle while a request is open — the invariant holds
     at write time, with no sweep backstop.
 
+    **The #1197 quiescence re-key:** "a session may not idle while it owes an
+    **awaited** open request." ``get_open_request_ids`` filters ``awaited=true``,
+    so a ``Tell(NewSession)`` fire-and-forget spawn (which writes an *unawaited*
+    ``request_opened`` edge) contributes nothing to ``open_ids`` — the
+    nudge/``no_return`` loop is skipped and the fire-and-forget agent reaches idle
+    with zero nudges. An ``Ask`` (awaited) request still triggers the loop. The
+    awaited filter lives in the reader (one of the load-bearing awaited triad), so
+    the re-key needs no special-casing here beyond an empty ``open_ids``.
+
     Returns an :class:`AssistantAppendResult` ``(nudged, autoerror_caller_run_id,
     assistant_focal_at_arrival)``; the caller (the harness loop) does the
     post-commit wakes — ``defer_wake(session)`` if nudged, ``defer_run_wake(run_id)``
@@ -1235,10 +1492,11 @@ async def append_assistant_and_guard_quiescence(
         # Gates, cheapest first (this runs on EVERY end-of-turn append):
         #   1. tool calls present → unresolved tool_call → active by construction
         #      (the tools haven't run yet), so it can't be idle — settle in memory.
-        #   2. nothing owed → no request edge at all (the ordinary session), or every
-        #      request already answered → one indexed anti-join. This — NOT parent_run_id
-        #      — is the totality gate (#1127): a session-caller invoke owes a request to
-        #      a non-run caller, so the guard can no longer short-circuit on child-ness.
+        #   2. nothing AWAITED owed → no request edge at all (the ordinary session),
+        #      every awaited request already answered, or only unawaited Tell edges
+        #      exist (#1197) → one indexed anti-join. This — NOT parent_run_id — is the
+        #      totality gate (#1127): a session-caller invoke owes a request to a
+        #      non-run caller, so the guard can no longer short-circuit on child-ness.
         #   3. only now pay the multi-EXISTS idleness derivation (the same
         #      _SESSION_STATUS_EXPR every external reader uses) — it could still be
         #      active via a user message that arrived during inference.
