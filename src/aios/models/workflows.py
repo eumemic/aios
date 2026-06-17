@@ -19,7 +19,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, validate_http_servers
+from aios.models.agents import (
+    HttpServerRef,
+    HttpServerSpec,
+    McpServerSpec,
+    ToolSpec,
+    validate_http_servers,
+)
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal[
@@ -277,11 +283,17 @@ class WorkflowCreate(BaseModel):
     # path is unattenuated operator authority.
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
-    http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    # ``http_servers`` accepts either a full ``HttpServerSpec`` (identity-match, #949)
+    # or a bare name string (names-only sugar, #953) resolved against the acting
+    # agent at the authoring edge. The HTTP/operator path has no acting agent, so a
+    # bare name there is rejected by the service (nothing to resolve against).
+    http_servers: list[HttpServerRef] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> WorkflowCreate:
-        validate_http_servers(self.http_servers)
+        # Cross-item base_url uniqueness applies to full specs only; bare names
+        # carry no base_url until resolved against the agent (validated there).
+        validate_http_servers([s for s in self.http_servers if isinstance(s, HttpServerSpec)])
         return self
 
 
@@ -307,12 +319,14 @@ class WorkflowUpdate(BaseModel):
     description: str | None = None
     tools: list[ToolSpec] | None = None
     mcp_servers: list[McpServerSpec] | None = None
-    http_servers: list[HttpServerSpec] | None = None
+    # See ``WorkflowCreate.http_servers`` — bare names (names-only sugar, #953) or
+    # full ``HttpServerSpec`` (identity-match, #949); ``None`` preserves current.
+    http_servers: list[HttpServerRef] | None = None
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> WorkflowUpdate:
         if self.http_servers is not None:
-            validate_http_servers(self.http_servers)
+            validate_http_servers([s for s in self.http_servers if isinstance(s, HttpServerSpec)])
         return self
 
 

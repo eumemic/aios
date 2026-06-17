@@ -17627,7 +17627,14 @@
           },
           "http_servers": {
             "items": {
-              "$ref": "#/components/schemas/HttpServerSpec"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/HttpServerSpec"
+                }
+              ]
             },
             "type": "array",
             "title": "Http Servers"
@@ -17740,7 +17747,14 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/HttpServerSpec"
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpServerSpec"
+                    }
+                  ]
                 },
                 "type": "array"
               },

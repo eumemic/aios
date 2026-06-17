@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from aios.models.agents import HttpServerSpec
 from aios.models.workflows import GateResume, WfRun, WfRunCreate, WorkflowCreate, WorkflowUpdate
 
 
@@ -50,6 +51,7 @@ class TestWorkflowCreate:
             }
         )
         assert wf.mcp_servers[0].url == "https://srv.example"
+        assert isinstance(wf.http_servers[0], HttpServerSpec)
         assert wf.http_servers[0].base_url == "https://api.example"
         assert wf.tools == []
 
@@ -86,10 +88,50 @@ class TestWorkflowCreate:
             }
         )
 
-        assert [server.base_url for server in workflow.http_servers] == [
+        assert [
+            server.base_url
+            for server in workflow.http_servers
+            if isinstance(server, HttpServerSpec)
+        ] == [
             "https://one.example.com",
             "https://two.example.com",
         ]
+
+    def test_accepts_names_only_http_servers(self) -> None:
+        # #953 names-only sugar: a bare string references a grant the acting agent
+        # holds; it carries no base_url at the model layer (resolved in the service).
+        wf = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "http_servers": ["davenant"],
+            }
+        )
+        assert wf.http_servers == ["davenant"]
+
+    def test_accepts_mixed_names_and_specs(self) -> None:
+        wf = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "http_servers": ["davenant", _http_server("h", "https://api.example")],
+            }
+        )
+        assert wf.http_servers[0] == "davenant"
+        assert isinstance(wf.http_servers[1], HttpServerSpec)
+        assert wf.http_servers[1].base_url == "https://api.example"
+
+    def test_bare_names_skip_base_url_uniqueness(self) -> None:
+        # The cross-item base_url uniqueness check applies to full specs only — two
+        # bare names (no base_url yet) never collide at the model layer.
+        wf = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "http_servers": ["davenant", "other"],
+            }
+        )
+        assert wf.http_servers == ["davenant", "other"]
 
 
 class TestWorkflowUpdate:
@@ -126,7 +168,9 @@ class TestWorkflowUpdate:
         )
 
         assert update.http_servers is not None
-        assert [server.base_url for server in update.http_servers] == [
+        assert [
+            server.base_url for server in update.http_servers if isinstance(server, HttpServerSpec)
+        ] == [
             "https://one.example.com",
             "https://two.example.com",
         ]

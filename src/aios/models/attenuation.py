@@ -486,6 +486,12 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
     are identity-keyed on ``(name, base_url)`` (membership only): a server is flagged iff
     its identity is absent from ``actual``, never for a route/field divergence — the
     authoring gate inherits the launcher's frozen routes, so identity is the whole test.
+
+    A legibility nicety (#953): ``actual`` survives a declared server on its ``base_url``
+    key but emits it under the launcher's verbatim name, so a declared server whose
+    ``base_url`` IS present under a *different* name is reported as ``"name mismatch at
+    <base_url>"`` rather than listed bare among absent servers — distinguishing "you named
+    it wrong" from "the agent has no such grant".
     """
     out: dict[str, list[str]] = {}
 
@@ -504,7 +510,18 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
         out["mcp_servers"] = bad_mcp
 
     actual_ids = {(s.name, s.base_url) for s in actual.http_servers}
-    bad_http = [s.name for s in expected.http_servers if (s.name, s.base_url) not in actual_ids]
+    actual_base_urls = {s.base_url for s in actual.http_servers}
+    bad_http: list[str] = []
+    for s in expected.http_servers:
+        if (s.name, s.base_url) in actual_ids:
+            continue
+        if s.base_url in actual_base_urls:
+            # The base_url survived (matched the launcher) but under a different name —
+            # the declared name diverges from the agent's. Say so, rather than listing
+            # the declared name among grants the agent wholly lacks.
+            bad_http.append(f"name mismatch at {s.base_url}")
+        else:
+            bad_http.append(s.name)
     if bad_http:
         out["http_servers"] = bad_http
 

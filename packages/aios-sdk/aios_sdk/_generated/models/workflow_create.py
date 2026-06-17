@@ -86,7 +86,7 @@ class WorkflowCreate:
         description (None | str | Unset):
         tools (list[ToolSpec] | Unset):
         mcp_servers (list[McpServerSpec] | Unset):
-        http_servers (list[HttpServerSpec] | Unset):
+        http_servers (list[HttpServerSpec | str] | Unset):
     """
 
     name: str
@@ -96,9 +96,10 @@ class WorkflowCreate:
     description: None | str | Unset = UNSET
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
-    http_servers: list[HttpServerSpec] | Unset = UNSET
+    http_servers: list[HttpServerSpec | str] | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.http_server_spec import HttpServerSpec
         from ..models.workflow_create_input_schema_type_0 import (
             WorkflowCreateInputSchemaType0,
         )
@@ -146,11 +147,15 @@ class WorkflowCreate:
                 mcp_servers_item = mcp_servers_item_data.to_dict()
                 mcp_servers.append(mcp_servers_item)
 
-        http_servers: list[dict[str, Any]] | Unset = UNSET
+        http_servers: list[dict[str, Any] | str] | Unset = UNSET
         if not isinstance(self.http_servers, Unset):
             http_servers = []
             for http_servers_item_data in self.http_servers:
-                http_servers_item = http_servers_item_data.to_dict()
+                http_servers_item: dict[str, Any] | str
+                if isinstance(http_servers_item_data, HttpServerSpec):
+                    http_servers_item = http_servers_item_data.to_dict()
+                else:
+                    http_servers_item = http_servers_item_data
                 http_servers.append(http_servers_item)
 
         field_dict: dict[str, Any] = {}
@@ -259,11 +264,23 @@ class WorkflowCreate:
                 mcp_servers.append(mcp_servers_item)
 
         _http_servers = d.pop("http_servers", UNSET)
-        http_servers: list[HttpServerSpec] | Unset = UNSET
+        http_servers: list[HttpServerSpec | str] | Unset = UNSET
         if _http_servers is not UNSET:
             http_servers = []
             for http_servers_item_data in _http_servers:
-                http_servers_item = HttpServerSpec.from_dict(http_servers_item_data)
+
+                def _parse_http_servers_item(data: object) -> HttpServerSpec | str:
+                    try:
+                        if not isinstance(data, dict):
+                            raise TypeError()
+                        http_servers_item_type_1 = HttpServerSpec.from_dict(data)
+
+                        return http_servers_item_type_1
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    return cast(HttpServerSpec | str, data)
+
+                http_servers_item = _parse_http_servers_item(http_servers_item_data)
 
                 http_servers.append(http_servers_item)
 
