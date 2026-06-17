@@ -62,15 +62,24 @@ class TestCreateSchemaBranches:
         assert branch["properties"]["content"]["type"] == "string"
         assert branch["additionalProperties"] is False
 
-    def test_existing_branches_untouched(self) -> None:
+    def test_source_branches_include_external_event(self) -> None:
         assert [
             b["properties"]["kind"]["const"]
             for b in TRIGGER_CREATE_PARAMETERS_SCHEMA["properties"]["source"]["oneOf"]
-        ] == ["cron", "one_shot", "run_completion"]
+        ] == ["cron", "one_shot", "run_completion", "external_event"]
         assert [
             b["properties"]["kind"]["const"]
             for b in TRIGGER_CREATE_PARAMETERS_SCHEMA["properties"]["action"]["oneOf"]
         ] == ["sandbox_command", "wake_owner", "wake_session", "workflow"]
+
+    def test_external_event_branch(self) -> None:
+        # The reactive source carries ONLY ``kind`` — no schedule/fire_at/
+        # workflow_id — and bans extra keys (the {}-spec shape the DB CHECK
+        # enforces). The ingest secret is server-minted, never a request field.
+        branch = _branch(TRIGGER_CREATE_PARAMETERS_SCHEMA, "source", "external_event")
+        assert branch["required"] == ["kind"]
+        assert set(branch["properties"]) == {"kind"}
+        assert branch["additionalProperties"] is False
 
 
 class TestUpdateSchemaReplaceSemantics:
@@ -96,6 +105,18 @@ class TestUpdateSchemaReplaceSemantics:
         branch = _branch(TRIGGER_UPDATE_PARAMETERS_SCHEMA, "action", "wake_session")
         assert branch["required"] == ["kind", "target_session_id", "content"]
         assert branch["additionalProperties"] is False
+
+    def test_external_event_branch(self) -> None:
+        branch = _branch(TRIGGER_UPDATE_PARAMETERS_SCHEMA, "source", "external_event")
+        assert branch["required"] == ["kind"]
+        assert set(branch["properties"]) == {"kind"}
+        assert branch["additionalProperties"] is False
+
+    def test_source_branches_include_external_event(self) -> None:
+        assert [
+            b["properties"]["kind"]["const"]
+            for b in TRIGGER_UPDATE_PARAMETERS_SCHEMA["properties"]["source"]["oneOf"]
+        ] == ["cron", "one_shot", "run_completion", "external_event"]
 
     def test_existing_action_branches_untouched(self) -> None:
         assert [

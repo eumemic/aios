@@ -93,6 +93,20 @@ _SOURCE_SCHEMA: dict[str, Any] = {
             "required": ["kind", "workflow_id", "statuses"],
             "additionalProperties": False,
         },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"const": "external_event"},
+            },
+            "required": ["kind"],
+            "additionalProperties": False,
+            "description": (
+                "Reactive source fired by an authenticated inbound webhook. "
+                "Replacing the source TO external_event (or re-sending it for an "
+                "already-external trigger = rotation) mints a FRESH ingest secret "
+                "and returns it ONCE as `ingest_token`; replacing AWAY revokes it."
+            ),
+        },
     ],
 }
 

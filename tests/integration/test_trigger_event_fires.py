@@ -461,7 +461,7 @@ async def test_duplicate_claim_is_noop(trig_runtime: asyncpg.Pool[Any]) -> None:
     async with pool.acquire() as conn:
         first = await queries.claim_trigger_run(conn, ref.trigger_run_id, started_at=now)
         second = await queries.claim_trigger_run(conn, ref.trigger_run_id, started_at=now)
-    assert first is not None and first["workflow_id"] == watched
+    assert first is not None and first.event["workflow_id"] == watched
     assert second is None
 
     # A duplicate job against the already-claimed carrier exits without firing.
@@ -999,3 +999,169 @@ async def test_wake_session_fire_loop_terminates_at_rate_cap(
     target_events = await _events_of(pool, target.id)
     user_msgs = [e for e in target_events if e["data"].get("role") == "user"]
     assert len(user_msgs) == WAKE_SESSION_MAX_PER_HOUR
+
+
+# ─── external_event source (#1281): the inbound-webhook fire path ────────────
+
+
+async def _seed_external_event_fire(
+    pool: asyncpg.Pool[Any],
+    *,
+    trigger_id: str,
+    session_id: str,
+    trigger_name: str,
+    event: dict[str, Any],
+) -> str:
+    """Insert one pending external_event carrier (what the ingress commits)."""
+    async with pool.acquire() as conn, conn.transaction():
+        return await queries.insert_external_event_fire(
+            conn,
+            trigger_id=trigger_id,
+            account_id=ACC,
+            owner_session_id=session_id,
+            trigger_name=trigger_name,
+            event=event,
+        )
+
+
+async def test_external_event_fire_roots_lineage_and_carries_body(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """An external_event fire launches a FRESH-ROOT run (parent_run_id NULL) whose
+    input carries the inbound body verbatim under trigger.event, source
+    'external_event', and no trigger.run."""
+    pool = trig_runtime
+    _, _env, session = await seed_agent_env_session(pool, account_id=ACC, prefix="ee")
+    target = await _make_workflow(pool, _ECHO_INPUT)
+    tid = await _add_trigger(
+        pool,
+        session.id,
+        {
+            "name": "gh-hook",
+            "source": {"kind": "external_event"},
+            "action": {"kind": "workflow", "workflow_id": target},
+        },
+    )
+
+    body = {"action": "labeled", "issue": {"number": 7}}
+    trigger_run_id = await _seed_external_event_fire(
+        pool, trigger_id=tid, session_id=session.id, trigger_name="gh-hook", event=body
+    )
+
+    await run_trigger_step(tid, trigger_run_id=trigger_run_id)
+
+    async with pool.acquire() as conn:
+        launched = await conn.fetchrow(
+            "SELECT parent_run_id, input FROM wf_runs WHERE workflow_id = $1", target
+        )
+    assert launched is not None
+    # Fresh lineage root: an external stimulus is not a continuation of any run.
+    assert launched["parent_run_id"] is None
+    composed = queries.parse_jsonb(launched["input"])
+    assert composed["trigger"]["source"] == "external_event"
+    assert composed["trigger"]["event"] == body
+    assert "run" not in composed["trigger"]
+
+    # The carrier finalized ok and points at the launched run.
+    rows = await _carrier_rows(pool, tid)
+    assert [r["status"] for r in rows] == ["ok"]
+    assert rows[0]["trigger_context"] == "external_event"
+
+
+async def test_external_event_ingest_token_surfaced_once_on_create(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """add_trigger mints + surfaces an ingest_token for an external_event source
+    exactly once; the row stores only its sha256 hash; resolve matches it."""
+    import hashlib
+
+    pool = trig_runtime
+    _, _env, session = await seed_agent_env_session(pool, account_id=ACC, prefix="eetok")
+    created = await trig_service.add_trigger(
+        pool,
+        session.id,
+        TriggerCreate.model_validate(
+            {
+                "name": "tok-hook",
+                "source": {"kind": "external_event"},
+                "action": {"kind": "wake_owner", "content": "ping"},
+            }
+        ),
+        account_id=ACC,
+    )
+    assert created.ingest_token is not None
+    assert created.ingest_token.startswith("aios_evt_")
+
+    token_hash = hashlib.sha256(created.ingest_token.encode("utf-8")).hexdigest()
+    async with pool.acquire() as conn:
+        resolved = await queries.resolve_external_event_trigger(conn, ingest_token_hash=token_hash)
+    assert resolved is not None
+    assert resolved.trigger_id == created.id
+    assert resolved.account_id == ACC
+
+    # A non-external_event create surfaces no token.
+    plain = await trig_service.add_trigger(
+        pool,
+        session.id,
+        TriggerCreate.model_validate(
+            {
+                "name": "cron-job",
+                "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+                "action": {"kind": "wake_owner", "content": "tick"},
+            }
+        ),
+        account_id=ACC,
+    )
+    assert plain.ingest_token is None
+
+
+async def test_update_to_external_event_mints_and_away_revokes(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Source-replace TO external_event mints+surfaces a token and stores the
+    hash; replacing AWAY NULLs the hash and surfaces nothing."""
+    from aios.models.triggers import TriggerUpdate
+
+    pool = trig_runtime
+    _, _env, session = await seed_agent_env_session(pool, account_id=ACC, prefix="eeupd")
+    created = await trig_service.add_trigger(
+        pool,
+        session.id,
+        TriggerCreate.model_validate(
+            {
+                "name": "morph",
+                "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+                "action": {"kind": "wake_owner", "content": "tick"},
+            }
+        ),
+        account_id=ACC,
+    )
+    assert created.ingest_token is None
+
+    to_ee = await trig_service.update_trigger(
+        pool,
+        session.id,
+        "morph",
+        TriggerUpdate.model_validate({"source": {"kind": "external_event"}}),
+        account_id=ACC,
+    )
+    assert to_ee.ingest_token is not None
+    async with pool.acquire() as conn:
+        stored = await conn.fetchval(
+            "SELECT ingest_token_hash FROM triggers WHERE id = $1", created.id
+        )
+    assert stored is not None
+
+    away = await trig_service.update_trigger(
+        pool,
+        session.id,
+        "morph",
+        TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "*/9 * * * *"}}),
+        account_id=ACC,
+    )
+    assert away.ingest_token is None
+    async with pool.acquire() as conn:
+        stored2 = await conn.fetchval(
+            "SELECT ingest_token_hash FROM triggers WHERE id = $1", created.id
+        )
+    assert stored2 is None

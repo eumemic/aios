@@ -73,6 +73,18 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
         "MCP-surfaced for agents, but operators watch a session via "
         "`aios sessions stream` / `aios tail` rather than a blocking poll."
     ),
+    # ── External-event webhook ingress ───────────────────────────────
+    # The per-trigger inbound webhook edge (#1281). Authenticated by a
+    # path-embedded ingest token (``aios_evt_…``), not the operator bearer,
+    # and called BY external systems (a GitHub webhook, a monitor alarm) to
+    # push a workflow run — never by operators. Operators mint/rotate the
+    # token via `aios sessions triggers create/update` (which surface the
+    # plaintext once); the ingress itself is account-key-free by design.
+    "ingest_external_event": (
+        "Account-key-free webhook ingress authenticated by a per-trigger path "
+        "token; called by external systems, not operators. Operators mint the "
+        "token via trigger create/update."
+    ),
     # ── Interactive (browser-redirect) OAuth ─────────────────────────
     # The vault-credential "Connect" flow returns an authorization URL for the
     # user to sign in at the provider, then exchanges the returned code. It is

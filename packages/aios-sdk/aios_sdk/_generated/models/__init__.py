@@ -53,6 +53,7 @@ from .environment_update import EnvironmentUpdate
 from .event import Event
 from .event_data import EventData
 from .event_kind import EventKind
+from .external_event_source import ExternalEventSource
 from .file_upload_response import FileUploadResponse
 from .gate_resume import GateResume
 from .get_health_response_get_health import GetHealthResponseGetHealth
@@ -65,6 +66,9 @@ from .http_route_spec import HttpRouteSpec
 from .http_route_spec_methods_type_0_item import HttpRouteSpecMethodsType0Item
 from .http_server_spec import HttpServerSpec
 from .http_validation_error import HTTPValidationError
+from .ingest_external_event_response_ingest_external_event import (
+    IngestExternalEventResponseIngestExternalEvent,
+)
 from .invocation_handle import InvocationHandle
 from .invocation_handle_servicer_kind import InvocationHandleServicerKind
 from .invocation_request import InvocationRequest
@@ -224,6 +228,9 @@ from .trace_response_root_kind import TraceResponseRootKind
 from .trace_truncated import TraceTruncated
 from .trigger_create import TriggerCreate
 from .trigger_create_metadata import TriggerCreateMetadata
+from .trigger_created import TriggerCreated
+from .trigger_created_last_fire_status_type_0 import TriggerCreatedLastFireStatusType0
+from .trigger_created_metadata import TriggerCreatedMetadata
 from .trigger_echo import TriggerEcho
 from .trigger_echo_last_fire_status_type_0 import TriggerEchoLastFireStatusType0
 from .trigger_echo_metadata import TriggerEchoMetadata
@@ -341,6 +348,7 @@ __all__ = (
     "Event",
     "EventData",
     "EventKind",
+    "ExternalEventSource",
     "FileUploadResponse",
     "GateResume",
     "GetHealthResponseGetHealth",
@@ -353,6 +361,7 @@ __all__ = (
     "HttpRouteSpecMethodsType0Item",
     "HttpServerSpec",
     "HTTPValidationError",
+    "IngestExternalEventResponseIngestExternalEvent",
     "InvocationHandle",
     "InvocationHandleServicerKind",
     "InvocationRequest",
@@ -497,6 +506,9 @@ __all__ = (
     "TraceResponseRootKind",
     "TraceTruncated",
     "TriggerCreate",
+    "TriggerCreated",
+    "TriggerCreatedLastFireStatusType0",
+    "TriggerCreatedMetadata",
     "TriggerCreateMetadata",
     "TriggerEcho",
     "TriggerEchoLastFireStatusType0",

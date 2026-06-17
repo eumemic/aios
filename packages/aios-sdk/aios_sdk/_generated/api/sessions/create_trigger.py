@@ -8,7 +8,7 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
 from ...models.trigger_create import TriggerCreate
-from ...models.trigger_echo import TriggerEcho
+from ...models.trigger_created import TriggerCreated
 from ...types import UNSET, Response, Unset
 
 
@@ -39,9 +39,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> HTTPValidationError | TriggerEcho | None:
+) -> HTTPValidationError | TriggerCreated | None:
     if response.status_code == 201:
-        response_201 = TriggerEcho.from_dict(response.json())
+        response_201 = TriggerCreated.from_dict(response.json())
 
         return response_201
 
@@ -58,7 +58,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[HTTPValidationError | TriggerEcho]:
+) -> Response[HTTPValidationError | TriggerCreated]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -73,11 +73,17 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     body: TriggerCreate,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | TriggerEcho]:
+) -> Response[HTTPValidationError | TriggerCreated]:
     """Create Trigger
 
      Add a trigger. Granular operation per #270 — there is no whole-list
     ``set`` surface on ``SessionUpdate``.
+
+    For an ``external_event`` source the response carries ``ingest_token`` —
+    the plaintext ingest secret, surfaced EXACTLY ONCE (mirrors
+    ``RuntimeTokenIssued``). The full ingress URL
+    (``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side;
+    it is never stored and cannot be re-read.
 
     Args:
         session_id (str):
@@ -94,7 +100,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | TriggerEcho]
+        Response[HTTPValidationError | TriggerCreated]
     """
 
     kwargs = _get_kwargs(
@@ -116,11 +122,17 @@ def sync(
     client: AuthenticatedClient | Client,
     body: TriggerCreate,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | TriggerEcho | None:
+) -> HTTPValidationError | TriggerCreated | None:
     """Create Trigger
 
      Add a trigger. Granular operation per #270 — there is no whole-list
     ``set`` surface on ``SessionUpdate``.
+
+    For an ``external_event`` source the response carries ``ingest_token`` —
+    the plaintext ingest secret, surfaced EXACTLY ONCE (mirrors
+    ``RuntimeTokenIssued``). The full ingress URL
+    (``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side;
+    it is never stored and cannot be re-read.
 
     Args:
         session_id (str):
@@ -137,7 +149,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | TriggerEcho
+        HTTPValidationError | TriggerCreated
     """
 
     return sync_detailed(
@@ -154,11 +166,17 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     body: TriggerCreate,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | TriggerEcho]:
+) -> Response[HTTPValidationError | TriggerCreated]:
     """Create Trigger
 
      Add a trigger. Granular operation per #270 — there is no whole-list
     ``set`` surface on ``SessionUpdate``.
+
+    For an ``external_event`` source the response carries ``ingest_token`` —
+    the plaintext ingest secret, surfaced EXACTLY ONCE (mirrors
+    ``RuntimeTokenIssued``). The full ingress URL
+    (``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side;
+    it is never stored and cannot be re-read.
 
     Args:
         session_id (str):
@@ -175,7 +193,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | TriggerEcho]
+        Response[HTTPValidationError | TriggerCreated]
     """
 
     kwargs = _get_kwargs(
@@ -195,11 +213,17 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     body: TriggerCreate,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | TriggerEcho | None:
+) -> HTTPValidationError | TriggerCreated | None:
     """Create Trigger
 
      Add a trigger. Granular operation per #270 — there is no whole-list
     ``set`` surface on ``SessionUpdate``.
+
+    For an ``external_event`` source the response carries ``ingest_token`` —
+    the plaintext ingest secret, surfaced EXACTLY ONCE (mirrors
+    ``RuntimeTokenIssued``). The full ingress URL
+    (``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side;
+    it is never stored and cannot be re-read.
 
     Args:
         session_id (str):
@@ -216,7 +240,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | TriggerEcho
+        HTTPValidationError | TriggerCreated
     """
 
     return (

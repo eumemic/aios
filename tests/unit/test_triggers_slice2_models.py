@@ -21,6 +21,7 @@ from aios.models.triggers import (
     MAX_INPUT_TEMPLATE_BYTES,
     TRIGGER_ACTION_ADAPTER,
     TRIGGER_SOURCE_ADAPTER,
+    ExternalEventSource,
     RunCompletionSource,
     TriggerCreate,
     TriggerRunEcho,
@@ -209,6 +210,28 @@ class TestComputeInitialNextFireRunCompletion:
         src = RunCompletionSource(workflow_id="wf_w")
         assert compute_initial_next_fire(src, NOW) is None
 
+    def test_none_for_external_event(self) -> None:
+        # Reactive like run_completion: the tick never schedules it (next_fire
+        # stays NULL); fires dispatch from the ingress.
+        assert compute_initial_next_fire(ExternalEventSource(), NOW) is None
+
+
+class TestExternalEventSource:
+    def test_parses_from_kind_only(self) -> None:
+        src = TRIGGER_SOURCE_ADAPTER.validate_python({"kind": "external_event"})
+        assert isinstance(src, ExternalEventSource)
+        assert src.kind == "external_event"
+
+    def test_create_accepts_external_event_source(self) -> None:
+        spec = TriggerCreate.model_validate(
+            {
+                "name": "gh-hook",
+                "source": {"kind": "external_event"},
+                "action": {"kind": "wake_owner", "content": "ping"},
+            }
+        )
+        assert isinstance(spec.source, ExternalEventSource)
+
 
 class TestComposeWorkflowRunInput:
     def test_timer_fire_has_no_run_key(self) -> None:
@@ -262,6 +285,39 @@ class TestComposeWorkflowRunInput:
         assert run["status"] == "errored"
         assert run["output"] is None
         assert run["error"] == {"kind": "script_error"}
+
+    def test_external_event_body_rides_under_trigger_event(self) -> None:
+        """An external_event fire carries the inbound body verbatim under
+        ``trigger.event`` and NO ``trigger.run`` (it is a fresh lineage root,
+        not a continuation of any run)."""
+        body = {"action": "labeled", "issue": {"number": 7}}
+        composed = compose_workflow_run_input(
+            trigger_id="trig_1",
+            trigger_name="gh-hook",
+            source="external_event",
+            fired_at=NOW,
+            input_template={"route": "triage"},
+            event=body,
+        )
+        assert composed["trigger"]["source"] == "external_event"
+        assert composed["trigger"]["event"] == body
+        assert "run" not in composed["trigger"]
+        assert composed["input"] == {"route": "triage"}
+        json.dumps(composed)
+
+    def test_event_absent_for_non_external_fires(self) -> None:
+        """A run_completion / timer fire never grows a ``trigger.event`` key —
+        the event arg is only threaded for external_event."""
+        composed = compose_workflow_run_input(
+            trigger_id="trig_1",
+            trigger_name="reactor",
+            source="run_completion",
+            fired_at=NOW,
+            input_template=None,
+            completed_run=_wf_run(),
+            completed_error=None,
+        )
+        assert "event" not in composed["trigger"]
 
     def test_template_with_trigger_key_nests_harmlessly(self) -> None:
         """The author's shape is never parsed or mutated — a template carrying
