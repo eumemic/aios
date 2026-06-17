@@ -179,11 +179,19 @@ def find_live_agent(base_url: str, name: str, api_key: str) -> dict[str, Any] | 
         raise ReconcileError(
             f"GET agents?name={name} returned {status}: {json.dumps(payload)[:500]}"
         )
-    items = payload.get("items")
+    # GET /v1/agents returns the ListResponse[T] envelope (see
+    # src/aios/models/common.py): the rows live under 'data' (alongside
+    # 'has_more' / 'next_cursor') — there is NO 'items' key.
+    items = payload.get("data")
     if not isinstance(items, list):
         raise ReconcileError(
-            f"GET agents?name={name} response missing list 'items': {json.dumps(payload)[:500]}"
+            f"GET agents?name={name} response missing list 'data': {json.dumps(payload)[:500]}"
         )
+    # NOTE: we only inspect this first page of results. The name= equality filter
+    # returns newest-first, and the exact-name match we want is assumed to fit in a
+    # single page (the >=2-match guard below already refuses to reconcile when more
+    # than one exact match is present, so a name spilling onto a second page would
+    # have already tripped that guard). We deliberately do NOT follow next_cursor.
     # Defensive: the equality filter SHOULD return only exact matches, but a future
     # endpoint regression to a prefix/substring match would silently mis-reconcile,
     # so re-assert exact-name equality here before trusting the rows.

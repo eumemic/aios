@@ -190,14 +190,35 @@ def _mock_request(status: int, payload: Any) -> Any:
 
 
 def test_find_live_agent_zero_matches_is_none() -> None:
-    with _mock_request(200, {"items": []}):
+    with _mock_request(200, {"data": [], "has_more": False, "next_cursor": None}):
         assert ra.find_live_agent("https://x", "dev-implement", "k") is None
 
 
 def test_find_live_agent_one_match_returns_it() -> None:
     row = {"id": "agent_1", "name": "dev-implement", "version": 4}
-    with _mock_request(200, {"items": [row]}):
+    with _mock_request(200, {"data": [row], "has_more": False, "next_cursor": None}):
         assert ra.find_live_agent("https://x", "dev-implement", "k") == row
+
+
+def test_find_live_agent_reads_real_listresponse_data_envelope() -> None:
+    """Regression: GET /v1/agents returns the ``ListResponse[T]`` envelope from
+    src/aios/models/common.py — rows under 'data' (with 'has_more'/'next_cursor'),
+    NOT 'items'. Reading 'items' aborted every reconcile/--check run with a false
+    'response missing list' error. This pins the real envelope key."""
+    row = {"id": "agent_real", "name": "dev-implement", "version": 9}
+    envelope = {"data": [row], "has_more": False, "next_cursor": None}
+    with _mock_request(200, envelope):
+        assert ra.find_live_agent("https://x", "dev-implement", "k") == row
+
+
+def test_find_live_agent_legacy_items_envelope_is_loud() -> None:
+    """A response WITHOUT the 'data' key (e.g. the old/wrong 'items' shape) must
+    fail loud rather than be silently treated as zero matches."""
+    with (
+        _mock_request(200, {"items": [{"id": "a", "name": "dev-implement"}]}),
+        pytest.raises(ra.ReconcileError),
+    ):
+        ra.find_live_agent("https://x", "dev-implement", "k")
 
 
 def test_find_live_agent_two_matches_raises() -> None:
@@ -207,7 +228,10 @@ def test_find_live_agent_two_matches_raises() -> None:
         {"id": "agent_1", "name": "autodev-resilience-lieutenant", "version": 1},
         {"id": "agent_2", "name": "autodev-resilience-lieutenant", "version": 1},
     ]
-    with _mock_request(200, {"items": rows}), pytest.raises(ra.ReconcileError):
+    with (
+        _mock_request(200, {"data": rows, "has_more": False, "next_cursor": None}),
+        pytest.raises(ra.ReconcileError),
+    ):
         ra.find_live_agent("https://x", "autodev-resilience-lieutenant", "k")
 
 
@@ -220,7 +244,7 @@ def test_find_live_agent_ignores_inexact_substring_match() -> None:
     """Re-asserts exact equality on the rows the endpoint returns, so a future
     prefix/substring regression can't mis-reconcile."""
     rows = [{"id": "agent_x", "name": "dev-implement-v2", "version": 1}]
-    with _mock_request(200, {"items": rows}):
+    with _mock_request(200, {"data": rows, "has_more": False, "next_cursor": None}):
         assert ra.find_live_agent("https://x", "dev-implement", "k") is None
 
 
@@ -276,7 +300,7 @@ def test_reconcile_agent_update_puts_with_live_version() -> None:
     with mock.patch.object(ra, "_request") as req:
         # GET (find_live) then PUT
         req.side_effect = [
-            (200, {"items": [live]}),
+            (200, {"data": [live], "has_more": False, "next_cursor": None}),
             (200, {**live, "version": 8}),
         ]
         verdict = ra.reconcile_agent(m, base_url="https://x", api_key="k", check=False)
@@ -307,7 +331,7 @@ def test_reconcile_agent_put_409_is_loud() -> None:
     live = _live_from(_manifest(), version=3, id="agent_LIVE")
     with mock.patch.object(ra, "_request") as req:
         req.side_effect = [
-            (200, {"items": [live]}),
+            (200, {"data": [live], "has_more": False, "next_cursor": None}),
             (409, {"detail": "version mismatch"}),
         ]
         with pytest.raises(ra.ReconcileError):
@@ -319,7 +343,7 @@ def test_reconcile_agent_put_version_must_increment() -> None:
     live = _live_from(_manifest(), version=5, id="agent_LIVE")
     with mock.patch.object(ra, "_request") as req:
         req.side_effect = [
-            (200, {"items": [live]}),
+            (200, {"data": [live], "has_more": False, "next_cursor": None}),
             (200, {**live, "version": 5}),  # did NOT increment
         ]
         with pytest.raises(ra.ReconcileError):
