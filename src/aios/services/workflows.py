@@ -304,17 +304,20 @@ async def update_workflow(
     agent. The operator path stores declared http verbatim and rejects names-only sugar
     (no acting agent to resolve against).
     """
-    # Create-time validation (#1285) applies on UPDATE too. Only when this update
-    # actually replaces the script (``script is None`` preserves the stored — already
-    # validated — body). Validated against the MERGED tool surface (new ``tools`` if
-    # given, else the workflow's current tools). Fetch the current definition once here;
-    # the actor branch below re-reads under the version pin for its attenuation check.
-    if script is not None:
+    # Create-time validation (#1285) applies on UPDATE too. Runs whenever the update
+    # touches EITHER the script or the tool surface (``script is not None or tools is
+    # not None``): a tools-only update that narrows away a tool the STORED (unchanged)
+    # script still calls is itself surface drift, so re-validating only on a script
+    # change would leave that hole open. Validated against the EFFECTIVE merged surface
+    # — the new ``script`` if given else the stored body, against the new ``tools`` if
+    # given else the stored tools. Fetch the current definition once here; the actor
+    # branch below re-reads under the version pin for its attenuation check.
+    if script is not None or tools is not None:
         current_for_validation = await get_workflow(pool, workflow_id, account_id=account_id)
         await _validate_script_surface(
             pool,
             account_id=account_id,
-            script=script,
+            script=script if script is not None else current_for_validation.script,
             tools=tools if tools is not None else current_for_validation.tools,
         )
     effective: Surface | None = None

@@ -250,14 +250,40 @@ async def test_update_rejects_under_declared_tool_against_merged_surface(
     assert "http_request" in str(exc.value)
 
 
-async def test_update_without_script_change_is_not_revalidated(pool: asyncpg.Pool[Any]) -> None:
-    # An update that does not touch the script preserves the (already-validated) body and
-    # is not re-checked — a description-only edit succeeds.
+async def test_update_without_script_or_tools_change_is_not_revalidated(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    # An update that touches neither script nor tools preserves the (already-validated)
+    # body and surface and is not re-checked — a description-only edit succeeds.
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="u3", script=_VALID)
     updated = await wf_service.update_workflow(
         pool, wf.id, account_id=ACC, expected_version=wf.version, description="touched"
     )
     assert updated.description == "touched" and updated.version == wf.version + 1
+
+
+async def test_update_tools_only_validates_against_current_script(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    # Updating ONLY tools must re-validate the EFFECTIVE pair: the stored script calls
+    # tool('bash'); narrowing tools to [] (dropping bash) must be rejected, because the
+    # unchanged stored script still calls it — a tools-only surface-drift hole.
+    script = "async def main(input):\n    return await tool('bash', {'command': 'ls'})\n"
+    wf = await wf_service.create_workflow(
+        pool, account_id=ACC, name="u5", script=script, tools=[ToolSpec(type="bash")]
+    )
+    with pytest.raises(ValidationError) as exc:
+        await wf_service.update_workflow(
+            pool,
+            wf.id,
+            account_id=ACC,
+            expected_version=wf.version,
+            tools=[],  # drops bash → stored script's tool('bash') no longer covered
+        )
+    assert "bash" in str(exc.value)
+    # The stored definition is unchanged (still at its original version, bash retained).
+    after = await wf_service.get_workflow(pool, wf.id, account_id=ACC)
+    assert after.version == wf.version and {t.type for t in after.tools} == {"bash"}
 
 
 async def test_update_accepts_valid_new_script(pool: asyncpg.Pool[Any]) -> None:
