@@ -322,6 +322,34 @@ async def get_account_spend_state(
     return spent, limit
 
 
+async def get_account_subtree_spend_state(
+    pool: asyncpg.Pool[Any], account_id: str
+) -> tuple[int, float | None]:
+    """Return the rolled-up subtree spend (micro-USD) and the effective limit.
+
+    The sibling :func:`get_account_spend_state` reads the *flat* per-account
+    meter; this reads the *rolled-up* subtree envelope (every meter at or below
+    ``account_id``, archived edges severed — see
+    :func:`db.queries.get_account_subtree_spent_microusd`) against the same
+    effective spend limit. The pre-flight admission gate in the harness checks
+    against this rollup so an ancestor's ceiling is enforced once its
+    descendants' *cumulative* spend breaches it, even when no single account's
+    flat meter has crossed on its own. A hard ceiling, not an allocation
+    market — dollars are an externally-checkable derived scalar.
+    """
+    async with pool.acquire() as conn:
+        spent = await queries.get_account_subtree_spent_microusd(conn, account_id)
+        limit = await resolve_effective_spend_limit_usd_on(conn, account_id)
+    if not isinstance(cast(Any, spent), int) or not isinstance(
+        cast(Any, limit), int | float | None
+    ):
+        # Unit tests often use bare MagicMock pools and leave this collaborator
+        # unpatched. Treat untyped mock values as ungated; production queries
+        # return the annotated scalar types.
+        return 0, None
+    return spent, limit
+
+
 async def purge_account(
     pool: asyncpg.Pool[Any], *, target_account_id: str, caller_account_id: str
 ) -> None:

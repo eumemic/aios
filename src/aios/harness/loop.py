@@ -438,16 +438,30 @@ async def _run_session_step_body(
         )
         return _StepResult()
 
-    spent_microusd, spend_limit_usd = await accounts_service.get_account_spend_state(
-        pool, account_id
-    )
+    # Pre-flight admission against the rolled-up subtree envelope (#1279).
+    #
+    # The admission decision — refusing to *start* this step's model call
+    # before dispatch — is made against the rolled-up subtree envelope (P1's
+    # `get_account_subtree_spent_microusd`, #1296): the SUM of every meter at
+    # or below this account, archived edges severed. The rollup includes the
+    # account's own meter, so it subsumes the flat ceiling — a flat breach is
+    # always a subtree breach — but it ALSO latches once descendants'
+    # *cumulative* spend breaches an ancestor's effective limit, even when no
+    # single account's flat meter has crossed on its own. A hard ceiling, not
+    # an allocation market: dollars are an externally-checkable derived scalar.
+    # (The post-call warning threshold below measures the freshly-charged flat
+    # meter against this same effective limit — see `_charge_usage`.)
+    (
+        subtree_spent_microusd,
+        spend_limit_usd,
+    ) = await accounts_service.get_account_subtree_spend_state(pool, account_id)
     spend_limit_microusd = _limit_to_microusd(spend_limit_usd)
-    if spend_limit_microusd is not None and spent_microusd >= spend_limit_microusd:
+    if spend_limit_microusd is not None and subtree_spent_microusd >= spend_limit_microusd:
         assert spend_limit_usd is not None
         await _handle_spend_cap(
             pool,
             session_id,
-            spent_microusd=spent_microusd,
+            spent_microusd=subtree_spent_microusd,
             spend_limit_usd=spend_limit_usd,
             account_id=account_id,
         )
