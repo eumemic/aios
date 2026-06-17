@@ -428,8 +428,7 @@ async def test_needs_decision_applies_label_before_comment() -> None:
     muts = [
         (m, p)
         for (m, p) in scn.http
-        if m == "POST"
-        and p in ("/repos/o/r/issues/1224/labels", "/repos/o/r/issues/1224/comments")
+        if m == "POST" and p in ("/repos/o/r/issues/1224/labels", "/repos/o/r/issues/1224/comments")
     ]
     assert muts == [
         ("POST", "/repos/o/r/issues/1224/labels"),

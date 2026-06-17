@@ -91,9 +91,7 @@ def test_replay_with_marker_present_skips_the_post() -> None:
     # The replay/duplicate hazard: the marker is already in the thread → skip, no POST.
     ns = _namespace()
     post = ns["post_comment_once"]
-    resp = asyncio.run(
-        post("o/r", 7, MARKER, BODY, existing_comments=[{"body": BODY}])
-    )
+    resp = asyncio.run(post("o/r", 7, MARKER, BODY, existing_comments=[{"body": BODY}]))
     assert resp.get("skipped") is True
     assert resp["status"] == 200
     assert ns["posts"] == []  # NO duplicate POST

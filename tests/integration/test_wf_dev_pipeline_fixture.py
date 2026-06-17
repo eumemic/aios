@@ -497,8 +497,7 @@ async def test_spec_gate_applies_label_before_comment() -> None:
     ordered = [
         p
         for (m, p) in scn.http
-        if m == "POST"
-        and p in ("/repos/o/r/issues/5/labels", "/repos/o/r/issues/5/comments")
+        if m == "POST" and p in ("/repos/o/r/issues/5/labels", "/repos/o/r/issues/5/comments")
     ]
     # the "spec not ready" comment is POSTed, and a label POST precedes it (label guards it)
     assert "/repos/o/r/issues/5/comments" in ordered
