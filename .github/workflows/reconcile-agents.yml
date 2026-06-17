@@ -1,0 +1,69 @@
+# IaC-sync v1 (agents) — deploy-on-merge for the aios agent objects.
+#
+# The dev-pipeline's opus agents (dev-implement / dev-review / dev-fix /
+# dev-ci-watch / dev-risk) are otherwise 100% imperative and unversioned: a change
+# to one is a hand-edit no one can diff against intent. This Action brings them
+# under git, mirroring the workflow reconciler (reregister-workflows.yml): on a
+# push to `master` that touches an agent manifest under `infra/agents/`, it reads
+# each live agent BY NAME, diffs it against the committed (thin, secret-free)
+# manifest, and PUTs a version-bumped update in place — idempotent, fail-loud.
+# `scripts/reconcile_agents.py` carries the reconcile logic; `infra/agents/*.json`
+# are the source of truth. See `infra/agents/README.md` — especially the
+# id-vs-name constraint and the manual-rewire-on-create rule.
+#
+# Unlike the workflow Action there is NO integration-fixture step: agents have no
+# emitted script to fixture-drive, so the offline unit test is the right lowest
+# gate, not an oversight. The v2 evolution wraps `reconcile_agents.py --check` +
+# `reregister_workflows.py --check` on a cron trigger that files an issue on drift.
+name: Reconcile agents (IaC-sync v1)
+
+on:
+  push:
+    branches: [master]
+    # Trigger ONLY when an agent manifest changes — an unrelated master push is
+    # inert for the agent objects, so reconciling would be a pointless no-op.
+    paths:
+      - "infra/agents/**"
+
+# Never run two reconciles concurrently. cancel-in-progress: false lets an
+# in-flight deploy finish (a half-applied reconcile must complete, not be killed);
+# GitHub cancels the older PENDING run when a newer one queues, so the tip wins.
+# The script's 409 version-mismatch guard is defence-in-depth, not the serialiser.
+concurrency:
+  group: reconcile-agents
+  cancel-in-progress: false
+
+# Least-privilege: this job only checks out the repo and calls an external API —
+# it makes NO GitHub writes. Keep GITHUB_TOKEN read-only so it can't be abused for
+# a free write token sitting next to the prod-mutating AIOS_API_KEY.
+permissions:
+  contents: read
+
+env:
+  AIOS_URL: https://api.aios.eumemic.ai
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Sync deps (the script imports aios)
+        run: uv sync --dev
+
+      # The unit test is the gate: it validates every committed manifest against the
+      # real AgentCreate, asserts the no-secret invariant, and exercises the
+      # diff / duplicate-name / create-warning / check-no-write / 409 logic offline.
+      - name: Validate manifests + reconciler (unit gate)
+        run: uv run pytest tests/unit/test_reconcile_agents.py -q
+
+      - name: Reconcile live agents from the committed manifests
+        env:
+          # Provisioned out-of-band by the maintainer; NEVER inline a key.
+          AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
+        run: uv run python scripts/reconcile_agents.py
