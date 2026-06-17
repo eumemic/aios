@@ -228,7 +228,7 @@ class TestAnsweredDedup:
     async def test_skips_already_answered(self, probe: _ProbeConnector) -> None:
         """The tool_loop guards against double-execution on SSE replay
         by checking ``_answered`` before dispatching.  Verify directly."""
-        probe._answered.add("call_1")
+        probe._answered["call_1"] = None
         call = {
             "connection_id": "conn_1",
             "tool_call_id": "call_1",
@@ -241,6 +241,147 @@ class TestAnsweredDedup:
         else:
             await probe.dispatch_call(call)
         assert probe.calls == []
+
+
+class _IdempotencyConnector(_ProbeConnector):
+    """Probe whose ``_post_tool_result`` can be made to fail.
+
+    Models the issue's failure window: a side-effecting tool body runs,
+    the platform send succeeds, then the tool-result POST fails.  On
+    replay the body must NOT run a second time (no double-send); the
+    persisted result is re-POSTed instead.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # When > 0, the next ``_post_tool_result`` raises and decrements.
+        self.fail_posts: int = 0
+        self.post_attempts: int = 0
+
+    async def _post_tool_result(  # type: ignore[override]
+        self,
+        client: Any,
+        *,
+        connection_id: str,
+        session_id: str,
+        tool_call_id: str,
+        content: str | list[dict[str, Any]],
+        is_error: bool = False,
+    ) -> None:
+        self.post_attempts += 1
+        if self.fail_posts > 0:
+            self.fail_posts -= 1
+            raise RuntimeError("tool-result POST failed")
+        await super()._post_tool_result(
+            client,
+            connection_id=connection_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            content=content,
+            is_error=is_error,
+        )
+
+
+class TestOutboundIdempotency:
+    """#1234: persist the tool result *before* the result POST so a POST
+    failure after a successful platform send doesn't re-run the body."""
+
+    @staticmethod
+    def _call(
+        tool_call_id: str, name: str = "shout", arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        if arguments is None:
+            arguments = {"text": "hi"} if name == "shout" else {}
+        return {
+            "connection_id": "conn_1",
+            "tool_call_id": tool_call_id,
+            "session_id": "sess_1",
+            "name": name,
+            "arguments": json.dumps(arguments),
+        }
+
+    async def test_dispatch_marks_answered_before_result_post(self) -> None:
+        c = _IdempotencyConnector()
+        call = self._call("call_1")
+
+        # First dispatch: the body runs (side effect), then the result
+        # POST fails.  The id must already be marked answered.
+        c.fail_posts = 1
+        with pytest.raises(RuntimeError):
+            await c.dispatch_call(call)
+        assert c.calls == [("shout", {"text": "hi"})]
+        assert "call_1" in c._answered
+        assert c._answered["call_1"] == "HI"
+
+        # Reconnect replay: the loop sees the id is answered and re-POSTs
+        # the persisted result instead of re-running the body.
+        assert "call_1" in c._answered  # loop would take the replay branch
+        await c._replay_tool_result(c._client, call)
+
+        # Body ran exactly once — no second platform send.
+        assert c.calls == [("shout", {"text": "hi"})]
+        # The successful replay POST carried the persisted result.
+        assert len(c.results) == 1
+        assert c.results[0].kwargs["content"] == "HI"
+        assert c.results[0].kwargs["tool_call_id"] == "call_1"
+
+    async def test_already_answered_replays_persisted_result(self) -> None:
+        c = _IdempotencyConnector()
+        c._answered = {"call_x": "<result>"}
+        call = self._call("call_x")
+
+        # Simulate the _tool_loop replay branch for an already-answered id.
+        assert "call_x" in c._answered
+        await c._replay_tool_result(c._client, call)
+
+        # Tool body NOT invoked; persisted result re-POSTed.
+        assert c.calls == []
+        assert len(c.results) == 1
+        assert c.results[0].kwargs["content"] == "<result>"
+        assert c.results[0].kwargs["tool_call_id"] == "call_x"
+
+    async def test_replay_skips_when_no_persisted_result(self) -> None:
+        """A ``None`` persisted value (e.g. management call) has nothing to
+        replay, so ``_replay_tool_result`` is a no-op."""
+        c = _IdempotencyConnector()
+        c._answered = {"call_n": None}
+        await c._replay_tool_result(c._client, self._call("call_n"))
+        assert c.calls == []
+        assert c.results == []
+
+    async def test_error_result_marks_answered(self) -> None:
+        c = _IdempotencyConnector()
+        await c.dispatch_call(self._call("call_e", name="boom"))
+        # The raising tool ran once and produced an error result.
+        assert c.calls == [("boom", {})]
+        assert "call_e" in c._answered
+        body = json.loads(c._answered["call_e"])  # type: ignore[arg-type]
+        assert body["error"] == "kaboom"
+
+        # Replay does not re-invoke the tool body; it re-POSTs the error.
+        await c._replay_tool_result(c._client, self._call("call_e", name="boom"))
+        assert c.calls == [("boom", {})]
+        assert c.results[-1].kwargs["content"] == c._answered["call_e"]
+
+    async def test_unknown_tool_marks_answered(self) -> None:
+        c = _IdempotencyConnector()
+        await c.dispatch_call(self._call("call_u", name="no_such_tool"))
+        assert "call_u" in c._answered
+        body = json.loads(c._answered["call_u"])  # type: ignore[arg-type]
+        assert "unknown tool" in body["error"]
+
+    async def test_save_answered_receives_serialized_result(self) -> None:
+        """The persistence hook is handed the id and its serialized
+        result, exercising the widened ``save_answered`` contract."""
+        c = _IdempotencyConnector()
+        saved: list[tuple[str, str | None]] = []
+
+        async def _save(tool_call_id: str, result: str | None = None) -> None:
+            saved.append((tool_call_id, result))
+
+        c.save_answered = _save  # type: ignore[assignment,method-assign]
+        await c.dispatch_call(self._call("call_s"))
+        assert saved == [("call_s", "HI")]
 
 
 class _FocalConnector(_ProbeConnector):

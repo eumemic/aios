@@ -37,9 +37,15 @@ connector type once, then races three jobs concurrently:
    in a :class:`asyncio.TaskGroup` for clean shutdown.
 
 The runner tracks answered ``tool_call_id``s in memory so SSE
-reconnects (which replay the backfill) don't double-execute.  For
-durability across container restart, override :meth:`load_answered` /
-:meth:`save_answered` (a small SQLite spool ships at ``spool.py``).
+reconnects (which replay the backfill) don't double-execute.  Each
+answered id maps to its serialized tool-result payload (or ``None``):
+the persist point sits *between* the side-effecting tool body and the
+tool-result POST, so a POST that fails after a successful platform send
+won't re-run the body on replay — the persisted result is simply
+re-POSTed (the AIOS append is idempotent on ``(session_id,
+tool_call_id)``).  For durability across container restart, override
+:meth:`load_answered` / :meth:`save_answered` (a small SQLite spool
+ships at ``spool.py``).
 """
 
 from __future__ import annotations
@@ -225,7 +231,11 @@ class HttpConnector:
         self._client: Client | None = None
         self._tools: dict[str, _ToolMeta] = self._collect_tools()
         self._management: dict[str, _ManagementHandlerMeta] = self._collect_management_handlers()
-        self._answered: set[str] = set()
+        # tool_call_id → serialized tool-result payload (or None when no
+        # result is persisted, e.g. management calls).  Persisted between
+        # the side-effecting tool body and the result POST so a failed POST
+        # replays the persisted result instead of re-running the body.
+        self._answered: dict[str, str | None] = {}
         self._connections: dict[str, _ConnectionState] = {}
         # Subclasses narrow the value type via a class-body annotation::
         #
@@ -361,12 +371,51 @@ class HttpConnector:
         if self._loops_backfilled >= 3:
             self._all_loops_live.set()
 
-    async def load_answered(self) -> set[str]:
-        """Override: persisted tool_call_ids from a previous lifetime."""
-        return set()
+    async def load_answered(self) -> dict[str, str | None]:
+        """Override: persisted tool_call_ids from a previous lifetime.
 
-    async def save_answered(self, tool_call_id: str) -> None:
-        """Override: persist a freshly-answered tool_call_id."""
+        Returns a map of ``tool_call_id`` → serialized tool-result payload
+        (or ``None`` when no result was persisted).  Default ``{}``.
+        """
+        return {}
+
+    async def save_answered(self, tool_call_id: str, result: str | None = None) -> None:
+        """Override: persist a freshly-answered tool_call_id.
+
+        ``result`` is the serialized platform-send result to persist
+        alongside the id (``None`` when there is nothing to replay, e.g.
+        management calls).  Default no-op.
+        """
+
+    async def _mark_answered(self, tool_call_id: str, result: str | None) -> None:
+        """Record ``tool_call_id`` as answered and persist its result.
+
+        Co-located with the side-effecting tool body so the persist lands
+        *before* the result POST: a POST that fails after a successful
+        platform send won't re-run the body on replay.
+        """
+        self._answered[tool_call_id] = result
+        await self.save_answered(tool_call_id, result)
+
+    async def _replay_tool_result(self, client: Client, call: dict[str, Any]) -> None:
+        """Re-POST the persisted result for an already-answered call.
+
+        Heals the send-succeeded/result-POST-failed window: the tool body
+        already ran (and its side effect happened), so we only re-deliver
+        the persisted result.  When no result was persisted (value is
+        ``None``) there is nothing to replay and we skip.
+        """
+        tool_call_id = call.get("tool_call_id", "")
+        result = self._answered.get(tool_call_id)
+        if result is None:
+            return
+        await self._post_tool_result(
+            client,
+            connection_id=call.get("connection_id", ""),
+            session_id=call.get("session_id", ""),
+            tool_call_id=tool_call_id,
+            content=result,
+        )
 
     # ─── connector → aios glue ───────────────────────────────────────
 
@@ -758,17 +807,28 @@ class HttpConnector:
                         continue
                     call = json.loads(msg.data)
                     tool_call_id = call.get("tool_call_id", "")
-                    if not tool_call_id or tool_call_id in self._answered:
+                    if not tool_call_id:
                         continue
+                    if tool_call_id in self._answered:
+                        # Already executed in a prior lifetime/connection.
+                        # The side effect already happened, so re-POST the
+                        # persisted result (healing a result-POST that failed
+                        # after a successful platform send) instead of
+                        # re-running the body.  No-op when nothing persisted.
+                        await self._replay_tool_result(client, call)
+                        continue
+                    # ``dispatch_call`` marks the call answered (via
+                    # ``_mark_answered``) *between* the side-effecting tool
+                    # body and the result POST, so a POST failure can't
+                    # re-run the body on replay.
                     await self.dispatch_call(call)
-                    self._answered.add(tool_call_id)
-                    await self.save_answered(tool_call_id)
             # Same retry posture as ``_discovery_loop`` — only catch transport
             # errors; let ``_post_tool_result`` RuntimeErrors and other
             # application bugs propagate. A persistent 4xx/5xx on tool-result
-            # POST would otherwise loop forever (the answered set is only
-            # updated after a successful dispatch, so backfill replays the
-            # same call_id on every reconnect).
+            # POST would otherwise loop forever; but because the call is
+            # marked answered *before* the POST, a reconnect replays via
+            # ``_replay_tool_result`` (re-POST only) rather than re-running
+            # the side-effecting body.
             except httpx.HTTPError as exc:
                 log.warning(
                     "connector.tool_loop.stream_error",
@@ -829,12 +889,14 @@ class HttpConnector:
                 session_id=session_id,
                 reason="unknown_tool",
             )
+            error_content = json.dumps({"error": f"unknown tool {name!r}"})
+            await self._mark_answered(tool_call_id, error_content)
             await self._post_tool_result(
                 client,
                 connection_id=connection_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
-                content=json.dumps({"error": f"unknown tool {name!r}"}),
+                content=error_content,
                 is_error=True,
             )
             return
@@ -857,12 +919,14 @@ class HttpConnector:
                 reason="sandbox_path",
                 error=str(exc),
             )
+            error_content = json.dumps({"error": str(exc)})
+            await self._mark_answered(tool_call_id, error_content)
             await self._post_tool_result(
                 client,
                 connection_id=connection_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
-                content=json.dumps({"error": str(exc)}),
+                content=error_content,
                 is_error=True,
             )
             return
@@ -902,17 +966,24 @@ class HttpConnector:
                 reason=reason,
                 error=str(exc),
             )
+            error_content = json.dumps(error_payload)
+            await self._mark_answered(tool_call_id, error_content)
             await self._post_tool_result(
                 client,
                 connection_id=connection_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
-                content=json.dumps(error_payload),
+                content=error_content,
                 is_error=True,
             )
             return
         if not isinstance(result, str | list):
             result = json.dumps(result)
+        # Persist the (side-effecting) tool result BEFORE the result POST.
+        # A list result is serialized to JSON for persistence; it is still
+        # POSTed in its native list shape below.
+        serialized_result = result if isinstance(result, str) else json.dumps(result)
+        await self._mark_answered(tool_call_id, serialized_result)
         await self._post_tool_result(
             client,
             connection_id=connection_id,
@@ -971,8 +1042,9 @@ class HttpConnector:
                             "connector.management_call.dispatch_failed",
                             call_id=call_id,
                         )
-                    self._answered.add(call_id)
-                    await self.save_answered(call_id)
+                    # Management calls persist no replayable result; ``None``
+                    # keeps the existing skip-on-replay semantics.
+                    await self._mark_answered(call_id, None)
             except httpx.HTTPError as exc:
                 log.warning(
                     "connector.management_loop.stream_error",

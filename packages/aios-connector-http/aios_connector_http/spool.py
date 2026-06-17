@@ -6,19 +6,25 @@ backfills every pending call again — including ones we already
 executed — and we'd double-execute (e.g. send a Telegram message
 twice).
 
-The spool persists the answered ids on disk.  Subclass
-:class:`HttpConnector` and wire it in::
+The spool persists the answered ids on disk, each mapped to the
+serialized tool-result payload that was sent for it (or ``None`` when
+no result is persisted, e.g. management calls).  On replay the
+connector re-POSTs the persisted result instead of re-running the
+side-effecting tool body.  Subclass :class:`HttpConnector` and wire it
+in::
 
     class MyConnector(HttpConnector):
         def __init__(self) -> None:
             super().__init__()
             self._spool = SqliteAnsweredSpool("/var/lib/myconn/answered.sqlite")
 
-        async def load_answered(self) -> set[str]:
+        async def load_answered(self) -> dict[str, str | None]:
             return self._spool.load()
 
-        async def save_answered(self, tool_call_id: str) -> None:
-            self._spool.add(tool_call_id)
+        async def save_answered(
+            self, tool_call_id: str, result: str | None = None
+        ) -> None:
+            self._spool.add(tool_call_id, result)
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ from pathlib import Path
 
 
 class SqliteAnsweredSpool:
-    """Tiny on-disk set of ``tool_call_id`` strings."""
+    """Tiny on-disk map of ``tool_call_id`` → serialized result."""
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
@@ -37,18 +43,30 @@ class SqliteAnsweredSpool:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS answered ("
             "  tool_call_id TEXT PRIMARY KEY,"
-            "  added_at REAL NOT NULL DEFAULT (unixepoch('subsec'))"
+            "  result TEXT,"
+            # ``unixepoch('subsec')`` (sub-second resolution) only exists on
+            # SQLite >= 3.42; on the bookworm runtime (3.40) it yields NULL,
+            # which would violate NOT NULL and make ``INSERT OR IGNORE``
+            # silently drop every row.  COALESCE to integer-second
+            # ``unixepoch()`` keeps NOT NULL satisfied everywhere.
+            "  added_at REAL NOT NULL "
+            "DEFAULT (COALESCE(unixepoch('subsec'), unixepoch()))"
             ")"
         )
         self._conn.commit()
 
-    def load(self) -> set[str]:
-        rows = self._conn.execute("SELECT tool_call_id FROM answered").fetchall()
-        return {row[0] for row in rows}
+    def load(self) -> dict[str, str | None]:
+        rows = self._conn.execute(
+            "SELECT tool_call_id, result FROM answered"
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
 
-    def add(self, tool_call_id: str) -> None:
+    def add(self, tool_call_id: str, result: str | None = None) -> None:
+        # INSERT OR IGNORE keeps the first persisted result for an id: a
+        # replay re-POST never overwrites the original send result.
         self._conn.execute(
-            "INSERT OR IGNORE INTO answered (tool_call_id) VALUES (?)", (tool_call_id,)
+            "INSERT OR IGNORE INTO answered (tool_call_id, result) VALUES (?, ?)",
+            (tool_call_id, result),
         )
         self._conn.commit()
 
