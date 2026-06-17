@@ -142,6 +142,9 @@ from .o_auth_start_request_token_endpoint_auth_method_type_0 import (
 )
 from .o_auth_start_response import OAuthStartResponse
 from .one_shot_source import OneShotSource
+from .post_connector_runtime_chat_lifecycle_response_post_connector_runtime_chat_lifecycle import (
+    PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle,
+)
 from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle import (
     PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle,
 )
@@ -155,6 +158,10 @@ from .run_completion_source_replace_statuses_item import (
     RunCompletionSourceReplaceStatusesItem,
 )
 from .run_completion_source_statuses_item import RunCompletionSourceStatusesItem
+from .runtime_chat_lifecycle_request import RuntimeChatLifecycleRequest
+from .runtime_chat_lifecycle_request_data_type_0 import (
+    RuntimeChatLifecycleRequestDataType0,
+)
 from .runtime_lifecycle_request import RuntimeLifecycleRequest
 from .runtime_lifecycle_request_data_type_0 import RuntimeLifecycleRequestDataType0
 from .runtime_management_call_result_request import RuntimeManagementCallResultRequest
@@ -436,6 +443,7 @@ __all__ = (
     "OAuthStartRequestTokenEndpointAuthMethodType0",
     "OAuthStartResponse",
     "OneShotSource",
+    "PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle",
     "RecentChat",
@@ -443,6 +451,8 @@ __all__ = (
     "RunCompletionSourceReplace",
     "RunCompletionSourceReplaceStatusesItem",
     "RunCompletionSourceStatusesItem",
+    "RuntimeChatLifecycleRequest",
+    "RuntimeChatLifecycleRequestDataType0",
     "RuntimeLifecycleRequest",
     "RuntimeLifecycleRequestDataType0",
     "RuntimeManagementCallResultRequest",

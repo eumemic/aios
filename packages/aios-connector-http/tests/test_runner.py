@@ -1378,3 +1378,87 @@ class TestEmitSessionLifecycle:
         assert len(failed) == 1
         assert failed[0]["status_code"] == 422
         assert failed[0]["session_id"] == "sess_1"
+
+
+class TestEmitChatLifecycle:
+    """``emit_chat_lifecycle`` (#1260) POSTs the routing-key (chat_id)
+    variant of the session-targeted lifecycle route: the connector passes a
+    per-peer routing key and AIOS resolves it to the originating session."""
+
+    async def test_posts_chat_lifecycle_route_with_wake_and_data(
+        self, probe: _ProbeConnector
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = False
+        mock_response.json = MagicMock(
+            return_value={"appended_session_ids": ["sess_1"], "session_id": "sess_1"}
+        )
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        result = await probe.emit_chat_lifecycle(
+            connection_id="conn_1",
+            chat_id="+15550123",
+            event="connector_delivery_failed",
+            reason="30007",
+            data={"detail": "carrier blocked", "peer": "+15550123"},
+            wake=True,
+        )
+
+        assert result == {"appended_session_ids": ["sess_1"], "session_id": "sess_1"}
+        # Targets the routing-key route, not the session-id or broadcast one.
+        url = mock_post.call_args.args[0]
+        assert url == "/v1/connectors/runtime/chat-lifecycle"
+        body = mock_post.call_args.kwargs["json"]
+        assert body == {
+            "connection_id": "conn_1",
+            "chat_id": "+15550123",
+            "event": "connector_delivery_failed",
+            "wake": True,
+            "reason": "30007",
+            "data": {"detail": "carrier blocked", "peer": "+15550123"},
+        }
+
+    async def test_wake_defaults_false_and_optional_fields_omitted(
+        self, probe: _ProbeConnector
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = False
+        mock_response.json = MagicMock(return_value={"appended_session_ids": ["sess_1"]})
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        await probe.emit_chat_lifecycle(
+            connection_id="conn_1",
+            chat_id="+15550123",
+            event="connector_delivery_failed",
+        )
+
+        body = mock_post.call_args.kwargs["json"]
+        assert body["wake"] is False
+        assert "reason" not in body
+        assert "data" not in body
+
+    async def test_non_fatal_4xx_drops_returns_none(self, probe: _ProbeConnector) -> None:
+        """A non-fatal 4xx (notably a 404 when the chat_id has no bound
+        session) is logged and dropped (returns ``None``), matching
+        ``emit_inbound``/``emit_lifecycle``'s drop-don't-raise stance."""
+        mock_response = MagicMock()
+        mock_response.is_error = True
+        mock_response.status_code = 404
+        mock_response.text = '{"error":"no session bound to this chat_id on the connection"}'
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        with structlog.testing.capture_logs() as records:
+            result = await probe.emit_chat_lifecycle(
+                connection_id="conn_1",
+                chat_id="+19999999",
+                event="connector_delivery_failed",
+            )
+
+        assert result is None
+        failed = [r for r in records if r.get("event") == "connector.chat_lifecycle.failed"]
+        assert len(failed) == 1
+        assert failed[0]["status_code"] == 404
+        assert failed[0]["chat_id"] == "+19999999"

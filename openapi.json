@@ -7710,6 +7710,68 @@
         }
       }
     },
+    "/v1/connectors/runtime/chat-lifecycle": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Runtime Chat Lifecycle",
+        "description": "Append a ``kind=lifecycle`` event onto the single session that\n``body.chat_id`` resolves to on ``body.connection_id`` (#1260),\noptionally waking it.\n\nThe routing-key sibling of ``/runtime/session-lifecycle``: where that\nneeds the resolved ``session_id``, this carries the connector's per-peer\nrouting key (``chat_id``) and resolves it through the connection's\nper-chat binding server-side \u2014 the SMS design's \u00a73.5 req 1 second option\n(\"route the per-peer failure through the resolver on the callback's\n``To``\").  Like the session-lifecycle route it targets exactly one\nsession, NOT the broadcast fan-out: a per-peer delivery failure must not\npollute unrelated ``per_chat`` sessions.\n\nAuthorization mirrors the session-lifecycle route: the bearer's\nconnector must match ``body.connection_id``'s connector and any\nbearer-side ``connection_ids`` allowlist must include it (#350).  The\nbinding lookup itself is the per-session authorization \u2014 a ``chat_id``\nthat has no per-chat session on this connection 404s (no spurious\ncross-peer append), and the resolution is scoped to the bearer's\n``account_id``.\n\nWhen ``body.wake`` is set, a ``defer_wake`` is enqueued after the append\n(the same pattern as the session-lifecycle and tool-result intakes) so\nthe failure wakes the originating session rather than merely being\nvisible on its next turn.",
+        "operationId": "post_connector_runtime_chat_lifecycle",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeChatLifecycleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Post Connector Runtime Chat Lifecycle"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/runtime/tool-results": {
       "post": {
         "tags": [
@@ -13691,6 +13753,59 @@
         ],
         "title": "RunCompletionSourceReplace",
         "description": "Update-side variant (\u00a72.2 Replace rule): ``statuses`` is REQUIRED, so a\npartial source on update 422s instead of silently resetting a narrowed\nfilter back to all-three. (The first SOURCE member with a defaulted field,\nhence the first ``TriggerSourceReplace`` union.)"
+      },
+      "RuntimeChatLifecycleRequest": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          },
+          "event": {
+            "type": "string",
+            "title": "Event"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data"
+          },
+          "wake": {
+            "type": "boolean",
+            "title": "Wake",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connection_id",
+          "chat_id",
+          "event"
+        ],
+        "title": "RuntimeChatLifecycleRequest",
+        "description": "Body for ``POST /v1/connectors/runtime/chat-lifecycle`` (#1260).\n\nThe routing-key variant of :class:`RuntimeSessionLifecycleRequest`.\nBoth target a *single* session (not the broadcast fan-out), but where\nthe session-lifecycle route needs the caller to already hold the\nresolved ``session_id``, this route carries a per-peer **routing key**\n(``chat_id``) and resolves it through the connection's per-chat binding\nto the originating session server-side.\n\nThis is the second option the SMS design (\u00a73.5 req 1) calls out: \"route\nthe per-peer failure through the resolver on the callback's ``To``\".  A\nTwilio status callback knows the peer number (\u2192 ``chat_id``) but not the\nAIOS ``session_id`` \u2014 without this route the connector would have to do\nan extra round-trip (or maintain its own ``chat_id \u2192 session_id`` map)\njust to reach the originating per_chat session.  The broadcast\n``/runtime/lifecycle`` route stays for genuine connection-wide events.\n\n``chat_id`` is the connector's per-peer routing key, the same value the\ninbound path stamps onto ``chat_sessions``.  It must resolve to an\nexisting per-chat binding on ``connection_id`` \u2014 a routing key with no\nbound session 404s rather than fanning a spurious cross-peer notice (the\ndesign's \"if a correlation row is genuinely missing \u2026 drop rather than\nfan a spurious cross-peer failure\", \u00a73.5).\n\n``wake`` mirrors the session-lifecycle route: ``True`` pairs the append\nwith a ``defer_wake`` so the failure wakes the originating session;\ndefaults ``False`` (visible-on-next-turn)."
       },
       "RuntimeLifecycleRequest": {
         "properties": {

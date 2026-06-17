@@ -640,6 +640,75 @@ class HttpConnector:
             return None
         return dict(response.json())
 
+    async def emit_chat_lifecycle(
+        self,
+        *,
+        connection_id: str,
+        chat_id: str,
+        event: str,
+        reason: str | None = None,
+        data: dict[str, Any] | None = None,
+        wake: bool = False,
+    ) -> dict[str, Any] | None:
+        """Append a ``kind=lifecycle`` event onto the single session that
+        ``chat_id`` resolves to on ``connection_id`` (#1260), optionally
+        waking it.
+
+        The routing-key sibling of :meth:`emit_session_lifecycle`: where that
+        needs the resolved ``session_id``, this carries the connector's
+        per-peer routing key (``chat_id``) and lets AIOS resolve it through
+        the connection's per-chat binding. Use when a fact concerns one peer
+        and the connector knows the routing key but not the session — e.g. a
+        Twilio status callback that has the peer number (→ ``chat_id``) but
+        not the AIOS ``session_id``.
+
+        Set ``wake=True`` to make the failure wake the originating session
+        (stimulus-bearing) instead of merely being visible on its next turn.
+        Returns the appended-session payload (including the resolved
+        ``session_id``), or ``None`` when the API returned a non-fatal 4xx —
+        notably a ``404`` when the ``chat_id`` has no bound session on the
+        connection (a correlation gap is dropped, not raised), matching
+        :meth:`emit_inbound`/:meth:`emit_lifecycle`'s drop-don't-raise stance.
+        """
+        client = self._require_client()
+        log.info(
+            "connector.chat_lifecycle",
+            connector=self.connector,
+            connection_id=connection_id,
+            chat_id=chat_id,
+            lifecycle_event=event,
+            reason=reason,
+            wake=wake,
+        )
+        body: dict[str, Any] = {
+            "connection_id": connection_id,
+            "chat_id": chat_id,
+            "event": event,
+            "wake": wake,
+        }
+        if reason is not None:
+            body["reason"] = reason
+        if data is not None:
+            body["data"] = data
+        response = await client.get_async_httpx_client().post(
+            "/v1/connectors/runtime/chat-lifecycle",
+            json=body,
+        )
+        if response.is_error:
+            sc = response.status_code
+            log.warning(
+                "connector.chat_lifecycle.failed",
+                status_code=sc,
+                connection_id=connection_id,
+                chat_id=chat_id,
+                lifecycle_event=event,
+                body=response.text[:2000],
+            )
+            if _is_fatal_inbound_status(sc):
+                response.raise_for_status()
+            return None
+        return dict(response.json())
+
     # ─── runner ──────────────────────────────────────────────────────
 
     async def run_until_stopped(self, *, install_signal_handlers: bool = True) -> None:
