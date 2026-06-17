@@ -22,6 +22,7 @@ needs it:
 
 from __future__ import annotations
 
+from aios.models.agents import HttpServerSpec
 from aios.models.workflows import WorkflowCreate
 from aios.workflows.dev_pipeline import (
     REQUIRED_HTTP_SERVERS,
@@ -140,6 +141,7 @@ def test_workflow_create_carries_required_http_servers() -> None:
     wc = build_dev_pipeline_workflow_create(name="dev-pipeline")
     assert len(wc.http_servers) == 1
     server = wc.http_servers[0]
+    assert isinstance(server, HttpServerSpec)
     assert server.name == "github"
     assert {r.path_pattern for r in server.routes} == {"/repos/**", "/graphql"}
 
@@ -154,5 +156,5 @@ def test_workflow_create_github_server_name_matches_script_server() -> None:
     # The http_server name on the payload must equal the script's GITHUB_SERVER constant,
     # or every tool('http_request', {server_ref: GITHUB_SERVER}) fails with unknown server.
     wc = build_dev_pipeline_workflow_create(name="dev-pipeline", github_server="gh")
-    assert any(s.name == "gh" for s in wc.http_servers)
+    assert any(isinstance(s, HttpServerSpec) and s.name == "gh" for s in wc.http_servers)
     assert "'gh'" in wc.script or '"gh"' in wc.script

@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from aios.models.agents import HttpServerSpec
 from aios.models.workflows import GateResume, WfRun, WfRunCreate, WorkflowCreate, WorkflowUpdate
 
 
@@ -50,6 +51,7 @@ class TestWorkflowCreate:
             }
         )
         assert wf.mcp_servers[0].url == "https://srv.example"
+        assert isinstance(wf.http_servers[0], HttpServerSpec)
         assert wf.http_servers[0].base_url == "https://api.example"
         assert wf.tools == []
 
@@ -86,7 +88,11 @@ class TestWorkflowCreate:
             }
         )
 
-        assert [server.base_url for server in workflow.http_servers] == [
+        assert [
+            server.base_url
+            for server in workflow.http_servers
+            if isinstance(server, HttpServerSpec)
+        ] == [
             "https://one.example.com",
             "https://two.example.com",
         ]
@@ -112,6 +118,7 @@ class TestWorkflowCreate:
             }
         )
         assert wf.http_servers[0] == "davenant"
+        assert isinstance(wf.http_servers[1], HttpServerSpec)
         assert wf.http_servers[1].base_url == "https://api.example"
 
     def test_bare_names_skip_base_url_uniqueness(self) -> None:
@@ -161,7 +168,9 @@ class TestWorkflowUpdate:
         )
 
         assert update.http_servers is not None
-        assert [server.base_url for server in update.http_servers] == [
+        assert [
+            server.base_url for server in update.http_servers if isinstance(server, HttpServerSpec)
+        ] == [
             "https://one.example.com",
             "https://two.example.com",
         ]
