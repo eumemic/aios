@@ -278,8 +278,10 @@ async def test_update_workflow_roundtrip_and_stale_409(http_client: httpx.AsyncC
     assert "v2" in updated["script"]
     assert updated["name"] == name
 
-    # Stale token → 409; unknown id → 404.
-    r = await http_client.put(f"/v1/workflows/{wf['id']}", json={"version": 1, "script": "x"})
+    # Stale token → 409; unknown id → 404. Use a structurally valid script so the
+    # create-time script validation (#1285, which on UPDATE runs before the version /
+    # existence checks for an existing workflow) does not pre-empt the 409/404 under test.
+    r = await http_client.put(f"/v1/workflows/{wf['id']}", json={"version": 1, "script": _SCRIPT})
     assert r.status_code == 409
-    r = await http_client.put("/v1/workflows/wf_nope", json={"version": 1, "script": "x"})
+    r = await http_client.put("/v1/workflows/wf_nope", json={"version": 1, "script": _SCRIPT})
     assert r.status_code == 404
