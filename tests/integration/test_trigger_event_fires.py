@@ -918,12 +918,17 @@ async def test_wake_session_fire_errors_on_cross_account_target(
     pool = trig_runtime
     _, _, owner = await seed_agent_env_session(pool, account_id=ACC, prefix="wsxacc")
 
-    # A second account with its own session — the forbidden target.
+    # A second account with its own session — the forbidden target. It is a
+    # CHILD of the seeded root (``ACC``): the ``accounts_one_active_root``
+    # partial unique index permits only one ``parent_account_id IS NULL`` row,
+    # so a second root would violate it. A child is a distinct ``account_id``,
+    # which is all the strict same-account wake check (``target_account_id !=
+    # account_id``) needs to reject the cross-account target.
     other_acc = "acc_trig_other"
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
-            f"VALUES ('{other_acc}', NULL, TRUE, 'other')"
+            f"VALUES ('{other_acc}', '{ACC}', FALSE, 'other')"
         )
     _, _, foreign = await seed_agent_env_session(pool, account_id=other_acc, prefix="wsforeign")
 
