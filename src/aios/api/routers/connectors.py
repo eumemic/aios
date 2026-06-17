@@ -247,6 +247,33 @@ class RuntimeLifecycleRequest(BaseModel):
     data: dict[str, Any] | None = None
 
 
+class RuntimeSessionLifecycleRequest(BaseModel):
+    """Body for ``POST /v1/connectors/runtime/session-lifecycle`` (#1261).
+
+    The per-session-targeted sibling of :class:`RuntimeLifecycleRequest`.
+    Where the broadcast ``/runtime/lifecycle`` route fans a transport-down
+    notice across *every* session bound to the connection, this appends a
+    single ``kind=lifecycle`` event onto **one** named session — the gap
+    called out by the SMS design (§3.5 req 1): a delivery failure must reach
+    the *originating* session, not be broadcast.
+
+    ``wake`` optionally pairs the append with a ``defer_wake`` so the failure
+    isn't merely visible-on-next-turn but actually wakes the session (the
+    "give it stimulus" half of the design's option (a)). Defaults ``False``
+    so the primitive stays a plain visible-on-next-wake append unless the
+    caller opts into the wake.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: str
+    session_id: str
+    event: str
+    reason: str | None = None
+    data: dict[str, Any] | None = None
+    wake: bool = False
+
+
 def _check_runtime_scope(auth_connector: str, target_connector: str) -> None:
     """Raise 403 if a runtime bearer reaches outside its connector type."""
     if auth_connector != target_connector:
@@ -504,6 +531,86 @@ async def post_runtime_lifecycle(
     if failed:
         result["failed_session_ids"] = failed
     return result
+
+
+@router.post(
+    "/runtime/session-lifecycle",
+    operation_id="post_connector_runtime_session_lifecycle",
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_runtime_session_lifecycle(
+    body: RuntimeSessionLifecycleRequest,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> dict[str, Any]:
+    """Append a ``kind=lifecycle`` event onto **one** session bound to
+    ``body.connection_id`` (#1261), optionally waking it.
+
+    The per-session-targeted sibling of the broadcast ``/runtime/lifecycle``
+    route: where that fans a notice across every bound session, this targets
+    the single ``body.session_id`` — the SMS design's §3.5 req 1 (a delivery
+    failure must reach the *originating* session, not be broadcast).
+
+    Authorization mirrors ``post_runtime_tool_result`` exactly: the bearer's
+    connector must match ``body.connection_id``'s connector, any bearer-side
+    ``connection_ids`` allowlist must include it (#350), and the session must
+    be genuinely bound to that connection — so a runtime bearer can only
+    target a session within its own connections.
+
+    When ``body.wake`` is set, a ``defer_wake`` is enqueued after the append
+    (the exact pattern as the tool-result intake) so the failure wakes the
+    session rather than merely being visible on its next turn.
+    """
+    _, auth_connector, account_id, auth_connection_ids = auth
+    async with pool.acquire() as conn:
+        connection = await queries.get_connection(conn, body.connection_id, account_id=account_id)
+        _check_runtime_scope(auth_connector, connection.connector)
+        _check_runtime_connection_scope(auth_connection_ids, body.connection_id)
+        if not await queries.is_session_bound_to_connection(
+            conn,
+            connection_id=body.connection_id,
+            session_id=body.session_id,
+            account_id=account_id,
+        ):
+            raise ForbiddenError(
+                "session is not bound to this connection",
+                detail={
+                    "session_id": body.session_id,
+                    "connection_id": body.connection_id,
+                },
+            )
+    payload: dict[str, Any] = {
+        "event": body.event,
+        "connection_id": body.connection_id,
+        "connector": connection.connector,
+    }
+    if body.reason is not None:
+        payload["reason"] = body.reason
+    if body.data is not None:
+        payload["data"] = body.data
+    event = await sessions_service.append_event(
+        pool,
+        body.session_id,
+        "lifecycle",
+        payload,
+        account_id=account_id,
+    )
+    if body.wake:
+        await defer_wake(
+            pool,
+            body.session_id,
+            cause="connector_lifecycle",
+            account_id=account_id,
+        )
+    # Mirror the broadcast route's payload shape (a single-element list keeps
+    # callers that already handle ``appended_session_ids`` uniform), plus the
+    # appended event id and whether a wake was enqueued so the connector can
+    # log/correlate without a second read.
+    return {
+        "appended_session_ids": [body.session_id],
+        "event_id": event.id,
+        "woke": body.wake,
+    }
 
 
 @router.post(

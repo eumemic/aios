@@ -574,6 +574,72 @@ class HttpConnector:
             return None
         return dict(response.json())
 
+    async def emit_session_lifecycle(
+        self,
+        *,
+        connection_id: str,
+        session_id: str,
+        event: str,
+        reason: str | None = None,
+        data: dict[str, Any] | None = None,
+        wake: bool = False,
+    ) -> dict[str, Any] | None:
+        """Append a ``kind=lifecycle`` event onto **one** session bound to
+        ``connection_id`` (#1261), optionally waking it.
+
+        The per-session-targeted sibling of :meth:`emit_lifecycle`: where that
+        broadcasts a transport-down notice across every bound session, this
+        targets a single ``session_id``. Used when a fact concerns one
+        conversation, not the whole connection — e.g. a carrier-block /
+        delivery failure that must reach the *originating* session
+        (``event="connector_delivery_failed"``, ``wake=True``) rather than be
+        broadcast.
+
+        Set ``wake=True`` to make the failure wake the session (stimulus-
+        bearing) instead of merely being visible on its next turn. Returns the
+        appended-session payload, or ``None`` when the API returned a non-fatal
+        4xx (matching :meth:`emit_inbound`/:meth:`emit_lifecycle`'s
+        drop-don't-raise stance).
+        """
+        client = self._require_client()
+        log.info(
+            "connector.session_lifecycle",
+            connector=self.connector,
+            connection_id=connection_id,
+            session_id=session_id,
+            lifecycle_event=event,
+            reason=reason,
+            wake=wake,
+        )
+        body: dict[str, Any] = {
+            "connection_id": connection_id,
+            "session_id": session_id,
+            "event": event,
+            "wake": wake,
+        }
+        if reason is not None:
+            body["reason"] = reason
+        if data is not None:
+            body["data"] = data
+        response = await client.get_async_httpx_client().post(
+            "/v1/connectors/runtime/session-lifecycle",
+            json=body,
+        )
+        if response.is_error:
+            sc = response.status_code
+            log.warning(
+                "connector.session_lifecycle.failed",
+                status_code=sc,
+                connection_id=connection_id,
+                session_id=session_id,
+                lifecycle_event=event,
+                body=response.text[:2000],
+            )
+            if _is_fatal_inbound_status(sc):
+                response.raise_for_status()
+            return None
+        return dict(response.json())
+
     # ─── runner ──────────────────────────────────────────────────────
 
     async def run_until_stopped(self, *, install_signal_handlers: bool = True) -> None:

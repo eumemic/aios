@@ -121,6 +121,36 @@ def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
     return f"[The sandbox filesystem for this session was reset because {detail}. {_FS_FRESH_BASE}]"
 
 
+def _render_delivery_failure_notice(data: dict[str, Any]) -> str:
+    """Render a ``connector_delivery_failed`` lifecycle event (#1261) as a
+    bracketed user-role notice.
+
+    A connector appends this when an outbound the model consciously sent did
+    not arrive (carrier block / delivery failure). Like the FS renderer it is
+    total by contract — a pure function of ``data`` that never raises, since it
+    runs inside the per-wake replay where a raise would brick the session. The
+    connector-specific particulars ride in ``data`` (``connector`` names the
+    transport, ``detail`` carries the carrier reason, ``peer`` the recipient)
+    so core renders the fact without knowing about any specific transport.
+    """
+    connector = data.get("connector") or data.get("connection_id") or "a connector"
+    nested = data.get("data")
+    peer = data.get("peer")
+    detail = data.get("detail") or data.get("reason")
+    if isinstance(nested, dict):
+        # Producers (e.g. the SMS status-callback handler) carry carrier
+        # specifics under ``data`` per the broadcast-route payload shape.
+        peer = peer or nested.get("peer")
+        detail = detail or nested.get("detail")
+        connector = nested.get("connector") or connector
+    peer_clause = f" to {peer}" if peer else ""
+    detail_clause = f": {detail}" if detail else ""
+    return (
+        f"[A message you sent via {connector}{peer_clause} was not delivered"
+        f"{detail_clause}. The recipient did not receive it.]"
+    )
+
+
 # Notification markers truncate the source content to this many chars
 # (plus an ellipsis when truncated) so a busy non-focal channel
 # contributes O(tens-of-tokens) per inbound to the context — cheap
@@ -963,7 +993,15 @@ def build_messages(
         # so a GC/reset append never advances ``reacting_to`` or wakes the
         # session; the model reads the notice at its next genuine wake.
         if e.kind == "lifecycle" and e.data.get("event") in MODEL_VISIBLE_LIFECYCLE_EVENTS:
-            messages.append({"role": "user", "content": _render_fs_lifecycle_notice(e.data)})
+            # Dispatch on the lifecycle kind: FS-loss notices keep their
+            # renderer; ``connector_delivery_failed`` (#1261) routes to its own.
+            # Both are NON-stimulus-bearing here — the delivery-failure wake is
+            # produced by the session-targeted lifecycle route, not by render.
+            if e.data.get("event") == "connector_delivery_failed":
+                content = _render_delivery_failure_notice(e.data)
+            else:
+                content = _render_fs_lifecycle_notice(e.data)
+            messages.append({"role": "user", "content": content})
             continue
         if e.kind != "message":
             continue

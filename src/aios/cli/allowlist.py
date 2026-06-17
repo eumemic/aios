@@ -51,6 +51,9 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
     "post_connector_runtime_management_call_result": (
         "Called by connector containers via runtime token; not for operators."
     ),
+    "post_connector_runtime_session_lifecycle": (
+        "Called by connector containers via runtime token; not for operators."
+    ),
     "post_connector_runtime_tool_result": (
         "Called by connector containers via runtime token; not for operators."
     ),

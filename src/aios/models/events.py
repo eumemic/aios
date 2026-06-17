@@ -38,8 +38,20 @@ EventKind = Literal["message", "lifecycle", "span", "interrupt"]
 # so both the harness renderer (``harness/context.py``) and the db read
 # (``db/queries/events.py``: ``read_windowed_context_events``) can name the same
 # allowlist without the db layer importing the harness.
+# ``connector_delivery_failed`` (#1261): a connector-generic, NON-SMS-special
+# kind a connector appends (via the session-targeted lifecycle route) when an
+# outbound the model *consciously sent* did not arrive (carrier block / delivery
+# failure). Unlike the FS-loss notices it is paired at the producer with a wake
+# (the session-targeted lifecycle route's ``wake=True``), so the failure reaches
+# the originating session in a form the model acts on; the connector carries the
+# carrier-specific detail in ``data`` so core stays transport-agnostic.
 MODEL_VISIBLE_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
-    {"sandbox_fs_reset", "sandbox_fs_expired", "sandbox_fs_over_limit"}
+    {
+        "sandbox_fs_reset",
+        "sandbox_fs_expired",
+        "sandbox_fs_over_limit",
+        "connector_delivery_failed",
+    }
 )
 
 

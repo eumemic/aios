@@ -145,6 +145,9 @@ from .one_shot_source import OneShotSource
 from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle import (
     PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle,
 )
+from .post_connector_runtime_session_lifecycle_response_post_connector_runtime_session_lifecycle import (
+    PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle,
+)
 from .recent_chat import RecentChat
 from .run_completion_source import RunCompletionSource
 from .run_completion_source_replace import RunCompletionSourceReplace
@@ -155,6 +158,10 @@ from .run_completion_source_statuses_item import RunCompletionSourceStatusesItem
 from .runtime_lifecycle_request import RuntimeLifecycleRequest
 from .runtime_lifecycle_request_data_type_0 import RuntimeLifecycleRequestDataType0
 from .runtime_management_call_result_request import RuntimeManagementCallResultRequest
+from .runtime_session_lifecycle_request import RuntimeSessionLifecycleRequest
+from .runtime_session_lifecycle_request_data_type_0 import (
+    RuntimeSessionLifecycleRequestDataType0,
+)
 from .runtime_token import RuntimeToken
 from .runtime_token_issue import RuntimeTokenIssue
 from .runtime_token_issued import RuntimeTokenIssued
@@ -430,6 +437,7 @@ __all__ = (
     "OAuthStartResponse",
     "OneShotSource",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
+    "PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle",
     "RecentChat",
     "RunCompletionSource",
     "RunCompletionSourceReplace",
@@ -438,6 +446,8 @@ __all__ = (
     "RuntimeLifecycleRequest",
     "RuntimeLifecycleRequestDataType0",
     "RuntimeManagementCallResultRequest",
+    "RuntimeSessionLifecycleRequest",
+    "RuntimeSessionLifecycleRequestDataType0",
     "RuntimeToken",
     "RuntimeTokenIssue",
     "RuntimeTokenIssued",

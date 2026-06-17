@@ -1114,9 +1114,7 @@ class TestDeadWorkerRespawn:
         class _Crashing(HttpConnector):
             connector = "crashy"
 
-            async def serve_connection(
-                self, connection_id: str, secrets: dict[str, str]
-            ) -> None:
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
                 raise RuntimeError("revoked token")
 
         c = _Crashing(base_url="http://x", token="aios_runtime_x")
@@ -1142,9 +1140,7 @@ class TestDeadWorkerRespawn:
         class _Returns(HttpConnector):
             connector = "returns"
 
-            async def serve_connection(
-                self, connection_id: str, secrets: dict[str, str]
-            ) -> None:
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
                 return
 
         c = _Returns(base_url="http://x", token="aios_runtime_x")
@@ -1159,9 +1155,7 @@ class TestDeadWorkerRespawn:
         class _Blocks(HttpConnector):
             connector = "blocks"
 
-            async def serve_connection(
-                self, connection_id: str, secrets: dict[str, str]
-            ) -> None:
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
                 await asyncio.Event().wait()
 
         c = _Blocks(base_url="http://x", token="aios_runtime_x")
@@ -1191,9 +1185,7 @@ class TestDeadWorkerRespawn:
             # Collapse backoff so the test doesn't actually wait.
             RECONNECT_BACKOFF_INITIAL = 0.0
 
-            async def serve_connection(
-                self, connection_id: str, secrets: dict[str, str]
-            ) -> None:
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
                 spawns.append(dict(secrets))
                 if len(spawns) == 1:
                     raise RuntimeError("first spawn: revoked token")
@@ -1273,9 +1265,7 @@ class TestDeadWorkerRespawn:
             connector = "crashy"
             RECONNECT_BACKOFF_INITIAL = 1.0
 
-            async def serve_connection(
-                self, connection_id: str, secrets: dict[str, str]
-            ) -> None:
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
                 raise RuntimeError("still revoked")
 
         c = _Crashing(base_url="http://x", token="aios_runtime_x")
@@ -1307,3 +1297,84 @@ class TestDeadWorkerRespawn:
         assert "conn_1" in c._reconnect_backoff
         await c._on_connection_removed("conn_1")
         assert "conn_1" not in c._reconnect_backoff
+
+
+class TestEmitSessionLifecycle:
+    """``emit_session_lifecycle`` (#1261) POSTs the per-session-targeted
+    lifecycle route, passing through ``wake`` and the carrier ``data`` so a
+    connector doesn't hand-roll the request."""
+
+    async def test_posts_session_lifecycle_route_with_wake_and_data(
+        self, probe: _ProbeConnector
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = False
+        mock_response.json = MagicMock(return_value={"appended_session_id": "sess_1"})
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        result = await probe.emit_session_lifecycle(
+            connection_id="conn_1",
+            session_id="sess_1",
+            event="connector_delivery_failed",
+            reason="30007",
+            data={"detail": "carrier blocked", "peer": "+15550123"},
+            wake=True,
+        )
+
+        assert result == {"appended_session_id": "sess_1"}
+        # Targets the new route, not the broadcast one.
+        url = mock_post.call_args.args[0]
+        assert url == "/v1/connectors/runtime/session-lifecycle"
+        body = mock_post.call_args.kwargs["json"]
+        assert body == {
+            "connection_id": "conn_1",
+            "session_id": "sess_1",
+            "event": "connector_delivery_failed",
+            "wake": True,
+            "reason": "30007",
+            "data": {"detail": "carrier blocked", "peer": "+15550123"},
+        }
+
+    async def test_wake_defaults_false_and_optional_fields_omitted(
+        self, probe: _ProbeConnector
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = False
+        mock_response.json = MagicMock(return_value={"appended_session_id": "sess_1"})
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        await probe.emit_session_lifecycle(
+            connection_id="conn_1",
+            session_id="sess_1",
+            event="connector_delivery_failed",
+        )
+
+        body = mock_post.call_args.kwargs["json"]
+        assert body["wake"] is False
+        assert "reason" not in body
+        assert "data" not in body
+
+    async def test_non_fatal_4xx_drops_returns_none(self, probe: _ProbeConnector) -> None:
+        """A non-fatal 4xx is logged and dropped (returns ``None``), matching
+        ``emit_inbound``/``emit_lifecycle``'s drop-don't-raise stance."""
+        mock_response = MagicMock()
+        mock_response.is_error = True
+        mock_response.status_code = 422
+        mock_response.text = '{"error":"bad"}'
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        with structlog.testing.capture_logs() as records:
+            result = await probe.emit_session_lifecycle(
+                connection_id="conn_1",
+                session_id="sess_1",
+                event="connector_delivery_failed",
+            )
+
+        assert result is None
+        failed = [r for r in records if r.get("event") == "connector.session_lifecycle.failed"]
+        assert len(failed) == 1
+        assert failed[0]["status_code"] == 422
+        assert failed[0]["session_id"] == "sess_1"
