@@ -382,8 +382,11 @@ async def resume_gate_handler(session_id: str, arguments: dict[str, Any]) -> dic
 CREATE_WORKFLOW_DESCRIPTION = (
     "Author a new workflow (a deterministic Python orchestrator) under your account. "
     "Its declared tool/server surface must be a subset of your own — you cannot grant a "
-    "workflow a tool, MCP server, or HTTP server you don't yourself have. Returns the "
-    "created workflow (id, name, version).\n\n"
+    "workflow a tool, MCP server, or HTTP server you don't yourself have. For HTTP "
+    'servers you may pass a bare name string (e.g. http_servers: ["github"]) to '
+    "reference one of your own grants by name — its base_url and routes are resolved "
+    "from you — or a full HttpServerSpec object. Returns the created workflow (id, name, "
+    "version).\n\n"
     f"{WORKFLOW_SCRIPT_CONTRACT}"
 )
 UPDATE_WORKFLOW_DESCRIPTION = (

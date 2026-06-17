@@ -332,9 +332,12 @@ class TestSurfaceDiffHttpIdentity:
         assert surface_diff(expected, actual) == {"http_servers": ["api"]}
 
     def test_surface_diff_http_flags_renamed_server_same_base_url(self) -> None:
+        # #953 legibility nicety: a declared name that diverges from the agent's at the
+        # SAME base_url reads as "name mismatch at <base_url>", not bare among absent
+        # grants — distinguishing "named it wrong" from "the agent has no such grant".
         expected = canon(Surface([], [], [HttpServerSpec(name="api", base_url="https://api")]))
         actual = canon(Surface([], [], [HttpServerSpec(name="api2", base_url="https://api")]))
-        assert surface_diff(expected, actual) == {"http_servers": ["api"]}
+        assert surface_diff(expected, actual) == {"http_servers": ["name mismatch at https://api"]}
 
 
 # ── MCP toolset normal form ───────────────────────────────────────────────────

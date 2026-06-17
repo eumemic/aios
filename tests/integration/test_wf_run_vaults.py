@@ -500,6 +500,151 @@ async def test_update_time_http_missing_server_still_forbidden(
     assert fetched.version == 1
 
 
+# ─── #953: names-only http_servers declaration (Ask 3 follow-up) ─────────────
+#
+# A workflow author may reference the acting agent's http server by NAME ALONE —
+# ``http_servers=["api"]`` — instead of constructing a full HttpServerSpec whose
+# (name, base_url) must identity-match the agent's. The bare name resolves against
+# the acting agent (the agent's base_url + frozen routes inherited into storage),
+# exactly as the #949 identity-match path does. An unknown name fails closed; the
+# operator path (no acting agent) rejects bare names. Aliasing (a divergent local
+# name) is the open fork and is NOT shipped — run-time resolution is untouched.
+
+
+async def test_create_time_http_names_only_resolves_against_agent(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """Create-time: a names-only entry resolves to the agent's server and stores the
+    agent's full launcher-frozen routes — identical to declaring the spec by identity."""
+    pool = vault_pool
+    agent_http = HttpServerSpec(
+        name="api",
+        base_url="https://api",
+        routes=[
+            HttpRouteSpec(
+                path_pattern="/v1/**",
+                permission_policy=HttpPermissionPolicy(type="always_ask"),
+            )
+        ],
+    )
+    agent = await _make_agent(pool, "http-names-only", http_servers=[agent_http])
+    creator = await _make_session(pool, agent)
+
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id=ACC,
+        name="w-http-names-only",
+        script=_SCRIPT,
+        http_servers=["api"],  # names-only sugar
+        creator_session_id=creator,
+    )
+    fetched = await wf_service.get_workflow(pool, wf.id, account_id=ACC)
+    assert fetched.http_servers == [agent_http]
+
+
+async def test_create_time_http_names_only_unknown_name_forbidden(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """Create-time: a bare name the agent does not grant fails closed (no row leaks)."""
+    pool = vault_pool
+    agent_http = HttpServerSpec(name="api", base_url="https://api")
+    agent = await _make_agent(pool, "http-names-only-2", http_servers=[agent_http])
+    creator = await _make_session(pool, agent)
+
+    before = await _workflow_count(pool)
+    with pytest.raises(ForbiddenError, match=r"exceeds the acting agent's permissions") as ei:
+        await wf_service.create_workflow(
+            pool,
+            account_id=ACC,
+            name="w-http-names-ghost",
+            script=_SCRIPT,
+            http_servers=["ghost"],
+            creator_session_id=creator,
+        )
+    assert ei.value.detail["exceeds"]["http_servers"] == ["ghost"]
+    assert await _workflow_count(pool) == before
+
+
+async def test_create_time_http_names_only_rejected_on_operator_path(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """Operator path (no creator): names-only sugar has no agent to resolve against and is
+    rejected; the operator must declare a full HttpServerSpec."""
+    pool = vault_pool
+    before = await _workflow_count(pool)
+    with pytest.raises(ForbiddenError, match=r"names-only http_servers require an acting agent"):
+        await wf_service.create_workflow(
+            pool,
+            account_id=ACC,
+            name="w-http-op-names",
+            script=_SCRIPT,
+            http_servers=["api"],
+        )
+    assert await _workflow_count(pool) == before
+
+
+async def test_update_time_http_names_only_resolves_against_agent(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """Update-time: a names-only entry resolves against the acting agent and stores the
+    agent's full launcher-frozen routes."""
+    pool = vault_pool
+    agent_http = HttpServerSpec(
+        name="api",
+        base_url="https://api",
+        routes=[
+            HttpRouteSpec(
+                path_pattern="/v1/**",
+                permission_policy=HttpPermissionPolicy(type="always_ask"),
+            )
+        ],
+    )
+    agent = await _make_agent(pool, "http-names-up", http_servers=[agent_http])
+    actor = await _make_session(pool, agent)
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id=ACC,
+        name="w-http-names-up",
+        script=_SCRIPT,
+        http_servers=[HttpServerSpec(name="api", base_url="https://api", routes=[])],
+    )
+
+    updated = await wf_service.update_workflow(
+        pool,
+        wf.id,
+        account_id=ACC,
+        expected_version=1,
+        http_servers=["api"],  # names-only sugar
+        actor_session_id=actor,
+    )
+    assert updated.version == 2
+    fetched = await wf_service.get_workflow(pool, wf.id, account_id=ACC)
+    assert fetched.http_servers == [agent_http]
+
+
+async def test_create_time_http_name_mismatch_reports_base_url(
+    vault_pool: asyncpg.Pool[Any],
+) -> None:
+    """A full spec declaring the agent's base_url under a DIFFERENT name is rejected; the
+    exceeds detail reads as a name mismatch at the base_url, not a bare absent name (#953
+    legibility nicety). The authoring gate is unchanged — still rejected."""
+    pool = vault_pool
+    agent_http = HttpServerSpec(name="api", base_url="https://api")
+    agent = await _make_agent(pool, "http-mismatch", http_servers=[agent_http])
+    creator = await _make_session(pool, agent)
+
+    with pytest.raises(ForbiddenError, match=r"exceeds the acting agent's permissions") as ei:
+        await wf_service.create_workflow(
+            pool,
+            account_id=ACC,
+            name="w-http-mismatch",
+            script=_SCRIPT,
+            http_servers=[HttpServerSpec(name="aliased", base_url="https://api")],
+            creator_session_id=creator,
+        )
+    assert ei.value.detail["exceeds"]["http_servers"] == ["name mismatch at https://api"]
+
+
 async def test_run_cannot_bind_foreign_or_missing_vault(vault_pool: asyncpg.Pool[Any]) -> None:
     """A run binds only its own account's vaults; a foreign/unknown id rolls the insert back.
 

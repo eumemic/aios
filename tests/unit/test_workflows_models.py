@@ -91,6 +91,41 @@ class TestWorkflowCreate:
             "https://two.example.com",
         ]
 
+    def test_accepts_names_only_http_servers(self) -> None:
+        # #953 names-only sugar: a bare string references a grant the acting agent
+        # holds; it carries no base_url at the model layer (resolved in the service).
+        wf = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "http_servers": ["davenant"],
+            }
+        )
+        assert wf.http_servers == ["davenant"]
+
+    def test_accepts_mixed_names_and_specs(self) -> None:
+        wf = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "http_servers": ["davenant", _http_server("h", "https://api.example")],
+            }
+        )
+        assert wf.http_servers[0] == "davenant"
+        assert wf.http_servers[1].base_url == "https://api.example"
+
+    def test_bare_names_skip_base_url_uniqueness(self) -> None:
+        # The cross-item base_url uniqueness check applies to full specs only — two
+        # bare names (no base_url yet) never collide at the model layer.
+        wf = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "http_servers": ["davenant", "other"],
+            }
+        )
+        assert wf.http_servers == ["davenant", "other"]
+
 
 class TestWorkflowUpdate:
     def test_version_required_fields_optional(self) -> None:

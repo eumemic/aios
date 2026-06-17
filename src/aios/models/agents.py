@@ -307,6 +307,63 @@ def validate_http_servers(servers: list[HttpServerSpec]) -> None:
         seen.add(server.base_url)
 
 
+# ── names-only http_server declaration (Ask 3 from #939) ──────────────────────
+#
+# A workflow author may reference a grant the acting agent already holds by *name
+# alone* — ``http_servers: ["davenant"]`` — instead of reconstructing the full
+# ``HttpServerSpec(name=..., base_url=...)`` whose identity must match the agent's.
+# The bare name is resolved against the acting agent's servers at the authoring
+# edge (``aios.services.workflows``); the agent's ``base_url`` + frozen routes are
+# then inherited launcher-frozen into storage exactly as the #949 identity-match
+# path already does. This is **pure surface ergonomics**: a names-only entry can
+# only resolve to a server the agent already has, so it grants no new authority
+# and the run-time parent-wins-frozen resolution (keyed on the verbatim agent name)
+# is untouched.
+#
+# Resolution lives in the service (it needs the acting agent); aliasing — declaring
+# the agent's server under a *different* name with ``server_ref`` resolving against
+# the alias — is an open fork (#953) deliberately NOT shipped here: it would require
+# a run-time resolution change beyond the committed surface-only scope.
+
+HttpServerRef = str | HttpServerSpec
+"""An authoring-edge http_server entry: a bare name (names-only sugar, resolved
+against the acting agent) or a full ``HttpServerSpec`` (identity-match, #949)."""
+
+
+def resolve_http_server_refs(
+    refs: list[HttpServerRef], agent_servers: list[HttpServerSpec]
+) -> list[HttpServerSpec]:
+    """Resolve names-only entries against the acting agent's ``http_servers``.
+
+    Each ``str`` entry is replaced by ``HttpServerSpec(name=<name>, base_url=<the
+    agent's base_url for that name>, routes=[])`` — an empty-routes identity spec
+    the existing authoring gate then admits by identity and inherits frozen routes
+    into. A name with no matching agent server raises ``ValueError`` (the author
+    referenced a grant the agent does not hold). Full ``HttpServerSpec`` entries
+    pass through verbatim (the #949 identity-match path).
+
+    Resolution is by name; if the agent declares the same name at multiple
+    ``base_url``s the first is taken (agents validate ``base_url`` uniqueness, not
+    name uniqueness, so duplicate names are possible but the authoring gate then
+    flags any genuine mismatch downstream).
+    """
+    by_name: dict[str, HttpServerSpec] = {}
+    for s in agent_servers:
+        by_name.setdefault(s.name, s)
+    out: list[HttpServerSpec] = []
+    for ref in refs:
+        if isinstance(ref, str):
+            agent_server = by_name.get(ref)
+            if agent_server is None:
+                raise ValueError(
+                    f"http_servers references {ref!r}, which the acting agent does not grant"
+                )
+            out.append(HttpServerSpec(name=ref, base_url=agent_server.base_url, routes=[]))
+        else:
+            out.append(ref)
+    return out
+
+
 # ── Tool declaration ──────────────────────────────────────────────────────────
 
 

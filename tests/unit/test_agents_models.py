@@ -102,3 +102,55 @@ class TestAgentUpdateHttpServers:
         update = AgentUpdate.model_validate({"version": 1})
 
         assert update.http_servers is None
+
+
+class TestResolveHttpServerRefs:
+    """#953: names-only ``http_servers`` resolution against an acting agent's servers.
+
+    A bare name resolves to an empty-routes identity spec at the agent's ``base_url``
+    (the existing #949 identity-match path then inherits the agent's frozen routes); an
+    unknown name raises; full ``HttpServerSpec`` entries pass through verbatim.
+    """
+
+    def test_bare_name_resolves_to_agent_base_url_empty_routes(self) -> None:
+        from aios.models.agents import HttpServerSpec, resolve_http_server_refs
+
+        agent = [
+            HttpServerSpec(
+                name="davenant",
+                base_url="https://davenant.example",
+                routes=[HttpRouteSpec(path_pattern="/v1/**")],
+            )
+        ]
+        out = resolve_http_server_refs(["davenant"], agent)
+        assert out == [
+            HttpServerSpec(name="davenant", base_url="https://davenant.example", routes=[])
+        ]
+
+    def test_unknown_name_raises(self) -> None:
+        from aios.models.agents import HttpServerSpec, resolve_http_server_refs
+
+        agent = [HttpServerSpec(name="davenant", base_url="https://davenant.example")]
+        with pytest.raises(ValueError, match=r"references 'ghost', which the acting agent"):
+            resolve_http_server_refs(["ghost"], agent)
+
+    def test_full_spec_passes_through_verbatim(self) -> None:
+        from aios.models.agents import HttpServerSpec, resolve_http_server_refs
+
+        spec = HttpServerSpec(name="api", base_url="https://api", routes=[])
+        out = resolve_http_server_refs([spec], [spec])
+        assert out == [spec]
+
+    def test_mixed_names_and_specs(self) -> None:
+        from aios.models.agents import HttpServerSpec, resolve_http_server_refs
+
+        agent = [
+            HttpServerSpec(name="davenant", base_url="https://davenant.example"),
+            HttpServerSpec(name="api", base_url="https://api"),
+        ]
+        spec = HttpServerSpec(name="api", base_url="https://api", routes=[])
+        out = resolve_http_server_refs(["davenant", spec], agent)
+        assert out == [
+            HttpServerSpec(name="davenant", base_url="https://davenant.example", routes=[]),
+            spec,
+        ]

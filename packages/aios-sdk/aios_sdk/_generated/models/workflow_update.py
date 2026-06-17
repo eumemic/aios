@@ -95,7 +95,7 @@ class WorkflowUpdate:
             description (None | str | Unset):
             tools (list[ToolSpec] | None | Unset):
             mcp_servers (list[McpServerSpec] | None | Unset):
-            http_servers (list[HttpServerSpec] | None | Unset):
+            http_servers (list[HttpServerSpec | str] | None | Unset):
     """
 
     version: int
@@ -106,9 +106,10 @@ class WorkflowUpdate:
     description: None | str | Unset = UNSET
     tools: list[ToolSpec] | None | Unset = UNSET
     mcp_servers: list[McpServerSpec] | None | Unset = UNSET
-    http_servers: list[HttpServerSpec] | None | Unset = UNSET
+    http_servers: list[HttpServerSpec | str] | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.http_server_spec import HttpServerSpec
         from ..models.workflow_update_input_schema_type_0 import (
             WorkflowUpdateInputSchemaType0,
         )
@@ -176,13 +177,17 @@ class WorkflowUpdate:
         else:
             mcp_servers = self.mcp_servers
 
-        http_servers: list[dict[str, Any]] | None | Unset
+        http_servers: list[dict[str, Any] | str] | None | Unset
         if isinstance(self.http_servers, Unset):
             http_servers = UNSET
         elif isinstance(self.http_servers, list):
             http_servers = []
             for http_servers_type_0_item_data in self.http_servers:
-                http_servers_type_0_item = http_servers_type_0_item_data.to_dict()
+                http_servers_type_0_item: dict[str, Any] | str
+                if isinstance(http_servers_type_0_item_data, HttpServerSpec):
+                    http_servers_type_0_item = http_servers_type_0_item_data.to_dict()
+                else:
+                    http_servers_type_0_item = http_servers_type_0_item_data
                 http_servers.append(http_servers_type_0_item)
 
         else:
@@ -340,7 +345,9 @@ class WorkflowUpdate:
 
         mcp_servers = _parse_mcp_servers(d.pop("mcp_servers", UNSET))
 
-        def _parse_http_servers(data: object) -> list[HttpServerSpec] | None | Unset:
+        def _parse_http_servers(
+            data: object,
+        ) -> list[HttpServerSpec | str] | None | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -351,7 +358,23 @@ class WorkflowUpdate:
                 http_servers_type_0 = []
                 _http_servers_type_0 = data
                 for http_servers_type_0_item_data in _http_servers_type_0:
-                    http_servers_type_0_item = HttpServerSpec.from_dict(
+
+                    def _parse_http_servers_type_0_item(
+                        data: object,
+                    ) -> HttpServerSpec | str:
+                        try:
+                            if not isinstance(data, dict):
+                                raise TypeError()
+                            http_servers_type_0_item_type_1 = HttpServerSpec.from_dict(
+                                data
+                            )
+
+                            return http_servers_type_0_item_type_1
+                        except (TypeError, ValueError, AttributeError, KeyError):
+                            pass
+                        return cast(HttpServerSpec | str, data)
+
+                    http_servers_type_0_item = _parse_http_servers_type_0_item(
                         http_servers_type_0_item_data
                     )
 
@@ -360,7 +383,7 @@ class WorkflowUpdate:
                 return http_servers_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(list[HttpServerSpec] | None | Unset, data)
+            return cast(list[HttpServerSpec | str] | None | Unset, data)
 
         http_servers = _parse_http_servers(d.pop("http_servers", UNSET))
 

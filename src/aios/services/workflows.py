@@ -20,7 +20,13 @@ import asyncpg
 from aios.db.listen import open_listen_for_run_events
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError
-from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.agents import (
+    HttpServerRef,
+    HttpServerSpec,
+    McpServerSpec,
+    ToolSpec,
+    resolve_http_server_refs,
+)
 from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
@@ -64,7 +70,7 @@ async def _enforce_surface_attenuation(
     actor_session_id: str,
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
-    http_servers: list[HttpServerSpec],
+    http_servers: list[HttpServerRef],
 ) -> Surface:
     """Raise ``ForbiddenError`` unless the declared surface is admissible against the acting
     agent's; return the effective (clamped) surface for storage.
@@ -79,7 +85,9 @@ async def _enforce_surface_attenuation(
     * http_servers — identity survival: every declared ``(name, base_url)`` must appear in
       the clamp's http servers. The agent's routes/fields are inherited launcher-frozen
       into storage (the returned ``effective``), so a workflow need only name the server,
-      not reproduce its routes byte-perfect.
+      not reproduce its routes byte-perfect. A bare-name entry (names-only sugar, #953)
+      is resolved against the acting agent first — ``["davenant"]`` becomes the agent's
+      ``davenant`` server (empty routes), then admitted by identity like any other.
 
     http servers remain parent-wins-frozen at run-time (run-launch clamps to
     launcher-verbatim) — only the AUTHORING gate relaxes to identity, which grants no new
@@ -89,7 +97,17 @@ async def _enforce_surface_attenuation(
         pool, actor_session_id, account_id=account_id
     )
     agent = await agents_service.load_for_session(pool, session, account_id=account_id)
-    declared = Surface(tools, mcp_servers, http_servers)
+    # Resolve names-only entries against the acting agent (#953). An unknown name —
+    # a grant the agent does not hold — fails closed as a ForbiddenError, the same
+    # authority breach as declaring a server the agent lacks by full identity.
+    try:
+        resolved_http = resolve_http_server_refs(http_servers, agent.http_servers)
+    except ValueError as exc:
+        raise ForbiddenError(
+            "workflow surface exceeds the acting agent's permissions",
+            detail={"exceeds": {"http_servers": [r for r in http_servers if isinstance(r, str)]}},
+        ) from exc
+    declared = Surface(tools, mcp_servers, resolved_http)
     expected = attenuation_service.normalize(declared)
     effective = attenuation_service.clamp(declared, surface_of(agent))
     surviving_http = {(s.name, s.base_url) for s in effective.http_servers}
@@ -106,6 +124,28 @@ async def _enforce_surface_attenuation(
     return effective
 
 
+def _reject_operator_path_names_only(
+    http_servers: list[HttpServerRef] | None,
+) -> list[HttpServerSpec] | None:
+    """The HTTP/operator path has no acting agent to resolve a bare name against, so
+    names-only sugar (#953) is meaningless there — a bare string would otherwise leak
+    into storage as a non-``HttpServerSpec``. Reject it with a clear error; otherwise
+    return the input narrowed to ``list[HttpServerSpec]`` (no bare names remain).
+
+    Operators declaring an http_server must give a full ``HttpServerSpec`` (verbatim,
+    unattenuated). Names-only is an agent-authoring convenience, keyed on the actor.
+    """
+    if http_servers is None:
+        return None
+    bare = [s for s in http_servers if isinstance(s, str)]
+    if bare:
+        raise ForbiddenError(
+            "names-only http_servers require an acting agent to resolve against; "
+            f"the operator path must declare full HttpServerSpec objects (got bare names {bare!r})",
+        )
+    return [s for s in http_servers if isinstance(s, HttpServerSpec)]
+
+
 async def create_workflow(
     pool: asyncpg.Pool[Any],
     *,
@@ -117,7 +157,7 @@ async def create_workflow(
     description: str | None = None,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
-    http_servers: list[HttpServerSpec] | None = None,
+    http_servers: list[HttpServerRef] | None = None,
     creator_session_id: str | None = None,
 ) -> Workflow:
     """Create a workflow definition.
@@ -127,10 +167,13 @@ async def create_workflow(
     be a subset of the creating agent's own — an agent cannot grant a workflow a tool or
     server it does not itself have; a breach raises :class:`ForbiddenError`. http servers
     are admitted by identity (name + base_url) and their routes inherited launcher-frozen
-    into storage. With no creator (the HTTP/operator path) any surface may be declared
-    verbatim, account-scoped.
+    into storage; a names-only entry (``["davenant"]``, #953) is resolved against the
+    creating agent first. With no creator (the HTTP/operator path) any surface may be
+    declared verbatim, account-scoped — but names-only sugar is unavailable there (no
+    acting agent to resolve against).
     """
     effective: Surface | None = None
+    operator_http: list[HttpServerSpec] | None = None
     if creator_session_id is not None:
         effective = await _enforce_surface_attenuation(
             pool,
@@ -140,9 +183,11 @@ async def create_workflow(
             mcp_servers=mcp_servers or [],
             http_servers=http_servers or [],
         )
+    else:
+        operator_http = _reject_operator_path_names_only(http_servers)
     # Agent-authored: store the agent's launcher-frozen http routes (inherited by identity).
-    # Operator path: store the declared http servers verbatim.
-    http_to_store = effective.http_servers if effective is not None else http_servers
+    # Operator path: store the declared http servers verbatim (bare names already rejected).
+    http_to_store = effective.http_servers if effective is not None else operator_http
     async with pool.acquire() as conn:
         return await wf_queries.insert_workflow(
             conn,
@@ -171,7 +216,7 @@ async def update_workflow(
     description: str | None = None,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
-    http_servers: list[HttpServerSpec] | None = None,
+    http_servers: list[HttpServerRef] | None = None,
     actor_session_id: str | None = None,
 ) -> Workflow:
     """Update a workflow in place (optimistic concurrency on ``expected_version``).
@@ -187,9 +232,14 @@ async def update_workflow(
     launch; only runs created after the update see the new definition.
 
     http servers are admitted by identity and their routes inherited launcher-frozen into
-    storage (mirroring create); the operator path stores declared http verbatim.
+    storage (mirroring create); a names-only entry (#953) is resolved against the acting
+    agent. The operator path stores declared http verbatim and rejects names-only sugar
+    (no acting agent to resolve against).
     """
     effective: Surface | None = None
+    operator_http: list[HttpServerSpec] | None = None
+    if actor_session_id is None:
+        operator_http = _reject_operator_path_names_only(http_servers)
     if actor_session_id is not None:
         current = await get_workflow(pool, workflow_id, account_id=account_id)
         if current.version != expected_version:
@@ -207,21 +257,26 @@ async def update_workflow(
                     "id": workflow_id,
                 },
             )
+        # ``current.http_servers`` is the already-resolved stored spec; ``list(...)``
+        # widens it to ``list[HttpServerRef]`` for the (str | spec)-typed parameter.
+        merged_http: list[HttpServerRef] = (
+            http_servers if http_servers is not None else list(current.http_servers)
+        )
         effective = await _enforce_surface_attenuation(
             pool,
             account_id=account_id,
             actor_session_id=actor_session_id,
             tools=tools if tools is not None else current.tools,
             mcp_servers=mcp_servers if mcp_servers is not None else current.mcp_servers,
-            http_servers=http_servers if http_servers is not None else current.http_servers,
+            http_servers=merged_http,
         )
     # Agent-actor touching http: store the inherited launcher-frozen routes. Operator path,
     # or an edit that didn't touch http (``http_servers is None`` → query preserves current):
-    # pass the original argument through unchanged.
+    # pass the original argument through unchanged (operator bare names already rejected).
     http_to_store = (
         effective.http_servers
         if (effective is not None and http_servers is not None)
-        else http_servers
+        else operator_http
     )
     async with pool.acquire() as conn:
         return await wf_queries.update_workflow(
