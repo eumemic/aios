@@ -144,4 +144,27 @@ All downstream of **one** decision repeated at every layer: *state lives in a du
 
 The 11 in-core items (7 extends + 4 compositions) are **shovel-ready-shaped** — each has a verified primitive lineage, named edit points, and a deterministic acceptance story — *except* where an open fork above gates it (#5 deliver, #10 pairing → `needs-design` until the fork resolves). The 3 not-core items: #11 RLS needs sign-off; #13 provider-descriptor is a kaizen tidy; #14 PTY is console-BFF work. Several map onto in-flight epics (the deliver kernel #1122/#1165/#1127, triggers #818/#819, durable sandboxes #916) and should be filed as **issues that depend-on / are sub-issues-of** those, not standalone — to avoid the eve-run's relink churn.
 
-**This report is the durability anchor**: if filed, issues should link a committed `docs/design/` copy of it (absolute `blob/master` URL), never the `~/tmp` scratch path.
+**This report is the durability anchor**: issues link a committed `docs/design/` copy of it (absolute `blob/master` URL), never an ephemeral scratch path.
+
+## Filed as
+
+Filed 2026-06-17 (each issue links back here):
+
+| Adopt | Issue | Ratification |
+|---|---|---|
+| #2 memory intelligence (epic) | **#1370** → subs #1371 (profile auto-inject, needs-design), #1372 (`memory_search`, shovel-ready), #1373 (distillation, needs-design) | epic |
+| #1 agent-callable skill mutation | **#1374** | shovel-ready |
+| #3 `deny` arm + arg-match escalation | **#1375** | shovel-ready |
+| #4 lift isolation TCB onto the backend seam | **#1376** (depends-on #1347) | shovel-ready |
+| #5 no-model channel deliver | **#1377** (relates #1197/#1165/#1335/#1342) | needs-design |
+| #6 IANA-timezone cron | **#1378** | shovel-ready |
+| #8 Postgres FTS over the event log | **#1379** | shovel-ready |
+| #10 connector inbound admission (pairing) | **#1380** (depends-on #462) | needs-design |
+| #12 connector capability descriptor | **#1381** | shovel-ready |
+| #11 RLS DB backstop | **#1382** | needs-design + needs-decision (sign-off) |
+| #13 declarative provider/model descriptor | **#1383** | shovel-ready |
+| #7 result-returning `invoke_agent` | *already filed* — **#1127** (in-progress) | — |
+| #9 in-window stale-tool-output reducer | *broadens existing* — **#1359** (commented) | — |
+| #14 PTY-over-WS console terminal | *not filed* — aios-console repo work | — |
+
+Rejects (#15 LLM compaction, #16 in-process hook framework, #17 provider-OAuth-in-core) are recorded above as deliberate divergences, not filed as work.
