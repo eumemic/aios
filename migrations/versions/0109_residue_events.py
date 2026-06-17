@@ -59,9 +59,7 @@ depends_on: str | Sequence[str] | None = None
 AXIS_CHECK = "axis IN (1, 2)"
 
 # The ledger's frozen finder vocabulary — a new finder is a deliberate migration.
-FINDER_CHECK = (
-    "finder IN ('internal-armed-check', 'external-world', 'chairman', 'seat-incidental')"
-)
+FINDER_CHECK = "finder IN ('internal-armed-check', 'external-world', 'chairman', 'seat-incidental')"
 
 # Provenance of residue_kind: stamped at the gate-resolve source, written by the
 # observer, or a manual classification. Distinguishes a stamped-at-source row
@@ -98,8 +96,7 @@ def upgrade() -> None:
     # Render-path reads pull each axis SEPARATELY over a created_at window, so an
     # (account_id, axis, created_at) index serves both axis-scoped scans.
     op.execute(
-        "CREATE INDEX residue_events_axis_idx "
-        "ON residue_events (account_id, axis, created_at DESC)"
+        "CREATE INDEX residue_events_axis_idx ON residue_events (account_id, axis, created_at DESC)"
     )
 
     # 2. Append-only made structural: a BEFORE UPDATE OR DELETE trigger that
@@ -129,11 +126,7 @@ def downgrade() -> None:
     # Fail hard on any existing row — a classification is a never-reconstruct
     # fact (the 0108 unrepresentable-row stance). A residue row deleted on
     # downgrade would silently erase a recorded human-in-loop event.
-    n = (
-        op.get_bind()
-        .execute(sa.text("SELECT count(*) FROM residue_events"))
-        .scalar()
-    )
+    n = op.get_bind().execute(sa.text("SELECT count(*) FROM residue_events")).scalar()
     if n:
         raise RuntimeError(
             f"cannot downgrade: {n} residue_events row(s) — the residue ledger is "

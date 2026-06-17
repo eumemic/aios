@@ -44,7 +44,7 @@ def test_every_residue_aggregate_is_axis_scoped() -> None:
         # Every aggregate over residue_events MUST filter to a single axis.
         assert "axis = $" in low or "axis = " in low, (
             "an aggregate over residue_events is NOT axis-scoped — a cross-axis "
-            "aggregate would combine axis-1 and axis-2 (forbidden, #1328):\n%s" % block
+            f"aggregate would combine axis-1 and axis-2 (forbidden, #1328):\n{block}"
         )
         aggregated.append(block)
     # Sanity: there ARE aggregates (the test is actually exercising something).
@@ -64,17 +64,17 @@ def test_no_sum_across_axes_anywhere() -> None:
             # exactly the cross-axis combination the de-Goodhart forbids.
             assert "group by axis" not in low, (
                 "GROUP BY axis combines both axes into one aggregate (forbidden, "
-                "#1328): %s in %s" % (block, path.name)
+                f"#1328): {block} in {path.name}"
             )
 
 
 def test_render_keeps_axes_in_separate_data_structures() -> None:
     """The render takes two distinct AxisView inputs — there is no field that
     fuses the two axes, so the data shape itself enforces segregation."""
-    from aios.workflows.residue_render import AxisView, render_ledger
-
     # render_ledger's signature takes axis1 and axis2 separately.
     import inspect
+
+    from aios.workflows.residue_render import AxisView, render_ledger
 
     params = inspect.signature(render_ledger).parameters
     assert "axis1" in params and "axis2" in params

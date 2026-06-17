@@ -728,7 +728,13 @@ async def test_comment_thread_single_page_does_not_over_fetch() -> None:
 async def test_design_escalation_parks_then_resumes_and_completes() -> None:
     scn = Scenario(
         implement_escalated=True,
-        gate_results={"design": {"resolved": True, "resolution": "use a typed enum", "residue_kind": "design-judgment"}},
+        gate_results={
+            "design": {
+                "resolved": True,
+                "resolution": "use a typed enum",
+                "residue_kind": "design-judgment",
+            }
+        },
     )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
@@ -738,7 +744,10 @@ async def test_design_escalation_parks_then_resumes_and_completes() -> None:
 
 
 async def test_design_escalation_unresolved_stays_escalated() -> None:
-    scn = Scenario(implement_escalated=True, gate_results={"design": {"resolved": False, "residue_kind": "design-judgment"}})
+    scn = Scenario(
+        implement_escalated=True,
+        gate_results={"design": {"resolved": False, "residue_kind": "design-judgment"}},
+    )
     value, _, _ = await _drive(scn)
     assert value["state"] == "escalated"
     assert value["reason"] == "design"
@@ -1213,7 +1222,10 @@ async def test_merge_failed_is_labelled_autodev_failed() -> None:
 async def test_gate_park_is_not_labelled_failed() -> None:
     # An escalation parks at a gate; a deliberate "stay escalated" resume is NOT a silent
     # failure, so the run must NOT raise autodev:failed (the contract: a gate park ≠ fail).
-    scn = Scenario(implement_escalated=True, gate_results={"design": {"resolved": False, "residue_kind": "design-judgment"}})
+    scn = Scenario(
+        implement_escalated=True,
+        gate_results={"design": {"resolved": False, "residue_kind": "design-judgment"}},
+    )
     value, _, _ = await _drive(scn)
     assert value["state"] == "escalated"
     assert "autodev:failed" not in scn.labels_added
@@ -1223,7 +1235,10 @@ async def test_gate_park_is_not_labelled_failed() -> None:
 
 
 async def test_implement_agent_error_escalates_to_design_gate() -> None:
-    scn = Scenario(implement_error=True, gate_results={"design": {"resolved": False, "residue_kind": "design-judgment"}})
+    scn = Scenario(
+        implement_error=True,
+        gate_results={"design": {"resolved": False, "residue_kind": "design-judgment"}},
+    )
     value, _, _ = await _drive(scn)
     assert value["state"] == "escalated"
     assert value["reason"] == "design"
@@ -1363,8 +1378,9 @@ async def test_design_gate_resolved_with_residue_kind_proceeds() -> None:
     # WITH a valid stamp → the resolve succeeds and the run re-implements (AC6 success leg).
     scn = Scenario(
         implement_escalated=True,
-        gate_results={"design": {"resolved": True, "resolution": "x",
-                                 "residue_kind": "design-judgment"}},
+        gate_results={
+            "design": {"resolved": True, "resolution": "x", "residue_kind": "design-judgment"}
+        },
     )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"

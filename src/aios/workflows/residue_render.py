@@ -78,7 +78,7 @@ def _ratio_cell(found: int, denominator: int | None) -> str:
 
 def _axis_section(header: str, denominator_label: str, view: AxisView) -> str:
     lines = [header, ""]
-    lines.append("Denominator (%s): **%s**" % (denominator_label, _denominator_cell(view.denominator)))
+    lines.append(f"Denominator ({denominator_label}): **{_denominator_cell(view.denominator)}**")
     lines.append("")
     lines.append("| finder | count | of denominator |")
     lines.append("| --- | --- | --- |")
@@ -86,14 +86,17 @@ def _axis_section(header: str, denominator_label: str, view: AxisView) -> str:
     for finder in FINDERS:
         n = view.found_by_finder.get(finder, 0)
         total_found += n
-        lines.append("| %s | %d | %s |" % (finder, n, _ratio_cell(n, view.denominator)))
+        lines.append(f"| {finder} | {n} | {_ratio_cell(n, view.denominator)} |")
     lines.append("")
     # The load-bearing growth alarm + the fail-loud absence line — prominent, not
     # buried in the table.
-    lines.append("- **`other`-bucket (chairman irreducible residue — GROWTH ALARM):** %d"
-                 % view.other_count)
-    lines.append("- **`cannot-determine` (fail-loud; null telemetry, NOT counted clean):** %d"
-                 % view.cannot_determine_count)
+    lines.append(
+        f"- **`other`-bucket (chairman irreducible residue — GROWTH ALARM):** {view.other_count}"
+    )
+    lines.append(
+        "- **`cannot-determine` (fail-loud; null telemetry, NOT counted clean):** "
+        f"{view.cannot_determine_count}"
+    )
     return "\n".join(lines)
 
 

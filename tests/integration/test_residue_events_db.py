@@ -9,8 +9,9 @@ uncorrelated run-table denominator — all against real Postgres, no live model.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import asyncpg
 import pytest
@@ -24,9 +25,7 @@ ACCOUNT = "acc_residue"
 
 
 @pytest.fixture
-async def pool(
-    migrated_db_url: str, _reset_db_state: None
-) -> AsyncIterator[asyncpg.Pool[Any]]:
+async def pool(migrated_db_url: str, _reset_db_state: None) -> AsyncIterator[asyncpg.Pool[Any]]:
     p = await create_pool(migrated_db_url, min_size=1, max_size=4)
     try:
         async with p.acquire() as conn:
@@ -46,7 +45,7 @@ async def pool(
 
 
 def _window() -> datetime:
-    return datetime.now(timezone.utc) - timedelta(days=30)
+    return datetime.now(UTC) - timedelta(days=30)
 
 
 async def _insert_axis2(conn: asyncpg.Connection[Any], **kw: Any) -> bool:
@@ -131,14 +130,18 @@ async def test_kind_source_check_rejects_unknown_source(pool: asyncpg.Pool[Any])
 async def test_update_is_rejected_by_trigger(pool: asyncpg.Pool[Any]) -> None:
     async with pool.acquire() as conn:
         await residue.insert_residue_event(
-            conn, account_id=ACCOUNT, axis=2, finder="chairman",
-            residue_kind="design-judgment", kind_source=residue.KIND_SOURCE_GATE,
-            signature={}, idempotency_key="k_upd",
+            conn,
+            account_id=ACCOUNT,
+            axis=2,
+            finder="chairman",
+            residue_kind="design-judgment",
+            kind_source=residue.KIND_SOURCE_GATE,
+            signature={},
+            idempotency_key="k_upd",
         )
         with pytest.raises(asyncpg.PostgresError) as exc:
             await conn.execute(
-                "UPDATE residue_events SET finder = 'external-world' "
-                "WHERE account_id = $1",
+                "UPDATE residue_events SET finder = 'external-world' WHERE account_id = $1",
                 ACCOUNT,
             )
         assert "append-only" in str(exc.value)
@@ -147,9 +150,14 @@ async def test_update_is_rejected_by_trigger(pool: asyncpg.Pool[Any]) -> None:
 async def test_delete_is_rejected_by_trigger(pool: asyncpg.Pool[Any]) -> None:
     async with pool.acquire() as conn:
         await residue.insert_residue_event(
-            conn, account_id=ACCOUNT, axis=2, finder="chairman",
-            residue_kind="design-judgment", kind_source=residue.KIND_SOURCE_GATE,
-            signature={}, idempotency_key="k_del",
+            conn,
+            account_id=ACCOUNT,
+            axis=2,
+            finder="chairman",
+            residue_kind="design-judgment",
+            kind_source=residue.KIND_SOURCE_GATE,
+            signature={},
+            idempotency_key="k_del",
         )
         with pytest.raises(asyncpg.PostgresError) as exc:
             await conn.execute("DELETE FROM residue_events WHERE account_id = $1", ACCOUNT)
@@ -180,9 +188,7 @@ async def test_axis2_ingest_copies_stamp_verbatim(pool: asyncpg.Pool[Any]) -> No
 async def test_axis2_ingest_skips_non_human_in_loop_kind(pool: asyncpg.Pool[Any]) -> None:
     async with pool.acquire() as conn:
         # A verify/merge_guard gate is NOT a residue event.
-        inserted = await _insert_axis2(
-            conn, gate_kind="verify", result={"override": False}
-        )
+        inserted = await _insert_axis2(conn, gate_kind="verify", result={"override": False})
         assert inserted is False
         n = await conn.fetchval("SELECT count(*) FROM residue_events")
         assert n == 0
@@ -248,8 +254,11 @@ async def test_observer_cannot_determine_writes_fail_loud_row_not_ok(
 ) -> None:
     async with pool.acquire() as conn:
         inserted = await residue.ingest_observer_verdict_axis1(
-            conn, account_id=ACCOUNT, source_run_id="wfr_null",
-            verdict="cannot-determine", signature={"reason": "telemetry null"},
+            conn,
+            account_id=ACCOUNT,
+            source_run_id="wfr_null",
+            verdict="cannot-determine",
+            signature={"reason": "telemetry null"},
         )
         assert inserted is True
         row = await conn.fetchrow(
@@ -284,7 +293,7 @@ async def _seed_run(
         ACCOUNT,
         "res-wf",
     )
-    created = datetime.now(timezone.utc) - timedelta(days=age_days)
+    created = datetime.now(UTC) - timedelta(days=age_days)
     await conn.execute(
         "INSERT INTO wf_runs (id, workflow_id, account_id, environment_id, script, "
         "script_sha, host_semantics_epoch, status, created_at) "
@@ -321,7 +330,10 @@ async def test_denominator_independent_of_ops_agent_event_count(
             await _seed_run(conn, f"wfr_t{i}", "completed")
         # Ingest only ONE residue classification (far fewer than 5 runs).
         await residue.ingest_observer_verdict_axis1(
-            conn, account_id=ACCOUNT, source_run_id="wfr_t0", verdict="anomaly",
+            conn,
+            account_id=ACCOUNT,
+            source_run_id="wfr_t0",
+            verdict="anomaly",
             signature={"x": 1},
         )
         denom = await residue.run_table_denominator(
@@ -346,14 +358,24 @@ async def test_run_table_denominator_respects_window(pool: asyncpg.Pool[Any]) ->
 async def test_found_by_finder_is_axis_scoped(pool: asyncpg.Pool[Any]) -> None:
     async with pool.acquire() as conn:
         await residue.insert_residue_event(
-            conn, account_id=ACCOUNT, axis=1, finder="internal-armed-check",
-            residue_kind="uncorrelated-detection", kind_source=residue.KIND_SOURCE_OBSERVER,
-            signature={}, idempotency_key="a1",
+            conn,
+            account_id=ACCOUNT,
+            axis=1,
+            finder="internal-armed-check",
+            residue_kind="uncorrelated-detection",
+            kind_source=residue.KIND_SOURCE_OBSERVER,
+            signature={},
+            idempotency_key="a1",
         )
         await residue.insert_residue_event(
-            conn, account_id=ACCOUNT, axis=2, finder="chairman",
-            residue_kind="design-judgment", kind_source=residue.KIND_SOURCE_GATE,
-            signature={}, idempotency_key="a2",
+            conn,
+            account_id=ACCOUNT,
+            axis=2,
+            finder="chairman",
+            residue_kind="design-judgment",
+            kind_source=residue.KIND_SOURCE_GATE,
+            signature={},
+            idempotency_key="a2",
         )
         axis1 = await residue.found_by_finder(
             conn, account_id=ACCOUNT, axis=1, window_start=_window()
@@ -368,7 +390,10 @@ async def test_found_by_finder_is_axis_scoped(pool: asyncpg.Pool[Any]) -> None:
 async def test_found_by_finder_excludes_cannot_determine(pool: asyncpg.Pool[Any]) -> None:
     async with pool.acquire() as conn:
         await residue.ingest_observer_verdict_axis1(
-            conn, account_id=ACCOUNT, source_run_id="wfr_cd", verdict="cannot-determine",
+            conn,
+            account_id=ACCOUNT,
+            source_run_id="wfr_cd",
+            verdict="cannot-determine",
             signature={},
         )
         breakdown = await residue.found_by_finder(
@@ -377,7 +402,10 @@ async def test_found_by_finder_excludes_cannot_determine(pool: asyncpg.Pool[Any]
         # cannot-determine is surfaced on its own line, not as a clean finder hit.
         assert breakdown == {}
         cd = await residue.kind_count(
-            conn, account_id=ACCOUNT, axis=1,
-            residue_kind=residue.CANNOT_DETERMINE_KIND, window_start=_window(),
+            conn,
+            account_id=ACCOUNT,
+            axis=1,
+            residue_kind=residue.CANNOT_DETERMINE_KIND,
+            window_start=_window(),
         )
         assert cd == 1

@@ -192,9 +192,9 @@ async def ingest_gate_resume_axis2(
     kind = gate_result_residue_kind(result)
     if kind is None:
         raise ValueError(
-            "gate_resume for human-in-loop kind %r is missing residue_kind — the "
+            f"gate_resume for human-in-loop kind {gate_kind!r} is missing residue_kind — the "
             "human_gate() wrapper should have rejected this resolve; refusing to "
-            "infer a kind (#1328)." % (gate_kind,)
+            "infer a kind (#1328)."
         )
     signature = {"gate_kind": gate_kind, "source_gate_nonce": source_gate_nonce}
     return await insert_residue_event(
@@ -249,8 +249,7 @@ async def ingest_observer_verdict_axis1(
         residue_kind = CANNOT_DETERMINE_KIND
     else:
         raise ValueError(
-            "unknown observer verdict %r (expected ok/anomaly/cannot-determine) "
-            "(#1328)" % (verdict,)
+            f"unknown observer verdict {verdict!r} (expected ok/anomaly/cannot-determine) (#1328)"
         )
     return await insert_residue_event(
         conn,

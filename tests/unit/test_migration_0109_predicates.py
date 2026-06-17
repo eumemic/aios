@@ -49,7 +49,7 @@ def test_finder_check_freezes_the_four_finders() -> None:
         "chairman",
         "seat-incidental",
     ):
-        assert "'%s'" % finder in pred, finder
+        assert f"'{finder}'" in pred, finder
     # A new finder must be a deliberate migration, not a typo: exactly four.
     assert pred.count("'") == 8
 
@@ -58,7 +58,7 @@ def test_kind_source_check_freezes_the_three_sources() -> None:
     m = _load("0109")
     pred = m.KIND_SOURCE_CHECK
     for src in ("gate-resolve-payload", "observer", "manual"):
-        assert "'%s'" % src in pred, src
+        assert f"'{src}'" in pred, src
     assert pred.count("'") == 6
 
 
