@@ -80,6 +80,7 @@ dev = [
     # connector's runner directly to drive multi-connection routing.
     "aios-echo-http",
     "aios-signal",
+    "aios-slack",
     "aios-telegram",
     "aios-whatsapp",
 ]
@@ -99,6 +100,7 @@ packages = ["src/aios", "src/aios_connectors"]
 members = [
     "connectors/echo-http",
     "connectors/signal",
+    "connectors/slack",
     "connectors/telegram",
     "connectors/whatsapp",
     "packages/aios-connector-http",
@@ -113,6 +115,7 @@ aios-connector-http = { workspace = true }
 aios-echo-http = { workspace = true }
 aios-sdk = { workspace = true }
 aios-signal = { workspace = true }
+aios-slack = { workspace = true }
 aios-telegram = { workspace = true }
 aios-whatsapp = { workspace = true }
 

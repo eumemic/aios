@@ -145,17 +145,17 @@ jobs:
         # here lets ruff and mypy cover the hand-written surface so the
         # release workflow's ``no re-gate'' assumption is honored.
         #
-        # The three ``connectors/*/src`` trees (signal/telegram/whatsapp)
+        # The ``connectors/*/src`` trees (signal/slack/telegram/whatsapp)
         # and ``packages/aios-connector-http/aios_connector_http`` (whose
         # package lives at the package root, not under ``src/``) are
         # workspace members whose source had never been linted/typed.  The
         # echo-http connector has no ``src/`` and is omitted.
         run: |
-          uv run ruff check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
-          uv run ruff format --check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
+          uv run ruff check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
+          uv run ruff format --check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
 
       - name: Type check (mypy)
-        run: uv run mypy src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
+        run: uv run mypy src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
 
   unit:
     needs: detect
@@ -219,6 +219,7 @@ jobs:
         # -e`` (the Actions default), a failing suite aborts the job.
         run: |
           uv run pytest connectors/signal/tests -q
+          uv run pytest connectors/slack/tests -q
           uv run pytest connectors/telegram/tests -q
           uv run pytest connectors/whatsapp/tests -q
           uv run pytest packages/aios-connector-http/tests -q
