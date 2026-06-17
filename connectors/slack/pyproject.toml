@@ -13,6 +13,17 @@ dependencies = [
     # Socket-Mode only: we use AsyncWebClient + AsyncSocketModeClient.
     # slack-bolt's HTTP receiver / ack machinery is dead weight here.
     "slack-sdk>=3.31,<4",
+    # slack-sdk gates its async transport behind the ``[optional]`` extra:
+    # ``slack_sdk.socket_mode.aiohttp.SocketModeClient`` and
+    # ``AsyncRateLimitErrorRetryHandler`` import ``aiohttp``, and the
+    # Socket-Mode handshake needs a WebSocket client.  Without these the
+    # connector raises ``ModuleNotFoundError: No module named 'aiohttp'`` at
+    # import in any isolated install (e.g. the Docker image, which installs
+    # only this package's closure).  We pin aiohttp/websockets directly
+    # rather than ``slack-sdk[optional]`` to avoid dragging in that extra's
+    # unused boto3 / SQLAlchemy / aiodns weight.
+    "aiohttp>=3.7.3,<4",
+    "websockets>=9.1,<16",
 ]
 
 [dependency-groups]

@@ -224,6 +224,23 @@ jobs:
           uv run pytest connectors/whatsapp/tests -q
           uv run pytest packages/aios-connector-http/tests -q
 
+      - name: Slack connector isolated-install smoke test
+        # ``uv sync --dev`` above resolves the *unified workspace* env, where
+        # aiohttp/websockets are present transitively (aiodocker/litellm root
+        # deps).  That masks a missing dependency in a connector's own
+        # closure — exactly the gap that shipped a Docker image which crashed
+        # at ``import aios_slack`` with ``ModuleNotFoundError: aiohttp``.  This
+        # step installs ONLY the slack closure into a throwaway venv (the same
+        # ``--no-sources`` by-path install the Dockerfile does) and imports the
+        # connector, so a dropped runtime dep fails CI instead of production.
+        run: |
+          uv venv /tmp/slack-isolated
+          uv pip install --python /tmp/slack-isolated/bin/python --no-sources \
+            ./packages/aios-sdk \
+            ./packages/aios-connector-http \
+            ./connectors/slack
+          /tmp/slack-isolated/bin/python -c "import aios_slack.connector"
+
   integration:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'

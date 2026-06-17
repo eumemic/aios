@@ -173,10 +173,15 @@ class SlackConnector(HttpConnector):
 
         Read off the SDK base class's per-connection state, populated by
         ``_on_connection_added`` before the ``serve_connection`` worker is
-        spawned.  Returns ``None`` only if the slot is somehow absent (e.g.
-        a directly-invoked ``serve_connection`` in a test that did not go
-        through discovery) so the identity gate degrades to "no expectation"
-        rather than crashing.
+        spawned.
+
+        The ``None`` branch is **unreachable in production**: the runtime only
+        spawns ``serve_connection`` for connections it has already registered
+        via ``_on_connection_added``, so the slot is always present and the
+        INV-5 identity gate always has an expectation to enforce.  We keep the
+        ``None``-degrades-to-"no expectation" fallback solely so a unit test
+        can drive ``serve_connection`` directly without going through
+        discovery; it must never silence the gate against a real install.
         """
         conn = self._connections.get(connection_id)
         return conn.external_account_id if conn is not None else None
@@ -220,16 +225,33 @@ class SlackConnector(HttpConnector):
         Slice A only logs the raw event off the ack path; parsing, gating,
         and ``emit_inbound`` land in slice B.  Running this in its own task
         (not the listener) keeps the ack path unblocked.
+
+        Each iteration's handling is wrapped in a guard so that a transient
+        failure (today only a logging error; in slice B a parse/emit error)
+        is logged and the next event is processed, rather than escaping into
+        the :class:`asyncio.TaskGroup` and tearing down the whole connection
+        — and with it the socket task — over one bad envelope.
+        ``CancelledError`` is re-raised so shutdown still unwinds promptly.
         """
         while True:
             event = await state.inbound_queue.get()
-            log.info(
-                "slack.inbound.raw",
-                connection_id=connection_id,
-                team_id=state.team_id,
-                event_type=event.get("type"),
-                envelope_id=event.get("envelope_id"),
-            )
+            try:
+                log.info(
+                    "slack.inbound.raw",
+                    connection_id=connection_id,
+                    team_id=state.team_id,
+                    event_type=event.get("type"),
+                    envelope_id=event.get("envelope_id"),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception(
+                    "slack.inbound.drain_error",
+                    connection_id=connection_id,
+                    team_id=state.team_id,
+                    envelope_id=event.get("envelope_id"),
+                )
 
     @staticmethod
     async def _close_socket(socket_client: AsyncSocketModeClient) -> None:
