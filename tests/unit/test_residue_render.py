@@ -16,7 +16,12 @@ from aios.workflows.residue_render import (
 )
 
 
-def _axis(denominator, found=None, other=0, cd=0):
+def _axis(
+    denominator: int | None,
+    found: dict[str, int] | None = None,
+    other: int = 0,
+    cd: int = 0,
+) -> AxisView:
     return AxisView(
         denominator=denominator,
         found_by_finder=found or {},

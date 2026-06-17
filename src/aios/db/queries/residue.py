@@ -312,16 +312,16 @@ class MergedPrUniverse(NamedTuple):
     ``determinable=False`` and the render shows ``cannot-determine`` for axis-2 —
     NEVER an implicit short count (the look-green-while-doing-less guard)."""
 
-    count: int | None
+    pr_count: int | None
     determinable: bool
 
     @classmethod
     def determined(cls, count: int) -> MergedPrUniverse:
-        return cls(count=count, determinable=True)
+        return cls(pr_count=count, determinable=True)
 
     @classmethod
     def cannot_determine(cls) -> MergedPrUniverse:
-        return cls(count=None, determinable=False)
+        return cls(pr_count=None, determinable=False)
 
 
 # ─── axis-scoped found-by-finder breakdowns (NEVER cross-axis) ───────────────
