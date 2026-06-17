@@ -7,13 +7,37 @@ Slack connector for [aios](../../README.md).  Built on
 encrypted ``bot_token`` (``xoxb-…``) + ``app_token`` (``xapp-…``) the
 connector reads at ``serve_connection`` spawn.
 
-> **Status — MVP slice 1/4 (the connection layer).** This slice stands
-> up the package, the Socket-Mode transport, and the
-> ``serve_connection`` lifecycle.  The socket listener acks each
-> envelope and pushes the *raw* event onto a per-connection queue; it
-> does **not** yet parse, gate, or emit inbound events (slice B), and
-> ships no outbound ``slack_send`` / ``slack_react`` tools yet (a later
-> slice).  See `docs/design/slack-connector.md` §3.1–§3.3.
+> **Status — MVP slices 1–3/4.** Slice 1 stood up the package, the
+> Socket-Mode transport, and the ``serve_connection`` lifecycle. Slice 2
+> added inbound normalization + the four connector-side gates
+> (self/bot-loop, cross-app/team, subtype, mention-gate). Slice 3 adds
+> the outbound reply layer: the ``slack_send`` and ``slack_react``
+> ``@tool``\ s, plus the markdown→``mrkdwn`` pipeline and hard clamps in
+> `format.py`. A live DM-round-trip smoke lands in slice D. See
+> `docs/design/slack-connector.md` §3.1–§3.6.
+
+## Outbound tools (slice 3, §3.5)
+
+The model is heard on Slack only through two tools; ``connection_id`` and
+``chat_id`` are server-authoritative (injected by the SDK from the call's
+focal channel — the model cannot pick a workspace or conversation):
+
+- **``slack_send(text, thread_ts=None)`` → ``{ts, channel}``** —
+  ``chat.postMessage(channel=chat_id, text=…, mrkdwn=True)``. ``text`` is
+  written in Markdown and rendered to Slack ``mrkdwn`` then clamped to the
+  per-message ceiling before the call. ``thread_ts`` (read off the inbound
+  metadata header) threads the reply; default ``None`` posts top-level.
+  ``channel`` = ``self.focal_channel(team_id, chat_id)``.
+- **``slack_react(message_ts, emoji)`` → ``{status}``** —
+  ``reactions.add(channel=chat_id, timestamp=message_ts, name=emoji)``
+  (colon-stripped + normalized) when ``emoji`` is set. Mirrors
+  ``telegram_react``.
+
+> **Known v0 property — ``slack_send`` is at-least-once** (design §4). A
+> ``tool-result`` POST failure *after* a successful ``chat.postMessage``
+> re-dispatches the call on reconnect and posts a duplicate. The
+> ``SqliteAnsweredSpool`` does not close this window; a deterministic
+> idempotency-key fix is a separate SDK follow-up (benefits telegram too).
 
 ## Transport: Socket Mode
 

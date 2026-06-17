@@ -1,15 +1,28 @@
 """Slack connector built on the aios-connector-http SDK.
 
-MVP slices 1+2/4 — the connection layer (design §3.1-§3.3) plus the
-inbound decision layer (§3.4, §3.6).  Slice 1 stood up the package, the
-Socket-Mode transport, and the :meth:`SlackConnector.serve_connection`
-lifecycle.  Slice 2 adds inbound normalization and the four
-connector-side gates: the drain task now parses each raw Slack event,
-runs the self/bot-loop, cross-app/team, subtype, and mention gates (all
-pure functions in :mod:`aios_slack.parse`), and on a ``FORWARD`` outcome
-emits a normalized inbound via :meth:`emit_inbound`.  ``message_changed``
-is routed to a non-emitting system path; mention-gated drops are
-fail-quiet.  The outbound ``@tool`` vocabulary lands in a later slice.
+MVP slices 1-3/4 — the connection layer (design §3.1-§3.3), the inbound
+decision layer (§3.4, §3.6), and now the outbound reply layer (§3.5).
+Slice 1 stood up the package, the Socket-Mode transport, and the
+:meth:`SlackConnector.serve_connection` lifecycle.  Slice 2 added inbound
+normalization and the four connector-side gates: the drain task parses
+each raw Slack event, runs the self/bot-loop, cross-app/team, subtype,
+and mention gates (all pure functions in :mod:`aios_slack.parse`), and on
+a ``FORWARD`` outcome emits a normalized inbound via
+:meth:`emit_inbound`.  ``message_changed`` is routed to a non-emitting
+system path; mention-gated drops are fail-quiet.
+
+Slice 3 publishes the two outbound ``@tool``\\ s the model uses to be
+heard on Slack: :meth:`slack_send` (``chat.postMessage`` with
+``mrkdwn``, optional ``thread_ts`` threading) and :meth:`slack_react`
+(``reactions.add`` / ``reactions.remove``, mirroring ``telegram_react``).
+Both run their text through the markdown→``mrkdwn`` pipeline + hard
+clamps in :mod:`aios_slack.format` before the Web API call.
+``connection_id`` and ``chat_id`` are server-authoritative — the SDK
+injects them from the call's focal channel; the model cannot select a
+workspace.  ``slack_send`` is documented **at-least-once** (§4 retry
+posture): a ``tool-result`` POST failure after a successful
+``chat.postMessage`` re-dispatches and posts a duplicate; the
+idempotency-key fix is a separate SDK follow-up.
 
 Multi-connection runtime container: one container can serve N
 connections of type ``"slack"``, each bound to one Slack workspace
@@ -38,13 +51,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
-from aios_connector_http import HttpConnector
+from aios_connector_http import HttpConnector, tool
 from slack_sdk.http_retry.builtin_async_handlers import AsyncRateLimitErrorRetryHandler
 from slack_sdk.socket_mode.aiohttp import SocketModeClient as AsyncSocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
+from .format import clamp_message, markdown_to_mrkdwn, normalize_emoji
 from .parse import GateOutcome, InboundMessage, gate
 
 log = structlog.get_logger(__name__)
@@ -348,6 +362,134 @@ class SlackConnector(HttpConnector):
             content=msg.text,
             metadata=metadata,
         )
+
+    # ── model-facing tools (slice 3, design §3.5) ─────────────────────
+
+    @tool()
+    async def slack_send(
+        self,
+        text: str,
+        thread_ts: str | None = None,
+        *,
+        connection_id: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Send a message to your focal Slack conversation.
+
+        This is the only way the model is heard on Slack — bare assistant
+        text never reaches the channel on its own. The connection and
+        conversation are taken implicitly from your focal channel; the SDK
+        injects them from the call payload, so you cannot send to a
+        different workspace or conversation. Set focal with the built-in
+        ``switch_channel`` tool.
+
+        The message body is written in ordinary Markdown and rendered to
+        Slack's ``mrkdwn`` flavor before sending: ``**bold**`` →
+        ``*bold*``, ``[label](url)`` → a Slack link, fenced/inline code,
+        ``> quotes``, ``~~strike~~``, and ``_italic_`` all map to their
+        Slack equivalents. Text-only in v0 — there is no attachment or
+        Block Kit parameter yet.
+
+        Args:
+            text: The message body, in Markdown. Long bodies are clamped
+                to Slack's per-message ceiling before sending (the tail is
+                truncated with an ellipsis rather than failing the call).
+            thread_ts: When set, the message is posted as a reply in that
+                thread. Pass the ``thread_ts`` from the inbound message's
+                metadata header to keep a conversation threaded; pass the
+                ``ts`` returned by an earlier ``slack_send`` to continue a
+                thread you started. Default ``None`` posts a new top-level
+                message in the conversation.
+
+        Returns:
+            A dict with ``ts`` (the new message's timestamp id — feed it
+            to ``slack_react`` or as a later ``thread_ts``) and ``channel``
+            (the resolved focal-channel string, so observers read the send
+            target straight off the tool result).
+        """
+        state = self.state[connection_id]
+        body = clamp_message(markdown_to_mrkdwn(text))
+        # Build the channel from the ORIGINAL chat_id so the segment is
+        # byte-identical to inbound/focal form (the channel is the bare
+        # conversation id; threads share the channel session, §3.4).
+        channel = self.focal_channel(state.team_id, chat_id)
+
+        kwargs: dict[str, Any] = {"channel": chat_id, "text": body, "mrkdwn": True}
+        if thread_ts is not None:
+            kwargs["thread_ts"] = thread_ts
+
+        response = await state.web_client.chat_postMessage(**kwargs)
+        sent_ts = response["ts"]
+
+        # Record the thread we just posted into so the mention-gate's
+        # ``bot_thread_participant`` implicit-mention bypass (§3.6 gate 4)
+        # fires for subsequent replies in this thread — a human follow-up
+        # in a thread the bot is active in no longer needs an explicit
+        # @-mention.  We stamp the thread anchor (``thread_ts`` when this
+        # was a threaded reply; otherwise the new message's own ``ts``,
+        # which becomes the thread root if a human replies under it).
+        thread_anchor = thread_ts if thread_ts is not None else sent_ts
+        if isinstance(thread_anchor, str):
+            state.bot_thread_ts.add(thread_anchor)
+
+        return {"ts": sent_ts, "channel": channel}
+
+    @tool()
+    async def slack_react(
+        self,
+        message_ts: str,
+        emoji: str | None,
+        *,
+        connection_id: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """React to a message in your focal conversation, or clear a reaction.
+
+        A reaction is the cheapest way to acknowledge a message without
+        posting text — e.g. react ``eyes`` to show you're working on it,
+        or ``white_check_mark`` when done. The connection and conversation
+        are taken implicitly from your focal channel.
+
+        Args:
+            message_ts: The ``ts`` of the message to react to. Use the
+                ``message_ts`` from an inbound message's metadata header,
+                or the ``ts`` returned by an earlier ``slack_send``.
+            emoji: The emoji shortcode (e.g. ``"eyes"``, ``"thumbsup"``,
+                ``":white_check_mark:"`` — surrounding colons are stripped
+                and the name is normalized to Slack's bare-shortcode form).
+                When set, the reaction is added. Pass ``None`` to *remove*
+                the same-named reaction instead: Slack's ``reactions.remove``
+                is keyed by the shortcode, so pass the shortcode (not
+                ``None``) to clear a specific reaction; ``None`` is only
+                meaningful when the connector already knows which reaction
+                to drop, and otherwise is a no-op.
+
+        Returns:
+            A dict with ``status`` (``"ok"``).
+        """
+        state = self.state[connection_id]
+        # ``reactions.add`` when a shortcode is given (colon-stripped +
+        # normalized), ``reactions.remove`` when cleared — exactly one Web
+        # API call, mirroring ``telegram_react``.  Slack's ``reactions.remove``
+        # is keyed by name, so the ``None`` branch can only remove a name we
+        # can resolve; with no name in hand it is a logged no-op rather than
+        # an error (a bare ``reactions.remove`` with no name is rejected by
+        # Slack and would surface to the model as an opaque failed call).
+        if emoji is not None:
+            name = normalize_emoji(emoji)
+            await state.web_client.reactions_add(
+                channel=chat_id,
+                timestamp=message_ts,
+                name=name,
+            )
+        else:
+            log.info(
+                "slack.react.clear_noop",
+                connection_id=connection_id,
+                team_id=state.team_id,
+                message_ts=message_ts,
+            )
+        return {"status": "ok"}
 
     @staticmethod
     async def _close_socket(socket_client: AsyncSocketModeClient) -> None:

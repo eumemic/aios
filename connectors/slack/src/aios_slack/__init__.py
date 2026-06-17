@@ -1,8 +1,10 @@
 """Slack connector for aios (#1229).
 
-MVP slice 1/4 — the connection layer: package scaffold, Socket-Mode
-transport, and the ``serve_connection`` lifecycle.  Parsing, gating,
-and the outbound ``@tool`` vocabulary land in later slices.
+MVP slices 1-3/4 — the connection layer (package scaffold, Socket-Mode
+transport, ``serve_connection`` lifecycle), the inbound decision layer
+(normalization + the four connector gates), and the outbound reply layer
+(the ``slack_send`` / ``slack_react`` ``@tool``\\ s + the markdown→mrkdwn
+pipeline and hard clamps).  A live DM-round-trip smoke lands in slice D.
 """
 
 from __future__ import annotations
