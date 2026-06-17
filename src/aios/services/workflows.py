@@ -19,7 +19,7 @@ import asyncpg
 
 from aios.db.listen import open_listen_for_run_events
 from aios.db.queries import workflows as wf_queries
-from aios.errors import ConflictError, ForbiddenError, NotFoundError
+from aios.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,
@@ -40,6 +40,11 @@ from aios.services import attenuation as attenuation_service
 from aios.services import sessions as sessions_service
 from aios.services.await_completion import await_completion
 from aios.services.wake import defer_run_wake
+from aios.workflows.script_validation import (
+    declared_tool_names,
+    extract_required_agent_ids,
+    validate_workflow_script,
+)
 from aios.workflows.service import create_run, resume_gate
 
 __all__ = [
@@ -146,6 +151,65 @@ def _reject_operator_path_names_only(
     return [s for s in http_servers if isinstance(s, HttpServerSpec)]
 
 
+async def _validate_script_surface(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    script: str,
+    tools: list[ToolSpec],
+) -> None:
+    """Create-time validation of a workflow ``script`` (#1285).
+
+    Two halves of one check, run at author time so a structural or surface-drift
+    failure surfaces as a :class:`ValidationError` (a 4xx, turned into a clean
+    model-visible result by the tool dispatch layer) instead of a failed *run*:
+
+    * **Structural + script-local surface** — compile, top-level
+      ``async def main(input)``, and every string-literal ``tool("X")`` covered by
+      the declared ``tools``. Pure/AST (no pool); see
+      :func:`aios.workflows.script_validation.validate_workflow_script`.
+    * **Named-agent surface union** — for every string-literal
+      ``agent(agent_id="A")``, the run's declared surface must cover that child
+      agent's declared **tool** surface, or the #794 ``agent ∩ run`` clamp would
+      silently strip the child's tools at launch (the omitted-DELETE / omitted-PATCH
+      production incidents ``dev_pipeline.py`` records). Resolution needs the pool,
+      so it lives here, not in the pure validator.
+
+      **Chosen depth (documented in the PR):** resolve the child agent and require
+      the declared **tools** to be a superset of the child agent's declared tools. A
+      literal ``agent_id`` that does **not** resolve to a live same-account agent is
+      **skipped** (no false rejection) — such a call fails loud at run time as
+      ``agent_not_found``, which is a *different* failure class than surface drift and
+      out of scope for this create-time check. MCP / http-server union for child
+      agents is left to a follow-up; tool union covers the recorded incidents.
+    """
+    # Structural + script-local tool surface (raises ValidationError on failure).
+    validate_workflow_script(script, tools)
+
+    required_agent_ids = extract_required_agent_ids(script)
+    if not required_agent_ids:
+        return
+    declared = declared_tool_names(tools)
+    for agent_id in sorted(required_agent_ids):
+        try:
+            child = await agents_service.get_agent(pool, agent_id, account_id=account_id)
+        except NotFoundError:
+            # Un-resolvable (absent / archived / cross-account) — not a surface-drift
+            # failure; it fails loud at run time as ``agent_not_found``. Skip.
+            continue
+        child_tool_names = declared_tool_names([t for t in child.tools if t.enabled])
+        missing = sorted(child_tool_names - declared)
+        if missing:
+            joined = ", ".join(repr(m) for m in missing)
+            raise ValidationError(
+                f"workflow script invokes agent(agent_id={agent_id!r}) whose declared "
+                f"tool(s) {joined} are not in the workflow's declared tool surface; the "
+                "child surface is agent ∩ run (#794) — under-declaring silently strips "
+                "those tools from the child at launch. Add them to the workflow's `tools`",
+                detail={"agent_id": agent_id, "missing_tools": missing},
+            )
+
+
 async def create_workflow(
     pool: asyncpg.Pool[Any],
     *,
@@ -172,6 +236,10 @@ async def create_workflow(
     declared verbatim, account-scoped — but names-only sugar is unavailable there (no
     acting agent to resolve against).
     """
+    # Create-time validation (#1285): compile + `async def main(input)` + the declared
+    # surface must cover every literal tool("…")/agent(agent_id="…") the script uses.
+    # Runs on EVERY path (agent author + HTTP/operator), against the declared `tools`.
+    await _validate_script_surface(pool, account_id=account_id, script=script, tools=tools or [])
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
     if creator_session_id is not None:
@@ -236,6 +304,19 @@ async def update_workflow(
     agent. The operator path stores declared http verbatim and rejects names-only sugar
     (no acting agent to resolve against).
     """
+    # Create-time validation (#1285) applies on UPDATE too. Only when this update
+    # actually replaces the script (``script is None`` preserves the stored — already
+    # validated — body). Validated against the MERGED tool surface (new ``tools`` if
+    # given, else the workflow's current tools). Fetch the current definition once here;
+    # the actor branch below re-reads under the version pin for its attenuation check.
+    if script is not None:
+        current_for_validation = await get_workflow(pool, workflow_id, account_id=account_id)
+        await _validate_script_surface(
+            pool,
+            account_id=account_id,
+            script=script,
+            tools=tools if tools is not None else current_for_validation.tools,
+        )
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
     if actor_session_id is None:
