@@ -504,6 +504,39 @@ async def get_account_spent_microusd(conn: asyncpg.Connection[Any], account_id: 
     return int(value or 0)
 
 
+async def get_account_subtree_spent_microusd(
+    conn: asyncpg.Connection[Any], account_id: str
+) -> int:
+    """Return the rolled-up lifetime spend over ``account_id``'s subtree.
+
+    The flat :func:`get_account_spent_microusd` reads one row's
+    ``spent_microusd`` meter; the account tree is a limit-*inheritance*
+    hierarchy but not (until now) a budget-*accounting* one, so an ancestor
+    could never see its descendants' spend. This walks *down* the
+    ``parent_account_id`` edges — the mirror image of the upward
+    :func:`resolve_effective_spend_limit_usd` CTE — and sums every meter in
+    the subtree, self included.
+
+    Spend is an externally-checkable derived scalar (real dollars), not an
+    internal price market. Archived accounts sever the walk exactly as they
+    do for the inheritance resolvers: an archived node (and everything below
+    it) drops out of the live rollup, and an archived anchor rolls up to 0.
+    """
+    total: int | None = await conn.fetchval(
+        "WITH RECURSIVE subtree AS ("
+        "  SELECT id, spent_microusd "
+        "    FROM accounts WHERE id = $1 AND archived_at IS NULL "
+        "  UNION ALL "
+        "  SELECT a.id, a.spent_microusd "
+        "    FROM accounts a JOIN subtree s ON a.parent_account_id = s.id "
+        "    WHERE a.archived_at IS NULL"
+        ") "
+        "SELECT COALESCE(SUM(spent_microusd), 0) FROM subtree",
+        account_id,
+    )
+    return int(total or 0)
+
+
 async def resolve_account_by_path(
     conn: asyncpg.Connection[Any],
     *,

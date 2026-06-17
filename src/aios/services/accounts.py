@@ -381,7 +381,11 @@ async def get_usage(
     await get_account_in_scope(pool, target_account_id, caller_account_id=caller_account_id)
     async with pool.acquire() as conn:
         counts = await queries.count_account_resources(conn, target_account_id)
-        spent_microusd = await queries.get_account_spent_microusd(conn, target_account_id)
+        # Reported spend rolls up the whole subtree: an ancestor's spend is the
+        # sum of its descendants' meters, not just its own flat row. The account
+        # tree is a limit-inheritance hierarchy AND, for this externally-checkable
+        # dollar scalar, a budget-accounting one.
+        spent_microusd = await queries.get_account_subtree_spent_microusd(conn, target_account_id)
         spend_limit_usd = await resolve_effective_spend_limit_usd_on(conn, target_account_id)
         tokens = await queries.sum_account_session_tokens(conn, target_account_id)
     return AccountUsage(
