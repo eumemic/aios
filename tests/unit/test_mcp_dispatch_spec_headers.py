@@ -148,6 +148,7 @@ class TestMcpDispatchSuppression:
 
         call_mock.assert_not_awaited()  # no real MCP round-trip
         record_mock.assert_awaited_once()
+        assert record_mock.await_args is not None
         kwargs = record_mock.await_args.kwargs
         assert kwargs["server_name"] == "gh"
         assert kwargs["tool_name"] == "create_issue"

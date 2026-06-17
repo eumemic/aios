@@ -838,6 +838,7 @@ class TestOutboundSuppressionHttp:
         assert "url" not in captured
         # Audit event recorded with the un-suppressed intent.
         record.assert_awaited_once()
+        assert record.await_args is not None
         kwargs = record.await_args.kwargs
         assert kwargs["method"] == "POST"
         assert kwargs["path"] == "/lights/1"
@@ -938,6 +939,7 @@ class TestOutboundSuppressionHttp:
                 {"server_ref": "hue", "path": "/things", "method": "POST"},
             )
         assert result["status"] == 201
+        assert record.await_args is not None
         assert record.await_args.kwargs["synthesized_status"] == 201
 
     async def test_suppression_off_does_not_gate(self, _stub_runtime: Any) -> None:
