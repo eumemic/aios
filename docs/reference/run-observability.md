@@ -104,3 +104,29 @@ the **child-session** events produced when a run spawns agent sessions:
 
 Source of truth: `aios.models.workflows.WfRunEvent` and
 `aios.models.events.Event`.
+
+## (d) Per-run cost / token / wall-clock usage on the read path (#1324)
+
+`GET /v1/runs/{id}` (`WfRun`) and `GET /v1/runs` (`list_runs`) carry a `usage`
+object — the run's realized spend, the machine-observer's cost-substrate. It is
+summed over the run's direct child sessions via the same `run_children_usage`
+source the in-script `budget()` builtin consumes, so the run's `budget_usd`
+*ceiling* and its `usage.cost_microusd` *spend* are both legible from the read
+path (not buried in a builtin). On `list_runs` the whole page is enriched in one
+batched aggregate — no per-run fan-out.
+
+`usage` fields (`WfRunUsage`):
+
+| Field | Meaning |
+| --- | --- |
+| `cost_microusd` | Summed child-session cost (µUSD). A childless run sums to a real `0`. |
+| `input_tokens` / `output_tokens` | Summed child-session tokens. |
+| `cache_read_input_tokens` / `cache_creation_input_tokens` | Summed child-session cache tokens. |
+| `iteration_count` | The run's wake/step count. **Always `null` today** — the host keeps no per-run iteration counter on any substrate; reserved for when one lands. |
+| `wall_clock_ms` | `updated_at − created_at` (ms) for a **terminal** run; `null` while the run is still live (its `updated_at` is a moving "last touched" stamp, not an end). |
+
+**Fail-loud absence.** Every field is `int | null`, and a value that cannot be
+determined is returned as **explicit `null`**, never a silent `0` or an omitted
+key (cf. the `vault_ids:null` read-path disease). An observer reads `null` as
+*cannot-determine* and fails loud; it reads `0` as a real observed zero. Do not
+conflate the two.

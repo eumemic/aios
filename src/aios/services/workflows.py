@@ -32,6 +32,7 @@ from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     WfRun,
     WfRunEvent,
+    WfRunUsage,
     WfRunWaitResponse,
     Workflow,
 )
@@ -415,9 +416,42 @@ async def list_workflows(
 # ─── runs ────────────────────────────────────────────────────────────────────
 
 
+def _wall_clock_ms(run: WfRun) -> int | None:
+    """Wall-clock span (ms) for a TERMINAL run; ``None`` while it's still live (#1324).
+
+    A terminal run's ``updated_at`` is its completion instant, so ``updated_at -
+    created_at`` is its true wall-clock. A non-terminal run's ``updated_at`` is a
+    moving "last touched" stamp — surfacing a span off it would be a misleading
+    partial, so we report explicit ``None`` (cannot-determine) instead.
+    """
+    if run.status not in TERMINAL_RUN_STATUSES:
+        return None
+    return max(0, round((run.updated_at - run.created_at).total_seconds() * 1000))
+
+
+def _run_usage(run: WfRun, children: wf_queries.RunChildrenUsage) -> WfRunUsage:
+    """Project a run + its summed child usage into the read-path :class:`WfRunUsage`.
+
+    cost/tokens are the real summed children; ``iteration_count`` is explicit
+    ``None`` (no per-run iteration counter exists on any substrate yet — see the
+    model docstring); ``wall_clock_ms`` is terminal-only (:func:`_wall_clock_ms`).
+    """
+    return WfRunUsage(
+        cost_microusd=children.cost_microusd,
+        input_tokens=children.input_tokens,
+        output_tokens=children.output_tokens,
+        cache_read_input_tokens=children.cache_read_input_tokens,
+        cache_creation_input_tokens=children.cache_creation_input_tokens,
+        iteration_count=None,
+        wall_clock_ms=_wall_clock_ms(run),
+    )
+
+
 async def get_run(pool: asyncpg.Pool[Any], run_id: str, *, account_id: str) -> WfRun:
     async with pool.acquire() as conn:
-        return await wf_queries.get_wf_run(conn, run_id, account_id=account_id)
+        run = await wf_queries.get_wf_run(conn, run_id, account_id=account_id)
+        children = await wf_queries.run_children_usage(conn, run.id, account_id=account_id)
+        return run.model_copy(update={"usage": _run_usage(run, children)})
 
 
 async def list_runs(
@@ -432,7 +466,7 @@ async def list_runs(
     launcher_session_id: str | None = None,
 ) -> list[WfRun]:
     async with pool.acquire() as conn:
-        return await wf_queries.list_wf_runs(
+        runs = await wf_queries.list_wf_runs(
             conn,
             account_id=account_id,
             limit=limit,
@@ -442,6 +476,12 @@ async def list_runs(
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
         )
+        # Enrich the whole page in ONE batched aggregate (no N+1) so list_runs
+        # carries the same per-run usage substrate as get_run (#1324).
+        usage_by_run = await wf_queries.runs_children_usage(
+            conn, [r.id for r in runs], account_id=account_id
+        )
+        return [r.model_copy(update={"usage": _run_usage(r, usage_by_run[r.id])}) for r in runs]
 
 
 async def list_run_events(

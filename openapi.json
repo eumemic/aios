@@ -17515,6 +17515,16 @@
               }
             ],
             "title": "Archived At"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WfRunUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -17650,6 +17660,90 @@
         ],
         "title": "WfRunEvent",
         "description": "One row of a run's append-only journal (the replay-with-memo source).\n\n``call_key`` is set for ``call_started``/``call_result`` (the memo key) and for\n``annotation`` (the branch-local dedup key that makes ``log()``/``phase()``\nemit-once across replays); it is ``None`` for the ``run_started``/``run_completed``\nbookends. An ``annotation`` is a journaled progress marker (``payload`` =\n``{\"kind\": \"log\" | \"phase\", \"text\": ...}``), not a capability call.\n\nSchema note (#1140): a *run* event is ``{type, payload, seq}``. This is a\nDIFFERENT shape from a child-*session* event (``{kind, data}`` \u2014 see\n``aios.models.events.Event``). Don't assume one schema across both\nendpoints; ``docs/reference/run-observability.md`` documents the split."
+      },
+      "WfRunUsage": {
+        "properties": {
+          "cost_microusd": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Microusd"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "cache_read_input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Input Tokens"
+          },
+          "cache_creation_input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Creation Input Tokens"
+          },
+          "iteration_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iteration Count"
+          },
+          "wall_clock_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wall Clock Ms"
+          }
+        },
+        "type": "object",
+        "title": "WfRunUsage",
+        "description": "Per-run cost / token / iteration / wall-clock \u2014 the machine-observer's substrate.\n\nThe read-path projection of a run's actual spend (#1324). The numbers are summed\nover the run's direct child sessions via ``run_children_usage`` \u2014 the SAME source\n``step.py``'s ``budget()`` builtin consumes \u2014 so a run's ``budget_usd`` *ceiling*\n(on ``WfRun``) and its realized ``cost_microusd`` *spend* (here) are finally both\nlegible from the read path.\n\nEVERY field is ``int | None``, and absence is reported as **explicit null**, never\na silent ``0`` or an omitted key (cf. the ``vault_ids:null`` read-path disease this\nmust not inherit \u2014 see the substrate-different-verdict invariant). The observer\nreads null as *cannot-determine* and fails loud, NOT as \"zero spend\":\n\n* ``cost_microusd`` / ``*_tokens`` \u2014 summed over the run's child sessions. A run\n  with no children sums to ``0`` (a real, observed zero \u2014 distinct from null).\n* ``iteration_count`` \u2014 the run's wake/step count. The host keeps **no** per-run\n  iteration counter on any substrate today, so this is reported as ``None``\n  (cannot-determine) rather than fabricated from an unrelated proxy. Reserved for\n  when a real counter lands; surfaced now so the observer's contract is stable.\n* ``wall_clock_ms`` \u2014 wall-clock span ``updated_at - created_at`` in milliseconds,\n  reported ONLY for a TERMINAL run (``updated_at`` is its completion instant). A\n  still-running run's ``updated_at`` is a moving \"last touched\" stamp, not an end,\n  so it is reported as ``None`` rather than a misleading partial span."
       },
       "WfRunWaitResponse": {
         "properties": {

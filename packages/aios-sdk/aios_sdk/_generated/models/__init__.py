@@ -283,6 +283,7 @@ from .wf_run_event_payload import WfRunEventPayload
 from .wf_run_event_type import WfRunEventType
 from .wf_run_request_output_schema_type_0 import WfRunRequestOutputSchemaType0
 from .wf_run_status import WfRunStatus
+from .wf_run_usage import WfRunUsage
 from .wf_run_wait_response import WfRunWaitResponse
 from .wf_run_wait_response_error_type_0 import WfRunWaitResponseErrorType0
 from .wf_run_wait_response_run_status import WfRunWaitResponseRunStatus
@@ -568,6 +569,7 @@ __all__ = (
     "WfRunEventType",
     "WfRunRequestOutputSchemaType0",
     "WfRunStatus",
+    "WfRunUsage",
     "WfRunWaitResponse",
     "WfRunWaitResponseErrorType0",
     "WfRunWaitResponseRunStatus",
