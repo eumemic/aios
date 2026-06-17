@@ -388,3 +388,61 @@ def test_main_missing_api_key_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AIOS_API_KEY", raising=False)
     monkeypatch.setenv("AIOS_URL", "https://example.test")
     assert rr.main([]) == 2
+
+
+# ─── #1282: --check (no-write diff) mode ─────────────────────────────────────
+
+
+def _mock_get_then_assert_no_put(live_script: str) -> mock._patch[mock.MagicMock]:
+    """Patch rr._request so GET returns a live workflow with `live_script`; fail the
+    test if a PUT is ever issued (proves --check writes nothing)."""
+
+    def _fake(method: str, url: str, api_key: str, body: Any = None) -> tuple[int, dict[str, Any]]:
+        if method == "GET":
+            return 200, {"version": 9, "script": live_script}
+        raise AssertionError(f"--check issued a {method} — it must perform NO write")
+
+    return mock.patch.object(rr, "_request", side_effect=_fake)
+
+
+def test_main_check_in_sync_returns_zero_no_put(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--check against an identical live script: zero exit, no PUT."""
+    monkeypatch.setenv("AIOS_API_KEY", "k")
+    monkeypatch.setenv("AIOS_URL", "https://example.test")
+    monkeypatch.setenv("DEV_PIPELINE_WORKFLOW_ID", "wf_dev")
+    monkeypatch.delenv("TRIAGE_PIPELINE_WORKFLOW_ID", raising=False)
+    live = build_dev_pipeline_script()  # identical to what the builder regenerates
+    with _mock_get_then_assert_no_put(live):
+        rc = rr.main(["--check"])
+    assert rc == 0
+
+
+def test_main_check_drift_returns_nonzero_no_put(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--check against a DIFFERING live script: non-zero exit, still no PUT."""
+    monkeypatch.setenv("AIOS_API_KEY", "k")
+    monkeypatch.setenv("AIOS_URL", "https://example.test")
+    monkeypatch.setenv("DEV_PIPELINE_WORKFLOW_ID", "wf_dev")
+    monkeypatch.delenv("TRIAGE_PIPELINE_WORKFLOW_ID", raising=False)
+    # live script body differs from what the builder regenerates (a stale deployed
+    # script the merged builder would rewrite) → drift the round-trip cannot absorb.
+    live = build_dev_pipeline_script() + "\n# stale hand-edit the builder drops\n"
+    with _mock_get_then_assert_no_put(live):
+        rc = rr.main(["--check"])
+    assert rc == 1
+
+
+def test_reconcile_target_check_skips_put(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-target pipeline under check=True returns changed=True on drift but
+    never PUTs."""
+    dev = _dev_target()
+    live = build_dev_pipeline_script() + "\n# stale hand-edit\n"
+    with _mock_get_then_assert_no_put(live):
+        changed = rr.reconcile_target(
+            dev,
+            base_url="https://x",
+            workflow_id="wf_dev",
+            api_key="k",
+            verbose=False,
+            check=True,
+        )
+    assert changed is True

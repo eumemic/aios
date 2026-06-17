@@ -278,10 +278,18 @@ def reconcile_target(
     workflow_id: str,
     api_key: str,
     verbose: bool,
+    check: bool = False,
 ) -> bool:
     """Reconcile ONE workflow target: read live → extract → rebuild → validate →
-    decide → PUT.  Returns True if a PUT (version bump) was applied, False on a
-    no-op (already in sync).  Raises ReregisterError on any fatal problem.
+    decide → PUT.  Returns True if the target CHANGED (a PUT was applied, or — under
+    ``check=True`` — a PUT WOULD be applied), False on a no-op (already in sync).
+    Raises ReregisterError on any fatal problem.
+
+    When ``check=True`` this runs steps 1-5 (read live → extract → rebuild →
+    validate → decide) but SKIPS the PUT (step 6): it prints the per-target verdict
+    (``in-sync`` / ``WOULD-RE-REGISTER``) and performs no write. ``main`` then exits
+    non-zero iff any target would change — the read-only drift detector that seeds
+    the v2 ops-agent Vaughan check.
 
     This is the shared per-target pipeline — adding a workflow is a TARGETS entry,
     not a fork of this logic."""
@@ -314,8 +322,16 @@ def reconcile_target(
 
     # 5. Idempotency: no-op when regenerated == live.
     if not needs_update(new_script, live_script):
-        print(f"[{target.key}] regenerated script is identical — no-op (no version bump).")
+        if check:
+            print(f"[{target.key}] in-sync")
+        else:
+            print(f"[{target.key}] regenerated script is identical — no-op (no version bump).")
         return False
+
+    # 5b. --check: drift exists, but perform NO write. Report and return changed=True.
+    if check:
+        print(f"[{target.key}] WOULD-RE-REGISTER")
+        return True
 
     # 6. PUT (version bumps; omitted tools/http_servers preserved).
     print(f"[{target.key}] script changed — re-registering (PUT with version={live_version})…")
@@ -355,6 +371,15 @@ def main(argv: list[str] | None = None) -> int:
             "Repeatable. Default: every target whose *_WORKFLOW_ID env var is set."
         ),
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "read-only diff mode: read live → extract → rebuild → validate → decide, "
+            "print each target's verdict (in-sync / WOULD-RE-REGISTER), perform NO PUT, "
+            "and exit non-zero iff any target would change. Seeds the v2 drift loop."
+        ),
+    )
     args = parser.parse_args(argv)
 
     api_key = os.environ.get("AIOS_API_KEY")
@@ -390,7 +415,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         try:
             if reconcile_target(
-                target, base_url=url, workflow_id=workflow_id, api_key=api_key, verbose=args.verbose
+                target,
+                base_url=url,
+                workflow_id=workflow_id,
+                api_key=api_key,
+                verbose=args.verbose,
+                check=args.check,
             ):
                 changed += 1
             reconciled += 1
@@ -399,9 +429,25 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     if reconciled == 0 and skipped > 0:
-        print("FATAL: no workflow targets were configured (every *_WORKFLOW_ID is unset)",
-              file=sys.stderr)
+        print(
+            "FATAL: no workflow targets were configured (every *_WORKFLOW_ID is unset)",
+            file=sys.stderr,
+        )
         return 2
+    if args.check:
+        print(
+            f"Done (check): {reconciled} target(s) checked, {changed} would re-register, "
+            f"{skipped} skipped."
+        )
+        if changed:
+            # Drift detected under --check: exit non-zero (live ≠ declared), no writes.
+            print(
+                f"DRIFT: {changed} target(s) would re-register (no writes performed under "
+                "--check).",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
     print(f"Done: {reconciled} target(s) reconciled, {changed} re-registered, {skipped} skipped.")
     return 0
 

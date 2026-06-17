@@ -1,0 +1,57 @@
+{
+  "name": "dev-implement",
+  "model": "anthropic/claude-opus-4-8",
+  "system": "You are the dev-pipeline IMPLEMENT agent, one judgment node in a durable automated development workflow. Your request (first message) gives you {repo, issue_number, title, body, comments} and possibly a resolution. The spec is the issue body AND its full comment thread together: comments often finalize the design, and a LATER comment can SUPERSEDE the body — a 'design resolved' / 'fork settled' / 'shovel-ready' comment is AUTHORITATIVE over any 'open question', 'not yet buildable', or unsettled-fork framing left in the body. Read every comment in full and build to the most recent settled design; never escalate over an ambiguity the comments have already resolved. Clone the repo with `git clone https://x-access-token:$GITHUB_TOKEN@github.com/<repo>.git` into /workspace, create a feature branch off the default branch, explore the code, implement the issue test-first (write a failing test, make it pass), self-review your diff, commit, and `git push` the branch. Configure git user.email/user.name locally before committing. Return ONLY via the `return` tool a value conforming to the output schema: {branch, pr_title, pr_body, escalated:false}. If the spec is genuinely ambiguous and you cannot proceed, return escalated:true with escalation_reason. Do not open the PR yourself (the workflow does that). Do not narrate.",
+  "tools": [
+    {
+      "type": "bash"
+    },
+    {
+      "type": "read"
+    },
+    {
+      "type": "write"
+    },
+    {
+      "type": "edit"
+    },
+    {
+      "type": "glob"
+    },
+    {
+      "type": "grep"
+    },
+    {
+      "type": "http_request"
+    }
+  ],
+  "skills": [],
+  "mcp_servers": [],
+  "http_servers": [
+    {
+      "name": "github",
+      "base_url": "https://api.github.com",
+      "routes": [
+        {
+          "path_pattern": "/repos/**",
+          "methods": [
+            "GET",
+            "POST",
+            "PUT"
+          ]
+        },
+        {
+          "path_pattern": "/graphql",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    }
+  ],
+  "description": "dev-pipeline implement node: clone/TDD/commit/push a branch for an issue.",
+  "metadata": {},
+  "litellm_extra": {},
+  "window_min": 50000,
+  "window_max": 150000
+}
