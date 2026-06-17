@@ -1,12 +1,15 @@
 """Slack connector built on the aios-connector-http SDK.
 
-MVP slice 1/4 — the connection layer (design §3.1-§3.3).  This slice
-stands up the package, the Socket-Mode transport, and the
-:meth:`SlackConnector.serve_connection` lifecycle.  It does **not** yet
-parse, gate, or emit inbound events: the socket listener acks the
-envelope and pushes the *raw* Slack event onto a per-connection queue,
-and the drain task only logs.  Parsing / mention-gating / ``emit_inbound``
-land in slice B; the outbound ``@tool`` vocabulary in a later slice.
+MVP slices 1+2/4 — the connection layer (design §3.1-§3.3) plus the
+inbound decision layer (§3.4, §3.6).  Slice 1 stood up the package, the
+Socket-Mode transport, and the :meth:`SlackConnector.serve_connection`
+lifecycle.  Slice 2 adds inbound normalization and the four
+connector-side gates: the drain task now parses each raw Slack event,
+runs the self/bot-loop, cross-app/team, subtype, and mention gates (all
+pure functions in :mod:`aios_slack.parse`), and on a ``FORWARD`` outcome
+emits a normalized inbound via :meth:`emit_inbound`.  ``message_changed``
+is routed to a non-emitting system path; mention-gated drops are
+fail-quiet.  The outbound ``@tool`` vocabulary lands in a later slice.
 
 Multi-connection runtime container: one container can serve N
 connections of type ``"slack"``, each bound to one Slack workspace
@@ -31,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
@@ -41,6 +44,8 @@ from slack_sdk.socket_mode.aiohttp import SocketModeClient as AsyncSocketModeCli
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
+
+from .parse import GateOutcome, InboundMessage, gate
 
 log = structlog.get_logger(__name__)
 
@@ -66,9 +71,20 @@ class _SlackConnectionState:
     socket_client: AsyncSocketModeClient
     bot_user_id: str
     team_id: str
-    # Slice A only enqueues the raw Slack event dict; parsing into a typed
-    # ``InboundMessage`` is slice B.
+    # The transport enqueues the raw Slack envelope dict
+    # ``{type, envelope_id, payload}``; the drain task parses + gates it.
     inbound_queue: asyncio.Queue[dict[str, Any]]
+    # ``api_app_id`` is not returned by ``auth.test``; it rides on every
+    # Socket-Mode event payload.  Cached lazily from the first event so the
+    # cross-app gate (§3.6 gate 2) has an expectation to enforce; until then
+    # it is ``None`` and the gate fails open on the app dimension (the
+    # ``team_id`` dimension still enforces).
+    api_app_id: str | None = None
+    # The per-thread sent-``ts`` set powering the ``bot_thread_participant``
+    # implicit-mention bypass (§3.6 gate 4).  Slice C populates this from the
+    # ``ts`` of every ``slack_send`` the bot makes into a thread; here it
+    # starts empty and is consulted read-only by the gate.
+    bot_thread_ts: set[str] = field(default_factory=set)
 
 
 class SlackConnector(HttpConnector):
@@ -220,29 +236,22 @@ class SlackConnector(HttpConnector):
         await asyncio.Event().wait()
 
     async def _drain_queue(self, connection_id: str, state: _SlackConnectionState) -> None:
-        """Drain the per-connection inbound queue.
+        """Drain the per-connection inbound queue: parse, gate, emit.
 
-        Slice A only logs the raw event off the ack path; parsing, gating,
-        and ``emit_inbound`` land in slice B.  Running this in its own task
-        (not the listener) keeps the ack path unblocked.
+        Runs off the ack path (its own task, not the listener) so gating +
+        ``emit_inbound`` never eat into the 3s Socket-Mode ack window.
 
-        Each iteration's handling is wrapped in a guard so that a transient
-        failure (today only a logging error; in slice B a parse/emit error)
-        is logged and the next event is processed, rather than escaping into
-        the :class:`asyncio.TaskGroup` and tearing down the whole connection
-        — and with it the socket task — over one bad envelope.
+        Each iteration's handling is wrapped in a guard so a transient
+        failure (a malformed envelope, a parse/emit error) is logged and
+        the next event is processed, rather than escaping into the
+        :class:`asyncio.TaskGroup` and tearing down the whole connection —
+        and with it the socket task — over one bad envelope.
         ``CancelledError`` is re-raised so shutdown still unwinds promptly.
         """
         while True:
-            event = await state.inbound_queue.get()
+            envelope = await state.inbound_queue.get()
             try:
-                log.info(
-                    "slack.inbound.raw",
-                    connection_id=connection_id,
-                    team_id=state.team_id,
-                    event_type=event.get("type"),
-                    envelope_id=event.get("envelope_id"),
-                )
+                await self._handle_envelope(connection_id, state, envelope)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -250,8 +259,95 @@ class SlackConnector(HttpConnector):
                     "slack.inbound.drain_error",
                     connection_id=connection_id,
                     team_id=state.team_id,
-                    envelope_id=event.get("envelope_id"),
+                    envelope_id=envelope.get("envelope_id"),
                 )
+
+    async def _handle_envelope(
+        self,
+        connection_id: str,
+        state: _SlackConnectionState,
+        envelope: dict[str, Any],
+    ) -> None:
+        """Parse one Socket-Mode envelope, run the gates, and maybe emit.
+
+        Only ``events_api`` envelopes carrying a ``message`` event are
+        actionable for slice 2; everything else (``hello``, slash
+        commands, interactivity, non-message events) is logged and
+        ignored.  The four gates (``aios_slack.parse.gate``) decide the
+        disposition:
+
+        * ``FORWARD``  → build the normalized inbound and ``emit_inbound``.
+        * ``DROP``     → fail-quiet (mention-gated drops would be recorded
+          to per-channel pending-history in slice C; for now they are
+          observably logged and dropped).
+        * ``DIVERT_EDIT`` → ``message_changed`` system path; non-emitting.
+        """
+        payload = envelope.get("payload")
+        if envelope.get("type") != "events_api" or not isinstance(payload, dict):
+            log.debug(
+                "slack.inbound.skip_non_event",
+                connection_id=connection_id,
+                envelope_type=envelope.get("type"),
+            )
+            return
+
+        event = payload.get("event")
+        if not isinstance(event, dict) or event.get("type") != "message":
+            return
+
+        # Cache ``api_app_id`` off the first event so the cross-app gate has
+        # an expectation to enforce on subsequent events.
+        api_app_id = payload.get("api_app_id")
+        if isinstance(api_app_id, str) and state.api_app_id is None:
+            state.api_app_id = api_app_id
+
+        decision = gate(
+            event,
+            bot_user_id=state.bot_user_id,
+            team_id=state.team_id,
+            api_app_id=state.api_app_id,
+            bot_thread_ts=frozenset(state.bot_thread_ts),
+        )
+
+        if decision.outcome is GateOutcome.FORWARD and decision.message is not None:
+            await self._emit_message(connection_id, state, decision.message)
+            return
+
+        log.info(
+            "slack.inbound.gated",
+            connection_id=connection_id,
+            team_id=state.team_id,
+            outcome=decision.outcome.value,
+            reason=decision.reason,
+            record_pending=decision.record_pending,
+        )
+
+    async def _emit_message(
+        self,
+        connection_id: str,
+        state: _SlackConnectionState,
+        msg: InboundMessage,
+    ) -> None:
+        """Forward a gate-passing normalized inbound to aios.
+
+        ``chat_id`` is the bare Slack conversation id (threads share the
+        channel session, §3.4).  Slack-specific extras ride
+        ``connector_metadata`` under **non-reserved** keys only; ``sender``
+        carries the opaque id + the (already-sanitized) display name.
+        """
+        sender_payload: dict[str, Any] = {
+            "id": msg.sender_id,
+            "display_name": msg.sender_name,
+        }
+        metadata = build_metadata(msg, state)
+        await self.emit_inbound(
+            connection_id=connection_id,
+            event_id=msg.event_id,
+            chat_id=msg.chat_id,
+            sender=sender_payload,
+            content=msg.text,
+            metadata=metadata,
+        )
 
     @staticmethod
     async def _close_socket(socket_client: AsyncSocketModeClient) -> None:
@@ -260,3 +356,37 @@ class SlackConnector(HttpConnector):
             await socket_client.disconnect()
         with contextlib.suppress(Exception):
             await socket_client.close()
+
+
+def build_metadata(msg: InboundMessage, state: _SlackConnectionState) -> dict[str, Any]:
+    """Stamp Slack-specific extras onto a normalized inbound (§3.4, §3.6).
+
+    Everything Slack-specific rides ``connector_metadata`` under
+    **non-reserved** keys only.  The load-bearing entry is ``thread_ts``:
+    it is the model's ``slack_send(thread_ts=…)`` source read off the
+    inbound metadata header (the Telegram ``reply_to_message_id`` shape) —
+    threads share the channel session, so ``chat_id`` stays bare and
+    ``thread_ts`` is the lone thread authority.
+
+    ``self_mentioned`` is the derived convenience the harness renders;
+    ``chat_kind`` / ``team_id`` / ``app_id`` / ``message_ts`` are the
+    self-describing platform extras.
+    """
+    metadata: dict[str, Any] = {
+        "channel": msg.chat_id,
+        "chat_kind": msg.chat_kind,
+        "team_id": state.team_id,
+        "message_ts": msg.message_ts,
+        "self_mentioned": state.bot_user_id in msg.mentions,
+    }
+    if msg.thread_ts is not None:
+        metadata["thread_ts"] = msg.thread_ts
+    if state.api_app_id is not None:
+        metadata["app_id"] = state.api_app_id
+    if msg.mentions:
+        metadata["mentions"] = list(msg.mentions)
+    if msg.edited:
+        metadata["edited"] = True
+        if msg.edit_ts is not None:
+            metadata["edit_ts"] = msg.edit_ts
+    return metadata
