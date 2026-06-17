@@ -11,6 +11,13 @@ terminal post-merge cleanup that idempotently strips BOTH claim labels and close
 (``state:closed`` + ``state_reason:completed``), logging each gh() response (rank-6
 label-write visibility). ``_unlabel`` now also logs its DELETE outcome.
 
+#1302 sharpens the WHY: the pipeline must NOT delegate the close to GitHub's
+auto-close-via-PR-body-keyword. #1298 merged but left #1292 OPEN because the implement
+agent's body wrote ``Closes the ... **class**`` as prose (no ``Closes #<n>`` link) — the
+completion-marker-from-free-text antipattern. The deterministic close keys on the KNOWN
+``issue_number`` via the API, so a merged run whose PR body lacks ``Closes #n`` still ends
+with the issue CLOSED; the two ``test_close_*_pr_body*`` cases pin that property.
+
 These helpers live inside the workflow script source (``_BODY``), so they are not importable
 as module attributes. We build the production script and ``exec`` it in a fresh namespace,
 inject a fake async ``gh`` (recording every call) and a ``log`` sink, then drive the
@@ -211,3 +218,43 @@ def test_close_failure_is_surfaced_when_dispatched_kept() -> None:
     _run(ns["_close_source_issue"](REPO, ISSUE))
     logs = "\n".join(ns["_LOGS"])
     assert "FAILED" in logs and "close source issue" in logs
+
+
+# ─── #1302: the close is keyed on the KNOWN issue_number, NOT on PR-body free text ────
+
+
+def test_close_is_keyed_on_issue_number_not_pr_body_text() -> None:
+    # #1302: a merged dev_pipeline PR (#1298) left its source issue (#1292) OPEN because the
+    # pipeline delegated issue-close to GitHub's auto-close-via-PR-body-keyword, and the
+    # implement agent's body wrote ``Closes the ... **class**`` as *prose* — "Closes" with no
+    # ``#<n>`` link — so GitHub never closed it (the completion-marker-from-free-text
+    # antipattern). The deterministic fix closes on the KNOWN ``issue_number`` via the API.
+    #
+    # Pin that property structurally: ``_close_source_issue`` takes (repo, issue_number) and no
+    # PR body, and the PATCH path it targets is derived purely from ``issue_number`` — so the
+    # exact prose that broke #1298 (a "Closes ... class" body with no ``#n``) cannot affect the
+    # close. Whatever the body says, the merged issue ends CLOSED with state_reason=completed.
+    gh = _FakeGH()
+    ns = _ns(gh)
+    _run(ns["_close_source_issue"](REPO, ISSUE))
+
+    patches = [(p, b) for (m, p, b) in gh.calls if m == "PATCH"]
+    assert len(patches) == 1, "exactly one deterministic close PATCH, regardless of PR body"
+    path, body = patches[0]
+    # The close path is the KNOWN issue's path — derived from issue_number, never parsed prose.
+    assert path == ISSUE_PATH
+    assert str(ISSUE) in path
+    assert body == {"state": "closed", "state_reason": "completed"}
+
+
+def test_close_signature_takes_no_pr_body() -> None:
+    # #1302 regression guard against re-introducing the free-text dependency: the close helper
+    # must NOT grow a PR-body parameter — it closes on the structurally-known issue_number, so
+    # a body that omits or mangles ``Closes #n`` (the #1298 failure) is irrelevant to the close.
+    import inspect
+
+    ns = _ns(_FakeGH())
+    params = list(inspect.signature(ns["_close_source_issue"]).parameters)
+    assert params == ["repo", "issue_number"], (
+        "close must key on the known issue_number, never on PR-body text (#1302)"
+    )
