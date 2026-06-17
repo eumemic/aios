@@ -10,18 +10,26 @@ application vigilance rather than the schema. Every other session-child
 FK (events, session_vaults, session_memory_stores, files, chat_sessions,
 triggers, routing_rules-via-binding_id, …) already cascades.
 
-This migration makes the cascade uniform again. Following the 0093
-composite-FK precedent for session-children, we re-add the FK in its
-tenant-scoped composite form ``(session_id, account_id) REFERENCES
-sessions(id, account_id) ON DELETE CASCADE`` — structurally matching the
-tenant-tightness of the old hand-``DELETE`` (which carried
-``AND account_id = $2``) and reusing the ``sessions_id_account_id_key``
-unique added by 0093.
+This migration makes the cascade uniform again by re-adding the FK in
+exactly the *single-column* form the original 0015 table declared:
+``session_id REFERENCES sessions(id) ON DELETE CASCADE``.
+
+A tenant-scoped composite ``(session_id, account_id) REFERENCES
+sessions(id, account_id)`` (the 0093 precedent for some other
+session-children) is deliberately **not** used here: ``bindings`` is the
+one session-child whose ``account_id`` is rewritten *independently* of
+its ``session_id`` by ``reparent_connection`` (a cross-account connection
+move carries the active binding to the destination account while its
+``session_id`` keeps pointing at the source-account session). A composite
+FK would make that established reparent contract impossible — the
+``(session_id, account_id)`` pair would momentarily reference a
+``(session, destination_account)`` tuple that does not exist in
+``sessions``. The single-column FK gives the cascade-on-session-delete
+this migration is about without entangling ``bindings.account_id``.
 
 ``bindings.session_id`` is nullable (``per_chat`` bindings target a
-template and leave ``session_id`` NULL). With the default ``MATCH
-SIMPLE`` semantics the composite FK is simply not checked when any
-referencing column is NULL, so ``per_chat`` rows are unaffected.
+template and leave ``session_id`` NULL). A NULL referencing column simply
+isn't checked by the FK, so ``per_chat`` rows are unaffected.
 
 The swap uses the ``NOT VALID`` → ``VALIDATE`` two-step (per the 0093
 precedent) so the constraint is added without a long ``ACCESS EXCLUSIVE``
@@ -43,26 +51,26 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 # The bare single-column FK created inline by 0033's ``CREATE TABLE
-# bindings`` — Postgres auto-names it ``<table>_<column>_fkey``.
-_OLD_FK = "bindings_session_id_fkey"
-# The new tenant-scoped composite FK that carries the cascade.
-_NEW_FK = "bindings_session_account_id_fkey"
+# bindings`` — Postgres auto-names it ``<table>_<column>_fkey``. We reuse
+# the same name for the cascade-carrying single-column FK so the schema
+# stays byte-identical to 0015's shape (only the ON DELETE action differs).
+_FK = "bindings_session_id_fkey"
 
 
 def upgrade() -> None:
-    op.execute(f"ALTER TABLE bindings DROP CONSTRAINT {_OLD_FK}")
+    op.execute(f"ALTER TABLE bindings DROP CONSTRAINT {_FK}")
     op.execute(
-        f"ALTER TABLE bindings ADD CONSTRAINT {_NEW_FK} "
-        "FOREIGN KEY (session_id, account_id) "
-        "REFERENCES sessions(id, account_id) ON DELETE CASCADE NOT VALID"
+        f"ALTER TABLE bindings ADD CONSTRAINT {_FK} "
+        "FOREIGN KEY (session_id) "
+        "REFERENCES sessions(id) ON DELETE CASCADE NOT VALID"
     )
-    op.execute(f"ALTER TABLE bindings VALIDATE CONSTRAINT {_NEW_FK}")
+    op.execute(f"ALTER TABLE bindings VALIDATE CONSTRAINT {_FK}")
 
 
 def downgrade() -> None:
-    op.execute(f"ALTER TABLE bindings DROP CONSTRAINT {_NEW_FK}")
+    op.execute(f"ALTER TABLE bindings DROP CONSTRAINT {_FK}")
     # Restore the bare, cascade-less single-column FK as recreated by 0033.
     op.execute(
-        f"ALTER TABLE bindings ADD CONSTRAINT {_OLD_FK} "
+        f"ALTER TABLE bindings ADD CONSTRAINT {_FK} "
         "FOREIGN KEY (session_id) REFERENCES sessions(id)"
     )

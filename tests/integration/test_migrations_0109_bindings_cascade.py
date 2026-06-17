@@ -1,9 +1,10 @@
 """Migration 0109 restores ``ON DELETE CASCADE`` on ``bindings.session_id``
-(in the single-column form ``session_id REFERENCES sessions(id) ON DELETE
-CASCADE`` — the original 0015 shape; the composite ``(session_id,
-account_id)`` form is deliberately *not* used here because ``bindings``
-is the one session-child whose ``account_id`` is rewritten independently
-of its ``session_id`` by ``reparent_connection``).
+in the original single-column form ``session_id REFERENCES sessions(id) ON
+DELETE CASCADE`` (the shape the 0015 table declared, before the 0033
+redesign dropped the cascade). The composite ``(session_id, account_id)``
+form is deliberately *not* used here because ``bindings`` is the one
+session-child whose ``account_id`` is rewritten independently of its
+``session_id`` by ``reparent_connection``.
 
 The cascade existed in the original ``bindings`` table (0015) and was
 dropped when the 0033 connector redesign recreated the table. These tests
@@ -81,9 +82,13 @@ def test_upgrade_swaps_to_cascade_fk(postgres: object) -> None:
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
     after = _bindings_fk_def(db_url)
     assert "ON DELETE CASCADE" in after, f"cascade missing after 0109: {after}"
-    # Single-column form (the original 0015 shape), deliberately not composite.
-    assert "(session_id)" in after, f"not single-column: {after}"
+    # Single-column form, matching the original 0015 shape. A tenant-scoped
+    # composite FK is deliberately avoided: ``bindings.account_id`` is
+    # rewritten independently of ``session_id`` by ``reparent_connection``,
+    # which a composite ``(session_id, account_id)`` FK would break.
+    assert "FOREIGN KEY (session_id)" in after, f"not single-column: {after}"
     assert "REFERENCES sessions(id)" in after, f"wrong target: {after}"
+    assert "account_id" not in after, f"unexpectedly composite/tenant-scoped: {after}"
 
 
 @needs_docker

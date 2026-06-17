@@ -1273,7 +1273,7 @@ async def delete_session(
             account_id,
         )
         # bindings.session_id now carries ON DELETE CASCADE (migration
-        # 0105 restored the cascade dropped in the 0033 redesign), so
+        # 0109 restored the cascade dropped in the 0033 redesign), so
         # binding rows are cleaned up by Postgres as a side effect of the
         # `DELETE FROM sessions` below — no hand-DELETE required.
         await conn.execute(

@@ -9,10 +9,9 @@ it, leaving a bare ``session_id text REFERENCES sessions(id)``.
 bindings`` — the lone session-child held by application vigilance rather
 than the schema.
 
-Migration 0109 restores the cascade (in the single-column form
-``session_id REFERENCES sessions(id) ON DELETE CASCADE`` — the original
-0015 shape) and ``delete_session`` no longer pre-deletes from
-``bindings``.
+Migration 0109 restores the cascade (in the original single-column form
+``session_id REFERENCES sessions(id) ON DELETE CASCADE``) and
+``delete_session`` no longer pre-deletes from ``bindings``.
 
 Two guarantees are tested:
 
