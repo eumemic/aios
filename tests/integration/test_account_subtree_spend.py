@@ -32,10 +32,10 @@ async def conn(
 async def _make_tree(conn: asyncpg.Connection[Any]) -> None:
     """A small tree:
 
-        root
-        ├── childA
-        │   └── grand
-        └── childB
+    root
+    ├── childA
+    │   └── grand
+    └── childB
     """
     await conn.execute(
         """
@@ -49,9 +49,7 @@ async def _make_tree(conn: asyncpg.Connection[Any]) -> None:
 
 
 async def _set_spent(conn: asyncpg.Connection[Any], account_id: str, micro: int) -> None:
-    await conn.execute(
-        "UPDATE accounts SET spent_microusd = $2 WHERE id = $1", account_id, micro
-    )
+    await conn.execute("UPDATE accounts SET spent_microusd = $2 WHERE id = $1", account_id, micro)
 
 
 class TestSubtreeSpentMicrousd:
@@ -61,9 +59,7 @@ class TestSubtreeSpentMicrousd:
         # A leaf's subtree is just itself.
         assert await queries.get_account_subtree_spent_microusd(conn, "grand") == 500
 
-    async def test_ancestor_sums_descendants_and_self(
-        self, conn: asyncpg.Connection[Any]
-    ) -> None:
+    async def test_ancestor_sums_descendants_and_self(self, conn: asyncpg.Connection[Any]) -> None:
         await _make_tree(conn)
         await _set_spent(conn, "root", 1)
         await _set_spent(conn, "childA", 10)
@@ -80,9 +76,7 @@ class TestSubtreeSpentMicrousd:
         await _make_tree(conn)
         assert await queries.get_account_subtree_spent_microusd(conn, "root") == 0
 
-    async def test_archived_descendant_severs_subtree(
-        self, conn: asyncpg.Connection[Any]
-    ) -> None:
+    async def test_archived_descendant_severs_subtree(self, conn: asyncpg.Connection[Any]) -> None:
         await _make_tree(conn)
         await _set_spent(conn, "root", 1)
         await _set_spent(conn, "childA", 10)

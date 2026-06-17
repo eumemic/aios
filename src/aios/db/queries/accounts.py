@@ -504,9 +504,7 @@ async def get_account_spent_microusd(conn: asyncpg.Connection[Any], account_id: 
     return int(value or 0)
 
 
-async def get_account_subtree_spent_microusd(
-    conn: asyncpg.Connection[Any], account_id: str
-) -> int:
+async def get_account_subtree_spent_microusd(conn: asyncpg.Connection[Any], account_id: str) -> int:
     """Return the rolled-up lifetime spend over ``account_id``'s subtree.
 
     The flat :func:`get_account_spent_microusd` reads one row's
