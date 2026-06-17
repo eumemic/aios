@@ -28,6 +28,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 from collections.abc import AsyncIterator
@@ -1128,6 +1129,283 @@ class TestHttp:
             },
         )
         assert r.status_code == 422, r.text
+
+
+# ─── live-attach: POST/DELETE on an already-live session (#1216) ────────────
+
+
+class TestLiveAttachToLiveSession:
+    """The #1216 bar: a trigger added to an ALREADY-LIVE session via the HTTP
+    ``POST /v1/sessions/{id}/triggers`` endpoint is genuinely scheduled — it is
+    claimed by the scheduler's own claim transaction and fires the owning
+    session's wake WITHOUT a worker restart — and removing it via DELETE drops
+    it from the schedule. This is the end-to-end "live-attach actually
+    schedules" proof, not just "the row was inserted."
+
+    The load-bearing guarantee (the #925 lesson, called out in the issue) is
+    that the add/remove path NOTIFYs the scheduler so a runtime-added trigger
+    is noticed on its first due time. The scheduler is NOTIFY/poll-driven; a
+    bare DB write that emits no NOTIFY would be a dead heartbeat until the next
+    cold-path poll. Two of the tests below assert the NOTIFY edge directly
+    against the live ``aios_scheduled_tasks_due`` channel.
+    """
+
+    async def _create_session_via_http(
+        self, http_client: httpx.AsyncClient, agent_id: str, env_id: str
+    ) -> str:
+        r = await http_client.post(
+            "/v1/sessions", json={"agent_id": agent_id, "environment_id": env_id}
+        )
+        assert r.status_code == 201, r.text
+        session_id: str = r.json()["id"]
+        return session_id
+
+    @staticmethod
+    async def _await_notify(db_url: str, run: Any, *, timeout_s: float = 5.0) -> bool:
+        """LISTEN on ``aios_scheduled_tasks_due``, run ``run`` (an awaitable
+        factory performing the write on a DIFFERENT connection), and report
+        whether a NOTIFY arrived within ``timeout_s``.
+
+        The listener is attached BEFORE ``run`` executes so the edge can't be
+        missed; mirrors ``test_migrations_0087_notify_next_fire``'s pattern.
+        """
+        got = asyncio.Event()
+        listen_conn = await asyncpg.connect(db_url)
+        try:
+
+            def _cb(_c: Any, _pid: int, _chan: str, _payload: str) -> None:
+                got.set()
+
+            await listen_conn.add_listener("aios_scheduled_tasks_due", _cb)
+            await run()
+            try:
+                await asyncio.wait_for(got.wait(), timeout=timeout_s)
+                return True
+            except TimeoutError:
+                return False
+        finally:
+            await listen_conn.close()
+
+    async def test_post_to_live_session_is_claimed_and_wakes_owner(
+        self, pool: Any, http_client: httpx.AsyncClient, env_and_agent: tuple[str, str]
+    ) -> None:
+        """THE proof (#1216): a ``one_shot x wake_owner`` trigger POSTed to a
+        LIVE (already-idle) session
+
+          (a) appears in ``list_triggers`` (GET),
+          (b) is CLAIMED by the scheduler's own claim transaction
+              (``fetch_and_claim_due_triggers`` — the exact query the tick
+              runs), and
+          (c) when the claimed fire runs, the owning session WAKES: a
+              ``run_trigger`` fired (defer_wake called) AND a user-role wake
+              message is delivered to the session event log.
+
+        This is the end-to-end "live-attach actually schedules" assertion — it
+        drives the real claim path (not a hand-set ``running_since``) so it
+        would catch a regression where a runtime add inserts the row but never
+        gets scheduled.
+        """
+        from aios.harness import runtime, trigger_runner
+
+        env_id, agent_id = env_and_agent
+        sid = await self._create_session_via_http(http_client, agent_id, env_id)
+
+        # (a) POST a one-shot wake_owner trigger due in the (near) past so the
+        # very next claim picks it up — via the live HTTP endpoint.
+        fire_at = datetime.now(UTC) - timedelta(seconds=1)
+        r = await http_client.post(
+            f"/v1/sessions/{sid}/triggers",
+            json={
+                "name": "heartbeat",
+                "source": {"kind": "one_shot", "fire_at": fire_at.isoformat()},
+                "action": {"kind": "wake_owner", "content": "live-attached ping"},
+            },
+        )
+        assert r.status_code == 201, r.text
+        created = r.json()
+        assert created["source"]["kind"] == "one_shot"
+        assert created["action"]["kind"] == "wake_owner"
+
+        # It shows up in the list endpoint.
+        r = await http_client.get(f"/v1/sessions/{sid}/triggers")
+        assert r.status_code == 200, r.text
+        listed = {t["name"] for t in r.json()["data"]}
+        assert "heartbeat" in listed
+
+        # (b) The scheduler's claim transaction picks it up — exactly the query
+        # the tick runs. A row inserted without a NOTIFY would still be claimed
+        # by a poll, but the point here is that the claim path sees a
+        # runtime-added trigger at all (no restart needed).
+        now = datetime.now(UTC)
+        async with pool.acquire() as conn, conn.transaction():
+            claimed = await queries.fetch_and_claim_due_triggers(conn, now_utc=now)
+        claimed_for_session = [c for c in claimed if c.owner_session_id == sid]
+        assert claimed_for_session, "scheduler did not claim the runtime-added trigger"
+        echo_id = claimed_for_session[0].id
+
+        # (c) The claimed fire wakes the owning session: a user-role wake
+        # message lands and a wake is deferred (a `run_trigger` fired).
+        prev_pool = runtime.pool
+        runtime.pool = pool
+        with mock.patch(
+            "aios.harness.trigger_runner.defer_wake", new_callable=mock.AsyncMock
+        ) as mock_defer:
+            try:
+                await trigger_runner.run_trigger_step(echo_id)
+            finally:
+                runtime.pool = prev_pool
+
+        async with pool.acquire() as conn:
+            event_rows = await conn.fetch(
+                "SELECT kind, data FROM events WHERE session_id = $1 ORDER BY seq ASC", sid
+            )
+
+        def _data(row: Any) -> dict[str, Any]:
+            parsed: dict[str, Any] = (
+                json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+            )
+            return parsed
+
+        wake_msgs = [
+            r
+            for r in event_rows
+            if r["kind"] == "message"
+            and _data(r).get("role") == "user"
+            and _data(r).get("content") == "live-attached ping"
+        ]
+        assert wake_msgs, "expected the live-attached wake_owner content as a user message"
+        mock_defer.assert_called()
+
+    async def test_post_notifies_scheduler_immediately(
+        self,
+        pool: Any,
+        http_client: httpx.AsyncClient,
+        env_and_agent: tuple[str, str],
+        db_url: str,
+    ) -> None:
+        """The #925 load-bearing edge: POSTing a trigger to a live session emits
+        a NOTIFY on ``aios_scheduled_tasks_due`` (the same channel
+        session-creation uses), so the sleeping scheduler is woken and claims
+        the new trigger on its first due time WITHOUT waiting for the cold-path
+        heartbeat / a restart. A bare DB write that sent no NOTIFY would be a
+        dead heartbeat — exactly the #925 incident shape.
+        """
+        env_id, agent_id = env_and_agent
+        sid = await self._create_session_via_http(http_client, agent_id, env_id)
+
+        fire_at = datetime.now(UTC) + timedelta(hours=1)
+
+        async def _do_post() -> None:
+            r = await http_client.post(
+                f"/v1/sessions/{sid}/triggers",
+                json={
+                    "name": "notify-on-add",
+                    "source": {"kind": "one_shot", "fire_at": fire_at.isoformat()},
+                    "action": {"kind": "wake_owner", "content": "ping"},
+                },
+            )
+            assert r.status_code == 201, r.text
+
+        assert await self._await_notify(db_url, _do_post), (
+            "POST /triggers did not NOTIFY aios_scheduled_tasks_due — a "
+            "runtime-added trigger would be a dead heartbeat until the next poll"
+        )
+
+    async def test_delete_notifies_scheduler_and_drops_from_schedule(
+        self,
+        pool: Any,
+        http_client: httpx.AsyncClient,
+        env_and_agent: tuple[str, str],
+        db_url: str,
+    ) -> None:
+        """DELETE removes the trigger from ``list_triggers``, emits a NOTIFY so
+        the scheduler re-computes its next wake, and the row no longer fires
+        (the scheduler's claim transaction never sees it again)."""
+        env_id, agent_id = env_and_agent
+        sid = await self._create_session_via_http(http_client, agent_id, env_id)
+
+        # A due-in-the-past one-shot so we can prove it's no longer claimable.
+        fire_at = datetime.now(UTC) - timedelta(seconds=1)
+        r = await http_client.post(
+            f"/v1/sessions/{sid}/triggers",
+            json={
+                "name": "to-remove",
+                "source": {"kind": "one_shot", "fire_at": fire_at.isoformat()},
+                "action": {"kind": "wake_owner", "content": "ping"},
+            },
+        )
+        assert r.status_code == 201, r.text
+
+        async def _do_delete() -> None:
+            r = await http_client.delete(f"/v1/sessions/{sid}/triggers/to-remove")
+            assert r.status_code == 204, r.text
+
+        assert await self._await_notify(db_url, _do_delete), (
+            "DELETE /triggers did not NOTIFY aios_scheduled_tasks_due"
+        )
+
+        # Gone from the list.
+        r = await http_client.get(f"/v1/sessions/{sid}/triggers")
+        assert r.status_code == 200, r.text
+        assert all(t["name"] != "to-remove" for t in r.json()["data"])
+
+        # And no longer fires: the claim transaction never sees it.
+        future = datetime.now(UTC) + timedelta(hours=1)
+        async with pool.acquire() as conn, conn.transaction():
+            claimed = await queries.fetch_and_claim_due_triggers(conn, now_utc=future)
+        assert all(c.owner_session_id != sid for c in claimed)
+
+    async def test_post_cross_account_session_404(
+        self, pool: Any, http_client: httpx.AsyncClient
+    ) -> None:
+        """Account-scoped like every other session endpoint: POSTing a trigger
+        to a session owned by ANOTHER account 404s (the actor's account doesn't
+        own the session, so it can't be discovered)."""
+        _account_id, other_sid = await _isolated_account_session(pool)
+        fire_at = datetime.now(UTC) + timedelta(hours=1)
+        r = await http_client.post(
+            f"/v1/sessions/{other_sid}/triggers",
+            json={
+                "name": "intruder",
+                "source": {"kind": "one_shot", "fire_at": fire_at.isoformat()},
+                "action": {"kind": "wake_owner", "content": "ping"},
+            },
+        )
+        assert r.status_code == 404, r.text
+
+    async def test_delete_cross_account_session_404(
+        self, pool: Any, http_client: httpx.AsyncClient
+    ) -> None:
+        """Cannot DELETE a trigger off another account's session — 404 before
+        the actor's account can even name the row."""
+        account_id, other_sid = await _isolated_account_session(pool)
+        # Seed a trigger on the foreign session AS its owner so a 404 here is
+        # the cross-account guard, not merely a missing row.
+        await trig_service.add_trigger(
+            pool,
+            other_sid,
+            _wake_owner_spec("owned", datetime.now(UTC) + timedelta(hours=1)),
+            account_id=account_id,
+        )
+        r = await http_client.delete(f"/v1/sessions/{other_sid}/triggers/owned")
+        assert r.status_code == 404, r.text
+
+    async def test_post_duplicate_name_conflicts(
+        self, pool: Any, http_client: httpx.AsyncClient, env_and_agent: tuple[str, str]
+    ) -> None:
+        """Triggers are UNIQUE(name) per owner: a duplicate name on the same
+        live session is a clear 409, not a silent overwrite."""
+        env_id, agent_id = env_and_agent
+        sid = await self._create_session_via_http(http_client, agent_id, env_id)
+        body = {
+            "name": "dupe",
+            "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+            "action": {"kind": "wake_owner", "content": "ping"},
+        }
+        r = await http_client.post(f"/v1/sessions/{sid}/triggers", json=body)
+        assert r.status_code == 201, r.text
+        r = await http_client.post(f"/v1/sessions/{sid}/triggers", json=body)
+        assert r.status_code == 409, r.text
 
 
 # ─── enrichment + clone propagation ────────────────────────────────────────
