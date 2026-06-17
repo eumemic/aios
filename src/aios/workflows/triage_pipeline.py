@@ -68,6 +68,12 @@ from typing import Any
 
 from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.workflows import WorkflowCreate
+from aios.workflows.comment_idempotency import COMMENT_IDEMPOTENCY_HELPERS
+
+# The stable heading on the single needs-decision comment. It is BOTH the comment's first
+# line AND the maker-marker the replay guard scans for: a posted comment is its own
+# "already done" marker on the next read (aios#1292).
+NEEDS_DECISION_MARKER = "## Triage: needs a decision"
 
 # ─── default judgment-node agent id (override per deployment) ─────────────────
 DEFAULT_TRIAGE_AGENT_ID = "triage-classify"
@@ -142,6 +148,7 @@ def _render_constants(
         _py("DEFAULT_MODEL", default_model),
         _py("TRIAGE_STATE_LABELS", list(TRIAGE_STATE_LABELS)),
         _py("TRIAGE_CLASSES", list(TRIAGE_CLASSES)),
+        _py("NEEDS_DECISION_MARKER", NEEDS_DECISION_MARKER),
         _py("CLASSIFY_INSTRUCTIONS", CLASSIFY_INSTRUCTIONS),
         _py("TRIAGE_SCHEMA", TRIAGE_SCHEMA),
     ]
@@ -351,7 +358,7 @@ def _decision_comment(reason):
     needed (the settled-vs-forks split where relevant)."""
     why = (reason or "").strip() or "This issue requires chairman judgment before it can proceed."
     return (
-        "## Triage: needs a decision\n\n"
+        NEEDS_DECISION_MARKER + "\n\n"
         "Automated intake-triage routed this issue to **needs-decision** — it requires "
         "chairman judgment (strategy / capital / external commitment / genuinely ambiguous) "
         "rather than being shovel-ready or merely needing design.\n\n"
@@ -359,21 +366,36 @@ def _decision_comment(reason):
     )
 
 
-async def _apply_classification(repo, issue_number, classification, reason):
+async def _apply_classification(repo, issue_number, classification, reason, existing_comments):
     """Apply the label (and, for needs-decision, the one comment) for a classification. This is
     the clean SEAM the #1218 design-vet automation plugs into: the needs-design branch is just a
-    label today; later it dispatches a design-vet sub-workflow here. Returns the gh() label
-    response so a caller can branch on it.
+    label today; later it dispatches a design-vet sub-workflow here.
 
-    Triage NEVER applies ``approved`` — only the spec-readiness axis. ``classification`` is one
-    of TRIAGE_CLASSES (already normalised); an unknown value is rejected by the caller."""
+    LABEL-BEFORE-COMMENT (aios#1292, hazard 1): apply the idempotent additive label FIRST and
+    post the needs-decision comment ONLY after the label returns 2xx. The label then guards the
+    comment — a labeled issue drops out of ``is_untriaged`` so a re-run never re-classifies and
+    re-comments. If the label fails, we return immediately and post NO comment (a comment without
+    a label is exactly the duplicate-spam loop this fixes).
+
+    REPLAY DEDUP (aios#1292, hazard 2): the comment goes through ``post_comment_once``, which
+    scans the already-fetched thread for ``NEEDS_DECISION_MARKER`` and skips the POST if present
+    — so an at-least-once replay (POST ran, crash before journaling) never duplicates it.
+
+    Returns ``(label_resp, comment_resp)``: the label gh() response and the comment response
+    (a 2xx, a skip sentinel, or None when not needs-decision / label failed) so the caller can
+    branch and count side effects correctly. Triage NEVER applies ``approved`` — only the
+    spec-readiness axis. ``classification`` is one of TRIAGE_CLASSES (already normalised)."""
+    label_resp = await gh("POST", _ipath(repo, "/issues/%d/labels" % issue_number),
+                          {"labels": [classification]})
+    if _status(label_resp) not in (200, 201):
+        # Label did not stick → do NOT post the comment; the label must guard it.
+        return (label_resp, None)
+    comment_resp = None
     if classification == "needs-decision":
-        # Post the WHY comment first, then label — so a label-without-explanation window can't
-        # leave a needs-decision issue with no stated reason for the chairman.
-        await gh("POST", _ipath(repo, "/issues/%d/comments" % issue_number),
-                 {"body": _decision_comment(reason)})
-    return await gh("POST", _ipath(repo, "/issues/%d/labels" % issue_number),
-                    {"labels": [classification]})
+        comment_resp = await post_comment_once(
+            repo, issue_number, NEEDS_DECISION_MARKER,
+            _decision_comment(reason), existing_comments)
+    return (label_resp, comment_resp)
 
 
 # ─── the state machine ─────────────────────────────────────────────────────────
@@ -435,16 +457,31 @@ async def main(input):
                            % (result.get("classification") if isinstance(result, dict) else result)})
             continue
 
-        label_resp = await _apply_classification(repo, number, classification, reason)
+        # Label-before-comment + maker-marker dedup (aios#1292). The already-fetched
+        # ``comments`` thread is handed in so the replay guard can skip a duplicate POST.
+        label_resp, comment_resp = await _apply_classification(
+            repo, number, classification, reason,
+            comments if isinstance(comments, list) else [])
         if _status(label_resp) not in (200, 201):
             log("label %r on #%d FAILED -> %r" % (classification, number, _status(label_resp)))
             errors.append({"issue": number, "error": "label apply failed (status %r)"
                            % _status(label_resp)})
             continue
 
+        # The label stuck (the issue is now triaged and drops out of the next run's working
+        # set) → count it classified regardless of the comment outcome. A comment failure on
+        # an otherwise-labeled needs-decision issue is recorded as a NON-FATAL side-effect
+        # note, not a classify failure — the label already guards against re-classification,
+        # so this never undercounts the mutation (the MINOR fix in #1292).
         counts[classification] += 1
         if classification == "needs-decision":
             escalated.append({"issue": number, "reason": reason})
+            if not _comment_posted_ok(comment_resp):
+                log("needs-decision comment on #%d not posted -> %r" % (number, comment_resp))
+                errors.append({"issue": number,
+                               "error": "needs-decision comment not posted (status %r); "
+                               "label applied, will not re-classify"
+                               % _status(comment_resp)})
 
     # S3 — structured run summary: per-class counts + the explicit needs-decision list.
     phase("summary")
@@ -486,7 +523,11 @@ def build_triage_pipeline_script(
         max_issues_per_run=max_issues_per_run,
         default_model=default_model,
     )
-    return header + "\n" + _BODY
+    # Splice the shared comment-idempotency helper (aios#1292) into the body — authored once
+    # in comment_idempotency.py and injected into BOTH pipelines so the class fix can't drift.
+    # It references gh/_ipath/log from the body (all defined above); module-level defs resolve
+    # names at call time, so appending after the body is fine.
+    return header + "\n" + _BODY + COMMENT_IDEMPOTENCY_HELPERS
 
 
 def build_triage_pipeline_fixture_script(

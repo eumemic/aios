@@ -92,6 +92,7 @@ from typing import Any
 
 from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.workflows import WorkflowCreate
+from aios.workflows.comment_idempotency import COMMENT_IDEMPOTENCY_HELPERS
 
 # ─── default judgment-node agent ids (override per deployment) ───────────────
 DEFAULT_IMPLEMENT_AGENT_ID = "dev-implement"
@@ -186,6 +187,15 @@ RESOLUTION_SIGNALS: tuple[str, ...] = (
 LABEL_IN_PROGRESS = "autodev:in-progress"
 LABEL_FAILED = "autodev:failed"
 
+# Stable heading markers on the chairman-facing comments this pipeline posts. Each heading is
+# BOTH the comment's first line AND the maker-marker the replay guard scans for: a posted
+# comment is its own "already done" marker on the next read, so an at-least-once replay (the
+# POST ran, the worker crashed before journaling) never duplicates it (aios#1292 — the class
+# shared with triage_pipeline, closed via the same comment_idempotency helper).
+MARKER_SPEC_NOT_READY = "## Spec not ready for implementation"
+MARKER_RISK_ASSESSMENT = "## Risk Assessment"
+MARKER_MERGE_GUARD = "## Merge guard refused"
+
 # Dispatch-claim label (#1188): the cron-scanner / dev-conveyor stamps an issue ``dispatched``
 # when it launches a run for it. Like ``IN_PROGRESS`` it is an IN-FLIGHT claim that must be
 # stripped at the terminal post-merge cleanup — otherwise a merged-but-open issue reads as
@@ -264,6 +274,9 @@ def _render_constants(
         _py("LABEL_IN_PROGRESS", LABEL_IN_PROGRESS),
         _py("LABEL_FAILED", LABEL_FAILED),
         _py("LABEL_DISPATCHED", LABEL_DISPATCHED),
+        _py("MARKER_SPEC_NOT_READY", MARKER_SPEC_NOT_READY),
+        _py("MARKER_RISK_ASSESSMENT", MARKER_RISK_ASSESSMENT),
+        _py("MARKER_MERGE_GUARD", MARKER_MERGE_GUARD),
         _py("MAX_RUN_RETRIES", MAX_RUN_RETRIES),
         _py("MAX_MASTER_CI_ITERS", MAX_MASTER_CI_ITERS),
         _py("FIX_CI_LINT_HINT", FIX_CI_LINT_HINT),
@@ -518,6 +531,18 @@ def _json_body(resp):
 
 def _ipath(repo, suffix):
     return "/repos/%s%s" % (repo, suffix)
+
+
+async def post_markered_comment(repo, number, marker, body):
+    """Post one markered comment on issue/PR ``number`` UNLESS the (FRESHLY-fetched) thread
+    already carries ``marker`` — the maker-marker replay guard (aios#1292). Used for the PR
+    comments (risk / merge-guard) whose thread isn't already in scope; it fetches the thread
+    first so the guard sees any prior post (including one from a pre-crash attempt). A site that
+    already holds the thread calls ``post_comment_once`` directly with it. Returns the
+    post_comment_once result (a 2xx, the skip sentinel, or the failed POST response)."""
+    existing = await gh_paginated(_ipath(repo, "/issues/%d/comments" % number))
+    return await post_comment_once(repo, number, marker, body,
+                                   existing if isinstance(existing, list) else [])
 
 
 def _pr_head_sha(pr):
@@ -845,10 +870,14 @@ async def main(input):
     ok, reason = spec_ok(issue, kind, comments)
     if not ok:
         log("spec gate failed:", reason)
-        await gh("POST", _ipath(repo, "/issues/%d/comments" % issue_number),
-                 {"body": "## Spec not ready for implementation\n\n" + reason})
+        # Label-before-comment + maker-marker dedup (aios#1292): apply the `underspecified`
+        # label FIRST (idempotent/additive), then post the explanation comment ONLY if the
+        # already-fetched thread doesn't already carry the marker — so an at-least-once replay
+        # doesn't post a second "spec not ready" comment.
         await gh("POST", _ipath(repo, "/issues/%d/labels" % issue_number),
                  {"labels": ["underspecified"]})
+        await post_comment_once(repo, issue_number, MARKER_SPEC_NOT_READY,
+                                MARKER_SPEC_NOT_READY + "\n\n" + reason, comments)
         return await _fail(repo, issue_number, {"state": "spec_failed", "reason": reason})
 
     # A3 — implement (the coding agent: clone, explore, plan, TDD, self-review, push). The
@@ -1067,8 +1096,10 @@ async def main(input):
                    % (summary, tier, ", ".join(floored_files)))
     await gh("POST", _ipath(repo, "/issues/%d/labels" % pr_number),
              {"labels": ["risk:tier-%d" % tier]})
-    await gh("POST", _ipath(repo, "/issues/%d/comments" % pr_number),
-             {"body": "## Risk Assessment\n\n**Tier %d**\n\n%s" % (tier, summary)})
+    # Maker-marker dedup (aios#1292): skip the POST if the PR thread already carries the Risk
+    # Assessment marker (an at-least-once replay re-driving this node).
+    await post_markered_comment(repo, pr_number, MARKER_RISK_ASSESSMENT,
+                                "%s\n\n**Tier %d**\n\n%s" % (MARKER_RISK_ASSESSMENT, tier, summary))
 
     # S12 — merge-ref guard (fail-closed; the one node that catches broken-on-merge)
     phase("merge-guard")
@@ -1080,8 +1111,10 @@ async def main(input):
             (guard.get("stdout", "") if isinstance(guard, dict) else "")[-1200:],
             (guard.get("stderr", "") if isinstance(guard, dict) else "")[-600:],
             guard.get("exit_code") if isinstance(guard, dict) else None)
-        await gh("POST", _ipath(repo, "/issues/%d/comments" % pr_number),
-                 {"body": "## Merge guard refused\n\n```\n%s\n```" % detail})
+        # Maker-marker dedup (aios#1292): a replay re-driving the failed-guard node must not
+        # post a second "Merge guard refused" comment on the PR.
+        await post_markered_comment(repo, pr_number, MARKER_MERGE_GUARD,
+                                    "%s\n\n```\n%s\n```" % (MARKER_MERGE_GUARD, detail))
         escalations.append("merge_guard")
         decision = await gate({"kind": "merge_guard", "pr": pr_number, "detail": detail})
         if not (isinstance(decision, dict) and decision.get("proceed")):
@@ -1254,7 +1287,10 @@ def build_dev_pipeline_script(
         merge_method=merge_method,
         default_model=default_model,
     )
-    return header + "\n" + _BODY
+    # Splice the shared comment-idempotency helper (aios#1292) into the body — authored once
+    # in comment_idempotency.py and injected into BOTH pipelines so the class fix can't drift.
+    # It references gh/_ipath/log from the body; module-level defs resolve names at call time.
+    return header + "\n" + _BODY + COMMENT_IDEMPOTENCY_HELPERS
 
 
 def build_dev_pipeline_fixture_script(
