@@ -105,7 +105,7 @@ async def _stamp_lineage_span(
     """Append a system-owned ``wake_lineage`` span — the trusted depth carrier
     the cap reads. Mirrors what ``wake_session_handler`` writes on a real wake.
     """
-    from aios.tools.wake_session import WAKE_LINEAGE_SPAN_EVENT
+    from aios.services.wake import WAKE_LINEAGE_SPAN_EVENT
 
     async with pool.acquire() as conn:
         await queries.append_event(
@@ -126,8 +126,12 @@ def patched_defer_wake() -> Any:
     """Patch out the procrastinate enqueue.  The handler's SQL surface
     (event append, permission check, depth/rate-limit reads) is what's
     under test; the job-queue enqueue is exercised by the existing
-    ``tests/unit/test_wake.py`` suite."""
-    with mock.patch("aios.tools.wake_session.defer_wake", new_callable=AsyncMock) as m:
+    ``tests/unit/test_wake.py`` suite.
+
+    ``defer_wake`` now lives in ``aios.services.wake`` (issue #1280 moved the
+    cross-session delivery primitive there); ``deliver_cross_session_wake``
+    calls it from that module, so the patch must target the definition site."""
+    with mock.patch("aios.services.wake.defer_wake", new_callable=AsyncMock) as m:
         yield m
 
 

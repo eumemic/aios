@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..models.sandbox_command_action_replace import SandboxCommandActionReplace
     from ..models.trigger_update_metadata_type_0 import TriggerUpdateMetadataType0
     from ..models.wake_owner_action import WakeOwnerAction
+    from ..models.wake_session_action import WakeSessionAction
     from ..models.workflow_action_replace import WorkflowActionReplace
 
 
@@ -32,7 +33,8 @@ class TriggerUpdate:
 
         Attributes:
             source (CronSource | None | OneShotSource | RunCompletionSourceReplace | Unset):
-            action (None | SandboxCommandActionReplace | Unset | WakeOwnerAction | WorkflowActionReplace):
+            action (None | SandboxCommandActionReplace | Unset | WakeOwnerAction | WakeSessionAction |
+                WorkflowActionReplace):
             enabled (bool | None | Unset):
             metadata (None | TriggerUpdateMetadataType0 | Unset):
     """
@@ -45,6 +47,7 @@ class TriggerUpdate:
         | SandboxCommandActionReplace
         | Unset
         | WakeOwnerAction
+        | WakeSessionAction
         | WorkflowActionReplace
     ) = UNSET
     enabled: bool | None | Unset = UNSET
@@ -57,6 +60,7 @@ class TriggerUpdate:
         from ..models.sandbox_command_action_replace import SandboxCommandActionReplace
         from ..models.trigger_update_metadata_type_0 import TriggerUpdateMetadataType0
         from ..models.wake_owner_action import WakeOwnerAction
+        from ..models.wake_session_action import WakeSessionAction
         from ..models.workflow_action_replace import WorkflowActionReplace
 
         source: dict[str, Any] | None | Unset
@@ -77,6 +81,8 @@ class TriggerUpdate:
         elif isinstance(self.action, SandboxCommandActionReplace):
             action = self.action.to_dict()
         elif isinstance(self.action, WakeOwnerAction):
+            action = self.action.to_dict()
+        elif isinstance(self.action, WakeSessionAction):
             action = self.action.to_dict()
         elif isinstance(self.action, WorkflowActionReplace):
             action = self.action.to_dict()
@@ -119,6 +125,7 @@ class TriggerUpdate:
         from ..models.sandbox_command_action_replace import SandboxCommandActionReplace
         from ..models.trigger_update_metadata_type_0 import TriggerUpdateMetadataType0
         from ..models.wake_owner_action import WakeOwnerAction
+        from ..models.wake_session_action import WakeSessionAction
         from ..models.workflow_action_replace import WorkflowActionReplace
 
         d = dict(src_dict)
@@ -168,6 +175,7 @@ class TriggerUpdate:
             | SandboxCommandActionReplace
             | Unset
             | WakeOwnerAction
+            | WakeSessionAction
             | WorkflowActionReplace
         ):
             if data is None:
@@ -193,9 +201,17 @@ class TriggerUpdate:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
-                action_type_0_type_2 = WorkflowActionReplace.from_dict(data)
+                action_type_0_type_2 = WakeSessionAction.from_dict(data)
 
                 return action_type_0_type_2
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                action_type_0_type_3 = WorkflowActionReplace.from_dict(data)
+
+                return action_type_0_type_3
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             return cast(
@@ -203,6 +219,7 @@ class TriggerUpdate:
                 | SandboxCommandActionReplace
                 | Unset
                 | WakeOwnerAction
+                | WakeSessionAction
                 | WorkflowActionReplace,
                 data,
             )

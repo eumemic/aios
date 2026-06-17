@@ -15610,6 +15610,9 @@
                 "$ref": "#/components/schemas/WakeOwnerAction"
               },
               {
+                "$ref": "#/components/schemas/WakeSessionAction"
+              },
+              {
                 "$ref": "#/components/schemas/WorkflowAction"
               }
             ],
@@ -15619,6 +15622,7 @@
               "mapping": {
                 "sandbox_command": "#/components/schemas/SandboxCommandAction",
                 "wake_owner": "#/components/schemas/WakeOwnerAction",
+                "wake_session": "#/components/schemas/WakeSessionAction",
                 "workflow": "#/components/schemas/WorkflowAction"
               }
             }
@@ -15685,6 +15689,9 @@
                 "$ref": "#/components/schemas/WakeOwnerAction"
               },
               {
+                "$ref": "#/components/schemas/WakeSessionAction"
+              },
+              {
                 "$ref": "#/components/schemas/WorkflowAction"
               }
             ],
@@ -15694,6 +15701,7 @@
               "mapping": {
                 "sandbox_command": "#/components/schemas/SandboxCommandAction",
                 "wake_owner": "#/components/schemas/WakeOwnerAction",
+                "wake_session": "#/components/schemas/WakeSessionAction",
                 "workflow": "#/components/schemas/WorkflowAction"
               }
             }
@@ -15921,6 +15929,9 @@
                     "$ref": "#/components/schemas/WakeOwnerAction"
                   },
                   {
+                    "$ref": "#/components/schemas/WakeSessionAction"
+                  },
+                  {
                     "$ref": "#/components/schemas/WorkflowActionReplace"
                   }
                 ],
@@ -15929,6 +15940,7 @@
                   "mapping": {
                     "sandbox_command": "#/components/schemas/SandboxCommandActionReplace",
                     "wake_owner": "#/components/schemas/WakeOwnerAction",
+                    "wake_session": "#/components/schemas/WakeSessionAction",
                     "workflow": "#/components/schemas/WorkflowActionReplace"
                   }
                 }
@@ -16835,6 +16847,35 @@
         ],
         "title": "WakeOwnerAction",
         "description": "Deliver ``content`` as a user-role message to the trigger's OWNING\nsession, waking the model \u2014 the self-wake primitive on a timer.\n\nNo ``session_id``: the target is implicitly ``owner_session_id`` (NOT\nNULL this slice). An explicit-target wake is a separate future kind,\nnot a field on this one (avoids the uncapped cross-session wake that an\nunconstrained ``session_id`` would be \u2014 see the ``wake_session`` tool's\ndepth/rate caps)."
+      },
+      "WakeSessionAction": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "wake_session",
+            "title": "Kind",
+            "default": "wake_session"
+          },
+          "target_session_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Target Session Id"
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 16384,
+            "minLength": 1,
+            "title": "Content"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_session_id",
+          "content"
+        ],
+        "title": "WakeSessionAction",
+        "description": "Deliver ``content`` as a user-role message to an EXPLICITLY-NAMED\nsame-account session, waking it. The cross-session twin of wake_owner:\nruns through ``services.wake.deliver_cross_session_wake`` with the FIRING\nTRIGGER as the lineage root, so the wake_session depth/per-pair-rate caps\napply (a fire\u2192wake\u2192fire cascade terminates in bounded steps).\n\n``target_session_id`` is NOT resolved in the model \u2014 it is account-data,\nchecked at fire time (same as ``workflow_id``). A cross-account / archived\n/ cap-breaching target surfaces as a fire ``error`` (no silent drop), not a\nwrite-time rejection. Single named target only: no topics, no\ncompeting-consumers, no fan-out (issue #1280)."
       },
       "WfRun": {
         "properties": {

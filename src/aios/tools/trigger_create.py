@@ -49,7 +49,11 @@ TRIGGER_CREATE_DESCRIPTION = (
     "Actions: `{kind: 'sandbox_command', command}` runs bash in the "
     "session's sandbox WITHOUT waking the model; `{kind: 'wake_owner', "
     "content}` delivers `content` as a user-role message to THIS session, "
-    "waking the model; `{kind: 'workflow', workflow_id, input_template?, "
+    "waking the model; `{kind: 'wake_session', target_session_id, content}` "
+    "delivers `content` as a user-role message to ANOTHER same-account "
+    "session (named by id), waking it — subject to the same wake-depth / "
+    "per-pair-rate caps as the wake_session tool; `{kind: 'workflow', "
+    "workflow_id, input_template?, "
     "workflow_version?, vault_ids?}` launches a run of that workflow — "
     "deterministic, no model wake; the run launches into this session's own "
     "environment with your authority (its surface and vaults are checked "
@@ -179,6 +183,31 @@ _ACTION_SCHEMA: dict[str, Any] = {
                 },
             },
             "required": ["kind", "content"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"const": "wake_session"},
+                "target_session_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Session id (sess_...) of ANOTHER session in this account to "
+                        "wake at fire time."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_WAKE_CONTENT_CHARS,
+                    "description": (
+                        "Message delivered as a user-role event to the target session, "
+                        "waking it. Delivered verbatim."
+                    ),
+                },
+            },
+            "required": ["kind", "target_session_id", "content"],
             "additionalProperties": False,
         },
         {

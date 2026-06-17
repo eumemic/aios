@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..models.sandbox_command_action import SandboxCommandAction
     from ..models.trigger_create_metadata import TriggerCreateMetadata
     from ..models.wake_owner_action import WakeOwnerAction
+    from ..models.wake_session_action import WakeSessionAction
     from ..models.workflow_action import WorkflowAction
 
 
@@ -32,14 +33,14 @@ class TriggerCreate:
         Attributes:
             name (str): Stable user-chosen identifier; unique per session.
             source (CronSource | OneShotSource | RunCompletionSource):
-            action (SandboxCommandAction | WakeOwnerAction | WorkflowAction):
+            action (SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction):
             enabled (bool | Unset):  Default: True.
             metadata (TriggerCreateMetadata | Unset):
     """
 
     name: str
     source: CronSource | OneShotSource | RunCompletionSource
-    action: SandboxCommandAction | WakeOwnerAction | WorkflowAction
+    action: SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction
     enabled: bool | Unset = True
     metadata: TriggerCreateMetadata | Unset = UNSET
 
@@ -48,6 +49,7 @@ class TriggerCreate:
         from ..models.one_shot_source import OneShotSource
         from ..models.sandbox_command_action import SandboxCommandAction
         from ..models.wake_owner_action import WakeOwnerAction
+        from ..models.wake_session_action import WakeSessionAction
 
         name = self.name
 
@@ -63,6 +65,8 @@ class TriggerCreate:
         if isinstance(self.action, SandboxCommandAction):
             action = self.action.to_dict()
         elif isinstance(self.action, WakeOwnerAction):
+            action = self.action.to_dict()
+        elif isinstance(self.action, WakeSessionAction):
             action = self.action.to_dict()
         else:
             action = self.action.to_dict()
@@ -97,6 +101,7 @@ class TriggerCreate:
         from ..models.sandbox_command_action import SandboxCommandAction
         from ..models.trigger_create_metadata import TriggerCreateMetadata
         from ..models.wake_owner_action import WakeOwnerAction
+        from ..models.wake_session_action import WakeSessionAction
         from ..models.workflow_action import WorkflowAction
 
         d = dict(src_dict)
@@ -131,7 +136,9 @@ class TriggerCreate:
 
         def _parse_action(
             data: object,
-        ) -> SandboxCommandAction | WakeOwnerAction | WorkflowAction:
+        ) -> (
+            SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction
+        ):
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
@@ -148,11 +155,19 @@ class TriggerCreate:
                 return action_type_1
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                action_type_2 = WakeSessionAction.from_dict(data)
+
+                return action_type_2
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
             if not isinstance(data, dict):
                 raise TypeError()
-            action_type_2 = WorkflowAction.from_dict(data)
+            action_type_3 = WorkflowAction.from_dict(data)
 
-            return action_type_2
+            return action_type_3
 
         action = _parse_action(d.pop("action"))
 

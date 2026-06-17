@@ -253,6 +253,7 @@ from .wait_response import WaitResponse
 from .wait_response_session_status import WaitResponseSessionStatus
 from .wait_response_session_stop_reason_type_0 import WaitResponseSessionStopReasonType0
 from .wake_owner_action import WakeOwnerAction
+from .wake_session_action import WakeSessionAction
 from .wf_run import WfRun
 from .wf_run_caller_type_0 import WfRunCallerType0
 from .wf_run_create import WfRunCreate
@@ -526,6 +527,7 @@ __all__ = (
     "WaitResponseSessionStatus",
     "WaitResponseSessionStopReasonType0",
     "WakeOwnerAction",
+    "WakeSessionAction",
     "WfRun",
     "WfRunCallerType0",
     "WfRunCreate",

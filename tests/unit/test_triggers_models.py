@@ -17,12 +17,14 @@ from aios.models.triggers import (
     MAX_SCHEDULE_CHARS,
     MAX_TRIGGERS_PER_SESSION,
     MAX_WAKE_CONTENT_CHARS,
+    TRIGGER_ACTION_ADAPTER,
     TRIGGER_SOURCE_ADAPTER,
     CronSource,
     OneShotSource,
     TriggerCreate,
     TriggerEcho,
     TriggerUpdate,
+    WakeSessionAction,
     compute_initial_next_fire,
     compute_next_fire,
     validate_triggers,
@@ -160,6 +162,77 @@ class TestWakeOwnerAction:
         # extra="forbid" — a wake_owner can't carry a sandbox_command key.
         with pytest.raises(ValidationError):
             _spec(action={"kind": "wake_owner", "content": "hi", "command": "echo"})
+
+
+class TestWakeSessionAction:
+    """The explicit-target cross-session wake action kind (#1280)."""
+
+    def test_accepts_and_round_trips(self) -> None:
+        spec = _spec(
+            action={
+                "kind": "wake_session",
+                "target_session_id": "sess_01TARGET",
+                "content": "go look at run X",
+            }
+        )
+        assert isinstance(spec.action, WakeSessionAction)
+        assert spec.action.model_dump() == {
+            "kind": "wake_session",
+            "target_session_id": "sess_01TARGET",
+            "content": "go look at run X",
+        }
+
+    def test_discriminator_routes_through_action_adapter(self) -> None:
+        action = TRIGGER_ACTION_ADAPTER.validate_python(
+            {"kind": "wake_session", "target_session_id": "sess_01T", "content": "hi"}
+        )
+        assert isinstance(action, WakeSessionAction)
+
+    def test_missing_target_session_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _spec(action={"kind": "wake_session", "content": "hi"})
+
+    def test_missing_content_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _spec(action={"kind": "wake_session", "target_session_id": "sess_01T"})
+
+    def test_empty_target_session_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _spec(action={"kind": "wake_session", "target_session_id": "", "content": "hi"})
+
+    def test_empty_content_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _spec(action={"kind": "wake_session", "target_session_id": "sess_01T", "content": ""})
+
+    def test_content_too_long_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _spec(
+                action={
+                    "kind": "wake_session",
+                    "target_session_id": "sess_01T",
+                    "content": "x" * (MAX_WAKE_CONTENT_CHARS + 1),
+                }
+            )
+
+    def test_extra_key_rejected(self) -> None:
+        # extra="forbid" — a wake_session can't carry a stray key.
+        with pytest.raises(ValidationError):
+            _spec(
+                action={
+                    "kind": "wake_session",
+                    "target_session_id": "sess_01T",
+                    "content": "hi",
+                    "command": "echo",
+                }
+            )
+
+    def test_accepted_on_update_no_replace_twin(self) -> None:
+        # No Replace twin: both fields are required-at-create, so the same
+        # member serves the update side.
+        u = TriggerUpdate.model_validate(
+            {"action": {"kind": "wake_session", "target_session_id": "sess_01T", "content": "hi"}}
+        )
+        assert isinstance(u.action, WakeSessionAction)
 
 
 class TestTriggerCreateOrthogonality:
