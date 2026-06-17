@@ -812,9 +812,7 @@ class HttpConnector:
         if current is None:
             self._reconnect_backoff[connection_id] = self.RECONNECT_BACKOFF_INITIAL
         else:
-            self._reconnect_backoff[connection_id] = min(
-                current * 2, self.RECONNECT_BACKOFF_MAX
-            )
+            self._reconnect_backoff[connection_id] = min(current * 2, self.RECONNECT_BACKOFF_MAX)
 
     async def _on_connection_removed(self, connection_id: str) -> None:
         """Cancel the worker task for a vanished connection."""
