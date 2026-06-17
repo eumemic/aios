@@ -69,6 +69,7 @@ from typing import Any
 from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.workflows import WorkflowCreate
 from aios.workflows.comment_idempotency import COMMENT_IDEMPOTENCY_HELPERS
+from aios.workflows.gh_body import GH_BODY_HELPERS
 
 # The stable heading on the single needs-decision comment. It is BOTH the comment's first
 # line AND the maker-marker the replay guard scans for: a posted comment is its own
@@ -218,18 +219,6 @@ def _status(resp):
     return resp.get("status") if isinstance(resp, dict) else None
 
 
-def _json_body(resp):
-    if not isinstance(resp, dict):
-        return None
-    raw = resp.get("body")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except ValueError:
-        return None
-
-
 def _headers(resp):
     """Lower-cased response header map (GitHub sends ``Link`` capitalised)."""
     if not isinstance(resp, dict):
@@ -266,26 +255,9 @@ def _ipath(repo, suffix):
     return "/repos/%s%s" % (repo, suffix)
 
 
-async def gh_paginated(path, per_page=100, max_pages=50):
-    """GET every page of a GitHub list endpoint, following Link: rel="next". Concatenates the
-    per-page JSON arrays. A non-2xx / non-list page degrades to whatever was gathered so far.
-    Requires the route to allow a query string (allow_query). Replay-stable (each page is a
-    distinct tool() await)."""
-    items = []
-    page = 1
-    for _ in range(max_pages):
-        resp = await gh("GET", _with_query(path, per_page=per_page, page=page))
-        if _status(resp) != 200:
-            break
-        chunk = _json_body(resp)
-        if not isinstance(chunk, list):
-            break
-        items.extend(chunk)
-        nxt = _link_next_page(_headers(resp).get("link"))
-        if nxt is None:
-            break
-        page = nxt
-    return items
+# ``_json_body`` and ``gh_paginated`` are spliced in from the shared
+# ``GH_BODY_HELPERS`` source (aios#1294) so the fail-loud-on-truncated-or-
+# unparseable-2xx contract can never drift between the triage and dev pipelines.
 
 
 # ─── the untriaged filter (the idempotency boundary) ──────────────────────────
@@ -527,7 +499,14 @@ def build_triage_pipeline_script(
     # in comment_idempotency.py and injected into BOTH pipelines so the class fix can't drift.
     # It references gh/_ipath/log from the body (all defined above); module-level defs resolve
     # names at call time, so appending after the body is fine.
-    return header + "\n" + _BODY + COMMENT_IDEMPOTENCY_HELPERS
+    # Splice the shared GitHub-body helper (aios#1294: _json_body / gh_paginated that
+    # fail LOUD on a truncated or unparseable-2xx body instead of degrading to None/[])
+    # ahead of the comment-idempotency helper. Authored once in gh_body.py and injected
+    # into BOTH pipelines so the fail-loud contract can't drift. It references
+    # gh/_status/_headers/_link_next_page/_with_query/log from the body (all defined
+    # above); module-level defs resolve names at call time, so appending after the body
+    # is fine.
+    return header + "\n" + _BODY + GH_BODY_HELPERS + COMMENT_IDEMPOTENCY_HELPERS
 
 
 def build_triage_pipeline_fixture_script(

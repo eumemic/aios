@@ -12,6 +12,7 @@ On error: ``{"error": "..."}``.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -34,7 +35,32 @@ from aios.tools._glob_match import match_glob
 from aios.tools.registry import registry
 from aios.tools.url_safety import is_safe_url
 
-_MAX_RESPONSE_CHARS = 100_000
+# The response-body character cap. Bodies longer than this are truncated — but
+# NEVER silently: the result dict carries ``"truncated": True`` so the caller can
+# fail loud instead of degrading to an empty/None parse (aios#1294). The default is
+# ~1 MB (was 100 KB, which truncated a single page of a GitHub issue list mid-JSON
+# and broke the triage scan). Operators can raise/lower it via
+# ``AIOS_HTTP_RESPONSE_MAX_CHARS``; a missing / non-positive / unparseable value
+# falls back to the default so a bad env never disables the cap.
+_DEFAULT_MAX_RESPONSE_CHARS = 1_000_000
+
+
+def _max_response_chars() -> int:
+    """The response-body char cap, from ``AIOS_HTTP_RESPONSE_MAX_CHARS`` or the
+    default. Resolved per call so an operator override takes effect without a
+    process restart; a non-positive / unparseable value falls back to the default
+    (we never want a bad env to mean ``[:0]`` or an unbounded read)."""
+    raw = os.environ.get("AIOS_HTTP_RESPONSE_MAX_CHARS")
+    if raw:
+        try:
+            n = int(raw)
+        except ValueError:
+            return _DEFAULT_MAX_RESPONSE_CHARS
+        if n > 0:
+            return n
+    return _DEFAULT_MAX_RESPONSE_CHARS
+
+
 _TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
 _ALLOWED_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH")
 
@@ -48,9 +74,12 @@ HTTP_REQUEST_DESCRIPTION = (
     "Make an authenticated HTTP request to one of the agent's declared "
     "http_servers. Specify server_ref (the spec's name), path, method, "
     "optional headers (Authorization is set by the worker — your value "
-    "is ignored), and optional body. Response body is truncated to 100k "
-    "characters. Only paths matching an enabled route on the server's "
-    "allowlist are permitted; the worker refuses non-matching paths."
+    "is ignored), and optional body. Response body is truncated to ~1M "
+    "characters (configurable via AIOS_HTTP_RESPONSE_MAX_CHARS); when a body "
+    'is cut the result carries "truncated": true so callers never mistake a '
+    "truncated body for a complete one. Only paths matching an enabled route "
+    "on the server's allowlist are permitted; the worker refuses "
+    "non-matching paths."
 )
 
 HTTP_REQUEST_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -236,7 +265,16 @@ async def _load_session_agent(session_id: str) -> tuple[Agent | AgentVersion, st
     return agent, account_id, session.outbound_suppression
 
 
-def _decode_body(response: httpx.Response) -> str:
+def _decode_body(response: httpx.Response) -> tuple[str, bool]:
+    """Decode the response body to text and report whether it was truncated.
+
+    Returns ``(body, truncated)``. ``truncated`` is ``True`` only when a textish
+    body exceeded the char cap and was cut — so the caller can surface a
+    ``"truncated": True`` flag and NEVER hand back a body that silently lost its
+    tail (aios#1294: a 100 KB cut mid-JSON broke the triage scan). A refused
+    binary body is never "truncated" in this sense — the marker IS the full,
+    honest value — so it reports ``False``.
+    """
     content_type = response.headers.get("content-type", "")
     is_textish = (
         content_type.startswith("text/")
@@ -246,11 +284,15 @@ def _decode_body(response: httpx.Response) -> str:
         or content_type == ""
     )
     if is_textish:
-        return response.text[:_MAX_RESPONSE_CHARS]
+        text = response.text
+        cap = _max_response_chars()
+        if len(text) > cap:
+            return text[:cap], True
+        return text, False
     return (
         f"<binary content of type {content_type or 'unknown'}, "
         f"{len(response.content)} bytes — refused>"
-    )
+    ), False
 
 
 async def _do_http_request(
@@ -346,11 +388,18 @@ async def _do_http_request(
     except httpx.HTTPError as exc:
         return {"error": f"HTTP transport error: {type(exc).__name__}: {exc}"}
 
-    return {
+    body_text, truncated = _decode_body(response)
+    result: dict[str, Any] = {
         "status": response.status_code,
         "headers": dict(response.headers),
-        "body": _decode_body(response),
+        "body": body_text,
     }
+    # Signal a cut body explicitly (aios#1294). The flag is present ONLY when the
+    # body was truncated, so a caller can branch on its mere presence; never cut a
+    # body without saying so.
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
 async def http_request_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
