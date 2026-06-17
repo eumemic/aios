@@ -728,7 +728,7 @@ async def test_comment_thread_single_page_does_not_over_fetch() -> None:
 async def test_design_escalation_parks_then_resumes_and_completes() -> None:
     scn = Scenario(
         implement_escalated=True,
-        gate_results={"design": {"resolved": True, "resolution": "use a typed enum"}},
+        gate_results={"design": {"resolved": True, "resolution": "use a typed enum", "residue_kind": "design-judgment"}},
     )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
@@ -738,7 +738,7 @@ async def test_design_escalation_parks_then_resumes_and_completes() -> None:
 
 
 async def test_design_escalation_unresolved_stays_escalated() -> None:
-    scn = Scenario(implement_escalated=True, gate_results={"design": {"resolved": False}})
+    scn = Scenario(implement_escalated=True, gate_results={"design": {"resolved": False, "residue_kind": "design-judgment"}})
     value, _, _ = await _drive(scn)
     assert value["state"] == "escalated"
     assert value["reason"] == "design"
@@ -915,7 +915,7 @@ async def test_agent_resolved_conflict_reenters_ci_on_post_rebase_sha() -> None:
 async def test_high_risk_parks_for_merge_approval() -> None:
     scn = Scenario(
         risk_result={"tier": 4, "summary": "touches the scheduler"},
-        gate_results={"merge_approval": {"approve": True}},
+        gate_results={"merge_approval": {"approve": True, "residue_kind": "ladder-top-approval"}},
     )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2, auto_merge_max_tier=2)
     assert value["state"] == "done"
@@ -926,7 +926,7 @@ async def test_high_risk_parks_for_merge_approval() -> None:
 async def test_high_risk_hold_does_not_merge() -> None:
     scn = Scenario(
         risk_result={"tier": 4, "summary": "risky"},
-        gate_results={"merge_approval": {"approve": False}},
+        gate_results={"merge_approval": {"approve": False, "residue_kind": "ladder-top-approval"}},
     )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2, auto_merge_max_tier=2)
     assert value["state"] == "held"
@@ -941,7 +941,7 @@ async def test_malformed_risk_return_defaults_to_tier3_and_does_not_crash() -> N
     # falls back to the conservative tier-3 (which then parks for merge approval).
     scn = Scenario(
         risk_result={"summary": "no tier field"},
-        gate_results={"merge_approval": {"approve": True}},
+        gate_results={"merge_approval": {"approve": True, "residue_kind": "ladder-top-approval"}},
     )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
@@ -1213,7 +1213,7 @@ async def test_merge_failed_is_labelled_autodev_failed() -> None:
 async def test_gate_park_is_not_labelled_failed() -> None:
     # An escalation parks at a gate; a deliberate "stay escalated" resume is NOT a silent
     # failure, so the run must NOT raise autodev:failed (the contract: a gate park ≠ fail).
-    scn = Scenario(implement_escalated=True, gate_results={"design": {"resolved": False}})
+    scn = Scenario(implement_escalated=True, gate_results={"design": {"resolved": False, "residue_kind": "design-judgment"}})
     value, _, _ = await _drive(scn)
     assert value["state"] == "escalated"
     assert "autodev:failed" not in scn.labels_added
@@ -1223,7 +1223,7 @@ async def test_gate_park_is_not_labelled_failed() -> None:
 
 
 async def test_implement_agent_error_escalates_to_design_gate() -> None:
-    scn = Scenario(implement_error=True, gate_results={"design": {"resolved": False}})
+    scn = Scenario(implement_error=True, gate_results={"design": {"resolved": False, "residue_kind": "design-judgment"}})
     value, _, _ = await _drive(scn)
     assert value["state"] == "escalated"
     assert value["reason"] == "design"
@@ -1302,3 +1302,113 @@ async def test_accepts_trigger_envelope_input() -> None:
         max_ci_iters=2,
     )
     assert value["state"] == "done"
+
+
+# ─── residue_kind stamp enforced at the human_gate() wrapper (aios#1328, AC6/AC7) ─
+# locus (b): the required-residue_kind check lives in the dev_pipeline.py human_gate()
+# wrapper (NOT a platform 422 — unbuildable, see the issue's enforcement-locus
+# correction). A human-in-loop gate (design / merge_approval) resolved WITHOUT a valid
+# residue_kind is REJECTED by the wrapper — the run raises and does NOT proceed past the
+# gate. A non-human-in-loop gate (verify / merge_guard) does NOT require the key.
+
+
+async def _drive_allowing_raise(
+    scenario: Scenario,
+    *,
+    input: dict[str, Any] | None = None,
+    max_steps: int = 60,
+    **build_kwargs: Any,
+) -> Any:
+    """Drive the production script, returning the final host OUTCOME (whose kind may be
+    ``raised`` — the wrapper rejecting an unstamped resolve). Mirrors ``_drive`` but does
+    not assert the terminal kind, so a wrapper raise is observable."""
+    src = build_dev_pipeline_script(**build_kwargs)
+    inp = input or {"repo": REPO, "issue_number": ISSUE, "kind": "issue"}
+    memo: dict[str, Any] = {}
+    out = None
+    for _ in range(max_steps):
+        out = await run_script_host(source=src, input=inp, memo=memo)
+        if out.kind != "suspended":
+            return out
+        assert len(out.emitted) == 1
+        cap = out.emitted[0]
+        memo[cap.call_key] = scenario.outcome(cap)
+    raise AssertionError("workflow did not terminate")
+
+
+async def test_design_gate_resolved_without_residue_kind_is_rejected() -> None:
+    # Resolve the design gate with a payload MISSING residue_kind → the wrapper raises;
+    # the run does NOT proceed past the gate (no re-implement).
+    scn = Scenario(
+        implement_escalated=True,
+        gate_results={"design": {"resolved": True, "resolution": "x"}},  # no residue_kind
+    )
+    out = await _drive_allowing_raise(scn, max_review_iters=2, max_ci_iters=2)
+    assert out.kind == "raised", out.kind
+    assert "residue_kind" in (out.error_repr or "")
+    assert "implement-resumed" not in scn.tasks  # never proceeded past the gate
+
+
+async def test_design_gate_resolved_with_invalid_residue_kind_is_rejected() -> None:
+    scn = Scenario(
+        implement_escalated=True,
+        gate_results={"design": {"resolved": True, "residue_kind": "not-a-real-kind"}},
+    )
+    out = await _drive_allowing_raise(scn, max_review_iters=2, max_ci_iters=2)
+    assert out.kind == "raised", out.kind
+    assert "residue_kind" in (out.error_repr or "")
+
+
+async def test_design_gate_resolved_with_residue_kind_proceeds() -> None:
+    # WITH a valid stamp → the resolve succeeds and the run re-implements (AC6 success leg).
+    scn = Scenario(
+        implement_escalated=True,
+        gate_results={"design": {"resolved": True, "resolution": "x",
+                                 "residue_kind": "design-judgment"}},
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert "implement-resumed" in scn.tasks
+
+
+async def test_design_gate_other_sentinel_is_accepted() -> None:
+    # The OPEN ``other`` sentinel is an accepted stamp (it is the chairman's irreducible
+    # residue, MEASURED not forbidden).
+    scn = Scenario(
+        implement_escalated=True,
+        gate_results={"design": {"resolved": True, "residue_kind": "other"}},
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+
+
+async def test_merge_approval_gate_requires_residue_kind() -> None:
+    scn = Scenario(
+        risk_result={"tier": 4, "summary": "touches the scheduler"},
+        gate_results={"merge_approval": {"approve": True}},  # no residue_kind
+    )
+    out = await _drive_allowing_raise(
+        scn, max_review_iters=2, max_ci_iters=2, auto_merge_max_tier=2
+    )
+    assert out.kind == "raised", out.kind
+    assert "residue_kind" in (out.error_repr or "")
+
+
+async def test_verify_gate_does_not_require_residue_kind() -> None:
+    # A non-human-in-loop gate (verify, opened on review exhaustion) does NOT require the
+    # stamp — it resolves through bare gate(), so an unstamped resolve proceeds normally.
+    scn = Scenario(
+        review_results=[{"verdict": "fail", "issues": ["x"], "artifact_posted": True}],
+        gate_results={"verify": {"override": False}},  # no residue_kind, must NOT raise
+    )
+    value, _, _ = await _drive(scn, max_review_iters=1, max_ci_iters=2)
+    # The run reaches a terminal state without the wrapper rejecting the verify resolve.
+    assert value["state"] in ("escalated", "done", "held", "failed_implement")
+
+
+async def test_merge_guard_gate_does_not_require_residue_kind() -> None:
+    # merge_guard is also non-human-in-loop: an unstamped {"proceed": ...} must NOT raise.
+    scn = Scenario(merge_guard_exit=73, gate_results={"merge_guard": {"proceed": False}})
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "merge_guard_refused"

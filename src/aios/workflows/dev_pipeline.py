@@ -356,6 +356,59 @@ import re
 # freely even though their ``def``s are appended after this block.
 
 
+# ─── residue_kind stamp at the gate-resolve source (aios#1328, locus (b)) ─────
+# The de-Goodharted residue gauge demands that the WHY of a human-in-loop gate is
+# STAMPED at the source by the finder, on the gate-resolve payload — never inferred
+# from prose by the ops-agent (the completion-marker antipattern one level up). The
+# platform resolve handler cannot enforce this (it never persists the gate kind down
+# the suspend/resolve path), so the guarantee is WORKFLOW-AUTHOR-ENFORCED here: the
+# script knows its own ``kind``, so this wrapper demands ``residue_kind`` exactly for
+# the human-in-loop kinds it itself authors (merge_approval, design) and nowhere else.
+
+# The human-in-loop gate kinds (the ONLY kinds that require a residue_kind stamp).
+# A non-human-in-loop gate (verify, merge_guard) does NOT require the key.
+HUMAN_IN_LOOP_GATE_KINDS = ("merge_approval", "design")
+
+# The four human-in-loop residue KINDS plus the OPEN ``other`` sentinel — the set
+# a resolve payload's ``residue_kind`` must fall within. Frozen here in the workflow
+# the author controls (mirrors aios.db.queries.residue.ACCEPTED_GATE_RESIDUE_KINDS).
+ACCEPTED_RESIDUE_KINDS = (
+    "uncorrelated-detection",
+    "deadlock-break",
+    "design-judgment",
+    "ladder-top-approval",
+    "other",
+)
+
+
+async def human_gate(spec):
+    """``gate(spec)`` for a HUMAN-IN-LOOP kind, with the residue_kind stamp enforced.
+
+    Suspends like ``gate`` and, on resume, inspects the returned ``result`` and REJECTS
+    the resolve as incomplete -- raising, so the run does NOT proceed past the gate -- if
+    ``residue_kind`` is absent or outside {the four kinds} + {other}. The kind is thus
+    captured at the moment of human judgment, never reconstructed from prose; the ops-agent's
+    axis-2 INSERT later copies this finder's-own stamp verbatim (it classifies, not defines).
+
+    For a NON-human-in-loop kind this is a plain ``gate`` (no stamp demanded) -- but callers
+    should only route the human-in-loop kinds through here."""
+    kind = spec.get("kind") if isinstance(spec, dict) else None
+    result = await gate(spec)
+    if kind in HUMAN_IN_LOOP_GATE_KINDS:
+        residue_kind = result.get("residue_kind") if isinstance(result, dict) else None
+        if residue_kind not in ACCEPTED_RESIDUE_KINDS:
+            # The resolve is INCOMPLETE: the finder did not stamp the WHY. Reject it --
+            # the run must not proceed past the gate. A re-resume carrying a valid
+            # residue_kind (the workflow-crash-contract re-delivery) completes normally.
+            raise ValueError(
+                "human-in-loop gate %r resolved without a valid residue_kind "
+                "(got %r; expected one of %r) -- the finder must stamp the WHY at the "
+                "gate-resolve source (aios#1328); refusing to let the run proceed "
+                "unstamped." % (kind, residue_kind, ACCEPTED_RESIDUE_KINDS)
+            )
+    return result
+
+
 # ─── the state machine ───────────────────────────────────────────────────────
 
 async def main(input):
@@ -430,8 +483,8 @@ async def main(input):
                 "escalation_reason": "implement agent error: %s" % exc}
     if impl.get("escalated"):
         escalations.append("design")
-        decision = await gate({"kind": "design", "issue": issue_number,
-                               "question": impl.get("escalation_reason", "")})
+        decision = await human_gate({"kind": "design", "issue": issue_number,
+                                     "question": impl.get("escalation_reason", "")})
         if not (isinstance(decision, dict) and decision.get("resolved")):
             return {"state": "escalated", "reason": "design", "escalations": escalations}
         # resumed with a settled direction -> re-implement with the chairman's answer
@@ -673,7 +726,7 @@ async def main(input):
     phase("merge")
     if tier > AUTO_MERGE_MAX_TIER:
         escalations.append("merge_approval")
-        decision = await gate({"kind": "merge_approval", "pr": pr_number, "tier": tier})
+        decision = await human_gate({"kind": "merge_approval", "pr": pr_number, "tier": tier})
         if not (isinstance(decision, dict) and decision.get("approve")):
             return {"state": "held", "reason": "merge_approval", "pr_url": pr_url,
                     "pr_number": pr_number, "risk_tier": tier, "escalations": escalations}

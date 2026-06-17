@@ -36,7 +36,7 @@ precedent) so the constraint is added without a long ``ACCESS EXCLUSIVE``
 lock while existing rows are validated.
 
 Revision ID: 0110
-Revises: 0108
+Revises: 0109
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "0110"
-down_revision: str = "0108"
+down_revision: str = "0109"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

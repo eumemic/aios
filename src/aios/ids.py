@@ -71,6 +71,10 @@ WORKFLOW_EVENT: Final = "wfe"
 # Run→child spawns reuse the workflow ``call_key`` as the request_id; the API
 # caller (#1128) has no call_key, so it mints a fresh ``req_`` id here.
 REQUEST: Final = "req"
+# Residue events (#1328): one row per CLASSIFICATION the ops-agent writes to the
+# de-Goodharted detection-residue gauge (``residue_events``). Append-only;
+# axis-segregated; residue_kind stamped at the gate-resolve source.
+RESIDUE_EVENT: Final = "res"
 
 _PREFIXES: Final = frozenset(
     {
@@ -102,6 +106,7 @@ _PREFIXES: Final = frozenset(
         WORKFLOW_RUN,
         WORKFLOW_EVENT,
         REQUEST,
+        RESIDUE_EVENT,
     }
 )
 
