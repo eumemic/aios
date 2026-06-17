@@ -1146,6 +1146,13 @@ async def main(input):
     # dispatch-gate sweep / rank-6 staleness reaper. Make the terminal cleanup explicit and
     # idempotent: strip BOTH claim labels (logged) and close the issue (state_reason:completed).
     # A re-drive that finds it already closed / labels already gone is a no-op, not an error.
+    #
+    # #1302 — the close is keyed on the KNOWN `issue_number` here, NEVER on the PR body's
+    # `Closes #n` free text. #1298 merged but left #1292 OPEN because its body wrote "Closes
+    # the ... class" as prose with no `#n` link, so GitHub's auto-close-via-keyword never
+    # fired (the completion-marker-from-free-text antipattern). Closing on the structurally-
+    # known issue_number removes that free-text dependency entirely; the `Closes #n` in the
+    # body, when present, is a nicety we never rely on for the close.
     await _close_source_issue(repo, issue_number)
     result = {"state": "done", "pr_url": pr_url, "pr_number": pr_number, "merged": merged,
               "risk_tier": tier, "escalations": escalations}
