@@ -7648,6 +7648,68 @@
         }
       }
     },
+    "/v1/connectors/runtime/session-lifecycle": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Runtime Session Lifecycle",
+        "description": "Append a ``kind=lifecycle`` event onto **one** session bound to\n``body.connection_id`` (#1261), optionally waking it.\n\nThe per-session-targeted sibling of the broadcast ``/runtime/lifecycle``\nroute: where that fans a notice across every bound session, this targets\nthe single ``body.session_id`` \u2014 the SMS design's \u00a73.5 req 1 (a delivery\nfailure must reach the *originating* session, not be broadcast).\n\nAuthorization mirrors ``post_runtime_tool_result`` exactly: the bearer's\nconnector must match ``body.connection_id``'s connector, any bearer-side\n``connection_ids`` allowlist must include it (#350), and the session must\nbe genuinely bound to that connection \u2014 so a runtime bearer can only\ntarget a session within its own connections.\n\nWhen ``body.wake`` is set, a ``defer_wake`` is enqueued after the append\n(the exact pattern as the tool-result intake) so the failure wakes the\nsession rather than merely being visible on its next turn.",
+        "operationId": "post_connector_runtime_session_lifecycle",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeSessionLifecycleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Post Connector Runtime Session Lifecycle"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/runtime/tool-results": {
       "post": {
         "tags": [
@@ -13695,6 +13757,59 @@
         ],
         "title": "RuntimeManagementCallResultRequest",
         "description": "Idempotent on ``call_id`` \u2014 a replay POST against an already-resolved\nrow no-ops (no double-NOTIFY)."
+      },
+      "RuntimeSessionLifecycleRequest": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "event": {
+            "type": "string",
+            "title": "Event"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data"
+          },
+          "wake": {
+            "type": "boolean",
+            "title": "Wake",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connection_id",
+          "session_id",
+          "event"
+        ],
+        "title": "RuntimeSessionLifecycleRequest",
+        "description": "Body for ``POST /v1/connectors/runtime/session-lifecycle`` (#1261).\n\nThe per-session-targeted sibling of :class:`RuntimeLifecycleRequest`.\nWhere the broadcast ``/runtime/lifecycle`` route fans a transport-down\nnotice across *every* session bound to the connection, this appends a\nsingle ``kind=lifecycle`` event onto **one** named session \u2014 the gap\ncalled out by the SMS design (\u00a73.5 req 1): a delivery failure must reach\nthe *originating* session, not be broadcast.\n\n``wake`` optionally pairs the append with a ``defer_wake`` so the failure\nisn't merely visible-on-next-turn but actually wakes the session (the\n\"give it stimulus\" half of the design's option (a)). Defaults ``False``\nso the primitive stays a plain visible-on-next-wake append unless the\ncaller opts into the wake."
       },
       "RuntimeToken": {
         "properties": {
