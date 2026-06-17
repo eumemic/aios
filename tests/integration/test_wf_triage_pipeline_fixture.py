@@ -412,6 +412,71 @@ async def test_label_post_failure_is_recorded_per_issue() -> None:
     assert "label apply failed" in value["errors"][0]["error"]
 
 
+# ─── #1292: close the comment-POST non-idempotency class ──────────────────────
+
+
+async def test_needs_decision_applies_label_before_comment() -> None:
+    # Hazard 1 (error-path ordering): the idempotent additive label must be applied FIRST,
+    # the comment posted only after the label returns 2xx — so the label guards the comment.
+    issues = [_issue(1224, labels=list(PARITY_LABELS))]
+    scn = Scenario(
+        issues=issues,
+        classifications={1224: {"classification": "needs-decision", "reason": "capital"}},
+    )
+    await _drive(scn)
+    # the two mutating POSTs for #1224, in order
+    muts = [
+        (m, p)
+        for (m, p) in scn.http
+        if m == "POST" and p in ("/repos/o/r/issues/1224/labels", "/repos/o/r/issues/1224/comments")
+    ]
+    assert muts == [
+        ("POST", "/repos/o/r/issues/1224/labels"),
+        ("POST", "/repos/o/r/issues/1224/comments"),
+    ], "label must be POSTed before the needs-decision comment"
+
+
+async def test_needs_decision_label_fail_posts_no_comment() -> None:
+    # If the label POST fails, the comment must NOT be posted — the label guards the comment,
+    # and a comment-without-label would re-classify (and re-comment) on the next run.
+    issues = [_issue(1224, labels=list(PARITY_LABELS))]
+    scn = Scenario(
+        issues=issues,
+        classifications={1224: {"classification": "needs-decision", "reason": "capital"}},
+        label_post_status=422,
+    )
+    value, _, _ = await _drive(scn)
+    assert scn.comments_posted == {}  # no comment when the label failed
+    assert value["classified"] == 0
+    assert len(value["errors"]) == 1
+    assert value["errors"][0]["issue"] == 1224
+    assert "label apply failed" in value["errors"][0]["error"]
+
+
+async def test_needs_decision_skips_comment_when_marker_already_present() -> None:
+    # Hazard 2 (at-least-once replay): the maker-marker guard. If the already-fetched thread
+    # already carries the `## Triage: needs a decision` heading, the comment POST is skipped —
+    # no duplicate. (The label is still (idempotently) re-applied; that's additive and safe.)
+    issues = [_issue(1224, labels=list(PARITY_LABELS))]
+    scn = Scenario(
+        issues=issues,
+        classifications={1224: {"classification": "needs-decision", "reason": "capital"}},
+        comments={
+            1224: [
+                "## Triage: needs a decision\n\nAutomated intake-triage routed this issue "
+                "to **needs-decision**.\n\n**Why:** capital"
+            ]
+        },
+    )
+    value, _, _ = await _drive(scn)
+    assert scn.comments_posted == {}  # the prior comment is its own marker -> no duplicate
+    # the label is still applied and the issue still counts as classified (a skip is benign)
+    assert scn.labels_added[1224] == ["needs-decision"]
+    assert value["classified"] == 1
+    assert value["counts"]["needs-decision"] == 1
+    assert value["needs_decision"] == [{"issue": 1224, "reason": "capital"}]
+
+
 # ─── input handling ───────────────────────────────────────────────────────────
 
 

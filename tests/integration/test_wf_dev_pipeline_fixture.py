@@ -80,6 +80,7 @@ class Scenario:
         *,
         body: str = LONG_BODY,
         comments: list[str] | None = None,
+        pr_comments: list[str] | None = None,
         existing_pr: bool = False,
         implement_escalated: bool = False,
         implement_error: bool = False,
@@ -103,6 +104,11 @@ class Scenario:
         # The comment-thread the GET /issues/{n}/comments responder returns (list of body
         # strings → GitHub comment objects). None => no comments (empty array).
         self.comments = comments or []
+        # The PR (and any non-#5 issue) comment thread the maker-marker guard fetches before
+        # posting a risk / merge-guard / spec comment (aios#1292). Defaults to empty (no prior
+        # post → the first POST goes through); set it to a list carrying a `## <marker>` heading
+        # to model an at-least-once replay where the comment was already posted.
+        self.pr_comments = pr_comments or []
         self.existing_pr = existing_pr
         self.implement_escalated = implement_escalated
         self.implement_error = implement_error
@@ -140,6 +146,7 @@ class Scenario:
         self.agent_inputs: list[dict[str, Any]] = []
         self.gates: list[dict[str, Any]] = []
         self.http: list[tuple[str, str]] = []
+        self.comments_posted: list[str] = []  # every comment body POSTed (#1292 dedup checks)
         self.labels_added: list[str] = []  # every label name POSTed to /labels (item 3)
         self.labels_removed: list[str] = []  # every label name DELETEd from /labels
         self.issue_patches: list[dict[str, Any]] = []  # every PATCH body to /issues/5 (#1188)
@@ -183,12 +190,26 @@ class Scenario:
         # The comment-thread read is the one route that carries a query string (per_page/page);
         # the GitHub /repos/** route opts into allow_query (#1156). Split it off, serve the page.
         clean, _, query = path.partition("?")
-        if method == "GET" and clean == "/repos/o/r/issues/5/comments":  # the item-1 thread read
+        cm = re.match(r"^/repos/o/r/issues/(\d+)/comments$", clean)
+        if method == "GET" and cm:
             page = 1
             m = re.search(r"[?&]page=(\d+)", "?" + query)
             if m:
                 page = int(m.group(1))
-            return self._comments_page(page)
+            if int(cm.group(1)) == 5:  # the item-1 issue thread read (paginated)
+                return self._comments_page(page)
+            # Any OTHER comment-thread read (the PR threads the #1292 maker-marker guard
+            # fetches before posting risk/merge-guard comments). Serve the configured PR thread.
+            return {
+                "status": 200,
+                "headers": {},
+                "body": json.dumps([{"id": i, "body": b} for i, b in enumerate(self.pr_comments)]),
+            }
+        if method == "POST" and cm:  # capture a posted comment (maker-marker assertions)
+            raw = args.get("body")
+            if isinstance(raw, str):
+                self.comments_posted.append(json.loads(raw).get("body", ""))
+            return {"status": 201, "body": "{}"}
         assert "?" not in path, f"query string in path is rejected by http_request: {path!r}"
         if method == "POST" and path.endswith("/labels"):  # add label(s) — capture names
             raw = args.get("body")
@@ -373,12 +394,13 @@ async def test_happy_path_merges_and_completes() -> None:
     ]
     assert scn.gates == []  # tier-1 auto-merges; no gate opened
     assert scn.tasks == ["implement", "review-0", "ci-0", "risk", "master-ci-0"]
-    # never used a query string EXCEPT on the allow_query comments-pagination path
-    # (#1156); every other GitHub call stays clean-path (the production-path bug review caught)
+    # never used a query string EXCEPT on the allow_query comments-pagination paths
+    # (#1156: the issue thread read; #1292: the maker-marker guard's PR-thread read before
+    # posting risk/merge-guard comments); every other GitHub call stays clean-path.
     assert all(
         "?" not in path
         for _, path in scn.http
-        if not path.startswith("/repos/o/r/issues/5/comments")
+        if not re.match(r"^/repos/o/r/issues/\d+/comments", path)
     )
     # item 1: the comment thread is read at ingest (paginated -> ?per_page/?page carried)
     assert any(m == "GET" and p.startswith("/repos/o/r/issues/5/comments") for m, p in scn.http)
@@ -462,6 +484,68 @@ async def test_spec_gate_comment_resolution_word_without_quote_still_bounces() -
     value, _, _ = await _drive(scn)
     assert value["state"] == "spec_failed"
     assert "unresolved marker" in value["reason"]
+
+
+# ─── #1292: close the comment-POST non-idempotency class (shared with triage) ─
+
+
+async def test_spec_gate_applies_label_before_comment() -> None:
+    # Label-before-comment ordering: the `underspecified` label (idempotent/additive) is
+    # POSTed BEFORE the "spec not ready" comment, so the label guards the comment.
+    scn = Scenario(body="too short")
+    await _drive(scn)
+    ordered = [
+        p
+        for (m, p) in scn.http
+        if m == "POST" and p in ("/repos/o/r/issues/5/labels", "/repos/o/r/issues/5/comments")
+    ]
+    # the "spec not ready" comment is POSTed, and a label POST precedes it (label guards it)
+    assert "/repos/o/r/issues/5/comments" in ordered
+    comment_at = ordered.index("/repos/o/r/issues/5/comments")
+    assert ordered[:comment_at].count("/repos/o/r/issues/5/labels") >= 1
+    assert any("Spec not ready for implementation" in c for c in scn.comments_posted)
+
+
+async def test_spec_gate_skips_comment_when_marker_already_present() -> None:
+    # Replay dedup: the issue thread already carries the "## Spec not ready" marker (a prior
+    # attempt posted it, then the worker crashed before journaling) → the comment is skipped.
+    scn = Scenario(
+        body="too short",
+        comments=["## Spec not ready for implementation\n\nIssue body is too short (2 words)."],
+    )
+    value, _, _ = await _drive(scn)
+    assert value["state"] == "spec_failed"
+    assert scn.comments_posted == []  # no duplicate "spec not ready" comment
+
+
+async def test_risk_and_merge_guard_comments_skip_on_marker_replay() -> None:
+    # Replay dedup for the PR comments: the PR thread already carries BOTH the Risk Assessment
+    # and Merge guard refused markers → neither comment is re-posted on a replay. We force the
+    # merge guard to refuse (exit!=0) and park at the gate so both nodes run.
+    scn = Scenario(
+        merge_guard_exit=1,
+        gate_results={"merge_guard": {"proceed": False}},
+        pr_comments=[
+            "## Risk Assessment\n\n**Tier 1**\n\nsafe",
+            "## Merge guard refused\n\n```\nsentinel failed\n```",
+        ],
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "merge_guard_refused"
+    # both markered PR comments were already present -> nothing re-posted
+    assert scn.comments_posted == []
+
+
+async def test_risk_and_merge_guard_comments_posted_when_absent() -> None:
+    # The complement: an empty PR thread → both markered comments ARE posted (first time).
+    scn = Scenario(
+        merge_guard_exit=1,
+        gate_results={"merge_guard": {"proceed": False}},
+    )
+    await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert any("Risk Assessment" in c for c in scn.comments_posted)
+    assert any("Merge guard refused" in c for c in scn.comments_posted)
 
 
 async def test_thin_body_satisfied_by_comment_thread_proceeds() -> None:
