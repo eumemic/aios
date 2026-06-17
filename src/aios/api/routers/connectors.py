@@ -274,6 +274,46 @@ class RuntimeSessionLifecycleRequest(BaseModel):
     wake: bool = False
 
 
+class RuntimeChatLifecycleRequest(BaseModel):
+    """Body for ``POST /v1/connectors/runtime/chat-lifecycle`` (#1260).
+
+    The routing-key variant of :class:`RuntimeSessionLifecycleRequest`.
+    Both target a *single* session (not the broadcast fan-out), but where
+    the session-lifecycle route needs the caller to already hold the
+    resolved ``session_id``, this route carries a per-peer **routing key**
+    (``chat_id``) and resolves it through the connection's per-chat binding
+    to the originating session server-side.
+
+    This is the second option the SMS design (§3.5 req 1) calls out: "route
+    the per-peer failure through the resolver on the callback's ``To``".  A
+    Twilio status callback knows the peer number (→ ``chat_id``) but not the
+    AIOS ``session_id`` — without this route the connector would have to do
+    an extra round-trip (or maintain its own ``chat_id → session_id`` map)
+    just to reach the originating per_chat session.  The broadcast
+    ``/runtime/lifecycle`` route stays for genuine connection-wide events.
+
+    ``chat_id`` is the connector's per-peer routing key, the same value the
+    inbound path stamps onto ``chat_sessions``.  It must resolve to an
+    existing per-chat binding on ``connection_id`` — a routing key with no
+    bound session 404s rather than fanning a spurious cross-peer notice (the
+    design's "if a correlation row is genuinely missing … drop rather than
+    fan a spurious cross-peer failure", §3.5).
+
+    ``wake`` mirrors the session-lifecycle route: ``True`` pairs the append
+    with a ``defer_wake`` so the failure wakes the originating session;
+    defaults ``False`` (visible-on-next-turn).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: str
+    chat_id: str
+    event: str
+    reason: str | None = None
+    data: dict[str, Any] | None = None
+    wake: bool = False
+
+
 def _check_runtime_scope(auth_connector: str, target_connector: str) -> None:
     """Raise 403 if a runtime bearer reaches outside its connector type."""
     if auth_connector != target_connector:
@@ -608,6 +648,98 @@ async def post_runtime_session_lifecycle(
     # log/correlate without a second read.
     return {
         "appended_session_ids": [body.session_id],
+        "event_id": event.id,
+        "woke": body.wake,
+    }
+
+
+@router.post(
+    "/runtime/chat-lifecycle",
+    operation_id="post_connector_runtime_chat_lifecycle",
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_runtime_chat_lifecycle(
+    body: RuntimeChatLifecycleRequest,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> dict[str, Any]:
+    """Append a ``kind=lifecycle`` event onto the single session that
+    ``body.chat_id`` resolves to on ``body.connection_id`` (#1260),
+    optionally waking it.
+
+    The routing-key sibling of ``/runtime/session-lifecycle``: where that
+    needs the resolved ``session_id``, this carries the connector's per-peer
+    routing key (``chat_id``) and resolves it through the connection's
+    per-chat binding server-side — the SMS design's §3.5 req 1 second option
+    ("route the per-peer failure through the resolver on the callback's
+    ``To``").  Like the session-lifecycle route it targets exactly one
+    session, NOT the broadcast fan-out: a per-peer delivery failure must not
+    pollute unrelated ``per_chat`` sessions.
+
+    Authorization mirrors the session-lifecycle route: the bearer's
+    connector must match ``body.connection_id``'s connector and any
+    bearer-side ``connection_ids`` allowlist must include it (#350).  The
+    binding lookup itself is the per-session authorization — a ``chat_id``
+    that has no per-chat session on this connection 404s (no spurious
+    cross-peer append), and the resolution is scoped to the bearer's
+    ``account_id``.
+
+    When ``body.wake`` is set, a ``defer_wake`` is enqueued after the append
+    (the same pattern as the session-lifecycle and tool-result intakes) so
+    the failure wakes the originating session rather than merely being
+    visible on its next turn.
+    """
+    _, auth_connector, account_id, auth_connection_ids = auth
+    async with pool.acquire() as conn:
+        connection = await queries.get_connection(conn, body.connection_id, account_id=account_id)
+        _check_runtime_scope(auth_connector, connection.connector)
+        _check_runtime_connection_scope(auth_connection_ids, body.connection_id)
+        # Resolve the per-peer routing key to its bound session. A missing
+        # row means the chat was never bound on this connection (past
+        # retention, or a routing key that never spawned a session) — drop
+        # with a 404 rather than fanning a spurious cross-peer notice (§3.5).
+        row = await queries.get_chat_session_row(
+            conn,
+            body.connection_id,
+            body.chat_id,
+            account_id=account_id,
+        )
+    if row is None:
+        raise NotFoundError(
+            "no session bound to this chat_id on the connection",
+            detail={"connection_id": body.connection_id, "chat_id": body.chat_id},
+        )
+    _chat_id, session_id, _created_at = row
+    payload: dict[str, Any] = {
+        "event": body.event,
+        "connection_id": body.connection_id,
+        "connector": connection.connector,
+        "chat_id": body.chat_id,
+    }
+    if body.reason is not None:
+        payload["reason"] = body.reason
+    if body.data is not None:
+        payload["data"] = body.data
+    event = await sessions_service.append_event(
+        pool,
+        session_id,
+        "lifecycle",
+        payload,
+        account_id=account_id,
+    )
+    if body.wake:
+        await defer_wake(
+            pool,
+            session_id,
+            cause="connector_lifecycle",
+            account_id=account_id,
+        )
+    # Mirror the session-lifecycle route's shape (single-element list keeps
+    # callers handling ``appended_session_ids`` uniform), plus the resolved
+    # session_id, the appended event id, and whether a wake was enqueued.
+    return {
+        "appended_session_ids": [session_id],
+        "session_id": session_id,
         "event_id": event.id,
         "woke": body.wake,
     }
