@@ -56,9 +56,7 @@ class SqliteAnsweredSpool:
         self._conn.commit()
 
     def load(self) -> dict[str, str | None]:
-        rows = self._conn.execute(
-            "SELECT tool_call_id, result FROM answered"
-        ).fetchall()
+        rows = self._conn.execute("SELECT tool_call_id, result FROM answered").fetchall()
         return {row[0]: row[1] for row in rows}
 
     def add(self, tool_call_id: str, result: str | None = None) -> None:
