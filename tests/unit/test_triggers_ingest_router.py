@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from aios.api.deps import get_pool
 from aios.api.routers import triggers_ingest
+from aios.db import queries
 from aios.db.queries.triggers import ResolvedExternalEventTrigger
 from aios.errors import install_exception_handlers
 from aios.models.triggers import MAX_INGEST_EVENT_BYTES
@@ -87,7 +88,7 @@ def test_unknown_token_uniform_404(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _resolve(conn: Any, *, ingest_token_hash: str) -> None:
         return None
 
-    monkeypatch.setattr(triggers_ingest.queries, "resolve_external_event_trigger", _resolve)
+    monkeypatch.setattr(queries, "resolve_external_event_trigger", _resolve)
     client = TestClient(_app(_FakePool()))
     resp = client.post("/v1/triggers/ingest/aios_evt_missing", content=json.dumps({"a": 1}))
     assert resp.status_code == 404
@@ -112,8 +113,8 @@ def test_happy_path_records_fire_and_dispatches(monkeypatch: pytest.MonkeyPatch)
     async def _defer(trigger_id: str, trigger_run_id: str) -> None:
         recorded["defer"] = (trigger_id, trigger_run_id)
 
-    monkeypatch.setattr(triggers_ingest.queries, "resolve_external_event_trigger", _resolve)
-    monkeypatch.setattr(triggers_ingest.queries, "insert_external_event_fire", _insert)
+    monkeypatch.setattr(queries, "resolve_external_event_trigger", _resolve)
+    monkeypatch.setattr(queries, "insert_external_event_fire", _insert)
     monkeypatch.setattr(triggers_ingest, "defer_trigger_fire", _defer)
 
     client = TestClient(_app(_FakePool()))

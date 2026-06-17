@@ -461,7 +461,7 @@ async def test_duplicate_claim_is_noop(trig_runtime: asyncpg.Pool[Any]) -> None:
     async with pool.acquire() as conn:
         first = await queries.claim_trigger_run(conn, ref.trigger_run_id, started_at=now)
         second = await queries.claim_trigger_run(conn, ref.trigger_run_id, started_at=now)
-    assert first is not None and first["workflow_id"] == watched
+    assert first is not None and first.event["workflow_id"] == watched
     assert second is None
 
     # A duplicate job against the already-claimed carrier exits without firing.
