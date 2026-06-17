@@ -393,11 +393,11 @@ def test_main_missing_api_key_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
 # ─── #1282: --check (no-write diff) mode ─────────────────────────────────────
 
 
-def _mock_get_then_assert_no_put(live_script: str):
+def _mock_get_then_assert_no_put(live_script: str) -> mock._patch[mock.MagicMock]:
     """Patch rr._request so GET returns a live workflow with `live_script`; fail the
     test if a PUT is ever issued (proves --check writes nothing)."""
 
-    def _fake(method: str, url: str, api_key: str, body: Any = None):
+    def _fake(method: str, url: str, api_key: str, body: Any = None) -> tuple[int, dict[str, Any]]:
         if method == "GET":
             return 200, {"version": 9, "script": live_script}
         raise AssertionError(f"--check issued a {method} — it must perform NO write")
