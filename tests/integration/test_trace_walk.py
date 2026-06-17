@@ -60,7 +60,7 @@ async def _seed_run(
         pool,
         account_id=account_id,
         name=f"trace-walk-wf-{uuid4().hex}",
-        script="def main(ctx):\n    return None\n",
+        script="async def main(input):\n    return None\n",
         description=None,
         tools=[],
     )
