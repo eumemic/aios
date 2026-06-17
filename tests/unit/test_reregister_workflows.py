@@ -216,7 +216,7 @@ def test_workflow_triggers_on_both_builder_paths() -> None:
     assert "branches: [master]" in text
     # paths-filtered so unrelated master pushes don't fire — both builders listed.
     assert re.search(r"paths:\s*\n\s*-\s*\"src/aios/workflows/dev_pipeline\.py\"", text)
-    assert 'src/aios/workflows/triage_pipeline.py' in text
+    assert "src/aios/workflows/triage_pipeline.py" in text
 
 
 def test_workflow_references_secret_and_env_config() -> None:

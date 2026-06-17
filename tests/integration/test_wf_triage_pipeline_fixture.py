@@ -33,8 +33,14 @@ pytestmark = pytest.mark.integration
 REPO = "o/r"
 
 
-def _issue(number: int, *, labels: list[str] | None = None, body: str = "a spec",
-           pull_request: bool = False, state: str = "open") -> dict[str, Any]:
+def _issue(
+    number: int,
+    *,
+    labels: list[str] | None = None,
+    body: str = "a spec",
+    pull_request: bool = False,
+    state: str = "open",
+) -> dict[str, Any]:
     obj: dict[str, Any] = {
         "number": number,
         "title": f"Issue {number}",
@@ -78,7 +84,7 @@ class Scenario:
         self.http: list[tuple[str, str]] = []
         self.tasks: list[str] = []
         self.agent_inputs: list[dict[str, Any]] = []
-        self.labels_added: dict[int, list[str]] = {}     # issue -> labels POSTed
+        self.labels_added: dict[int, list[str]] = {}  # issue -> labels POSTed
         self.comments_posted: dict[int, list[str]] = {}  # issue -> comment bodies POSTed
 
     # ── pagination of the issue list ──
@@ -99,8 +105,11 @@ class Scenario:
     def _comments_page(self, number: int, page: int) -> dict[str, Any]:
         bodies = self.comments.get(number, [])
         # single page for the fixture's small threads
-        return {"status": 200, "headers": {},
-                "body": json.dumps([{"id": i, "body": b} for i, b in enumerate(bodies)])}
+        return {
+            "status": 200,
+            "headers": {},
+            "body": json.dumps([{"id": i, "body": b} for i, b in enumerate(bodies)]),
+        }
 
     def _http(self, args: dict[str, Any]) -> dict[str, Any]:
         path, method = args["path"], args["method"]
@@ -150,8 +159,11 @@ class Scenario:
             number = int(spec["input"].get("issue_number", 0))
             if number in self.agent_error_on:
                 return {"error": {"kind": "child_errored"}}
-            return {"ok": self.classifications.get(
-                number, {"classification": "needs-design", "reason": ""})}
+            return {
+                "ok": self.classifications.get(
+                    number, {"classification": "needs-design", "reason": ""}
+                )
+            }
         raise AssertionError(f"unhandled capability {cid} spec={spec!r}")
 
 
@@ -228,8 +240,12 @@ async def test_needs_decision_posts_one_comment_with_the_reason() -> None:
     issues = [_issue(1224, labels=list(PARITY_LABELS))]
     scn = Scenario(
         issues=issues,
-        classifications={1224: {"classification": "needs-decision",
-                                "reason": "requires external partner commitment"}},
+        classifications={
+            1224: {
+                "classification": "needs-decision",
+                "reason": "requires external partner commitment",
+            }
+        },
     )
     value, _, _ = await _drive(scn)
     assert value["counts"]["needs-decision"] == 1
@@ -245,8 +261,7 @@ async def test_needs_decision_posts_one_comment_with_the_reason() -> None:
 
 
 async def test_shovel_ready_and_needs_design_post_no_comment() -> None:
-    issues = [_issue(1221, labels=list(PARITY_LABELS)),
-              _issue(1223, labels=list(PARITY_LABELS))]
+    issues = [_issue(1221, labels=list(PARITY_LABELS)), _issue(1223, labels=list(PARITY_LABELS))]
     scn = Scenario(
         issues=issues,
         classifications={
@@ -284,8 +299,9 @@ async def test_re_run_over_labeled_set_is_a_noop() -> None:
 
 async def test_each_state_label_marks_an_issue_already_triaged() -> None:
     # Any ONE of the five triage state-labels means the issue is already triaged.
-    issues = [_issue(1000 + i, labels=["enhancement", lab])
-              for i, lab in enumerate(TRIAGE_STATE_LABELS)]
+    issues = [
+        _issue(1000 + i, labels=["enhancement", lab]) for i, lab in enumerate(TRIAGE_STATE_LABELS)
+    ]
     scn = Scenario(issues=issues)
     value, _, _ = await _drive(scn)
     assert value["untriaged"] == 0
@@ -294,10 +310,10 @@ async def test_each_state_label_marks_an_issue_already_triaged() -> None:
 
 async def test_mixed_untriaged_and_triaged_only_touches_untriaged() -> None:
     issues = [
-        _issue(1221, labels=["enhancement"]),                 # untriaged
+        _issue(1221, labels=["enhancement"]),  # untriaged
         _issue(1222, labels=["enhancement", "shovel-ready"]),  # already triaged
-        _issue(1223, labels=[]),                               # untriaged (no labels at all)
-        _issue(1224, labels=["needs-decision"]),               # already triaged
+        _issue(1223, labels=[]),  # untriaged (no labels at all)
+        _issue(1224, labels=["needs-decision"]),  # already triaged
     ]
     scn = Scenario(
         issues=issues,
@@ -401,9 +417,7 @@ async def test_label_post_failure_is_recorded_per_issue() -> None:
 
 async def test_accepts_trigger_envelope_input() -> None:
     scn = Scenario(issues=[])
-    value, _, _ = await _drive(
-        scn, input={"trigger": {"kind": "cron"}, "input": {"repo": REPO}}
-    )
+    value, _, _ = await _drive(scn, input={"trigger": {"kind": "cron"}, "input": {"repo": REPO}})
     assert value["state"] == "done"
 
 
@@ -431,8 +445,9 @@ async def test_max_issues_per_run_bounds_one_sweep() -> None:
     issues = [_issue(1221 + i, labels=["enhancement"]) for i in range(5)]
     scn = Scenario(
         issues=issues,
-        classifications={n: {"classification": "shovel-ready", "reason": "r"}
-                         for n in range(1221, 1226)},
+        classifications={
+            n: {"classification": "shovel-ready", "reason": "r"} for n in range(1221, 1226)
+        },
     )
     value, _, _ = await _drive(scn, max_issues_per_run=2)
     # only the first 2 (sorted) are classified this run; a re-run handles the rest
