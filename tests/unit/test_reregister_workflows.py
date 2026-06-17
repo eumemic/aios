@@ -17,6 +17,7 @@ import sys
 import urllib.error
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -43,11 +44,11 @@ def _load_script_module() -> ModuleType:
 rr = _load_script_module()
 
 
-def _dev_target() -> object:
+def _dev_target() -> Any:
     return next(t for t in rr._targets() if t.key == "dev-pipeline")
 
 
-def _triage_target() -> object:
+def _triage_target() -> Any:
     return next(t for t in rr._targets() if t.key == "triage-pipeline")
 
 
@@ -320,6 +321,17 @@ def test_concurrency_comment_is_accurate() -> None:
 # ─── main() target loop (the generalisation, exercised offline) ──────────────
 
 
+def _record(seen: list[str], result: bool) -> Any:
+    """Build a reconcile_target stub that records each target's key and returns
+    ``result`` — without ``list.append`` (whose ``None`` return is not boolable)."""
+
+    def _stub(target: Any, **kwargs: Any) -> bool:
+        seen.append(target.key)
+        return result
+
+    return _stub
+
+
 def test_main_skips_target_with_unset_id_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Only the dev id is set → triage is skipped, dev reconciles. reconcile_target is
     # stubbed so no network is touched.
@@ -328,7 +340,7 @@ def test_main_skips_target_with_unset_id_env(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("DEV_PIPELINE_WORKFLOW_ID", "wf_dev")
     monkeypatch.delenv("TRIAGE_PIPELINE_WORKFLOW_ID", raising=False)
     seen: list[str] = []
-    with mock.patch.object(rr, "reconcile_target", lambda t, **k: seen.append(t.key) or False):
+    with mock.patch.object(rr, "reconcile_target", _record(seen, False)):
         rc = rr.main([])
     assert rc == 0
     assert seen == ["dev-pipeline"]  # triage skipped (no id)
@@ -340,7 +352,7 @@ def test_main_reconciles_all_configured_targets(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("DEV_PIPELINE_WORKFLOW_ID", "wf_dev")
     monkeypatch.setenv("TRIAGE_PIPELINE_WORKFLOW_ID", "wf_triage")
     seen: list[str] = []
-    with mock.patch.object(rr, "reconcile_target", lambda t, **k: seen.append(t.key) or True):
+    with mock.patch.object(rr, "reconcile_target", _record(seen, True)):
         rc = rr.main([])
     assert rc == 0
     assert set(seen) == {"dev-pipeline", "triage-pipeline"}
@@ -366,7 +378,7 @@ def test_main_only_filters_to_named_target(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("DEV_PIPELINE_WORKFLOW_ID", "wf_dev")
     monkeypatch.setenv("TRIAGE_PIPELINE_WORKFLOW_ID", "wf_triage")
     seen: list[str] = []
-    with mock.patch.object(rr, "reconcile_target", lambda t, **k: seen.append(t.key) or False):
+    with mock.patch.object(rr, "reconcile_target", _record(seen, False)):
         rc = rr.main(["--only", "triage-pipeline"])
     assert rc == 0
     assert seen == ["triage-pipeline"]
