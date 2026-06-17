@@ -4932,6 +4932,10 @@ async def test_list_runs_enriches_each_run_with_usage(
 
     runs = await wf_service.list_runs(pool, account_id="acc_wf")
     by_id = {r.id: r for r in runs}
-    assert by_id[run_a].usage is not None and by_id[run_a].usage.cost_microusd == 500
-    assert by_id[run_a].usage.input_tokens == 7
-    assert by_id[run_b].usage is not None and by_id[run_b].usage.cost_microusd == 0
+    usage_a = by_id[run_a].usage
+    assert usage_a is not None
+    assert usage_a.cost_microusd == 500
+    assert usage_a.input_tokens == 7
+    usage_b = by_id[run_b].usage
+    assert usage_b is not None
+    assert usage_b.cost_microusd == 0
