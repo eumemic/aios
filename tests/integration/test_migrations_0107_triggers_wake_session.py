@@ -125,20 +125,23 @@ def test_every_prior_kind_still_inserts_under_new_check(postgres: object) -> Non
 
     rows = {
         "sandbox": (
-            "'cron'", "'{\"schedule\": \"*/5 * * * *\"}'::jsonb",
-            "'{\"kind\": \"sandbox_command\", \"command\": \"echo hi\", "
-            "\"timeout_seconds\": 60, \"max_output_bytes\": 2048}'::jsonb",
+            "'cron'",
+            '\'{"schedule": "*/5 * * * *"}\'::jsonb',
+            '\'{"kind": "sandbox_command", "command": "echo hi", '
+            '"timeout_seconds": 60, "max_output_bytes": 2048}\'::jsonb',
             "NULL",
         ),
         "wake_owner": (
-            "'cron'", "'{\"schedule\": \"*/5 * * * *\"}'::jsonb",
-            "'{\"kind\": \"wake_owner\", \"content\": \"hi\"}'::jsonb",
+            "'cron'",
+            '\'{"schedule": "*/5 * * * *"}\'::jsonb',
+            '\'{"kind": "wake_owner", "content": "hi"}\'::jsonb',
             "NULL",
         ),
         "workflow": (
-            "'cron'", "'{\"schedule\": \"*/5 * * * *\"}'::jsonb",
-            "'{\"kind\": \"workflow\", \"workflow_id\": \"wf_x\", \"workflow_version\": null, "
-            "\"input_template\": null, \"vault_ids\": []}'::jsonb",
+            "'cron'",
+            '\'{"schedule": "*/5 * * * *"}\'::jsonb',
+            '\'{"kind": "workflow", "workflow_id": "wf_x", "workflow_version": null, '
+            '"input_template": null, "vault_ids": []}\'::jsonb',
             "'env_mig'",
         ),
     }
