@@ -677,6 +677,28 @@ class ToolBroker:
         session_id, server, _toolset, tool_name = resolved
         assert tool_name is not None
 
+        # Outbound suppression (#710): MCP is default-deny under suppression.
+        # The sandbox CLI broker makes the identical decision the model
+        # dispatch path does — so a tool called from bash and the same tool
+        # called by the model are suppressed (or not) alike.
+        from aios.harness import runtime
+        from aios.services import outbound_suppression as outbound_suppression_service
+        from aios.services import sessions as sessions_service
+
+        pool = runtime.require_pool()
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        qualified = f"mcp__{server.name}__{tool_name}"
+        if await self._mcp_suppressed(pool, session_id, account_id, qualified):
+            await outbound_suppression_service.record_mcp_suppression(
+                pool,
+                session_id,
+                account_id=account_id,
+                server_name=server.name,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+            return JSONResponse(outbound_suppression_service.mcp_synthesized_result())
+
         vault_id, headers = await self._load_auth_for(session_id, server.url)
         log.info(
             "tool_broker.invoke_mcp",
@@ -688,6 +710,20 @@ class ToolBroker:
             server.url, vault_id, headers, tool_name, arguments, spec_headers=server.headers
         )
         return JSONResponse(envelope)
+
+    async def _mcp_suppressed(
+        self, pool: Any, session_id: str, account_id: str, qualified_name: str
+    ) -> bool:
+        """Whether an MCP call from the sandbox CLI is suppressed (#710)."""
+        from aios.models.agents import mcp_tool_suppressed
+        from aios.services import agents as agents_service
+        from aios.services import sessions as sessions_service
+
+        session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
+        if session.outbound_suppression != "on":
+            return False
+        agent = await agents_service.load_for_session(pool, session, account_id=account_id)
+        return mcp_tool_suppressed(qualified_name, agent.tools)
 
 
 __all__ = ["ToolBroker"]

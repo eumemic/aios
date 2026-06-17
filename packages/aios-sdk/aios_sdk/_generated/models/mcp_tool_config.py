@@ -19,17 +19,27 @@ T = TypeVar("T", bound="McpToolConfig")
 class McpToolConfig:
     """Per-tool override within an ``mcp_toolset`` entry.
 
-    Attributes:
-        name (str):
-        enabled (bool | Unset):  Default: True.
-        permission_policy (McpPermissionPolicy | None | Unset):
-        transport (McpToolConfigTransportType0 | None | Unset):
+    ``read_allow`` opts a single discovered tool into the outbound-suppression
+    read allowlist (#710): MCP has no HTTP-method convention, so when a session
+    runs with ``outbound_suppression == "on"`` every MCP call is *default-deny*
+    (suppressed with a synthesized success) UNLESS the operator marked the
+    specific tool ``read_allow=True`` at config time. A read-allowed tool runs
+    for real even under suppression. Default ``False`` — the safe choice for a
+    protocol that can't self-describe side effects.
+
+        Attributes:
+            name (str):
+            enabled (bool | Unset):  Default: True.
+            permission_policy (McpPermissionPolicy | None | Unset):
+            transport (McpToolConfigTransportType0 | None | Unset):
+            read_allow (bool | Unset):  Default: False.
     """
 
     name: str
     enabled: bool | Unset = True
     permission_policy: McpPermissionPolicy | None | Unset = UNSET
     transport: McpToolConfigTransportType0 | None | Unset = UNSET
+    read_allow: bool | Unset = False
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.mcp_permission_policy import McpPermissionPolicy
@@ -54,6 +64,8 @@ class McpToolConfig:
         else:
             transport = self.transport
 
+        read_allow = self.read_allow
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -67,6 +79,8 @@ class McpToolConfig:
             field_dict["permission_policy"] = permission_policy
         if transport is not UNSET:
             field_dict["transport"] = transport
+        if read_allow is not UNSET:
+            field_dict["read_allow"] = read_allow
 
         return field_dict
 
@@ -117,11 +131,14 @@ class McpToolConfig:
 
         transport = _parse_transport(d.pop("transport", UNSET))
 
+        read_allow = d.pop("read_allow", UNSET)
+
         mcp_tool_config = cls(
             name=name,
             enabled=enabled,
             permission_policy=permission_policy,
             transport=transport,
+            read_allow=read_allow,
         )
 
         return mcp_tool_config

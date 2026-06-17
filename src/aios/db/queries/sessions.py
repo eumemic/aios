@@ -151,6 +151,10 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         origin=row.get("origin") or "foreground",
         parent_run_id=row.get("parent_run_id"),
         archive_when_idle=bool(row.get("archive_when_idle")),
+        # Soft read: present in every ``SELECT *`` / ``RETURNING *`` feeder;
+        # the few explicit-column reads that don't select it fall back to the
+        # safe default "off" (#710).
+        outbound_suppression=row.get("outbound_suppression") or "off",
         # Present only when the query derives it (list_sessions); other callers
         # (single read, INSERT ... RETURNING) leave it None.
         last_event_at=row.get("last_event_at"),
@@ -183,6 +187,7 @@ async def insert_session(
     focal_channel: str | None = None,
     focal_locked: bool = False,
     archive_when_idle: bool = False,
+    outbound_suppression: str = "off",
 ) -> Session:
     """Insert a fresh session row.
 
@@ -207,9 +212,10 @@ async def insert_session(
             INSERT INTO sessions (
                 id, agent_id, environment_id, agent_version, title, metadata,
                 workspace_volume_path, env,
-                focal_channel, focal_locked, account_id, archive_when_idle
+                focal_channel, focal_locked, account_id, archive_when_idle,
+                outbound_suppression
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12, $13)
             RETURNING *
             """,
             new_id,
@@ -224,6 +230,7 @@ async def insert_session(
             focal_locked,
             account_id,
             archive_when_idle,
+            outbound_suppression,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -1173,6 +1180,7 @@ async def update_session(
     agent_version: int | None | EllipsisType = ...,
     title: str | None | EllipsisType = ...,
     metadata: dict[str, Any] | None = None,
+    outbound_suppression: str | None = None,
 ) -> Session:
     # Refuse updates to archived sessions: read paths
     # (``list_sessions``, the worker, the resolver) all filter
@@ -1207,6 +1215,8 @@ async def update_session(
         fields.append(("title", title, None))
     if metadata is not None:
         fields.append(("metadata", metadata, "jsonb"))
+    if outbound_suppression is not None:
+        fields.append(("outbound_suppression", outbound_suppression, None))
     sets = _build_set_assignments(fields, args)
     if not sets:
         return current

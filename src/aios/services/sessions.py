@@ -254,6 +254,7 @@ async def create_session(
     focal_channel: str | None = None,
     focal_locked: bool = False,
     archive_when_idle: bool = False,
+    outbound_suppression: str = "off",
 ) -> Session:
     """Create a session row and return it.
 
@@ -305,6 +306,7 @@ async def create_session(
             focal_channel=focal_channel,
             focal_locked=focal_locked,
             archive_when_idle=archive_when_idle,
+            outbound_suppression=outbound_suppression,
             account_id=account_id,
         )
         if vault_ids:
@@ -1636,6 +1638,7 @@ async def update_session(
     metadata: dict[str, Any] | None = None,
     vault_ids: list[str] | None = None,
     resources: list[SessionResource] | None = None,
+    outbound_suppression: str | None = None,
     crypto_box: CryptoBox | None = None,
 ) -> Session:
     # One transaction so a 4xx from resource attach (e.g. name collision)
@@ -1648,6 +1651,12 @@ async def update_session(
         # create_session guard (issue #851).
         if agent_id is not None:
             await queries.get_agent(conn, agent_id, account_id=account_id)
+        # Whether outbound_suppression actually flips — read the pre-update
+        # value so an idempotent re-PUT (same mode) doesn't recycle the sandbox.
+        suppression_changed = False
+        if outbound_suppression is not None:
+            pre = await queries.get_session_bare(conn, session_id, account_id=account_id)
+            suppression_changed = outbound_suppression != pre.outbound_suppression
         session = await queries.update_session(
             conn,
             session_id,
@@ -1655,6 +1664,7 @@ async def update_session(
             agent_version=agent_version,
             title=title,
             metadata=metadata,
+            outbound_suppression=outbound_suppression,
             account_id=account_id,
         )
         # Validate the resolved pin: agent_version may be supplied without
@@ -1703,7 +1713,7 @@ async def update_session(
     # on the next step; no-op in the API process (registry global is
     # worker-only). An idempotent re-PUT (same vaults, same resources) writes
     # nothing and must not recycle the sandbox.
-    if changed:
+    if changed or suppression_changed:
         _evict_sandbox_for_resource_change(session_id)
     return result
 

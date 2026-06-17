@@ -11636,6 +11636,17 @@
             "type": "boolean",
             "title": "Allow Query",
             "default": false
+          },
+          "suppress": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suppress"
           }
         },
         "additionalProperties": false,
@@ -11676,6 +11687,13 @@
             },
             "type": "array",
             "title": "Routes"
+          },
+          "suppressed_response_status": {
+            "type": "integer",
+            "maximum": 599.0,
+            "minimum": 100.0,
+            "title": "Suppressed Response Status",
+            "default": 200
           }
         },
         "additionalProperties": false,
@@ -12663,6 +12681,11 @@
               }
             ],
             "title": "Transport"
+          },
+          "read_allow": {
+            "type": "boolean",
+            "title": "Read Allow",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -12671,7 +12694,7 @@
           "name"
         ],
         "title": "McpToolConfig",
-        "description": "Per-tool override within an ``mcp_toolset`` entry."
+        "description": "Per-tool override within an ``mcp_toolset`` entry.\n\n``read_allow`` opts a single discovered tool into the outbound-suppression\nread allowlist (#710): MCP has no HTTP-method convention, so when a session\nruns with ``outbound_suppression == \"on\"`` every MCP call is *default-deny*\n(suppressed with a synthesized success) UNLESS the operator marked the\nspecific tool ``read_allow=True`` at config time. A read-allowed tool runs\nfor real even under suppression. Default ``False`` \u2014 the safe choice for a\nprotocol that can't self-describe side effects."
       },
       "McpToolsetConfig": {
         "properties": {
@@ -14097,6 +14120,15 @@
             "title": "Archive When Idle",
             "default": false
           },
+          "outbound_suppression": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "title": "Outbound Suppression",
+            "default": "off"
+          },
           "last_event_at": {
             "anyOf": [
               {
@@ -14242,6 +14274,16 @@
             "title": "Archive When Idle",
             "description": "When true, the session is soft-archived the first time it goes idle owing nothing \u2014 a self-reclaiming, one-shot session. Immutable after launch. Workflow agent() children launch with this set.",
             "default": false
+          },
+          "outbound_suppression": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "title": "Outbound Suppression",
+            "description": "Outbound-suppression mode (#710). 'off' (default) \u2014 normal behavior. 'on' \u2014 bound http_server writes (POST/PUT/PATCH/DELETE by default, per-route overridable) and ALL bound mcp_server calls (default-deny; opt known-safe reads in via McpToolConfig.read_allow) are intercepted: they return a synthesized success and append a tool_call_suppressed audit event instead of leaving the broker. Used for safe rehydration testing and parallel-run cutover. Mutable via PUT /sessions/{id}.",
+            "default": "off"
           },
           "workspace_path": {
             "anyOf": [
@@ -14686,6 +14728,22 @@
               }
             ],
             "title": "Resources"
+          },
+          "outbound_suppression": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outbound Suppression",
+            "description": "Flip outbound-suppression mode (#710). None (default) preserves the current mode; 'on'/'off' sets it. Changing it recycles the session's cached sandbox so the next step re-reads the flag. This is the atomic 'flip outbound from v1 to v2' lever in a parallel-run cutover."
           }
         },
         "additionalProperties": false,

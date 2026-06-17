@@ -43,6 +43,14 @@ class TestMcpDispatchSpecHeaders:
             patch("aios.harness.tool_dispatch._tool_lifecycle", _fake_lifecycle),
             patch("aios.harness.tool_dispatch._append_tool_result_event", new_callable=AsyncMock),
             patch("aios.harness.tool_dispatch.runtime.require_crypto_box", return_value=object()),
+            # Outbound suppression off (#710): the dispatch path consults this
+            # gate before deciding to make the real call; this test exercises
+            # the real-dispatch path, so it stays open.
+            patch(
+                "aios.harness.tool_dispatch._mcp_call_suppressed",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
             patch(
                 "aios.mcp.client.resolve_auth_for_target_url",
                 new_callable=AsyncMock,
@@ -97,3 +105,52 @@ class TestMcpDispatchSpecHeaders:
             )
 
         assert "missing" in captured.get("bail", "")
+
+
+class TestMcpDispatchSuppression:
+    """When the suppression gate (#710) fires, the model-path dispatcher
+    synthesizes a success, records the audit event, and never calls
+    ``call_mcp_tool``."""
+
+    async def test_suppressed_call_synthesizes_and_records(self) -> None:
+        spec = McpServerSpec(name="gh", url="https://mcp.github/")
+        mcp_server_map = {"gh": spec}
+
+        call_mock = AsyncMock(return_value={"content": "ok"})
+        record_mock = AsyncMock()
+        with (
+            patch("aios.harness.tool_dispatch._tool_lifecycle", _fake_lifecycle),
+            patch("aios.harness.tool_dispatch._append_tool_result_event", new_callable=AsyncMock),
+            patch(
+                "aios.harness.tool_dispatch._mcp_call_suppressed",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "aios.services.outbound_suppression.record_mcp_suppression",
+                record_mock,
+            ),
+            patch("aios.mcp.client.call_mcp_tool", call_mock),
+        ):
+            await _execute_mcp_tool_async(
+                MagicMock(),
+                "sess_x",
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "mcp__gh__create_issue",
+                        "arguments": "{}",
+                    },
+                },
+                mcp_server_map,
+                account_id="acc_test_stub",
+            )
+
+        call_mock.assert_not_awaited()  # no real MCP round-trip
+        record_mock.assert_awaited_once()
+        assert record_mock.await_args is not None
+        kwargs = record_mock.await_args.kwargs
+        assert kwargs["server_name"] == "gh"
+        assert kwargs["tool_name"] == "create_issue"
+        # arguments come from the lifecycle-yielded _ToolCall.raw_args ("{}").
+        assert kwargs["arguments"] == {}

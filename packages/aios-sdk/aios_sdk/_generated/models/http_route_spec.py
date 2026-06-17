@@ -72,6 +72,7 @@ class HttpRouteSpec:
             permission_policy (HttpPermissionPolicy | None | Unset):
             methods (list[HttpRouteSpecMethodsType0Item] | None | Unset):
             allow_query (bool | Unset):  Default: False.
+            suppress (bool | None | Unset):
     """
 
     path_pattern: str
@@ -80,6 +81,7 @@ class HttpRouteSpec:
     permission_policy: HttpPermissionPolicy | None | Unset = UNSET
     methods: list[HttpRouteSpecMethodsType0Item] | None | Unset = UNSET
     allow_query: bool | Unset = False
+    suppress: bool | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.http_permission_policy import HttpPermissionPolicy
@@ -116,6 +118,12 @@ class HttpRouteSpec:
 
         allow_query = self.allow_query
 
+        suppress: bool | None | Unset
+        if isinstance(self.suppress, Unset):
+            suppress = UNSET
+        else:
+            suppress = self.suppress
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -133,6 +141,8 @@ class HttpRouteSpec:
             field_dict["methods"] = methods
         if allow_query is not UNSET:
             field_dict["allow_query"] = allow_query
+        if suppress is not UNSET:
+            field_dict["suppress"] = suppress
 
         return field_dict
 
@@ -201,6 +211,15 @@ class HttpRouteSpec:
 
         allow_query = d.pop("allow_query", UNSET)
 
+        def _parse_suppress(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        suppress = _parse_suppress(d.pop("suppress", UNSET))
+
         http_route_spec = cls(
             path_pattern=path_pattern,
             description=description,
@@ -208,6 +227,7 @@ class HttpRouteSpec:
             permission_policy=permission_policy,
             methods=methods,
             allow_query=allow_query,
+            suppress=suppress,
         )
 
         return http_route_spec
