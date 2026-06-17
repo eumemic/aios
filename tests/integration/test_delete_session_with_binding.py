@@ -129,8 +129,7 @@ class TestDeleteSessionWithBinding:
                 session_id,
             )
         assert remaining == 0, (
-            f"delete_session left {remaining} binding row(s) referencing the "
-            f"deleted session"
+            f"delete_session left {remaining} binding row(s) referencing the deleted session"
         )
 
     async def test_raw_session_delete_cascades_to_bindings(
