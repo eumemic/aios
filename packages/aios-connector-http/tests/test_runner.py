@@ -22,6 +22,7 @@ import httpx
 import pytest
 import structlog
 from aios_connector_http import HttpConnector, tool
+from aios_connector_http.runner import _ConnectionState
 
 
 class _RecordedResult:
@@ -954,3 +955,214 @@ class TestDiscoveryLoopReconnectsOnStaleStream:
         # It backed off between the failed attempt and the reconnect
         # (rather than busy-looping).
         assert sleeps and sleeps[0] >= 1.0
+
+
+class TestDeadWorkerRespawn:
+    """Regression for #1233: ``_isolated_serve_connection``'s ``finally``
+    must pop ``self._connections[connection_id]`` (not just ``self.state``)
+    on a terminal ``serve_connection`` failure, so a later discovery
+    ``added`` re-spawns the worker instead of being short-circuited as
+    "already running."  Paired with a bounded re-spawn backoff so a
+    hard-failing connection doesn't hot-loop.
+    """
+
+    async def test_terminal_failure_pops_connections_slot(self) -> None:
+        """A non-cancel ``serve_connection`` crash must clear the
+        ``_connections`` slot so the id is no longer "already running"."""
+
+        class _Crashing(HttpConnector):
+            connector = "crashy"
+
+            async def serve_connection(
+                self, connection_id: str, secrets: dict[str, str]
+            ) -> None:
+                raise RuntimeError("revoked token")
+
+        c = _Crashing(base_url="http://x", token="aios_runtime_x")
+        # Simulate the live-connection bookkeeping _on_connection_added sets.
+        c._connections["conn_1"] = _ConnectionState(
+            connection_id="conn_1", external_account_id="acct_1"
+        )
+        c._connection_served.setdefault("conn_1", asyncio.Event()).set()
+
+        # Should NOT raise (failure isolation preserved).
+        await c._isolated_serve_connection("conn_1", {"token": "bad"})
+
+        # The zombie is gone: the connection slot was popped so a later
+        # ``added`` re-spawns rather than short-circuiting.
+        assert "conn_1" not in c._connections
+        # The served event is cleared so wait_connection_served re-arms.
+        assert not c._connection_served["conn_1"].is_set()
+
+    async def test_clean_return_pops_connections_slot(self) -> None:
+        """A ``serve_connection`` that simply returns is also terminal —
+        no zombie and no armed backoff."""
+
+        class _Returns(HttpConnector):
+            connector = "returns"
+
+            async def serve_connection(
+                self, connection_id: str, secrets: dict[str, str]
+            ) -> None:
+                return
+
+        c = _Returns(base_url="http://x", token="aios_runtime_x")
+        await c._isolated_serve_connection("conn_1", {})
+        assert "conn_1" not in c._reconnect_backoff
+
+    async def test_cancellation_leaves_connections_to_removed_handler(self) -> None:
+        """A ``removed``-driven cancel must NOT pop ``_connections`` here
+        (that's ``_on_connection_removed``'s job) and must NOT arm backoff;
+        the CancelledError re-raises for a clean TaskGroup cancel."""
+
+        class _Blocks(HttpConnector):
+            connector = "blocks"
+
+            async def serve_connection(
+                self, connection_id: str, secrets: dict[str, str]
+            ) -> None:
+                await asyncio.Event().wait()
+
+        c = _Blocks(base_url="http://x", token="aios_runtime_x")
+        c._connections["conn_1"] = _ConnectionState(
+            connection_id="conn_1", external_account_id="acct_1"
+        )
+        task = asyncio.create_task(c._isolated_serve_connection("conn_1", {}))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Not a failure: this handler leaves the slot for the removed path
+        # and arms no backoff.
+        assert "conn_1" in c._connections
+        assert "conn_1" not in c._reconnect_backoff
+
+    async def test_failed_connection_can_respawn_via_added(self) -> None:
+        """End-to-end of the fix: after a terminal failure the very next
+        discovery ``added`` must re-fetch secrets and re-spawn the
+        worker rather than short-circuiting on "already running"."""
+
+        spawns: list[dict[str, str]] = []
+        healthy = asyncio.Event()
+
+        class _FlakyThenOk(HttpConnector):
+            connector = "flaky"
+            # Collapse backoff so the test doesn't actually wait.
+            RECONNECT_BACKOFF_INITIAL = 0.0
+
+            async def serve_connection(
+                self, connection_id: str, secrets: dict[str, str]
+            ) -> None:
+                spawns.append(dict(secrets))
+                if len(spawns) == 1:
+                    raise RuntimeError("first spawn: revoked token")
+                # Second spawn (after secret correction): block forever.
+                healthy.set()
+                await asyncio.Event().wait()
+
+        c = _FlakyThenOk(base_url="http://x", token="aios_runtime_x")
+        c._client = MagicMock()
+
+        secrets_seq = [{"token": "bad"}, {"token": "good"}]
+
+        def _secrets_response(token_map: dict[str, str]) -> MagicMock:
+            body = MagicMock()
+            secrets_obj = MagicMock()
+            secrets_obj.additional_properties = token_map
+            body.secrets = secrets_obj
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.parsed = body
+            return resp
+
+        responses = [_secrets_response(s) for s in secrets_seq]
+
+        async def _fake_get_secrets(*, client: Any, connection_id: str) -> Any:
+            del client, connection_id
+            return responses.pop(0)
+
+        async with asyncio.TaskGroup() as tg:
+            with patch(
+                "aios_connector_http.runner._get_runtime_secrets",
+                new=_fake_get_secrets,
+            ):
+                # First ``added`` spawns a worker that fails terminally.
+                await c._on_connection_added(tg, "conn_1", "acct_1")
+                await c.wait_connection_served("conn_1", deadline=5.0)
+                # Let the failing worker run its finally and pop the slot.
+                for _ in range(50):
+                    await asyncio.sleep(0)
+                    if "conn_1" not in c._connections:
+                        break
+                assert "conn_1" not in c._connections, "zombie slot not cleared"
+
+                # The backfill replays ``added`` — must NOT short-circuit.
+                await c._on_connection_added(tg, "conn_1", "acct_1")
+                await asyncio.wait_for(healthy.wait(), timeout=5.0)
+
+            # Cancel the now-healthy blocking worker so the TG can exit.
+            await c._on_connection_removed("conn_1")
+
+        # Two spawns: the failed one, then the corrected re-spawn — and the
+        # second saw the corrected secret (re-fetched at re-spawn).
+        assert spawns == [{"token": "bad"}, {"token": "good"}]
+
+    def test_arm_reconnect_backoff_escalates_and_caps(self) -> None:
+        class _C(HttpConnector):
+            connector = "c"
+            RECONNECT_BACKOFF_INITIAL = 1.0
+            RECONNECT_BACKOFF_MAX = 4.0
+
+        c = _C(base_url="http://x", token="aios_runtime_x")
+        c._arm_reconnect_backoff("conn_1")
+        assert c._reconnect_backoff["conn_1"] == 1.0
+        c._arm_reconnect_backoff("conn_1")
+        assert c._reconnect_backoff["conn_1"] == 2.0
+        c._arm_reconnect_backoff("conn_1")
+        assert c._reconnect_backoff["conn_1"] == 4.0
+        c._arm_reconnect_backoff("conn_1")  # capped
+        assert c._reconnect_backoff["conn_1"] == 4.0
+
+    async def test_respawn_sleeps_backoff_before_serving(self) -> None:
+        """A re-spawn after a terminal failure sleeps the armed backoff
+        before doing platform work, so a hard-failing connection doesn't
+        hot-loop on every backfill replay."""
+
+        class _Crashing(HttpConnector):
+            connector = "crashy"
+            RECONNECT_BACKOFF_INITIAL = 1.0
+
+            async def serve_connection(
+                self, connection_id: str, secrets: dict[str, str]
+            ) -> None:
+                raise RuntimeError("still revoked")
+
+        c = _Crashing(base_url="http://x", token="aios_runtime_x")
+
+        sleeps: list[float] = []
+        _real_sleep = asyncio.sleep
+
+        async def _fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+            await _real_sleep(0)
+
+        with patch("aios_connector_http.runner.asyncio.sleep", new=_fake_sleep):
+            # First spawn: no backoff armed yet, no sleep.
+            await c._isolated_serve_connection("conn_1", {})
+            assert sleeps == []
+            assert c._reconnect_backoff["conn_1"] == 1.0
+            # Second spawn: armed backoff is slept before serving.
+            await c._isolated_serve_connection("conn_1", {})
+            assert sleeps == [1.0]
+            # Failure escalated the backoff for the next attempt.
+            assert c._reconnect_backoff["conn_1"] == 2.0
+
+    async def test_removed_clears_armed_backoff(self) -> None:
+        class _C(HttpConnector):
+            connector = "c"
+
+        c = _C(base_url="http://x", token="aios_runtime_x")
+        c._arm_reconnect_backoff("conn_1")
+        assert "conn_1" in c._reconnect_backoff
+        await c._on_connection_removed("conn_1")
+        assert "conn_1" not in c._reconnect_backoff
