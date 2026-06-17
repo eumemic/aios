@@ -279,7 +279,9 @@ async def test_update_workflow_roundtrip_and_stale_409(http_client: httpx.AsyncC
     assert updated["name"] == name
 
     # Stale token → 409; unknown id → 404.
-    r = await http_client.put(f"/v1/workflows/{wf['id']}", json={"version": 1, "script": "x"})
+    # (`script` is a valid `async def main(input)` here so create-time validation
+    # passes and the stale-version / missing-id checks are what return 409 / 404.)
+    r = await http_client.put(f"/v1/workflows/{wf['id']}", json={"version": 1, "script": _SCRIPT})
     assert r.status_code == 409
-    r = await http_client.put("/v1/workflows/wf_nope", json={"version": 1, "script": "x"})
+    r = await http_client.put("/v1/workflows/wf_nope", json={"version": 1, "script": _SCRIPT})
     assert r.status_code == 404

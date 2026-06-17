@@ -19,7 +19,7 @@ import asyncpg
 
 from aios.db.listen import open_listen_for_run_events
 from aios.db.queries import workflows as wf_queries
-from aios.errors import ConflictError, ForbiddenError, NotFoundError
+from aios.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,
@@ -41,6 +41,11 @@ from aios.services import sessions as sessions_service
 from aios.services.await_completion import await_completion
 from aios.services.wake import defer_run_wake
 from aios.workflows.service import create_run, resume_gate
+from aios.workflows.validation import (
+    ExtractedSurface,
+    declared_tool_name,
+    validate_workflow_script,
+)
 
 __all__ = [
     "archive_workflow",
@@ -146,6 +151,62 @@ def _reject_operator_path_names_only(
     return [s for s in http_servers if isinstance(s, HttpServerSpec)]
 
 
+async def _check_agent_surface(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    extracted: ExtractedSurface,
+    declared_tools: list[ToolSpec] | None,
+) -> None:
+    """Validate-declared coverage of string-literal ``agent(agent_id="A")`` references.
+
+    Surface-model depth (documented in the PR): a named child wields ``agent ∩ run``
+    (the #794 clamp), so a tool the child needs but the run under-declares is
+    **silently stripped** at spawn. We therefore resolve each *string-literal*
+    ``agent_id`` and require the declared tool surface to cover that agent's own
+    declared tools (the union half contributed by the named child). The error names
+    the missing tool(s) and the agent that needs them.
+
+    Bounded, false-rejection-free depth choices:
+      * **Un-AST-able** ``agent_id`` (computed / from ``input`` / a variable) never
+        reaches here — it is excluded by the literal-only AST extraction.
+      * An ``agent_id`` that **does not resolve** (no such agent in the account *yet*)
+        is **not** a create-time rejection: the agent may be authored later, and a run
+        would surface ``agent_not_found`` as a recoverable value. Rejecting here would
+        be a false positive against a still-valid authoring order.
+      * Only the named agent's **own** tools participate (one hop); a child's transitive
+        ``agent()`` fan-out is out of scope (it is gated at its own spawn).
+    """
+    if not extracted.agent_ids:
+        return
+    declared_names = {declared_tool_name(t) for t in (declared_tools or [])}
+    missing_by_agent: dict[str, list[str]] = {}
+    for agent_id in sorted(extracted.agent_ids):
+        try:
+            agent = await agents_service.get_agent(pool, agent_id, account_id=account_id)
+        except NotFoundError:
+            # Authoring may precede the named agent's creation; do not false-reject.
+            continue
+        missing = sorted(
+            declared_tool_name(t)
+            for t in agent.tools
+            if t.enabled and declared_tool_name(t) not in declared_names
+        )
+        if missing:
+            missing_by_agent[agent_id] = missing
+    if missing_by_agent:
+        parts = "; ".join(
+            f"agent {aid!r} needs " + ", ".join(repr(m) for m in tools)
+            for aid, tools in sorted(missing_by_agent.items())
+        )
+        raise ValidationError(
+            "workflow script references agent(s) whose required tools are not present "
+            f"in the declared `tools` surface ({parts}); a named agent child wields "
+            "agent ∩ run, so the under-declared tools would be silently stripped",
+            detail={"reason": "undeclared_agent_surface", "missing_by_agent": missing_by_agent},
+        )
+
+
 async def create_workflow(
     pool: asyncpg.Pool[Any],
     *,
@@ -172,6 +233,13 @@ async def create_workflow(
     declared verbatim, account-scoped — but names-only sugar is unavailable there (no
     acting agent to resolve against).
     """
+    # Create-time validation (#1284): compile + assert `async def main(input)` +
+    # validate the declared surface is a superset of the AST-extracted required surface
+    # (literal-only). Raises a model-visible ValidationError before any row is written.
+    extracted = validate_workflow_script(script, tools=tools)
+    await _check_agent_surface(
+        pool, account_id=account_id, extracted=extracted, declared_tools=tools
+    )
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
     if creator_session_id is not None:
@@ -236,6 +304,23 @@ async def update_workflow(
     agent. The operator path stores declared http verbatim and rejects names-only sugar
     (no acting agent to resolve against).
     """
+    # Create-time validation applies on update too (#1284): validate the MERGED
+    # result — an omitted ``script``/``tools`` preserves the stored value, so the
+    # script that will run after this update is ``script if script is not None else
+    # current.script`` checked against ``tools if tools is not None else
+    # current.tools``. Fetch current once here when either is omitted (the actor path
+    # re-reads below for the version-pinned attenuation; this read is account-scoped
+    # and cheap). Runs before any write, so a rejected update mutates nothing.
+    current_wf: Workflow | None = None
+    if script is None or tools is None:
+        current_wf = await get_workflow(pool, workflow_id, account_id=account_id)
+    merged_script = script if script is not None else (current_wf.script if current_wf else "")
+    merged_tools = tools if tools is not None else (current_wf.tools if current_wf else None)
+    extracted = validate_workflow_script(merged_script, tools=merged_tools)
+    await _check_agent_surface(
+        pool, account_id=account_id, extracted=extracted, declared_tools=merged_tools
+    )
+
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
     if actor_session_id is None:
