@@ -18,12 +18,16 @@ token. #1187 found that trivially bypassable two ways and broadens + fails the f
   endorsed the broader rule; the false-positive cost is one human gate-clear).
 * **Fail-OPEN on a files-fetch failure.** When ``GET /pulls/N/files`` failed/returned a
   non-list the old floor was skipped, leaving a possibly-auto-merging tier standing — the
-  opposite of the docstring's claim. We now FAIL CLOSED: a non-list payload floors to ≥3.
+  opposite of the docstring's claim. We now FAIL CLOSED: a non-list payload floors to ≥4.
 
 The fix is a DETERMINISTIC floor in the risk node — not the risk agent's judgment:
-``tier = max(tier, 3)`` so the PR parks at the human merge_approval gate (tier ≥3 >
-AUTO_MERGE_MAX_TIER=2) and never auto-merges. A security control must not depend on an LLM
-noticing, and must err conservative on missing evidence.
+``tier = max(tier, 4)`` so the PR parks at the human merge_approval gate (tier ≥4 >
+AUTO_MERGE_MAX_TIER=3) and never auto-merges. The floor is tier-4 (not 3): once
+``AUTO_MERGE_MAX_TIER`` rose to 3 (green + dev-review-cleared work through tier-3
+auto-merges, #1282/#1300), a tier-3 floor would let the CI-config class auto-merge — exactly
+the IaC-reconcile / CI-config blind spot (manifest-vs-live-prod) that CI + dev-review
+structurally CANNOT validate. A security control must not depend on an LLM noticing, and must
+err conservative on missing evidence.
 
 The floor helpers (``_risk_floor`` / ``_changed_workflow_files`` /
 ``_is_workflow_path``) live inside the workflow *script source* (``_BODY``), so they are
@@ -90,35 +94,36 @@ _SECRET_WORKFLOW_DIFF = [
 ]
 
 
-# ─── the acceptance criterion: a secret-referencing workflow change is floored ≥3 ─────
+# ─── the acceptance criterion: a secret-referencing workflow change is floored ≥4 ─────
 
 
-def test_secret_workflow_diff_floors_tier_to_3(
+def test_secret_workflow_diff_floors_tier_to_4(
     risk_floor: Callable[[int, Any], tuple[int, list[str]]],
 ) -> None:
-    # A risk agent rating this tier-2 (as in #1184) must be floored to 3 so it parks at
-    # the merge_approval gate (3 > AUTO_MERGE_MAX_TIER=2) and never auto-merges.
+    # A risk agent rating this tier-2 (as in #1184) must be floored to 4 so it parks at
+    # the merge_approval gate (4 > AUTO_MERGE_MAX_TIER=3) and never auto-merges. The floor
+    # is 4 (not 3) so the CI-config class stays parked now that tier-3 auto-merges.
     tier, floored = risk_floor(2, _SECRET_WORKFLOW_DIFF)
-    assert tier >= 3
-    assert tier == 3
+    assert tier >= 4
+    assert tier == 4
     assert floored == [".github/workflows/reregister-dev-pipeline.yml"]
 
 
 def test_floor_never_lowers_a_higher_tier(
     risk_floor: Callable[[int, Any], tuple[int, list[str]]],
 ) -> None:
-    # The floor is max(tier, 3): a tier-4 stays 4, never dropped to 3.
+    # The floor is max(tier, 4): a tier-4 stays 4, never raised past it.
     tier, floored = risk_floor(4, _SECRET_WORKFLOW_DIFF)
     assert tier == 4
     assert floored
 
 
-@pytest.mark.parametrize("base", [1, 2, 3])
+@pytest.mark.parametrize("base", [1, 2, 3, 4])
 def test_floor_is_max_not_overwrite(
     risk_floor: Callable[[int, Any], tuple[int, list[str]]], base: int
 ) -> None:
     tier, _ = risk_floor(base, _SECRET_WORKFLOW_DIFF)
-    assert tier == max(base, 3)
+    assert tier == max(base, 4)
 
 
 # ─── the negative criterion: unrelated PRs are unaffected ──────────────────────
@@ -148,7 +153,7 @@ def test_any_workflow_change_is_floored_even_without_secret_token(
         }
     ]
     tier, floored = risk_floor(1, files)
-    assert tier == 3
+    assert tier == 4
     assert floored == [".github/workflows/lint.yml"]
 
 
@@ -157,7 +162,7 @@ def test_env_var_exfil_step_is_floored(
 ) -> None:
     # The core #1187 acceptance criterion: a step that exfiltrates the keystone secret via
     # the ENV VAR the workflow already injects — ``$AIOS_API_KEY``, with NO literal
-    # ``secrets.`` in the added hunk — must STILL be floored ≥3 (no bypass).
+    # ``secrets.`` in the added hunk — must STILL be floored ≥4 (no bypass).
     files = [
         {
             "filename": ".github/workflows/reregister-dev-pipeline.yml",
@@ -172,7 +177,7 @@ def test_env_var_exfil_step_is_floored(
     # The added hunk contains no literal ``secrets.`` token — the old heuristic missed it.
     assert "secrets." not in files[0]["patch"]
     tier, floored = risk_floor(2, files)
-    assert tier >= 3
+    assert tier >= 4
     assert floored == [".github/workflows/reregister-dev-pipeline.yml"]
 
 
@@ -185,7 +190,7 @@ def test_mixed_diff_floors_when_any_secret_workflow_present(
         *_SECRET_WORKFLOW_DIFF,
     ]
     tier, floored = risk_floor(1, files)
-    assert tier == 3
+    assert tier == 4
     assert floored == [".github/workflows/reregister-dev-pipeline.yml"]
 
 
@@ -199,7 +204,7 @@ def test_workflow_without_textual_patch_is_floored(
     # it is secret-free, so we floor it (fail safe — cost is one human gate-clear).
     files = [{"filename": ".github/workflows/reregister-dev-pipeline.yml"}]
     tier, floored = risk_floor(2, files)
-    assert tier == 3
+    assert tier == 4
     assert floored == [".github/workflows/reregister-dev-pipeline.yml"]
 
 
@@ -208,21 +213,22 @@ def test_non_list_files_payload_fails_closed(
 ) -> None:
     # #1187: a None / non-list payload means the ``GET /pulls/N/files`` fetch FAILED (or
     # returned garbage) — we cannot prove the PR doesn't touch a workflow, so we FAIL
-    # CLOSED: floor to tier-3 and require a human gate. (The old behaviour failed OPEN here,
+    # CLOSED: floor to tier-4 and require a human gate. (The old behaviour failed OPEN here,
     # leaving a possibly-auto-merging tier-2 standing — the docstring-vs-code mismatch
-    # #1187 fixes.) Must not raise.
+    # #1187 fixes.) Floor is tier-4 (not 3) so the class stays parked now that tier-3
+    # auto-merges (#1282/#1300). Must not raise.
     bad: Any
     for bad in (None, {}, "oops"):
         tier, floored = risk_floor(2, bad)
-        assert tier >= 3
-        assert tier == 3
+        assert tier >= 4
+        assert tier == 4
         assert floored  # records WHY it floored (files-unavailable sentinel)
 
 
 def test_non_list_files_payload_never_lowers_higher_tier(
     risk_floor: Callable[[int, Any], tuple[int, list[str]]],
 ) -> None:
-    # Fail-closed is still max(tier, 3): a tier-4 stays 4.
+    # Fail-closed is still max(tier, 4): a tier-4 stays 4.
     tier, floored = risk_floor(4, None)
     assert tier == 4
     assert floored
