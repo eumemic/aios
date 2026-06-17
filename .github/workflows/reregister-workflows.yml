@@ -1,0 +1,90 @@
+# IaC-sync v1 (issue #1179, generalised in #1226): deploy-on-merge for the aios
+# workflow objects (dev-pipeline, triage-pipeline, …).
+#
+# A live workflow is a DB snapshot — a run snapshots `workflows.script` at launch
+# and there is NO startup re-sync, so a merged fix to a `build_*_script()` builder
+# is INERT until someone re-registers the workflow (proven live 2026-06-16: #1177
+# merged but every run kept executing the OLD script until a hand re-register).
+# This Action automates the hand recipe: on a push to `master` that touches a
+# registered builder, it reads the live workflow, re-extracts its configurable
+# constants from the LIVE header (drift-safe — NOT hardcoded), rebuilds the script
+# from the updated builder, validates it, and PUTs it back, bumping the version.
+#
+# #1226 generalised the original single-target `reregister-dev-pipeline.yml` to a
+# LIST of workflow files. The reconcile script (`scripts/reregister_workflows.py`)
+# carries a `TARGETS` registry; this Action fires when ANY registered builder
+# changes and the script reconciles each target whose `*_WORKFLOW_ID` env var is
+# set (a no-op per target whose regenerated script already matches the live one).
+# Adding a workflow is one `TARGETS` entry + one `paths:` line + one env id — the
+# extract → regenerate → validate → PUT pipeline is shared, not forked.
+#
+# This is IaC-sync **v1**: a one-shot reconcile of a known set of objects. The v2
+# evolution — a reconcile loop over manifests for all infra (agents/triggers/envs
+# as source of truth) — is sketched in eumemic-company
+# `architecture/dev-machine-reification.md` § infrastructure-as-code.
+name: Re-register workflows (IaC-sync v1)
+
+on:
+  push:
+    branches: [master]
+    # Trigger ONLY when a registered builder changes — a builder-less master push is
+    # inert for the workflow objects, so re-registering would be a pointless no-op PUT.
+    paths:
+      - "src/aios/workflows/dev_pipeline.py"
+      - "src/aios/workflows/triage_pipeline.py"
+
+# Never run two re-registers concurrently. With cancel-in-progress: false a
+# stacked pair of builder merges queues on this group: GitHub cancels the older
+# PENDING (queued) run when a newer one arrives, so the tip run wins and applies
+# last. We do NOT cancel an in-flight (already-running) deploy — a half-applied
+# re-register must finish, not be killed. The script's 409 version-mismatch guard
+# stays as defence-in-depth against a manual PUT racing the Action, not as the
+# serialisation mechanism here.
+concurrency:
+  group: reregister-workflows
+  cancel-in-progress: false
+
+# Least-privilege: this job only checks out the repo and calls an external API —
+# it makes NO GitHub writes. Keep the GITHUB_TOKEN read-only so it can't be abused
+# (e.g. by a compromised freshly-resolved third-party dep) for a free write token
+# sitting next to the prod-mutating AIOS_API_KEY.
+permissions:
+  contents: read
+
+env:
+  AIOS_URL: https://api.aios.eumemic.ai
+  DEV_PIPELINE_WORKFLOW_ID: wf_01KV4YGV4PSGP08TJBAY32J2VK
+  # Provisioned out-of-band by the maintainer once the triage-pipeline workflow is
+  # created. Until it is set, the triage target is SKIPPED (not an error) — the
+  # dev-pipeline target still reconciles. Replace with the real id after creation.
+  TRIAGE_PIPELINE_WORKFLOW_ID: ${{ vars.TRIAGE_PIPELINE_WORKFLOW_ID }}
+
+jobs:
+  reregister:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Sync deps (the script imports aios)
+        run: uv sync --dev
+
+      # Harder validation than the script's inline `ast.parse`: exec the emitted
+      # programs against the host with simulated returns. Abort the deploy if a
+      # regenerated machine can't even be driven through its state machine.
+      - name: Validate regenerated scripts (fixture drives)
+        run: >
+          uv run pytest
+          tests/integration/test_wf_dev_pipeline_fixture.py
+          tests/integration/test_wf_triage_pipeline_fixture.py
+          -q
+
+      - name: Re-register live workflows from the updated builders
+        env:
+          # Provisioned out-of-band by the maintainer; NEVER inline a key.
+          AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
+        run: uv run python scripts/reregister_workflows.py
