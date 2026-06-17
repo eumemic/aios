@@ -172,3 +172,106 @@ def test_gh_paginated_non_2xx_page_stops_and_returns_gathered() -> None:
     ns = _namespace(pages)
     items = asyncio.run(ns["gh_paginated"]("/repos/o/r/issues"))
     assert items == [1, 2]
+
+
+# ─── aios#1323: no-silent-degrade LIST-read invariant ────────────────────────
+
+
+def test_gh_paginated_raises_when_page_ceiling_hit_with_next_still_dangling() -> None:
+    # The aios#1323 core: every page we fetch STILL advertises rel="next" (an
+    # unbounded list relative to our ceiling). Hitting max_pages with a next page
+    # still dangling must RAISE cannot-determine, NEVER return the partial list as
+    # if it were complete.
+    page = {"status": 200, "body": "[1,2]", "headers": {"Link": '<...?page=99>; rel="next"'}}
+    ns = _namespace([dict(page) for _ in range(10)])
+    err = ns["GitHubListIncomplete"]
+    with pytest.raises(err):
+        asyncio.run(ns["gh_paginated"]("/repos/o/r/issues", max_pages=3))
+
+
+def test_gh_paginated_complete_walk_under_ceiling_returns_full_list() -> None:
+    # When the walk reaches a page with NO rel="next" before the ceiling, the list
+    # is provably complete and returns normally (no false cannot-determine).
+    pages = [
+        {"status": 200, "body": "[1,2]", "headers": {"Link": '<...?page=2>; rel="next"'}},
+        {"status": 200, "body": "[3,4]"},  # no Link -> last page, complete
+    ]
+    ns = _namespace(pages)
+    items = asyncio.run(ns["gh_paginated"]("/repos/o/r/issues", max_pages=3))
+    assert items == [1, 2, 3, 4]
+
+
+def test_paginated_check_runs_read_does_not_return_false_green() -> None:
+    # THE acceptance scenario: a reconciler reads a PAGINATED check-runs list to
+    # decide if a commit is "all green". Page 1 is all-success but a rel="next"
+    # dangles past the page ceiling — the red/pending check runs live on an
+    # unfetched page. A truncated read must NOT let the caller conclude "green".
+    #
+    # We model the caller's exact green-decision: it is green iff EVERY fetched
+    # check run concluded "success". The invariant guarantees it can only run that
+    # decision over a PROVABLY-COMPLETE list — a truncated read raises instead.
+    success_page = {
+        "status": 200,
+        "body": json.dumps([{"conclusion": "success"}, {"conclusion": "success"}]),
+        "headers": {"Link": '<...?page=99>; rel="next"'},  # more pages exist!
+    }
+    ns = _namespace([dict(success_page) for _ in range(10)])
+    err = ns["GitHubListIncomplete"]
+
+    def reconciler_says_green(repo_path: str) -> bool:
+        runs = asyncio.run(ns["gh_paginated"](repo_path, max_pages=3))
+        return all(r.get("conclusion") == "success" for r in runs)
+
+    # The truncated read does NOT silently return [all-success] -> "green"; it
+    # raises cannot-determine, so the caller can never emit a false green.
+    with pytest.raises(err):
+        reconciler_says_green("/repos/o/r/commits/abc/check-runs")
+
+
+# ─── aios#1323: graphql_list_complete (totalCount == len(nodes)) ─────────────
+
+
+def test_graphql_list_complete_returns_nodes_when_count_matches() -> None:
+    ns = _namespace()
+    conn = {"totalCount": 2, "nodes": [{"id": "a"}, {"id": "b"}]}
+    assert ns["graphql_list_complete"](conn) == [{"id": "a"}, {"id": "b"}]
+
+
+def test_graphql_list_complete_raises_on_undercount() -> None:
+    # len(nodes) < totalCount: there are unfetched pages -> cannot-determine.
+    ns = _namespace()
+    err = ns["GitHubListIncomplete"]
+    conn = {"totalCount": 5, "nodes": [{"id": "a"}, {"id": "b"}]}
+    with pytest.raises(err):
+        ns["graphql_list_complete"](conn, where="check runs for abc")
+
+
+def test_graphql_check_runs_undercount_does_not_return_false_green() -> None:
+    # GraphQL twin of the check-runs scenario: totalCount=4 but only the 2 fetched
+    # nodes are success; the unfetched 2 could be red. The caller can only run its
+    # green decision over a complete list, so the undercount raises instead of
+    # yielding a false green.
+    ns = _namespace()
+    err = ns["GitHubListIncomplete"]
+    conn = {
+        "totalCount": 4,
+        "nodes": [{"conclusion": "SUCCESS"}, {"conclusion": "SUCCESS"}],
+    }
+
+    def says_green() -> bool:
+        nodes = ns["graphql_list_complete"](conn, where="check runs")
+        return all(n.get("conclusion") == "SUCCESS" for n in nodes)
+
+    with pytest.raises(err):
+        says_green()
+
+
+def test_graphql_list_complete_raises_on_malformed_connection() -> None:
+    ns = _namespace()
+    err = ns["GitHubListIncomplete"]
+    with pytest.raises(err):
+        ns["graphql_list_complete"]({"nodes": []})  # no totalCount
+    with pytest.raises(err):
+        ns["graphql_list_complete"]({"totalCount": 0})  # no nodes
+    with pytest.raises(err):
+        ns["graphql_list_complete"]("not a dict")

@@ -1,5 +1,5 @@
-"""Shared GitHub-body parsing helper (aios#1294) — the CLASS fix for silent
-truncate-then-degrade-to-empty.
+"""Shared GitHub-body parsing helper (aios#1294, aios#1323) — the CLASS fix for
+silent truncate-then-degrade-to-empty AND silent list under-count.
 
 ``http_request`` caps a response body at a configurable char limit and now sets
 ``"truncated": True`` whenever it cuts one (the tool no longer truncates
@@ -35,6 +35,27 @@ functions splice it into their ``_BODY``. The text references ``gh``, ``_status`
 pipeline bodies already define with identical semantics — so it composes without
 per-pipeline edits.
 
+aios#1323 — NO-SILENT-DEGRADE LIST-READ INVARIANT (generalises #1294 from response
+BODIES to list PAGINATION): a LIST read is only honest if it can prove it saw the
+WHOLE list. The shipped ``gh_paginated`` followed ``Link: rel="next"`` but, when it
+hit its ``max_pages`` ceiling with a ``rel="next"`` still dangling, RETURNED THE
+PARTIAL LIST AS IF COMPLETE — the same look-green-while-doing-less shape #1294
+polices, one layer up. A reconciler that reads a paginated check-runs list, gets
+page 1, and concludes "all green" is silently under-counting the substrate it
+judges. The fix here:
+
+  * ``gh_paginated`` now RAISES ``GitHubListIncomplete`` if it exhausts ``max_pages``
+    while GitHub still advertises an unfetched ``rel="next"`` page — it NEVER returns
+    a partial set silently treated as complete. (A truncated/unparseable 2xx page
+    still raises ``GitHubBodyError`` as before.)
+  * ``graphql_list_complete`` asserts ``len(nodes) == totalCount`` for a GraphQL
+    connection and raises ``GitHubListIncomplete`` on a mismatch — the GraphQL twin
+    of the REST ``rel="next"`` walk.
+
+``GitHubListIncomplete`` is the first-class ``cannot-determine`` verdict: a LIST
+read that cannot prove completeness is fatal-loud, NEVER coerced to an empty / ok /
+green partial result.
+
 DETERMINISM: the helper does only pure string/list/dict work plus the same ``gh``
 calls the surrounding body already makes; it imports nothing and reads no clock.
 The raise is a deterministic function of the (replayed) tool result, so replay
@@ -60,6 +81,17 @@ class GitHubBodyError(RuntimeError):
     truncated by the response cap, or 2xx-but-unparseable JSON. Raised instead of
     returning None/[] so a structurally-incomplete read never degrades to a silent
     empty result (aios#1294)."""
+
+
+class GitHubListIncomplete(RuntimeError):
+    """A LIST read that could NOT prove it fetched the whole list — REST
+    pagination that still advertised an unfetched ``Link: rel="next"`` page when
+    the page ceiling was hit, or a GraphQL connection where ``len(nodes)`` did not
+    equal ``totalCount``. This is the first-class ``cannot-determine`` verdict of
+    aios#1323: a list read that cannot prove completeness is raised LOUD, NEVER
+    returned as a partial set silently treated as complete (the dominant
+    look-green-while-doing-less shape — a paginated check-runs read that sees page
+    1 and concludes "all green")."""
 
 
 def _resp_truncated(resp):
@@ -117,20 +149,77 @@ async def gh_paginated(path, per_page=100, max_pages=50):
     change and stops pagination (returns what was gathered). The page number is
     rebuilt onto OUR path, so no host-bearing next URL crosses the route gate; each
     request is a distinct ``tool()`` await (per-content-hash call_key), so replay
-    stays stable. Requires the route to allow a query string (``allow_query``)."""
+    stays stable. Requires the route to allow a query string (``allow_query``).
+
+    aios#1323 — the no-silent-degrade list-read invariant: if the page ceiling
+    (``max_pages``) is reached while GitHub STILL advertises an unfetched
+    ``rel="next"`` page, we RAISE ``GitHubListIncomplete`` rather than return the
+    partial list as if it were the whole list. Silently truncating a list read at
+    the ceiling is exactly the look-green-while-doing-less shape (a check-runs read
+    that returns page 1 and is treated as "all green"); the cap exists to bound work,
+    not to license a silent under-count. Raise the ceiling for genuinely huge lists.
+    """
     items = []
     page = 1
     for _ in range(max_pages):
         resp = await gh("GET", _with_query(path, per_page=per_page, page=page))
         if _status(resp) != 200:
-            break
+            return items  # non-2xx (auth/404) is the caller's branch
         chunk = _json_body(resp)  # raises loud on truncated / unparseable 2xx
         if not isinstance(chunk, list):
-            break
+            return items  # genuine shape change — stop, return what we have
         items.extend(chunk)
         nxt = _link_next_page(_headers(resp).get("link"))
         if nxt is None:
-            break
+            return items  # last page reached cleanly — the list is COMPLETE
         page = nxt
-    return items
+    # Loop fell through the ceiling with a rel="next" still dangling: we CANNOT
+    # prove we saw the whole list, so this read is cannot-determine, never a
+    # silently-truncated "complete" list (aios#1323).
+    raise GitHubListIncomplete(
+        "GitHub list read for %r exhausted the %d-page ceiling while a "
+        "rel=\"next\" page was still unfetched — refusing to treat a partial "
+        "(%d-item) read as the complete list. Raise max_pages or paginate more "
+        "finely; never silently under-count a list read." % (path, max_pages, len(items))
+    )
+
+
+def graphql_list_complete(connection, *, where=""):
+    """Assert a GraphQL connection was fetched in FULL and return its ``nodes``.
+
+    ``connection`` is a parsed GraphQL connection object — a dict carrying both a
+    ``totalCount`` (the server's authoritative count) and a ``nodes`` list (what we
+    actually fetched). The GraphQL twin of the REST ``rel="next"`` walk: a single
+    GraphQL page returns at most ``first:N`` nodes, so a connection with more than
+    ``N`` items comes back with ``len(nodes) < totalCount`` and a ``pageInfo`` cursor
+    we did not follow. Returning those ``nodes`` as if complete is the same silent
+    under-count #1294 polices for bodies.
+
+    Returns ``nodes`` iff ``len(nodes) == totalCount``. On ANY mismatch — fewer
+    nodes than the count (unfetched pages) OR a malformed connection missing either
+    field — raise ``GitHubListIncomplete`` (cannot-determine), NEVER a partial list.
+    ``where`` is an optional label for the error message (e.g. ``"check runs for
+    <sha>"``). Pure: deterministic over its input, no I/O."""
+    label = (" for %s" % where) if where else ""
+    if not isinstance(connection, dict):
+        raise GitHubListIncomplete(
+            "GraphQL connection%s is not an object (%r) — cannot prove the list is "
+            "complete; refusing to degrade to empty (aios#1323)." % (label, type(connection).__name__)
+        )
+    total = connection.get("totalCount")
+    nodes = connection.get("nodes")
+    if not isinstance(total, int) or not isinstance(nodes, list):
+        raise GitHubListIncomplete(
+            "GraphQL connection%s is missing totalCount/nodes (totalCount=%r, "
+            "nodes=%r) — cannot prove the list is complete; refusing to degrade to "
+            "empty (aios#1323)." % (label, total, type(nodes).__name__)
+        )
+    if len(nodes) != total:
+        raise GitHubListIncomplete(
+            "GraphQL list%s under-counted: fetched %d node(s) but totalCount is %d "
+            "— there are unfetched pages, so this read is cannot-determine, NOT a "
+            "complete list. Paginate the connection (follow pageInfo.endCursor) "
+            "before treating it as whole (aios#1323)." % (label, len(nodes), total)
+        )
+    return nodes
 '''
