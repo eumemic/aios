@@ -214,22 +214,52 @@ class TestDecodeBody:
 
     def test_text_passthrough(self) -> None:
         r = self._response("text/plain", b"hello")
-        assert _decode_body(r) == "hello"
+        assert _decode_body(r) == ("hello", False)
 
     def test_json_passthrough(self) -> None:
         r = self._response("application/json", b'{"k": "v"}')
-        assert _decode_body(r) == '{"k": "v"}'
+        assert _decode_body(r) == ('{"k": "v"}', False)
 
     def test_binary_refused(self) -> None:
         r = self._response("application/octet-stream", b"\x00\x01\x02\x03")
-        decoded = _decode_body(r)
+        decoded, truncated = _decode_body(r)
         assert decoded.startswith("<binary content of type application/octet-stream")
         assert "4 bytes" in decoded
+        # A refused-binary marker is the full honest value, not a truncated body.
+        assert truncated is False
 
-    def test_truncates_at_cap(self) -> None:
-        large = b"x" * 200_000
+    def test_under_cap_not_truncated(self) -> None:
+        # Just under the default ~1 MB cap: full body, no truncated flag.
+        body = b"x" * 999_999
+        r = self._response("text/plain", body)
+        decoded, truncated = _decode_body(r)
+        assert len(decoded) == 999_999
+        assert truncated is False
+
+    def test_truncates_at_cap_and_signals(self) -> None:
+        # Over the default cap: body is cut AND truncated is reported True so the
+        # caller can fail loud instead of silently parsing a half-body (aios#1294).
+        large = b"x" * 2_000_000
         r = self._response("text/plain", large)
-        assert len(_decode_body(r)) == 100_000
+        decoded, truncated = _decode_body(r)
+        assert len(decoded) == 1_000_000
+        assert truncated is True
+
+    def test_cap_is_env_configurable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AIOS_HTTP_RESPONSE_MAX_CHARS", "50")
+        r = self._response("text/plain", b"y" * 200)
+        decoded, truncated = _decode_body(r)
+        assert len(decoded) == 50
+        assert truncated is True
+
+    def test_bad_env_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An unparseable / non-positive override must NOT disable the cap.
+        for bad in ("not-a-number", "0", "-5"):
+            monkeypatch.setenv("AIOS_HTTP_RESPONSE_MAX_CHARS", bad)
+            r = self._response("text/plain", b"z" * 1_500_000)
+            decoded, truncated = _decode_body(r)
+            assert len(decoded) == 1_000_000
+            assert truncated is True
 
 
 # ── http_request_handler ────────────────────────────────────────────────────
@@ -510,6 +540,35 @@ class TestHttpRequestHandler:
             )
         assert result["status"] == 200
         assert result["body"] == '{"on": true}'
+        # A complete body never carries the truncated flag.
+        assert "truncated" not in result
+
+    async def test_over_cap_body_sets_truncated_flag(
+        self, _stub_runtime: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An over-cap 2xx body is cut AND the result carries ``truncated: True``
+        # so the caller can fail loud rather than parse a half-body (aios#1294).
+        monkeypatch.setenv("AIOS_HTTP_RESPONSE_MAX_CHARS", "100")
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        response = httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b"[" + b"0," * 500 + b"0]",
+        )
+        stub = _make_stub_client(response=response)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth({"Authorization": "Bearer xyz"}),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert result["status"] == 200
+        assert len(result["body"]) == 100
+        assert result["truncated"] is True
 
     async def test_upstream_4xx_returns_status(self, _stub_runtime: Any) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
