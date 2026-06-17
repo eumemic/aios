@@ -151,9 +151,7 @@ async def test_preflight_gate_trips_on_subtree_rollup() -> None:
         ),
         patch("aios.harness.loop._dispatch_confirmed_tools", AsyncMock(return_value=[])),
         patch("aios.harness.loop.accounts_service.get_account_spend_state", flat_state),
-        patch(
-            "aios.harness.loop.accounts_service.get_account_subtree_spend_state", subtree_state
-        ),
+        patch("aios.harness.loop.accounts_service.get_account_subtree_spend_state", subtree_state),
         patch("aios.harness.loop.sessions_service.append_event", append_event),
         patch("aios.harness.loop.fail_all_open_requests", AsyncMock()) as fail_open,
         patch(

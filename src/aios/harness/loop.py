@@ -451,9 +451,10 @@ async def _run_session_step_body(
     # an allocation market: dollars are an externally-checkable derived scalar.
     # (The post-call warning threshold below measures the freshly-charged flat
     # meter against this same effective limit — see `_charge_usage`.)
-    subtree_spent_microusd, spend_limit_usd = (
-        await accounts_service.get_account_subtree_spend_state(pool, account_id)
-    )
+    (
+        subtree_spent_microusd,
+        spend_limit_usd,
+    ) = await accounts_service.get_account_subtree_spend_state(pool, account_id)
     spend_limit_microusd = _limit_to_microusd(spend_limit_usd)
     if spend_limit_microusd is not None and subtree_spent_microusd >= spend_limit_microusd:
         assert spend_limit_usd is not None
