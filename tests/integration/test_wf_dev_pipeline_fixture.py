@@ -312,6 +312,23 @@ class Scenario:
             return {"status": 200, "body": "[]"}
         return {"status": 200, "body": "{}"}  # comments / labels / graphql
 
+    def _ci_verdict(self, verdict: dict[str, Any] | str, dispatched_sha: str) -> Any:
+        """Model a CORRECT ci-watch agent's structured verdict (aios#1392 Fix 2, #1314/#1364):
+        unless the test's verdict dict says otherwise, a watch reports the commit it polled
+        (``polled_sha`` = the head_sha it was dispatched with — the live head in this fixture)
+        and, for a green, ``required_complete=True`` (the full required-check set concluded). A
+        test models a FALSE-green by overriding ``polled_sha`` (wrong-parent #1314) or
+        ``required_complete`` (premature #1364) in its ``ci_results`` entry. A non-dict verdict
+        (a test sentinel) is passed through unchanged. Without this, the script-side
+        ``_ci_verdict`` would (correctly) reject every bare green as unverifiable -> ``retry``."""
+        if not isinstance(verdict, dict):
+            return verdict
+        out = dict(verdict)
+        out.setdefault("polled_sha", dispatched_sha)
+        if out.get("status") == "green":
+            out.setdefault("required_complete", True)
+        return out
+
     def outcome(self, cap: Any) -> dict[str, Any]:
         """Return the full memo outcome ({"ok": value} or {"error": {...}}) for a capability."""
         cid, spec = cap.capability_id, cap.spec
@@ -371,16 +388,21 @@ class Scenario:
                 idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
                 return {"ok": self.review_results[min(idx, len(self.review_results) - 1)]}
             if task == "watch_ci":
+                dispatched_sha = spec["input"].get("head_sha", "")
                 if spec["input"].get("ref"):  # post-merge master watch (advisory, retried)
                     if self.master_ci_results is not None:
                         idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
                         item = self.master_ci_results[min(idx, len(self.master_ci_results) - 1)]
                         if item == "error":
                             return {"error": {"kind": "child_errored"}}
-                        return {"ok": item}
+                        return {"ok": self._ci_verdict(item, dispatched_sha)}
                     if self.master_ci_error:
                         return {"error": {"kind": "child_errored"}}
-                    return {"ok": {"status": self.master_ci, "detail": ""}}
+                    return {
+                        "ok": self._ci_verdict(
+                            {"status": self.master_ci, "detail": ""}, dispatched_sha
+                        )
+                    }
                 if self.ci_error_on == label:
                     return {"error": {"kind": "child_errored"}}
                 # #1389: a SHA-keyed responder — the watch's verdict is a function of the
@@ -390,12 +412,19 @@ class Scenario:
                 if self.ci_results_by_sha is not None:
                     sha = spec["input"].get("head_sha", "")
                     return {
-                        "ok": self.ci_results_by_sha.get(
-                            sha, {"status": "red", "detail": f"no CI for {sha}"}
+                        "ok": self._ci_verdict(
+                            self.ci_results_by_sha.get(
+                                sha, {"status": "red", "detail": f"no CI for {sha}"}
+                            ),
+                            dispatched_sha,
                         )
                     }
                 idx = int(label.rsplit("-", 1)[1]) if label.startswith("ci-") else 0
-                return {"ok": self.ci_results[min(idx, len(self.ci_results) - 1)]}
+                return {
+                    "ok": self._ci_verdict(
+                        self.ci_results[min(idx, len(self.ci_results) - 1)], dispatched_sha
+                    )
+                }
             if task == "risk":
                 return {"ok": self.risk_result}
             if task in ("fix", "fix_ci"):

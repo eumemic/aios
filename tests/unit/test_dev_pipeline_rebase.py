@@ -340,3 +340,116 @@ def test_sync_plumbing_error_fails_closed_to_error() -> None:
     result = _sync(ns)
     assert result["outcome"] == "error"
     assert "detail" in result
+
+
+# ─── _shas_equal: the conservative commit-identity comparison (aios#1392 Fix 2) ──
+
+# A real PR head and a wrong-parent orphan, both valid SHA-1s.
+_HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+_ORPHAN = "0000000000000000000000000000000000000abc"
+
+
+def test_shas_equal_exact_match() -> None:
+    ns = _ns()
+    assert ns["_shas_equal"](_HEAD, _HEAD) is True
+
+
+def test_shas_equal_case_insensitive() -> None:
+    ns = _ns()
+    assert ns["_shas_equal"](_HEAD.upper(), _HEAD.lower()) is True
+
+
+def test_shas_equal_abbreviation_prefix_matches() -> None:
+    # git's short SHA is a prefix of the full one — they name the same commit.
+    ns = _ns()
+    assert ns["_shas_equal"](_HEAD[:8], _HEAD) is True
+    assert ns["_shas_equal"](_HEAD, _HEAD[:12]) is True
+
+
+def test_shas_equal_different_commits_do_not_match() -> None:
+    ns = _ns()
+    assert ns["_shas_equal"](_HEAD, _ORPHAN) is False
+
+
+def test_shas_equal_rejects_too_short_or_empty() -> None:
+    # A stray empty / 1-char value must never spuriously prefix-match (git's min unambiguous
+    # abbreviation is 7) — otherwise "" would "match" everything and re-open the false-green.
+    ns = _ns()
+    assert ns["_shas_equal"]("", _HEAD) is False
+    assert ns["_shas_equal"](_HEAD, "") is False
+    assert ns["_shas_equal"]("a1b2c3", _HEAD) is False  # 6 chars < 7
+    assert ns["_shas_equal"](None, _HEAD) is False
+
+
+# ─── _ci_verdict: the 3-state script-side verdict classifier (aios#1392 Fix 2) ──
+# Returns "pass" (trusted), "red" (genuinely broken -> fix), or "retry" (unverified
+# green/no_ci -> re-watch, never fix). The "retry" path is the key fix: an unverified green is
+# NOT routed to the fixer (the code is not broken — CI just hasn't settled / we can't confirm).
+
+
+def _verdict(ns: dict[str, Any], ci: dict[str, Any], polled_head: str) -> str:
+    return str(_run(ns["_ci_verdict"](REPO, PR, ci, polled_head)))
+
+
+def test_ci_verdict_red_is_red() -> None:
+    ns = _ns(gh=_FakeGH({"head": {"sha": _HEAD}}))
+    assert _verdict(ns, {"status": "red", "polled_sha": _HEAD}, _HEAD) == "red"
+
+
+def test_ci_verdict_green_on_live_head_with_complete_checks_passes() -> None:
+    ns = _ns(gh=_FakeGH({"head": {"sha": _HEAD}}))
+    ci = {"status": "green", "polled_sha": _HEAD, "required_complete": True}
+    assert _verdict(ns, ci, _HEAD) == "pass"
+
+
+def test_ci_verdict_green_without_required_complete_is_retry_not_red() -> None:
+    # Premature-green: green but the required set has not concluded -> RETRY (re-watch),
+    # NOT "red" (which would dispatch a fixer against a passing-but-incomplete build).
+    ns = _ns(gh=_FakeGH({"head": {"sha": _HEAD}}))
+    ci = {"status": "green", "polled_sha": _HEAD, "required_complete": False}
+    assert _verdict(ns, ci, _HEAD) == "retry"
+    # a missing flag is treated as not-complete (fail-closed)
+    assert _verdict(ns, {"status": "green", "polled_sha": _HEAD}, _HEAD) == "retry"
+
+
+def test_ci_verdict_no_ci_on_live_head_passes_and_is_exempt_from_completeness() -> None:
+    # no_ci has no required checks to wait on, so it is exempt from required_complete; but it
+    # must still be on the live head.
+    ns = _ns(gh=_FakeGH({"head": {"sha": _HEAD}}))
+    assert _verdict(ns, {"status": "no_ci", "polled_sha": _HEAD}, _HEAD) == "pass"
+
+
+def test_ci_verdict_no_ci_on_wrong_parent_is_retry() -> None:
+    # Wrong-parent: a no_ci read on an orphan commit (NOT the live head) is rejected to
+    # RETRY — the empty re-trigger commit that caused #1314.
+    ns = _ns(gh=_FakeGH({"head": {"sha": _HEAD}}))
+    assert _verdict(ns, {"status": "no_ci", "polled_sha": _ORPHAN}, _HEAD) == "retry"
+
+
+def test_ci_verdict_missing_polled_sha_is_retry() -> None:
+    # An agent that doesn't report which commit it polled cannot be verified -> fail closed.
+    ns = _ns(gh=_FakeGH({"head": {"sha": _HEAD}}))
+    assert _verdict(ns, {"status": "green", "required_complete": True}, _HEAD) == "retry"
+
+
+def test_ci_verdict_falls_back_to_dispatched_head_when_live_read_blank() -> None:
+    # When the live PR re-read yields no usable SHA-1 (head absent / non-SHA-1), fall back to
+    # the SHA the watch was dispatched with — so a genuine pass is not falsely rejected on a
+    # plumbing hiccup, but the polled commit must still match THAT.
+    ns = _ns(gh=_FakeGH({}))  # no head in payload -> _live_head_sha returns ""
+    ok = {"status": "green", "polled_sha": _HEAD, "required_complete": True}
+    assert _verdict(ns, ok, _HEAD) == "pass"
+    bad = {"status": "green", "polled_sha": _ORPHAN, "required_complete": True}
+    assert _verdict(ns, bad, _HEAD) == "retry"
+
+
+def test_ci_verdict_fails_closed_when_no_head_anchor_at_all() -> None:
+    # The fail-OPEN fix: if BOTH the live read is empty AND the dispatched head is empty, there
+    # is no anchor to verify against. The verdict must fail CLOSED to "retry" — NEVER trust an
+    # unverifiable green (the prior `expected = live or polled` -> "" path silently skipped the
+    # check and trusted the agent's polled_sha).
+    ns = _ns(gh=_FakeGH({}))  # _live_head_sha returns ""
+    ci = {"status": "green", "polled_sha": _ORPHAN, "required_complete": True}
+    assert _verdict(ns, ci, "") == "retry"  # polled_head also empty -> no anchor -> retry
+    # and a no_ci with no anchor is likewise not trusted
+    assert _verdict(ns, {"status": "no_ci", "polled_sha": _ORPHAN}, "") == "retry"
