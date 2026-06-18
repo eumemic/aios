@@ -54,16 +54,23 @@ def _issue_json(body: str = LONG_BODY) -> str:
     )
 
 
-def _pr_json(*, sha: str = "sha_initial", merged: bool = False) -> str:
-    return json.dumps(
-        {
-            "number": 42,
-            "node_id": "PR_node42",
-            "html_url": "https://github.com/o/r/pull/42",
-            "head": {"sha": sha, "ref": BRANCH},
-            "merged": merged,
-        }
-    )
+def _pr_json(
+    *, sha: str = "sha_initial", merged: bool = False, mergeable_state: str | None = None
+) -> str:
+    payload: dict[str, Any] = {
+        "number": 42,
+        "node_id": "PR_node42",
+        "html_url": "https://github.com/o/r/pull/42",
+        "head": {"sha": sha, "ref": BRANCH},
+        "merged": merged,
+    }
+    if mergeable_state is not None:
+        # The sync stage (#1385) reads mergeable_state to decide whether to rebase. A clean PR
+        # is the default (omitted -> _needs_rebase False -> sync no-op); set "dirty"/"behind"
+        # to model master having moved under the branch.
+        payload["mergeable_state"] = mergeable_state
+        payload["mergeable"] = mergeable_state == "clean"
+    return json.dumps(payload)
 
 
 # ─── the capability responder (a deterministic function of the capability) ────
@@ -99,6 +106,8 @@ class Scenario:
         merge_returns_sha: bool = True,
         commit_sha: str | None = MERGE_SHA,
         transient_5xx: dict[tuple[str, str], int] | None = None,
+        mergeable_state: str | None = None,
+        rebase_exit: list[int] | None = None,
     ) -> None:
         self.body = body
         # The comment-thread the GET /issues/{n}/comments responder returns (list of body
@@ -142,6 +151,13 @@ class Scenario:
         # then the real response. Counts are mutated as attempts arrive (replay-stable because
         # each retry is a distinct call_key, so a replay re-asks each attempt exactly once).
         self.transient_5xx = dict(transient_5xx or {})
+        # The sync stage (#1385). mergeable_state seeds the PR's mergeable_state field so the
+        # sync probe decides whether to rebase; rebase_exit is the queue of exit codes the
+        # mechanical-rebase bash node returns per invocation (75 noop / 0 done / 76 conflict /
+        # 77 error). When rebase_exit is exhausted the last code is reused.
+        self.mergeable_state = mergeable_state
+        self.rebase_exit = list(rebase_exit or [])
+        self.rebase_commands: list[str] = []  # every rebase bash command dispatched
         self.tasks: list[str] = []
         self.agent_inputs: list[dict[str, Any]] = []
         self.gates: list[dict[str, Any]] = []
@@ -239,8 +255,10 @@ class Scenario:
             raw = args.get("body")
             self.followups.append(json.loads(raw) if isinstance(raw, str) else {})
             return {"status": 201, "body": json.dumps({"number": 99})}
-        if method == "GET" and path == "/repos/o/r/pulls/42":  # merge-confirm read
-            body = json.loads(_pr_json(merged=self.pr_merged_on_confirm))
+        if method == "GET" and path == "/repos/o/r/pulls/42":  # sync probe + merge-confirm read
+            body = json.loads(
+                _pr_json(merged=self.pr_merged_on_confirm, mergeable_state=self.mergeable_state)
+            )
             body["merge_commit_sha"] = self.commit_sha  # confirm-read fallback for master sha
             return {"status": 200, "body": json.dumps(body)}
         if method == "GET" and path == "/repos/o/r/commits/master":  # ref->SHA-1 canonicalise
@@ -272,7 +290,25 @@ class Scenario:
         if cid == "tool":
             if spec["tool_name"] == "http_request":
                 return {"ok": self._http(spec["input"])}
-            if spec["tool_name"] == "bash":  # merge-ref guard
+            if spec["tool_name"] == "bash":
+                command = spec["input"].get("command", "")
+                if "git rebase origin/master" in command:  # sync-stage mechanical rebase (#1385)
+                    self.rebase_commands.append(command)
+                    code = (
+                        self.rebase_exit.pop(0)
+                        if len(self.rebase_exit) > 1
+                        else (self.rebase_exit[0] if self.rebase_exit else 0)
+                    )
+                    return {
+                        "ok": {
+                            "exit_code": code,
+                            "stdout": "REBASE",
+                            "stderr": "",
+                            "timed_out": False,
+                            "truncated": False,
+                        }
+                    }
+                # merge-ref guard
                 return {
                     "ok": {
                         "exit_code": self.merge_guard_exit,
@@ -386,6 +422,7 @@ async def test_happy_path_merges_and_completes() -> None:
         "implement",
         "open-pr",
         "verify",
+        "sync",
         "risk",
         "merge-guard",
         "mark-ready",
@@ -652,6 +689,96 @@ async def test_merge_guard_refusal_proceed_merges() -> None:
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
     assert value["merged"] is True
+
+
+# ─── sync / rebase recovery (#1385) ───────────────────────────────────────────
+
+
+async def test_clean_pr_skips_rebase_entirely() -> None:
+    # A mergeable PR (no master drift) must NOT run any rebase bash node — the sync stage is
+    # an idempotent no-op and the run merges as before.
+    scn = Scenario(mergeable_state="clean")
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["merged"] is True
+    assert scn.rebase_commands == []  # never touched the rebase bash node
+
+
+async def test_dirty_pr_mechanically_rebases_then_reenters_ci_and_merges() -> None:
+    # master moved under the branch (dirty) but the rebase replays cleanly (exit 0 = DONE).
+    # The branch is healed mechanically (no fix agent), CI re-runs on the updated branch
+    # (a distinct `reci-0` watch), and the PR merges.
+    scn = Scenario(mergeable_state="dirty", rebase_exit=[0])
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["merged"] is True
+    assert len(scn.rebase_commands) == 1  # exactly the one mechanical rebase
+    # CI was re-entered after the rebase (the post-rebase `reci` watch ran)
+    assert any(t.startswith("reci") for t in scn.tasks)
+
+
+async def test_dirty_pr_already_current_is_noop_and_does_not_reenter_ci() -> None:
+    # GitHub reports dirty but the mechanical rebase finds the branch already current (exit
+    # 75 = NOOP) — a re-driven sync on an already-healed branch. CI is NOT re-entered.
+    scn = Scenario(mergeable_state="dirty", rebase_exit=[75])
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["merged"] is True
+    assert not any(t.startswith("reci") for t in scn.tasks)  # no CI re-entry on a no-op
+
+
+async def test_real_conflict_resolved_by_fix_agent_then_merges() -> None:
+    # The mechanical rebase CONFLICTs (76); the fix agent resolves it; the confirm rebase
+    # reports NOOP (75) -> healed; CI re-runs; the PR merges. exits: [76, 75].
+    scn = Scenario(mergeable_state="dirty", rebase_exit=[76, 75])
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["merged"] is True
+    # the SAME fix agent fix_ci uses was dispatched with the rebase resolve task
+    assert any(i.get("task") == "fix_ci" and "rebase_hint" in i for i in scn.agent_inputs)
+    assert any(t.startswith("reci") for t in scn.tasks)  # CI re-entered after the resolve
+
+
+async def test_unresolvable_conflict_parks_at_rebase_conflict_gate() -> None:
+    # The conflict never heals (mechanical 76, then both confirm attempts stay 76). The run
+    # parks at the NEW, distinct `rebase_conflict` gate — NOT the verify or merge gate.
+    scn = Scenario(
+        mergeable_state="dirty",
+        rebase_exit=[76, 76, 76],
+        gate_results={"rebase_conflict": {}},  # chairman does not resolve -> escalate
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "rebase_conflict"
+    assert any(g["kind"] == "rebase_conflict" for g in scn.gates)
+    # a marker comment naming the conflict was posted to the PR
+    assert any("Rebase conflict" in c for c in scn.comments_posted)
+
+
+async def test_rebase_conflict_gate_resolved_continues_to_merge() -> None:
+    # The chairman resolves the rebase_conflict gate -> the run continues past sync to merge.
+    scn = Scenario(
+        mergeable_state="dirty",
+        rebase_exit=[76, 76, 76],
+        gate_results={"rebase_conflict": {"resolved": True}},
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["merged"] is True
+    assert any(g["kind"] == "rebase_conflict" for g in scn.gates)
+
+
+async def test_rebase_plumbing_error_fails_closed_to_rebase_conflict_gate() -> None:
+    # A clone/fetch/push failure (exit 77) cannot prove the branch is healthy: fail closed to
+    # the rebase_conflict gate rather than waving a possibly-unmergeable branch through.
+    scn = Scenario(
+        mergeable_state="dirty",
+        rebase_exit=[77],
+        gate_results={"rebase_conflict": {}},
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "rebase_conflict"
 
 
 async def test_high_risk_parks_for_merge_approval() -> None:

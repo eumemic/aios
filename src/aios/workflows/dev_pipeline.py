@@ -196,6 +196,7 @@ LABEL_FAILED = "autodev:failed"
 MARKER_SPEC_NOT_READY = "## Spec not ready for implementation"
 MARKER_RISK_ASSESSMENT = "## Risk Assessment"
 MARKER_MERGE_GUARD = "## Merge guard refused"
+MARKER_REBASE_CONFLICT = "## Rebase conflict — branch could not be healed"
 
 # Dispatch-claim label (#1188): the cron-scanner / dev-conveyor stamps an issue ``dispatched``
 # when it launches a run for it. Like ``IN_PROGRESS`` it is an IN-FLIGHT claim that must be
@@ -228,6 +229,37 @@ FIX_CI_LINT_HINT = (
     "— you MUST run `ruff format` (write mode, not --check) over the affected paths and "
     "commit the result. Run both `ruff check --fix` and `ruff format` so a combined "
     "lint+format failure is fully resolved before re-pushing."
+)
+
+# Rebase/sync recovery (#1385): when master moves under an open PR it goes DIRTY/non-
+# mergeable, GitHub can't compute ``refs/pull/N/merge``, CI never re-runs and the run jams at
+# the CI watch. The sync stage HEALS the branch instead of parking: a mechanical
+# ``git rebase origin/master`` + force-push-with-lease in a bash node, and — only if that hits
+# REAL conflicts — a bounded (≤MAX_REBASE_ATTEMPTS) hand-off to the SAME fix agent ``fix_ci``
+# uses, with a resolve-conflicts task. Still unresolved after the budget parks at a NEW,
+# distinct ``rebase_conflict`` gate (never the orphaned-at-CI jam, never a silent zombie).
+MAX_REBASE_ATTEMPTS = 2
+
+# Distinct bash exit codes the mechanical rebase node uses so the orchestrator can branch on
+# the OUTCOME (a value, never a raise) — mirrors the merge-guard's fail-closed exit-code style:
+#   0  -> rebased (or already current: an idempotent no-op re-run leaves the branch as-is)
+#   75 -> the branch is ALREADY current with origin/master (no rebase was needed) — a no-op
+#   76 -> the mechanical rebase hit REAL conflicts (a hand-off to the fix agent is required)
+#   77 -> a structural/plumbing failure (clone/fetch/push) the rebase could not even attempt
+REBASE_EXIT_DONE = 0
+REBASE_EXIT_NOOP = 75
+REBASE_EXIT_CONFLICT = 76
+REBASE_EXIT_ERROR = 77
+
+# The resolve-conflicts hand-off rides this hint so the fix agent (the same one ``fix_ci``
+# invokes) knows the task is a rebase-conflict resolution, not a CI failure: rebase onto
+# origin/master, resolve the conflict markers, commit, and force-push-with-lease the branch.
+FIX_REBASE_HINT = (
+    "This is a REBASE-CONFLICT resolution, not a CI fix. Master moved under this PR and a "
+    "mechanical `git rebase origin/master` hit conflicts the machine could not auto-resolve. "
+    "Fetch `origin/master`, rebase the PR branch onto it, resolve every conflict by hand "
+    "(remove all conflict markers, keep both intents correct), run the tests, then "
+    "`git push --force-with-lease` the rebased branch. Return the new head_sha."
 )
 
 
@@ -278,9 +310,16 @@ def _render_constants(
         _py("MARKER_SPEC_NOT_READY", MARKER_SPEC_NOT_READY),
         _py("MARKER_RISK_ASSESSMENT", MARKER_RISK_ASSESSMENT),
         _py("MARKER_MERGE_GUARD", MARKER_MERGE_GUARD),
+        _py("MARKER_REBASE_CONFLICT", MARKER_REBASE_CONFLICT),
         _py("MAX_RUN_RETRIES", MAX_RUN_RETRIES),
         _py("MAX_MASTER_CI_ITERS", MAX_MASTER_CI_ITERS),
+        _py("MAX_REBASE_ATTEMPTS", MAX_REBASE_ATTEMPTS),
+        _py("REBASE_EXIT_DONE", REBASE_EXIT_DONE),
+        _py("REBASE_EXIT_NOOP", REBASE_EXIT_NOOP),
+        _py("REBASE_EXIT_CONFLICT", REBASE_EXIT_CONFLICT),
+        _py("REBASE_EXIT_ERROR", REBASE_EXIT_ERROR),
         _py("FIX_CI_LINT_HINT", FIX_CI_LINT_HINT),
+        _py("FIX_REBASE_HINT", FIX_REBASE_HINT),
         _py("IMPLEMENT_SCHEMA", IMPLEMENT_SCHEMA),
         _py("REVIEW_SCHEMA", REVIEW_SCHEMA),
         _py("FIX_SCHEMA", FIX_SCHEMA),
@@ -622,6 +661,86 @@ def _merge_guard_command(repo, pr_number):
     return "\n".join(lines)
 
 
+def _needs_rebase(pr):
+    """Decide whether the PR's branch needs a sync/rebase from its mergeability fields
+    (#1385). ``pr`` is the ``GET /pulls/{n}`` payload; GitHub reports two signals:
+
+      - ``mergeable``: ``True`` (clean), ``False`` (conflicting), or ``None`` (GitHub has
+        not finished computing the merge yet — a transient unknown, NOT a conflict).
+      - ``mergeable_state``: ``clean`` / ``has_hooks`` / ``unstable`` / ``blocked`` (all
+        mergeable-against-base), vs ``dirty`` / ``behind`` (the branch is out of date with
+        base — exactly the master-moved-under case this stage heals).
+
+    We treat ONLY the unambiguous out-of-date states as needing a rebase: ``mergeable is
+    False`` (a real conflict GitHub already computed) OR ``mergeable_state in {dirty,
+    behind}``. A ``None``/unknown mergeable with a benign state is NOT forced through a
+    rebase (idempotence: a branch already current with master is a no-op — we don't rebase a
+    clean PR just because GitHub hasn't recomputed yet). Returns a plain bool.
+
+    The string set is deliberately tight: ``clean``/``unstable``/``has_hooks``/``blocked``
+    are all mergeable-against-base (``unstable`` = failing checks, ``blocked`` = required
+    review — neither is a master-moved-under conflict), so none of them triggers a rebase."""
+    if not isinstance(pr, dict):
+        return False
+    state = pr.get("mergeable_state")
+    if state in ("dirty", "behind"):
+        return True
+    if pr.get("mergeable") is False:
+        return True
+    return False
+
+
+def _rebase_command(repo, branch):
+    """The mechanical rebase node (#1385): fetch ``origin/master``, ``git rebase
+    origin/master`` the PR branch, and ``git push --force-with-lease`` the result. Run in a
+    bash node against a fresh clone, returning a DISTINCT exit code the orchestrator branches
+    on (a value, never a raise — same fail-closed exit-code discipline as the merge guard):
+
+      - REBASE_EXIT_NOOP (75): the branch is ALREADY current with origin/master — no rebase
+        is needed, nothing is pushed. This is the idempotence guarantee: re-running the stage
+        on an already-healed branch is a clean no-op under the at-least-once crash contract.
+      - REBASE_EXIT_DONE (0): the rebase replayed cleanly onto origin/master and the result
+        was force-pushed-with-lease. CI must re-run on the updated branch (the caller
+        re-enters the CI watch).
+      - REBASE_EXIT_CONFLICT (76): the rebase hit REAL conflicts ``git rebase`` could not
+        auto-resolve — we ``git rebase --abort`` (leave the branch untouched) and signal the
+        caller to hand off to the fix agent.
+      - REBASE_EXIT_ERROR (77): a plumbing failure (clone/fetch/push) before a rebase verdict
+        — fail-closed so a flaky clone is never mistaken for a clean branch.
+
+    ``--force-with-lease`` (not ``--force``) so a concurrent push to the PR branch aborts the
+    push rather than clobbering it. ``rm -rf`` then clone makes the node re-run-tolerant under
+    the at-least-once bash contract. ``set -u -o pipefail`` (NOT ``-e``: we branch on the
+    rebase's own exit explicitly, so a non-zero rebase must not abort the script)."""
+    lines = [
+        "set -u -o pipefail",
+        "D=/workspace/rebase-%s" % branch.replace("/", "-"),
+        "rm -rf \"$D\"",
+        "git clone --quiet "
+        "https://x-access-token:$GITHUB_TOKEN@github.com/%s.git \"$D\" || exit %d"
+        % (repo, REBASE_EXIT_ERROR),
+        "cd \"$D\" || exit %d" % REBASE_EXIT_ERROR,
+        "git config user.email dev-pipeline@aios.local",
+        "git config user.name 'aios dev-pipeline'",
+        "git fetch --quiet origin %s || exit %d" % (BASE_BRANCH, REBASE_EXIT_ERROR),
+        "git checkout --quiet -B %s origin/%s || exit %d"
+        % (branch, branch, REBASE_EXIT_ERROR),
+        # Already current with origin/master? (the branch contains origin/master's tip) ->
+        # nothing to do. This is the idempotent no-op: a re-driven stage on a healed branch.
+        "if git merge-base --is-ancestor origin/%s HEAD; then" % BASE_BRANCH,
+        "  echo REBASE_NOOP; exit %d" % REBASE_EXIT_NOOP,
+        "fi",
+        "if git rebase origin/%s; then" % BASE_BRANCH,
+        "  git push --force-with-lease origin %s || exit %d" % (branch, REBASE_EXIT_ERROR),
+        "  echo REBASE_DONE; exit %d" % REBASE_EXIT_DONE,
+        "else",
+        "  git rebase --abort || true",
+        "  echo REBASE_CONFLICT; exit %d" % REBASE_EXIT_CONFLICT,
+        "fi",
+    ]
+    return "\n".join(lines)
+
+
 def _mark_ready_query():
     return ("mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id})"
             "{pullRequest{isDraft}}}")
@@ -794,6 +913,132 @@ async def _file_followup(repo, title, body):
     if isinstance(created, dict):
         return created.get("number")
     return None
+
+
+async def _watch_ci(repo, pr_number, head_sha, comment_bodies, model, label_prefix):
+    """The bounded CI watch->fix->re-watch loop (the agent OWNS the durable wait), factored
+    out so it can be RE-ENTERED after a sync/rebase heals the branch (#1385): a successful
+    rebase force-pushes a new tip, so CI must re-run on the updated branch before merge. The
+    ``label_prefix`` distinguishes the labels of the second entry (``reci-…``) from the first
+    (``ci-…``) so replay stays deterministic (a distinct call_key per agent invocation).
+
+    Returns ``(ci_ok, ci_agent_error, head_sha)``: ``ci_ok`` True on green/no_ci, else the
+    caller parks at the verify gate; ``ci_agent_error`` distinguishes a flaky-agent break from
+    plain CI exhaustion; ``head_sha`` is the (possibly fix-advanced) head for downstream nodes.
+    Bounded N watches / N-1 fixes — matches autodev's CI loop."""
+    ci_ok = False
+    ci_agent_error = False
+    for i in range(MAX_CI_ITERS):
+        # A ci-watch / ci-fix agent error breaks the loop and falls through to the verify
+        # gate (item 5) — it does NOT crash the run nor silently pass a red PR.
+        try:
+            ci = await agent(
+                {"task": "watch_ci", "repo": repo, "pr_number": pr_number, "head_sha": head_sha},
+                agent_id=CI_AGENT_ID, output_schema=CI_SCHEMA, model=model,
+                label="%s-%d" % (label_prefix, i))
+        except AgentError as exc:
+            log("ci-watch agent error -> escalate:", exc)
+            ci_agent_error = True
+            break
+        if ci["status"] in ("green", "no_ci"):
+            ci_ok = True
+            break
+        if i == MAX_CI_ITERS - 1:
+            break
+        before = head_sha
+        try:
+            fix = await agent(
+                {"task": "fix_ci", "repo": repo, "pr_number": pr_number,
+                 "detail": ci.get("detail", ""), "comments": comment_bodies,
+                 "lint_hint": FIX_CI_LINT_HINT},
+                agent_id=FIX_AGENT_ID, output_schema=FIX_SCHEMA, model=model,
+                label="%s-fix-%d" % (label_prefix, i))
+            head_sha = fix["head_sha"]
+        except AgentError as exc:
+            log("ci-fix agent error -> escalate:", exc)
+            ci_agent_error = True
+            break
+        if before and head_sha == before:
+            break
+    return ci_ok, ci_agent_error, head_sha
+
+
+async def _sync_branch(repo, pr_number, branch, comment_bodies, model):
+    """Rebase/sync recovery stage (#1385): HEAL a branch master moved under instead of
+    parking or orphaning it. Returns one of:
+
+      - ``{"outcome": "noop"}``      — branch already current with master (idempotent no-op);
+                                       the CI watch does NOT need re-entry.
+      - ``{"outcome": "rebased", "head_sha": <sha or "">}`` — the branch was rebased (mechanically
+                                       or agent-resolved); the caller MUST re-enter the CI watch
+                                       so CI re-runs on the updated branch before merge.
+      - ``{"outcome": "conflict", "detail": <str>}`` — still unresolved after the bounded fix-agent
+                                       attempts; the caller parks at the ``rebase_conflict`` gate.
+      - ``{"outcome": "error", "detail": <str>}`` — a plumbing failure attempting the rebase;
+                                       the caller parks at the ``rebase_conflict`` gate too (we
+                                       cannot prove the branch is healthy — fail closed).
+
+    Flow: (1) read mergeability via ``GET /pulls/{n}``; a clean/unknown-but-benign branch is a
+    no-op. (2) A DIRTY/behind/conflicting branch gets a MECHANICAL ``git rebase origin/master``
+    + force-push-with-lease (``_rebase_command``). A clean replay -> rebased; an already-current
+    branch -> no-op (idempotent). (3) A REAL conflict hands off to the SAME fix agent ``fix_ci``
+    uses, with a resolve-conflicts task, bounded to MAX_REBASE_ATTEMPTS; each attempt re-runs
+    the mechanical rebase to confirm the branch is now clean. (4) Still conflicted after the
+    budget -> conflict (the caller parks at the new ``rebase_conflict`` gate)."""
+    # (1) Mergeability probe — a clean branch is the common case and a clean no-op.
+    pr = _json_body(await gh("GET", _ipath(repo, "/pulls/%d" % pr_number)))
+    if not _needs_rebase(pr):
+        log("sync: PR #%d is mergeable (state=%r) -> no rebase needed"
+            % (pr_number, pr.get("mergeable_state") if isinstance(pr, dict) else None))
+        return {"outcome": "noop"}
+
+    # (2) Mechanical rebase first — the cheap, deterministic path that heals the common
+    # master-moved-under-with-no-textual-conflict case without spending an agent.
+    rb = await tool("bash", {"command": _rebase_command(repo, branch), "timeout_seconds": 600})
+    code = rb.get("exit_code") if isinstance(rb, dict) else None
+    if code == REBASE_EXIT_NOOP:
+        log("sync: branch %r already current with %s -> no-op" % (branch, BASE_BRANCH))
+        return {"outcome": "noop"}
+    if code == REBASE_EXIT_DONE:
+        log("sync: mechanical rebase of %r onto %s succeeded -> re-enter CI"
+            % (branch, BASE_BRANCH))
+        return {"outcome": "rebased", "head_sha": ""}
+    if code == REBASE_EXIT_ERROR:
+        detail = "%s\n%s\nexit=%r" % (
+            (rb.get("stdout", "") if isinstance(rb, dict) else "")[-800:],
+            (rb.get("stderr", "") if isinstance(rb, dict) else "")[-400:], code)
+        log("sync: mechanical rebase plumbing error -> fail closed to rebase_conflict gate")
+        return {"outcome": "error", "detail": detail}
+
+    # (3) REAL conflict (REBASE_EXIT_CONFLICT) -> hand off to the fix agent, bounded. Each
+    # attempt: dispatch the resolve-conflicts task, then RE-RUN the mechanical rebase to
+    # CONFIRM the agent actually healed the branch (a no-op/done exit proves it).
+    last_detail = "mechanical rebase hit conflicts git could not auto-resolve"
+    for attempt in range(MAX_REBASE_ATTEMPTS):
+        try:
+            fix = await agent(
+                {"task": "fix_ci", "repo": repo, "pr_number": pr_number,
+                 "detail": last_detail, "comments": comment_bodies,
+                 "rebase_hint": FIX_REBASE_HINT, "lint_hint": FIX_CI_LINT_HINT},
+                agent_id=FIX_AGENT_ID, output_schema=FIX_SCHEMA, model=model,
+                label="rebase-fix-%d" % attempt)
+        except AgentError as exc:
+            last_detail = "rebase-fix agent error: %s" % exc
+            log("sync: rebase-fix agent error on attempt %d:" % attempt, exc)
+            continue
+        # Confirm the branch is now mergeable by re-running the mechanical rebase: a
+        # NOOP (the agent rebased + pushed) or a clean DONE proves it healed.
+        confirm = await tool("bash",
+                             {"command": _rebase_command(repo, branch), "timeout_seconds": 600})
+        ccode = confirm.get("exit_code") if isinstance(confirm, dict) else None
+        if ccode in (REBASE_EXIT_NOOP, REBASE_EXIT_DONE):
+            log("sync: rebase conflict resolved by fix agent on attempt %d" % attempt)
+            return {"outcome": "rebased", "head_sha": fix.get("head_sha", "")
+                    if isinstance(fix, dict) else ""}
+        last_detail = ("rebase still conflicting after fix attempt %d (confirm exit=%r)"
+                       % (attempt, ccode))
+        log("sync:", last_detail)
+    return {"outcome": "conflict", "detail": last_detail}
 
 
 # ─── the state machine ───────────────────────────────────────────────────────
@@ -989,40 +1234,10 @@ async def main(input):
                     "escalations": escalations}
 
     # A9 — CI watch (the agent OWNS the durable wait) -> fix -> re-watch, bounded
-    # (N watches, N-1 fixes — matches autodev's CI loop).
-    ci_ok = False
-    ci_agent_error = False
-    for i in range(MAX_CI_ITERS):
-        # A ci-watch / ci-fix agent error breaks the loop and falls through to the verify
-        # gate (item 5) — it does NOT crash the run nor silently pass a red PR.
-        try:
-            ci = await agent(
-                {"task": "watch_ci", "repo": repo, "pr_number": pr_number, "head_sha": head_sha},
-                agent_id=CI_AGENT_ID, output_schema=CI_SCHEMA, model=model, label="ci-%d" % i)
-        except AgentError as exc:
-            log("ci-watch agent error -> escalate:", exc)
-            ci_agent_error = True
-            break
-        if ci["status"] in ("green", "no_ci"):
-            ci_ok = True
-            break
-        if i == MAX_CI_ITERS - 1:
-            break
-        before = head_sha
-        try:
-            fix = await agent(
-                {"task": "fix_ci", "repo": repo, "pr_number": pr_number,
-                 "detail": ci.get("detail", ""), "comments": comment_bodies,
-                 "lint_hint": FIX_CI_LINT_HINT},
-                agent_id=FIX_AGENT_ID, output_schema=FIX_SCHEMA, model=model,
-                label="ci-fix-%d" % i)
-            head_sha = fix["head_sha"]
-        except AgentError as exc:
-            log("ci-fix agent error -> escalate:", exc)
-            ci_agent_error = True
-            break
-        if before and head_sha == before:
-            break
+    # (N watches, N-1 fixes — matches autodev's CI loop). Factored into _watch_ci so the
+    # post-rebase re-entry below can drive the identical loop with a distinct label prefix.
+    ci_ok, ci_agent_error, head_sha = await _watch_ci(
+        repo, pr_number, head_sha, comment_bodies, model, "ci")
     if not ci_ok:
         _ci_reason = ("CI-watch agent error" if ci_agent_error
                       else "CI failing after %d checks" % MAX_CI_ITERS)
@@ -1032,6 +1247,43 @@ async def main(input):
             return {"state": "escalated",
                     "reason": "ci_agent_error" if ci_agent_error else "ci_exhausted",
                     "escalations": escalations}
+
+    # S-SYNC — rebase/sync recovery (#1385). Early in the merge path (BEFORE the merge guard)
+    # and on every run re-entry: check mergeability and HEAL a branch master moved under
+    # instead of parking or orphaning it. A clean/already-current branch is an idempotent
+    # no-op (safe under the at-least-once crash contract). A DIRTY/behind branch is
+    # mechanically rebased + force-pushed-with-lease; a real conflict is handed to the SAME
+    # fix agent (bounded ≤MAX_REBASE_ATTEMPTS). Still unresolved -> park at the NEW, distinct
+    # `rebase_conflict` gate. After a successful rebase RE-ENTER the CI watch (CI must re-run
+    # on the updated branch) before proceeding to merge.
+    phase("sync")
+    sync = await _sync_branch(repo, pr_number, branch, comment_bodies, model)
+    if sync["outcome"] in ("conflict", "error"):
+        detail = sync.get("detail", "")
+        await post_markered_comment(repo, pr_number, MARKER_REBASE_CONFLICT,
+                                    "%s\n\n```\n%s\n```" % (MARKER_REBASE_CONFLICT, detail))
+        escalations.append("rebase_conflict")
+        decision = await gate({"kind": "rebase_conflict", "pr": pr_number, "detail": detail})
+        if not (isinstance(decision, dict) and decision.get("resolved")):
+            return {"state": "escalated", "reason": "rebase_conflict",
+                    "pr_url": pr_url, "pr_number": pr_number, "escalations": escalations}
+    elif sync["outcome"] == "rebased":
+        # The branch was rebased onto master: a new tip was force-pushed, so CI MUST re-run on
+        # the updated branch before merge. Re-enter the CI watch (distinct `reci` label prefix
+        # keeps replay deterministic). A fix-advanced head_sha overrides the (now-stale) one.
+        if sync.get("head_sha"):
+            head_sha = sync["head_sha"]
+        ci_ok, ci_agent_error, head_sha = await _watch_ci(
+            repo, pr_number, head_sha, comment_bodies, model, "reci")
+        if not ci_ok:
+            _ci_reason = ("CI-watch agent error after rebase" if ci_agent_error
+                          else "CI failing after %d checks after rebase" % MAX_CI_ITERS)
+            escalations.append("verify")
+            decision = await gate({"kind": "verify", "pr": pr_number, "reason": _ci_reason})
+            if not (isinstance(decision, dict) and decision.get("resolved")):
+                return {"state": "escalated",
+                        "reason": "ci_agent_error" if ci_agent_error else "ci_exhausted",
+                        "escalations": escalations}
 
     # A10/S11 — risk tiering (best-effort; never blocks). Conservative tier-3 default. The
     # guard tolerates BOTH a child failure (AgentError) AND a malformed/short return
