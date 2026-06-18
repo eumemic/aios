@@ -37,6 +37,11 @@ BRANCH = "issue-5"
 # name (issue #1178) — a SHA-256 clone would re-resolve `master` to a 64-char id GitHub's
 # REST API rejects, hard-erroring the watch on a green master.
 MERGE_SHA = "f823360f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
+# The SHA-1 the PR's head moves to after a sync-stage rebase force-pushes the rebased tip
+# (#1389). The CI re-entry MUST key on THIS, not the stale pre-rebase head_sha the run still
+# carries. A real 40-char SHA-1 (not a `sha_…` placeholder) so it survives _live_head_sha's
+# SHA-1 validation — a non-SHA-1 head is treated as unresolvable (#1178) and rejected.
+POST_REBASE_SHA = "ab12cd34ef560718293a4b5c6d7e8f9012345678"
 # A concrete, >50-word spec body that clears the scripted spec gate.
 LONG_BODY = (
     "Add a durable retry wrapper around the outbound webhook dispatcher so that transient "
@@ -820,9 +825,7 @@ def _reentry_watch_shas(scn: Scenario) -> list[str]:
     order. The FIRST is the pre-rebase `ci` watch (keyed on the original head); any LATER
     one is the post-rebase `reci` re-entry — #1389 requires it to carry the rebased tip."""
     return [
-        i["head_sha"]
-        for i in scn.agent_inputs
-        if i.get("task") == "watch_ci" and not i.get("ref")
+        i["head_sha"] for i in scn.agent_inputs if i.get("task") == "watch_ci" and not i.get("ref")
     ]
 
 
@@ -837,10 +840,10 @@ async def test_mechanical_rebase_reenters_ci_on_post_rebase_sha_not_stale_head()
     scn = Scenario(
         mergeable_state="dirty",
         rebase_exit=[0],
-        post_rebase_head_sha="sha_rebased",
+        post_rebase_head_sha=POST_REBASE_SHA,
         ci_results_by_sha={
-            "sha_initial": {"status": "green", "detail": ""},   # pre-rebase `ci` watch
-            "sha_rebased": {"status": "green", "detail": ""},   # post-rebase `reci` watch
+            "sha_initial": {"status": "green", "detail": ""},  # pre-rebase `ci` watch
+            POST_REBASE_SHA: {"status": "green", "detail": ""},  # post-rebase `reci` watch
         },
     )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
@@ -849,7 +852,7 @@ async def test_mechanical_rebase_reenters_ci_on_post_rebase_sha_not_stale_head()
     shas = _reentry_watch_shas(scn)
     # the pre-rebase watch keyed on the original head; the post-rebase re-entry on the tip
     assert shas[0] == "sha_initial"
-    assert shas[-1] == "sha_rebased", (
+    assert shas[-1] == POST_REBASE_SHA, (
         "post-rebase CI re-entry must run against the rebased tip, not the stale head"
     )
     # the stale pre-rebase SHA is used by AT MOST the single pre-rebase watch
@@ -864,10 +867,10 @@ async def test_agent_resolved_conflict_reenters_ci_on_post_rebase_sha() -> None:
     scn = Scenario(
         mergeable_state="dirty",
         rebase_exit=[76, 75],
-        post_rebase_head_sha="sha_rebased",
+        post_rebase_head_sha=POST_REBASE_SHA,
         ci_results_by_sha={
             "sha_initial": {"status": "green", "detail": ""},
-            "sha_rebased": {"status": "green", "detail": ""},
+            POST_REBASE_SHA: {"status": "green", "detail": ""},
         },
     )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
@@ -875,7 +878,7 @@ async def test_agent_resolved_conflict_reenters_ci_on_post_rebase_sha() -> None:
     assert value["merged"] is True
     assert any(i.get("task") == "fix_ci" and "rebase_hint" in i for i in scn.agent_inputs)
     shas = _reentry_watch_shas(scn)
-    assert shas[-1] == "sha_rebased", (
+    assert shas[-1] == POST_REBASE_SHA, (
         "post-rebase CI re-entry must run against the rebased tip, not the stale head"
     )
 

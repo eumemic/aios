@@ -223,6 +223,50 @@ def test_sync_clean_mechanical_rebase_returns_rebased() -> None:
     assert len(tool.commands) == 1
 
 
+# The post-rebase tip the live PR re-read reports (#1389): a 40-char SHA-1, distinct from any
+# stale pre-rebase head_sha the caller might otherwise carry into the CI re-entry.
+_LIVE_HEAD_SHA = "abcdef0123456789abcdef0123456789abcdef01"
+
+
+def test_sync_mechanical_rebase_threads_live_post_rebase_head_sha() -> None:
+    # #1389: after the mechanical rebase force-pushes the rebased tip, _sync_branch RE-READS
+    # the live PR head (GET /pulls/{n}) and returns THAT sha so the caller's CI re-entry keys
+    # on the rebased tip — not the stale pre-rebase head_sha.
+    gh = _FakeGH({"mergeable_state": "dirty", "head": {"sha": _LIVE_HEAD_SHA}})
+    tool = _FakeBash([0])  # REBASE_EXIT_DONE
+    ns = _ns(gh=gh, tool=tool, agent=_FakeAgent())
+    result = _sync(ns)
+    assert result["outcome"] == "rebased"
+    assert result["head_sha"] == _LIVE_HEAD_SHA
+    # the live re-read actually happened: a SECOND GET /pulls/{n} after the mergeability probe
+    assert gh.calls.count(("GET", f"/repos/{REPO}/pulls/{PR}")) == 2
+
+
+def test_sync_agent_resolved_conflict_prefers_live_head_over_agent_report() -> None:
+    # #1389 (agent path): the fix agent self-reports a head_sha, but the confirm rebase may
+    # have force-pushed a new tip on top of it. The live PR re-read is authoritative — its sha
+    # is threaded, NOT the agent's (possibly stale) self-report.
+    gh = _FakeGH({"mergeable_state": "dirty", "head": {"sha": _LIVE_HEAD_SHA}})
+    tool = _FakeBash([76, 0])  # mechanical conflict, then confirm DONE
+    agent = _FakeAgent(head_sha="agent-reported-sha")
+    ns = _ns(gh=gh, tool=tool, agent=agent)
+    result = _sync(ns)
+    assert result["outcome"] == "rebased"
+    assert result["head_sha"] == _LIVE_HEAD_SHA  # live tip wins over the agent's self-report
+
+
+def test_sync_agent_resolved_conflict_falls_back_to_agent_sha_when_live_read_blank() -> None:
+    # #1389 fallback: when the live PR re-read yields no usable SHA-1 (head absent), the agent's
+    # reported head_sha is used rather than returning an empty head_sha.
+    gh = _FakeGH({"mergeable_state": "dirty"})  # no head.sha in the payload
+    tool = _FakeBash([76, 75])  # conflict, then confirm NOOP
+    agent = _FakeAgent(head_sha="agentsha")
+    ns = _ns(gh=gh, tool=tool, agent=agent)
+    result = _sync(ns)
+    assert result["outcome"] == "rebased"
+    assert result["head_sha"] == "agentsha"
+
+
 # ─── _sync_branch: a REAL conflict is resolved by the fix agent (bounded) ─────
 
 

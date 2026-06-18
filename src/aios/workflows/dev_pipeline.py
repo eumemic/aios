@@ -967,10 +967,12 @@ async def _live_head_sha(repo, pr_number):
     """Re-read the LIVE PR head SHA via ``GET /pulls/{n}`` after a rebase force-pushed a new
     tip. The CI watch MUST key on the POST-rebase SHA, not the stale pre-rebase one: the old
     commit carries the OLD (pre-rebase) green checks, and reporting it green would merge a tip
-    whose CI never re-ran (#1389). Returns ``""`` on a read failure — callers fall back to
-    whatever (possibly agent-reported) SHA they already hold and never silently trust junk."""
+    whose CI never re-ran (#1389). Returns ``""`` on a read failure OR a non-SHA-1 value
+    (a 64-char SHA-256 GitHub's REST endpoints reject, #1178) — callers fall back to whatever
+    (possibly agent-reported) SHA they already hold and never silently trust junk."""
     pr = _json_body(await gh("GET", _ipath(repo, "/pulls/%d" % pr_number)))
-    return _pr_head_sha(pr)
+    sha = _pr_head_sha(pr)
+    return sha if _is_sha1(sha) else ""
 
 
 async def _sync_branch(repo, pr_number, branch, comment_bodies, model):
