@@ -720,13 +720,7 @@ def build_reaper_script(
     # (aios#1292: post_comment_once / the maker-marker) BEFORE the body's main(), so the
     # body's references resolve.
     return (
-        header
-        + "\n"
-        + GH_BODY_HELPERS
-        + "\n"
-        + COMMENT_IDEMPOTENCY_HELPERS
-        + "\n"
-        + _REAPER_BODY
+        header + "\n" + GH_BODY_HELPERS + "\n" + COMMENT_IDEMPOTENCY_HELPERS + "\n" + _REAPER_BODY
     )
 
 
@@ -804,7 +798,7 @@ def build_reaper_workflow_create(
     (``REQUIRED_TOOLS = [list_runs, http_request]`` and the GET·POST-only ``github``
     server — NO PUT/PATCH/DELETE, NO resume_gate/gate), so a deployer POSTs one object
     and the declared surface can never drift from the script that needs it (#1135). The
-    deploy-time wiring (a ``CronSource`` → ``WorkflowAction`` firing every 30–60 min with
+    deploy-time wiring (a ``CronSource`` → ``WorkflowAction`` firing every 30-60 min with
     the ``{repo, dev_pipeline_workflow_id}`` input template) lives outside this object —
     the reaper reads ``trigger.fired_at`` from whatever cron the deployer arms.
     """

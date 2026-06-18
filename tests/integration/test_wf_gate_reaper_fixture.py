@@ -149,8 +149,12 @@ class ReaperScenario:
             return _gh_list(self.open_pulls)
         if method == "GET" and "/pulls/" in base:
             num = int(base.rsplit("/", 1)[1])
-            return {"status": 200, "body": json.dumps(
-                {"number": num, "mergeable_state": self.pr_states.get(num, "clean")})}
+            return {
+                "status": 200,
+                "body": json.dumps(
+                    {"number": num, "mergeable_state": self.pr_states.get(num, "clean")}
+                ),
+            }
         raise AssertionError(f"unexpected http_request {method} {path}")
 
     def outcome(self, cap: Any) -> dict[str, Any]:
@@ -271,7 +275,7 @@ async def test_redrive_caps_and_escalates_to_owner() -> None:
         in_progress=[_issue(7)],
     )
     value = await _drive(scn, input=_cron_input(max_redrive_attempts=2))
-    f = [x for x in value["found"] if x["class"] == "in-progress-no-run"][0]
+    f = next(x for x in value["found"] if x["class"] == "in-progress-no-run")
     assert f["action"] == "escalated"
     assert "needs a human" in f["detail"]
 
@@ -287,8 +291,9 @@ async def test_stale_gate_is_escalated_not_resolved() -> None:
             "pending": [],
             "running": [],
             "suspended": [
-                _run_row("g1", status="suspended", issue_number=9,
-                         updated_at="2026-06-18T01:00:00+00:00")
+                _run_row(
+                    "g1", status="suspended", issue_number=9, updated_at="2026-06-18T01:00:00+00:00"
+                )
             ],
             "errored": [],
             "cancelled": [],
@@ -309,8 +314,9 @@ async def test_fresh_gate_within_threshold_is_left_alone() -> None:
             "pending": [],
             "running": [],
             "suspended": [
-                _run_row("g1", status="suspended", issue_number=9,
-                         updated_at="2026-06-18T11:00:00+00:00")
+                _run_row(
+                    "g1", status="suspended", issue_number=9, updated_at="2026-06-18T11:00:00+00:00"
+                )
             ],
             "errored": [],
             "cancelled": [],
@@ -330,8 +336,9 @@ async def test_gate_staleness_uses_frozen_fired_at_not_wall_clock() -> None:
             "pending": [],
             "running": [],
             "suspended": [
-                _run_row("g1", status="suspended", issue_number=9,
-                         updated_at="2020-01-01T00:00:00+00:00")
+                _run_row(
+                    "g1", status="suspended", issue_number=9, updated_at="2020-01-01T00:00:00+00:00"
+                )
             ],
             "errored": [],
             "cancelled": [],
@@ -436,8 +443,9 @@ async def test_clean_sweep_is_ok_with_structured_summary() -> None:
 
 async def test_missing_config_is_cannot_determine() -> None:
     scn = ReaperScenario()
-    value = await _drive(scn, input={"trigger": {"source": "cron", "fired_at": FIRED_AT},
-                                     "input": {}})
+    value = await _drive(
+        scn, input={"trigger": {"source": "cron", "fired_at": FIRED_AT}, "input": {}}
+    )
     assert value["verdict"] == "cannot-determine"
     assert "missing" in value["reason"]
 
