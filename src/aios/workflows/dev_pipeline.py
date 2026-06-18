@@ -963,6 +963,16 @@ async def _watch_ci(repo, pr_number, head_sha, comment_bodies, model, label_pref
     return ci_ok, ci_agent_error, head_sha
 
 
+async def _live_head_sha(repo, pr_number):
+    """Re-read the LIVE PR head SHA via ``GET /pulls/{n}`` after a rebase force-pushed a new
+    tip. The CI watch MUST key on the POST-rebase SHA, not the stale pre-rebase one: the old
+    commit carries the OLD (pre-rebase) green checks, and reporting it green would merge a tip
+    whose CI never re-ran (#1389). Returns ``""`` on a read failure — callers fall back to
+    whatever (possibly agent-reported) SHA they already hold and never silently trust junk."""
+    pr = _json_body(await gh("GET", _ipath(repo, "/pulls/%d" % pr_number)))
+    return _pr_head_sha(pr)
+
+
 async def _sync_branch(repo, pr_number, branch, comment_bodies, model):
     """Rebase/sync recovery stage (#1385): HEAL a branch master moved under instead of
     parking or orphaning it. Returns one of:
@@ -1002,7 +1012,7 @@ async def _sync_branch(repo, pr_number, branch, comment_bodies, model):
     if code == REBASE_EXIT_DONE:
         log("sync: mechanical rebase of %r onto %s succeeded -> re-enter CI"
             % (branch, BASE_BRANCH))
-        return {"outcome": "rebased", "head_sha": ""}
+        return {"outcome": "rebased", "head_sha": await _live_head_sha(repo, pr_number)}
     if code == REBASE_EXIT_ERROR:
         detail = "%s\n%s\nexit=%r" % (
             (rb.get("stdout", "") if isinstance(rb, dict) else "")[-800:],
@@ -1033,8 +1043,13 @@ async def _sync_branch(repo, pr_number, branch, comment_bodies, model):
         ccode = confirm.get("exit_code") if isinstance(confirm, dict) else None
         if ccode in (REBASE_EXIT_NOOP, REBASE_EXIT_DONE):
             log("sync: rebase conflict resolved by fix agent on attempt %d" % attempt)
-            return {"outcome": "rebased", "head_sha": fix.get("head_sha", "")
-                    if isinstance(fix, dict) else ""}
+            # Re-read the LIVE PR head rather than trusting the fix agent's reported
+            # head_sha: the confirm rebase above may itself have force-pushed a new tip,
+            # so the agent-reported SHA can already be stale. Fall back to the agent's
+            # value only if the live re-read comes back empty (plumbing hiccup).
+            live = await _live_head_sha(repo, pr_number)
+            agent_sha = fix.get("head_sha", "") if isinstance(fix, dict) else ""
+            return {"outcome": "rebased", "head_sha": live or agent_sha}
         last_detail = ("rebase still conflicting after fix attempt %d (confirm exit=%r)"
                        % (attempt, ccode))
         log("sync:", last_detail)
