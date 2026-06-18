@@ -67,23 +67,71 @@ RESILIENCE CONTRACT (the Phase-0 hardening, aios#987; design doc §10):
    removed on success; every terminal NON-gate failure ``return`` first labels
    ``autodev:failed``. A gate park is a durable suspension (auto-recover on resume), NOT a
    failure, so it is deliberately not labelled failed.
-4. **Auto-recovery.** ``retry_count`` rides the input envelope; a re-launched run that arrives
-   with ``retry_count >= MAX_RUN_RETRIES`` terminates at ``dead_letter`` instead of looping.
-   The DEPLOY-TIME WIRING (Phase 2, not in this script): a ``run_completion`` trigger fires on
-   ``status=errored`` and re-launches the workflow with ``retry_count + 1`` and the same
-   ``{repo, issue_number}``. Re-launch is idempotent by construction — S4 lists open PRs and
-   ADOPTS the branch's PR instead of creating a duplicate ("open-pr"; a 422 on create re-lists
-   and adopts), and MERGE re-confirms ``GET /pulls/{n}.merged`` before declaring
-   ``merge_failed`` so an already-merged PR is never double-merged or lost.
-5. **AgentError guards.** Every agentic node (implement/review/fix/ci-watch/risk) runs under a
-   defensive guard: an ``agent_not_found`` / transient agent error escalates to the relevant
-   gate (design / verify) or, for the best-effort risk node, degrades to the conservative
-   default — so a flaky judgment agent parks the run for a human instead of crashing it (an
-   uncaught ``AgentError`` at the root fails the whole run). The post-merge master-CI watch is
-   the one node that does NEITHER (issue #1176): the merge is already committed and the run has
+4. **Auto-recovery (closing the STRUCTURAL ASYMMETRY — the keystone).** The only armed
+   recovery is the DEPLOY-TIME ``run_completion`` trigger, which fires on a TERMINAL
+   ``status=errored`` and re-launches the workflow with the same ``{repo, issue_number}``. It
+   can NEVER see a durable ``suspended`` gate-park, so a recoverable failure buried in a verify
+   gate is structurally unreachable by recovery. A ci-watch / ci-fix CHILD that ERRORS mid-call
+   (the ~1hr ceiling / "errored before responding") is recoverable, NOT a real red verdict, so
+   it RAISES (→ ``errored`` → re-launch) rather than parking — see ``_recover_or_park``.
+   Re-launch is idempotent by construction (S4 ADOPTS the branch's existing PR; MERGE
+   re-confirms ``GET /pulls/{n}.merged``) and re-enters the sync stage, so it re-rebases too.
+   BOUNDED by a DURABLE counter: the re-launch re-runs the SAME static input template (the
+   trigger cannot mutate it to carry ``retry_count + 1`` — see
+   ``harness/trigger_runner.compose_workflow_run_input``), so the bound lives in GitHub state —
+   an ``autodev:recovery-N`` label stamped before each re-raise (``_recovery_attempts`` reads
+   it at ingest). After ``MAX_RECOVERY_ATTEMPTS`` the recoverable error PARKS at the verify
+   gate for a human instead of re-raising — never an unbounded re-spend loop. (The in-envelope
+   ``retry_count`` / ``MAX_RUN_RETRIES`` dead-letter guard at the top of ``main`` is retained as
+   a belt-and-suspenders for any future trigger that DOES set it, but the durable label is the
+   load-bearing bound.)
+5. **AgentError guards.** Every agentic node runs under a defensive guard. The implement/review
+   judgment nodes escalate an ``agent_not_found`` / transient error to the relevant gate
+   (design / verify) — a flaky judgment agent parks the run for a HUMAN rather than crashing it
+   (an uncaught ``AgentError`` at the root fails the whole run). The **CI-watch / CI-fix** nodes
+   are DIFFERENT (item 4): a child error WITH NO PRIOR RED in the loop is RECOVERABLE
+   (re-running re-attempts the same build), so it RAISES for bounded auto-recovery; but a child
+   error AFTER a genuine red verdict is NOT recoverable (the tree is really broken) and PARKS at
+   the verify gate, as does a GENUINELY red verdict that survives the bounded fixes. The
+   best-effort risk node degrades to the conservative default. The post-merge master-CI watch
+   does NEITHER park NOR raise (issue #1176): the merge is already committed and the run has
    already returned done, so a flaky watch is RETRIED (≤ ``MAX_MASTER_CI_ITERS``) and, if still
    indeterminate, degrades to a distinct non-blocking advisory — never coerced to the
    most-blocking outcome and never allowed to re-suspend a completed run at a false gate.
+6. **No false-greens (the CI verdict is script-VERIFIED, not agent-trusted).** A ``watch_ci``
+   agent's ``green`` / ``no_ci`` is re-classified in-script by ``_ci_verdict`` before it counts
+   as a pass — an uncorrelated guard against the two false-green holes: (a) a verdict whose
+   polled commit is NOT the live PR head (a wrong-parent / orphan re-trigger commit reading
+   ``total_count=0`` as ``no_ci``, #1314) is rejected; (b) a ``green`` declared before the FULL
+   required-check set concluded (#1364) is rejected as premature. ``_ci_verdict`` returns a
+   3-state label — ``pass`` (trusted), ``red`` (genuinely broken → fix), or ``retry`` (an
+   UNVERIFIED green/no_ci → RE-WATCH, never run a fixer against passing code). It fails CLOSED:
+   if NO head anchor is available (live read empty AND no dispatched SHA), the verdict is
+   ``retry``, never trusted. An unsettled loop falls through to the verify gate / the
+   uncorrelated merge-guard, so a false-green can never walk a genuinely-red PR toward a merge.
+
+OUT-OF-BAND DEPLOY STEPS (this script is necessary but not sufficient — both are needed for
+the recovery + false-green guards to actually function in prod):
+  * The ``run_completion[errored]`` trigger on this workflow MUST exist and re-launch with the
+    same ``{repo, issue_number}`` — items 4/5's RAISE only recovers if that trigger fires.
+    Without it a recoverable CI error terminates ``errored`` with ``autodev:in-progress`` left
+    on and no re-launch (a worse outcome than the prior gate-park) — register/verify it on
+    deploy.
+  * The ``dev-ci-watch`` agent (its prompt lives in the aios object graph, NOT this repo) MUST
+    be taught to emit ``polled_sha`` and, for green, ``required_complete`` (both new, both
+    OPTIONAL in ``CI_SCHEMA``). Until it does, ``_ci_verdict`` returns ``retry`` for every
+    green/no_ci and EVERY PR parks at the verify gate — fail-CLOSED (no false merges) but
+    auto-merge throughput is zero. Ship the agent-prompt change in lockstep with this script.
+
+KNOWN RESIDUALS (documented, not fixed here — narrow, backstopped):
+  * ``no_ci`` is exempt from ``required_complete`` (there are no required checks to wait on),
+    so a transient ``total_count=0`` on the GENUINE head (required checks configured but not
+    yet scheduled) reads ``no_ci`` -> ``pass`` before CI ran. Narrow window; the uncorrelated
+    merge-guard re-runs the sentinels on the merge ref as the backstop. Tightening this
+    without breaking legitimately-no-CI repos is a follow-up.
+  * ``autodev:recovery-N`` labels are not stripped on terminal success, so a CLOSED issue that
+    is later RE-OPENED and re-dispatched would read a stale budget. Rare (merged issues close);
+    cleanup is a cheap follow-up.
 """
 
 from __future__ import annotations
@@ -146,6 +194,18 @@ CI_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {"type": "string", "enum": ["green", "red", "no_ci"]},
         "detail": {"type": "string"},
+        # The commit the watch ACTUALLY polled check-runs for. The script verifies this
+        # equals the LIVE PR head before trusting a green/no_ci verdict (#1314): a watch that
+        # polled an orphan / wrong-parent commit (so `total_count=0` reads as `no_ci`) must
+        # never count as a pass on a PR whose real head is red. Omitted -> the verdict is
+        # SHA-unverifiable, so a green/no_ci is NOT trusted (fail-closed).
+        "polled_sha": {"type": "string"},
+        # True only when the FULL required-check set has CONCLUDED (not merely a subset +
+        # a clean commit-status). A green declared while lint/unit are still running is a
+        # premature-green (#1364); when False the script does not trust a green verdict and
+        # defers to the uncorrelated merge-guard. Omitted -> treated as not-complete
+        # (fail-closed: an old agent that can't report completeness can't manufacture a green).
+        "required_complete": {"type": "boolean"},
     },
 }
 
@@ -187,6 +247,19 @@ RESOLUTION_SIGNALS: tuple[str, ...] = (
 # (a gate park is a durable suspension, not a failure, so it is NOT labelled failed).
 LABEL_IN_PROGRESS = "autodev:in-progress"
 LABEL_FAILED = "autodev:failed"
+
+# Auto-recovery attempt counter (the keystone bound). The deploy-time
+# ``run_completion[errored]`` trigger re-launches a workflow with the SAME static input
+# template — it does NOT (and cannot) mutate the template to carry ``retry_count + 1`` (see
+# ``harness/trigger_runner.compose_workflow_run_input``: the author's template rides verbatim).
+# So an in-envelope ``retry_count`` never increments across re-launches, and a counter we keep
+# only in run state is reset every re-launch. The bound therefore lives in DURABLE,
+# re-launch-surviving GitHub state: a ``autodev:recovery-N`` label stamped on the issue before
+# each re-raise. ``_recovery_attempts`` reads the highest N already present at ingest; a
+# recoverable CI child-error re-raises only while ``N < MAX_RECOVERY_ATTEMPTS``, else it PARKS
+# at the verify gate for a human (never an unbounded re-spend loop).
+LABEL_RECOVERY_PREFIX = "autodev:recovery-"
+MAX_RECOVERY_ATTEMPTS = 2
 
 # Stable heading markers on the chairman-facing comments this pipeline posts. Each heading is
 # BOTH the comment's first line AND the maker-marker the replay guard scans for: a posted
@@ -307,6 +380,8 @@ def _render_constants(
         _py("LABEL_IN_PROGRESS", LABEL_IN_PROGRESS),
         _py("LABEL_FAILED", LABEL_FAILED),
         _py("LABEL_DISPATCHED", LABEL_DISPATCHED),
+        _py("LABEL_RECOVERY_PREFIX", LABEL_RECOVERY_PREFIX),
+        _py("MAX_RECOVERY_ATTEMPTS", MAX_RECOVERY_ATTEMPTS),
         _py("MARKER_SPEC_NOT_READY", MARKER_SPEC_NOT_READY),
         _py("MARKER_RISK_ASSESSMENT", MARKER_RISK_ASSESSMENT),
         _py("MARKER_MERGE_GUARD", MARKER_MERGE_GUARD),
@@ -562,6 +637,23 @@ def _is_sha1(value):
     REST commit/check-runs endpoints can resolve. A 64-char SHA-256 object id (issue #1178)
     returns False, so we never hand one to a GitHub REST endpoint."""
     return isinstance(value, str) and bool(_SHA1_RE.match(value))
+
+
+def _shas_equal(a, b):
+    """Whether two commit ids name the SAME commit, tolerant of case and abbreviation —
+    GitHub returns full 40-char lowercase SHAs but a watch agent may report an abbreviated
+    or upper-cased one. Equal iff (case-insensitively) one is a non-empty prefix of the other
+    AND both are at least 7 hex chars (git's minimum unambiguous abbreviation), so a stray
+    empty / 1-char value can never spuriously match. Used to verify a polled commit IS the
+    live PR head (#1314) — a conservative comparison: when in doubt it returns False (reject),
+    never a false match that would trust a wrong-parent green."""
+    if not (isinstance(a, str) and isinstance(b, str)):
+        return False
+    a, b = a.strip().lower(), b.strip().lower()
+    if len(a) < 7 or len(b) < 7:
+        return False
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    return long.startswith(short)
 
 
 async def _resolve_sha1(repo, ref):
@@ -822,8 +914,10 @@ def _risk_floor(tier, files):
 
 
 async def _label(repo, issue_number, name):
-    """Add one label (best-effort, retried by gh)."""
-    await gh("POST", _ipath(repo, "/issues/%d/labels" % issue_number), {"labels": [name]})
+    """Add one label (best-effort, retried by gh). Returns the gh() response so a caller that
+    needs the label to have DURABLY persisted (the recovery counter) can confirm it."""
+    return await gh("POST", _ipath(repo, "/issues/%d/labels" % issue_number),
+                    {"labels": [name]})
 
 
 async def _unlabel(repo, issue_number, name):
@@ -840,6 +934,103 @@ async def _unlabel(repo, issue_number, name):
     else:
         log("unlabel %r on #%d FAILED -> %r %r" % (name, issue_number, st, resp))
     return resp
+
+
+def _recovery_attempts(issue):
+    """How many auto-recovery re-launches this issue has already had — read from the DURABLE
+    ``autodev:recovery-N`` labels on the issue (the only counter that survives a re-launch; an
+    in-envelope ``retry_count`` does not, since the trigger re-runs the static template). The
+    value is the highest N present, or 0 if none. Tolerant of a malformed label name."""
+    labels = issue.get("labels") if isinstance(issue, dict) else None
+    if not isinstance(labels, list):
+        return 0
+    best = 0
+    for lab in labels:
+        name = lab.get("name") if isinstance(lab, dict) else lab
+        if isinstance(name, str) and name.startswith(LABEL_RECOVERY_PREFIX):
+            tail = name[len(LABEL_RECOVERY_PREFIX):]
+            if tail.isdigit():
+                best = max(best, int(tail))
+    return best
+
+
+async def _recover_or_park(repo, issue_number, pr_number, attempts, reason, escalations):
+    """Dispose of a RECOVERABLE child-agent error (a ci-watch / ci-fix CHILD that ERRORED
+    mid-call — the ~1hr ceiling / "errored before responding" — NOT a real red verdict).
+
+    THE structural asymmetry (the keystone): the only armed auto-recovery is a
+    ``run_completion[errored]`` trigger, which fires on a TERMINAL ``errored`` and can NEVER
+    see a durable ``suspended`` gate-park. A recoverable error buried in a verify gate is thus
+    unreachable by recovery. So while we still have recovery budget we RAISE to terminate
+    ``errored`` — the trigger re-launches the build (S4 idempotently adopts the existing PR),
+    exactly what a gate-park denied these runs.
+
+    BOUNDED by a DURABLE counter (``autodev:recovery-N`` labels), because the re-launch carries
+    the SAME static input template — an in-envelope ``retry_count`` never increments (see
+    ``harness/trigger_runner``), so a run-state counter would reset every cycle and loop
+    forever. We stamp ``autodev:recovery-{attempts+1}`` BEFORE raising (durable, survives the
+    re-launch) and only raise while ``attempts < MAX_RECOVERY_ATTEMPTS``. Once the budget is
+    spent we PARK at the verify gate for a human instead — a recoverable error that keeps
+    recurring becomes a human escalation, never an unbounded re-spend loop.
+
+    Returns a terminal ``{"state": "escalated", ...}`` dict when it parked unresolved (the
+    caller returns it); RAISES ``RuntimeError`` (→ ``errored`` → re-launch) when budget remains;
+    returns ``None`` when a human resumed the verify gate (the caller proceeds)."""
+    if attempts < MAX_RECOVERY_ATTEMPTS:
+        # Stamp the durable attempt counter FIRST (so the re-launched run reads attempts+1),
+        # then raise to errored. The counter is the ONLY thing bounding the re-launch loop
+        # (the in-envelope retry_count never increments), so we MUST confirm the label
+        # persisted before raising: if the POST did not land, the re-launched run would read
+        # the SAME attempts value and loop forever with no advancing bound. So on a label-write
+        # failure we DON'T raise — we PARK at the verify gate (fail SAFE to a human, never an
+        # unbounded re-spend loop). autodev:in-progress is intentionally left on — the
+        # re-launch re-claims it idempotently. A genuinely-red tree (agent RETURNED red) is NOT
+        # routed here; it parks, because re-launching a real red PR just re-fails.
+        stamp = await _label(repo, issue_number, "%s%d" % (LABEL_RECOVERY_PREFIX, attempts + 1))
+        if _status(stamp) in (200, 201):
+            raise RuntimeError(
+                "dev_pipeline auto-recovery: %s (attempt %d/%d) — re-launching via "
+                "run_completion[errored]" % (reason, attempts + 1, MAX_RECOVERY_ATTEMPTS))
+        log("recovery counter label POST did NOT confirm (%r) -> NOT raising (would loop "
+            "unbounded); parking at verify gate instead: %s" % (_status(stamp), reason))
+    # Budget exhausted: a recurring recoverable error becomes a HUMAN escalation, not a loop.
+    log("auto-recovery budget exhausted (%d attempts) -> park at verify gate: %s"
+        % (attempts, reason))
+    escalations.append("verify")
+    decision = await gate({"kind": "verify", "pr": pr_number,
+                           "reason": "auto-recovery budget exhausted: %s" % reason})
+    if not (isinstance(decision, dict) and decision.get("resolved")):
+        return {"state": "escalated", "reason": "ci_recovery_exhausted",
+                "escalations": escalations}
+    return None
+
+
+async def _handle_ci_outcome(repo, issue_number, pr_number, ci_outcome, attempts,
+                             escalations, where):
+    """Dispose of a non-``pass`` ``_watch_ci`` outcome at a CI-watch call site. Returns ``None``
+    when the run may PROCEED (a human resumed a gate), a terminal ``{"state": "escalated", ...}``
+    dict the caller must return, or RAISES (→ errored → bounded auto-recovery re-launch) for a
+    recoverable child-agent error. ``where`` (e.g. "" / " after rebase") tags the gate reason.
+
+      * ``"agent_err"`` — recoverable child error, no prior real red -> _recover_or_park
+        (raise while budget remains, else park for a human).
+      * ``"red"`` / ``"unsettled"`` — genuinely red after fixes, OR CI never settled -> park at
+        the verify gate (re-launching would not help; a human decides)."""
+    if ci_outcome == "agent_err":
+        return await _recover_or_park(
+            repo, issue_number, pr_number, attempts,
+            "CI-watch/fix agent errored mid-call%s" % where, escalations)
+    reason = ("CI genuinely red after %d checks%s" % (MAX_CI_ITERS, where)
+              if ci_outcome == "red"
+              else "CI never settled (unverifiable head / incomplete checks) after %d checks%s"
+              % (MAX_CI_ITERS, where))
+    escalations.append("verify")
+    decision = await gate({"kind": "verify", "pr": pr_number, "reason": reason})
+    if not (isinstance(decision, dict) and decision.get("resolved")):
+        return {"state": "escalated",
+                "reason": "ci_exhausted" if ci_outcome == "red" else "ci_unsettled",
+                "escalations": escalations}
+    return None
 
 
 async def _fail(repo, issue_number, result):
@@ -915,6 +1106,67 @@ async def _file_followup(repo, title, body):
     return None
 
 
+async def _ci_verdict(repo, pr_number, ci, polled_head):
+    """Classify a ``watch_ci`` verdict — a SCRIPT-side (uncorrelated) re-check of the
+    correlated agent's claim, closing the two false-green holes the forensics found. Returns
+    one of three labels (NOT a bool), so the caller can distinguish a genuinely-broken tree
+    (FIX it) from an unverified-pass (just RE-WATCH — never run a fixer against passing code):
+
+      * ``"pass"``  — a TRUSTED green/no_ci: safe to proceed to merge.
+      * ``"red"``   — the agent RETURNED a red verdict: the tree is genuinely broken -> fix.
+      * ``"retry"`` — a green/no_ci we could NOT trust (unverifiable head, premature checks):
+                      re-watch on the next iteration; do NOT dispatch a fixer (the code is not
+                      broken, CI just hasn't settled / we couldn't confirm the head).
+
+    A green / no_ci is trusted as ``"pass"`` ONLY when ALL hold:
+
+    1. **A verifiable head exists.** The watch reports ``polled_sha`` (the commit it inspected).
+       We need an EXPECTED head to compare it against: GitHub's LIVE ``GET /pulls/{n}`` head,
+       or — only if that read comes back empty — the SHA we dispatched the watch with. If
+       NEITHER is available (both empty) we CANNOT verify the head, so we fail CLOSED to
+       ``"retry"`` rather than trust an unverifiable pass (#1314). A missing ``polled_sha`` is
+       likewise unverifiable -> ``"retry"``.
+    2. **The polled commit IS that head (#1314).** An empty re-trigger commit pushed onto the
+       WRONG parent never becomes head, so its ``total_count=0`` ``no_ci`` must not count.
+    3. **The full required-check set concluded (#1364).** A ``green`` declared while lint/unit
+       are still running is premature; require ``required_complete`` (``no_ci`` is exempt —
+       there are no required checks to wait on).
+
+    Never RAISES for a logic reason — only the underlying ``gh`` read can raise (a truncated
+    body), which the caller's loop is not expected to catch; that surfaces as a recoverable
+    errored run, the correct disposition for a persistent read fault."""
+    status = ci.get("status")
+    if status == "red":
+        return "red"
+    if status not in ("green", "no_ci"):
+        # An unexpected status (schema should prevent it) is treated as a non-pass we re-watch.
+        return "retry"
+    polled_sha = ci.get("polled_sha", "")
+    if not polled_sha:
+        log("ci verdict %r has no polled_sha -> cannot verify head, re-watching" % status)
+        return "retry"
+    # #1364 premature-green: green must see the FULL required-check set concluded. no_ci has
+    # no required checks, so the completeness flag does not apply to it.
+    if status == "green" and not ci.get("required_complete", False):
+        log("ci verdict green but required_complete is false -> premature, re-watching")
+        return "retry"
+    # #1314 wrong-parent: the polled commit must be the LIVE PR head. Prefer GitHub's live
+    # head; fall back to the dispatched SHA ONLY if the live read is empty. If we have NO
+    # anchor at all, fail CLOSED to retry (never trust an unverifiable head — the fail-OPEN
+    # hole the review caught).
+    live_head = await _live_head_sha(repo, pr_number)
+    expected = live_head or polled_head
+    if not expected:
+        log("ci verdict %r but no verifiable head (live+dispatched both empty) -> re-watching"
+            % status)
+        return "retry"
+    if not _shas_equal(polled_sha, expected):
+        log("ci verdict %r polled %r but expected head %r -> wrong-parent, re-watching"
+            % (status, polled_sha, expected))
+        return "retry"
+    return "pass"
+
+
 async def _watch_ci(repo, pr_number, head_sha, comment_bodies, model, label_prefix):
     """The bounded CI watch->fix->re-watch loop (the agent OWNS the durable wait), factored
     out so it can be RE-ENTERED after a sync/rebase heals the branch (#1385): a successful
@@ -922,27 +1174,49 @@ async def _watch_ci(repo, pr_number, head_sha, comment_bodies, model, label_pref
     ``label_prefix`` distinguishes the labels of the second entry (``reci-…``) from the first
     (``ci-…``) so replay stays deterministic (a distinct call_key per agent invocation).
 
-    Returns ``(ci_ok, ci_agent_error, head_sha)``: ``ci_ok`` True on green/no_ci, else the
-    caller parks at the verify gate; ``ci_agent_error`` distinguishes a flaky-agent break from
-    plain CI exhaustion; ``head_sha`` is the (possibly fix-advanced) head for downstream nodes.
-    Bounded N watches / N-1 fixes — matches autodev's CI loop."""
+    Returns ``(ci_ok, ci_outcome, head_sha)`` where ``ci_outcome`` is one of:
+
+      * ``"pass"``      — a TRUSTED green/no_ci (``ci_ok`` True): proceed to merge.
+      * ``"red"``       — genuinely red after exhausting the bounded fixes: park at the verify
+                          gate for a human (a re-launch would just re-fail).
+      * ``"agent_err"`` — a ci-watch / ci-fix CHILD ERRORED mid-call WITHOUT a prior real-red
+                          verdict in this loop: RECOVERABLE -> the caller re-launches (errored)
+                          for auto-recovery (bounded). This is the keystone class.
+      * ``"unsettled"`` — the loop ran out of iterations on ``"retry"`` verdicts (head never
+                          verifiable / checks never concluded): park at the verify gate, but
+                          NOT a recoverable re-launch (re-running won't make CI settle).
+
+    CRITICAL split (the review's #2): a child error AFTER a genuine red verdict is NOT
+    recoverable (the tree is really broken), so it degrades to ``"red"`` (park), not
+    ``"agent_err"`` (re-launch). And a ``"retry"`` verdict NEVER dispatches the fixer — running
+    a fixer against passing-but-unsettled code would churn the branch (the review's #4); only a
+    genuine ``"red"`` triggers a fix. ``head_sha`` is the (possibly fix-advanced) head for
+    downstream nodes. Bounded N watches / N-1 fixes — matches autodev's CI loop."""
     ci_ok = False
-    ci_agent_error = False
+    saw_real_red = False
+    last_outcome = "unsettled"
     for i in range(MAX_CI_ITERS):
-        # A ci-watch / ci-fix agent error breaks the loop and falls through to the verify
-        # gate (item 5) — it does NOT crash the run nor silently pass a red PR.
         try:
             ci = await agent(
                 {"task": "watch_ci", "repo": repo, "pr_number": pr_number, "head_sha": head_sha},
                 agent_id=CI_AGENT_ID, output_schema=CI_SCHEMA, model=model,
                 label="%s-%d" % (label_prefix, i))
         except AgentError as exc:
-            log("ci-watch agent error -> escalate:", exc)
-            ci_agent_error = True
-            break
-        if ci["status"] in ("green", "no_ci"):
-            ci_ok = True
-            break
+            # A child error AFTER a real red is NOT recoverable (the tree is genuinely broken);
+            # only a child error with no prior red is the recoverable keystone class.
+            log("ci-watch agent error:", exc)
+            return ci_ok, ("red" if saw_real_red else "agent_err"), head_sha
+        verdict = await _ci_verdict(repo, pr_number, ci, head_sha)
+        if verdict == "pass":
+            return True, "pass", head_sha
+        if verdict == "retry":
+            # Green/no_ci we could not trust (unverifiable head / premature checks): RE-WATCH
+            # on the next iteration. Do NOT run the fixer (the code is not broken).
+            last_outcome = "unsettled"
+            continue
+        # verdict == "red": the tree is genuinely broken -> dispatch the bounded fixer.
+        saw_real_red = True
+        last_outcome = "red"
         if i == MAX_CI_ITERS - 1:
             break
         before = head_sha
@@ -955,12 +1229,13 @@ async def _watch_ci(repo, pr_number, head_sha, comment_bodies, model, label_pref
                 label="%s-fix-%d" % (label_prefix, i))
             head_sha = fix["head_sha"]
         except AgentError as exc:
-            log("ci-fix agent error -> escalate:", exc)
-            ci_agent_error = True
-            break
+            # A fix-agent error on a genuinely-red tree is NOT recoverable (re-running re-fails)
+            # -> "red" (park for a human), never "agent_err" (re-launch).
+            log("ci-fix agent error (on a real-red tree):", exc)
+            return ci_ok, "red", head_sha
         if before and head_sha == before:
             break
-    return ci_ok, ci_agent_error, head_sha
+    return ci_ok, last_outcome, head_sha
 
 
 async def _live_head_sha(repo, pr_number):
@@ -1092,6 +1367,12 @@ async def main(input):
         return await _fail(repo, issue_number,
                            {"state": "error", "reason": "could not read issue %d (status %r)"
                             % (issue_number, _status(resp))})
+    # Auto-recovery attempt count — read from the DURABLE autodev:recovery-N labels on the
+    # issue (the only counter that survives a re-launch; see _recover_or_park). Bounds the
+    # keystone re-raise so a recurring recoverable CI child-error escalates to a human rather
+    # than looping. Read BEFORE in-progress is stamped affects nothing (recovery labels are a
+    # disjoint namespace), and BEFORE any recoverable raise can occur downstream.
+    recovery_attempts = _recovery_attempts(issue)
     # Read the FULL thread, not just GitHub's first 30: gh_paginated follows
     # Link: rel="next" so a design/spec resolution posted as comment #31+ is ingested
     # (#1156). A comments-endpoint failure degrades to whatever pages were gathered
@@ -1253,17 +1534,13 @@ async def main(input):
     # A9 — CI watch (the agent OWNS the durable wait) -> fix -> re-watch, bounded
     # (N watches, N-1 fixes — matches autodev's CI loop). Factored into _watch_ci so the
     # post-rebase re-entry below can drive the identical loop with a distinct label prefix.
-    ci_ok, ci_agent_error, head_sha = await _watch_ci(
+    ci_ok, ci_outcome, head_sha = await _watch_ci(
         repo, pr_number, head_sha, comment_bodies, model, "ci")
     if not ci_ok:
-        _ci_reason = ("CI-watch agent error" if ci_agent_error
-                      else "CI failing after %d checks" % MAX_CI_ITERS)
-        escalations.append("verify")
-        decision = await gate({"kind": "verify", "pr": pr_number, "reason": _ci_reason})
-        if not (isinstance(decision, dict) and decision.get("resolved")):
-            return {"state": "escalated",
-                    "reason": "ci_agent_error" if ci_agent_error else "ci_exhausted",
-                    "escalations": escalations}
+        terminal = await _handle_ci_outcome(repo, issue_number, pr_number, ci_outcome,
+                                            recovery_attempts, escalations, "")
+        if terminal is not None:
+            return terminal
 
     # S-SYNC — rebase/sync recovery (#1385). Early in the merge path (BEFORE the merge guard)
     # and on every run re-entry: check mergeability and HEAL a branch master moved under
@@ -1290,17 +1567,13 @@ async def main(input):
         # keeps replay deterministic). A fix-advanced head_sha overrides the (now-stale) one.
         if sync.get("head_sha"):
             head_sha = sync["head_sha"]
-        ci_ok, ci_agent_error, head_sha = await _watch_ci(
+        ci_ok, ci_outcome, head_sha = await _watch_ci(
             repo, pr_number, head_sha, comment_bodies, model, "reci")
         if not ci_ok:
-            _ci_reason = ("CI-watch agent error after rebase" if ci_agent_error
-                          else "CI failing after %d checks after rebase" % MAX_CI_ITERS)
-            escalations.append("verify")
-            decision = await gate({"kind": "verify", "pr": pr_number, "reason": _ci_reason})
-            if not (isinstance(decision, dict) and decision.get("resolved")):
-                return {"state": "escalated",
-                        "reason": "ci_agent_error" if ci_agent_error else "ci_exhausted",
-                        "escalations": escalations}
+            terminal = await _handle_ci_outcome(repo, issue_number, pr_number, ci_outcome,
+                                                recovery_attempts, escalations, " after rebase")
+            if terminal is not None:
+                return terminal
 
     # A10/S11 — risk tiering (best-effort; never blocks). Conservative tier-3 default. The
     # guard tolerates BOTH a child failure (AgentError) AND a malformed/short return

@@ -53,9 +53,17 @@ LONG_BODY = (
 )
 
 
-def _issue_json(body: str = LONG_BODY) -> str:
+def _issue_json(body: str = LONG_BODY, labels: list[str] | None = None) -> str:
     return json.dumps(
-        {"number": ISSUE, "title": "Add webhook retry", "body": body, "state": "open"}
+        {
+            "number": ISSUE,
+            "title": "Add webhook retry",
+            "body": body,
+            "state": "open",
+            # GitHub returns labels as objects with a `name`; the recovery-attempt counter
+            # (_recovery_attempts) reads the highest `autodev:recovery-N` present at ingest.
+            "labels": [{"name": n} for n in (labels or [])],
+        }
     )
 
 
@@ -91,6 +99,8 @@ class Scenario:
         self,
         *,
         body: str = LONG_BODY,
+        labels: list[str] | None = None,
+        label_post_fails: set[str] | None = None,
         comments: list[str] | None = None,
         pr_comments: list[str] | None = None,
         existing_pr: bool = False,
@@ -117,6 +127,12 @@ class Scenario:
         ci_results_by_sha: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.body = body
+        # Labels the issue GET reports (objects with `name`). The recovery-attempt counter
+        # reads any `autodev:recovery-N` here at ingest to bound the auto-recovery re-raise.
+        self.labels = labels or []
+        # Label names whose POST persistently fails (422) — models a label-write failure so the
+        # recovery counter cannot advance its durable bound.
+        self.label_post_fails = label_post_fails or set()
         # The comment-thread the GET /issues/{n}/comments responder returns (list of body
         # strings → GitHub comment objects). None => no comments (empty array).
         self.comments = comments or []
@@ -246,8 +262,12 @@ class Scenario:
         assert "?" not in path, f"query string in path is rejected by http_request: {path!r}"
         if method == "POST" and path.endswith("/labels"):  # add label(s) — capture names
             raw = args.get("body")
-            if isinstance(raw, str):
-                self.labels_added.extend(json.loads(raw).get("labels", []))
+            names = json.loads(raw).get("labels", []) if isinstance(raw, str) else []
+            # Model a persistent label-write FAILURE for specific names (the recovery counter
+            # must NOT raise-and-loop when its bound-advancing label can't persist).
+            if any(n in self.label_post_fails for n in names):
+                return {"status": 422, "body": "{}"}
+            self.labels_added.extend(names)
             return {"status": 200, "body": "[]"}
         if method == "DELETE" and "/labels/" in path:  # remove one label — capture decoded name
             self.labels_removed.append(path.rsplit("/labels/", 1)[1].replace("%3A", ":"))
@@ -263,7 +283,7 @@ class Scenario:
             and "/labels" not in path
         )
         if is_issue_get:
-            return {"status": 200, "body": _issue_json(self.body)}
+            return {"status": 200, "body": _issue_json(self.body, self.labels)}
         if method == "GET" and path == "/repos/o/r/pulls":  # list open PRs (clean path)
             return {"status": 200, "body": "[" + _pr_json() + "]" if self.existing_pr else "[]"}
         if method == "POST" and path == "/repos/o/r/pulls":
@@ -311,6 +331,22 @@ class Scenario:
             # file → the floor does not fire and the run completes normally.
             return {"status": 200, "body": "[]"}
         return {"status": 200, "body": "{}"}  # comments / labels / graphql
+
+    def _ci_verdict(self, verdict: dict[str, Any] | str, dispatched_sha: str) -> Any:
+        """Model a CORRECT ci-watch agent's structured verdict (#1314/#1364): unless the test's
+        verdict dict says otherwise, a watch reports the commit it polled (``polled_sha`` = the
+        head_sha it was dispatched with — the live head in this fixture) and, for a green,
+        ``required_complete=True`` (the full required-check set concluded). A test models a
+        FALSE-green by overriding ``polled_sha`` (wrong-parent #1314) or ``required_complete``
+        (premature #1364) in its ``ci_results`` entry. A non-dict verdict (a test sentinel) is
+        passed through unchanged."""
+        if not isinstance(verdict, dict):
+            return verdict
+        out = dict(verdict)
+        out.setdefault("polled_sha", dispatched_sha)
+        if out.get("status") == "green":
+            out.setdefault("required_complete", True)
+        return out
 
     def outcome(self, cap: Any) -> dict[str, Any]:
         """Return the full memo outcome ({"ok": value} or {"error": {...}}) for a capability."""
@@ -371,16 +407,21 @@ class Scenario:
                 idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
                 return {"ok": self.review_results[min(idx, len(self.review_results) - 1)]}
             if task == "watch_ci":
+                dispatched_sha = spec["input"].get("head_sha", "")
                 if spec["input"].get("ref"):  # post-merge master watch (advisory, retried)
                     if self.master_ci_results is not None:
                         idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
                         item = self.master_ci_results[min(idx, len(self.master_ci_results) - 1)]
                         if item == "error":
                             return {"error": {"kind": "child_errored"}}
-                        return {"ok": item}
+                        return {"ok": self._ci_verdict(item, dispatched_sha)}
                     if self.master_ci_error:
                         return {"error": {"kind": "child_errored"}}
-                    return {"ok": {"status": self.master_ci, "detail": ""}}
+                    return {
+                        "ok": self._ci_verdict(
+                            {"status": self.master_ci, "detail": ""}, dispatched_sha
+                        )
+                    }
                 if self.ci_error_on == label:
                     return {"error": {"kind": "child_errored"}}
                 # #1389: a SHA-keyed responder — the watch's verdict is a function of the
@@ -388,14 +429,21 @@ class Scenario:
                 # reads a different (failing) verdict than the post-rebase tip. A SHA absent
                 # from the map is red, so a stale-SHA read can NEVER masquerade as green.
                 if self.ci_results_by_sha is not None:
-                    sha = spec["input"].get("head_sha", "")
                     return {
-                        "ok": self.ci_results_by_sha.get(
-                            sha, {"status": "red", "detail": f"no CI for {sha}"}
+                        "ok": self._ci_verdict(
+                            self.ci_results_by_sha.get(
+                                dispatched_sha,
+                                {"status": "red", "detail": f"no CI for {dispatched_sha}"},
+                            ),
+                            dispatched_sha,
                         )
                     }
                 idx = int(label.rsplit("-", 1)[1]) if label.startswith("ci-") else 0
-                return {"ok": self.ci_results[min(idx, len(self.ci_results) - 1)]}
+                return {
+                    "ok": self._ci_verdict(
+                        self.ci_results[min(idx, len(self.ci_results) - 1)], dispatched_sha
+                    )
+                }
             if task == "risk":
                 return {"ok": self.risk_result}
             if task in ("fix", "fix_ci"):
@@ -435,6 +483,35 @@ async def _drive(
         keys.append(cap.call_key)
         memo[cap.call_key] = scenario.outcome(cap)
     raise AssertionError(f"workflow did not terminate within {max_steps} steps")
+
+
+async def _drive_to_raise(
+    scenario: Scenario,
+    *,
+    input: dict[str, Any] | None = None,
+    max_steps: int = 60,
+    **build_kwargs: Any,
+) -> tuple[str, list[str]]:
+    """Drive the script expecting it to TERMINATE ERRORED (a raise) — the keystone recovery
+    path: a recoverable child-agent error re-raises so the run goes ``errored`` and the
+    deploy-time ``run_completion[errored]`` trigger re-launches it (the structural-asymmetry
+    fix). Returns (error_repr, phases). Asserts the run did NOT return or suspend."""
+    src = build_dev_pipeline_script(**build_kwargs)
+    inp = input or {"repo": REPO, "issue_number": ISSUE, "kind": "issue"}
+    memo: dict[str, Any] = {}
+    phases: list[str] = []
+    for _ in range(max_steps):
+        out = await run_script_host(source=src, input=inp, memo=memo)
+        phases = [a.payload["text"] for a in out.annotations if a.payload["kind"] == "phase"]
+        if out.kind == "raised":
+            return out.error_repr or "", phases
+        assert out.kind == "suspended", (
+            f"expected a recoverable raise, got {out.kind}",
+            out.error_repr,
+        )
+        cap = out.emitted[0]
+        memo[cap.call_key] = scenario.outcome(cap)
+    raise AssertionError(f"workflow did not raise within {max_steps} steps")
 
 
 # ─── happy path ───────────────────────────────────────────────────────────────
@@ -1209,12 +1286,103 @@ async def test_review_agent_error_escalates_to_verify_gate() -> None:
     assert any(g["kind"] == "verify" for g in scn.gates)
 
 
-async def test_ci_watch_agent_error_escalates_to_verify_gate() -> None:
-    scn = Scenario(ci_error_on="ci-0", gate_results={"verify": {"resolved": False}})
+async def test_ci_watch_agent_error_re_raises_for_auto_recovery_not_gate_park() -> None:
+    # KEYSTONE FIX (the structural asymmetry): a ci-WATCH child that ERRORS mid-call is a
+    # RECOVERABLE failure, NOT a real red verdict. It must terminate the run ERRORED (a raise)
+    # so the deploy-time run_completion[errored] trigger RE-LAUNCHES it — never park it at a
+    # verify gate as a durable `suspended` the errored-only trigger can structurally never see.
+    scn = Scenario(ci_error_on="ci-0")
+    err, _ = await _drive_to_raise(scn, max_review_iters=2, max_ci_iters=2)
+    assert "auto-recovery" in err
+    assert "agent errored mid-call" in err
+    # it did NOT open a verify gate — a recoverable error is not a human escalation
+    assert not any(g["kind"] == "verify" for g in scn.gates)
+    # the DURABLE recovery counter was stamped BEFORE the raise (so the re-launched run reads
+    # attempt 1 and the bound is real across re-launches — the in-envelope retry_count can't).
+    assert "autodev:recovery-1" in scn.labels_added
+
+
+async def test_ci_fix_agent_error_after_real_red_parks_not_re_raises() -> None:
+    # The review's #2 split: a ci-FIX child that errors AFTER a genuine red verdict is NOT
+    # recoverable (the tree is really broken — re-running just re-fails), so it PARKS at the
+    # verify gate for a human rather than entering the auto-recovery re-launch loop.
+    scn = Scenario(
+        ci_results=[{"status": "red", "detail": "tests failing"}],
+        ci_error_on="ci-fix-0",
+        gate_results={"verify": {"resolved": False}},
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=3)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "ci_exhausted"  # genuine-red disposition, not a re-launch
+    assert any(g["kind"] == "verify" for g in scn.gates)
+    assert "autodev:recovery-1" not in scn.labels_added  # never entered the recovery path
+
+
+async def test_ci_recovery_budget_exhausted_parks_at_verify_gate_via_durable_label() -> None:
+    # The keystone bound is DURABLE: a run that re-launches and finds the issue already carries
+    # `autodev:recovery-2` (== MAX_RECOVERY_ATTEMPTS) must NOT re-raise — it PARKS at the verify
+    # gate for a human. This is the bound that the non-incrementing in-envelope retry_count
+    # could never provide (the trigger re-runs the static template).
+    scn = Scenario(
+        labels=["autodev:recovery-2"],
+        ci_error_on="ci-0",
+        gate_results={"verify": {"resolved": False}},
+    )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "escalated"
-    assert value["reason"] == "ci_agent_error"
+    assert value["reason"] == "ci_recovery_exhausted"
     assert any(g["kind"] == "verify" for g in scn.gates)
+    # it did NOT stamp a third recovery label or raise — the budget is spent
+    assert "autodev:recovery-3" not in scn.labels_added
+
+
+async def test_ci_recovery_label_write_failure_parks_does_not_loop() -> None:
+    # The bound is the DURABLE label, so if its POST cannot persist the run must NOT re-raise
+    # (a re-launch would read the same attempts and loop forever with no advancing bound). It
+    # fails SAFE: PARK at the verify gate for a human instead of raising. (The review's #1.)
+    scn = Scenario(
+        ci_error_on="ci-0",
+        label_post_fails={"autodev:recovery-1"},
+        gate_results={"verify": {"resolved": False}},
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "ci_recovery_exhausted"  # parked, did not raise/loop
+    assert any(g["kind"] == "verify" for g in scn.gates)
+    assert "autodev:recovery-1" not in scn.labels_added  # the failed POST is not recorded
+
+
+async def test_ci_agent_error_at_retry_budget_dead_letters_not_infinite_raise() -> None:
+    # The retained belt-and-suspenders bound: a run that arrives with retry_count >=
+    # MAX_RUN_RETRIES dead-letters at the top of main (before any spend). (The durable-label
+    # bound above is the load-bearing one; this guards a future trigger that DOES set
+    # retry_count.)
+    scn = Scenario(ci_error_on="ci-0")
+    value, _, _ = await _drive(
+        scn,
+        input={"repo": REPO, "issue_number": ISSUE, "kind": "issue", "retry_count": 2},
+        max_review_iters=2,
+        max_ci_iters=2,
+    )
+    assert value["state"] == "dead_letter"
+    assert scn.tasks == []  # dead-lettered before any agent spend
+    assert "autodev:failed" in scn.labels_added
+
+
+async def test_ci_genuinely_red_after_fixes_still_parks_at_verify_gate() -> None:
+    # The split's OTHER half: a GENUINELY red tree (the agent RETURNED red, never errored)
+    # after exhausting the bounded fixes still parks at the verify gate for a human — it is
+    # NOT re-launched, because re-running a real red PR would just re-fail. (Distinguishes a
+    # recoverable child-error from an unrecoverable red verdict.)
+    scn = Scenario(
+        ci_results=[{"status": "red", "detail": "unit tests fail"}],
+        gate_results={"verify": {"resolved": False}},
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "ci_exhausted"
+    assert any(g["kind"] == "verify" for g in scn.gates)
+    assert "autodev:recovery-1" not in scn.labels_added  # a real red is not a recovery
 
 
 async def test_agent_error_resume_resolved_continues() -> None:
@@ -1222,6 +1390,73 @@ async def test_agent_error_resume_resolved_continues() -> None:
     scn = Scenario(review_error_on="review-0", gate_results={"verify": {"resolved": True}})
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
+
+
+# ─── false-green guards (Fix 2: a false-green must never walk a red PR to a merge gate) ──
+
+
+async def test_no_ci_on_wrong_parent_commit_is_not_trusted_as_green() -> None:
+    # Fix 2a (#1314): a ci-watch that polled an ORPHAN / wrong-parent commit reads total_count=0
+    # = `no_ci`, but that commit is NOT the live PR head, so it must NOT count as a pass. The
+    # live head here is `sha_initial` (GET /pulls/42); the watch reports it polled a DIFFERENT
+    # commit -> the verdict is rejected -> the loop re-watches and (still wrong) parks at the
+    # verify gate rather than walking past it to a merge gate believing it was green.
+    wrong_parent = "0000000000000000000000000000000000000abc"  # a valid SHA-1, but not the head
+    scn = Scenario(
+        ci_results=[{"status": "no_ci", "detail": "no checks", "polled_sha": wrong_parent}],
+        gate_results={"verify": {"resolved": False}},
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    # the false `no_ci` did NOT pass; the run parked at the verify gate, never merged. The
+    # disposition is `ci_unsettled` (an unverifiable verdict we RE-WATCH), not `ci_exhausted`
+    # (a genuine red) — and crucially it never ran a FIXER against the (not-broken) branch.
+    assert value["state"] == "escalated"
+    assert value["reason"] == "ci_unsettled"
+    assert any(g["kind"] == "verify" for g in scn.gates)
+    assert "PUT" not in {m for m, _ in scn.http if "/merge" in _}  # never reached merge
+    assert not any(t.startswith("ci-fix") for t in scn.tasks)  # no fixer on a not-red tree
+
+
+async def test_legit_no_ci_on_actual_head_still_passes() -> None:
+    # The legitimate case Fix 2a must NOT break: a PR with NO CI configured (total_count=0) on
+    # the ACTUAL head is a real pass. The default _ci_verdict stamps polled_sha = the head the
+    # watch was dispatched with (the live head), so this no_ci is trusted and the run merges.
+    scn = Scenario(ci_results=[{"status": "no_ci", "detail": "repo has no CI"}])
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "done"
+    assert value["merged"] is True
+
+
+async def test_premature_green_before_required_checks_complete_is_not_trusted() -> None:
+    # Fix 2b (#1364): a `green` declared while the required-check set has NOT fully concluded
+    # (required_complete=False) is premature and must NOT be trusted. The watch keeps polling;
+    # if it never settles green-with-complete, the run defers to the verify gate / merge-guard
+    # (the uncorrelated backstop) rather than walking a possibly-red tree to merge.
+    scn = Scenario(
+        ci_results=[{"status": "green", "detail": "subset done", "required_complete": False}],
+        gate_results={"verify": {"resolved": False}},
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
+    assert value["state"] == "escalated"
+    assert value["reason"] == "ci_unsettled"  # an unverified green is re-watched, not "red"
+    assert any(g["kind"] == "verify" for g in scn.gates)
+    # the review's #4: a premature green must NOT trigger the fixer (the code is not broken).
+    assert not any(t.startswith("ci-fix") for t in scn.tasks)
+
+
+async def test_premature_green_then_complete_green_passes() -> None:
+    # The watch self-heals: a premature green (required_complete=False) on the first poll is
+    # rejected, but a later poll reporting a COMPLETE green (required_complete=True) is trusted
+    # and the run merges. (Models CI finishing between two polls.)
+    scn = Scenario(
+        ci_results=[
+            {"status": "green", "detail": "subset", "required_complete": False},
+            {"status": "green", "detail": "all done", "required_complete": True},
+        ],
+    )
+    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=3)
+    assert value["state"] == "done"
+    assert value["merged"] is True
 
 
 # ─── auto-recovery retry budget (item 4) ──────────────────────────────────────
