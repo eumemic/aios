@@ -36,6 +36,7 @@ from typing import Any
 
 import pytest
 
+from aios.models.agents import HttpServerSpec
 from aios.workflows.gate_reaper import (
     DEFAULT_GATE_STALE_HOURS,
     DEFAULT_MAX_REDRIVE_ATTEMPTS,
@@ -464,7 +465,10 @@ def test_reaper_surface_cannot_resolve_gates() -> None:
     wc = build_reaper_workflow_create()
     assert {t.type for t in wc.tools} == {"list_runs", "http_request"}
     assert len(wc.http_servers) == 1
-    route = wc.http_servers[0].routes[0]
+    server = wc.http_servers[0]
+    assert isinstance(server, HttpServerSpec)
+    route = server.routes[0]
+    assert route.methods is not None
     assert set(route.methods) == {"GET", "POST"}
     assert "DELETE" not in route.methods and "PUT" not in route.methods
 

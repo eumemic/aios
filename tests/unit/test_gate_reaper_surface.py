@@ -10,6 +10,7 @@ GitHub route grants only GET/POST (no merge/close/unlabel).
 
 from __future__ import annotations
 
+from aios.models.agents import HttpServerSpec
 from aios.models.workflows import WorkflowCreate
 from aios.workflows.gate_reaper import (
     REQUIRED_HTTP_SERVERS,
@@ -62,7 +63,9 @@ def test_build_workflow_create_bundles_script_and_surface() -> None:
     assert wc.name == "gate_reaper"
     assert {t.type for t in wc.tools} == {"list_runs", "http_request"}
     assert len(wc.http_servers) == 1
-    assert wc.http_servers[0].name == "github"
+    server = wc.http_servers[0]
+    assert isinstance(server, HttpServerSpec)
+    assert server.name == "github"
     assert wc.script == build_reaper_script()
 
 
