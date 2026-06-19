@@ -46,7 +46,7 @@ from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimite
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of, surface_of
-from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent
+from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent, WfRunStatus
 from aios.services import attenuation as attenuation_service
 from aios.services.sessions import (
     create_child_session,
@@ -1281,7 +1281,7 @@ async def _commit_terminal_and_dispatch(
     conn: asyncpg.Connection[Any],
     run: WfRun,
     *,
-    status: str,
+    status: WfRunStatus,
     payload: dict[str, Any],
     output: Any,
 ) -> None:

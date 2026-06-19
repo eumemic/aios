@@ -33,6 +33,7 @@ from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.attenuation import Surface
 from aios.models.sessions import Session
 from aios.models.vaults import VaultCredentialCreate
+from aios.models.workflows import WfRunStatus
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services import vaults as vaults_service
@@ -3303,7 +3304,7 @@ async def test_lease_flips_before_the_harvest(wf_runtime: asyncpg.Pool[Any]) -> 
 
     real_set_run_status = wf_queries.set_run_status
 
-    async def exploding_flip(conn: Any, rid: str, status: str, *, account_id: str) -> None:
+    async def exploding_flip(conn: Any, rid: str, status: WfRunStatus, *, account_id: str) -> None:
         if status == "running":
             raise RuntimeError("died at the lease flip")
         await real_set_run_status(conn, rid, status, account_id=account_id)

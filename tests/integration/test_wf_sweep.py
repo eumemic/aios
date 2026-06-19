@@ -19,7 +19,7 @@ import pytest
 
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
-from aios.models.workflows import WfRunSignalKind
+from aios.models.workflows import WfRunSignalKind, WfRunStatus
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from aios.workflows.sweep import wake_runs_needing_step
 
@@ -56,7 +56,7 @@ def test_wake_workflow_task_registered_on_workflows_queue() -> None:
     assert app.tasks["harness.wake_workflow"].queue == "workflows"
 
 
-async def _make_run(pool: asyncpg.Pool[Any], *, status: str = "suspended") -> str:
+async def _make_run(pool: asyncpg.Pool[Any], *, status: WfRunStatus = "suspended") -> str:
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(
             conn,
@@ -133,8 +133,10 @@ async def test_status_clauses(sweep_pool: asyncpg.Pool[Any]) -> None:
     lease: any mid-step crash) are ALWAYS swept; a bare parked run and terminals
     never are."""
     pool = sweep_pool
-    runs = {s: await _make_run(pool, status=s) for s in ("pending", "running", "suspended")}
-    for s in ("completed", "errored", "cancelled"):
+    seeded: tuple[WfRunStatus, ...] = ("pending", "running", "suspended")
+    runs = {s: await _make_run(pool, status=s) for s in seeded}
+    terminal: tuple[WfRunStatus, ...] = ("completed", "errored", "cancelled")
+    for s in terminal:
         runs[s] = await _make_run(pool, status=s)
     assert await _needing(pool) == {runs["pending"], runs["running"]}
 

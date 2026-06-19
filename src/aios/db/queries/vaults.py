@@ -687,9 +687,9 @@ async def resolve_vault_credential(
     target_url: str,
 ) -> tuple[EncryptedBlob, AuthType] | None:
     """Look up a credential in a specific vault by ``target_url`` — no
-    ``session_vaults`` join.  The DB's CHECK constraint guarantees
-    ``auth_type`` is one of the ``AuthType`` literals, so the cast on
-    the way out is exhaustively safe.
+    ``session_vaults`` join.  ``auth_type`` is written only through the
+    ``AuthType``-typed ``insert`` writer (single-sourced from the Literal,
+    #1081), so the cast on the way out is exhaustively safe.
     """
     row = await conn.fetchrow(
         """
@@ -727,8 +727,9 @@ async def resolve_session_credential(
     ``(EncryptedBlob, auth_type, vault_id)`` for the first match, or
     ``None`` if no credential exists. The ``vault_id`` is needed by the
     OAuth refresh path to scope ``SELECT … FOR UPDATE`` to a specific row.
-    The DB's CHECK constraint guarantees ``auth_type`` is one of the
-    ``AuthType`` literals, so the cast on the way out is exhaustively safe.
+    ``auth_type`` is written only through the ``AuthType``-typed ``insert``
+    writer (single-sourced from the Literal, #1081), so the cast on the way
+    out is exhaustively safe.
     """
     row = await conn.fetchrow(
         """
