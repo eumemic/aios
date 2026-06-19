@@ -60,7 +60,7 @@ def _check_value_set(constraintdef: str) -> set[str]:
 
 
 async def _constraintdef(conn: asyncpg.Connection[Any], name: str) -> str | None:
-    return await conn.fetchval(
+    result: str | None = await conn.fetchval(
         """
         SELECT pg_get_constraintdef(c.oid)
           FROM pg_constraint c
@@ -68,6 +68,7 @@ async def _constraintdef(conn: asyncpg.Connection[Any], name: str) -> str | None
         """,
         name,
     )
+    return result
 
 
 @needs_docker
