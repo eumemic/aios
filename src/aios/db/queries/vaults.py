@@ -826,25 +826,46 @@ class EnvVarCredentialEcho(NamedTuple):
     updated_at: datetime
 
 
-# Shared FROM/WHERE/ORDER-BY body for the two session env-var credential
-# queries below. The account-scoping (``sv.account_id``/``vc.account_id =
-# $2``), archival (``archived_at IS NULL``), DISTINCT-ON-rank predicate and
-# first-vault-wins ordering live here ONCE so the provision-set
-# (:func:`list_session_env_var_credentials`) and the per-step drift echo-set
-# (:func:`list_session_env_var_credential_echoes`) can NEVER silently diverge:
-# a future account-scoping or security fix to this body applies to both. The
-# two queries differ ONLY in their SELECT columns (and return type). ``$1`` is
-# the session id, ``$2`` the account id.
-_SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE = """
-          FROM session_vaults sv
-          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
-         WHERE sv.session_id = $1
+# Owner-parameterized FROM/WHERE/ORDER-BY body for the env-var credential
+# membership/resolution predicate — the security-critical scope shared by ALL
+# three credential queries below (the two session sets *and* the run set). The
+# cross-tenant scope (``account_id = $2`` on BOTH the binding row and the
+# credential row), archival filter (``archived_at IS NULL``), DISTINCT-ON-rank
+# predicate and first-vault-wins ordering live here ONCE, across BOTH owners,
+# so the provision-set (:func:`list_session_env_var_credentials`), the per-step
+# drift echo-set (:func:`list_session_env_var_credential_echoes`) and the
+# workflow-run set (:func:`list_run_env_var_credentials`) can NEVER silently
+# diverge: a future account-scoping or security fix to this body applies to all
+# three. ``$1`` is the owner id (session/run), ``$2`` the account id — bind
+# positions are identical across owners, so no call-site change.
+#
+# The interpolated names (``table``/``a``/``owner_col``) are static module
+# literals — never user input, so no injection risk — matching the already
+# blessed f-string interpolation idiom in ``db/queries/__init__.py``
+# (``_get_scoped``/``_list_scoped`` interpolate ``{table}``/``{column}``).
+_ENV_VAR_CREDENTIALS_FROM_WHERE = """
+          FROM {table} {a}
+          JOIN vault_credentials vc ON vc.vault_id = {a}.vault_id
+         WHERE {a}.{owner_col} = $1
            AND vc.auth_type = 'environment_variable'
            AND vc.archived_at IS NULL
-           AND sv.account_id = $2
+           AND {a}.account_id = $2
            AND vc.account_id = $2
-         ORDER BY vc.secret_name, sv.rank
+         ORDER BY vc.secret_name, {a}.rank
 """.strip()
+
+# Session owner: shared by the two session queries (provision set + drift echo
+# set) so they can't diverge. ``$1`` is the session id, ``$2`` the account id.
+_SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE = _ENV_VAR_CREDENTIALS_FROM_WHERE.format(
+    table="session_vaults", a="sv", owner_col="session_id"
+)
+
+# Run owner: the workflow-run twin, derived from the SAME template — its body
+# can no longer drift from the session predicate by a dropped hand-edit.
+# ``$1`` is the run id, ``$2`` the account id.
+_RUN_ENV_VAR_CREDENTIALS_FROM_WHERE = _ENV_VAR_CREDENTIALS_FROM_WHERE.format(
+    table="wf_run_vaults", a="rv", owner_col="run_id"
+)
 
 
 async def list_run_env_var_credentials(
@@ -860,20 +881,18 @@ async def list_run_env_var_credentials(
     ``secret_name`` resolves first-vault-wins by ``wf_run_vaults.rank``.
     Runs have no per-step drift echo, so this is the only run env-var
     credential membership query.
+
+    Embeds ``_RUN_ENV_VAR_CREDENTIALS_FROM_WHERE``, derived from the SAME
+    owner-parameterized ``_ENV_VAR_CREDENTIALS_FROM_WHERE`` template the two
+    session queries derive their body from, so the cross-tenant credential
+    predicate can't diverge between the session and run execution paths.
     """
     rows = await conn.fetch(
-        """
+        f"""
         SELECT DISTINCT ON (vc.secret_name)
                vc.id, vc.secret_name, vc.allowed_hosts,
                vc.ciphertext, vc.nonce, vc.updated_at
-          FROM wf_run_vaults rv
-          JOIN vault_credentials vc ON vc.vault_id = rv.vault_id
-         WHERE rv.run_id = $1
-           AND vc.auth_type = 'environment_variable'
-           AND vc.archived_at IS NULL
-           AND rv.account_id = $2
-           AND vc.account_id = $2
-         ORDER BY vc.secret_name, rv.rank
+        {_RUN_ENV_VAR_CREDENTIALS_FROM_WHERE}
         """,
         run_id,
         account_id,
