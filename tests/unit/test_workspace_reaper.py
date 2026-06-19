@@ -65,18 +65,39 @@ def _mk_workspace(root: Path, account_id: str, session_id: str, *, age_s: float 
     return d
 
 
-def _fake_pool(candidates: list[dict[str, Any]] | Exception) -> MagicMock:
-    """Pool whose acquired conn returns ``candidates`` (or raises) from the query.
+def _fake_pool(
+    candidates: list[dict[str, Any]] | Exception,
+    *,
+    live_paths: list[str] | None = None,
+) -> MagicMock:
+    """Pool whose acquired conn answers the reaper's two ``conn.fetch`` calls.
 
-    ``candidates`` are the rows the DB query would yield — i.e. already filtered
-    to archived ∧ aged ∧ not-active by the SQL. Each is a dict with ``id``,
-    ``account_id``, ``workspace_volume_path``.
+    ``candidates`` are the rows the candidate query would yield — i.e. already
+    filtered to archived ∧ aged ∧ not-active by the SQL. Each is a dict with
+    ``id`` / ``account_id`` / ``workspace_volume_path``. Pass an ``Exception`` to
+    simulate a DB error on the candidate read.
+
+    ``live_paths`` are the stored ``workspace_volume_path`` values the LIVE-clone
+    keep-set query (``unscoped_live_workspace_volume_paths``) would return; the
+    reaper realpath-normalizes them and skips any candidate that collides. The
+    two fetches are routed by SQL text: the candidate query selects
+    ``archived_at IS NOT NULL``, the live query ``archived_at IS NULL``.
     """
+    live_paths = live_paths or []
     conn = MagicMock()
+
     if isinstance(candidates, Exception):
         conn.fetch = AsyncMock(side_effect=candidates)
     else:
-        conn.fetch = AsyncMock(return_value=candidates)
+
+        async def _route_fetch(sql: str, *_a: Any, **_k: Any) -> list[Any]:
+            if "archived_at IS NULL" in sql:
+                # the live-clone keep-set query: rows with workspace_volume_path
+                return [{"workspace_volume_path": p} for p in live_paths]
+            # the candidate query: archived ∧ aged ∧ not-active rows
+            return candidates
+
+        conn.fetch = AsyncMock(side_effect=_route_fetch)
 
     class _Cm:
         async def __aenter__(self) -> Any:
@@ -266,6 +287,89 @@ async def test_symlink_canonical_to_sibling_session_is_never_followed(
     assert result.skipped_confinement == 1
     assert victim.exists(), "a same-root symlink target (live sibling) must survive"
     assert (victim / "scratch.txt").exists()
+
+
+async def test_symlinked_account_component_to_live_sibling_is_never_followed(
+    env: dict[str, Any],
+) -> None:
+    """CRITICAL (#1395 never-delete breach): a symlink at the ACCOUNT component
+    ``<root>/<account_id>`` pointing at a real sibling account's dir must NOT be
+    followed — reaping the archived session's canonical leaf would ``rmtree`` the
+    LIVE victim's session dir under the symlinked-through account.
+
+    The leaf-only ``is_symlink()`` check is blind to a PARENT symlink, and
+    ``realpath(stored) == realpath(canonical)`` collapses the parent symlink
+    identically on both sides (so it matches and waves the candidate through).
+    Fix 1 confines on the FULLY-RESOLVED canonical path (no symlink anywhere in
+    the chain, realpath still two levels under the resolved root), so a
+    parent-component symlink breaks the realpath equality ⇒ skipped, never reaped.
+
+    Non-vacuous: against the unfixed leaf-only confinement this test FAILS —
+    ``reaped == 1`` and the victim's data is deleted; with Fix 1 it PASSES.
+    """
+    root = env["root"]
+    # The live victim: account ``acct_victim`` with a real, populated session dir.
+    victim_account = root / "acct_victim"
+    victim_account.mkdir()
+    victim_session = victim_account / "sess_victim"
+    victim_session.mkdir()
+    (victim_session / "live-data.txt").write_text("a LIVE cross-account session's files")
+
+    # The attacker account component is a SYMLINK to the victim account dir, so
+    # ``<root>/acct_attacker/sess_victim`` traverses the parent symlink to the
+    # victim's real session dir under the SAME root.
+    attacker_account = root / "acct_attacker"
+    attacker_account.symlink_to(victim_account)
+
+    # The archived session's stored path is its canonical default through the
+    # symlinked account — it realpath-collapses to the victim's real dir, exactly
+    # as the canonical recomputed from ids does (the bug the two old guards miss).
+    canonical_via_symlink = str(attacker_account / "sess_victim")
+    pool = _fake_pool([_row("acct_attacker", "sess_victim", canonical_via_symlink)])
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 0, "a parent-component symlink must never be followed into a delete"
+    assert result.skipped_confinement == 1
+    assert victim_session.exists(), "the LIVE cross-account victim's session dir must remain"
+    assert (victim_session / "live-data.txt").exists(), "the victim's live data must remain"
+
+
+async def test_live_clone_sharing_archived_parents_canonical_dir_is_skipped(
+    env: dict[str, Any],
+) -> None:
+    """Fix 2 (residual, same never-delete class): a LIVE session whose
+    ``workspace_volume_path`` realpath-equals an archived candidate's canonical
+    dir must cause the archived candidate to be SKIPPED.
+
+    ``clone_session`` lets a live clone share another session's volume — and a
+    live clone can point at an archived parent's OWN canonical default path. If
+    the reaper reaped the archived parent's row it would ``rmtree`` the directory
+    the live clone is actively using ⇒ cross-session live data loss. The
+    live-clone keep-set cross-check skips the parent when a live session collides.
+
+    Non-vacuous: without the keep-set cross-check the parent's canonical dir
+    passes every confinement check (its OWN stored path equals its OWN canonical),
+    so it is reaped (``reaped == 1``) and the live clone's volume is destroyed;
+    with Fix 2 the live collision skips it (``reaped == 0``).
+    """
+    # The archived parent's canonical default dir (its stored path == canonical).
+    parent_dir = _mk_workspace(env["root"], "acct1", "sess_parent")
+    parent_canonical = str(parent_dir)
+
+    # A LIVE clone shares the parent's directory (its stored workspace path is the
+    # parent's canonical dir). It is non-archived, so it is in the live keep-set.
+    pool = _fake_pool(
+        [_row("acct1", "sess_parent", parent_canonical)],
+        live_paths=[parent_canonical],
+    )
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 0, "reaping a dir a LIVE clone shares would destroy the clone's volume"
+    assert result.skipped_confinement == 1
+    assert parent_dir.exists(), "the shared directory the live clone uses must remain"
+    assert (parent_dir / "scratch.txt").exists()
 
 
 async def test_off_shape_ids_are_never_reaped(env: dict[str, Any]) -> None:

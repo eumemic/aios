@@ -163,6 +163,36 @@ async def unscoped_reapable_archived_workspaces(
     return rows
 
 
+async def unscoped_live_workspace_volume_paths(
+    conn: asyncpg.Connection[Any],
+) -> list[str]:
+    """Return every NON-archived (live) session's stored ``workspace_volume_path``.
+
+    The keep-set for the archived-workspace reaper's live-clone cross-check
+    (aios#40, same never-delete class as the confinement gate). ``clone_session``
+    lets a live clone *share* the volume of another session — and a live clone
+    can legitimately point at an ARCHIVED parent's OWN canonical default path
+    (``<root>/<account>/<parent>``). Reaping that archived parent's row would
+    ``rmtree`` the very directory the live clone is using ⇒ cross-session live
+    data loss.
+
+    Returns the *stored* paths verbatim, across all accounts (``unscoped_``); the
+    caller realpath-normalizes them into a keep-set and skips any reap candidate
+    whose canonical realpath collides with a live path. NULL/empty stored values
+    are filtered out (they can never realpath-collide with a real canonical dir).
+    """
+    rows = await conn.fetch(
+        """
+        SELECT workspace_volume_path
+          FROM sessions
+         WHERE archived_at IS NULL
+           AND workspace_volume_path IS NOT NULL
+           AND workspace_volume_path <> ''
+        """,
+    )
+    return [row["workspace_volume_path"] for row in rows]
+
+
 async def gc_snapshot_session_states(
     conn: asyncpg.Connection[Any], session_ids: Sequence[str]
 ) -> list[asyncpg.Record]:

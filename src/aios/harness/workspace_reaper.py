@@ -43,10 +43,20 @@ reaps **only** that, and **only** when the stored ``workspace_volume_path``
   never be ``workspace_root`` itself or a reserved sibling root (``_runs`` …).
 * A relative / empty / out-of-tree stored value never resolves-equal ⇒ skipped.
 
-A symlink AT the canonical leaf is additionally never followed (its target may
-be a live sibling session's dir, or escape the root). The symlink check runs on
-the UN-resolved leaf — the path handed to ``rmtree`` is never symlink-
-dereferenced — so a symlink swap can't redirect the delete onto a real victim.
+Confinement is proven on the FULLY-RESOLVED canonical path — no symlink anywhere
+in its chain (leaf, parent ACCOUNT component, OR root) and its realpath still
+exactly ``<resolved_root>/<account>/<session>``. A symlink at ANY component
+(e.g. a swapped ``<root>/<account>`` redirecting at another account's LIVE dir)
+breaks that and is skipped. The path handed to ``rmtree`` is the UN-resolved
+canonical — never symlink-dereferenced — so a swap can't redirect the delete
+onto a real victim. (The CHECK resolves; the TARGET does not — they are kept
+deliberately separate, since re-merging them is what caused the prior bugs.)
+
+A residual same-class guard: a LIVE clone can share an archived parent's OWN
+canonical default dir (``clone_session`` shares volumes). Before reaping, the
+candidate's canonical realpath is cross-checked against the keep-set of every
+non-archived session's workspace realpath; a collision skips the candidate so
+reaping the parent never deletes a live clone's volume.
 
 Six guardrails (irreversible deletion — never-delete care)
 ----------------------------------------------------------
@@ -161,6 +171,26 @@ def _canonical_workspace_path(account_id: str, session_id: str, workspace_root: 
     return workspace_root / account_id / session_id
 
 
+def _live_workspace_realpath_keepset(live_paths: list[str]) -> frozenset[str]:
+    """Realpath-normalize the live-clone keep-set (Fix 2), in a sync helper.
+
+    Kept off the async sweep path so the ``os.path.realpath`` calls don't trip
+    ASYNC240 (and mirror ``_resolve_reap_target``'s sync filesystem discipline).
+    A ``realpath`` that raises (vanished path / perm) drops that entry — but a
+    dropped live path can never *match* a candidate's canonical realpath, so
+    dropping is conservative: it never causes a wrong delete. (A candidate's own
+    canonical realpath is computed independently and must equal a KEPT live path
+    to be skipped.)
+    """
+    out: set[str] = set()
+    for p in live_paths:
+        try:
+            out.add(os.path.realpath(p))
+        except OSError:
+            continue
+    return frozenset(out)
+
+
 def _resolve_reap_target(
     *,
     account_id: str,
@@ -168,6 +198,7 @@ def _resolve_reap_target(
     stored_path: str | None,
     workspace_root: Path,
     mtime_cutoff: float,
+    live_workspace_realpaths: frozenset[str],
 ) -> tuple[Path | None, str]:
     """Decide whether (and where) to reap a single archived session's workspace.
 
@@ -177,6 +208,10 @@ def _resolve_reap_target(
     fail-closed: anything we cannot positively confirm safe returns ``None``.
 
     ``workspace_root`` MUST be already-resolved (the caller resolves it once).
+    ``live_workspace_realpaths`` is the realpath keep-set of every LIVE (non-
+    archived) session's stored workspace path (the caller builds it once); a
+    candidate whose canonical realpath collides with a live path is skipped (a
+    live clone can share an archived parent's own canonical dir).
     """
     # Id-shape gate: a well-formed id can't contain a separator/``..``, so an
     # interpolated id can never reshape the path. Reject anything off-shape.
@@ -185,9 +220,54 @@ def _resolve_reap_target(
 
     canonical = _canonical_workspace_path(account_id, session_id, workspace_root)
 
-    # Never follow a symlink at the canonical leaf — its target may be a live
-    # sibling session's dir or escape the root. Checked on the UN-resolved path
-    # (``lstat``/``islink``), before any dereference, or this guard is dead.
+    # ── Confinement CHECK vs. rmtree TARGET — two DIFFERENT resolutions ──────
+    # These two concerns MUST stay separate (re-merging them is what caused the
+    # two prior confinement bugs). The CHECK proves safety on the FULLY-RESOLVED
+    # path (symlinks collapsed at EVERY component — leaf, parent, AND root); the
+    # TARGET handed to ``rmtree`` is the UN-resolved ``canonical`` (a path with a
+    # symlink anywhere in its chain must never be dereferenced into a delete).
+    #
+    # Why the earlier guards were insufficient (the cross-account LIVE-data
+    # delete the review proved): a symlink at the ACCOUNT component
+    # ``<root>/<account_id>`` is invisible to a leaf-only ``is_symlink()`` check,
+    # and ``realpath(stored) == realpath(canonical)`` collapses that parent
+    # symlink IDENTICALLY on both sides (so it matches and waves the candidate
+    # through), and ``canonical.parent.parent == workspace_root`` is computed on
+    # the UN-resolved path (so it passes trivially). ``rmtree(canonical)`` then
+    # follows the parent symlink and deletes its real target — which can be
+    # ANOTHER account's LIVE session dir. ``volumes.py`` documents in-sandbox
+    # symlink swaps under ``workspace_root`` as a real, defended-against threat,
+    # so this is reachable, not theoretical.
+    #
+    # The fix: confirm the canonical path has NO symlink anywhere in its chain
+    # (``realpath(canonical) == canonical``) AND its realpath is still exactly
+    # ``realpath(workspace_root)/<account_id>/<session_id>`` (two levels under
+    # the RESOLVED root). A symlink at ANY component (leaf OR parent OR root)
+    # breaks one of these equalities ⇒ skipped, never reaped.
+    #
+    # IMPORTANT: never replace ``canonical`` (the rmtree target) with its
+    # ``.resolve()``/``realpath`` form — the target must stay the un-resolved
+    # path so a swap can't redirect the delete onto a real victim.
+    try:
+        canonical_real = os.path.realpath(canonical)
+    except OSError:
+        return None, "confinement"
+    if canonical_real != str(canonical):
+        # A symlink exists somewhere in the canonical chain (leaf, parent, or
+        # root). The un-resolved path differs from its realpath ⇒ fail closed.
+        return None, "confinement"
+    # And the resolved canonical must sit exactly two levels under the RESOLVED
+    # root: ``realpath(root)/<account_id>/<session_id>``. ``workspace_root`` is
+    # already resolved by the caller, but a parent/root symlink could still have
+    # left ``canonical_real`` outside it — recompute against the resolved root.
+    expected_real = os.path.join(os.path.realpath(workspace_root), account_id, session_id)
+    if canonical_real != expected_real:
+        return None, "confinement"
+
+    # Belt-and-suspenders: never follow a symlink at the canonical leaf either.
+    # Checked on the UN-resolved path (``lstat``/``islink``); redundant with the
+    # realpath-equality above but kept as a cheap, explicit leaf guard so a
+    # future refactor of the chain check can't silently reintroduce leaf-follow.
     if canonical.is_symlink():
         return None, "confinement"
 
@@ -198,9 +278,20 @@ def _resolve_reap_target(
     if not stored_path:
         return None, "confinement"
     try:
-        if os.path.realpath(stored_path) != os.path.realpath(canonical):
+        if os.path.realpath(stored_path) != canonical_real:
             return None, "confinement"
     except OSError:
+        return None, "confinement"
+
+    # Live-clone keep-set cross-check (same never-delete class): a LIVE clone can
+    # share an archived parent's OWN canonical default dir. Reaping the archived
+    # parent's row would ``rmtree`` the directory the live clone is still using ⇒
+    # cross-session live data loss. Skip if this candidate's canonical realpath
+    # collides with any live session's workspace realpath. (The keep-set is
+    # fail-closed-empty only when its query erred — and on that error the caller
+    # skips the WHOLE sweep, so an empty set here always means "no live collision
+    # among the sessions we could enumerate".)
+    if canonical_real in live_workspace_realpaths:
         return None, "confinement"
 
     # Structural belt: a real dir that is exactly two levels under the root.
@@ -244,10 +335,20 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
                 conn,
                 min_archived_age_seconds=float(settings.workspace_reaper_min_archived_age_seconds),
             )
+            # Live-clone keep-set (Fix 2): every non-archived session's workspace
+            # path, realpath-normalized. Read in the SAME critical section as the
+            # candidate set so the two reads see one consistent DB snapshot.
+            live_paths = await queries.unscoped_live_workspace_volume_paths(conn)
     except (asyncpg.PostgresError, OSError):
         # fail-closed: a DB hiccup must never be read as "everything is dead".
+        # If EITHER read fails (candidates or live keep-set) we reap nothing this
+        # pass — an absent keep-set must never be treated as "no live clones".
         log.exception("workspace_reaper.candidate_read_failed")
         return ReapResult()
+
+    # Normalize the live keep-set once (sync helper — keeps os.path off the
+    # async path; see _live_workspace_realpath_keepset for the drop semantics).
+    live_workspace_realpaths = _live_workspace_realpath_keepset(live_paths)
 
     reaped = bytes_freed = skip_conf = skip_missing = skip_fresh = skip_error = 0
     for row in candidates:
@@ -257,6 +358,7 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
             stored_path=row["workspace_volume_path"],
             workspace_root=workspace_root,
             mtime_cutoff=mtime_cutoff,
+            live_workspace_realpaths=live_workspace_realpaths,
         )
         if reason == "confinement":
             skip_conf += 1
