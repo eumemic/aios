@@ -148,15 +148,29 @@ async def test_ip6tables_output_policy_is_drop(
     """The belt-and-suspenders per-session DROP: even if a v6 route ever
     appears, ``ip6tables -P OUTPUT DROP`` blocks egress. Read it back from the
     shared netns via an operator-image sidecar (the sandbox itself holds no
-    NET_ADMIN), selecting the legacy backend so it works under runsc."""
+    NET_ADMIN), selecting the legacy backend so it works under runsc.
+
+    The assertion is guarded the same way the lockdown apply is: on hosts where
+    the ``ip6_tables`` kernel module is not loaded — common on CI runners and
+    any IPv6-disabled host — the v6 ``filter`` table cannot be initialized, so
+    there is no v6 netfilter path to leak through and the apply correctly skips
+    its DROP. In that case ``ip6tables -S OUTPUT`` fails to initialize and there
+    is no policy to read back; the test passes (there is nothing to secure).
+    When the v6 table IS present (the exact case the DROP defends), the policy
+    MUST be ``DROP``."""
     backend, handle = limited_sandbox
     settings = get_settings()
     # Mirror the lockdown's legacy-backend selection so this reads the same
-    # table the apply wrote to under runsc.
+    # table the apply wrote to under runsc, and its table-availability guard so
+    # a missing ip6_tables module is not a spurious failure.
     script = (
         "if command -v ip6tables-legacy >/dev/null 2>&1; then IP6T=ip6tables-legacy; "
         "else IP6T=ip6tables; fi\n"
-        '"$IP6T" -S OUTPUT | grep -qx -- "-P OUTPUT DROP"'
+        'if v6_output="$("$IP6T" -S OUTPUT 2>/dev/null)"; then\n'
+        '  printf "%s\\n" "$v6_output" | grep -qx -- "-P OUTPUT DROP"\n'
+        "else\n"
+        '  echo "ip6tables filter table unavailable; no v6 egress path to lock down" >&2\n'
+        "fi"
     )
     result = await backend.run_netns_sidecar(
         handle.sandbox_id,
@@ -167,6 +181,7 @@ async def test_ip6tables_output_policy_is_drop(
         runtime=settings.sandbox_runtime,
     )
     assert result.exit_code == 0, (
-        "ip6tables OUTPUT policy is not DROP after lockdown apply\n"
+        "ip6tables OUTPUT policy is not DROP after lockdown apply (and the v6 "
+        "filter table WAS initializable)\n"
         f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
     )

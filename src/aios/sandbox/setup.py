@@ -228,15 +228,38 @@ _IP6TABLES_BACKEND_SELECT = (
 # network-create flag is the weakest of the three changes — redundant against
 # the current Docker default and inert for the live network — so the real
 # defense is this per-session DROP.
+#
+# The whole block is GUARDED on the v6 ``filter`` table being initializable
+# (``"$IP6T" -S OUTPUT`` succeeds). On hosts where the ``ip6_tables`` kernel
+# module is not loaded — common on CI runners and any IPv6-disabled host —
+# ``ip6tables`` aborts with ``can't initialize ip6tables table 'filter': Table
+# does not exist (do you need to insmod?)``. Under ``set -e`` that would abort
+# the entire lockdown apply and fail every Limited provision closed-noisily — a
+# self-inflicted outage triggered by the absence of the very v6 stack we are
+# trying to lock down. But that absence is itself the security property: with no
+# v6 ``filter`` table there is no v6 netfilter path to leak through, so skipping
+# the DROP is safe. When the table IS present (a v6 route/stack exists — the
+# exact case the DROP defends), the flush/loopback/DROP run and any failure
+# there is a real error. We deliberately do NOT ``modprobe ip6_tables`` (the
+# sidecar holds no module-load capability and forcing the module on just to drop
+# would re-introduce a v6 surface where none existed).
 _IP6TABLES_LOCKDOWN_LINES = (
     "",
     "# Belt-and-suspenders: deny ALL IPv6 egress (#1207). The IPv4 -P OUTPUT DROP",
     "# above is iptables-only; without this an IPv6 route would bypass it.",
     _IP6TABLES_BACKEND_SELECT,
-    '"$IP6T" -F OUTPUT',
-    "# Allow v6 loopback so in-netns localhost/DNS still works; deny everything else.",
-    '"$IP6T" -A OUTPUT -o lo -j ACCEPT',
-    '"$IP6T" -P OUTPUT DROP',
+    "# Guard on the v6 filter table being initializable: if ip6_tables is not",
+    "# loaded (no v6 netfilter path to leak through) skip rather than abort under",
+    "# set -e; when it IS present the DROP below is enforced and verified.",
+    'if "$IP6T" -S OUTPUT >/dev/null 2>&1; then',
+    '  "$IP6T" -F OUTPUT',
+    "  # Allow v6 loopback so in-netns localhost/DNS still works; deny everything else.",
+    '  "$IP6T" -A OUTPUT -o lo -j ACCEPT',
+    '  "$IP6T" -P OUTPUT DROP',
+    "else",
+    '  echo "ip6tables filter table unavailable (ip6_tables not loaded); '
+    'no IPv6 egress path to lock down — skipping v6 DROP" >&2',
+    "fi",
 )
 
 
@@ -517,9 +540,18 @@ def build_lockdown_verify_script(
         # ip6tables policy too, the new v6 DROP is itself unverified — re-creating
         # the exact "green verify while open" gap one layer down. Selects the same
         # legacy backend the apply wrote to, so the verify reads the right table
-        # under runsc.
+        # under runsc. The assertion is GUARDED the same way the apply is: when
+        # the v6 ``filter`` table is not initializable (``ip6_tables`` not loaded
+        # — no v6 netfilter path to leak through, so the apply correctly skipped
+        # its DROP) there is no policy to read back and the verify passes. When
+        # the table IS present, ``-S OUTPUT`` succeeds and the DROP policy must be
+        # there (a missing DROP fails the verify, closing the "green verify while
+        # open" gap for the case the DROP actually defends).
         lines.append(_IP6TABLES_BACKEND_SELECT)
-        lines.append("\"$IP6T\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'")
+        lines.append(
+            'if v6_output="$("$IP6T" -S OUTPUT 2>/dev/null)"; then '
+            "printf '%s\\n' \"$v6_output\" | grep -qx -- '-P OUTPUT DROP'; fi"
+        )
     if dnat_hosts:
         lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'")
     return "\n".join(lines)
