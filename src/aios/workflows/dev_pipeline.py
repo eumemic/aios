@@ -382,16 +382,16 @@ ACCEPTED_RESIDUE_KINDS = (
 
 
 async def human_gate(spec):
-    """``gate(spec)`` for a HUMAN-IN-LOOP kind, with the residue_kind stamp enforced.
-
-    Suspends like ``gate`` and, on resume, inspects the returned ``result`` and REJECTS
-    the resolve as incomplete -- raising, so the run does NOT proceed past the gate -- if
-    ``residue_kind`` is absent or outside {the four kinds} + {other}. The kind is thus
-    captured at the moment of human judgment, never reconstructed from prose; the ops-agent's
-    axis-2 INSERT later copies this finder's-own stamp verbatim (it classifies, not defines).
-
-    For a NON-human-in-loop kind this is a plain ``gate`` (no stamp demanded) -- but callers
-    should only route the human-in-loop kinds through here."""
+    # ``gate(spec)`` for a HUMAN-IN-LOOP kind, with the residue_kind stamp enforced.
+    #
+    # Suspends like ``gate`` and, on resume, inspects the returned ``result`` and REJECTS
+    # the resolve as incomplete -- raising, so the run does NOT proceed past the gate -- if
+    # ``residue_kind`` is absent or outside {the four kinds} + {other}. The kind is thus
+    # captured at the moment of human judgment, never reconstructed from prose; the ops-agent's
+    # axis-2 INSERT later copies this finder's-own stamp verbatim (it classifies, not defines).
+    #
+    # For a NON-human-in-loop kind this is a plain ``gate`` (no stamp demanded) -- but callers
+    # should only route the human-in-loop kinds through here.
     kind = spec.get("kind") if isinstance(spec, dict) else None
     result = await gate(spec)
     if kind in HUMAN_IN_LOOP_GATE_KINDS:
