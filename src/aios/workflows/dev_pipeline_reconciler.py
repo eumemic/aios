@@ -413,12 +413,19 @@ def owner(item):
         if verdict in ("green", "no_ci"):
             reviewed = _reviewed_label_for(labels, head_sha)
             approved = LABEL_MERGE_APPROVED in labels
-            # 8. merge:approved → merge (effector). Re-check the tier gate defensively: a
-            # merge:approved that somehow carries tier>cap (it never should — the review branch
-            # refuses to stamp it) is NOT merged; it falls through to escalate.
+            # 8. merge:approved → merge (effector). Re-check the tier gate defensively: merge is
+            # routed ONLY for a merge:approved PR carrying an EXPLICIT in-cap tier (1 <= tier <=
+            # AUTO_MERGE_MAX_TIER). Two anomalous shapes escalate instead of merging (defense in
+            # depth — neither ever occurs in practice, because the review branch stamps risk:tier-N
+            # BEFORE merge:approved and fails closed to tier-4 on any risk failure):
+            #   * tier>cap somehow approved → escalate (the #1158 second line).
+            #   * a merge:approved with NO risk:tier-N label (tier is None) → escalate, NOT merge:
+            #     a missing tier means the review branch never completed its tier stamp, so we must
+            #     NOT treat 'no tier' as 'within cap'. The effector only merges on positive evidence
+            #     of an in-cap tier, never on the ABSENCE of a tier.
             if approved:
                 tier = item.get("risk_tier")
-                if not isinstance(tier, int) or tier <= AUTO_MERGE_MAX_TIER:
+                if isinstance(tier, int) and 1 <= tier <= AUTO_MERGE_MAX_TIER:
                     return (item, "merge")
                 return (item, "escalate")
             # 6/7. green ∧ not-yet-(or stale-)reviewed-for-head, OR reviewed-for-head but the

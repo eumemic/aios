@@ -264,11 +264,21 @@ def test_owner_refuses_merge_for_tier_above_cap() -> None:
         assert _transition(item) == "escalate"
 
 
-def test_owner_routes_merge_for_tier_within_cap() -> None:
+def test_owner_routes_merge_for_explicit_in_cap_tier() -> None:
     approved_labels = frozenset({LABEL_MERGE_APPROVED, LABEL_REVIEWED_PREFIX + _SHA})
-    for tier in (None, 1, 2, AUTO_MERGE_MAX_TIER):
+    for tier in (1, 2, AUTO_MERGE_MAX_TIER):
         item = _pr(labels=approved_labels, risk_tier=tier, head_sha=_SHA)
-        assert _transition(item) == "merge", f"tier {tier} (within cap) must route to merge"
+        assert _transition(item) == "merge", f"tier {tier} (explicit, in cap) must route to merge"
+
+
+def test_owner_refuses_merge_for_approved_pr_with_no_tier() -> None:
+    # Defense in depth: a merge:approved PR carrying NO risk:tier-N label (tier is None) means the
+    # review branch never completed its tier stamp — owner() must NOT treat 'no tier' as 'in cap'
+    # and merge. The effector merges only on POSITIVE evidence of an in-cap tier; it escalates here.
+    approved_labels = frozenset({LABEL_MERGE_APPROVED, LABEL_REVIEWED_PREFIX + _SHA})
+    item = _pr(labels=approved_labels, risk_tier=None, head_sha=_SHA)
+    assert _transition(item) != "merge"
+    assert _transition(item) == "escalate"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -374,32 +384,51 @@ def test_select_actionable_empty_is_none() -> None:
 
 
 def _gate_call_count(src: str) -> int:
-    """Count actual ``gate(...)`` CALL nodes (not prose mentions of "gate()" in docstrings)."""
+    """Count actual ``gate(...)`` CALL nodes (not prose mentions of "gate()" in docstrings).
+
+    Catches BOTH the bare-name form ``gate(...)`` AND the attribute form ``x.gate(...)`` — so a
+    ``from aios... import gate as g`` alias OR a ``module.gate()`` getattr escape can't smuggle a
+    suspend past the ban. The author namespace injects ``gate`` as a bare global (no module to
+    attribute off), but we match the attribute form too so the guard is robust to a future splice
+    that imports it differently. (We also assert no aliasing import statement below.)"""
     tree = ast.parse(src)
-    return sum(
-        1
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "gate"
-    )
+    count = 0
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        func = n.func
+        if (isinstance(func, ast.Name) and func.id == "gate") or (
+            isinstance(func, ast.Attribute) and func.attr == "gate"
+        ):
+            count += 1
+    return count
 
 
 def test_assembled_script_has_zero_gate_calls() -> None:
     # gate() durably SUSPENDS the whole run (the orphan bug relocated, not fixed). The reconciler
     # BANS it in the loop — escalation is a durable needs:human/* label, the queryable mailbox.
-    assert _gate_call_count(build_reconciler_script(repo="o/r")) == 0
-    assert (
-        _gate_call_count(
-            build_reconciler_fixture_script(
-                implement_agent_id="i",
-                review_agent_id="r",
-                fix_agent_id="f",
-                ci_agent_id="c",
-                risk_agent_id="k",
-                repo="o/r",
-            )
-        )
-        == 0
-    )
+    for src in (
+        build_reconciler_script(repo="o/r"),
+        build_reconciler_fixture_script(
+            implement_agent_id="i",
+            review_agent_id="r",
+            fix_agent_id="f",
+            ci_agent_id="c",
+            risk_agent_id="k",
+            repo="o/r",
+        ),
+    ):
+        assert _gate_call_count(src) == 0
+        # Alias-proofing: no ``import gate``/``gate as``/``= gate`` rebinding can sneak a call past
+        # the AST matcher above (the author namespace exposes gate as a bare global, so any such
+        # binding would be a deliberate smuggle). The script does no aliasing of capabilities.
+        tree = ast.parse(src)
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom):
+                assert all(a.name != "gate" for a in n.names), "gate must never be imported/aliased"
+            # a `g = gate` style rebinding of the bare global
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Name):
+                assert n.value.id != "gate", "gate must never be rebound to an alias"
 
 
 def test_assembled_script_excludes_datetime_import() -> None:
