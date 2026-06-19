@@ -975,12 +975,40 @@ async def discover_session_mcp_tools(
 
     crypto_box = runtime.require_crypto_box()
 
+    # Binding identity for the discovery result cache (#1391): the agent id +
+    # version. The tool set is agent-definition-level and immutable within a
+    # version, so caching on this key is correct — a version bump lands on a
+    # fresh key (re-discovers), while a static binding serves from cache and
+    # pays no per-step ``list_tools()`` RPC. Frozen-surface / version-pinned
+    # sessions keep one (id, version) for the session lifetime, so they serve
+    # from cache for the whole session with no rediscovery.
+    binding_id = f"{getattr(agent, 'id', '?')}:{getattr(agent, 'version', '?')}"
+
+    # Circuit breaker (#1391): skip a server whose discovery recently timed out /
+    # failed so one unresponsive server can't re-stall the prelude every step —
+    # the agent proceeds degraded on the healthy servers' (possibly cached) tools.
+    from aios.mcp.client import _DISCOVERY_UNHEALTHY_BACKOFF_S
+
     async def _discover_one(spec: McpServerSpec) -> tuple[list[dict[str, Any]], str | None]:
         vault_id, headers = await resolve_auth_for_target_url(
             pool, crypto_box, session_id, spec.url, account_id=account_id
         )
+        _pool = runtime.mcp_session_pool
+        if _pool is not None:
+            from aios.mcp.client import _headers_key
+
+            hkey = _headers_key(spec.headers)
+            # A cached result is always served (cheap, no RPC) even while the
+            # circuit is open; only an uncached discovery is short-circuited.
+            if _pool.get_cached_tools(spec.url, vault_id, hkey, binding_id) is None and (
+                _pool.is_unhealthy(spec.url, vault_id, hkey)
+            ):
+                raise TimeoutError(
+                    f"MCP server {spec.name!r} discovery skipped: "
+                    f"in backoff ({_DISCOVERY_UNHEALTHY_BACKOFF_S:.0f}s) after a prior timeout"
+                )
         return await discover_mcp_tools(
-            spec.url, vault_id, headers, spec.name, spec_headers=spec.headers
+            spec.url, vault_id, headers, spec.name, spec_headers=spec.headers, binding_id=binding_id
         )
 
     # Discovery runs as part of the step prelude — a process the model

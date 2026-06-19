@@ -274,3 +274,65 @@ class TestDiscoverSessionMcpTools:
             "Failed server must NOT appear in the instructions dict — the system "
             "prompt would otherwise list a server the model can't actually use"
         )
+
+    async def test_unhealthy_server_is_skipped_via_circuit_breaker(self) -> None:
+        """#1391: a server whose discovery recently timed out is in backoff on
+        the pool; the prelude skips its (uncached) discovery fast — it never
+        calls ``discover_mcp_tools`` for it — while a healthy server proceeds.
+        The agent runs degraded on the healthy server's tools, not stalled.
+        """
+        from aios.harness import runtime
+        from aios.harness.loop import discover_session_mcp_tools
+        from aios.mcp.client import _headers_key
+        from aios.mcp.pool import McpSessionPool
+
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="slow", url="https://mcp.slow"),
+                McpServerSpec(name="ok", url="https://mcp.ok"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="slow"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="ok"),
+            ],
+        )
+
+        pool = McpSessionPool()
+        # Mark the slow server's transport key unhealthy (as a prior discovery
+        # timeout would). vault_id is None here (resolve mocked to no-cred).
+        pool.mark_unhealthy("https://mcp.slow", None, _headers_key(None), backoff_s=60.0)
+
+        discovered: list[str] = []
+
+        async def _discover(
+            _url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            discovered.append(name)
+            return [{"name": f"mcp__{name}__t"}], None
+
+        prior = runtime.mcp_session_pool
+        runtime.mcp_session_pool = pool
+        try:
+            with (
+                patch(
+                    "aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock
+                ) as resolve,
+                patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+            ):
+                resolve.return_value = (None, {})
+                tools, _instructions = await discover_session_mcp_tools(
+                    pool=AsyncMock(),
+                    session_id="sess_x",
+                    agent=agent,
+                    account_id="acc_test_stub",
+                )
+        finally:
+            runtime.mcp_session_pool = prior
+
+        # The slow server was short-circuited (never discovered); only 'ok' ran.
+        assert discovered == ["ok"]
+        assert {t["name"] for t in tools} == {"mcp__ok__t"}
