@@ -285,3 +285,51 @@ async def test_update_workflow_roundtrip_and_stale_409(http_client: httpx.AsyncC
     assert r.status_code == 409
     r = await http_client.put("/v1/workflows/wf_nope", json={"version": 1, "script": _SCRIPT})
     assert r.status_code == 404
+
+
+async def test_workflow_versions_endpoints(http_client: httpx.AsyncClient) -> None:
+    """The version-history endpoints: list (newest-first), get-one, and 404s."""
+    name = f"ver-{_uniq()}"
+    r = await http_client.post("/v1/workflows", json={"name": name, "script": _SCRIPT})
+    assert r.status_code == 201
+    wf = r.json()
+
+    # A real update mints v2 (a rename is versioned with the script change).
+    new_name = f"{name}-2"
+    r = await http_client.put(
+        f"/v1/workflows/{wf['id']}",
+        json={"version": 1, "name": new_name, "script": "async def main(input):\n    return 2\n"},
+    )
+    assert r.status_code == 200
+
+    # list → newest-first, each a full snapshot of the definition at that version.
+    r = await http_client.get(f"/v1/workflows/{wf['id']}/versions")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert [v["version"] for v in data] == [2, 1]
+    assert data[0]["name"] == new_name and "return 2" in data[0]["script"]
+    assert data[1]["name"] == name and data[1]["script"] == _SCRIPT
+
+    # get one historical version → the v1 snapshot, untouched by the later update.
+    r = await http_client.get(f"/v1/workflows/{wf['id']}/versions/1")
+    assert r.status_code == 200
+    v1 = r.json()
+    assert v1["version"] == 1 and v1["name"] == name and v1["script"] == _SCRIPT
+
+    # Unknown version → 404; unknown workflow → empty list (no parent existence probe).
+    assert (await http_client.get(f"/v1/workflows/{wf['id']}/versions/99")).status_code == 404
+    r = await http_client.get("/v1/workflows/wf_nope/versions")
+    assert r.status_code == 200 and r.json()["data"] == []
+
+
+async def test_workflow_versions_cross_tenant_isolated(http_client: httpx.AsyncClient) -> None:
+    """A foreign tenant cannot read another tenant's workflow versions."""
+    name = f"ver-iso-{_uniq()}"
+    r = await http_client.post("/v1/workflows", json={"name": name, "script": _SCRIPT})
+    wf = r.json()
+
+    other_key = await _mint_tenant(http_client, f"other-{_uniq()}")
+    r = await http_client.get(f"/v1/workflows/{wf['id']}/versions/1", headers=_bearer(other_key))
+    assert r.status_code == 404
+    r = await http_client.get(f"/v1/workflows/{wf['id']}/versions", headers=_bearer(other_key))
+    assert r.status_code == 200 and r.json()["data"] == []

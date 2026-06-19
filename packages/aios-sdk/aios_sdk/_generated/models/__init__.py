@@ -103,6 +103,7 @@ from .list_response_vault_credential import ListResponseVaultCredential
 from .list_response_wf_run import ListResponseWfRun
 from .list_response_wf_run_event import ListResponseWfRunEvent
 from .list_response_workflow import ListResponseWorkflow
+from .list_response_workflow_version import ListResponseWorkflowVersion
 from .list_session_events_dir import ListSessionEventsDir
 from .list_session_events_kind_type_0 import ListSessionEventsKindType0
 from .list_sessions_status_type_0 import ListSessionsStatusType0
@@ -308,6 +309,9 @@ from .workflow_output_schema_type_0 import WorkflowOutputSchemaType0
 from .workflow_update import WorkflowUpdate
 from .workflow_update_input_schema_type_0 import WorkflowUpdateInputSchemaType0
 from .workflow_update_output_schema_type_0 import WorkflowUpdateOutputSchemaType0
+from .workflow_version import WorkflowVersion
+from .workflow_version_input_schema_type_0 import WorkflowVersionInputSchemaType0
+from .workflow_version_output_schema_type_0 import WorkflowVersionOutputSchemaType0
 
 __all__ = (
     "Account",
@@ -407,6 +411,7 @@ __all__ = (
     "ListResponseWfRun",
     "ListResponseWfRunEvent",
     "ListResponseWorkflow",
+    "ListResponseWorkflowVersion",
     "ListSessionEventsDir",
     "ListSessionEventsKindType0",
     "ListSessionsStatusType0",
@@ -592,4 +597,7 @@ __all__ = (
     "WorkflowUpdate",
     "WorkflowUpdateInputSchemaType0",
     "WorkflowUpdateOutputSchemaType0",
+    "WorkflowVersion",
+    "WorkflowVersionInputSchemaType0",
+    "WorkflowVersionOutputSchemaType0",
 )

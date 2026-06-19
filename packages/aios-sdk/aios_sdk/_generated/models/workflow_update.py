@@ -30,9 +30,11 @@ class WorkflowUpdate:
     current version or the update 409s (re-fetch and retry). Omitted fields are
     preserved — nullable fields (``input_schema``/``output_schema``/``description``)
     can therefore be replaced but never cleared back to null, as on ``AgentUpdate``.
-    An identical update is a no-op (no bump). There is no version-snapshot table —
-    a run pins ``script`` + the declared surface onto itself at launch, so in-flight
-    runs never observe an update. (The ``AgentUpdate`` shape, minus history.)
+    An identical update is a no-op (no bump). Each real bump is snapshotted into the
+    immutable ``workflow_versions`` history (see :class:`WorkflowVersion`) in the same
+    transaction, copy-on-write like ``agent_versions``. A run additionally pins
+    ``script`` + the declared surface onto itself at launch, so in-flight runs never
+    observe an update. (The ``AgentUpdate`` shape.)
 
         Attributes:
             version (int):

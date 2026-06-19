@@ -71,6 +71,30 @@ class Workflow(BaseModel):
     archived_at: datetime | None = None
 
 
+class WorkflowVersion(BaseModel):
+    """Read view of a specific workflow version from the immutable history.
+
+    The workflow analog of :class:`aios.models.agents.AgentVersion`: a complete,
+    immutable snapshot of a workflow's definition at one ``version``. ``name`` IS
+    versioned — a rename mints a new version — so this carries it alongside the
+    script + declared surface. Snapshots exactly ``update_workflow``'s no-op
+    comparison set (``name, script, input_schema, output_schema, description,
+    tools, mcp_servers, http_servers``).
+    """
+
+    workflow_id: str
+    version: int
+    name: str
+    script: str
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+    description: str | None = None
+    tools: list[ToolSpec] = Field(default_factory=list)
+    mcp_servers: list[McpServerSpec] = Field(default_factory=list)
+    http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    created_at: datetime
+
+
 class WfRunUsage(BaseModel):
     """Per-run cost / token / iteration / wall-clock — the machine-observer's substrate.
 
@@ -345,9 +369,11 @@ class WorkflowUpdate(BaseModel):
     current version or the update 409s (re-fetch and retry). Omitted fields are
     preserved — nullable fields (``input_schema``/``output_schema``/``description``)
     can therefore be replaced but never cleared back to null, as on ``AgentUpdate``.
-    An identical update is a no-op (no bump). There is no version-snapshot table —
-    a run pins ``script`` + the declared surface onto itself at launch, so in-flight
-    runs never observe an update. (The ``AgentUpdate`` shape, minus history.)
+    An identical update is a no-op (no bump). Each real bump is snapshotted into the
+    immutable ``workflow_versions`` history (see :class:`WorkflowVersion`) in the same
+    transaction, copy-on-write like ``agent_versions``. A run additionally pins
+    ``script`` + the declared surface onto itself at launch, so in-flight runs never
+    observe an update. (The ``AgentUpdate`` shape.)
     """
 
     model_config = ConfigDict(extra="forbid")

@@ -426,6 +426,126 @@ async def test_update_workflow_rename_collision_conflicts(
         )
 
 
+# ─── workflow_versions — immutable copy-on-write definition history ───────────
+
+
+async def test_create_workflow_snapshots_v1(wf_conn: asyncpg.Connection[Any]) -> None:
+    """``insert_workflow`` dual-writes the v1 snapshot in the same transaction."""
+    wf = await wf_queries.insert_workflow(
+        wf_conn,
+        account_id="acc_root",
+        name="ver",
+        script="A",
+        input_schema={"type": "object"},
+        description="d1",
+        tools=[ToolSpec(type="web_search")],
+    )
+    v1 = await wf_queries.get_workflow_version(wf_conn, wf.id, 1, account_id="acc_root")
+    assert v1.workflow_id == wf.id
+    assert v1.version == 1
+    assert v1.name == "ver"
+    assert v1.script == "A"
+    assert v1.input_schema == {"type": "object"}
+    assert v1.description == "d1"
+    assert [t.type for t in v1.tools] == ["web_search"]
+    versions = await wf_queries.list_workflow_versions(wf_conn, wf.id, account_id="acc_root")
+    assert [v.version for v in versions] == [1]
+
+
+async def test_real_update_mints_v2_and_both_rows_immutable(
+    wf_conn: asyncpg.Connection[Any],
+) -> None:
+    """A real update mints v2; the list is newest-first and v1 keeps its old script."""
+    wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="ver", script="A")
+    await wf_queries.update_workflow(
+        wf_conn, wf.id, account_id="acc_root", expected_version=1, script="B", name="ver2"
+    )
+    versions = await wf_queries.list_workflow_versions(wf_conn, wf.id, account_id="acc_root")
+    assert [v.version for v in versions] == [2, 1]  # newest-first
+    v1 = await wf_queries.get_workflow_version(wf_conn, wf.id, 1, account_id="acc_root")
+    v2 = await wf_queries.get_workflow_version(wf_conn, wf.id, 2, account_id="acc_root")
+    # v1 snapshots the original; the rename is versioned into v2 (name IS versioned).
+    assert v1.script == "A" and v1.name == "ver"
+    assert v2.script == "B" and v2.name == "ver2"
+
+
+async def test_noop_update_writes_no_version_row(wf_conn: asyncpg.Connection[Any]) -> None:
+    """The no-op path bumps nothing and mints no version row."""
+    wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="ver", script="A")
+    await wf_queries.update_workflow(
+        wf_conn, wf.id, account_id="acc_root", expected_version=1, script="A"
+    )
+    versions = await wf_queries.list_workflow_versions(wf_conn, wf.id, account_id="acc_root")
+    assert [v.version for v in versions] == [1]
+
+
+async def test_version_rows_reject_update_trigger(wf_conn: asyncpg.Connection[Any]) -> None:
+    """The ``BEFORE UPDATE`` trigger rejects ANY UPDATE on ``workflow_versions``."""
+    wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="ver", script="A")
+    with pytest.raises(asyncpg.PostgresError):
+        await wf_conn.execute(
+            "UPDATE workflow_versions SET script = 'X' WHERE workflow_id = $1 AND version = 1",
+            wf.id,
+        )
+    # The row is unchanged.
+    v1 = await wf_queries.get_workflow_version(wf_conn, wf.id, 1, account_id="acc_root")
+    assert v1.script == "A"
+
+
+async def test_torn_write_rolls_back_version_bump(
+    wf_conn: asyncpg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forced failure of the version INSERT rolls back the ``workflows.version`` bump.
+
+    Drives the copy-on-write invariant: a torn write (bumped head, no version row)
+    is corruption, so the wrapping transaction must roll the bump back too.
+    """
+    wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="ver", script="A")
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("forced version-insert failure")
+
+    monkeypatch.setattr(wf_queries, "_insert_workflow_version", _boom)
+    with pytest.raises(RuntimeError, match="forced version-insert failure"):
+        await wf_queries.update_workflow(
+            wf_conn, wf.id, account_id="acc_root", expected_version=1, script="B"
+        )
+    # The head is still v1 with the original script — the bump rolled back.
+    head = await wf_queries.get_workflow(wf_conn, wf.id, account_id="acc_root")
+    assert head.version == 1 and head.script == "A"
+    versions = await wf_queries.list_workflow_versions(wf_conn, wf.id, account_id="acc_root")
+    assert [v.version for v in versions] == [1]
+
+
+async def test_archived_workflow_versions_still_readable(
+    wf_conn: asyncpg.Connection[Any],
+) -> None:
+    """Version reads are archived-blind on the parent (post-mortem audit)."""
+    wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="ver", script="A")
+    await wf_queries.update_workflow(
+        wf_conn, wf.id, account_id="acc_root", expected_version=1, script="B"
+    )
+    await wf_queries.archive_workflow(wf_conn, wf.id, account_id="acc_root")
+    versions = await wf_queries.list_workflow_versions(wf_conn, wf.id, account_id="acc_root")
+    assert [v.version for v in versions] == [2, 1]
+    v1 = await wf_queries.get_workflow_version(wf_conn, wf.id, 1, account_id="acc_root")
+    assert v1.script == "A"
+
+
+async def test_version_reads_account_scoped(wf_conn: asyncpg.Connection[Any]) -> None:
+    """A foreign account's version reads miss (NotFound), like the parent reads."""
+    wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="ver", script="A")
+    await wf_conn.execute(
+        "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+        "VALUES ('acc_other', NULL, TRUE, 'other')"
+    )
+    with pytest.raises(NotFoundError):
+        await wf_queries.get_workflow_version(wf_conn, wf.id, 1, account_id="acc_other")
+    assert (
+        await wf_queries.list_workflow_versions(wf_conn, wf.id, account_id="acc_other")
+    ) == []
+
+
 # ─── list_wf_runs — launcher filter (the agent list_runs default scoping) ─────
 
 
