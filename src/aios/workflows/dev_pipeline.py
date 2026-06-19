@@ -404,12 +404,19 @@ async def main(input):
     ok, reason = spec_ok(issue, kind, comments)
     if not ok:
         log("spec gate failed:", reason)
+        # `underspecified` and `shovel-ready` are MUTUALLY EXCLUSIVE on the spec-readiness axis:
+        # an issue the spec-gate just rejected is, by definition, NOT shovel-ready. Strip the
+        # `shovel-ready` claim as we stamp `underspecified`, so the spec-gate's verdict can never
+        # leave the contradictory `shovel-ready ∧ underspecified` pair on the board (the upstream
+        # mislabel that #1075/#1076/#1081/#1087 were stuck in). The strip is best-effort and
+        # idempotent (a 404 = already absent); it does not gate the failure path.
         # Label-before-comment + maker-marker dedup (aios#1292): apply the `underspecified`
         # label FIRST (idempotent/additive), then post the explanation comment ONLY if the
         # already-fetched thread doesn't already carry the marker — so an at-least-once replay
         # doesn't post a second "spec not ready" comment.
         await gh("POST", _ipath(repo, "/issues/%d/labels" % issue_number),
                  {"labels": ["underspecified"]})
+        await _unlabel(repo, issue_number, "shovel-ready")
         await post_comment_once(repo, issue_number, MARKER_SPEC_NOT_READY,
                                 MARKER_SPEC_NOT_READY + "\n\n" + reason, comments)
         return await _fail(repo, issue_number, {"state": "spec_failed", "reason": reason})

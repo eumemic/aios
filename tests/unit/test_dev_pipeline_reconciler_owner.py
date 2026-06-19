@@ -56,6 +56,7 @@ def _issue(
     shovel_ready: bool = False,
     approved: bool = False,
     dispatched: bool = False,
+    underspecified: bool = False,
     has_open_pr: bool = False,
     closed: bool = False,
     labels: frozenset[str] = frozenset(),
@@ -68,6 +69,7 @@ def _issue(
         "shovel_ready": shovel_ready,
         "approved": approved,
         "dispatched": dispatched,
+        "underspecified": underspecified,
         "has_open_pr": has_open_pr,
     }
 
@@ -152,9 +154,18 @@ def _pr_cross_product() -> list[dict[str, Any]]:
 
 def _issue_cross_product() -> list[dict[str, Any]]:
     out = []
-    for sr, ap, disp, has_pr, closed in itertools.product(_BOOLS, _BOOLS, _BOOLS, _BOOLS, _BOOLS):
+    for sr, ap, disp, under, has_pr, closed in itertools.product(
+        _BOOLS, _BOOLS, _BOOLS, _BOOLS, _BOOLS, _BOOLS
+    ):
         out.append(
-            _issue(shovel_ready=sr, approved=ap, dispatched=disp, has_open_pr=has_pr, closed=closed)
+            _issue(
+                shovel_ready=sr,
+                approved=ap,
+                dispatched=disp,
+                underspecified=under,
+                has_open_pr=has_pr,
+                closed=closed,
+            )
         )
     return out
 
@@ -303,6 +314,23 @@ def test_advanced_build_issue_is_not_re_picked() -> None:
     assert _transition(after) is None  # dispatched -> no longer build-eligible
     after_pr = _issue(shovel_ready=True, approved=True, dispatched=False, has_open_pr=True)
     assert _transition(after_pr) is None  # a PR already exists -> no re-build
+
+
+def test_underspecified_issue_is_never_build_eligible() -> None:
+    # `shovel-ready` and `underspecified` are opposite poles of the spec-readiness axis and must
+    # never coexist. The dispatch gate treats `underspecified` as a HARD disqualifier (defense in
+    # depth): even a mislabeled `shovel-ready ∧ approved ∧ underspecified` issue (the
+    # #1075/#1076/#1081/#1087 mislabel class) is NEVER picked for a build.
+    eligible = _issue(shovel_ready=True, approved=True, dispatched=False, has_open_pr=False)
+    assert _transition(eligible) == "build"
+    mislabeled = _issue(
+        shovel_ready=True,
+        approved=True,
+        dispatched=False,
+        has_open_pr=False,
+        underspecified=True,
+    )
+    assert _transition(mislabeled) is None  # underspecified -> not build-eligible
 
 
 def test_advanced_review_pr_is_not_re_reviewed_at_same_head() -> None:

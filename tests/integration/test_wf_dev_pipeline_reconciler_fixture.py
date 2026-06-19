@@ -387,6 +387,11 @@ async def test_build_spec_gate_failure_parks_needs_human_no_agent() -> None:
     assert "needs:human/spec" in scn.labels_added.get(12, [])
     assert "build-12" not in scn.agent_labels  # no implement agent spent
     assert "underspecified" in scn.labels_added.get(12, [])
+    # `shovel-ready` and `underspecified` are mutually exclusive on the spec-readiness axis: the
+    # spec-gate STRIPS the stale `shovel-ready` claim as it stamps `underspecified`, so a rejection
+    # can never leave the contradictory `shovel-ready ∧ underspecified` pair (the #1075/#1076/#1081/
+    # #1087 mislabel class).
+    assert "shovel-ready" in scn.labels_removed.get(12, [])
 
 
 async def test_build_dispatched_issue_is_not_re_built() -> None:

@@ -546,6 +546,11 @@ async def test_spec_gate_short_circuits_without_spawning_agents() -> None:
     # item 3: a spec failure is a terminal NON-gate failure -> labelled autodev:failed
     assert "autodev:failed" in scn.labels_added
     assert "autodev:in-progress" in scn.labels_removed
+    # `shovel-ready` and `underspecified` are mutually exclusive on the spec-readiness axis: the
+    # spec-gate stamps `underspecified` AND strips the stale `shovel-ready` claim, so a rejection
+    # can never leave the contradictory pair (the #1075/#1076/#1081/#1087 mislabel class).
+    assert "underspecified" in scn.labels_added
+    assert "shovel-ready" in scn.labels_removed
 
 
 async def test_spec_gate_blocks_unresolved_marker() -> None:

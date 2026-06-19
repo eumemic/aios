@@ -109,6 +109,13 @@ LABEL_PIPELINE_V2 = "pipeline:v2"
 LABEL_SHOVEL_READY = "shovel-ready"
 LABEL_APPROVED = "approved"
 LABEL_DISPATCHED = "dispatched"
+# `underspecified` is the spec-gate's "NOT spec-complete" verdict — the OPPOSITE pole of
+# `shovel-ready` on the spec-readiness axis. The two MUST NOT coexist; the spec-gate strips
+# `shovel-ready` when it stamps `underspecified`. The dispatch gate ALSO treats its presence as a
+# hard build disqualifier (defense in depth): an issue is build-eligible only if NOT underspecified,
+# so a mislabeled `shovel-ready ∧ underspecified` issue can never be picked for a build even if some
+# path leaves the contradiction on the board (the #1075/#1076/#1081/#1087 mislabel class).
+LABEL_UNDERSPECIFIED = "underspecified"
 # Stamped on the issue once the implement agent has produced a diff (the design's row-1 ``→
 # autodev:built`` marker). It is the at-least-once dedup for the implement agent itself: a build
 # re-driven by a crash mid-implement re-reads this marker (and the PR branch's commit count) and
@@ -247,6 +254,7 @@ def _render_constants(
         # the reconciler's own routing / claim / escalation / advisory labels + markers
         _py("LABEL_PIPELINE_V2", LABEL_PIPELINE_V2),
         _py("LABEL_SHOVEL_READY", LABEL_SHOVEL_READY),
+        _py("LABEL_UNDERSPECIFIED", LABEL_UNDERSPECIFIED),
         _py("LABEL_APPROVED", LABEL_APPROVED),
         _py("LABEL_DISPATCHED", LABEL_DISPATCHED),
         _py("LABEL_BUILT", LABEL_BUILT),
@@ -378,9 +386,14 @@ def owner(item):
 
     if kind == "issue":
         # 1. build-eligible issue → PR-FIRST build. The dispatch gate is the two-axis model:
-        # shovel-ready ∧ approved ∧ ¬dispatched, plus no PR already open for it.
+        # shovel-ready ∧ approved ∧ ¬dispatched, plus no PR already open for it — AND NOT
+        # `underspecified`. `shovel-ready` and `underspecified` are opposite poles of the
+        # spec-readiness axis and must never coexist; the `¬underspecified` clause is defense in
+        # depth so a mislabeled `shovel-ready ∧ underspecified` issue is NEVER picked for a build
+        # (the #1075/#1076/#1081/#1087 mislabel class). An `underspecified` issue is terminal here.
         if (item.get("shovel_ready") and item.get("approved")
                 and not item.get("dispatched")
+                and not item.get("underspecified")
                 and not item.get("has_open_pr")):
             return (item, "build")
         # Any other issue (needs-design/needs-decision/blocked/already-dispatched/has-open-PR) is
@@ -664,6 +677,7 @@ def _build_eligible_issue(repo, issue, open_prs):
         "shovel_ready": LABEL_SHOVEL_READY in labels,
         "approved": LABEL_APPROVED in labels,
         "dispatched": LABEL_DISPATCHED in labels,
+        "underspecified": LABEL_UNDERSPECIFIED in labels,
         "has_open_pr": has_open_pr,
         "title": issue.get("title", ""), "body": issue.get("body", ""),
     }
@@ -743,7 +757,14 @@ async def _do_build(repo, item):
     ok, reason = spec_ok(issue_obj, "issue", comments)
     if not ok:
         log("build: spec gate failed on #%d:" % number, reason)
+        # `underspecified` and `shovel-ready` are MUTUALLY EXCLUSIVE on the spec-readiness axis:
+        # the spec-gate just judged this issue NOT spec-complete, so it is NOT shovel-ready. Stamp
+        # `underspecified` and STRIP the stale `shovel-ready` claim together, so a spec-gate
+        # rejection can never leave the contradictory `shovel-ready ∧ underspecified` pair on the
+        # board (the upstream mislabel #1075/#1076/#1081/#1087 were stuck in). The strip is
+        # best-effort/idempotent (404 = already absent).
         await _label(repo, number, "underspecified")
+        await _unlabel(repo, number, LABEL_SHOVEL_READY)
         await post_comment_once(repo, number, MARKER_SPEC_NOT_READY,
                                 MARKER_SPEC_NOT_READY + "\n\n" + reason, comments)
         await _label(repo, number, NEEDS_HUMAN_SPEC)
@@ -1108,7 +1129,7 @@ async def _do_escalate(repo, item):
     diag = {k: (sorted(item[k]) if isinstance(item.get(k), frozenset) else item.get(k))
             for k in ("kind", "labels", "closed", "draft", "needs_rebase", "ci_verdict",
                       "human_blocked", "risk_tier", "shovel_ready", "approved", "dispatched",
-                      "has_open_pr")
+                      "underspecified", "has_open_pr")
             if k in item}
     await post_markered_comment(
         repo, number, MARKER_STUCK,
