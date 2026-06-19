@@ -181,7 +181,8 @@ async def _drive(
 def _verdict(value: dict[str, Any], app: str) -> str:
     for v in value["verdicts"]:
         if v["app"] == app:
-            return v["verdict"]
+            verdict: str = v["verdict"]
+            return verdict
     raise AssertionError(f"no verdict for {app}: {value['verdicts']!r}")
 
 

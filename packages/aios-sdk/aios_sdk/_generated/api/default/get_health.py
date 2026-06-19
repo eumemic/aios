@@ -50,13 +50,24 @@ def sync_detailed(
 ) -> Response[GetHealthResponseGetHealth]:
     r"""Health
 
-     Liveness probe. Unauthenticated; returns the running aios version.
+     Liveness probe. Unauthenticated; returns the running aios version + build SHA.
 
     Suitable for load balancer health checks and monitoring probes. Always
-    returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up. Deliberately does NOT touch the DB pool — a post-startup
+    returns 200 with ``{\"status\": \"ok\", \"version\": <version>, \"build_sha\": <sha-or-None>}``
+    if the process is up. Deliberately does NOT touch the DB pool — a post-startup
     Postgres outage must not flip liveness (that's ``/ready``'s job), or an
     orchestrator would kill an otherwise-healthy process during a DB blip.
+
+    ``build_sha`` (aios#1327, Unit A2) is the git commit baked into THIS image at
+    build time (``ENV AIOS_BUILD_SHA`` in the Dockerfile ``base`` stage). It is the
+    in-process running-truth read: unlike ``version`` (a static package string that
+    never changes between builds), it tells you which commit is actually running.
+    ``None`` when ``AIOS_BUILD_SHA`` is unset — an un-instrumented build — which the
+    running==merged reconciler reads as ``cannot-determine``, never a false match.
+    ``version`` stays the static package string, untouched.
+
+    The return type is ``dict[str, str | None]`` (not ``dict[str, str]``): ``build_sha``
+    is genuinely nullable because ``os.environ.get`` returns ``str | None``.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -81,13 +92,24 @@ def sync(
 ) -> GetHealthResponseGetHealth | None:
     r"""Health
 
-     Liveness probe. Unauthenticated; returns the running aios version.
+     Liveness probe. Unauthenticated; returns the running aios version + build SHA.
 
     Suitable for load balancer health checks and monitoring probes. Always
-    returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up. Deliberately does NOT touch the DB pool — a post-startup
+    returns 200 with ``{\"status\": \"ok\", \"version\": <version>, \"build_sha\": <sha-or-None>}``
+    if the process is up. Deliberately does NOT touch the DB pool — a post-startup
     Postgres outage must not flip liveness (that's ``/ready``'s job), or an
     orchestrator would kill an otherwise-healthy process during a DB blip.
+
+    ``build_sha`` (aios#1327, Unit A2) is the git commit baked into THIS image at
+    build time (``ENV AIOS_BUILD_SHA`` in the Dockerfile ``base`` stage). It is the
+    in-process running-truth read: unlike ``version`` (a static package string that
+    never changes between builds), it tells you which commit is actually running.
+    ``None`` when ``AIOS_BUILD_SHA`` is unset — an un-instrumented build — which the
+    running==merged reconciler reads as ``cannot-determine``, never a false match.
+    ``version`` stays the static package string, untouched.
+
+    The return type is ``dict[str, str | None]`` (not ``dict[str, str]``): ``build_sha``
+    is genuinely nullable because ``os.environ.get`` returns ``str | None``.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -108,13 +130,24 @@ async def asyncio_detailed(
 ) -> Response[GetHealthResponseGetHealth]:
     r"""Health
 
-     Liveness probe. Unauthenticated; returns the running aios version.
+     Liveness probe. Unauthenticated; returns the running aios version + build SHA.
 
     Suitable for load balancer health checks and monitoring probes. Always
-    returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up. Deliberately does NOT touch the DB pool — a post-startup
+    returns 200 with ``{\"status\": \"ok\", \"version\": <version>, \"build_sha\": <sha-or-None>}``
+    if the process is up. Deliberately does NOT touch the DB pool — a post-startup
     Postgres outage must not flip liveness (that's ``/ready``'s job), or an
     orchestrator would kill an otherwise-healthy process during a DB blip.
+
+    ``build_sha`` (aios#1327, Unit A2) is the git commit baked into THIS image at
+    build time (``ENV AIOS_BUILD_SHA`` in the Dockerfile ``base`` stage). It is the
+    in-process running-truth read: unlike ``version`` (a static package string that
+    never changes between builds), it tells you which commit is actually running.
+    ``None`` when ``AIOS_BUILD_SHA`` is unset — an un-instrumented build — which the
+    running==merged reconciler reads as ``cannot-determine``, never a false match.
+    ``version`` stays the static package string, untouched.
+
+    The return type is ``dict[str, str | None]`` (not ``dict[str, str]``): ``build_sha``
+    is genuinely nullable because ``os.environ.get`` returns ``str | None``.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -137,13 +170,24 @@ async def asyncio(
 ) -> GetHealthResponseGetHealth | None:
     r"""Health
 
-     Liveness probe. Unauthenticated; returns the running aios version.
+     Liveness probe. Unauthenticated; returns the running aios version + build SHA.
 
     Suitable for load balancer health checks and monitoring probes. Always
-    returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up. Deliberately does NOT touch the DB pool — a post-startup
+    returns 200 with ``{\"status\": \"ok\", \"version\": <version>, \"build_sha\": <sha-or-None>}``
+    if the process is up. Deliberately does NOT touch the DB pool — a post-startup
     Postgres outage must not flip liveness (that's ``/ready``'s job), or an
     orchestrator would kill an otherwise-healthy process during a DB blip.
+
+    ``build_sha`` (aios#1327, Unit A2) is the git commit baked into THIS image at
+    build time (``ENV AIOS_BUILD_SHA`` in the Dockerfile ``base`` stage). It is the
+    in-process running-truth read: unlike ``version`` (a static package string that
+    never changes between builds), it tells you which commit is actually running.
+    ``None`` when ``AIOS_BUILD_SHA`` is unset — an un-instrumented build — which the
+    running==merged reconciler reads as ``cannot-determine``, never a false match.
+    ``version`` stays the static package string, untouched.
+
+    The return type is ``dict[str, str | None]`` (not ``dict[str, str]``): ``build_sha``
+    is genuinely nullable because ``os.environ.get`` returns ``str | None``.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

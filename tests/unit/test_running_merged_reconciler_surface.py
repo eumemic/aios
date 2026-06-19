@@ -116,6 +116,7 @@ def test_trigger_interim_flag_threads_into_template() -> None:
     tc = build_running_merged_reconciler_trigger(
         name="rmr-cron", workflow_id="wf_abc", vault_id="vault_github", interim=True
     )
+    assert isinstance(tc.action, WorkflowAction)
     assert tc.action.input_template == {"interim": True}
 
 
@@ -127,5 +128,7 @@ def test_trigger_custom_schedule_and_version_pin() -> None:
         schedule="*/30 * * * *",
         workflow_version=3,
     )
+    assert isinstance(tc.source, CronSource)
     assert tc.source.schedule == "*/30 * * * *"
+    assert isinstance(tc.action, WorkflowAction)
     assert tc.action.workflow_version == 3
