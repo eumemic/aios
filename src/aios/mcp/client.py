@@ -406,9 +406,7 @@ async def discover_mcp_tools(
                 result = await _list_tools_timed(entry.session)
             except BaseException:
                 await asyncio.shield(_pool.discard(url, vault_id, hkey, entry))
-                _pool.mark_unhealthy(
-                    url, vault_id, hkey, backoff_s=_DISCOVERY_UNHEALTHY_BACKOFF_S
-                )
+                _pool.mark_unhealthy(url, vault_id, hkey, backoff_s=_DISCOVERY_UNHEALTHY_BACKOFF_S)
                 raise
             else:
                 await asyncio.shield(_pool.release(url, vault_id, hkey, entry))
@@ -443,9 +441,7 @@ async def discover_mcp_tools(
     if _pool is not None and binding_id is not None:
         # Cache the freshly-discovered result so the next step (same binding
         # identity, no list_changed) serves it without a list_tools() RPC (#1391).
-        _pool.set_cached_tools(
-            url, vault_id, hkey, binding_id, tools, init_result.instructions
-        )
+        _pool.set_cached_tools(url, vault_id, hkey, binding_id, tools, init_result.instructions)
     return tools, init_result.instructions
 
 

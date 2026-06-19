@@ -96,13 +96,9 @@ class TestDiscoveryResultCache:
             patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
             patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
         ):
-            tools1, instr1 = await discover_mcp_tools(
-                URL, "v", {}, "github", binding_id="agt_1:3"
-            )
+            tools1, instr1 = await discover_mcp_tools(URL, "v", {}, "github", binding_id="agt_1:3")
             assert session.list_tools.await_count == 1
-            tools2, instr2 = await discover_mcp_tools(
-                URL, "v", {}, "github", binding_id="agt_1:3"
-            )
+            tools2, instr2 = await discover_mcp_tools(URL, "v", {}, "github", binding_id="agt_1:3")
 
         # Cache hit: no further RPC, identical result.
         assert session.list_tools.await_count == 1
@@ -110,9 +106,7 @@ class TestDiscoveryResultCache:
         assert instr2 == instr1
         assert tools1[0]["function"]["name"] == "mcp__github__create_issue"
 
-    async def test_binding_version_bump_rediscovers(
-        self, pool_runtime: McpSessionPool
-    ) -> None:
+    async def test_binding_version_bump_rediscovers(self, pool_runtime: McpSessionPool) -> None:
         """Acceptance: a binding-identity bump (agent-version change) re-pays
         discovery — the new tool set propagates with no staleness."""
         session = _make_mock_session(["tool_v3"])
