@@ -345,3 +345,120 @@ async def test_sentinel_substitution_does_not_mutate_caller_input() -> None:
 
     # The original author dict still carries the sentinel, not the substituted token.
     assert headers["Idempotency-Key"] == AIOS_IDEMPOTENCY_KEY_SENTINEL
+
+
+# ─── the run-journal READ pair (list_runs / get_run from inside a run, #1396) ──
+
+
+def test_journal_reads_are_in_run_tools() -> None:
+    # The run-journal read pair is now run-callable — the gate that made the gate_reaper
+    # (#1386) and telemetry_observer (#1326) dead-men inert ("not callable from a workflow
+    # run") is gone, scoped to the run's OWN account.
+    assert "list_runs" in run_tools.RUN_TOOLS
+    assert "get_run" in run_tools.RUN_TOOLS
+
+
+async def test_list_runs_is_account_scoped_never_launcher_scoped() -> None:
+    """A run's list_runs dispatches to the service with the RUN's account and NO
+    launcher-session filter (a run has no launching session). account_wide is accepted for
+    schema parity but is a no-op — a run is always account-scoped within its own account."""
+    run = _run(tools=[ToolSpec(type="list_runs")])
+    fake_run = SimpleNamespace(model_dump=lambda **_: {"id": "wfr_seen", "status": "running"})
+    svc = AsyncMock(return_value=[fake_run])
+    with (
+        patch("aios.harness.runtime.require_pool", return_value="POOL"),
+        patch("aios.workflows.run_tools.wf_service.list_runs", new=svc),
+    ):
+        out = await invoke_run_tool(
+            run=run,
+            call_key="sha:k#0",
+            account_id="acc_t",
+            tool_name="list_runs",
+            tool_input={"workflow_id": "wf_dev", "status": "running", "account_wide": True},
+        )
+    assert out == {"runs": [{"id": "wfr_seen", "status": "running"}]}
+    assert svc.await_args is not None  # the service was actually dispatched to
+    kwargs = svc.await_args.kwargs
+    assert kwargs["account_id"] == "acc_t"  # the RUN's own account — the isolation boundary
+    assert kwargs["launcher_session_id"] is None  # never a session filter — account-scoped
+    assert kwargs["workflow_id"] == "wf_dev"
+    assert kwargs["status"] == "running"
+
+
+async def test_get_run_is_account_scoped() -> None:
+    run = _run(tools=[ToolSpec(type="get_run")])
+    fake_run = SimpleNamespace(model_dump=lambda **_: {"id": "wfr_x", "status": "completed"})
+    svc = AsyncMock(return_value=fake_run)
+    with (
+        patch("aios.harness.runtime.require_pool", return_value="POOL"),
+        patch("aios.workflows.run_tools.wf_service.get_run", new=svc),
+    ):
+        out = await invoke_run_tool(
+            run=run,
+            call_key="sha:k#0",
+            account_id="acc_t",
+            tool_name="get_run",
+            tool_input={"run_id": "wfr_x"},
+        )
+    assert out == {"id": "wfr_x", "status": "completed"}
+    assert svc.await_args is not None  # the service was actually dispatched to
+    assert svc.await_args.args == ("POOL", "wfr_x")
+    assert svc.await_args.kwargs["account_id"] == "acc_t"  # the run reads ONLY its own account
+
+
+async def test_cross_account_get_run_is_a_recoverable_error_not_a_raise() -> None:
+    """The isolation boundary: a get_run for an id outside the run's account raises
+    NotFoundError in the query layer (account-scoped read) — surfaced as a recoverable
+    {"error": ...} value, NEVER a run-terminal raise and NEVER another account's run."""
+    from aios.errors import NotFoundError
+
+    run = _run(tools=[ToolSpec(type="get_run")])
+    with (
+        patch("aios.harness.runtime.require_pool", return_value="POOL"),
+        patch(
+            "aios.workflows.run_tools.wf_service.get_run",
+            new=AsyncMock(side_effect=NotFoundError("workflow run wfr_other not found")),
+        ),
+    ):
+        out = await invoke_run_tool(
+            run=run,
+            call_key="sha:k#0",
+            account_id="acc_t",
+            tool_name="get_run",
+            tool_input={"run_id": "wfr_other"},
+        )
+    assert "error" in out and "not found" in out["error"]
+
+
+async def test_undeclared_journal_tool_is_recoverable_error() -> None:
+    # list_runs is run-callable, but a workflow that didn't DECLARE it still can't call it
+    # (the declared-surface half of the gate is unchanged).
+    run = _run(tools=[])
+    out = await invoke_run_tool(
+        run=run,
+        call_key="sha:k#0",
+        account_id="acc_t",
+        tool_name="list_runs",
+        tool_input={},
+    )
+    assert "error" in out and "declared" in out["error"]
+
+
+def test_standing_dead_men_declared_tools_are_actually_run_callable() -> None:
+    """The class-preventing guard (#1396 — why no test caught it). The standing
+    immune-system workflows declare a tool surface, but a DECLARED tool that is not also
+    RUN_CALLABLE is silently inert in a live run ("not callable from a workflow run") — the
+    exact defect that left both dead-men no-ops. This pins the invariant: every worker tool
+    a standing dead-man declares must be in RUN_TOOLS (bash is run-callable via the sandbox
+    path; http_request via the worker; the run-journal pair via #1396). If a future dead-man
+    declares a NEW worker tool without adding it to RUN_TOOLS, this fails LOUD at author
+    time instead of silently no-op'ing in production."""
+    from aios.workflows.gate_reaper import REQUIRED_TOOLS as REAPER_TOOLS
+    from aios.workflows.telemetry_observer import REQUIRED_TOOLS as OBSERVER_TOOLS
+
+    for required in (REAPER_TOOLS, OBSERVER_TOOLS):
+        for spec in required:
+            assert spec.type in run_tools.RUN_TOOLS, (
+                f"{spec.type!r} is declared by a standing dead-man but is NOT run-callable "
+                "(not in RUN_TOOLS) — it would be silently inert in a live run"
+            )
