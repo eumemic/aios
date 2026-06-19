@@ -9,7 +9,7 @@
     "/health": {
       "get": {
         "summary": "Health",
-        "description": "Liveness probe. Unauthenticated; returns the running aios version.\n\nSuitable for load balancer health checks and monitoring probes. Always\nreturns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the\nprocess is up. Deliberately does NOT touch the DB pool \u2014 a post-startup\nPostgres outage must not flip liveness (that's ``/ready``'s job), or an\norchestrator would kill an otherwise-healthy process during a DB blip.",
+        "description": "Liveness probe. Unauthenticated; returns the running aios version + build SHA.\n\nSuitable for load balancer health checks and monitoring probes. Always\nreturns 200 with ``{\"status\": \"ok\", \"version\": <version>, \"build_sha\": <sha-or-None>}``\nif the process is up. Deliberately does NOT touch the DB pool \u2014 a post-startup\nPostgres outage must not flip liveness (that's ``/ready``'s job), or an\norchestrator would kill an otherwise-healthy process during a DB blip.\n\n``build_sha`` (aios#1327, Unit A2) is the git commit baked into THIS image at\nbuild time (``ENV AIOS_BUILD_SHA`` in the Dockerfile ``base`` stage). It is the\nin-process running-truth read: unlike ``version`` (a static package string that\nnever changes between builds), it tells you which commit is actually running.\n``None`` when ``AIOS_BUILD_SHA`` is unset \u2014 an un-instrumented build \u2014 which the\nrunning==merged reconciler reads as ``cannot-determine``, never a false match.\n``version`` stays the static package string, untouched.\n\nThe return type is ``dict[str, str | None]`` (not ``dict[str, str]``): ``build_sha``\nis genuinely nullable because ``os.environ.get`` returns ``str | None``.",
         "operationId": "get_health",
         "responses": {
           "200": {
@@ -18,7 +18,14 @@
               "application/json": {
                 "schema": {
                   "additionalProperties": {
-                    "type": "string"
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": "object",
                   "title": "Response Get Health"
