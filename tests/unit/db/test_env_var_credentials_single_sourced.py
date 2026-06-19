@@ -33,11 +33,7 @@ from aios.db.queries import vaults
 def _normalize(body: str, table: str, alias: str, owner_col: str) -> str:
     """Replace this owner's table/alias/owner-column with neutral tokens so two
     owners' bodies are comparable iff they are structurally identical."""
-    return (
-        body.replace(table, "<TABLE>")
-        .replace(owner_col, "<OWNER_COL>")
-        .replace(alias, "<A>")
-    )
+    return body.replace(table, "<TABLE>").replace(owner_col, "<OWNER_COL>").replace(alias, "<A>")
 
 
 def test_env_var_predicate_single_sourced_across_owners() -> None:
@@ -63,16 +59,16 @@ def test_owner_constants_derive_from_one_template() -> None:
     """Both owner constants must be ``.format()`` renderings of the single
     ``_ENV_VAR_CREDENTIALS_FROM_WHERE`` template (the one home of the
     predicate), not hand-written twins."""
-    assert vaults._SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE == (
+    assert (
         vaults._ENV_VAR_CREDENTIALS_FROM_WHERE.format(
             table="session_vaults", a="sv", owner_col="session_id"
         )
-    )
-    assert vaults._RUN_ENV_VAR_CREDENTIALS_FROM_WHERE == (
+    ) == vaults._SESSION_ENV_VAR_CREDENTIALS_FROM_WHERE
+    assert (
         vaults._ENV_VAR_CREDENTIALS_FROM_WHERE.format(
             table="wf_run_vaults", a="rv", owner_col="run_id"
         )
-    )
+    ) == vaults._RUN_ENV_VAR_CREDENTIALS_FROM_WHERE
 
 
 def test_security_predicate_present_in_template() -> None:
