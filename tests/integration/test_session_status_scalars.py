@@ -488,6 +488,52 @@ class TestDerivedStatus:
             )
             assert row is not None and row["last_stimulus_seq"] == 3
 
+    async def test_no_reaction_tool_result_is_not_a_stimulus(
+        self,
+        pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    ) -> None:
+        """A fire-and-forget tool result (``data['no_reaction']=true``) is a
+        delivery confirmation the model has nothing to react to: it must NOT
+        bump ``last_stimulus_seq``, so the session settles idle instead of
+        re-inferring to react to its own send (the duplicate-send loop)."""
+        pool, account_id, session_id = pool_and_session
+        async with pool.acquire() as conn:
+            # user (seq 1)
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "user", "content": "say hi to alice"},
+            )
+            # assistant reacts to the user (seq 2)
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "assistant", "content": "on it", "reacting_to": 1},
+            )
+            # fire-and-forget delivery ack (seq 3) — NOT a stimulus
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "tc_send",
+                    "content": '{"sent_at_ms": 1}',
+                    "no_reaction": True,
+                },
+            )
+            s = await _scalars(conn, session_id)
+            session = await queries.get_session(conn, session_id, account_id=account_id)
+        # last_stimulus_seq stays at 1 (the user) — the ack did not advance it.
+        assert s["last_stimulus_seq"] == 1
+        assert s["last_reacted_seq"] == 1
+        assert session.status == "idle"
+
     async def test_status_active_rescheduling_after_failed_step(
         self,
         pool_and_session: tuple[asyncpg.Pool[Any], str, str],

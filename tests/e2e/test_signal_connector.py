@@ -27,7 +27,7 @@ import pytest
 
 from tests.conftest import needs_docker
 from tests.e2e.conftest import live_aios_server
-from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
+from tests.e2e.harness import Harness, assistant, tool_call
 from tests.helpers.connections import authed_client, issue_runtime_token
 
 pytestmark = pytest.mark.docker
@@ -382,7 +382,6 @@ class TestSignalMultiConnection:
                         )
                     ]
                 ),
-                assistant("done"),
             ]
         )
         await sess_svc.append_user_message(
@@ -430,10 +429,14 @@ class TestSignalMultiConnection:
                     raise AssertionError("tool_result event never persisted")
                 await asyncio.sleep(0.1)
 
-            # Drive the wrap-up step so harness state stays clean.
-            await harness.run_step(session_a.id)
-            events = await harness.events(session_a.id)
-            assert last_assistant_content(events) == "done"
+            # ``signal_send`` is fire-and-forget: the successful delivery
+            # confirmation is appended to the session log (the model still
+            # sees it) but must NOT re-wake the session to react to its own
+            # send.  That re-wake was the duplicate-send loop ("same DM
+            # delivered 4x").  Drain any in-flight tool tasks, then assert
+            # the sweep does not consider session A ready for inference.
+            await harness.wait_for_tools(session_a.id)
+            assert session_a.id not in await harness.sessions_needing_inference(session_a.id)
         finally:
             connector_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

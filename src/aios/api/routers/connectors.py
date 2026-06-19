@@ -220,6 +220,16 @@ class RuntimeToolResultRequest(BaseModel):
     tool_call_id: str
     content: str | list[dict[str, Any]]
     is_error: bool = False
+    # The connector declares (via ``@tool(fire_and_forget=True)``) that a
+    # *successful* result for this tool is a delivery confirmation the model
+    # has nothing to react to (a message send/reaction ack).  When set, the
+    # result is still appended to the log — the model sees it — but the
+    # session is NOT woken to react to its own send (closes the duplicate-send
+    # loop).  A failed result NEVER carries this (the runner only sets it
+    # on the post-success path); the intake also AND-gates it with
+    # ``not is_error`` so a failure always wakes.  Default False keeps a
+    # not-yet-redeployed connector's omitted field behaving exactly as before.
+    no_reaction: bool = False
 
 
 class RuntimeLifecycleRequest(BaseModel):
@@ -780,15 +790,28 @@ async def post_runtime_tool_result(
                     "connection_id": body.connection_id,
                 },
             )
+        # A failure ALWAYS wakes: AND-gate the connector's ``no_reaction`` flag
+        # with ``not is_error`` so only a successful fire-and-forget result is
+        # excluded from the wake decision.
+        no_reaction = body.no_reaction and not body.is_error
         event = await sessions_service.append_tool_result(
             conn,
             session_id=body.session_id,
             tool_call_id=body.tool_call_id,
             content=body.content,
             is_error=body.is_error,
+            no_reaction=no_reaction,
             account_id=account_id,
         )
-    await defer_wake(pool, body.session_id, cause="connector_tool_result", account_id=account_id)
+    # The result is ALWAYS appended (tool-always-appends-result invariant). Only
+    # the wake is conditional: a successful fire-and-forget result stamps
+    # ``data['no_reaction']=true`` and skips ``defer_wake`` — its row is excluded
+    # from the wake gate so the session settles instead of re-inferring to react
+    # to its own delivery confirmation.
+    if not no_reaction:
+        await defer_wake(
+            pool, body.session_id, cause="connector_tool_result", account_id=account_id
+        )
     return event
 
 
