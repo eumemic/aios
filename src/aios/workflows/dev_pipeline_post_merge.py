@@ -256,15 +256,22 @@ def _merge_sha(pr):
 
 
 def _reviewed_sha(labels):
-    """The sha a ``reviewed:green@<sha>`` label records the reconciler reviewed (any present;
-    None if unstamped). The provenance check (c) requires SOME reviewed-green stamp on a
-    merged ``pipeline:v2`` PR — its absence means the PR merged without the gate's review."""
-    for n in labels:
-        if isinstance(n, str) and n.startswith(LABEL_REVIEWED_PREFIX):
-            tail = n[len(LABEL_REVIEWED_PREFIX):]
-            if tail:
-                return tail
-    return None
+    """The sha a ``reviewed:green@<sha>`` label records the reconciler reviewed (None if
+    unstamped). The provenance check (c) requires SOME reviewed-green stamp on a merged
+    ``pipeline:v2`` PR — its absence means the PR merged without the gate's review (a re-pushed
+    PR legitimately carries the OLD reviewed:green@<sha> too, since the reconciler stamps them
+    additively; presence-of-any is the correct backstop bar, the reconciler enforced
+    reviewed-FOR-head at merge time).
+
+    Picks the LEXICOGRAPHICALLY-SMALLEST matching sha when several are present, NOT 'first in
+    set-iteration order': ``labels`` is a frozenset and Python's str hashing is PYTHONHASHSEED-
+    salted, so an iteration-order pick would be non-deterministic ACROSS replays in fresh
+    processes — a replay-stability hazard the moment this value is ever surfaced or compared.
+    ``min()`` is a stable, content-only pick."""
+    shas = [n[len(LABEL_REVIEWED_PREFIX):] for n in labels
+            if isinstance(n, str) and n.startswith(LABEL_REVIEWED_PREFIX)
+            and n[len(LABEL_REVIEWED_PREFIX):]]
+    return min(shas) if shas else None
 
 
 def _risk_tier(labels):
@@ -365,8 +372,8 @@ async def _recently_merged_v2_prs(repo, limit):
     unparseable 2xx page, so a half-read never reads as 'no merges to check'.
 
     Returns the list, or None on a non-2xx read (the read is then the caller's branch — distinct
-    from [] = proven-empty)."""
-    per_page = min(int(limit), 100) if isinstance(limit, int) and limit > 0 else 100
+    from [] = proven-empty). ``limit`` is a positive int (coerced once in ``main()``)."""
+    per_page = min(limit, 100)
     resp = await gh("GET", _with_query(_ipath(repo, "/pulls"),
                                        state="closed", sort="updated", direction="desc",
                                        per_page=per_page))
@@ -505,7 +512,18 @@ async def main(input):
     cfg = _config(input)
     repo = cfg.get("repo") or DEFAULT_REPO
     workflow_id = cfg.get("dev_pipeline_workflow_id", DEV_PIPELINE_WORKFLOW_ID)
-    limit = cfg.get("scan_limit", SCAN_LIMIT)
+    # Coerce the scan cap to a positive int ONCE here (the single source of truth), so a cron
+    # config that delivers ``scan_limit`` as a JSON string never reaches a ``len(runs) >= limit``
+    # comparison downstream (TypeError) — both the merged-PR scan and the run-journal witness read
+    # receive a clean int. A non-numeric / non-positive value falls back to the rendered default.
+    limit = SCAN_LIMIT
+    raw_limit = cfg.get("scan_limit", SCAN_LIMIT)
+    try:
+        parsed_limit = int(raw_limit)
+        if parsed_limit > 0:
+            limit = parsed_limit
+    except (TypeError, ValueError):
+        log("post-merge: non-numeric scan_limit %r — using default %d" % (raw_limit, SCAN_LIMIT))
     if not isinstance(repo, str) or not repo:
         return {"verdict": "cannot-determine", "scanned": 0, "found": [], "checked": [],
                 "reason": "no repo provided (input.repo) and no DEFAULT_REPO configured"}

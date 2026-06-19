@@ -121,6 +121,15 @@ class Scenario:
     def _http(self, args: dict[str, Any]) -> dict[str, Any]:
         method, path = args["method"], args["path"]
         self.http.append((method, path))
+        # BEHAVIORAL maker≠checker-across-the-boundary guard: the checker READS + ESCALATES only.
+        # It must NEVER emit a mutating verb — no PUT (merge), no PATCH (close an issue), no DELETE
+        # (unlabel). The deploy surface (GET·POST-only) rejects these in prod, but assert it here
+        # too so a future _BODY edit that regresses into _unlabel/merge/close fails LOUD in CI
+        # rather than slipping past the catch-all into the surface-rejection failure mode.
+        assert method in ("GET", "POST"), (
+            f"post-merge checker emitted a MUTATING verb {method} {path} — it must only read + "
+            "escalate (it can never mutate the merge it judges)"
+        )
         clean = path.split("?", 1)[0]
 
         # the closed/merged PR list
@@ -467,6 +476,30 @@ async def test_missing_repo_with_no_default_is_cannot_determine() -> None:
     out = await run_script_host(source=src, input={}, memo={})
     assert out.kind == "returned"
     assert out.value["verdict"] == "cannot-determine"
+
+
+async def test_string_scan_limit_is_coerced_not_a_crash() -> None:
+    # A cron config can deliver scan_limit as a JSON STRING. It must coerce to an int (used in a
+    # `len(runs) >= limit` comparison on the run-journal witness path) — a string would TypeError
+    # mid-sweep. Pair a string limit WITH a wired workflow_id (the witness path that does the
+    # comparison) so the regression would actually fire.
+    scn = Scenario(
+        merged_prs=[_merged_pr(80, labels=_gate_labels())],
+        issue_states={80: "closed"},
+        completed_run_issues=[80],
+    )
+    value = await _drive(
+        scn,
+        input={"repo": REPO, "scan_limit": "50", "dev_pipeline_workflow_id": WF},
+    )
+    assert value["verdict"] == "ok"
+    assert value["scanned"] == 1
+
+
+async def test_nonnumeric_scan_limit_falls_back_to_default() -> None:
+    # A garbage scan_limit must fall back to the default, never crash the sweep.
+    value = await _drive(Scenario(), input={"repo": REPO, "scan_limit": "not-a-number"})
+    assert value["verdict"] == "ok"
 
 
 # ─── deploy surface sanity (mirrors the unit assertions through the create) ───
