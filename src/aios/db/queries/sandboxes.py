@@ -12,6 +12,8 @@ from typing import Any
 
 import asyncpg
 
+from aios.db.queries.sessions import session_active_predicate
+
 # ─── durable session sandboxes: snapshot pointer (§5.1) ───────────────────────
 #
 # Worker-side, unscoped (per the ``unscoped_`` convention): the snapshot
@@ -112,6 +114,53 @@ async def unscoped_live_session_ids(
         list(session_ids),
     )
     return {row["id"] for row in rows}
+
+
+async def unscoped_reapable_archived_workspaces(
+    conn: asyncpg.Connection[Any], *, min_archived_age_seconds: float
+) -> list[asyncpg.Record]:
+    """Return ``(id, account_id, workspace_volume_path)`` for sessions whose
+    ``/workspace`` host dir is reap-eligible — the archived-session workspace
+    reaper (aios#40, the "45G hole").
+
+    A session qualifies iff ALL hold:
+
+    * ``archived_at IS NOT NULL`` — archived-only. Session archival is terminal
+      and permanent: no code path ever clears ``sessions.archived_at`` (the
+      archive fence at ``append_event`` rejects every later write), so an
+      archived session never wakes, never re-provisions, never re-reads its
+      ``/workspace``. We reap only archived sessions; a live/idle/running
+      session is structurally excluded by this clause.
+
+    * ``archived_at < now() - min_archived_age_seconds`` — the min-age floor, on
+      *DB archive time* (not file mtime). Guards a just-archived session whose
+      workspace something might still be reading in the seconds after archive.
+
+    * ``NOT (active)`` — defense-in-depth. Archived dominates the read-path
+      status label, but the explicit ``archive_session`` path carries no
+      active-guard, so archived ∧ event-watermark-active is reachable for a
+      step that was in flight at archive time. We re-confirm not-active here
+      with the SAME predicate the wake sweep uses, read fresh at sweep time, so
+      a session with work still pending is never a candidate.
+
+    Returns the *stored* ``workspace_volume_path`` verbatim; the caller is
+    responsible for the canonical-path confinement check (it reaps ONLY the
+    derived ``workspace_root/<account_id>/<session_id>`` and only when the
+    stored value resolves equal to it — a user-overridden / clone-shared /
+    aliased path is therefore never reaped). Worker-side / unscoped: the reaper
+    holds these rows across all accounts.
+    """
+    rows: list[asyncpg.Record] = await conn.fetch(
+        f"""
+        SELECT id, account_id, workspace_volume_path
+          FROM sessions
+         WHERE archived_at IS NOT NULL
+           AND archived_at < now() - make_interval(secs => $1::double precision)
+           AND NOT {session_active_predicate("sessions")}
+        """,
+        float(min_archived_age_seconds),
+    )
+    return rows
 
 
 async def gc_snapshot_session_states(

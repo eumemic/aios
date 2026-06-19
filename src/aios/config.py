@@ -358,6 +358,52 @@ class Settings(BaseSettings):
         "(an immediate first sweep runs at worker startup, then repeats at "
         "this cadence — mirrors the snapshot GC reconciler).",
     )
+
+    # ── archived-session workspace reaper (#40, the 45G hole) ──────────────────
+    workspace_reaper_enabled: bool = Field(
+        default=False,
+        description="Kill-switch for the archived-session workspace reaper "
+        "(reclaims the per-session ``/workspace`` host dir of "
+        "``archived_at IS NOT NULL`` sessions — the 45G hole #1192 did not "
+        "cover). Ships DARK (default OFF) and is enabled after review (set "
+        "``AIOS_WORKSPACE_REAPER_ENABLED=true``): unlike the #1192 reaper, this "
+        "deletes a session's actual working files, not reconstructible clones, "
+        "so it does not ship enabled. When False the reaper is never started "
+        "and deletes nothing.",
+    )
+    workspace_reaper_dry_run: bool = Field(
+        default=False,
+        description="When True the archived-session workspace reaper logs what "
+        "it WOULD reap (paths + bytes reclaimable) and the structured per-sweep "
+        "count, but deletes nothing. Lets a deploy verify the keep-set/predicate "
+        "on real data before the destructive sweep is armed "
+        "(``AIOS_WORKSPACE_REAPER_DRY_RUN=true``).",
+    )
+    workspace_reaper_min_archived_age_seconds: int = Field(
+        default=86_400,
+        ge=0,
+        description="Minimum age, by ``sessions.archived_at`` (DB archive time, "
+        "NOT file mtime), before an archived session's ``/workspace`` dir is "
+        "eligible for reaping. Conservative default 24h: guards a just-archived "
+        "session whose workspace something might still be reading in the window "
+        "right after archive.",
+    )
+    workspace_reaper_min_mtime_age_seconds: int = Field(
+        default=3600,
+        ge=0,
+        description="Belt-and-suspenders floor on the workspace dir's own mtime "
+        "for the archived-session workspace reaper: a dir touched more recently "
+        "than this (e.g. a step that was mid-write at archive time) is left "
+        "alone regardless of archive age. The dominant gate is the DB "
+        "archived-and-aged check; this is the provision/write race floor.",
+    )
+    workspace_reaper_interval_seconds: float = Field(
+        default=3600.0,
+        gt=0.0,
+        description="Interval for the periodic archived-session workspace "
+        "reaper sweep (an immediate first sweep runs at worker startup, then "
+        "repeats at this cadence).",
+    )
     tool_broker_socket_path: Path | None = Field(
         default=None,
         description="Host path for the tool broker's Unix-domain socket. "
