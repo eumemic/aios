@@ -1,23 +1,28 @@
-"""Integration test: ``delete_session`` must succeed when the session
-was ever attached to a connection (or otherwise had a ``bindings`` row).
+"""Integration test: deleting a session that has a ``bindings`` row must
+succeed — and the cascade is enforced by the schema, not by application
+code.
 
-``bindings.session_id REFERENCES sessions(id)`` carries NO ``ON DELETE
-CASCADE`` (migration 0033). Every other session-children FK (in
-``session_vaults``, ``session_memory_stores``, ``session_github_repositories``,
-``files``, ``events``, ``chat_sessions``) has the cascade — ``bindings``
-is the lone outlier. ``delete_session`` pre-deletes from ``session_vaults``
-and ``events`` (redundant given the cascades, but explicit-as-intent
-style), then runs ``DELETE FROM sessions`` — which trips the FK
-constraint and raises ``asyncpg.ForeignKeyViolationError`` whenever a
-binding row references the session.
+``bindings.session_id`` originally (migration 0015) declared ``ON DELETE
+CASCADE``; the 0033 connector redesign recreated ``bindings`` and dropped
+it, leaving a bare ``session_id text REFERENCES sessions(id)``.
+``delete_session`` compensated with an explicit hand-``DELETE FROM
+bindings`` — the lone session-child held by application vigilance rather
+than the schema.
 
-The operator-curated single_session attach flow leaves a row even
-after detach (archived bindings stay in the table), so any session
-that's been bound via the connector tools is undeletable. Surfaces as
-500 from ``DELETE /v1/sessions/{id}``.
+Migration 0110 restores the cascade (in the original single-column form
+``session_id REFERENCES sessions(id) ON DELETE CASCADE``) and
+``delete_session`` no longer pre-deletes from ``bindings``.
 
-Fix: pre-delete from ``bindings`` in ``delete_session``, mirroring
-the explicit-deletes pattern for the other session children.
+Two guarantees are tested:
+
+* ``delete_session`` still succeeds and leaves no binding rows for a
+  session that was attached to a connection (regression coverage for the
+  route-500 the hand-DELETE used to prevent).
+* The cascade is enforced at the DB level: a *raw* ``DELETE FROM
+  sessions`` — bypassing ``delete_session`` entirely, simulating any new
+  session-deletion path that doesn't replicate the old hand-DELETE —
+  succeeds and removes the binding row. This is the correct-by-
+  construction property the migration buys.
 """
 
 from __future__ import annotations
@@ -36,6 +41,64 @@ from aios.services import environments as environments_service
 pytestmark = pytest.mark.integration
 
 
+async def _seed_session_with_binding(
+    pool: asyncpg.Pool[Any],
+) -> str:
+    """Create an acc_a session with an active ``bindings`` row tying it to
+    an acc_a connection. Returns the session id."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
+            VALUES ('acc_root', NULL,       TRUE,  'tenant-root'),
+                   ('acc_a',    'acc_root', FALSE, 'tenant-a')
+            """
+        )
+
+    agent_a = await agents_service.create_agent(
+        pool,
+        account_id="acc_a",
+        name="a-agent",
+        model="openrouter/test",
+        system="",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=50_000,
+        window_max=150_000,
+    )
+    env_a = await environments_service.create_environment(
+        pool,
+        account_id="acc_a",
+        name="a-env",
+    )
+    async with pool.acquire() as conn:
+        session = await queries.insert_session(
+            conn,
+            account_id="acc_a",
+            agent_id=agent_a.id,
+            environment_id=env_a.id,
+            agent_version=agent_a.version,
+            title=None,
+            metadata={},
+        )
+        connection = await queries.insert_connection(
+            conn,
+            account_id="acc_a",
+            connector="signal",
+            external_account_id="+15550001",
+            metadata={},
+        )
+        await queries.insert_binding(
+            conn,
+            account_id="acc_a",
+            connection_id=connection.id,
+            mode="single_session",
+            session_id=session.id,
+        )
+    return session.id
+
+
 @pytest.fixture
 async def pool_session_with_binding(
     migrated_db_url: str, _reset_db_state: None
@@ -44,57 +107,8 @@ async def pool_session_with_binding(
     active ``bindings`` row tying it to an acc_a connection."""
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
     try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
-                VALUES ('acc_root', NULL,       TRUE,  'tenant-root'),
-                       ('acc_a',    'acc_root', FALSE, 'tenant-a')
-                """
-            )
-
-        agent_a = await agents_service.create_agent(
-            pool,
-            account_id="acc_a",
-            name="a-agent",
-            model="openrouter/test",
-            system="",
-            tools=[],
-            description=None,
-            metadata={},
-            window_min=50_000,
-            window_max=150_000,
-        )
-        env_a = await environments_service.create_environment(
-            pool,
-            account_id="acc_a",
-            name="a-env",
-        )
-        async with pool.acquire() as conn:
-            session = await queries.insert_session(
-                conn,
-                account_id="acc_a",
-                agent_id=agent_a.id,
-                environment_id=env_a.id,
-                agent_version=agent_a.version,
-                title=None,
-                metadata={},
-            )
-            connection = await queries.insert_connection(
-                conn,
-                account_id="acc_a",
-                connector="signal",
-                external_account_id="+15550001",
-                metadata={},
-            )
-            await queries.insert_binding(
-                conn,
-                account_id="acc_a",
-                connection_id=connection.id,
-                mode="single_session",
-                session_id=session.id,
-            )
-        yield pool, session.id
+        session_id = await _seed_session_with_binding(pool)
+        yield pool, session_id
     finally:
         await pool.close()
 
@@ -104,26 +118,51 @@ class TestDeleteSessionWithBinding:
         self,
         pool_session_with_binding: tuple[asyncpg.Pool[Any], str],
     ) -> None:
-        """``delete_session`` must succeed and clean up the binding row
-        even when the session has been attached to a connection.
-
-        Pre-fix: ``asyncpg.ForeignKeyViolationError`` propagates from
-        ``DELETE FROM sessions`` because ``bindings.session_id`` has no
-        ``ON DELETE CASCADE`` and ``delete_session`` doesn't pre-delete
-        from ``bindings`` (it pre-deletes from ``session_vaults`` and
-        ``events``, but missed ``bindings``).
-        """
+        """``delete_session`` succeeds and cleans up the binding row even
+        when the session has been attached to a connection."""
         pool, session_id = pool_session_with_binding
         async with pool.acquire() as conn:
-            # Today: raises asyncpg.ForeignKeyViolationError.
             await queries.delete_session(conn, session_id, account_id="acc_a")
-            # Bindings for this session must be gone.
             remaining = await conn.fetchval(
                 "SELECT COUNT(*) FROM bindings WHERE session_id = $1",
                 session_id,
             )
         assert remaining == 0, (
-            f"delete_session left {remaining} binding row(s) referencing "
-            f"the deleted session — bindings.session_id has no ON DELETE "
-            f"CASCADE and delete_session must pre-delete from bindings."
+            f"delete_session left {remaining} binding row(s) referencing the deleted session"
+        )
+
+    async def test_raw_session_delete_cascades_to_bindings(
+        self,
+        pool_session_with_binding: tuple[asyncpg.Pool[Any], str],
+    ) -> None:
+        """A *raw* ``DELETE FROM sessions`` — bypassing ``delete_session``
+        and any application-level hand-DELETE — succeeds and removes the
+        binding row.
+
+        This is the correct-by-construction property restored by migration
+        0110: the cascade is enforced by Postgres regardless of which code
+        path deletes the session. Pre-fix this raw DELETE raised
+        ``asyncpg.ForeignKeyViolationError`` because ``bindings.session_id``
+        had no ``ON DELETE CASCADE``.
+        """
+        pool, session_id = pool_session_with_binding
+        async with pool.acquire() as conn:
+            # No hand-DELETE from bindings — rely purely on the schema.
+            await conn.execute(
+                "DELETE FROM sessions WHERE id = $1 AND account_id = $2",
+                session_id,
+                "acc_a",
+            )
+            remaining_bindings = await conn.fetchval(
+                "SELECT COUNT(*) FROM bindings WHERE session_id = $1",
+                session_id,
+            )
+            remaining_sessions = await conn.fetchval(
+                "SELECT COUNT(*) FROM sessions WHERE id = $1",
+                session_id,
+            )
+        assert remaining_sessions == 0, "session row not deleted"
+        assert remaining_bindings == 0, (
+            f"raw DELETE FROM sessions left {remaining_bindings} binding "
+            f"row(s) — ON DELETE CASCADE on bindings.session_id is missing"
         )
