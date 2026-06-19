@@ -444,21 +444,23 @@ async def test_undeclared_journal_tool_is_recoverable_error() -> None:
     assert "error" in out and "declared" in out["error"]
 
 
-def test_standing_dead_men_declared_tools_are_actually_run_callable() -> None:
-    """The class-preventing guard (#1396 — why no test caught it). The standing
-    immune-system workflows declare a tool surface, but a DECLARED tool that is not also
-    RUN_CALLABLE is silently inert in a live run ("not callable from a workflow run") — the
-    exact defect that left both dead-men no-ops. This pins the invariant: every worker tool
-    a standing dead-man declares must be in RUN_TOOLS (bash is run-callable via the sandbox
-    path; http_request via the worker; the run-journal pair via #1396). If a future dead-man
-    declares a NEW worker tool without adding it to RUN_TOOLS, this fails LOUD at author
-    time instead of silently no-op'ing in production."""
-    from aios.workflows.gate_reaper import REQUIRED_TOOLS as REAPER_TOOLS
-    from aios.workflows.telemetry_observer import REQUIRED_TOOLS as OBSERVER_TOOLS
+def test_standing_dead_men_worker_tools_are_run_callable() -> None:
+    """The class-preventing guard (#1396 — why no test caught it). A workflow may DECLARE a
+    worker tool that is not also RUN_CALLABLE; it is then silently inert in a live run ("not
+    callable from a workflow run") — the exact defect that left both immune-system dead-men
+    (the gate_reaper and telemetry_observer, now in the company application) no-ops. This pins
+    the SUBSTRATE half of that invariant: the worker tools those dead-men declare — the run-
+    journal read pair (``list_runs``/``get_run``, run-callable via #1396) and ``http_request``
+    — must be in RUN_TOOLS, else they would be silently inert. The dead-men's OWN declared
+    surface is pinned app-side (test_gate_reaper_surface / the telemetry observer's tests); this
+    keeps the run-callability guard in the substrate that owns RUN_TOOLS, with no import of the
+    extracted app. If a future RUN_TOOLS regression drops one of these, this fails LOUD here."""
+    # The exact worker-tool types the standing dead-men declare (gate_reaper:
+    # [list_runs, http_request]; telemetry_observer: [get_run, list_runs]).
+    dead_man_worker_tools = ("list_runs", "get_run", "http_request")
 
-    for required in (REAPER_TOOLS, OBSERVER_TOOLS):
-        for spec in required:
-            assert spec.type in run_tools.RUN_TOOLS, (
-                f"{spec.type!r} is declared by a standing dead-man but is NOT run-callable "
-                "(not in RUN_TOOLS) — it would be silently inert in a live run"
-            )
+    for tool_type in dead_man_worker_tools:
+        assert tool_type in run_tools.RUN_TOOLS, (
+            f"{tool_type!r} is declared by a standing dead-man but is NOT run-callable "
+            "(not in RUN_TOOLS) — it would be silently inert in a live run"
+        )

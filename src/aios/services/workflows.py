@@ -173,8 +173,8 @@ async def _validate_script_surface(
       ``agent(agent_id="A")``, the run's declared surface must cover that child
       agent's declared **tool** surface, or the #794 ``agent ∩ run`` clamp would
       silently strip the child's tools at launch (the omitted-DELETE / omitted-PATCH
-      production incidents ``dev_pipeline.py`` records). Resolution needs the pool,
-      so it lives here, not in the pure validator.
+      production incidents an application workflow recorded). Resolution needs the
+      pool, so it lives here, not in the pure validator.
 
       **Chosen depth (documented in the PR):** resolve the child agent and require
       the declared **tools** to be a superset of the child agent's declared tools. A

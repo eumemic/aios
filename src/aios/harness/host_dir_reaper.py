@@ -8,7 +8,7 @@ aios runtime down):
 
 * ``<workspace_root>/_session_repos/<session_id>/`` — per-session git
   working-tree clones of ``github_repository`` attachments.
-* ``<workspace_root>/_runs/<run_id>/`` — per-run dev_pipeline scratch
+* ``<workspace_root>/_runs/<run_id>/`` — per-run workflow scratch
   (``/workspace`` for a run sandbox).
 
 This reaper closes that missing-GC gap. It runs an immediate sweep at worker
