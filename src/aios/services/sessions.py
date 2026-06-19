@@ -35,7 +35,6 @@ from aios.models.agents import (
     Agent,
     AgentVersion,
     is_mcp_tool_name,
-    resolve_permission,
 )
 from aios.models.attenuation import Surface, surface_of
 from aios.models.events import Event, EventKind
@@ -958,42 +957,39 @@ def _classify_awaiting(
     ``ToolDefinition.classify_permission`` — so the view stays
     consistent with what the harness will do.
     """
-    # Late import: aios.tools package init pulls in services.wake which
-    # imports this module.
-    from aios.tools.invoke import parse_arguments
-    from aios.tools.registry import registry as tool_registry
+    # Late import: aios.tools package init (reached transitively via the
+    # disposition classifier's own late registry import) pulls in services.wake
+    # which imports this module — so the classifier is imported here, not at
+    # module load, to preserve that cycle break.
+    from aios.harness.tool_disposition import ToolDisposition, classify_tool_call
 
     name = tc["name"]
     tool_call_id = tc["tool_call_id"]
     has_allow_lifecycle = tc["has_allow_lifecycle"]
     pending_since = tc["pending_since"]
 
-    if is_mcp_tool_name(name):
-        if (
-            agents_service.effective_mcp_permission(name, agent.tools) == "always_ask"
-            and not has_allow_lifecycle
-        ):
-            return AwaitingToolCall(
-                tool_call_id=tool_call_id, name=name, kind="mcp", pending_since=pending_since
-            )
-        return None
-    if tool_registry.has(name):
-        perm_tool = resolve_permission(name, agent.tools)
-        perm_route: str | None = None
-        tool_def = tool_registry.get(name)
-        if tool_def.classify_permission is not None:
-            args = parse_arguments(tc.get("arguments"))
-            if args is not None:
-                perm_route = tool_def.classify_permission(args, agent)
-        if (perm_tool == "always_ask" or perm_route == "always_ask") and not has_allow_lifecycle:
-            return AwaitingToolCall(
-                tool_call_id=tool_call_id, name=name, kind="builtin", pending_since=pending_since
-            )
-        return None
-    # Unknown name: client-executed custom tool.
-    return AwaitingToolCall(
-        tool_call_id=tool_call_id, name=name, kind="custom", pending_since=pending_since
+    # Thin projection of the single-source disposition (#1076). The view is
+    # blocked on external action iff the call needs an unresolved confirmation
+    # or is a client-executed custom tool. ``has_allow_lifecycle`` is this
+    # call's "always_ask gate already satisfied" bit. No mcp_server_map here:
+    # the read path doesn't distinguish unknown_mcp (an unregistered MCP server
+    # surfaces as a normal awaiting MCP call, as before).
+    disposition = classify_tool_call(
+        name,
+        tc.get("arguments"),
+        agent,
+        confirmation_resolved=has_allow_lifecycle,
     )
+    if disposition is ToolDisposition.NEEDS_CONFIRM:
+        kind = "mcp" if is_mcp_tool_name(name) else "builtin"
+        return AwaitingToolCall(
+            tool_call_id=tool_call_id, name=name, kind=kind, pending_since=pending_since
+        )
+    if disposition is ToolDisposition.CUSTOM:
+        return AwaitingToolCall(
+            tool_call_id=tool_call_id, name=name, kind="custom", pending_since=pending_since
+        )
+    return None
 
 
 async def compute_awaiting(

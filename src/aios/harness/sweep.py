@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 if TYPE_CHECKING:
-    from aios.models.agents import ToolSpec
+    from aios.models.agents import HttpServerSpec, ToolSpec
 
 from aios.config import get_settings
 from aios.db.queries import (
@@ -86,6 +86,27 @@ class _Candidate:
     tool_call_id: str
     tool_name: str
     created_at: dt.datetime
+    # Raw ``function.arguments`` (str or dict, provider-dependent), carried so
+    # the sweep can apply the SAME arg-aware route refinement the dispatch and
+    # read paths do (#1076). Already read at candidate construction; previously
+    # discarded. ``None`` for the rare malformed assistant turn with no
+    # ``function`` blob — the classifier falls through to the base permission.
+    arguments: Any | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SweepAgentSurface:
+    """The minimal agent surface the disposition classifier (#1076) consumes.
+
+    The classifier reads only ``.tools`` (permission resolution) and
+    ``.http_servers`` (arg-aware route refinement for ``http_request``), so the
+    sweep builds this thin stand-in per candidate session rather than hydrating
+    a full :class:`~aios.models.agents.Agent`. Structurally a duck-typed
+    ``Agent`` for the two attributes the classifier touches.
+    """
+
+    tools: list[ToolSpec]
+    http_servers: list[HttpServerSpec]
 
 
 # ─── query constants ─────────────────────────────────────────────────────────
@@ -359,8 +380,11 @@ async def find_and_repair_ghosts(
             tcid = tc.get("id")
             if not tcid or tcid in existing_results or tcid in session_in_flight:
                 continue
-            name = (tc.get("function") or {}).get("name", "")
-            candidates.append(_Candidate(sid, tcid, name, created_at))
+            function = tc.get("function") or {}
+            name = function.get("name", "")
+            candidates.append(
+                _Candidate(sid, tcid, name, created_at, arguments=function.get("arguments"))
+            )
 
     if not candidates:
         return []
@@ -371,11 +395,15 @@ async def find_and_repair_ghosts(
     # bound). All other candidates are left alone (legitimately waiting).
     candidate_sids = list({c.session_id for c in candidates})
     async with pool.acquire() as conn:
-        # LEFT JOIN agent_versions to respect version pinning.
+        # LEFT JOIN agent_versions to respect version pinning. ``http_servers``
+        # is fetched alongside ``tools`` so the classifier can apply the
+        # arg-aware route refinement for ``http_request`` (#1076) — the same
+        # refinement the dispatch and read paths apply.
         agent_rows = await conn.fetch(
             """
             SELECT s.id AS session_id,
-                   COALESCE(av.tools, a.tools) AS tools
+                   COALESCE(av.tools, a.tools) AS tools,
+                   COALESCE(av.http_servers, a.http_servers) AS http_servers
               FROM sessions s
               JOIN agents a ON a.id = s.agent_id
               LEFT JOIN agent_versions av
@@ -384,15 +412,16 @@ async def find_and_repair_ghosts(
             """,
             candidate_sids,
         )
-    from aios.models.agents import ToolSpec
+    from aios.models.agents import HttpServerSpec, ToolSpec
 
-    agent_tools_by_session: dict[str, list[ToolSpec]] = {}
+    agent_surface_by_session: dict[str, _SweepAgentSurface] = {}
     for r in agent_rows:
-        raw = r["tools"]
-        tools_list = parse_jsonb(raw)
-        agent_tools_by_session[r["session_id"]] = [
-            ToolSpec.model_validate(t) for t in (tools_list or [])
-        ]
+        tools_list = parse_jsonb(r["tools"])
+        http_list = parse_jsonb(r["http_servers"])
+        agent_surface_by_session[r["session_id"]] = _SweepAgentSurface(
+            tools=[ToolSpec.model_validate(t) for t in (tools_list or [])],
+            http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
+        )
 
     # Abandoned-client-call bound (#752): a client-result-pending call whose
     # assistant turn is older than this is treated as abandoned. The cutoff is
@@ -401,15 +430,17 @@ async def find_and_repair_ghosts(
     client_max_age = get_settings().client_tool_call_max_age_seconds
     abandoned_cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=client_max_age)
 
+    empty_surface = _SweepAgentSurface(tools=[], http_servers=[])
     ghosts: list[_Candidate] = []
     abandoned: list[_Candidate] = []
     for c in candidates:
         confirmed = confirmed_by_session.get(c.session_id, set())
-        agent_tools = agent_tools_by_session.get(c.session_id, [])
-        if _was_dispatched(c.tool_name, c.tool_call_id, confirmed, agent_tools):
+        surface = agent_surface_by_session.get(c.session_id, empty_surface)
+        if _was_dispatched(c, confirmed, surface):
             ghosts.append(c)
         elif (
-            _is_client_result_pending(c.tool_name, agent_tools) and c.created_at < abandoned_cutoff
+            _is_client_result_pending(c.tool_name, surface.tools)
+            and c.created_at < abandoned_cutoff
         ):
             # Not dispatched AND client-result-pending AND older than the bound:
             # the client disconnected and will never return a result. Without
@@ -541,35 +572,43 @@ async def find_and_repair_ghosts(
 
 
 def _was_dispatched(
-    name: str,
-    tool_call_id: str,
+    candidate: _Candidate,
     confirmed_ids: set[str],
-    agent_tools: list[ToolSpec],
+    surface: _SweepAgentSurface,
 ) -> bool:
     """Determine whether a tool call was dispatched by the harness.
 
     A dispatched tool that has no result and no in-flight task is a
     ghost. A tool that was never dispatched (custom, or unconfirmed
-    ``always_ask``) is legitimately waiting for the client.
+    ``always_ask``) is legitimately waiting for the client or the user.
 
-    Uses the same permission resolution as the step function.
+    Thin projection of the single-source disposition classifier (#1076): a call
+    counts as dispatched UNLESS it is a client-executed ``custom`` tool or an
+    ``always_ask`` confirmation that has NOT yet been satisfied. The
+    ``confirmation_resolved`` bit is this call's id ∈ ``confirmed_ids``, so a
+    confirmation-pending call projects to ``NEEDS_CONFIRM`` → not dispatched.
+
+    This is where the historical drift lived: the previous body applied only
+    ``resolve_permission`` (the tool's BASE permission) and **missed the
+    arg-aware route refinement** that the dispatch and read paths both apply —
+    so a route-gated ``always_ask`` ``http_request`` parked awaiting user
+    confirmation was wrongly reported dispatched, and the ghost-repair branch
+    fabricated an error result that killed the parked confirmation (the exact
+    outcome ``_is_client_result_pending``'s docstring forbids). Routing through
+    the single classifier closes that gap by construction: the refinement now
+    exists in exactly one place. No ``mcp_server_map`` here — the sweep doesn't
+    distinguish ``unknown_mcp`` (an unregistered MCP server resolves through the
+    normal MCP ladder, preserving prior behavior).
     """
-    from aios.models.agents import is_mcp_tool_name, resolve_permission
-    from aios.services.agents import effective_mcp_permission
-    from aios.tools.registry import registry
+    from aios.harness.tool_disposition import ToolDisposition, classify_tool_call
 
-    if is_mcp_tool_name(name):
-        if effective_mcp_permission(name, agent_tools) == "always_allow":
-            return True
-        return tool_call_id in confirmed_ids
-
-    if not registry.has(name):
-        return False
-
-    perm = resolve_permission(name, agent_tools)
-    if perm == "always_ask":
-        return tool_call_id in confirmed_ids
-    return True
+    disposition = classify_tool_call(
+        candidate.tool_name,
+        candidate.arguments,
+        surface,  # type: ignore[arg-type]  # duck-typed: classifier reads only .tools/.http_servers
+        confirmation_resolved=candidate.tool_call_id in confirmed_ids,
+    )
+    return disposition not in (ToolDisposition.NEEDS_CONFIRM, ToolDisposition.CUSTOM)
 
 
 def _is_client_result_pending(name: str, agent_tools: list[ToolSpec]) -> bool:

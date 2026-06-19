@@ -44,12 +44,11 @@ from aios.harness.step_context import (
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.harness.tokens import approx_tokens
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
+from aios.harness.tool_disposition import classify_tool_call
 from aios.logging import get_logger
 from aios.models.agents import (
     McpServerSpec,
-    PermissionPolicy,
     is_mcp_tool_name,
-    resolve_permission,
 )
 from aios.services import accounts as accounts_service
 from aios.services import agents as agents_service
@@ -903,48 +902,28 @@ def _classify_tool_call(
     * ``"unknown_mcp"`` — MCP-namespaced tool whose server is not
       registered.  Routed to immediate tool-error so the model can
       self-correct rather than leaving the call unresolved.
-    """
-    from aios.harness.tool_dispatch import _parse_mcp_tool_name
-    from aios.tools.invoke import parse_arguments
-    from aios.tools.registry import registry as tool_registry
 
+    Thin projection of the single-source disposition classifier
+    (:func:`aios.harness.tool_disposition.classify_tool_call`, #1076): the
+    permission ladder is walked exactly once there; the three consumers
+    (this dispatch path, the awaiting view, the recovery sweep) differ only
+    in their terminal projection.  ``ToolDispatchKind``'s literals are the
+    :class:`~aios.harness.tool_disposition.ToolDisposition` values verbatim.
+    """
+    # Thin projection of the single-source disposition classifier (#1076).
+    # A fresh dispatch is never pre-confirmed, so confirmation_resolved=False;
+    # the loop carries the mcp_server_map and so distinguishes unknown_mcp.
     function = tool_call.get("function") or {}
     name: str = function.get("name") or ""
 
-    if is_mcp_tool_name(name):
-        try:
-            server_name, _ = _parse_mcp_tool_name(name)
-        except ValueError:
-            return "unknown_mcp"
-        # hallucinated/unregistered server -> unknown_mcp tool error so the model self-corrects
-        if server_name not in mcp_server_map:
-            return "unknown_mcp"
-        perm = agents_service.effective_mcp_permission(name, agent.tools)
-        if perm == "always_allow":
-            return "mcp_immediate"
-        return "needs_confirm"
-
-    if not tool_registry.has(name):
-        return "custom"
-
-    tool_def = tool_registry.get(name)
-    perm_tool = resolve_permission(name, agent.tools)
-    perm_route: PermissionPolicy | None = None
-    if tool_def.classify_permission is not None:
-        # Arg-aware refinement: tools like ``http_request`` resolve a
-        # per-call policy from the parsed arguments + agent config
-        # (e.g. matched route's ``permission_policy`` on
-        # ``agent.http_servers``).  Malformed args fall through to
-        # dispatch so the schema validator emits a typed error the
-        # model can self-correct from.
-        args = parse_arguments(function.get("arguments"))
-        if args is not None:
-            perm_route = tool_def.classify_permission(args, agent)
-
-    if perm_tool == "always_ask" or perm_route == "always_ask":
-        return "needs_confirm"
-
-    return "immediate"
+    disposition = classify_tool_call(
+        name,
+        function.get("arguments"),
+        agent,
+        confirmation_resolved=False,
+        mcp_server_map=mcp_server_map,
+    )
+    return disposition.value
 
 
 async def discover_session_mcp_tools(
