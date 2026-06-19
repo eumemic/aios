@@ -11,12 +11,17 @@ a ``FORWARD`` outcome emits a normalized inbound via
 :meth:`emit_inbound`.  ``message_changed`` is routed to a non-emitting
 system path; mention-gated drops are fail-quiet.
 
-Slice 3 publishes the two outbound ``@tool``\\ s the model uses to be
+Slice 3 publishes the outbound ``@tool``\\ s the model uses to be
 heard on Slack: :meth:`slack_send` (``chat.postMessage`` with
-``mrkdwn``, optional ``thread_ts`` threading) and :meth:`slack_react`
-(``reactions.add`` / ``reactions.remove``, mirroring ``telegram_react``).
-Both run their text through the markdown→``mrkdwn`` pipeline + hard
-clamps in :mod:`aios_slack.format` before the Web API call.
+``mrkdwn``, optional ``thread_ts`` threading), :meth:`slack_react`
+(``reactions.add`` / ``reactions.remove``, mirroring ``telegram_react``),
+and the message-lifecycle pair :meth:`slack_edit_message` (``chat.update``)
+and :meth:`slack_delete_message` (``chat.delete``) — both scoped to the
+bot's own messages.  The text-bearing tools run their body through the
+markdown→``mrkdwn`` pipeline + hard clamps in :mod:`aios_slack.format`
+before the Web API call.  A ``chat.update`` echoes back as a bot-authored
+``message_changed`` event that the slice-B nested self-filter (§3.6 gate 1)
+already drops, so an edit never re-wakes the session.
 ``connection_id`` and ``chat_id`` are server-authoritative — the SDK
 injects them from the call's focal channel; the model cannot select a
 workspace.  ``slack_send`` is documented **at-least-once** (§4 retry
@@ -489,6 +494,90 @@ class SlackConnector(HttpConnector):
                 team_id=state.team_id,
                 message_ts=message_ts,
             )
+        return {"status": "ok"}
+
+    @tool()
+    async def slack_edit_message(
+        self,
+        message_ts: str,
+        text: str,
+        *,
+        connection_id: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Replace the text of a message you sent earlier in your focal conversation.
+
+        Useful for turning a placeholder into a final answer ("working on
+        it…" → the result) or fixing a typo without posting a follow-up.
+        Slack only lets the bot edit its **own** messages. The connection
+        and conversation are taken implicitly from your focal channel; the
+        SDK injects them from the call payload, so you cannot edit a
+        message in a different workspace or conversation.
+
+        The new body is written in ordinary Markdown and rendered to
+        Slack's ``mrkdwn`` flavor before sending — the same conversion and
+        length clamp as ``slack_send``.
+
+        Args:
+            message_ts: The ``ts`` of the message to edit. Use the ``ts``
+                returned by an earlier ``slack_send``.
+            text: The replacement body, in Markdown. Long bodies are
+                clamped to Slack's per-message ceiling before sending (the
+                tail is truncated with an ellipsis rather than failing the
+                call).
+
+        Returns:
+            A dict with ``ts`` (the edited message's timestamp id — it is
+            unchanged by an edit) and ``channel`` (the resolved
+            focal-channel string, so observers read the edit target straight
+            off the tool result).
+        """
+        state = self.state[connection_id]
+        body = clamp_message(markdown_to_mrkdwn(text))
+        # Build the channel from the ORIGINAL chat_id so the segment is
+        # byte-identical to inbound/focal form (the channel is the bare
+        # conversation id; threads share the channel session, §3.4).
+        channel = self.focal_channel(state.team_id, chat_id)
+
+        response = await state.web_client.chat_update(
+            channel=chat_id,
+            ts=message_ts,
+            text=body,
+            mrkdwn=True,
+        )
+        # ``chat.update`` echoes the (unchanged) message ``ts``; fall back to
+        # the input ``message_ts`` if the field is absent.  The edit arrives
+        # back as a bot-authored ``message_changed`` event that the slice-B
+        # nested self-filter (§3.6 gate 1) already drops, so it never
+        # re-wakes the session — no bot_thread_ts bookkeeping is needed here.
+        edited_ts = response.get("ts", message_ts)
+        return {"ts": edited_ts, "channel": channel}
+
+    @tool()
+    async def slack_delete_message(
+        self,
+        message_ts: str,
+        *,
+        connection_id: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Delete a message you sent earlier in your focal conversation.
+
+        Slack only lets the bot delete its **own** messages (unless it has
+        been granted broader admin rights in the conversation). The
+        connection and conversation are taken implicitly from your focal
+        channel; the SDK injects them from the call payload, so you cannot
+        delete a message in a different workspace or conversation.
+
+        Args:
+            message_ts: The ``ts`` of the message to delete. Use the ``ts``
+                returned by an earlier ``slack_send``.
+
+        Returns:
+            A dict with ``status`` (``"ok"``).
+        """
+        state = self.state[connection_id]
+        await state.web_client.chat_delete(channel=chat_id, ts=message_ts)
         return {"status": "ok"}
 
     @staticmethod

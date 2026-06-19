@@ -11,14 +11,15 @@ connector reads at ``serve_connection`` spawn.
 > Socket-Mode transport, and the ``serve_connection`` lifecycle. Slice 2
 > added inbound normalization + the four connector-side gates
 > (self/bot-loop, cross-app/team, subtype, mention-gate). Slice 3 adds
-> the outbound reply layer: the ``slack_send`` and ``slack_react``
-> ``@tool``\ s, plus the markdown→``mrkdwn`` pipeline and hard clamps in
-> `format.py`. A live DM-round-trip smoke lands in slice D. See
+> the outbound reply layer: the ``slack_send``, ``slack_react``,
+> ``slack_edit_message``, and ``slack_delete_message`` ``@tool``\ s, plus
+> the markdown→``mrkdwn`` pipeline and hard clamps in `format.py`. A live
+> DM-round-trip smoke lands in slice D. See
 > `docs/design/slack-connector.md` §3.1–§3.6.
 
 ## Outbound tools (slice 3, §3.5)
 
-The model is heard on Slack only through two tools; ``connection_id`` and
+The model is heard on Slack only through these tools; ``connection_id`` and
 ``chat_id`` are server-authoritative (injected by the SDK from the call's
 focal channel — the model cannot pick a workspace or conversation):
 
@@ -32,6 +33,15 @@ focal channel — the model cannot pick a workspace or conversation):
   ``reactions.add(channel=chat_id, timestamp=message_ts, name=emoji)``
   (colon-stripped + normalized) when ``emoji`` is set. Mirrors
   ``telegram_react``.
+- **``slack_edit_message(message_ts, text)`` → ``{ts, channel}``** —
+  ``chat.update(channel=chat_id, ts=message_ts, text=…, mrkdwn=True)``.
+  Same Markdown→``mrkdwn`` render + clamp as ``slack_send``; scoped to the
+  bot's own messages. The resulting ``message_changed`` echo is a
+  bot-authored edit the slice-2 nested self-filter already drops, so an
+  edit never re-wakes the session.
+- **``slack_delete_message(message_ts)`` → ``{status}``** —
+  ``chat.delete(channel=chat_id, ts=message_ts)``; scoped to the bot's own
+  messages.
 
 > **Known v0 property — ``slack_send`` is at-least-once** (design §4). A
 > ``tool-result`` POST failure *after* a successful ``chat.postMessage``
