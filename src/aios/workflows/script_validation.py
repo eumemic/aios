@@ -12,9 +12,10 @@ failed *run* read back off the journal:
    union of the script's own ``tool("…")`` calls (and its named ``agent(agent_id=…)``
    children — resolved in the service layer, see ``services.workflows``). An
    under-declared surface is **silently clamped** at run launch (#794), so the
-   script hits a runtime route-mismatch, not a load error. ``dev_pipeline.py``
-   records two production incidents from exactly this (an omitted ``DELETE`` that
-   silently no-op'd every unlabel; an omitted ``PATCH`` that left merged issues open).
+   script hits a runtime route-mismatch, not a load error. An application
+   workflow recorded two production incidents from exactly this (an omitted
+   ``DELETE`` that silently no-op'd every unlabel; an omitted ``PATCH`` that left
+   merged issues open).
 
 This module lifts the host's own ``compile(...)`` to create time and adds two AST
 checks, so all of class (1) and the *script-local* half of class (2) are caught as
