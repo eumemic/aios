@@ -31,16 +31,23 @@ from typing import Any
 import asyncpg
 
 from aios.db.queries import workflows as wf_queries
+from aios.errors import AiosError
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.mcp.client import resolve_auth_for_target_url_run
 from aios.models.workflows import WfRun
+from aios.services import workflows as wf_service
 from aios.services.wake import defer_run_wake
 from aios.tools.http_request import _do_http_request, _find_server, _match_route, _split_query
 from aios.tools.invoke import validate_arguments
 from aios.tools.registry import registry
 from aios.tools.web_fetch import web_fetch_handler
 from aios.tools.web_search import web_search_handler
+from aios.tools.workflow_management import (
+    _RUN_ECHO_EXCLUDE,
+    _GetRunArgs,
+    _ListRunsArgs,
+)
 from aios.workflows.idempotency_key import (
     AIOS_IDEMPOTENCY_KEY_SENTINEL,
     idempotency_key,
@@ -75,10 +82,16 @@ def _substitute_idempotency_sentinel(
 # The builtins a run may call directly. The network/credential trio run on the
 # worker (:func:`invoke_run_tool`); ``bash`` runs in the run's provisioned sandbox
 # (:mod:`aios.workflows.run_sandbox`) — the step routes by the tool's execution
-# class. The other sandbox builtins (read/write/edit/glob/grep) and authed-MCP /
-# search_events stay out of scope (later slices), so a ``tool('read')`` is a
-# recoverable not-callable value at the run frontier.
-RUN_TOOLS: frozenset[str] = frozenset({"web_search", "web_fetch", "http_request", "bash"})
+# class. ``list_runs`` / ``get_run`` are the run-journal READ pair (#1396): they run
+# on the worker too, dispatched to the workflow service ACCOUNT-SCOPED to ``run.account_id``
+# (never a launcher-session filter, never cross-account) — the substrate the standing
+# immune-system dead-men (``gate_reaper`` #1386, ``telemetry_observer`` #1326) read to
+# correlate the GitHub blackboard against which runs are live. The other sandbox builtins
+# (read/write/edit/glob/grep) and authed-MCP / search_events stay out of scope (later
+# slices), so a ``tool('read')`` is a recoverable not-callable value at the run frontier.
+RUN_TOOLS: frozenset[str] = frozenset(
+    {"web_search", "web_fetch", "http_request", "bash", "list_runs", "get_run"}
+)
 
 # Per-worker in-flight tool tasks, keyed (run_id, call_key). Gates *launching* (so a
 # sibling-triggered re-wake — e.g. parallel([tool(), agent()]) — doesn't double-dispatch a
@@ -171,6 +184,63 @@ def gate_run_tool(run: WfRun, tool_name: str) -> dict[str, Any] | None:
     return None
 
 
+async def _read_run_journal(
+    *, account_id: str, tool_name: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    """The run-journal READ pair — ``list_runs`` / ``get_run`` from inside a run (#1396).
+
+    Dispatches to the workflow service ACCOUNT-SCOPED to the calling run's account, never
+    a launcher-session filter, never cross-account:
+
+      * ``list_runs`` — ``launcher_session_id=None`` (a run has no launching session; the
+        only meaningful scope is the whole account). The ``account_wide`` arg is therefore
+        a no-op here — a run is *always* account-scoped, never narrower; we accept it for
+        schema parity with the session tool and ignore it. The run sees its OWN account's
+        runs and only those, because ``account_id=account_id`` is the run's own account
+        (``run.account_id``, threaded by :func:`invoke_run_tool`) — the isolation boundary
+        is the same one the http-credential resolver and the get_run NotFound scope enforce.
+      * ``get_run`` — the account-scoped single-run read. A cross-account / missing id
+        raises :class:`NotFoundError` in the query layer; we catch it (and any client-class
+        :class:`AiosError`) and return it as a recoverable ``{"error": …}`` value, so the
+        contract "``invoke_run_tool`` never raises; errors are values the script branches on"
+        holds — and a run can never read another account's run.
+
+    The returned shape MATCHES the session tools (``{"runs": [...]}`` / the full WfRun
+    dict, both with the heavy script/surface blobs trimmed by ``_RUN_ECHO_EXCLUDE``), so a
+    workflow's reader code is identical whether the same tool is called from a session or a
+    run.
+    """
+    pool = runtime.require_pool()
+    try:
+        if tool_name == "list_runs":
+            parsed = _ListRunsArgs.model_validate(args)
+            runs = await wf_service.list_runs(
+                pool,
+                account_id=account_id,
+                limit=parsed.limit,
+                after=parsed.after,
+                workflow_id=parsed.workflow_id,
+                status=parsed.status,
+                parent_run_id=parsed.parent_run_id,
+                # A run is account-scoped, never launcher-scoped: a run has no launching
+                # session to filter on. account_wide is accepted for schema parity and
+                # has no effect (the run is always account-wide within its OWN account).
+                launcher_session_id=None,
+            )
+            return {"runs": [r.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE) for r in runs]}
+        # get_run
+        parsed_get = _GetRunArgs.model_validate(args)
+        run = await wf_service.get_run(pool, parsed_get.run_id, account_id=account_id)
+        return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
+    except AiosError as exc:
+        # A denied/not-found read (e.g. a cross-account get_run id) is a recoverable value
+        # the script branches on — never a run-terminal raise (matching the agent()/
+        # http_request "errors resolve" contract). The 4xx isolation boundary holds: the
+        # query is account-scoped, so a foreign id reads NotFound, never another account's
+        # run.
+        return {"error": str(exc)}
+
+
 async def invoke_run_tool(
     *, run: WfRun, call_key: str, account_id: str, tool_name: str, tool_input: Any
 ) -> dict[str, Any]:
@@ -188,6 +258,8 @@ async def invoke_run_tool(
     if schema_error is not None:
         return {"error": schema_error}
 
+    if tool_name in ("list_runs", "get_run"):
+        return await _read_run_journal(account_id=account_id, tool_name=tool_name, args=args)
     if tool_name == "http_request":
         # A route an operator marked ``always_ask`` requires per-call human confirmation —
         # which a run has no channel for. Deny rather than execute unconfirmed, so a run is
