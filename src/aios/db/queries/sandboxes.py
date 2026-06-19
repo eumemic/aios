@@ -12,6 +12,8 @@ from typing import Any
 
 import asyncpg
 
+from aios.db.queries.sessions import session_active_predicate
+
 # ─── durable session sandboxes: snapshot pointer (§5.1) ───────────────────────
 #
 # Worker-side, unscoped (per the ``unscoped_`` convention): the snapshot
@@ -112,6 +114,83 @@ async def unscoped_live_session_ids(
         list(session_ids),
     )
     return {row["id"] for row in rows}
+
+
+async def unscoped_reapable_archived_workspaces(
+    conn: asyncpg.Connection[Any], *, min_archived_age_seconds: float
+) -> list[asyncpg.Record]:
+    """Return ``(id, account_id, workspace_volume_path)`` for sessions whose
+    ``/workspace`` host dir is reap-eligible — the archived-session workspace
+    reaper (aios#40, the "45G hole").
+
+    A session qualifies iff ALL hold:
+
+    * ``archived_at IS NOT NULL`` — archived-only. Session archival is terminal
+      and permanent: no code path ever clears ``sessions.archived_at`` (the
+      archive fence at ``append_event`` rejects every later write), so an
+      archived session never wakes, never re-provisions, never re-reads its
+      ``/workspace``. We reap only archived sessions; a live/idle/running
+      session is structurally excluded by this clause.
+
+    * ``archived_at < now() - min_archived_age_seconds`` — the min-age floor, on
+      *DB archive time* (not file mtime). Guards a just-archived session whose
+      workspace something might still be reading in the seconds after archive.
+
+    * ``NOT (active)`` — defense-in-depth. Archived dominates the read-path
+      status label, but the explicit ``archive_session`` path carries no
+      active-guard, so archived ∧ event-watermark-active is reachable for a
+      step that was in flight at archive time. We re-confirm not-active here
+      with the SAME predicate the wake sweep uses, read fresh at sweep time, so
+      a session with work still pending is never a candidate.
+
+    Returns the *stored* ``workspace_volume_path`` verbatim; the caller is
+    responsible for the canonical-path confinement check (it reaps ONLY the
+    derived ``workspace_root/<account_id>/<session_id>`` and only when the
+    stored value resolves equal to it — a user-overridden / clone-shared /
+    aliased path is therefore never reaped). Worker-side / unscoped: the reaper
+    holds these rows across all accounts.
+    """
+    rows: list[asyncpg.Record] = await conn.fetch(
+        f"""
+        SELECT id, account_id, workspace_volume_path
+          FROM sessions
+         WHERE archived_at IS NOT NULL
+           AND archived_at < now() - make_interval(secs => $1::double precision)
+           AND NOT {session_active_predicate("sessions")}
+        """,
+        float(min_archived_age_seconds),
+    )
+    return rows
+
+
+async def unscoped_live_workspace_volume_paths(
+    conn: asyncpg.Connection[Any],
+) -> list[str]:
+    """Return every NON-archived (live) session's stored ``workspace_volume_path``.
+
+    The keep-set for the archived-workspace reaper's live-clone cross-check
+    (aios#40, same never-delete class as the confinement gate). ``clone_session``
+    lets a live clone *share* the volume of another session — and a live clone
+    can legitimately point at an ARCHIVED parent's OWN canonical default path
+    (``<root>/<account>/<parent>``). Reaping that archived parent's row would
+    ``rmtree`` the very directory the live clone is using ⇒ cross-session live
+    data loss.
+
+    Returns the *stored* paths verbatim, across all accounts (``unscoped_``); the
+    caller realpath-normalizes them into a keep-set and skips any reap candidate
+    whose canonical realpath collides with a live path. NULL/empty stored values
+    are filtered out (they can never realpath-collide with a real canonical dir).
+    """
+    rows = await conn.fetch(
+        """
+        SELECT workspace_volume_path
+          FROM sessions
+         WHERE archived_at IS NULL
+           AND workspace_volume_path IS NOT NULL
+           AND workspace_volume_path <> ''
+        """,
+    )
+    return [row["workspace_volume_path"] for row in rows]
 
 
 async def gc_snapshot_session_states(

@@ -412,6 +412,8 @@ from .sandboxes import (  # noqa: E402
     unscoped_clear_session_snapshot,
     unscoped_get_session_snapshot_bytes,
     unscoped_live_session_ids,
+    unscoped_live_workspace_volume_paths,
+    unscoped_reapable_archived_workspaces,
     unscoped_set_session_snapshot,
 )
 from .session_templates import (  # noqa: E402
@@ -804,6 +806,8 @@ __all__ = [
     "unscoped_get_trigger_row",
     "unscoped_live_session_account_id",
     "unscoped_live_session_ids",
+    "unscoped_live_workspace_volume_paths",
+    "unscoped_reapable_archived_workspaces",
     "unscoped_set_session_snapshot",
     "update_account",
     "update_agent",

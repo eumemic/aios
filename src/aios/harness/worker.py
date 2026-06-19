@@ -49,6 +49,7 @@ from aios.harness.sweep import (
 )
 from aios.harness.task_registry import TaskRegistry
 from aios.harness.trigger_runner import sweep_trigger_fires
+from aios.harness.workspace_reaper import sweep_archived_workspaces
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.sandbox.backends.docker import DockerBackend
@@ -330,6 +331,17 @@ async def worker_main() -> None:
         )
         _supervise(host_dir_reaper_task, latch=supervised_latch, fatal=supervised_failure)
 
+        # Start the archived-session workspace reaper (#40 — the 45G hole): GC
+        # the per-session ``/workspace`` host dir of archived sessions, which
+        # the #1192 reaper does NOT cover. Ships DARK
+        # (``workspace_reaper_enabled`` defaults OFF) — it deletes real working
+        # files, not reconstructible clones, so it is enabled only after review.
+        workspace_reaper_task = asyncio.create_task(
+            _workspace_reaper_loop(pool),
+            name="workspace_reaper",
+        )
+        _supervise(workspace_reaper_task, latch=supervised_latch, fatal=supervised_failure)
+
         # Start periodic sweep (every 30s).
         sweep_task = asyncio.create_task(
             _periodic_sweep(pool, task_registry, interval=30),
@@ -589,6 +601,34 @@ async def _host_dir_reaper_loop(pool: asyncpg.Pool[Any]) -> None:
                 log.info("host_dir_reaper.swept", removed=removed)
         except Exception:
             log.exception("host_dir_reaper.tick_failed")
+
+
+async def _workspace_reaper_loop(pool: asyncpg.Pool[Any]) -> None:
+    """Background loop for the archived-session workspace reaper (#40).
+
+    Same shape as ``_host_dir_reaper_loop``: try/except INSIDE the loop so one
+    DB/FS hiccup never silently disables it, immediate first sweep at boot, then
+    every configured interval. ``sweep_archived_workspaces`` itself honours the
+    ``workspace_reaper_enabled`` kill-switch (default OFF — ships dark).
+    """
+    log = get_logger("aios.worker.workspace_reaper")
+    interval = get_settings().workspace_reaper_interval_seconds
+    first = True
+    while True:
+        try:
+            if not first:
+                await asyncio.sleep(interval)
+            first = False
+            result = await sweep_archived_workspaces(pool)
+            if result.reaped or result.bytes_freed:
+                log.info(
+                    "workspace_reaper.swept",
+                    reaped=result.reaped,
+                    bytes_freed=result.bytes_freed,
+                    dry_run=result.dry_run,
+                )
+        except Exception:
+            log.exception("workspace_reaper.tick_failed")
 
 
 async def _run_interrupt_listener(
