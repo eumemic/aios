@@ -117,6 +117,17 @@ def _find_mcp_toolset(agent_tools: list[ToolSpec], server_name: str) -> ToolSpec
     return None
 
 
+def _binding_id(agent: Any) -> str:
+    """Binding identity for the shared MCP tool-list cache (#1391).
+
+    The broker re-discovers on every model-initiated introspection
+    (``mcp list-methods`` / ``mcp schema``); keying the cache on the SAME
+    ``agent id + version`` the step prelude uses lets the two share a single
+    cached tool list instead of each re-paying a ``list_tools()`` RPC.
+    """
+    return f"{getattr(agent, 'id', '?')}:{getattr(agent, 'version', '?')}"
+
+
 def _find_builtin_spec(agent_tools: list[ToolSpec], name: str) -> ToolSpec | None:
     """Find the agent's ToolSpec for a built-in by name.
 
@@ -535,7 +546,7 @@ class ToolBroker:
 
     async def _resolve_mcp(
         self, request: Request, *, require_tool: bool
-    ) -> tuple[str, McpServerSpec, ToolSpec, str | None] | Response:
+    ) -> tuple[str, McpServerSpec, ToolSpec, str | None, Any] | Response:
         """Resolve session, server, toolset, and (optionally) tool for an
         MCP route.
 
@@ -559,7 +570,7 @@ class ToolBroker:
             return _err(404, f"MCP server {server_name!r} has no URL configured")
 
         if not require_tool:
-            return session_id, server, toolset, None
+            return session_id, server, toolset, None, agent
 
         tool_name = request.path_params["tool"]
         qualified = f"mcp__{server_name}__{tool_name}"
@@ -584,18 +595,23 @@ class ToolBroker:
                 f"synchronous confirmation bridge is not built. Use the "
                 f"model-tool path.",
             )
-        return session_id, server, toolset, tool_name
+        return session_id, server, toolset, tool_name, agent
 
     async def _mcp_list_methods(self, request: Request) -> Response:
         resolved = await self._resolve_mcp(request, require_tool=False)
         if isinstance(resolved, Response):
             return resolved
-        session_id, server, toolset, _ = resolved
+        session_id, server, toolset, _, agent = resolved
 
         vault_id, headers = await self._load_auth_for(session_id, server.url)
         try:
             tool_dicts, _instructions = await discover_mcp_tools(
-                server.url, vault_id, headers, server.name, spec_headers=server.headers
+                server.url,
+                vault_id,
+                headers,
+                server.name,
+                spec_headers=server.headers,
+                binding_id=_binding_id(agent),
             )
         except Exception as exc:
             log.warning(
@@ -633,13 +649,18 @@ class ToolBroker:
         resolved = await self._resolve_mcp(request, require_tool=True)
         if isinstance(resolved, Response):
             return resolved
-        session_id, server, _toolset, tool_name = resolved
+        session_id, server, _toolset, tool_name, agent = resolved
         assert tool_name is not None  # require_tool=True
 
         vault_id, headers = await self._load_auth_for(session_id, server.url)
         try:
             tool_dicts, _ = await discover_mcp_tools(
-                server.url, vault_id, headers, server.name, spec_headers=server.headers
+                server.url,
+                vault_id,
+                headers,
+                server.name,
+                spec_headers=server.headers,
+                binding_id=_binding_id(agent),
             )
         except Exception as exc:
             log.warning(
@@ -674,7 +695,7 @@ class ToolBroker:
         resolved = await self._resolve_mcp(request, require_tool=True)
         if isinstance(resolved, Response):
             return resolved
-        session_id, server, _toolset, tool_name = resolved
+        session_id, server, _toolset, tool_name, _agent = resolved
         assert tool_name is not None
 
         # Outbound suppression (#710): MCP is default-deny under suppression.

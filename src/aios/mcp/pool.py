@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from mcp.client.session import ClientSession
+from mcp.client.session import ClientSession, MessageHandlerFnT
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import InitializeResult
 
@@ -202,6 +202,22 @@ class McpSessionPool:
         # before close() unwinds the owner task's contexts — defeating
         # the leak fix.
         self._close_tasks: set[asyncio.Task[None]] = set()
+        # Discovered-tool-list result cache (#1391). Keyed on
+        # ``(_PoolKey, binding_id)`` where ``binding_id`` is the caller's
+        # binding identity (agent id + version, or the frozen-surface hash) —
+        # the precondition that makes the tool set static across steps. Caches
+        # the FULL ``(tools, instructions)`` discovery result so the per-step
+        # prelude no longer re-pays a ``list_tools()`` RPC every turn ("connection
+        # reuse" was never "result reuse"). Invalidated on a binding-identity
+        # change (a new key never hits) or a ``tools/list_changed`` notification
+        # (which drops every binding's entry for the affected _PoolKey).
+        self._tool_cache: dict[tuple[_PoolKey, str], tuple[list[Any], str | None]] = {}
+        # Per-_PoolKey circuit breaker (#1391). When discovery times out or the
+        # transport fails, the key is marked unhealthy until ``unhealthy_until``
+        # (monotonic seconds) so the next prelude SKIPS it fast instead of
+        # re-stalling for the per-server timeout every step. A successful
+        # discovery clears the entry.
+        self._unhealthy_until: dict[_PoolKey, float] = {}
 
     def _condition_for(self, key: _PoolKey) -> asyncio.Condition:
         cond = self._conditions.get(key)
@@ -236,7 +252,31 @@ class McpSessionPool:
         self._close_tasks.add(task)
         task.add_done_callback(self._close_tasks.discard)
 
-    async def _open_entry(self, url: str, headers: dict[str, str]) -> _Entry:
+    def _make_list_changed_handler(self, key: _PoolKey) -> MessageHandlerFnT:
+        """Build a ``ClientSession`` message handler that invalidates the tool
+        cache on a ``tools/list_changed`` notification (#1391).
+
+        The MCP spec's ``notifications/tools/list_changed`` is the protocol's
+        own cache-invalidation signal — previously unhandled, so aios ignored it
+        and unconditionally re-polled. Registering this handler lets a server
+        push an updated tool set: the cached ``(tools, instructions)`` for every
+        binding on this transport key is dropped, and the next prelude
+        re-discovers. Non-notification messages (server requests, exceptions)
+        are passed through unchanged.
+        """
+        from mcp.types import ServerNotification, ToolListChangedNotification
+
+        async def _handler(message: Any) -> None:
+            if isinstance(message, ServerNotification) and isinstance(
+                message.root, ToolListChangedNotification
+            ):
+                self._invalidate_tools_for_pool_key(key)
+
+        return _handler
+
+    async def _open_entry(
+        self, url: str, headers: dict[str, str], key: _PoolKey | None = None
+    ) -> _Entry:
         """Open a fresh session inside a dedicated long-lived owner task.
 
         The contexts (httpx client, streamable-http client, ClientSession)
@@ -244,11 +284,16 @@ class McpSessionPool:
         the anyio cancel-scope constraint. The task signals ``ready`` once
         the session is initialized, then awaits ``shutdown`` so the
         contexts stay open for the entry's lifetime.
+
+        When ``key`` is supplied, a ``tools/list_changed`` message handler is
+        registered on the session so the server's own invalidation signal drops
+        the cached tool list for that transport key (#1391).
         """
         ready = asyncio.Event()
         shutdown = asyncio.Event()
         sink = HttpErrorSink()
         result: dict[str, Any] = {}
+        message_handler = self._make_list_changed_handler(key) if key is not None else None
 
         async def _own() -> None:
             try:
@@ -264,7 +309,7 @@ class McpSessionPool:
                         streamable_http_client(url, http_client=http_client)
                     )
                     session = await stack.enter_async_context(
-                        ClientSession(read_stream, write_stream)
+                        ClientSession(read_stream, write_stream, message_handler=message_handler)
                     )
                     result["session"] = session
                     result["init"] = await session.initialize()
@@ -324,7 +369,7 @@ class McpSessionPool:
                     return entry
                 if len(self._in_use.get(key, set())) < MAX_SESSIONS_PER_KEY:
                     log.info("mcp_pool.connecting", url=url)
-                    entry = await self._open_entry(url, headers)
+                    entry = await self._open_entry(url, headers, key)
                     self._in_use.setdefault(key, set()).add(entry)
                     log.info("mcp_pool.connected", url=url)
                     return entry
@@ -432,6 +477,9 @@ class McpSessionPool:
                 for entry in self._in_use.get(key, set()):
                     entry.discard_on_release = True
                     flagged += 1
+        # Drop any cached tool lists discovered under the rotated identity so a
+        # re-auth re-discovers rather than serving the stale-identity set (#1391).
+        self.invalidate_tools_by_vault(vault_id)
         if idle_closed or flagged:
             log.info(
                 "mcp_pool.evict_by_vault",
@@ -439,6 +487,97 @@ class McpSessionPool:
                 idle_closed=idle_closed,
                 in_use_flagged=flagged,
             )
+
+    # ── tool-list result cache (#1391) ────────────────────────────────────
+
+    def get_cached_tools(
+        self, url: str, vault_id: str | None, headers_key: str, binding_id: str
+    ) -> tuple[list[Any], str | None] | None:
+        """Return the cached ``(tools, instructions)`` for this binding, or ``None``.
+
+        The cache key folds the transport identity (``_PoolKey``) together with
+        the caller's ``binding_id`` (agent id + version, or frozen-surface hash).
+        A binding-identity bump (agent-version change) therefore lands on a fresh
+        key and misses — propagating the new tool set to the next step with no
+        explicit invalidation (#1391 staleness guard).
+        """
+        key: _PoolKey = (url, vault_id, headers_key)
+        return self._tool_cache.get((key, binding_id))
+
+    def set_cached_tools(
+        self,
+        url: str,
+        vault_id: str | None,
+        headers_key: str,
+        binding_id: str,
+        tools: list[Any],
+        instructions: str | None,
+    ) -> None:
+        """Cache a successful ``(tools, instructions)`` discovery for this binding."""
+        key: _PoolKey = (url, vault_id, headers_key)
+        self._tool_cache[(key, binding_id)] = (tools, instructions)
+
+    def _invalidate_tools_for_pool_key(self, key: _PoolKey) -> None:
+        """Drop every binding's cached tool list for one transport key.
+
+        Fired by the ``tools/list_changed`` notification handler: the server
+        announced its tool set changed, so every binding that discovered against
+        this ``(url, vault_id, headers_key)`` must re-discover on its next step.
+        """
+        stale = [ck for ck in self._tool_cache if ck[0] == key]
+        for ck in stale:
+            del self._tool_cache[ck]
+        if stale:
+            log.info("mcp_pool.tools_cache_invalidated", url=key[0], dropped=len(stale))
+
+    def invalidate_tools_by_vault(self, vault_id: str) -> None:
+        """Drop cached tool lists for every key bound to ``vault_id``.
+
+        Called alongside :meth:`evict_by_vault` on a credential rotation so a
+        re-auth can't keep serving a tool list discovered under the old identity.
+        """
+        stale = [ck for ck in self._tool_cache if ck[0][1] == vault_id]
+        for ck in stale:
+            del self._tool_cache[ck]
+
+    # ── per-key discovery circuit breaker (#1391) ─────────────────────────
+
+    def is_unhealthy(
+        self, url: str, vault_id: str | None, headers_key: str, *, now: float | None = None
+    ) -> bool:
+        """True if this transport key is in a discovery backoff window.
+
+        The prelude consults this BEFORE attempting ``list_tools()`` so a server
+        that just timed out is skipped fast (agent runs degraded on the other
+        servers' tools) instead of re-stalling the turn prelude every step.
+        """
+        key: _PoolKey = (url, vault_id, headers_key)
+        until = self._unhealthy_until.get(key)
+        if until is None:
+            return False
+        if (now if now is not None else time.monotonic()) >= until:
+            del self._unhealthy_until[key]
+            return False
+        return True
+
+    def mark_unhealthy(
+        self,
+        url: str,
+        vault_id: str | None,
+        headers_key: str,
+        *,
+        backoff_s: float,
+        now: float | None = None,
+    ) -> None:
+        """Open the circuit for this transport key for ``backoff_s`` seconds."""
+        key: _PoolKey = (url, vault_id, headers_key)
+        self._unhealthy_until[key] = (now if now is not None else time.monotonic()) + backoff_s
+        log.warning("mcp_pool.marked_unhealthy", url=url, backoff_s=backoff_s)
+
+    def mark_healthy(self, url: str, vault_id: str | None, headers_key: str) -> None:
+        """Clear any backoff for this transport key (a successful discovery)."""
+        key: _PoolKey = (url, vault_id, headers_key)
+        self._unhealthy_until.pop(key, None)
 
     async def _reap_idle_once(self, *, idle_timeout: float, now: float) -> None:
         """Close idle entries unused longer than ``idle_timeout`` seconds.

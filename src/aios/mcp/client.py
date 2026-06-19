@@ -105,6 +105,20 @@ MAX_TOOLS_PER_SERVER = 128
 # ``harness/completion.py``.
 _TOOL_CALL_TIMEOUT_S = 120.0
 
+# Per-server bound for discovery ``list_tools()`` (#1391). Previously discovery
+# had no ceiling but the httpx read timeout + the 960s step budget, so a single
+# unresponsive server could starve the whole turn prelude until the step budget
+# fired (then re-hang on retry). This caps each server's discovery so a slow one
+# is skipped — degraded, not dead — rather than stalling every prelude. Tighter
+# than ``_TOOL_CALL_TIMEOUT_S`` because discovery is a synchronous prelude leg the
+# model didn't initiate, not real work.
+_DISCOVERY_TIMEOUT_S = 30.0
+
+# Backoff applied to a transport key whose discovery timed out / failed, so the
+# next several preludes skip it fast via the pool circuit breaker instead of
+# re-stalling each step (#1391).
+_DISCOVERY_UNHEALTHY_BACKOFF_S = 60.0
+
 # httpx client bounds for MCP transport. ``read`` is the longest leg —
 # tool calls that do real work (DB lookups, external APIs) commonly take
 # tens of seconds. Connect/write/pool are tight because they're network
@@ -313,6 +327,19 @@ async def _auth_from_credential(
     return vault_id, headers
 
 
+async def _list_tools_timed(session: ClientSession) -> Any:
+    """``session.list_tools()`` under a per-server discovery timeout (#1391).
+
+    The discovery RPC previously had no finite ceiling other than the httpx read
+    timeout and the outer 960s step budget, so a hung server starved the entire
+    turn prelude. Wrapping it in ``asyncio.timeout`` mirrors the proven
+    ``_call_tool_fast`` bound on invocation and converts a stall into a prompt
+    ``TimeoutError`` the caller can mark unhealthy + skip.
+    """
+    async with asyncio.timeout(_DISCOVERY_TIMEOUT_S):
+        return await session.list_tools()
+
+
 async def discover_mcp_tools(
     url: str,
     vault_id: str | None,
@@ -320,6 +347,7 @@ async def discover_mcp_tools(
     server_name: str,
     *,
     spec_headers: dict[str, str] | None = None,
+    binding_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Connect to an MCP server and discover available tools.
 
@@ -332,12 +360,26 @@ async def discover_mcp_tools(
       any. Used by the harness to compose per-connector affordance prose
       into the system prompt.
 
-    Raises on transport / protocol / auth failure. Callers decide how to
-    surface the error: the step prelude (``discover_session_mcp_tools``)
-    logs at WARN and filters the failed server out of the tools and
-    instructions it returns, since the model didn't consciously initiate
-    that discovery. The broker HTTP handlers translate it into a 502
-    response because the sandboxed model DID initiate the call.
+    When ``binding_id`` is supplied and the worker pool is present, the
+    ``(tools, instructions)`` result is cached on the pool keyed on the
+    transport identity + ``binding_id`` (#1391). A cache hit skips the
+    ``list_tools()`` RPC entirely, so the per-step prelude no longer re-polls a
+    static tool set every turn; the cache is invalidated by a binding-identity
+    bump (a fresh key misses) or the server's ``tools/list_changed``
+    notification. ``binding_id`` is ``None`` for the API-process / test path
+    (no caching).
+
+    The discovery ``list_tools()`` is bounded by ``_DISCOVERY_TIMEOUT_S``; on a
+    timeout / transport failure the transport key is marked unhealthy on the
+    pool so subsequent preludes can skip it fast (circuit breaker) rather than
+    re-stalling every step.
+
+    Raises on transport / protocol / auth failure (including discovery
+    timeout). Callers decide how to surface the error: the step prelude
+    (``discover_session_mcp_tools``) logs at WARN and filters the failed server
+    out of the tools and instructions it returns, since the model didn't
+    consciously initiate that discovery. The broker HTTP handlers translate it
+    into a 502 response because the sandboxed model DID initiate the call.
     """
     from aios.harness import runtime
 
@@ -345,20 +387,26 @@ async def discover_mcp_tools(
     merged = _merge_headers(spec_headers, headers)
     hkey = _headers_key(spec_headers)
 
+    if _pool is not None and binding_id is not None:
+        cached = _pool.get_cached_tools(url, vault_id, hkey, binding_id)
+        if cached is not None:
+            return cached[0], cached[1]
+
     if _pool is not None:
         # Pool path: check out a session; on a transport/protocol error discard
         # it and retry once with a fresh one. Always release-or-discard so the
         # per-key cap slot is freed.
         entry = await _pool.acquire(url, vault_id, hkey, merged)
         try:
-            result = await entry.session.list_tools()
+            result = await _list_tools_timed(entry.session)
         except Exception:
             await asyncio.shield(_pool.discard(url, vault_id, hkey, entry))
             entry = await _pool.acquire(url, vault_id, hkey, merged)
             try:
-                result = await entry.session.list_tools()
+                result = await _list_tools_timed(entry.session)
             except BaseException:
                 await asyncio.shield(_pool.discard(url, vault_id, hkey, entry))
+                _pool.mark_unhealthy(url, vault_id, hkey, backoff_s=_DISCOVERY_UNHEALTHY_BACKOFF_S)
                 raise
             else:
                 await asyncio.shield(_pool.release(url, vault_id, hkey, entry))
@@ -371,11 +419,12 @@ async def discover_mcp_tools(
         else:
             await asyncio.shield(_pool.release(url, vault_id, hkey, entry))
         init_result = entry.init_result
+        _pool.mark_healthy(url, vault_id, hkey)
     else:
         # Fallback: fresh connection per call (API process, tests).
         async with AsyncExitStack() as stack:
             session, init_result = await _open_session(url, merged, stack)
-            result = await session.list_tools()
+            result = await _list_tools_timed(session)
 
     if len(result.tools) > MAX_TOOLS_PER_SERVER:
         log.warning(
@@ -389,6 +438,10 @@ async def discover_mcp_tools(
         make_function_tool(f"mcp__{server_name}__{tool.name}", tool)
         for tool in result.tools[:MAX_TOOLS_PER_SERVER]
     ]
+    if _pool is not None and binding_id is not None:
+        # Cache the freshly-discovered result so the next step (same binding
+        # identity, no list_changed) serves it without a list_tools() RPC (#1391).
+        _pool.set_cached_tools(url, vault_id, hkey, binding_id, tools, init_result.instructions)
     return tools, init_result.instructions
 
 
