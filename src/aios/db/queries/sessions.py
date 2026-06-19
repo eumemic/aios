@@ -484,6 +484,14 @@ async def get_open_request_ids(
     injects one request per child, so this is ``[]`` or one id; the set shape is
     ready for multi-request `invoke_session`.
 
+    Only **awaited** edges (``awaited=true``, the ``Ask`` arm) count: a
+    ``Tell(NewSession)`` fire-and-forget spawn writes a real ``request_opened``
+    row with ``awaited=false`` (#1197) — it carries lineage/depth/surface but owes
+    **no** response, so the asked set filters it out. An absent ``awaited`` reads
+    as ``true`` (additive/legacy), so pre-#1197 rows keep their obligation. This
+    is one of the three awaited-triad readers (with the #1131 totality gate and
+    the #1132 cap) that must apply the same filter in lockstep.
+
     Reads the trusted ``request_opened`` frame rather than the forgeable
     ``metadata.request`` user-message blob (which #1123 still dual-writes for the
     legacy run path until #1131 retires it). Both halves are partial-indexed
@@ -495,6 +503,13 @@ async def get_open_request_ids(
         "WHERE req.session_id = $1 AND req.account_id = $2 "
         "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
         "AND req.data->>'request_id' IS NOT NULL "
+        # #1197 awaited-triad filter: a ``Tell(NewSession)`` writes a real
+        # ``request_opened`` row with ``awaited=false`` (lineage/depth/surface
+        # carrier, no response obligation), so the open set must exclude it —
+        # else a fire-and-forget spawn would wrongly owe a response. An absent
+        # field reads as awaited=true (additive/legacy), so pre-#1197 rows keep
+        # their obligation.
+        "AND COALESCE((req.data->>'awaited')::boolean, TRUE) "
         "AND NOT EXISTS (SELECT 1 FROM events resp "
         "    WHERE resp.session_id = $1 AND resp.account_id = $2 "
         "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
@@ -746,6 +761,7 @@ async def append_request_opened(
     environment_id: str,
     frozen_surface: dict[str, Any],
     vault_ids: list[str],
+    awaited: bool = True,
 ) -> None:
     """Append the trusted ``request_opened`` lifecycle event — the *ask* half of
     the request edge (#1123).
@@ -767,6 +783,19 @@ async def append_request_opened(
     value. ``frozen_surface`` / ``vault_ids`` are the #794 clamp results computed
     at the launch site.
 
+    ``awaited`` (#1197) carries the ``Ask | Tell`` distinction on the edge: an
+    ``Ask`` opens an **awaited** edge (``awaited=true``) the target must answer
+    (``return``/``error``); a ``Tell(NewSession)`` fire-and-forget spawn opens an
+    **unawaited** edge (``awaited=false``) — a real ``request_opened`` row (so it
+    still carries lineage / depth / the #794-frozen surface), but with **no
+    response obligation**. It is a first-class, *explicitly-passed* field — never
+    inferred from ``request_id``-presence — so the discriminated-union discipline
+    holds at the call site. The triad of readers that derive "open request" from
+    this frame (this issue's quiescence guard nudge/``no_return`` loop, the #1131
+    totality gate, the #1132 cap) all filter ``awaited=true``; an absent field
+    reads as ``awaited=true`` (additive/legacy), so existing rows keep their
+    obligation.
+
     Idempotency is the **caller's** responsibility: the ``create_child_session``
     path gates this behind its first-spawn ``ON CONFLICT`` check, so a replayed
     wake opens the edge exactly once (see :func:`get_open_request_ids` for the
@@ -785,6 +814,7 @@ async def append_request_opened(
             "environment_id": environment_id,
             "frozen_surface": frozen_surface,
             "vault_ids": vault_ids,
+            "awaited": awaited,
         },
     )
 

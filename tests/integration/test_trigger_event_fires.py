@@ -77,7 +77,12 @@ async def trig_runtime(
             mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()),
             mock.patch("aios.workflows.run_tools.defer_run_wake", new=AsyncMock()),
             mock.patch("aios.workflows.step.defer_trigger_fire", new=AsyncMock()),
+            # `_surface_failure` still calls the module-level import in
+            # trigger_runner; `wake_owner` now routes through the stimulate spine
+            # (#1197) and resolves defer_wake from its source module. Patch both
+            # call sites so neither path hits the (unopened) procrastinate app.
             mock.patch("aios.harness.trigger_runner.defer_wake", new=AsyncMock()),
+            mock.patch("aios.services.wake.defer_wake", new=AsyncMock()),
         ):
             yield pool
     finally:

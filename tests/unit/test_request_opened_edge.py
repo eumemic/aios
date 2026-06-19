@@ -94,13 +94,16 @@ def test_append_request_opened_emits_lifecycle_kind() -> None:
 
 
 def test_create_child_session_calls_append_request_opened_after_first_spawn_guard() -> None:
-    """``create_child_session`` opens the edge only on a real insert.
+    """The spine's NewSession arm opens the edge only on a real insert.
 
     The ``append_request_opened`` call must appear textually after the
     ``if child is None: return False`` first-spawn guard, so a replayed wake (which
-    early-returns at the guard) never re-opens the edge — exactly-once.
+    early-returns at the guard) never re-opens the edge — exactly-once. Since #1197
+    factored the three near-copy creation paths onto the private ``stimulate``
+    spine, the edge writer lives in ``_stimulate_new_session`` (the NewSession arm
+    ``create_child_session`` is now a thin caller of).
     """
-    func = _func_def(sessions_svc.create_child_session, "create_child_session")
+    func = _func_def(sessions_svc._stimulate_new_session, "_stimulate_new_session")
 
     # Find the line of `if child is None: return False`.
     guard_line: int | None = None
@@ -124,8 +127,11 @@ def test_create_child_session_calls_append_request_opened_after_first_spawn_guar
 
 
 def test_create_child_session_opens_edge_inside_transaction() -> None:
-    """The edge write shares the servicer-creation transaction (rollback → no edge)."""
-    func = _func_def(sessions_svc.create_child_session, "create_child_session")
+    """The edge write shares the servicer-creation transaction (rollback → no edge).
+
+    The edge writer lives in the spine's NewSession arm (#1197).
+    """
+    func = _func_def(sessions_svc._stimulate_new_session, "_stimulate_new_session")
     txn = next(node for node in ast.walk(func) if isinstance(node, ast.AsyncWith))
     end = max(
         (n.lineno for n in ast.walk(txn) if hasattr(n, "lineno")),
@@ -196,3 +202,56 @@ def test_get_open_request_ids_reads_request_opened_not_metadata_blob() -> None:
     assert "request_response" in sql
     # It must NOT read the asked set off the forgeable metadata blob anymore.
     assert "'metadata'->'request'" not in sql
+
+
+# ─── #1197: the `awaited` bit + the `Ask | Tell` discriminated union ──────────
+
+
+def test_open_request_ids_filters_awaited_true() -> None:
+    """The open-set reader is one of the awaited-triad readers: it must filter
+    ``awaited=true`` (absent → true), so a ``Tell(NewSession)``'s unawaited edge is
+    excluded and a fire-and-forget spawn never wrongly owes a response."""
+    sql = _sql_literals(sessions_q.get_open_request_ids)
+    assert "awaited" in sql, "open set must filter on the awaited bit (#1197)"
+    # Absent ⇒ awaited=true (additive/legacy): the filter must COALESCE to TRUE.
+    assert "COALESCE" in sql.upper()
+
+
+def test_append_request_opened_signature_has_awaited() -> None:
+    """``append_request_opened`` takes an explicit ``awaited`` field (default true)
+    — never inferred from request_id-presence, so the union discipline holds."""
+    import inspect
+
+    sig = inspect.signature(sessions_q.append_request_opened)
+    assert "awaited" in sig.parameters
+    assert sig.parameters["awaited"].default is True
+
+
+def test_stimulate_union_makes_illegal_combinations_unrepresentable() -> None:
+    """The ``Ask | Tell`` union is a TYPE at the spine boundary, not a runtime
+    guard: illegal combinations have no constructor.
+
+    * no ``AskExistingSession`` carries ``vault_ids`` (a non-creating target binds
+      none);
+    * no ``Tell*`` arm carries ``output_schema`` (a Tell owes no response).
+    """
+    import dataclasses
+
+    ask_existing_fields = {f.name for f in dataclasses.fields(sessions_svc.AskExistingSession)}
+    assert "vault_ids" not in ask_existing_fields
+
+    for tell_cls in (sessions_svc.TellNewSession, sessions_svc.TellExistingSession):
+        tell_fields = {f.name for f in dataclasses.fields(tell_cls)}
+        assert "output_schema" not in tell_fields, f"{tell_cls.__name__} must not own output_schema"
+
+
+def test_stimulate_is_not_model_callable() -> None:
+    """The spine is service-internal: it is NOT registered as a model-facing tool.
+
+    A weak structural proxy for the mechanism/policy split — ``stimulate`` is a
+    plain service function, not decorated/registered into the tool registry.
+    """
+    # The tool registry never imports `stimulate`; the public surface is the
+    # Ask|Tell type, not a `deliver()` bool. Assert no `deliver` public function
+    # leaked onto the service module.
+    assert not hasattr(sessions_svc, "deliver"), "no public deliver(); spine is private"

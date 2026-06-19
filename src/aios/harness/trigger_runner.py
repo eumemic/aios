@@ -502,11 +502,18 @@ async def _run_wake_owner(
     """
     pool = runtime.require_pool()
     try:
-        await sessions_service.append_user_message(
-            pool, trigger.owner_session_id, action.content, account_id=trigger.account_id
-        )
-        await defer_wake(
-            pool, trigger.owner_session_id, cause="message", account_id=trigger.account_id
+        # #1197: `wake_owner` IS a `Tell(ExistingSession)` — a channel-less message
+        # + wake, no request edge. Route through the `stimulate` spine's
+        # existing-session Tell arm (the service-level mechanism the wake/notify
+        # policy surfaces share), preserving the channel-less invisibility property.
+        await sessions_service.stimulate(
+            pool,
+            sessions_service.TellExistingSession(
+                session_id=trigger.owner_session_id,
+                content=action.content,
+                cause="message",
+            ),
+            account_id=trigger.account_id,
         )
         log.info(
             "trigger.fired",

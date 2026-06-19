@@ -1734,6 +1734,56 @@ async def test_idle_with_open_request_is_nudged(
     assert status == "active"  # the nudge user message keeps it alive, no idle window
 
 
+async def test_tell_spawned_child_reaches_idle_with_zero_nudges(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1197: a `Tell(NewSession)` fire-and-forget spawn writes an UNAWAITED edge,
+    so the child owes no response — the quiescence guard skips the nudge/no_return
+    loop entirely and it reaches idle with ZERO nudges (the acceptance criterion).
+
+    Contrast with `test_idle_with_open_request_is_nudged`: same idle assistant
+    turn, but the awaited bit is the only difference."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    cid = child_session_id(run_id, "sha:tell#0")
+    created = await sessions_service.create_child_session(
+        pool,
+        session_id=cid,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        agent_version=1,
+        model=None,
+        parent_run_id=run_id,
+        surface=Surface([], [], []),
+        vault_ids=[],
+        input="fire-and-forget",
+        awaited=False,  # the Tell arm
+    )
+    assert created is True
+
+    assistant = await _idle_assistant_turn(pool, cid)
+    result = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, cid, assistant, account_id="acc_wf", parent_run_id=run_id
+    )
+    assert not result.nudged and result.autoerror_caller_run_id is None  # no nudge, no auto-error
+
+    async with pool.acquire() as conn:
+        # The unawaited edge is excluded from the open set — no obligation.
+        open_ids = await db_queries.get_open_request_ids(conn, cid, account_id="acc_wf")
+        status = await db_queries.derive_session_status(conn, cid, account_id="acc_wf")
+        nudge_msgs = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'message' AND role = 'user' "
+            "AND data->'metadata'->'nudged_request_ids' IS NOT NULL",
+            cid,
+            "acc_wf",
+        )
+    assert open_ids == []  # no awaited request open
+    assert status == "idle"  # free to rest — fire-and-forget owes nothing
+    assert nudge_msgs == 0  # ZERO nudges
+
+
 async def test_quiescence_guard_is_noop_for_non_child(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:

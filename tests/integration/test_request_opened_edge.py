@@ -307,6 +307,201 @@ async def test_create_child_session_rollback_leaves_no_edge(
     assert edges == 0
 
 
+# ─── #1197: the `awaited` bit — Ask ⇒ true, Tell ⇒ false ─────────────────────
+
+
+async def test_ask_create_child_session_writes_awaited_true(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """The behavior-preserved ``Ask(NewSession)`` path writes ``awaited=true`` and
+    the child owes its response (it appears in the open set)."""
+    pool, account_id, agent_id, env_id = pool_env
+    parent_run_id = await _seed_parent_run(pool, account_id=account_id, environment_id=env_id)
+    child_id = "ses_ask_child"
+    surface = Surface(tools=[], mcp_servers=[], http_servers=[])
+
+    created = await service.create_child_session(
+        pool,
+        session_id=child_id,
+        account_id=account_id,
+        agent_id=agent_id,
+        environment_id=env_id,
+        agent_version=1,
+        model="openrouter/test",
+        parent_run_id=parent_run_id,
+        surface=surface,
+        vault_ids=[],
+        request_id="req-ask",
+        input="hello",
+        depth=1,
+    )
+    assert created is True
+    async with pool.acquire() as conn:
+        awaited = await conn.fetchval(
+            "SELECT data->>'awaited' FROM events WHERE session_id = $1 "
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_opened'",
+            child_id,
+        )
+        assert awaited == "true"
+        # An awaited edge IS in the open set — the child owes a response.
+        assert await queries.get_open_request_ids(conn, child_id, account_id=account_id) == [
+            "req-ask"
+        ]
+
+
+async def test_tell_new_session_writes_unawaited_edge_with_no_obligation(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """``Tell(NewSession)`` (``awaited=False``) writes a REAL ``request_opened``
+    row — lineage/depth/surface carrier — but it is EXCLUDED from the open set, so
+    the fire-and-forget child owes NO response (the awaited-triad filter)."""
+    pool, account_id, agent_id, env_id = pool_env
+    parent_run_id = await _seed_parent_run(pool, account_id=account_id, environment_id=env_id)
+    child_id = "ses_tell_child"
+    surface = Surface(tools=[], mcp_servers=[], http_servers=[])
+
+    created = await service.create_child_session(
+        pool,
+        session_id=child_id,
+        account_id=account_id,
+        agent_id=agent_id,
+        environment_id=env_id,
+        agent_version=1,
+        model="openrouter/test",
+        parent_run_id=parent_run_id,
+        surface=surface,
+        vault_ids=[],
+        input="fire-and-forget",
+        depth=1,
+        awaited=False,  # the Tell arm — no request_id needed
+    )
+    assert created is True
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT data FROM events WHERE session_id = $1 "
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_opened'",
+            child_id,
+        )
+        assert row is not None  # a real edge row exists (lineage/depth/surface carrier)
+        data = queries.parse_jsonb(row["data"])
+        assert data["awaited"] is False
+        assert data["depth"] == 1  # depth still carried
+        # ...but it is NOT in the open set — no response obligation.
+        assert await queries.get_open_request_ids(conn, child_id, account_id=account_id) == []
+
+
+async def test_tell_new_session_rejects_output_schema(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A ``Tell`` cannot carry an ``output_schema`` (it owes no response)."""
+    from aios.errors import ValidationError
+
+    pool, account_id, agent_id, env_id = pool_env
+    parent_run_id = await _seed_parent_run(pool, account_id=account_id, environment_id=env_id)
+    surface = Surface(tools=[], mcp_servers=[], http_servers=[])
+    with pytest.raises(ValidationError):
+        await service.create_child_session(
+            pool,
+            session_id="ses_tell_bad",
+            account_id=account_id,
+            agent_id=agent_id,
+            environment_id=env_id,
+            agent_version=1,
+            model="openrouter/test",
+            parent_run_id=parent_run_id,
+            surface=surface,
+            vault_ids=[],
+            input="x",
+            depth=1,
+            awaited=False,
+            output_schema={"type": "object"},
+        )
+
+
+async def test_legacy_edge_without_awaited_field_reads_as_awaited(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A pre-#1197 ``request_opened`` row with no ``awaited`` field reads as
+    awaited (additive/legacy) — it still owes a response."""
+    pool, account_id, _agent_id, env_id = pool_env
+    _agent, _env, session = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="legacy-awaited"
+    )
+    # Hand-write a legacy frame WITHOUT the awaited key. ``events.seq`` is
+    # ``bigint NOT NULL`` (gapless per session, allocated off the session's
+    # ``last_event_seq`` counter — see ``queries.events.append_event``), so the
+    # raw INSERT must allocate a seq the same way rather than omit the column.
+    async with pool.acquire() as conn, conn.transaction():
+        seq = await conn.fetchval(
+            "UPDATE sessions SET last_event_seq = last_event_seq + 1 "
+            "WHERE id = $1 AND account_id = $2 RETURNING last_event_seq",
+            session.id,
+            account_id,
+        )
+        await conn.execute(
+            "INSERT INTO events (id, account_id, session_id, seq, kind, data) "
+            "VALUES ('evt_legacy_awaited', $1, $2, $3, 'lifecycle', $4::jsonb)",
+            account_id,
+            session.id,
+            seq,
+            '{"event":"request_opened","request_id":"req-legacy",'
+            '"caller":{"kind":"run","id":"run_x"},"depth":0,'
+            '"environment_id":"' + env_id + '","frozen_surface":'
+            '{"tools":[],"mcp_servers":[],"http_servers":[]},"vault_ids":[]}',
+        )
+    async with pool.acquire() as conn:
+        assert await queries.get_open_request_ids(conn, session.id, account_id=account_id) == [
+            "req-legacy"
+        ]
+
+
+async def test_tell_existing_session_appends_message_no_edge_channel_less(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``Tell(ExistingSession)`` appends a channel-less user message + wakes, opens
+    NO request edge, and never renders to a connector (no ``orig_channel``)."""
+    pool, account_id, _agent_id, _env_id = pool_env
+    _agent, _env, session = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="tell-existing"
+    )
+
+    deferred: list[tuple[str, str]] = []
+
+    async def _fake_defer_wake(_pool: Any, sid: str, *, cause: str, account_id: str) -> None:
+        deferred.append((sid, cause))
+
+    import aios.services.wake as wake_module
+
+    monkeypatch.setattr(wake_module, "defer_wake", _fake_defer_wake)
+    ok = await service.stimulate(
+        pool,
+        service.TellExistingSession(session_id=session.id, content="go look", cause="message"),
+        account_id=account_id,
+    )
+    assert ok is True
+    assert deferred == [(session.id, "message")]
+
+    async with pool.acquire() as conn:
+        # A user message landed...
+        msg = await conn.fetchrow(
+            "SELECT data, orig_channel FROM events WHERE session_id = $1 "
+            "AND kind = 'message' AND role = 'user' ORDER BY seq DESC LIMIT 1",
+            session.id,
+        )
+        assert msg is not None
+        assert queries.parse_jsonb(msg["data"])["content"] == "go look"
+        # ...channel-less (never renders to a connector).
+        assert msg["orig_channel"] is None
+        # ...and NO request edge was opened.
+        edges = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 "
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_opened'",
+            session.id,
+        )
+        assert edges == 0
+
+
 # ─── #1124: the DOWN-counting trusted depth on the edge bounds cycles ─────────
 
 

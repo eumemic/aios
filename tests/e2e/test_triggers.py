@@ -784,9 +784,11 @@ class TestWakeOwnerAction:
         prev_registry = runtime.sandbox_registry
         runtime.pool = pool
         runtime.sandbox_registry = exploding
-        with mock.patch(
-            "aios.harness.trigger_runner.defer_wake", new_callable=mock.AsyncMock
-        ) as mock_defer:
+        # #1197: wake_owner now routes through the `stimulate` spine's
+        # Tell(ExistingSession) arm, which resolves `defer_wake` from its source
+        # module — so patch it there (the canonical call-site patch), not at the
+        # old `trigger_runner` import which the reroute no longer touches.
+        with mock.patch("aios.services.wake.defer_wake", new_callable=mock.AsyncMock) as mock_defer:
             try:
                 await trigger_runner.run_trigger_step(echo.id)
             finally:
@@ -843,7 +845,9 @@ class TestWakeOwnerAction:
 
         prev_pool = runtime.pool
         runtime.pool = pool
-        with mock.patch("aios.harness.trigger_runner.defer_wake", new_callable=mock.AsyncMock):
+        # #1197: wake_owner routes through the stimulate spine → patch defer_wake
+        # at its source module (the reroute bypasses the trigger_runner import).
+        with mock.patch("aios.services.wake.defer_wake", new_callable=mock.AsyncMock):
             try:
                 await trigger_runner.run_trigger_step(echo.id)
             finally:
@@ -1247,9 +1251,9 @@ class TestLiveAttachToLiveSession:
         # message lands and a wake is deferred (a `run_trigger` fired).
         prev_pool = runtime.pool
         runtime.pool = pool
-        with mock.patch(
-            "aios.harness.trigger_runner.defer_wake", new_callable=mock.AsyncMock
-        ) as mock_defer:
+        # #1197: wake_owner routes through the stimulate spine → patch defer_wake
+        # at its source module (the reroute bypasses the trigger_runner import).
+        with mock.patch("aios.services.wake.defer_wake", new_callable=mock.AsyncMock) as mock_defer:
             try:
                 await trigger_runner.run_trigger_step(echo_id)
             finally:
