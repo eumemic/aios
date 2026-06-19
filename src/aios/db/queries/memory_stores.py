@@ -35,7 +35,9 @@ from aios.ids import (
 )
 from aios.models.github_repositories import GithubRepositoryResourceEcho
 from aios.models.memory_stores import (
+    Access,
     Actor,
+    ActorType,
     Memory,
     MemoryPrefix,
     MemoryStore,
@@ -285,7 +287,7 @@ async def insert_memory_with_version(
     path: str,
     content: str,
     content_sha256: str,
-    actor_type: str,
+    actor_type: ActorType,
     actor_ref: str,
 ) -> Memory:
     """Insert a new memory + its initial ``created`` version in one txn.
@@ -504,7 +506,7 @@ async def update_memory_with_version(
     new_content_sha256: str | None,
     new_path: str | None,
     precondition_sha256: str | None,
-    actor_type: str,
+    actor_type: ActorType,
     actor_ref: str,
 ) -> Memory:
     """Update content and/or path; record a ``modified`` version.
@@ -617,7 +619,7 @@ async def delete_memory_with_version(
     account_id: str,
     store_id: str,
     memory_id: str,
-    actor_type: str,
+    actor_type: ActorType,
     actor_ref: str,
 ) -> None:
     """Soft-delete: tombstone version row + ``deleted_at`` on the memory."""
@@ -721,7 +723,7 @@ async def redact_memory_version(
     account_id: str,
     store_id: str,
     version_id: str,
-    actor_type: str,
+    actor_type: ActorType,
     actor_ref: str,
 ) -> MemoryVersion:
     """Strip content fields from a version while keeping the audit trail.
@@ -1190,7 +1192,7 @@ async def insert_session_memory_store(
     *,
     memory_store_id: str,
     rank: int,
-    access: str,
+    access: Access,
     instructions: str,
     name_at_attach: str,
     description_at_attach: str,

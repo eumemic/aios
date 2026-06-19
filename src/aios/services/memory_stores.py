@@ -24,6 +24,7 @@ from aios.db import queries
 from aios.errors import ConflictError, MemoryStoreArchivedError, RateLimitedError
 from aios.models.memory_stores import (
     MAX_STORES_PER_SESSION,
+    ActorType,
     Memory,
     MemoryPrefix,
     MemoryStore,
@@ -50,7 +51,7 @@ class SessionActor:
 Actor = ApiActor | SessionActor
 
 
-def _actor_columns(actor: Actor) -> tuple[str, str]:
+def _actor_columns(actor: Actor) -> tuple[ActorType, str]:
     if isinstance(actor, SessionActor):
         return "session_actor", actor.session_id
     return "api_actor", "api"

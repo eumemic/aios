@@ -31,6 +31,7 @@ from aios.models.workflows import (
     WfRunEventType,
     WfRunSignal,
     WfRunSignalKind,
+    WfRunStatus,
     Workflow,
 )
 
@@ -764,7 +765,7 @@ async def get_run_for_step(conn: asyncpg.Connection[Any], run_id: str) -> WfRun 
 
 
 async def set_run_status(
-    conn: asyncpg.Connection[Any], run_id: str, status: str, *, account_id: str
+    conn: asyncpg.Connection[Any], run_id: str, status: WfRunStatus, *, account_id: str
 ) -> None:
     """Set a NON-terminal status transition. Never overwrites a terminal status:
     under procrastinate dual execution (a reaped stale worker resuming next to its
@@ -785,7 +786,7 @@ async def set_run_terminal(
     conn: asyncpg.Connection[Any],
     run_id: str,
     *,
-    status: str,
+    status: WfRunStatus,
     output: Any,
     account_id: str,
 ) -> None:
