@@ -427,13 +427,23 @@ async def test_legacy_edge_without_awaited_field_reads_as_awaited(
     _agent, _env, session = await seed_agent_env_session(
         pool, account_id=account_id, prefix="legacy-awaited"
     )
-    # Hand-write a legacy frame WITHOUT the awaited key.
-    async with pool.acquire() as conn:
+    # Hand-write a legacy frame WITHOUT the awaited key. ``events.seq`` is
+    # ``bigint NOT NULL`` (gapless per session, allocated off the session's
+    # ``last_event_seq`` counter — see ``queries.events.append_event``), so the
+    # raw INSERT must allocate a seq the same way rather than omit the column.
+    async with pool.acquire() as conn, conn.transaction():
+        seq = await conn.fetchval(
+            "UPDATE sessions SET last_event_seq = last_event_seq + 1 "
+            "WHERE id = $1 AND account_id = $2 RETURNING last_event_seq",
+            session.id,
+            account_id,
+        )
         await conn.execute(
-            "INSERT INTO events (id, account_id, session_id, kind, data) "
-            "VALUES ('evt_legacy_awaited', $1, $2, 'lifecycle', $3::jsonb)",
+            "INSERT INTO events (id, account_id, session_id, seq, kind, data) "
+            "VALUES ('evt_legacy_awaited', $1, $2, $3, 'lifecycle', $4::jsonb)",
             account_id,
             session.id,
+            seq,
             '{"event":"request_opened","request_id":"req-legacy",'
             '"caller":{"kind":"run","id":"run_x"},"depth":0,'
             '"environment_id":"' + env_id + '","frozen_surface":'
