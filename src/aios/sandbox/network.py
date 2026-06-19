@@ -37,8 +37,19 @@ async def ensure_sandbox_network() -> None:
     that split ``--hostname`` from ``--name`` will fail here.
     """
     if not await _network_exists(SANDBOX_NETWORK_NAME):
+        # ``--ipv6=false`` makes the IPv4-only egress lockdown's no-IPv6
+        # invariant explicit at create time rather than relying on the Docker
+        # default (#1207). NOTE this is the WEAKEST of the v6-disable changes:
+        # it is redundant against the current Docker default, does NOT defend a
+        # daemon configured with default-IPv6-on, and is INERT for an
+        # already-running network (which constraint #4 forbids us from
+        # recreating). The load-bearing protection is the per-session
+        # ``ip6tables -P OUTPUT DROP`` applied in the lockdown sidecar (see
+        # ``setup.build_iptables_script``); this flag is belt-and-suspenders on
+        # top of it, NOT a substitute, and must never be "fixed" by tearing
+        # down and recreating the live prod network.
         rc, _, stderr_bytes = await run_docker_cli(
-            ["docker", "network", "create", SANDBOX_NETWORK_NAME]
+            ["docker", "network", "create", "--ipv6=false", SANDBOX_NETWORK_NAME]
         )
         if rc == 0:
             log.info("sandbox.network_created", network=SANDBOX_NETWORK_NAME)

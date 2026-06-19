@@ -74,6 +74,27 @@ class TestEnsureNetworkOnHost:
             ["docker", "network", "create"],
         ]
 
+    async def test_create_passes_ipv6_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#1207: the network is created with ``--ipv6=false`` so the IPv4-only
+        egress lockdown's no-IPv6 invariant is explicit at create time rather
+        than resting on the Docker default. (This is the weakest of the three
+        v6-disable changes — the load-bearing protection is the per-session
+        ip6tables DROP — but the flag must be present on new creates.)"""
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            if argv[:3] == ["docker", "network", "inspect"]:
+                return 1, b"", b"Error: No such network"
+            if argv[:3] == ["docker", "network", "create"]:
+                return 0, b"netid\n", b""
+            pytest.fail(f"unexpected argv: {argv}")
+
+        calls = install_docker_responder(monkeypatch, responder)
+        await ensure_sandbox_network()
+        create = next(c for c in calls if c[:3] == ["docker", "network", "create"])
+        assert "--ipv6=false" in create
+        # The network name is still the final positional argument.
+        assert create[-1] == SANDBOX_NETWORK_NAME
+
 
 # ── ensure_sandbox_network: in-container worker ──────────────────────────────
 

@@ -195,6 +195,51 @@ _IPTABLES_BACKEND_SELECT = (
 )
 
 
+# Same legacy-vs-nft backend selection as ``_IPTABLES_BACKEND_SELECT`` but for
+# the IPv6 ``ip6tables`` command (#1207). gVisor's netstack (``runsc``)
+# implements the *legacy* netfilter ABI, so a bare ``ip6tables`` would fail with
+# ``Failed to initialize nft: Protocol not supported`` and — under ``set -e`` —
+# abort the entire lockdown apply, failing every Limited provision closed-noisily
+# (a self-inflicted outage). We always prefer ``ip6tables-legacy`` when present
+# and fall back to ``ip6tables`` on runc hosts whose image lacks it. Debian's
+# ``iptables`` package ships BOTH the v4 and v6 legacy alternatives, so the
+# operator sidecar image (settings.docker_image) that already carries
+# ``iptables-legacy`` for the v4 path carries ``ip6tables-legacy`` too.
+_IP6TABLES_BACKEND_SELECT = (
+    "if command -v ip6tables-legacy >/dev/null 2>&1; then IP6T=ip6tables-legacy; "
+    "else IP6T=ip6tables; fi"
+)
+
+
+# Belt-and-suspenders IPv6 egress denial (#1207). The IPv4-only egress lockdown
+# rests on the ``aios-sandbox`` network being created without ``--ipv6`` so no
+# v6 route exists — an implicit, undocumented invariant. The moment a v6 route
+# appears (network recreated with ``--ipv6``, or a Docker default flips), the
+# IPv4-only ``-P OUTPUT DROP`` is silently bypassable over IPv6 (fail-open).
+# This block makes v6 egress impossible *by construction*: flush the v6 OUTPUT
+# chain, allow only loopback (so any in-netns v6 localhost/DNS still works), and
+# set the default OUTPUT policy to DROP — mirroring the v4 DROP. It is emitted
+# only on the Limited lockdown path (total-egress-denial intent); the
+# Unrestricted DNAT-only path deliberately leaves all egress open.
+#
+# This is the LOAD-BEARING prod protection for the IPv6 gap: it is applied
+# per-session in the sidecar netns regardless of how the (already-running, never
+# recreated — constraint #4) prod network was created. The ``--ipv6=false``
+# network-create flag is the weakest of the three changes — redundant against
+# the current Docker default and inert for the live network — so the real
+# defense is this per-session DROP.
+_IP6TABLES_LOCKDOWN_LINES = (
+    "",
+    "# Belt-and-suspenders: deny ALL IPv6 egress (#1207). The IPv4 -P OUTPUT DROP",
+    "# above is iptables-only; without this an IPv6 route would bypass it.",
+    _IP6TABLES_BACKEND_SELECT,
+    '"$IP6T" -F OUTPUT',
+    "# Allow v6 loopback so in-netns localhost/DNS still works; deny everything else.",
+    '"$IP6T" -A OUTPUT -o lo -j ACCEPT',
+    '"$IP6T" -P OUTPUT DROP',
+)
+
+
 # Emitted shell helper that resolves a hostname to its **IPv4 addresses only**,
 # one per line. Centralizes the IPv4-only resolution shared by every host
 # lookup in the lockdown scripts (the allowed-host loops, the extra-host-ports
@@ -283,6 +328,14 @@ def build_iptables_script(
     and any additional ``(host, port)`` pairs in ``extra_host_ports``.
     Everything else is dropped.
 
+    As a belt-and-suspenders measure (#1207) the script ALSO denies all IPv6
+    egress: it flushes the ``ip6tables`` OUTPUT chain, allows v6 loopback, and
+    sets ``-P OUTPUT DROP``. The IPv4 ``iptables`` DROP is IPv4-only, so without
+    this an IPv6 route appearing on the sandbox network (currently created
+    without ``--ipv6``) would silently bypass the lockdown over v6. The v6 path
+    uses the same legacy-vs-nft backend selection as the v4 path so a bare
+    ``ip6tables`` never aborts the apply under runsc's legacy-only netstack.
+
     The extra-host-ports surface exists because the credential proxy
     binds to a non-standard ephemeral port; without it, in-sandbox
     git traffic to the proxy would be dropped by the default policy.
@@ -355,6 +408,10 @@ def build_iptables_script(
     lines.append("# Drop everything else")
     lines.append('"$IPT" -P OUTPUT DROP')
 
+    # Belt-and-suspenders: mirror the v4 DROP on IPv6 so the IPv4-only lockdown
+    # cannot be bypassed over v6 if a v6 route ever appears (#1207).
+    lines.extend(_IP6TABLES_LOCKDOWN_LINES)
+
     return "\n".join(lines)
 
 
@@ -426,10 +483,15 @@ def build_lockdown_verify_script(
 
     When ``assert_drop`` (the default), asserts the filter-table default OUTPUT
     policy is ``DROP`` — proof the lockdown actually landed in the shared netns,
-    not merely that the apply script exited 0. The DNAT-only Unrestricted path
-    (#1153) passes ``assert_drop=False``: that script deliberately leaves the
-    filter policy at ``ACCEPT``, so there is no DROP to assert (asserting it
-    would always fail).
+    not merely that the apply script exited 0. It ALSO asserts the IPv6
+    ``ip6tables`` OUTPUT policy is ``DROP`` (#1207): the apply installs a
+    belt-and-suspenders v6 DROP, and leaving it unverified would re-create the
+    exact "green verify while open" gap one layer down. The v6 assertion uses
+    the same legacy-backend selection as the apply so it reads the right table
+    under runsc. The DNAT-only Unrestricted path (#1153) passes
+    ``assert_drop=False``: that script deliberately leaves the filter policy at
+    ``ACCEPT`` and installs no v6 DROP, so there is no DROP (v4 or v6) to assert
+    (asserting it would always fail).
 
     When ``dnat_hosts`` is non-empty it ALSO asserts the nat table carries at
     least one ``DNAT`` OUTPUT rule. Without this, a credential host whose
@@ -451,6 +513,13 @@ def build_lockdown_verify_script(
     lines = [_IPTABLES_BACKEND_SELECT]
     if assert_drop:
         lines.append("\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'")
+        # Extend the read-back verify to v6 (#1207): without asserting the
+        # ip6tables policy too, the new v6 DROP is itself unverified — re-creating
+        # the exact "green verify while open" gap one layer down. Selects the same
+        # legacy backend the apply wrote to, so the verify reads the right table
+        # under runsc.
+        lines.append(_IP6TABLES_BACKEND_SELECT)
+        lines.append("\"$IP6T\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'")
     if dnat_hosts:
         lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'")
     return "\n".join(lines)

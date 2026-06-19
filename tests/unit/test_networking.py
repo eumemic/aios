@@ -267,6 +267,83 @@ class TestBuildIptablesScript:
         assert "--dport 80 -j DNAT" not in script
 
 
+# ── IPv6 belt-and-suspenders egress DROP (#1207) ──────────────────────────────
+
+
+class TestIPv6EgressLockdown:
+    """The Limited lockdown mirrors the v4 ``-P OUTPUT DROP`` on ip6tables so
+    the IPv4-only lockdown cannot be bypassed over IPv6 if a v6 route ever
+    appears (network recreated with ``--ipv6``, or a Docker default flips)."""
+
+    def test_emits_ip6tables_output_drop(self) -> None:
+        script = build_iptables_script(allowed_hosts={"api.example.com"})
+        assert '"$IP6T" -P OUTPUT DROP' in script
+
+    def test_flushes_ip6tables_output_chain(self) -> None:
+        script = build_iptables_script(allowed_hosts={"api.example.com"})
+        assert '"$IP6T" -F OUTPUT' in script
+        # The flush precedes the DROP policy so re-apply is idempotent.
+        assert script.index('"$IP6T" -F OUTPUT') < script.index('"$IP6T" -P OUTPUT DROP')
+
+    def test_allows_v6_loopback(self) -> None:
+        """Total v6 egress denial, but loopback stays open so any in-netns
+        v6 localhost/DNS still works (the spec's 'flush + DROP with loopback
+        allowed' form)."""
+        script = build_iptables_script(allowed_hosts={"api.example.com"})
+        assert '"$IP6T" -A OUTPUT -o lo -j ACCEPT' in script
+        # Loopback ACCEPT precedes the DROP policy (rules are order-independent
+        # for a policy, but the ACCEPT rule must exist alongside it).
+        assert script.index('"$IP6T" -A OUTPUT -o lo -j ACCEPT') < script.index(
+            '"$IP6T" -P OUTPUT DROP'
+        )
+
+    def test_selects_legacy_ip6tables_backend(self) -> None:
+        """runsc's netstack speaks the legacy netfilter ABI, not nft. A bare
+        ``ip6tables`` under ``set -e`` would error on runsc and abort the whole
+        lockdown apply, failing every Limited provision closed-noisily. So the
+        v6 path mirrors the v4 legacy-backend selection."""
+        script = build_iptables_script(allowed_hosts={"api.example.com"})
+        assert "command -v ip6tables-legacy" in script
+
+    def test_no_bare_ip6tables_invocations(self) -> None:
+        """Every v6 netfilter command goes through the ``$IP6T`` selector so it
+        never silently uses the nft default (which fails on runsc)."""
+        script = build_iptables_script(
+            allowed_hosts={"api.example.com"},
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        for line in script.splitlines():
+            stripped = line.strip()
+            # The detection preamble names the binaries; that's expected.
+            if "command -v ip6tables-legacy" in stripped:
+                continue
+            assert not stripped.startswith("ip6tables "), (
+                f"bare ip6tables invocation would use the nft default: {line!r}"
+            )
+
+    def test_v6_drop_present_with_dnat(self) -> None:
+        """The v6 DROP is on the lockdown (filter-DROP) path regardless of
+        credential DNAT, which only touches the v4 nat table."""
+        script = build_iptables_script(
+            allowed_hosts={"plain.example.com"},
+            extra_host_ports=[("aios-worker", 8765)],
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+        )
+        assert '"$IP6T" -P OUTPUT DROP' in script
+
+    def test_dnat_only_script_has_no_v6_drop(self) -> None:
+        """The Unrestricted DNAT-only path leaves general egress open, so it
+        must NOT install a v6 DROP (which would deny v6 egress in an otherwise
+        open box)."""
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+        )
+        assert "ip6tables" not in script
+        assert "-P OUTPUT DROP" not in script
+
+
 # ── IPv4-only host resolution (#978) ──────────────────────────────────────────
 
 
@@ -481,12 +558,35 @@ class TestBuildLockdownVerifyScript:
                 f"verify uses a bare iptables (nft default): {line!r}"
             )
 
+    def test_asserts_ip6tables_drop_policy(self) -> None:
+        """#1207: the v6 DROP installed by the apply must itself be verified —
+        without asserting ``ip6tables -S OUTPUT`` shows ``-P OUTPUT DROP`` the
+        new v6 DROP is unverified, re-creating the 'green verify while open' gap
+        one layer down."""
+        script = build_lockdown_verify_script()
+        assert "\"$IP6T\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'" in script
+
+    def test_v6_verify_uses_legacy_backend_no_bare_ip6tables(self) -> None:
+        """The v6 read-back selects the same legacy backend the apply wrote to,
+        so it reads the right table under runsc — and never a bare ip6tables."""
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
+        assert "command -v ip6tables-legacy" in script
+        for line in script.splitlines():
+            stripped = line.strip()
+            if "command -v ip6tables-legacy" in stripped:
+                continue
+            assert not stripped.startswith("ip6tables "), (
+                f"verify uses a bare ip6tables (nft default): {line!r}"
+            )
+
     def test_assert_drop_false_omits_drop_assertion(self) -> None:
         # The DNAT-only Unrestricted path (#1153) leaves the filter policy at
         # ACCEPT, so the verify must NOT assert a DROP policy (it would always
-        # fail) — but still asserts nat DNAT coverage.
+        # fail) — but still asserts nat DNAT coverage. The v6 DROP assertion is
+        # likewise omitted (the DNAT-only path installs no v6 DROP).
         script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], assert_drop=False)
         assert "OUTPUT DROP" not in script
+        assert "IP6T" not in script
         assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in script
 
     def test_assert_drop_true_is_default(self) -> None:
