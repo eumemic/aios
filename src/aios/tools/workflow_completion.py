@@ -125,12 +125,27 @@ async def respond_to_request(
         if ctx is None:
             return "not_a_child"  # the session row is gone — nothing to respond to
         account_id, parent_run_id = ctx
+        caller = await queries.get_request_caller(conn, session_id, request_id=request_id)
+        caller_kind = caller.get("kind") if caller else None
         if request_id not in await queries.get_open_request_ids(
             conn, session_id, account_id=account_id
         ):
-            return "unknown_request"  # already answered, never asked, or a typo from the model
-        caller = await queries.get_request_caller(conn, session_id, request_id=request_id)
-        caller_kind = caller.get("kind") if caller else None
+            # The request isn't open. Either it was genuinely asked and is now
+            # answered, or it was never a request of this session. The trusted
+            # ``request_opened`` edge disambiguates: a caller edge exists iff it
+            # was asked.
+            #
+            # For a *session*/*api* caller the answer is idempotent — a sequential
+            # re-answer collapses to the one already-captured response, so report
+            # ``duplicate`` (first-writer-wins, no second wake). For the *run*
+            # path (the model's own ``return``/``error`` on a workflow child) a
+            # sequential re-answer to a closed request stays ``unknown_request``
+            # so the model gets a tool error and self-corrects (legacy behaviour;
+            # a genuinely-concurrent race is still caught one layer down at
+            # ``write_child_response``/``write_response_if_absent`` → ``duplicate``).
+            if caller is not None and caller_kind in ("session", "api"):
+                return "duplicate"
+            return "unknown_request"
         async with conn.transaction():
             if caller_kind == "run":
                 # Legacy run path: keep the fused child_done marker. Fail closed if the
