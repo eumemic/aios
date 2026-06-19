@@ -37,11 +37,6 @@ BRANCH = "issue-5"
 # name (issue #1178) — a SHA-256 clone would re-resolve `master` to a 64-char id GitHub's
 # REST API rejects, hard-erroring the watch on a green master.
 MERGE_SHA = "f823360f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
-# The SHA-1 the PR's head moves to after a sync-stage rebase force-pushes the rebased tip
-# (#1389). The CI re-entry MUST key on THIS, not the stale pre-rebase head_sha the run still
-# carries. A real 40-char SHA-1 (not a `sha_…` placeholder) so it survives _live_head_sha's
-# SHA-1 validation — a non-SHA-1 head is treated as unresolvable (#1178) and rejected.
-POST_REBASE_SHA = "ab12cd34ef560718293a4b5c6d7e8f9012345678"
 # A concrete, >50-word spec body that clears the scripted spec gate.
 LONG_BODY = (
     "Add a durable retry wrapper around the outbound webhook dispatcher so that transient "
@@ -59,23 +54,16 @@ def _issue_json(body: str = LONG_BODY) -> str:
     )
 
 
-def _pr_json(
-    *, sha: str = "sha_initial", merged: bool = False, mergeable_state: str | None = None
-) -> str:
-    payload: dict[str, Any] = {
-        "number": 42,
-        "node_id": "PR_node42",
-        "html_url": "https://github.com/o/r/pull/42",
-        "head": {"sha": sha, "ref": BRANCH},
-        "merged": merged,
-    }
-    if mergeable_state is not None:
-        # The sync stage (#1385) reads mergeable_state to decide whether to rebase. A clean PR
-        # is the default (omitted -> _needs_rebase False -> sync no-op); set "dirty"/"behind"
-        # to model master having moved under the branch.
-        payload["mergeable_state"] = mergeable_state
-        payload["mergeable"] = mergeable_state == "clean"
-    return json.dumps(payload)
+def _pr_json(*, sha: str = "sha_initial", merged: bool = False) -> str:
+    return json.dumps(
+        {
+            "number": 42,
+            "node_id": "PR_node42",
+            "html_url": "https://github.com/o/r/pull/42",
+            "head": {"sha": sha, "ref": BRANCH},
+            "merged": merged,
+        }
+    )
 
 
 # ─── the capability responder (a deterministic function of the capability) ────
@@ -98,23 +86,18 @@ class Scenario:
         implement_error: bool = False,
         review_results: list[dict[str, Any]] | None = None,
         review_error_on: str | None = None,
-        ci_results: list[dict[str, Any]] | None = None,
-        ci_error_on: str | None = None,
+        ci_results: list[str] | None = None,
+        ci_unreadable: bool = False,
         risk_result: dict[str, Any] | None = None,
         merge_guard_exit: int = 0,
         merge_status: int = 200,
         pr_merged_on_confirm: bool = False,
         gate_results: dict[str, Any] | None = None,
         master_ci: str = "green",
-        master_ci_error: bool = False,
-        master_ci_results: list[dict[str, Any] | str] | None = None,
+        master_ci_unreadable: bool = False,
         merge_returns_sha: bool = True,
         commit_sha: str | None = MERGE_SHA,
         transient_5xx: dict[tuple[str, str], int] | None = None,
-        mergeable_state: str | None = None,
-        rebase_exit: list[int] | None = None,
-        post_rebase_head_sha: str | None = None,
-        ci_results_by_sha: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.body = body
         # The comment-thread the GET /issues/{n}/comments responder returns (list of body
@@ -132,8 +115,16 @@ class Scenario:
             {"verdict": "pass", "issues": [], "artifact_posted": True}
         ]
         self.review_error_on = review_error_on  # an agent label that raises AgentError
-        self.ci_results = ci_results or [{"status": "green", "detail": ""}]
-        self.ci_error_on = ci_error_on  # an agent label that raises AgentError
+        # The DETERMINISTIC CI watch (#1316) is no longer an agent: it reads the GitHub Checks +
+        # combined-status REST API. ``ci_results`` is the per-PR-CI-loop-iteration verdict status
+        # ("green"/"red"/"no_ci"), mapped to the head_sha that iteration polls: iteration 0 reads
+        # the PR's initial head sha, iteration i>0 reads the sha the i-th ci-fix pushed
+        # ("sha_ci-fix-{i-1}"). The responder synthesises the Checks/status payloads for the sha.
+        self.ci_results = ci_results or ["green"]
+        # When True, BOTH CI surfaces return a non-2xx for every commit read — modelling an API
+        # outage. The PR-CI watch then never reaches a terminal verdict (fail-SAFE red after the
+        # bound); the post-merge advisory watch degrades to indeterminate.
+        self.ci_unreadable = ci_unreadable
         self.risk_result = (
             risk_result if risk_result is not None else {"tier": 1, "summary": "safe"}
         )
@@ -141,13 +132,11 @@ class Scenario:
         self.merge_status = merge_status
         self.pr_merged_on_confirm = pr_merged_on_confirm
         self.gate_results = gate_results or {}
+        # The post-merge master-CI verdict the deterministic advisory watch reads for the merge
+        # commit ("green"/"red"/"no_ci"). ``master_ci_unreadable`` makes both surfaces return a
+        # non-2xx for the master sha on every poll => the watch degrades to INDETERMINATE.
         self.master_ci = master_ci
-        self.master_ci_error = master_ci_error
-        # Per-attempt post-merge master-CI verdicts, indexed by the watch's per-retry label
-        # ("master-ci-{i}"). Each item is either a verdict dict ({"status": ..., "detail": ...})
-        # or the string "error" (the watch agent raises AgentError that attempt). When set, this
-        # overrides master_ci/master_ci_error. The last item is reused for any later attempt.
-        self.master_ci_results = master_ci_results
+        self.master_ci_unreadable = master_ci_unreadable
         # issue #1178: whether the merge PUT body carries the merge commit's SHA-1. When False,
         # the workflow falls back to resolving BASE_BRANCH via GET /repos/{repo}/commits/master.
         self.merge_returns_sha = merge_returns_sha
@@ -158,23 +147,6 @@ class Scenario:
         # then the real response. Counts are mutated as attempts arrive (replay-stable because
         # each retry is a distinct call_key, so a replay re-asks each attempt exactly once).
         self.transient_5xx = dict(transient_5xx or {})
-        # The sync stage (#1385). mergeable_state seeds the PR's mergeable_state field so the
-        # sync probe decides whether to rebase; rebase_exit is the queue of exit codes the
-        # mechanical-rebase bash node returns per invocation (75 noop / 0 done / 76 conflict /
-        # 77 error). When rebase_exit is exhausted the last code is reused.
-        self.mergeable_state = mergeable_state
-        self.rebase_exit = list(rebase_exit or [])
-        # #1389: after a successful mechanical rebase force-pushes a NEW tip, GET /pulls/42 must
-        # report the POST-rebase head SHA — the old `sha_initial` commit carries the OLD CI
-        # checks. When set, the PR's head.sha flips to this value once a rebase bash node has
-        # run (rebase_commands non-empty), modelling the live tip the CI re-entry MUST key on.
-        self.post_rebase_head_sha = post_rebase_head_sha
-        # #1389: a `watch_ci` responder that KEYS ON head_sha (the default ci_results queue is
-        # head_sha-independent, so it structurally cannot catch a stale-SHA read). Maps a head
-        # SHA -> the verdict the watch returns for it; a SHA absent from the map yields a failing
-        # (red) verdict, so a watch re-entered on the stale pre-rebase SHA does NOT report green.
-        self.ci_results_by_sha = ci_results_by_sha
-        self.rebase_commands: list[str] = []  # every rebase bash command dispatched
         self.tasks: list[str] = []
         self.agent_inputs: list[dict[str, Any]] = []
         self.gates: list[dict[str, Any]] = []
@@ -212,6 +184,54 @@ class Scenario:
             )
         return {"status": 200, "headers": headers, "body": body}
 
+    # ── deterministic CI watch (#1316): synthesise the Checks + combined-status payloads ──
+    # The watch reads GET /commits/{sha}/check-runs and GET /commits/{sha}/status and reduces
+    # them to a green/red/no_ci verdict. We map each commit sha to a desired verdict and emit
+    # the payload shape that produces it.
+    @staticmethod
+    def _verdict_payloads(verdict: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(check_runs_payload, combined_status_payload) that reduces to ``verdict``."""
+        if verdict == "green":
+            checks = {
+                "total_count": 1,
+                "check_runs": [{"status": "completed", "conclusion": "success"}],
+            }
+        elif verdict == "red":
+            checks = {
+                "total_count": 1,
+                "check_runs": [{"status": "completed", "conclusion": "failure"}],
+            }
+        elif verdict == "no_ci":
+            return {"total_count": 0, "check_runs": []}, {"state": "success", "total_count": 0}
+        elif verdict == "pending":
+            # CI is PRESENT but not yet terminal (a queued run / pending rollup): the watch's
+            # verdict is None ("keep polling"), so a watch that only ever sees this EXHAUSTS its
+            # bound and fails SAFE to red — never waved through as green.
+            return (
+                {"total_count": 1, "check_runs": [{"status": "queued"}]},
+                {"state": "pending", "total_count": 1},
+            )
+        else:
+            raise AssertionError(f"unknown CI verdict {verdict!r}")
+        return checks, {"state": "success", "total_count": 0}
+
+    def _ci_verdict_for_sha(self, sha: str) -> str:
+        """The PR-CI / master verdict configured for a commit ``sha``.
+
+        The PR-CI loop polls the PR head sha each outer iteration: iteration 0 reads the PR's
+        initial head (``sha_initial``), and after the i-th ci-fix the head is ``sha_ci-fix-{i}``
+        — so ``sha_ci-fix-{i}`` maps to ci_results[i+1]. The master commit sha maps to
+        ``master_ci``."""
+        if sha in (self.commit_sha, MERGE_SHA):
+            return self.master_ci
+        if sha == "sha_initial":
+            return self.ci_results[0]
+        m = re.match(r"^sha_ci-fix-(\d+)$", sha)
+        if m:
+            idx = int(m.group(1)) + 1
+            return self.ci_results[min(idx, len(self.ci_results) - 1)]
+        return self.ci_results[min(0, len(self.ci_results) - 1)]
+
     def _http(self, args: dict[str, Any]) -> dict[str, Any]:
         path, method = args["path"], args["method"]
         remaining = self.transient_5xx.get((method, path), 0)
@@ -243,6 +263,19 @@ class Scenario:
             if isinstance(raw, str):
                 self.comments_posted.append(json.loads(raw).get("body", ""))
             return {"status": 201, "body": "{}"}
+        # ── deterministic CI watch (#1316): the Checks + combined-status reads ──
+        # The check-runs read carries ?per_page=100 (the /repos/** route opts into allow_query),
+        # so it is split on ``clean`` like the comment route — handled BEFORE the no-query assert.
+        cr = re.match(r"^/repos/o/r/commits/([0-9a-zA-Z_\-]+)/check-runs$", clean)
+        st = re.match(r"^/repos/o/r/commits/([0-9a-zA-Z_\-]+)/status$", clean)
+        if method == "GET" and (cr or st):
+            sha = (cr or st).group(1)  # type: ignore[union-attr]
+            is_master = sha in (self.commit_sha, MERGE_SHA)
+            if (is_master and self.master_ci_unreadable) or (not is_master and self.ci_unreadable):
+                return {"status": 503, "headers": {}, "body": ""}  # both surfaces down
+            checks_payload, status_payload = self._verdict_payloads(self._ci_verdict_for_sha(sha))
+            payload = checks_payload if cr else status_payload
+            return {"status": 200, "headers": {}, "body": json.dumps(payload)}
         assert "?" not in path, f"query string in path is rejected by http_request: {path!r}"
         if method == "POST" and path.endswith("/labels"):  # add label(s) — capture names
             raw = args.get("body")
@@ -272,21 +305,8 @@ class Scenario:
             raw = args.get("body")
             self.followups.append(json.loads(raw) if isinstance(raw, str) else {})
             return {"status": 201, "body": json.dumps({"number": 99})}
-        if method == "GET" and path == "/repos/o/r/pulls/42":  # sync probe + merge-confirm read
-            # #1389: once a rebase has force-pushed a new tip, the LIVE head SHA must reflect it
-            # so the CI re-entry keys on the post-rebase tip, not the stale pre-rebase one.
-            sha = (
-                self.post_rebase_head_sha
-                if (self.post_rebase_head_sha and self.rebase_commands)
-                else "sha_initial"
-            )
-            body = json.loads(
-                _pr_json(
-                    sha=sha,
-                    merged=self.pr_merged_on_confirm,
-                    mergeable_state=self.mergeable_state,
-                )
-            )
+        if method == "GET" and path == "/repos/o/r/pulls/42":  # merge-confirm read
+            body = json.loads(_pr_json(merged=self.pr_merged_on_confirm))
             body["merge_commit_sha"] = self.commit_sha  # confirm-read fallback for master sha
             return {"status": 200, "body": json.dumps(body)}
         if method == "GET" and path == "/repos/o/r/commits/master":  # ref->SHA-1 canonicalise
@@ -312,48 +332,13 @@ class Scenario:
             return {"status": 200, "body": "[]"}
         return {"status": 200, "body": "{}"}  # comments / labels / graphql
 
-    def _ci_verdict(self, verdict: dict[str, Any] | str, dispatched_sha: str) -> Any:
-        """Model a CORRECT ci-watch agent's structured verdict (aios#1392 Fix 2, #1314/#1364):
-        unless the test's verdict dict says otherwise, a watch reports the commit it polled
-        (``polled_sha`` = the head_sha it was dispatched with — the live head in this fixture)
-        and, for a green, ``required_complete=True`` (the full required-check set concluded). A
-        test models a FALSE-green by overriding ``polled_sha`` (wrong-parent #1314) or
-        ``required_complete`` (premature #1364) in its ``ci_results`` entry. A non-dict verdict
-        (a test sentinel) is passed through unchanged. Without this, the script-side
-        ``_ci_verdict`` would (correctly) reject every bare green as unverifiable -> ``retry``."""
-        if not isinstance(verdict, dict):
-            return verdict
-        out = dict(verdict)
-        out.setdefault("polled_sha", dispatched_sha)
-        if out.get("status") == "green":
-            out.setdefault("required_complete", True)
-        return out
-
     def outcome(self, cap: Any) -> dict[str, Any]:
         """Return the full memo outcome ({"ok": value} or {"error": {...}}) for a capability."""
         cid, spec = cap.capability_id, cap.spec
         if cid == "tool":
             if spec["tool_name"] == "http_request":
                 return {"ok": self._http(spec["input"])}
-            if spec["tool_name"] == "bash":
-                command = spec["input"].get("command", "")
-                if "git rebase origin/master" in command:  # sync-stage mechanical rebase (#1385)
-                    self.rebase_commands.append(command)
-                    code = (
-                        self.rebase_exit.pop(0)
-                        if len(self.rebase_exit) > 1
-                        else (self.rebase_exit[0] if self.rebase_exit else 0)
-                    )
-                    return {
-                        "ok": {
-                            "exit_code": code,
-                            "stdout": "REBASE",
-                            "stderr": "",
-                            "timed_out": False,
-                            "truncated": False,
-                        }
-                    }
-                # merge-ref guard
+            if spec["tool_name"] == "bash":  # merge-ref guard
                 return {
                     "ok": {
                         "exit_code": self.merge_guard_exit,
@@ -387,48 +372,12 @@ class Scenario:
                     return {"error": {"kind": "child_errored"}}
                 idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
                 return {"ok": self.review_results[min(idx, len(self.review_results) - 1)]}
-            if task == "watch_ci":
-                dispatched_sha = spec["input"].get("head_sha", "")
-                if spec["input"].get("ref"):  # post-merge master watch (advisory, retried)
-                    if self.master_ci_results is not None:
-                        idx = int(label.rsplit("-", 1)[1]) if "-" in label else 0
-                        item = self.master_ci_results[min(idx, len(self.master_ci_results) - 1)]
-                        if item == "error":
-                            return {"error": {"kind": "child_errored"}}
-                        return {"ok": self._ci_verdict(item, dispatched_sha)}
-                    if self.master_ci_error:
-                        return {"error": {"kind": "child_errored"}}
-                    return {
-                        "ok": self._ci_verdict(
-                            {"status": self.master_ci, "detail": ""}, dispatched_sha
-                        )
-                    }
-                if self.ci_error_on == label:
-                    return {"error": {"kind": "child_errored"}}
-                # #1389: a SHA-keyed responder — the watch's verdict is a function of the
-                # head_sha it was dispatched with, so a re-entry on a STALE pre-rebase SHA
-                # reads a different (failing) verdict than the post-rebase tip. A SHA absent
-                # from the map is red, so a stale-SHA read can NEVER masquerade as green.
-                if self.ci_results_by_sha is not None:
-                    sha = spec["input"].get("head_sha", "")
-                    return {
-                        "ok": self._ci_verdict(
-                            self.ci_results_by_sha.get(
-                                sha, {"status": "red", "detail": f"no CI for {sha}"}
-                            ),
-                            dispatched_sha,
-                        )
-                    }
-                idx = int(label.rsplit("-", 1)[1]) if label.startswith("ci-") else 0
-                return {
-                    "ok": self._ci_verdict(
-                        self.ci_results[min(idx, len(self.ci_results) - 1)], dispatched_sha
-                    )
-                }
+            # watch_ci is NO LONGER an agent (#1316): the CI watch is a deterministic poll of the
+            # GitHub Checks + combined-status REST API, served by ``_http`` above. No agent task.
             if task == "risk":
                 return {"ok": self.risk_result}
             if task in ("fix", "fix_ci"):
-                if self.review_error_on == label or self.ci_error_on == label:
+                if self.review_error_on == label:
                     return {"error": {"kind": "child_errored"}}
                 return {"ok": {"head_sha": f"sha_{label}", "pushed": True}}
         if cid == "gate":
@@ -498,14 +447,24 @@ async def test_happy_path_merges_and_completes() -> None:
         "post-merge",
     ]
     assert scn.gates == []  # tier-1 auto-merges; no gate opened
-    assert scn.tasks == ["implement", "review-0", "ci-0", "risk", "master-ci-0"]
+    # The CI watch (PR-CI and post-merge master) is now a deterministic http poll, not an agent —
+    # so the agent task list no longer carries `ci-*` / `master-ci-*` entries (#1316).
+    assert scn.tasks == ["implement", "review-0", "risk"]
+    # the deterministic CI watch instead reads the Checks + combined-status surfaces over http
+    assert ("GET", "/repos/o/r/commits/sha_initial/check-runs?per_page=100") in scn.http
+    assert ("GET", "/repos/o/r/commits/sha_initial/status") in scn.http
+    assert ("GET", f"/repos/o/r/commits/{MERGE_SHA}/check-runs?per_page=100") in scn.http
+    assert ("GET", f"/repos/o/r/commits/{MERGE_SHA}/status") in scn.http
     # never used a query string EXCEPT on the allow_query comments-pagination paths
     # (#1156: the issue thread read; #1292: the maker-marker guard's PR-thread read before
     # posting risk/merge-guard comments); every other GitHub call stays clean-path.
+    # (#1316: the deterministic CI watch's check-runs read also opts into ?per_page on the
+    # allow_query /repos/** route).
     assert all(
         "?" not in path
         for _, path in scn.http
         if not re.match(r"^/repos/o/r/issues/\d+/comments", path)
+        and not re.match(r"^/repos/o/r/commits/[^/]+/check-runs", path)
     )
     # item 1: the comment thread is read at ingest (paginated -> ?per_page/?page carried)
     assert any(m == "GET" and p.startswith("/repos/o/r/issues/5/comments") for m, p in scn.http)
@@ -759,159 +718,6 @@ async def test_merge_guard_refusal_proceed_merges() -> None:
     assert value["merged"] is True
 
 
-# ─── sync / rebase recovery (#1385) ───────────────────────────────────────────
-
-
-async def test_clean_pr_skips_rebase_entirely() -> None:
-    # A mergeable PR (no master drift) must NOT run any rebase bash node — the sync stage is
-    # an idempotent no-op and the run merges as before.
-    scn = Scenario(mergeable_state="clean")
-    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "done"
-    assert value["merged"] is True
-    assert scn.rebase_commands == []  # never touched the rebase bash node
-
-
-async def test_dirty_pr_mechanically_rebases_then_reenters_ci_and_merges() -> None:
-    # master moved under the branch (dirty) but the rebase replays cleanly (exit 0 = DONE).
-    # The branch is healed mechanically (no fix agent), CI re-runs on the updated branch
-    # (a distinct `reci-0` watch), and the PR merges.
-    scn = Scenario(mergeable_state="dirty", rebase_exit=[0])
-    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "done"
-    assert value["merged"] is True
-    assert len(scn.rebase_commands) == 1  # exactly the one mechanical rebase
-    # CI was re-entered after the rebase (the post-rebase `reci` watch ran)
-    assert any(t.startswith("reci") for t in scn.tasks)
-
-
-async def test_dirty_pr_already_current_is_noop_and_does_not_reenter_ci() -> None:
-    # GitHub reports dirty but the mechanical rebase finds the branch already current (exit
-    # 75 = NOOP) — a re-driven sync on an already-healed branch. CI is NOT re-entered.
-    scn = Scenario(mergeable_state="dirty", rebase_exit=[75])
-    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "done"
-    assert value["merged"] is True
-    assert not any(t.startswith("reci") for t in scn.tasks)  # no CI re-entry on a no-op
-
-
-async def test_real_conflict_resolved_by_fix_agent_then_merges() -> None:
-    # The mechanical rebase CONFLICTs (76); the fix agent resolves it; the confirm rebase
-    # reports NOOP (75) -> healed; CI re-runs; the PR merges. exits: [76, 75].
-    scn = Scenario(mergeable_state="dirty", rebase_exit=[76, 75])
-    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "done"
-    assert value["merged"] is True
-    # the SAME fix agent fix_ci uses was dispatched with the rebase resolve task
-    assert any(i.get("task") == "fix_ci" and "rebase_hint" in i for i in scn.agent_inputs)
-    assert any(t.startswith("reci") for t in scn.tasks)  # CI re-entered after the resolve
-
-
-async def test_unresolvable_conflict_parks_at_rebase_conflict_gate() -> None:
-    # The conflict never heals (mechanical 76, then both confirm attempts stay 76). The run
-    # parks at the NEW, distinct `rebase_conflict` gate — NOT the verify or merge gate.
-    scn = Scenario(
-        mergeable_state="dirty",
-        rebase_exit=[76, 76, 76],
-        gate_results={"rebase_conflict": {}},  # chairman does not resolve -> escalate
-    )
-    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "escalated"
-    assert value["reason"] == "rebase_conflict"
-    assert any(g["kind"] == "rebase_conflict" for g in scn.gates)
-    # a marker comment naming the conflict was posted to the PR
-    assert any("Rebase conflict" in c for c in scn.comments_posted)
-
-
-async def test_rebase_conflict_gate_resolved_continues_to_merge() -> None:
-    # The chairman resolves the rebase_conflict gate -> the run continues past sync to merge.
-    scn = Scenario(
-        mergeable_state="dirty",
-        rebase_exit=[76, 76, 76],
-        gate_results={"rebase_conflict": {"resolved": True}},
-    )
-    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "done"
-    assert value["merged"] is True
-    assert any(g["kind"] == "rebase_conflict" for g in scn.gates)
-
-
-async def test_rebase_plumbing_error_fails_closed_to_rebase_conflict_gate() -> None:
-    # A clone/fetch/push failure (exit 77) cannot prove the branch is healthy: fail closed to
-    # the rebase_conflict gate rather than waving a possibly-unmergeable branch through.
-    scn = Scenario(
-        mergeable_state="dirty",
-        rebase_exit=[77],
-        gate_results={"rebase_conflict": {}},
-    )
-    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "escalated"
-    assert value["reason"] == "rebase_conflict"
-
-
-def _reentry_watch_shas(scn: Scenario) -> list[str]:
-    """The head_sha each branch (non-master, non-`ref`) CI watch was dispatched with, in
-    order. The FIRST is the pre-rebase `ci` watch (keyed on the original head); any LATER
-    one is the post-rebase `reci` re-entry — #1389 requires it to carry the rebased tip."""
-    return [
-        i["head_sha"] for i in scn.agent_inputs if i.get("task") == "watch_ci" and not i.get("ref")
-    ]
-
-
-async def test_mechanical_rebase_reenters_ci_on_post_rebase_sha_not_stale_head() -> None:
-    # #1389: a mechanical rebase (exit 0) force-pushes a NEW tip; the CI re-entry MUST key on
-    # the POST-rebase head SHA, not the stale pre-rebase `sha_initial`. The watch_ci responder
-    # here KEYS ON head_sha (the default queue is head_sha-independent and structurally cannot
-    # catch a stale read). Both heads are green so the run still merges; the load-bearing
-    # assertion is that the RE-ENTRY watch was dispatched with the rebased tip, not the stale
-    # one — before this fix it carried `sha_initial` (the empty-string head_sha was falsy, so
-    # `main` never overwrote the stale pre-rebase head before re-entering the watch).
-    scn = Scenario(
-        mergeable_state="dirty",
-        rebase_exit=[0],
-        post_rebase_head_sha=POST_REBASE_SHA,
-        ci_results_by_sha={
-            "sha_initial": {"status": "green", "detail": ""},  # pre-rebase `ci` watch
-            POST_REBASE_SHA: {"status": "green", "detail": ""},  # post-rebase `reci` watch
-        },
-    )
-    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "done"
-    assert value["merged"] is True
-    shas = _reentry_watch_shas(scn)
-    # the pre-rebase watch keyed on the original head; the post-rebase re-entry on the tip
-    assert shas[0] == "sha_initial"
-    assert shas[-1] == POST_REBASE_SHA, (
-        "post-rebase CI re-entry must run against the rebased tip, not the stale head"
-    )
-    # the stale pre-rebase SHA is used by AT MOST the single pre-rebase watch
-    assert shas.count("sha_initial") == 1
-
-
-async def test_agent_resolved_conflict_reenters_ci_on_post_rebase_sha() -> None:
-    # #1389 (folded-in path): the mechanical rebase CONFLICTs (76), the fix agent resolves it,
-    # the confirm rebase reports NOOP (75). The CI re-entry MUST still key on the LIVE post-
-    # rebase head (read from GET /pulls/42), not the fix agent's (possibly stale) reported SHA
-    # nor the pre-rebase head. The SHA-keyed watch is green ONLY on the rebased tip.
-    scn = Scenario(
-        mergeable_state="dirty",
-        rebase_exit=[76, 75],
-        post_rebase_head_sha=POST_REBASE_SHA,
-        ci_results_by_sha={
-            "sha_initial": {"status": "green", "detail": ""},
-            POST_REBASE_SHA: {"status": "green", "detail": ""},
-        },
-    )
-    value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
-    assert value["state"] == "done"
-    assert value["merged"] is True
-    assert any(i.get("task") == "fix_ci" and "rebase_hint" in i for i in scn.agent_inputs)
-    shas = _reentry_watch_shas(scn)
-    assert shas[-1] == POST_REBASE_SHA, (
-        "post-rebase CI re-entry must run against the rebased tip, not the stale head"
-    )
-
-
 async def test_high_risk_parks_for_merge_approval() -> None:
     scn = Scenario(
         risk_result={"tier": 4, "summary": "touches the scheduler"},
@@ -965,27 +771,33 @@ async def test_merge_failure_not_confirmed_reports_merge_failed() -> None:
     assert value["state"] == "merge_failed"
 
 
-async def test_post_merge_master_ci_agent_error_returns_done_without_parking() -> None:
-    # #1176: a persistently-erroring post-merge master-CI watch must NOT park the completed
+async def test_post_merge_master_ci_unreadable_returns_done_without_parking() -> None:
+    # #1176 + #1316: a post-merge master-CI watch that can NEVER read either CI surface (both
+    # the Checks and combined-status GETs are down on every poll) must NOT park the completed
     # run at a (false) human gate. The merge is a committed fact, so the run returns done; the
-    # erroring watch degrades to a DISTINCT, non-blocking "indeterminate" advisory (NOT
+    # unreadable watch degrades to a DISTINCT, non-blocking "indeterminate" advisory (NOT
     # master_red) recorded in result["advisories"], leaving the blocking escalations clean.
-    scn = Scenario(master_ci_error=True)
+    scn = Scenario(master_ci_unreadable=True)
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
     assert value["merged"] is True
-    # agent flakiness is never coerced to the most-blocking outcome: no gate, no blocking escalation
+    # an API outage is never coerced to the most-blocking outcome: no gate, no blocking escalation
     assert scn.gates == []
     assert value["escalations"] == []
     assert "master_red" not in value["escalations"]
     # the distinct "could not determine master state" signal, kept apart from "master is red"
     assert value["master_ci"] == "indeterminate"
     assert value["advisories"] == ["master_ci_indeterminate"]
-    # the watch was RETRIED a bounded number of times before being declared indeterminate
-    assert scn.tasks.count("master-ci-0") == 1
-    assert "master-ci-1" in scn.tasks
-    assert "master-ci-2" in scn.tasks
-    assert "master-ci-3" not in scn.tasks  # bounded at MAX_MASTER_CI_ITERS=3
+    # the watch RETRIED the deterministic read a BOUNDED number of times before declaring
+    # indeterminate (it did not spin forever). Each of the MAX_MASTER_CI_ITERS=3 watch polls
+    # issues a check-runs GET whose 503 is in turn retried by gh's transient-5xx budget (3
+    # attempts), so the trace carries 3*3 = 9 master check-runs reads — bounded, not unbounded.
+    master_polls = sum(
+        1
+        for m, p in scn.http
+        if m == "GET" and p.startswith(f"/repos/o/r/commits/{MERGE_SHA}/check-runs")
+    )
+    assert master_polls == 9  # MAX_MASTER_CI_ITERS(3) * gh transient-retry budget(3); bounded
     # a best-effort follow-up issue is filed for the indeterminate state (non-blocking alert)
     assert len(scn.followups) == 1
     assert "INDETERMINATE" in scn.followups[0]["title"]
@@ -1010,7 +822,7 @@ async def test_red_and_indeterminate_are_distinct_advisory_reasons() -> None:
     # Acceptance: "master is red" and "could not determine master state" are DISTINCT reasons.
     red = Scenario(master_ci="red")
     red_value, _, _ = await _drive(red, max_review_iters=2, max_ci_iters=2)
-    indet = Scenario(master_ci_error=True)
+    indet = Scenario(master_ci_unreadable=True)
     indet_value, _, _ = await _drive(indet, max_review_iters=2, max_ci_iters=2)
     assert red_value["advisories"] == ["master_red"]
     assert indet_value["advisories"] == ["master_ci_indeterminate"]
@@ -1018,17 +830,29 @@ async def test_red_and_indeterminate_are_distinct_advisory_reasons() -> None:
     assert red_value["master_ci"] != indet_value["master_ci"]
 
 
-async def test_post_merge_watch_error_then_success_recovers_to_green() -> None:
-    # #1176: a TRANSIENTLY-flaky watch (errors once, then returns green) is retried within the
-    # bound and recovers — no advisory, no follow-up issue, run done.
-    scn = Scenario(master_ci_results=["error", {"status": "green", "detail": ""}])
+async def test_post_merge_watch_transient_5xx_recovers_to_green() -> None:
+    # #1176 + #1316: a TRANSIENTLY-flaky master-CI read (the first two check-runs / status GETs
+    # 503) is retried by gh's bounded transient-5xx retry and recovers to a real green verdict —
+    # no advisory, no follow-up issue, run done. The deterministic watch never coerces a
+    # transient blip into a false indeterminate.
+    scn = Scenario(
+        transient_5xx={
+            ("GET", f"/repos/o/r/commits/{MERGE_SHA}/check-runs?per_page=100"): 2,
+            ("GET", f"/repos/o/r/commits/{MERGE_SHA}/status"): 2,
+        }
+    )
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
     assert value["master_ci"] == "green"
     assert "advisories" not in value
     assert scn.followups == []
-    assert "master-ci-0" in scn.tasks and "master-ci-1" in scn.tasks
-    assert "master-ci-2" not in scn.tasks  # stopped retrying once a verdict arrived
+    # the master check-runs read was attempted more than once (transient retries) then succeeded
+    master_check_polls = sum(
+        1
+        for m, p in scn.http
+        if (m, p) == ("GET", f"/repos/o/r/commits/{MERGE_SHA}/check-runs?per_page=100")
+    )
+    assert master_check_polls >= 3  # 2 transient 503s + a successful read
 
 
 def _sha1_re() -> re.Pattern[str]:
@@ -1048,12 +872,19 @@ async def test_post_merge_watch_is_handed_the_merge_sha1_not_the_branch_name() -
     assert value["master_ci"] == "green"
     assert "advisories" not in value  # green master raises no advisory
     assert scn.followups == []
-    # the watch input carries a 40-char SHA-1 head_sha, not just a branch name
-    watch_in = [i for i in scn.agent_inputs if i.get("task") == "watch_ci" and i.get("ref")]
-    assert watch_in, "post-merge master-CI watch was never dispatched"
-    for w in watch_in:
-        assert w["head_sha"] == MERGE_SHA
-        assert _sha1_re().match(w["head_sha"]), "watch head_sha must be a SHA-1"
+    # the watch polls the commit endpoints with a 40-char SHA-1, not a branch name (#1316)
+    master_reads = [
+        p
+        for m, p in scn.http
+        if m == "GET"
+        and re.match(r"^/repos/o/r/commits/[^/]+/(check-runs|status)", p)
+        and MERGE_SHA in p
+    ]
+    assert master_reads, "post-merge master-CI watch never read the commit CI surfaces"
+    for p in master_reads:
+        sha = re.match(r"^/repos/o/r/commits/([^/]+)/", p).group(1)  # type: ignore[union-attr]
+        assert sha == MERGE_SHA
+        assert _sha1_re().match(sha), "watch sha must be a SHA-1"
 
 
 async def test_post_merge_watch_never_passes_a_sha256_to_a_github_endpoint() -> None:
@@ -1065,12 +896,18 @@ async def test_post_merge_watch_never_passes_a_sha256_to_a_github_endpoint() -> 
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
     assert value["master_ci"] == "green"
-    watch_in = [i for i in scn.agent_inputs if i.get("task") == "watch_ci" and i.get("ref")]
-    assert watch_in, "post-merge master-CI watch was never dispatched"
-    for w in watch_in:
-        sha = w["head_sha"]
+    ci_read_shas = [
+        re.match(r"^/repos/o/r/commits/([^/?]+)/(?:check-runs|status)", p).group(1)  # type: ignore[union-attr]
+        for m, p in scn.http
+        if m == "GET" and re.match(r"^/repos/o/r/commits/[^/?]+/(?:check-runs|status)", p)
+    ]
+    # NO CI read — PR-CI or master — is ever issued against a 64-char SHA-256 object id.
+    assert ci_read_shas, "the watch never read the commit CI surfaces"
+    for sha in ci_read_shas:
         assert len(sha) != 64, "a 64-char SHA-256 id must never reach the watch"
-        assert _sha1_re().match(sha), "watch head_sha must be a SHA-1"
+    # the master watch specifically read the canonicalised merge SHA-1 (not a branch name)
+    assert MERGE_SHA in ci_read_shas
+    assert _sha1_re().match(MERGE_SHA), "watch master sha must be a SHA-1"
     # the fallback actually went to GitHub's canonicalising endpoint
     assert ("GET", "/repos/o/r/commits/master") in scn.http
 
@@ -1079,7 +916,7 @@ async def test_post_merge_watch_unresolvable_sha_degrades_to_indeterminate() -> 
     # issue #1178 regression guard: if BASE_BRANCH cannot be resolved to a SHA-1 at all, the
     # workflow must NOT fall back to dispatching the watch with a branch name (the very path
     # that produced the SHA-256 error). It degrades to the non-blocking indeterminate advisory
-    # and the watch agent is never invoked.
+    # and the watch never reads a CI surface (there is no SHA-1 to read).
     scn = Scenario(merge_returns_sha=False, commit_sha=None)
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "done"
@@ -1087,8 +924,16 @@ async def test_post_merge_watch_unresolvable_sha_degrades_to_indeterminate() -> 
     assert value["escalations"] == []  # never coerced to a blocking outcome
     assert value["master_ci"] == "indeterminate"
     assert value["advisories"] == ["master_ci_indeterminate"]
-    # the watch agent was NOT dispatched with an unresolved ref
-    assert not any(t.startswith("master-ci-") for t in scn.tasks)
+    # the master watch was NOT dispatched: no CI read targets a SHA-1 commit (the only SHA-1
+    # read would be the master watch — the PR-CI reads target the placeholder PR head shas).
+    master_ci_reads = [
+        mm.group(1)
+        for m, p in scn.http
+        if m == "GET"
+        and (mm := re.match(r"^/repos/o/r/commits/([^/?]+)/(?:check-runs|status)", p))
+        and _sha1_re().match(mm.group(1))
+    ]
+    assert master_ci_reads == [], "the master watch must not read CI for an unresolved ref"
     assert len(scn.followups) == 1
     assert "INDETERMINATE" in scn.followups[0]["title"]
 
@@ -1108,13 +953,16 @@ async def test_post_merge_advisory_never_marks_failed_and_releases_in_progress()
 
 
 async def test_ci_red_then_fix_then_green_completes() -> None:
-    scn = Scenario(
-        ci_results=[{"status": "red", "detail": "test_x failed"}, {"status": "green", "detail": ""}]
-    )
+    # The deterministic watch reads the PR head sha each iteration: iteration 0 reads
+    # ``sha_initial`` (red), the fix agent (ci-fix-0) pushes ``sha_ci-fix-0``, iteration 1
+    # reads that (green) -> done. ``ci_results`` is the per-iteration verdict (#1316).
+    scn = Scenario(ci_results=["red", "green"])
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=3)
     assert value["state"] == "done"
+    # the ci-fix repair agent ran (judgment stays an agent), then the re-watched sha was green
     assert "ci-fix-0" in scn.tasks
-    assert "ci-1" in scn.tasks
+    assert ("GET", "/repos/o/r/commits/sha_initial/check-runs?per_page=100") in scn.http
+    assert ("GET", "/repos/o/r/commits/sha_ci-fix-0/check-runs?per_page=100") in scn.http
 
 
 async def test_review_fail_then_fix_then_pass_completes() -> None:
@@ -1238,11 +1086,16 @@ async def test_review_agent_error_escalates_to_verify_gate() -> None:
     assert any(g["kind"] == "verify" for g in scn.gates)
 
 
-async def test_ci_watch_agent_error_escalates_to_verify_gate() -> None:
-    scn = Scenario(ci_error_on="ci-0", gate_results={"verify": {"resolved": False}})
+async def test_ci_watch_never_terminal_fails_safe_to_verify_gate() -> None:
+    # #1316: the CI watch is deterministic and cannot raise an AgentError. When CI is PRESENT
+    # but never reaches a terminal state (a queued run / pending rollup on every poll), the
+    # watch fails SAFE to a red verdict after exhausting its poll bound — never waved through as
+    # green. The bounded ci-fix loop can't recover a never-terminal build, so the verify gate
+    # is reached and the run escalates with reason ``ci_exhausted``.
+    scn = Scenario(ci_results=["pending"], gate_results={"verify": {"resolved": False}})
     value, _, _ = await _drive(scn, max_review_iters=2, max_ci_iters=2)
     assert value["state"] == "escalated"
-    assert value["reason"] == "ci_agent_error"
+    assert value["reason"] == "ci_exhausted"
     assert any(g["kind"] == "verify" for g in scn.gates)
 
 

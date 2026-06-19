@@ -303,6 +303,180 @@ async def _resolve_sha1(repo, ref):
     return sha if _is_sha1(sha) else None
 
 
+# ─── deterministic CI watch (issue #1316): no agent, no model ────────────────
+#
+# Waiting for a CI run to reach a terminal state is a procedural task — zero judgment
+# (architecture/intelligence-vs-computation.md). The watch is a bounded poll of the GitHub
+# Checks + combined-status REST API via the run's http_request tool, returning the SAME
+# CI_SCHEMA ({status: green|red|no_ci, detail}) the old `watch_ci` agent did. `fix_ci`
+# STAYS an agent() — diagnosing and repairing a red build is genuine judgment; only the
+# wait/read is de-intelligenced.
+#
+# Two GitHub surfaces report CI on a commit and BOTH must be consulted:
+#   - the Checks API (GitHub Actions et al.): GET /commits/{sha}/check-runs
+#   - the legacy Statuses API (external CI via the commit-status protocol):
+#     GET /commits/{sha}/status (the COMBINED rollup)
+# A commit with neither is `no_ci`. A commit whose checks/statuses are all terminal is
+# green (every terminal outcome a success/neutral/skip) or red (any failure). A commit
+# still running anything is NOT terminal — poll again.
+
+# Check-run conclusions that count as a FAILED build (a `completed` run with one of these
+# fails CI). `null`/success/neutral/skipped/`stale` do not fail the build; an
+# `action_required` run is treated as failing (it blocks merge and needs human/agent action).
+_CI_FAIL_CONCLUSIONS = frozenset(
+    {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
+)
+# Combined-status states (Statuses API rollup): success | pending | failure (error folds
+# into failure on the combined endpoint). `pending` is non-terminal.
+_CI_STATUS_FAIL_STATES = frozenset({"failure", "error"})
+
+
+def _check_runs_terminal(check_runs):
+    """Reduce a check-runs list to ``(count, all_terminal, any_failed)``.
+
+    ``count`` is how many check-runs exist (0 => this surface reports no CI). A check-run
+    is terminal iff ``status == "completed"``; ``any_failed`` is True iff some COMPLETED
+    run has a failing conclusion. A non-list/garbage payload yields ``(0, True, False)``
+    (this surface contributes nothing — the caller folds in the other surface)."""
+    if not isinstance(check_runs, list):
+        return (0, True, False)
+    count = 0
+    all_terminal = True
+    any_failed = False
+    for run in check_runs:
+        if not isinstance(run, dict):
+            continue
+        count += 1
+        if run.get("status") != "completed":
+            all_terminal = False
+            continue
+        if run.get("conclusion") in _CI_FAIL_CONCLUSIONS:
+            any_failed = True
+    return (count, all_terminal, any_failed)
+
+
+def _combined_status_terminal(combined):
+    """Reduce a combined-status payload to ``(count, all_terminal, any_failed)``.
+
+    ``count`` is ``total_count`` (number of contexts reporting; 0 => no legacy CI). The
+    combined ``state`` is terminal unless ``pending``; ``any_failed`` iff the rollup state
+    is failure/error. A non-dict/garbage payload yields ``(0, True, False)``."""
+    if not isinstance(combined, dict):
+        return (0, True, False)
+    try:
+        count = int(combined.get("total_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    state = combined.get("state")
+    all_terminal = state != "pending"
+    any_failed = state in _CI_STATUS_FAIL_STATES
+    return (count, all_terminal, any_failed)
+
+
+def _ci_poll_verdict(check_runs, combined):
+    """Map a (check-runs, combined-status) pair to a CI_SCHEMA dict — pure, no I/O.
+
+    Returns ``{"status": ...}`` where status is:
+      * ``no_ci``  — neither surface reports any check/status for the commit.
+      * ``green``  — at least one surface reports CI and EVERY reported check/status is
+                     terminal with no failure.
+      * ``red``    — at least one terminal failure on either surface.
+      * ``None``   — CI exists but is NOT yet terminal (something still queued/running):
+                     the caller polls again. (None is NOT a CI_SCHEMA status — it is the
+                     in-loop "keep waiting" sentinel.)
+
+    A red verdict is returned EAGERLY (a failure is terminal even if other checks are still
+    running) so a doomed build fails fast instead of waiting out the slowest green job."""
+    cr_count, cr_terminal, cr_failed = _check_runs_terminal(check_runs)
+    st_count, st_terminal, st_failed = _combined_status_terminal(combined)
+    total = cr_count + st_count
+    if total == 0:
+        return {"status": "no_ci", "detail": "no check-runs or commit statuses on the commit"}
+    if cr_failed or st_failed:
+        return {"status": "red",
+                "detail": "%d check-run(s), %d status context(s); a terminal failure was reported"
+                          % (cr_count, st_count)}
+    if cr_terminal and st_terminal:
+        return {"status": "green",
+                "detail": "%d check-run(s), %d status context(s); all terminal, none failed"
+                          % (cr_count, st_count)}
+    return None  # CI present but still running -> keep polling
+
+
+async def _read_ci(repo, head_sha):
+    """One deterministic read of both CI surfaces for ``head_sha`` -> ``(verdict, read_ok)``.
+
+    ``verdict`` is a CI_SCHEMA dict (green/red/no_ci) or None (CI present but still running);
+    ``read_ok`` is True iff AT LEAST ONE surface GET returned a 2xx we could parse. Both GETs
+    go through ``gh`` (bounded transient-5xx retry) against the bound-vault-authed http_request
+    tool — NO agent, NO model, NO gh CLI (#1138).
+
+    A surface whose GET is non-2xx is treated as contributing nothing (the helper reducers
+    fold a garbage/None body to ``(0, True, False)``), so a transient single-surface blip
+    can't manufacture a false red — the verdict falls through to the other surface or to
+    'keep polling'. When NEITHER surface read (``read_ok`` False) the caller cannot trust a
+    'no_ci' verdict (it is indistinguishable from 'both endpoints down'), so the advisory
+    master-CI path treats that as INDETERMINATE rather than a real verdict.
+
+    We request ``per_page=100`` on check-runs: the combined verdict only needs
+    status/conclusion, and a commit with >100 check-runs is unheard-of in this pipeline, so a
+    single first page (newest-first per app) is sufficient without paginating."""
+    checks_resp = await gh("GET", _with_query(
+        _ipath(repo, "/commits/%s/check-runs" % head_sha), per_page=100))
+    status_resp = await gh("GET", _ipath(repo, "/commits/%s/status" % head_sha))
+    checks_ok = _status(checks_resp) == 200
+    status_ok = _status(status_resp) == 200
+    checks_body = _json_body(checks_resp) if checks_ok else None
+    check_runs = checks_body.get("check_runs") if isinstance(checks_body, dict) else None
+    combined = _json_body(status_resp) if status_ok else None
+    return (_ci_poll_verdict(check_runs, combined), checks_ok or status_ok)
+
+
+async def watch_ci(repo, head_sha, max_iters):
+    """Deterministic CI-watch NODE (issue #1316) — the procedural replacement for the old
+    `watch_ci` agent. Polls both CI surfaces for ``head_sha`` up to ``max_iters`` times and
+    returns a CI_SCHEMA dict ({status: green|red|no_ci, detail}). NO agent/model call.
+
+    A terminal verdict (green/red/no_ci) is returned the moment it is reached. If CI is still
+    running after ``max_iters`` reads, we return a `red` verdict carrying a
+    'did-not-reach-terminal' detail — the same outcome the bounded agent loop produced when it
+    exhausted its iterations on a still-pending build (the A9 loop then escalates to the verify
+    gate). This is fail-SAFE: an indeterminate (never-terminal) build is NOT waved through as
+    green. ``head_sha`` must be a GitHub SHA-1 (the caller resolves it; #1178)."""
+    for _ in range(max(1, int(max_iters))):
+        verdict, _read_ok = await _read_ci(repo, head_sha)
+        if verdict is not None:
+            return verdict
+    return {"status": "red",
+            "detail": "CI did not reach a terminal state within %d polls of %s"
+                      % (max(1, int(max_iters)), head_sha)}
+
+
+async def watch_ci_advisory(repo, head_sha, max_iters):
+    """The ADVISORY (post-merge master-CI) variant of the deterministic watch (issue #1316 +
+    #1176). Returns ``(status, detail)`` where ``status`` is 'green'/'red'/'no_ci' for a
+    well-formed verdict, or None for INDETERMINATE — distinct from a real verdict, exactly as
+    the old retrying agent loop distinguished an AgentError/malformed return from a green/red.
+
+    Indeterminate means EITHER (a) every poll failed to read either CI surface (both GETs
+    non-2xx across all attempts), OR (b) CI never reached a terminal state within ``max_iters``
+    polls. Neither coerces to the most-blocking 'red': the merge is already a committed fact, so
+    the caller files a non-blocking 'master_ci_indeterminate' advisory and NEVER re-suspends the
+    completed run."""
+    any_read_ok = False
+    for _ in range(max(1, int(max_iters))):
+        verdict, read_ok = await _read_ci(repo, head_sha)
+        any_read_ok = any_read_ok or read_ok
+        if verdict is not None and read_ok:
+            return (verdict["status"], verdict.get("detail", ""))
+    if not any_read_ok:
+        return (None, "master-CI watch indeterminate: could not read either CI surface "
+                      "(check-runs / combined status) for %s after %d polls"
+                      % (head_sha, max(1, int(max_iters))))
+    return (None, "master-CI watch indeterminate: CI did not reach a terminal state for %s "
+                  "within %d polls" % (head_sha, max(1, int(max_iters))))
+
+
 def _find_open_pr(prs, branch):
     """Client-side filter of an open-PRs list for the one whose head ref is ``branch``
     (http_request forbids a ?head= query, so we list clean and match here)."""
@@ -698,45 +872,40 @@ async def _ci_verdict(repo, pr_number, ci, polled_head):
 
 
 async def _watch_ci(repo, pr_number, head_sha, comment_bodies, model, label_prefix):
-    """The bounded CI watch->fix->re-watch loop (the agent OWNS the durable wait), factored
-    out so it can be RE-ENTERED after a sync/rebase heals the branch (#1385): a successful
-    rebase force-pushes a new tip, so CI must re-run on the updated branch before merge. The
-    ``label_prefix`` distinguishes the labels of the second entry (``reci-…``) from the first
-    (``ci-…``) so replay stays deterministic (a distinct call_key per agent invocation).
+    """The bounded CI watch->fix->re-watch loop, factored out so it can be RE-ENTERED after a
+    sync/rebase heals the branch (#1385): a successful rebase force-pushes a new tip, so CI
+    must re-run on the updated branch before merge. The ``label_prefix`` distinguishes the
+    labels of the second entry (``reci-…``) from the first (``ci-…``) so replay stays
+    deterministic (a distinct call_key per ci-FIX agent invocation).
+
+    The WATCH itself is DETERMINISTIC (issue #1316): each iteration polls both GitHub CI
+    surfaces (Checks + combined-status) for ``head_sha`` via ``watch_ci`` — NO agent/model.
+    Only ``fix_ci`` (repairing a red build) stays an agent(), so the only AgentError this loop
+    can surface is a ci-FIX failure. The deterministic read inspects EXACTLY the commit it is
+    handed, so the #1314 wrong-parent false-green hole cannot open (there is no agent
+    self-reporting a polled commit), and a green/no_ci verdict already requires the FULL check
+    set to be terminal (the ``_ci_poll_verdict`` reducer), subsuming the #1364 premature-green
+    guard. The post-rebase #1389 correctness is preserved by the CALLER: the S-SYNC re-entry
+    re-reads the LIVE post-rebase head (``_live_head_sha``) and hands THAT sha here, so a stale
+    pre-rebase commit's old green checks are never polled.
 
     Returns ``(ci_ok, ci_agent_error, head_sha)``: ``ci_ok`` True on green/no_ci, else the
-    caller parks at the verify gate; ``ci_agent_error`` distinguishes a flaky-agent break from
-    plain CI exhaustion; ``head_sha`` is the (possibly fix-advanced) head for downstream nodes.
-    Bounded N watches / N-1 fixes — matches autodev's CI loop."""
+    caller parks at the verify gate; ``ci_agent_error`` distinguishes a flaky ci-FIX-agent
+    break from plain CI exhaustion; ``head_sha`` is the (possibly fix-advanced) head for
+    downstream nodes. Bounded N watches / N-1 fixes — matches autodev's CI loop."""
     ci_ok = False
     ci_agent_error = False
     for i in range(MAX_CI_ITERS):
-        # A ci-watch / ci-fix agent error breaks the loop and falls through to the verify
-        # gate (item 5) — it does NOT crash the run nor silently pass a red PR.
-        try:
-            ci = await agent(
-                {"task": "watch_ci", "repo": repo, "pr_number": pr_number, "head_sha": head_sha},
-                agent_id=CI_AGENT_ID, output_schema=CI_SCHEMA, model=model,
-                label="%s-%d" % (label_prefix, i))
-        except AgentError as exc:
-            log("ci-watch agent error -> escalate:", exc)
-            ci_agent_error = True
-            break
-        # Fix 2 (false-green guard, aios#1392): a green/no_ci is SCRIPT-VERIFIED before it
-        # counts as a pass — _ci_verdict rejects a verdict whose polled commit is not the
-        # live PR head (#1314) or whose required-check set has not concluded (#1364),
-        # returning "retry" (re-watch, never fix) instead of trusting the agent.
-        verdict = await _ci_verdict(repo, pr_number, ci, head_sha)
-        if verdict == "pass":
+        # The watch is a DETERMINISTIC read of the GitHub Checks + combined-status API for the
+        # current head_sha (no agent, no AgentError to catch). A still-running build that never
+        # reaches terminal within the bound fails SAFE to red (escalates to the verify gate) —
+        # never a silent green. A green/no_ci is trusted only when every reported check/status
+        # is terminal.
+        ci = await watch_ci(repo, head_sha, MAX_CI_ITERS)
+        if ci["status"] in ("green", "no_ci"):
             ci_ok = True
             break
-        if verdict == "retry":
-            # An UNVERIFIED green/no_ci (unverifiable head / premature checks): re-watch on the
-            # next iteration. Do NOT dispatch the fixer (the code is not broken — CI just hasn't
-            # settled / we could not confirm the head). On the final iteration this falls through
-            # to the verify gate (ci_ok stays False) — fail-closed, never a false pass.
-            continue
-        # verdict == "red": the tree is genuinely broken -> dispatch the bounded fixer below.
+        # ci["status"] == "red": the tree is genuinely broken -> dispatch the bounded fixer.
         if i == MAX_CI_ITERS - 1:
             break
         before = head_sha
