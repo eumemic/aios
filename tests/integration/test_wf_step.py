@@ -1718,10 +1718,10 @@ async def test_idle_with_open_request_is_nudged(
     _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:n#0")
 
     assistant = await _idle_assistant_turn(pool, cid)
-    nudged, caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
+    result = await sessions_service.append_assistant_and_guard_quiescence(
         pool, cid, assistant, account_id="acc_wf", parent_run_id=_run_id
     )
-    assert nudged and caller is None
+    assert result.nudged and result.autoerror_caller_run_id is None
 
     async with pool.acquire() as conn:
         open_ids = await db_queries.get_open_request_ids(conn, cid, account_id="acc_wf")
@@ -1750,10 +1750,10 @@ async def test_quiescence_guard_is_noop_for_non_child(
         metadata={},
     )
     assistant = await _idle_assistant_turn(pool, fg.id)
-    nudged, caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
+    result = await sessions_service.append_assistant_and_guard_quiescence(
         pool, fg.id, assistant, account_id="acc_wf", parent_run_id=None
     )
-    assert not nudged and caller is None
+    assert not result.nudged and result.autoerror_caller_run_id is None
     async with pool.acquire() as conn:
         status = await db_queries.derive_session_status(conn, fg.id, account_id="acc_wf")
         nudge_msgs = await conn.fetchval(
@@ -1776,21 +1776,23 @@ async def test_open_request_is_auto_errored_after_nudge_budget(
     run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:nr#0")
 
     for _ in range(sessions_service.REQUEST_NUDGE_BUDGET):
-        nudged, _caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
+        _qresult = await sessions_service.append_assistant_and_guard_quiescence(
             pool,
             cid,
             await _idle_assistant_turn(pool, cid),
             account_id="acc_wf",
             parent_run_id=run_id,
         )
+        nudged = _qresult.nudged
         assert nudged  # still under budget — keep nudging
 
     # Budget spent: the next pure-text turn auto-errors the request instead.
-    nudged, caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
+    result = await sessions_service.append_assistant_and_guard_quiescence(
         pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
     )
-    assert not nudged
-    assert caller == run_id  # auto-errored → the caller run is woken to harvest the no_return
+    assert not result.nudged
+    # auto-errored → the caller run is woken to harvest the no_return
+    assert result.autoerror_caller_run_id == run_id
 
     async with pool.acquire() as conn:
         resp = await db_queries.read_request_response(
@@ -1962,10 +1964,10 @@ async def test_child_reclaimed_on_quiescence_and_parent_still_harvests(
             result={"answer": 42},
             error=None,
         )
-    nudged, caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
+    result = await sessions_service.append_assistant_and_guard_quiescence(
         pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
     )
-    assert not nudged and caller is None
+    assert not result.nudged and result.autoerror_caller_run_id is None
 
     # End-of-step reclaim (what loop._run_step does for an archive_when_idle session).
     assert await sessions_service.reclaim_session_if_idle(pool, cid, account_id="acc_wf") is True

@@ -188,6 +188,7 @@ async def compute_step_prelude(
     )
     from aios.harness.memory_stores import augment_with_memory_stores
     from aios.harness.skills import augment_system_prompt
+    from aios.services import sessions as sessions_service
     from aios.services import skills as skills_service
 
     tools = to_openai_tools(agent.tools)
@@ -195,9 +196,18 @@ async def compute_step_prelude(
     # focal attention; inject it whenever the session has bound channels.
     if channels:
         tools.append(_switch_channel_tool_spec())
-    # return/error are a workflow agent child's only way to finish — injected
-    # only for a background child of a run (§3.5), never a foreground session.
-    if session.origin == "background" and session.parent_run_id is not None:
+    # return/error are how a session ANSWERS a request it owes — a background child
+    # of a run (§3.5), OR a session-caller invoke target (#1127). The gate is owning
+    # an open request edge (#1123), not child-ness: a plain foreground session that
+    # was invoked owes a response and must be handed the means to give one. The
+    # background-child fast-path avoids the query on the run hot path; otherwise one
+    # indexed open-request lookup decides it.
+    owes_request = session.origin == "background" and session.parent_run_id is not None
+    if not owes_request:
+        owes_request = await sessions_service.session_owns_open_request(
+            pool, session_id, account_id=account_id
+        )
+    if owes_request:
         from aios.tools.workflow_completion import workflow_completion_tool_specs
 
         tools.extend(workflow_completion_tool_specs())

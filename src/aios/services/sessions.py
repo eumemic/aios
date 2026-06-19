@@ -520,6 +520,7 @@ async def invoke(
     output_schema: dict[str, Any] | None = None,
     environment_id: str | None = None,
     crypto_box: CryptoBox | None = None,
+    caller: dict[str, Any] | None = None,
 ) -> InvocationHandle:
     """The API caller's request-*writer* (#1128).
 
@@ -540,7 +541,11 @@ async def invoke(
     constructors all account-scope). ``environment_id`` is ownership-checked on the
     ``agent`` / ``workflow`` create-paths (the per-field containment clamp is #1130).
     """
-    caller = {"kind": "api", "id": account_id}
+    # Default provenance is the API caller (#1128); the model-facing invoke* surface
+    # (#1127) passes caller={"kind":"session", "id":<the executing session>}. Either
+    # way the WRITTEN edge is the authorization fact — caller-kind-agnostic (#1123).
+    if caller is None:
+        caller = {"kind": "api", "id": account_id}
 
     if target_kind == "agent":
         if environment_id is None:
@@ -1166,6 +1171,21 @@ class AssistantAppendResult(NamedTuple):
     nudged: bool
     autoerror_caller_run_id: str | None
     assistant_focal_at_arrival: str | None
+    autoerror_caller_session_ids: tuple[str, ...] = ()
+
+
+async def session_owns_open_request(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> bool:
+    """True iff the session owns at least one still-open request edge (#1127).
+
+    The gate the step builder uses to decide whether to inject the ``return``/``error``
+    completion tools: a session that owes a response — a workflow child OR a
+    session-caller ``invoke`` target — must be handed the means to answer. One indexed
+    anti-join (``get_open_request_ids``); ``False`` for any ordinary session.
+    """
+    async with pool.acquire() as conn:
+        return bool(await queries.get_open_request_ids(conn, session_id, account_id=account_id))
 
 
 async def append_assistant_and_guard_quiescence(
@@ -1179,11 +1199,13 @@ async def append_assistant_and_guard_quiescence(
     """Append the model's assistant message and, **atomically**, enforce the
     request-totality invariant: a session may not go idle while it owes a response.
 
-    Only a workflow child (``parent_run_id`` set) can ever owe a request, so for any
-    other session this is a plain assistant append — the totality machinery (and its
-    per-turn open-request scan) is skipped entirely.
+    Any session that owns an open request edge (#1123) can owe a response — a
+    workflow child (run caller) OR a session-caller ``invoke`` target (#1127). A
+    session with no open request is a plain assistant append, the totality machinery
+    (and its per-turn open-request scan) skipped entirely. The gate is **owning an
+    open request**, no longer ``parent_run_id``.
 
-    For a workflow child, in one transaction: append the assistant message; if the
+    When it does owe, in one transaction: append the assistant message; if the
     session would now be idle (a tool-call-free turn — ``derive_session_status``
     reads the just-appended event) and it still owes request responses, then for
     each open request either append a **nudge** (a user message that re-triggers
@@ -1204,24 +1226,27 @@ async def append_assistant_and_guard_quiescence(
     """
     nudged = False
     autoerror_caller_run_id: str | None = None
+    autoerror_caller_session_ids: list[str] = []
     async with pool.acquire() as conn, conn.transaction():
         assistant_event = await queries.append_event(
             conn, session_id=session_id, kind="message", data=assistant_msg, account_id=account_id
         )
         focal = assistant_event.focal_channel_at_arrival
         # Gates, cheapest first (this runs on EVERY end-of-turn append):
-        #   1. not a workflow child → cannot owe a request → plain append, done.
-        #   2. tool calls present → unresolved tool_call → active by construction
+        #   1. tool calls present → unresolved tool_call → active by construction
         #      (the tools haven't run yet), so it can't be idle — settle in memory.
-        #   3. nothing owed → every request already answered → one indexed anti-join.
-        #   4. only now pay the multi-EXISTS idleness derivation (the same
+        #   2. nothing owed → no request edge at all (the ordinary session), or every
+        #      request already answered → one indexed anti-join. This — NOT parent_run_id
+        #      — is the totality gate (#1127): a session-caller invoke owes a request to
+        #      a non-run caller, so the guard can no longer short-circuit on child-ness.
+        #   3. only now pay the multi-EXISTS idleness derivation (the same
         #      _SESSION_STATUS_EXPR every external reader uses) — it could still be
         #      active via a user message that arrived during inference.
-        if parent_run_id is None or assistant_msg.get("tool_calls"):
+        if assistant_msg.get("tool_calls"):
             return AssistantAppendResult(False, None, focal)
         open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
         if not open_ids:
-            return AssistantAppendResult(False, None, focal)  # every request answered
+            return AssistantAppendResult(False, None, focal)  # nothing owed (or all answered)
         if await queries.derive_session_status(conn, session_id, account_id=account_id) != "idle":
             return AssistantAppendResult(False, None, focal)
         to_nudge: list[str] = []
@@ -1230,17 +1255,36 @@ async def append_assistant_and_guard_quiescence(
                 conn, session_id, account_id=account_id, request_id=request_id
             )
             if nudges >= REQUEST_NUDGE_BUDGET:
-                if await write_child_response(
-                    conn,
-                    session_id,
-                    account_id=account_id,
-                    parent_run_id=parent_run_id,
-                    request_id=request_id,
-                    is_error=True,
-                    result=None,
-                    error={"kind": "no_return"},
-                ):
-                    autoerror_caller_run_id = parent_run_id
+                # Auto-error past budget. Route the response-write + caller-wake by the
+                # trusted edge's caller kind (#1127): a run caller keeps the fused
+                # child_done marker; a session/api caller writes the plain response edge.
+                # The run path stays byte-for-byte behavior-preserved.
+                caller = await queries.get_request_caller(conn, session_id, request_id=request_id)
+                caller_kind = caller.get("kind") if caller else None
+                if caller_kind == "run" and parent_run_id is not None:
+                    if await write_child_response(
+                        conn,
+                        session_id,
+                        account_id=account_id,
+                        parent_run_id=parent_run_id,
+                        request_id=request_id,
+                        is_error=True,
+                        result=None,
+                        error={"kind": "no_return"},
+                    ):
+                        autoerror_caller_run_id = parent_run_id
+                else:
+                    wrote = await queries.write_response_if_absent(
+                        conn,
+                        session_id,
+                        account_id=account_id,
+                        request_id=request_id,
+                        is_error=True,
+                        result=None,
+                        error={"kind": "no_return"},
+                    )
+                    if wrote and caller_kind == "session" and caller and caller.get("id"):
+                        autoerror_caller_session_ids.append(caller["id"])
             else:
                 to_nudge.append(request_id)
         if to_nudge:
@@ -1256,7 +1300,9 @@ async def append_assistant_and_guard_quiescence(
                 account_id=account_id,
             )
             nudged = True
-    return AssistantAppendResult(nudged, autoerror_caller_run_id, focal)
+    return AssistantAppendResult(
+        nudged, autoerror_caller_run_id, focal, tuple(autoerror_caller_session_ids)
+    )
 
 
 async def append_tool_result(

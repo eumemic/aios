@@ -50,6 +50,9 @@ BuiltinToolType = Literal[
     "get_run",
     "list_runs",
     "list_run_events",
+    "invoke",
+    "invoke_agent",
+    "invoke_workflow",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled

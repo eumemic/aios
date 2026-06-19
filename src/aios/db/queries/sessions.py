@@ -506,6 +506,32 @@ async def get_open_request_ids(
     return [r["rid"] for r in rows]
 
 
+async def get_request_caller(
+    conn: asyncpg.Connection[Any], session_id: str, *, request_id: str
+) -> dict[str, Any] | None:
+    """The trusted ``caller`` of a request — ``{kind, id}`` — off its ``request_opened``
+    edge, or ``None`` if no such open-edge exists.
+
+    Reads the #1123 ``request_opened`` lifecycle frame (the trusted half), NEVER the
+    forgeable ``metadata.request`` user-message blob, so the caller provenance can be
+    trusted to route a response wake (#1127): ``kind == "run"`` → the run harvest path
+    (fused ``child_done`` marker); ``kind == "session"`` → wake the caller session;
+    ``kind == "api"`` → the ephemeral HTTP awaiter (no wake — it long-polls). Like
+    :func:`get_request_output_schema`, ``session_id`` is a unique PK so it is sufficient
+    scope on its own (the caller already account-scoped the session).
+    """
+    caller = await conn.fetchval(
+        "SELECT req.data->'caller' FROM events req "
+        "WHERE req.session_id = $1 "
+        "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+        "AND req.data->>'request_id' = $2 "
+        "ORDER BY req.seq ASC LIMIT 1",
+        session_id,
+        request_id,
+    )
+    return parse_jsonb(caller) if caller is not None else None
+
+
 async def get_request_output_schema(
     conn: asyncpg.Connection[Any], session_id: str, *, request_id: str
 ) -> dict[str, Any] | None:

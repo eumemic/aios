@@ -15566,7 +15566,10 @@
                   "list_workflows",
                   "get_run",
                   "list_runs",
-                  "list_run_events"
+                  "list_run_events",
+                  "invoke",
+                  "invoke_agent",
+                  "invoke_workflow"
                 ]
               },
               {

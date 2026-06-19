@@ -25,6 +25,7 @@ from aios.tools import edit as _edit  # noqa: F401
 from aios.tools import glob as _glob  # noqa: F401
 from aios.tools import grep as _grep  # noqa: F401
 from aios.tools import http_request as _http_request  # noqa: F401
+from aios.tools import invoke_session as _invoke_session  # noqa: F401
 from aios.tools import list_related_sessions as _list_related_sessions  # noqa: F401
 from aios.tools import read as _read  # noqa: F401
 from aios.tools import schedule_wake as _schedule_wake  # noqa: F401
