@@ -9,7 +9,7 @@ it, leaving a bare ``session_id text REFERENCES sessions(id)``.
 bindings`` — the lone session-child held by application vigilance rather
 than the schema.
 
-Migration 0109 restores the cascade (in the original single-column form
+Migration 0110 restores the cascade (in the original single-column form
 ``session_id REFERENCES sessions(id) ON DELETE CASCADE``) and
 ``delete_session`` no longer pre-deletes from ``bindings``.
 
@@ -140,7 +140,7 @@ class TestDeleteSessionWithBinding:
         binding row.
 
         This is the correct-by-construction property restored by migration
-        0109: the cascade is enforced by Postgres regardless of which code
+        0110: the cascade is enforced by Postgres regardless of which code
         path deletes the session. Pre-fix this raw DELETE raised
         ``asyncpg.ForeignKeyViolationError`` because ``bindings.session_id``
         had no ``ON DELETE CASCADE``.

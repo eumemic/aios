@@ -1,4 +1,4 @@
-"""Migration 0109 restores ``ON DELETE CASCADE`` on ``bindings.session_id``
+"""Migration 0110 restores ``ON DELETE CASCADE`` on ``bindings.session_id``
 in the original single-column form ``session_id REFERENCES sessions(id) ON
 DELETE CASCADE`` (the shape the 0015 table declared, before the 0033
 redesign dropped the cascade). The composite ``(session_id, account_id)``
@@ -72,16 +72,16 @@ def _bindings_fk_def(db_url: str) -> str:
 def test_upgrade_swaps_to_cascade_fk(postgres: object) -> None:
     db_url = _alembic_url(postgres)
 
-    # Before 0109: the bare single-column FK with no ON DELETE action.
+    # Before 0110: the bare single-column FK with no ON DELETE action.
     up = _run_alembic(["upgrade", "0108"], db_url)
     assert up.returncode == 0, f"upgrade to 0108 failed:\n{up.stderr}\n{up.stdout}"
     before = _bindings_fk_def(db_url)
-    assert "ON DELETE CASCADE" not in before, f"unexpected cascade pre-0109: {before}"
+    assert "ON DELETE CASCADE" not in before, f"unexpected cascade pre-0110: {before}"
 
     up = _run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
     after = _bindings_fk_def(db_url)
-    assert "ON DELETE CASCADE" in after, f"cascade missing after 0109: {after}"
+    assert "ON DELETE CASCADE" in after, f"cascade missing after 0110: {after}"
     # Single-column form, matching the original 0015 shape. A tenant-scoped
     # composite FK is deliberately avoided: ``bindings.account_id`` is
     # rewritten independently of ``session_id`` by ``reparent_connection``,
