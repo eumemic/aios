@@ -1763,10 +1763,10 @@ async def test_tell_spawned_child_reaches_idle_with_zero_nudges(
     assert created is True
 
     assistant = await _idle_assistant_turn(pool, cid)
-    nudged, caller, _focal = await sessions_service.append_assistant_and_guard_quiescence(
+    result = await sessions_service.append_assistant_and_guard_quiescence(
         pool, cid, assistant, account_id="acc_wf", parent_run_id=run_id
     )
-    assert not nudged and caller is None  # no nudge, no auto-error
+    assert not result.nudged and result.autoerror_caller_run_id is None  # no nudge, no auto-error
 
     async with pool.acquire() as conn:
         # The unawaited edge is excluded from the open set — no obligation.
