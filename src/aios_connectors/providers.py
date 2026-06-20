@@ -16,6 +16,7 @@ from typing import Any
 
 import asyncpg
 
+from aios.models.connectors import ConnectorCapabilities
 from aios.services import connections as connections_service
 from aios.services import sessions as sessions_service
 
@@ -34,5 +35,13 @@ class SubsystemToolProvider:
     ) -> list[dict[str, Any]]:
         account_id = await sessions_service.load_session_account_id(pool, session_id)
         return await connections_service.list_tools_for_session(
+            pool, session_id, account_id=account_id
+        )
+
+    async def list_capabilities_for_session(
+        self, pool: asyncpg.Pool[Any], session_id: str
+    ) -> dict[str, ConnectorCapabilities]:
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        return await connections_service.list_capabilities_for_session(
             pool, session_id, account_id=account_id
         )

@@ -28,6 +28,7 @@ from aios.ids import (
     make_id,
 )
 from aios.models.connections import BindingMode, Connection, ConnectionMode
+from aios.models.connectors import ConnectorCapabilities
 
 # ─── bindings (#328 PR 7 — unit of curation, succeeded the in-place
 #                          ``connections.session_id`` / ``session_template_id``
@@ -522,6 +523,57 @@ async def list_connection_tools_for_session(
     for row in rows:
         out.extend(parse_jsonb(row["tools"]))
     return out
+
+
+async def list_connection_capabilities_for_session(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> dict[str, ConnectorCapabilities]:
+    """Typed capability descriptors for every connector type whose active
+    connection is bound to ``session_id``, keyed by connector type.
+
+    The capability sibling to :func:`list_connection_tools_for_session`: walks
+    the same two lineage paths to the active connections bound to this session,
+    then JOINs to ``connectors.capabilities`` — the runtime container is the
+    source of truth for what richer renderings its connector type supports.
+
+    A connector row carrying the empty ``'{}'`` row-default validates to the
+    empty-floor :class:`ConnectorCapabilities` (every sub-descriptor absent),
+    so the caller never has to special-case "no declared capabilities".
+
+    This is the read seam #1335's outbound delta renderer plugs into: it reads
+    the declared KIND (``caps.draft_streaming``/``caps.native_buttons``) rather
+    than a ``connector == 'slack'`` identity branch.  No in-tree consumer calls
+    it yet (the prelude read site is deferred to #1335) — a deliberate seam,
+    exercised by the read-symmetry integration test.
+    """
+    rows = await conn.fetch(
+        f"""
+        SELECT cat.connector AS connector, cat.capabilities AS capabilities
+          FROM connectors cat
+         WHERE cat.connector IN (
+                SELECT DISTINCT c.connector
+                  FROM connections c
+                 WHERE c.archived_at IS NULL
+                   AND c.account_id = $2
+                   AND {
+            _session_bound_to_connection_predicate(
+                connection_alias="c", session_param_index=1, account_id_param_index=2
+            )
+        }
+            )
+        """,
+        session_id,
+        account_id,
+    )
+    return {
+        row["connector"]: ConnectorCapabilities.model_validate(
+            parse_jsonb(row["capabilities"]) or {}
+        )
+        for row in rows
+    }
 
 
 async def get_connection_for_account(
@@ -1124,6 +1176,35 @@ async def update_connector_tools_schema(
         """,
         connector,
         json.dumps(tools_schema),
+    )
+
+
+async def update_connector_capabilities(
+    conn: asyncpg.Connection[Any],
+    connector: str,
+    *,
+    account_id: str,
+    capabilities: dict[str, Any],
+) -> None:
+    """Upsert ``connectors.capabilities`` for ``connector`` wholesale.
+
+    The capability sibling to :func:`update_connector_tools_schema`, on the
+    same single-row-per-connector-type catalog.  The runtime container
+    publishes its typed richness descriptor via
+    ``PUT /v1/connectors/{connector}/capabilities``; a brand-new connector type
+    can publish its capabilities before its first connection exists.  The
+    ``ON CONFLICT (connector)`` upsert keeps one row per type.
+    """
+    await conn.execute(
+        """
+        INSERT INTO connectors (connector, capabilities, created_at, updated_at)
+        VALUES ($1, $2::jsonb, now(), now())
+        ON CONFLICT (connector) DO UPDATE
+           SET capabilities = EXCLUDED.capabilities,
+               updated_at   = now()
+        """,
+        connector,
+        json.dumps(capabilities),
     )
 
 

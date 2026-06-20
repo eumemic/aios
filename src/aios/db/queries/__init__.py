@@ -312,6 +312,7 @@ from .connections import (  # noqa: E402
     insert_connection,
     insert_management_call,
     list_chat_sessions_for_connection,
+    list_connection_capabilities_for_session,
     list_connection_tools_for_session,
     list_connections,
     list_pending_management_calls_for_connector,
@@ -326,6 +327,7 @@ from .connections import (  # noqa: E402
     reparent_connection,
     set_connection_secrets,
     try_record_inbound_ack,
+    update_connector_capabilities,
     update_connector_tools_schema,
 )
 from .environments import (  # noqa: E402
@@ -720,6 +722,7 @@ __all__ = [
     "list_chat_sessions_for_connection",
     "list_child_accounts",
     "list_confirmed_unresolved_tool_calls",
+    "list_connection_capabilities_for_session",
     "list_connection_tools_for_session",
     "list_connections",
     "list_environments",
@@ -813,6 +816,7 @@ __all__ = [
     "unscoped_set_session_snapshot",
     "update_account",
     "update_agent",
+    "update_connector_capabilities",
     "update_connector_tools_schema",
     "update_environment",
     "update_memory_store",
