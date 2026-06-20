@@ -681,11 +681,31 @@ async def _stimulate_existing_tell(
     response obligation, no lineage edge). The service-level mechanism the
     wake/notify policy surfaces call.
     """
+    await tell_existing_session(
+        pool, stim.session_id, content=stim.content, cause=stim.cause, account_id=account_id
+    )
+    return True
+
+
+async def tell_existing_session(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    content: str,
+    cause: str,
+    account_id: str,
+) -> Event:
+    """THE channel-less ``Tell(ExistingSession)`` writer: append a user-role message
+    + defer a wake, opening NO request edge (no response obligation). Returns the
+    appended event. The spine's ``TellExistingSession`` arm, the ``wake_self`` tool,
+    and the trigger failure-surface path all project from this one writer (the
+    *cross-session* ``deliver_cross_session_wake`` adds its depth/rate caps + lineage
+    span on top, and folds onto this arm with the Stage-6 edge-depth reconciliation)."""
     from aios.services.wake import defer_wake
 
-    await append_user_message(pool, stim.session_id, stim.content, account_id=account_id)
-    await defer_wake(pool, stim.session_id, cause=stim.cause, account_id=account_id)
-    return True
+    event = await append_user_message(pool, session_id, content, account_id=account_id)
+    await defer_wake(pool, session_id, cause=cause, account_id=account_id)
+    return event
 
 
 async def create_child_session(

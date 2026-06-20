@@ -12,7 +12,6 @@ from typing import Any
 from aios.errors import AiosError
 from aios.harness import runtime
 from aios.services import sessions as sessions_service
-from aios.services.wake import defer_wake
 from aios.tools.registry import registry
 
 
@@ -51,10 +50,9 @@ async def wake_self_handler(session_id: str, arguments: dict[str, Any]) -> dict[
 
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    event = await sessions_service.append_user_message(
-        pool, session_id, content, account_id=account_id
+    event = await sessions_service.tell_existing_session(
+        pool, session_id, content=content, cause="message", account_id=account_id
     )
-    await defer_wake(pool, session_id, cause="message", account_id=account_id)
     return {
         "woken": True,
         "session_id": session_id,

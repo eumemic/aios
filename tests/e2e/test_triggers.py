@@ -702,9 +702,7 @@ class TestRecordFire:
         prev_registry = runtime.sandbox_registry
         runtime.pool = pool
         runtime.sandbox_registry = registry
-        with mock.patch(
-            "aios.harness.trigger_runner.defer_wake", new_callable=mock.AsyncMock
-        ) as mock_defer:
+        with mock.patch("aios.services.wake.defer_wake", new_callable=mock.AsyncMock) as mock_defer:
             try:
                 await trigger_runner.run_trigger_step(echo.id)
             finally:
@@ -1693,7 +1691,7 @@ class TestOneShotLifecycle:
         prev_registry = runtime.sandbox_registry
         runtime.pool = pool
         runtime.sandbox_registry = registry
-        with mock.patch("aios.harness.trigger_runner.defer_wake", new_callable=mock.AsyncMock):
+        with mock.patch("aios.services.wake.defer_wake", new_callable=mock.AsyncMock):
             try:
                 await trigger_runner.run_trigger_step(echo.id)
             finally:
@@ -2065,7 +2063,7 @@ class TestReEnableNextFireInvariant:
         prev_registry = runtime.sandbox_registry
         runtime.pool = pool
         runtime.sandbox_registry = registry
-        with mock.patch("aios.harness.trigger_runner.defer_wake", new_callable=mock.AsyncMock):
+        with mock.patch("aios.services.wake.defer_wake", new_callable=mock.AsyncMock):
             try:
                 await trigger_runner.run_trigger_step(echo.id)
             finally:

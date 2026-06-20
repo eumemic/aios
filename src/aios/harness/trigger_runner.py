@@ -70,7 +70,6 @@ from aios.services.wake import (
     WakeSessionRateLimitedError,
     WakeSessionTargetUnavailableError,
     defer_trigger_fire,
-    defer_wake,
     deliver_cross_session_wake,
 )
 
@@ -722,8 +721,9 @@ async def _surface_failure(session_id: str, account_id: str, content: str) -> No
     """
     pool = runtime.require_pool()
     try:
-        await sessions_service.append_user_message(pool, session_id, content, account_id=account_id)
-        await defer_wake(pool, session_id, cause="message", account_id=account_id)
+        await sessions_service.tell_existing_session(
+            pool, session_id, content=content, cause="message", account_id=account_id
+        )
     except Exception:
         log.exception(
             "trigger.surface_failure_failed",
