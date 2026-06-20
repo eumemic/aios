@@ -16,7 +16,7 @@ the request_id it owes a response to. These tests drive the real
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
@@ -72,7 +72,7 @@ def _final_user_text(messages: list[dict[str, Any]]) -> str | None:
 
 
 @pytest.fixture
-def _stub_tool_provider() -> AsyncIterator[None]:
+def _stub_tool_provider() -> Iterator[None]:
     prev = runtime.tool_provider
     tp = mock.Mock()
     tp.list_tools_for_session = AsyncMock(return_value=[])
