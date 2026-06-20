@@ -80,11 +80,6 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
         "operators watch a session via `aios sessions stream` / `aios tail` rather "
         "than a blocking poll."
     ),
-    "cancel_invocation": (
-        "Recursive invocation cancel by edge handle (task_id + request_id). MCP-surfaced "
-        "for agents; a dedicated `aios` cancel command is a follow-up — operators currently "
-        "cancel a run via `aios runs cancel` or POST the endpoint directly."
-    ),
     # ── External-event webhook ingress ───────────────────────────────
     # The per-trigger inbound webhook edge (#1281). Authenticated by a
     # path-embedded ingest token (``aios_evt_…``), not the operator bearer,

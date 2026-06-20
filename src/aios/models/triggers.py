@@ -191,9 +191,8 @@ TriggerSourceReplace = Annotated[
 class SandboxCommandAction(BaseModel):
     """Run a bash command in the session's sandbox WITHOUT waking the model.
 
-    Verbatim today's scheduled-task behavior. Defaults for
-    ``timeout_seconds`` / ``max_output_bytes`` are materialized at write
-    time so the stored row is self-describing (the runner carries no
+    Defaults for ``timeout_seconds`` / ``max_output_bytes`` are materialized
+    at write time so the stored row is self-describing (the runner carries no
     defaults knowledge).
     """
 

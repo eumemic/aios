@@ -197,11 +197,12 @@ async def test_workflow_description_round_trips(http_client: httpx.AsyncClient) 
     assert r2.status_code == 201 and r2.json()["description"] is None
 
 
-async def test_cancel_run_endpoint(http_client: httpx.AsyncClient) -> None:
-    """The cancel endpoint is wired + account-scoped + idempotent. (The terminal flip
-    lands on a worker wake — mocked out here, as for create/resume — so the returned
-    run still shows its pre-cancel status; the finalize-to-``cancelled`` path is the
-    step integration test's job.)"""
+async def test_cancel_run_via_invocation_endpoint(http_client: httpx.AsyncClient) -> None:
+    """A run is cancelled through the unified ``POST /v1/invocations/{task_id}/cancel``
+    (the run-side ``POST /runs/{id}/cancel`` was merged into it). Wired + account-scoped
+    + idempotent + **202 Accepted** (the terminal flip to ``cancelled`` lands on a worker
+    wake — mocked out here, as for create/resume). ``request_id`` is a free operator
+    label for the run arm."""
     env_id = await _create_env(http_client)
     wf = (
         await http_client.post("/v1/workflows", json={"name": f"c-{_uniq()}", "script": _SCRIPT})
@@ -210,14 +211,21 @@ async def test_cancel_run_endpoint(http_client: httpx.AsyncClient) -> None:
         await http_client.post("/v1/runs", json={"workflow_id": wf["id"], "environment_id": env_id})
     ).json()
 
-    r = await http_client.post(f"/v1/runs/{run['id']}/cancel")
-    assert r.status_code == 200 and r.json()["id"] == run["id"], r.text
-    # Idempotent: a second cancel is still 200.
-    assert (await http_client.post(f"/v1/runs/{run['id']}/cancel")).status_code == 200
+    cancel_url = f"/v1/invocations/{run['id']}/cancel"
+    r = await http_client.post(cancel_url, params={"request_id": "operator"})
+    assert r.status_code == 202, r.text
+    # Idempotent: a second cancel is still 202.
+    assert (
+        await http_client.post(cancel_url, params={"request_id": "operator"})
+    ).status_code == 202
     # Unknown + cross-tenant both 404.
-    assert (await http_client.post("/v1/runs/wfr_nope/cancel")).status_code == 404
+    assert (
+        await http_client.post("/v1/invocations/wfr_nope/cancel", params={"request_id": "operator"})
+    ).status_code == 404
     key_b = await _mint_tenant(http_client, f"tenant-b-{_uniq()}")
-    cross = await http_client.post(f"/v1/runs/{run['id']}/cancel", headers=_bearer(key_b))
+    cross = await http_client.post(
+        cancel_url, params={"request_id": "operator"}, headers=_bearer(key_b)
+    )
     assert cross.status_code == 404, cross.text
 
 

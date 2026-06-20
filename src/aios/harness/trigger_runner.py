@@ -337,7 +337,7 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
     # risks deadlock on the small pool.
     if auto_disable:
         content = (
-            f"[Scheduled task '{trigger.name}' auto-disabled after "
+            f"[Trigger '{trigger.name}' auto-disabled after "
             f"{MAX_CONSECUTIVE_FAILURES} consecutive failures: "
             f"{error_summary or status}]"
         )

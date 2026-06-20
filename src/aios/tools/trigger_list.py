@@ -17,9 +17,8 @@ from aios.services import triggers as triggers_service
 from aios.tools.registry import registry
 
 TRIGGER_LIST_DESCRIPTION = (
-    "List all triggers for this session, with each trigger's name, source "
-    "(cron/one_shot), action (sandbox_command/wake_owner), enabled state, "
-    "last fire status, and consecutive failure count."
+    "List all triggers for this session, with each trigger's name, source kind, "
+    "action kind, enabled state, last fire status, and consecutive failure count."
 )
 
 TRIGGER_LIST_PARAMETERS_SCHEMA: dict[str, Any] = {

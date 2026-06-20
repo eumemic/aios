@@ -333,15 +333,6 @@ async def resume_gate(
     return await service.get_run(pool, run_id, account_id=account_id)
 
 
-@runs_router.post("/{run_id}/cancel", operation_id="cancel_run")
-async def cancel_run(run_id: str, pool: PoolDep, account_id: AccountIdDep) -> WfRun:
-    """Cancel a run (pending/running/suspended). Records a cancel marker + wakes the
-    run; it finalizes ``cancelled`` on its next wake (so the returned run may still
-    show its pre-cancel status — like ``resume``). Idempotent on an already-terminal
-    run; a cross-tenant run 404s."""
-    return await service.cancel_run(pool, run_id=run_id, account_id=account_id)
-
-
 @runs_router.get("/{run_id}/stream", openapi_extra={"x-codegen": {"targets": []}})
 async def stream_run_events(
     run_id: str,
