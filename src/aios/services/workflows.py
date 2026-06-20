@@ -535,12 +535,18 @@ async def await_run(
         subscription.terminate()
 
     done = run.status in TERMINAL_RUN_STATUSES
-    is_error = run.status == "errored"
+    # A cancelled run is an ERROR outcome to its awaiter, not a false success: it
+    # deliberately writes no request_response, so a status-blind awaiter would
+    # surface ``{ok: null}``. Surface it as ``error.kind='cancelled'`` (the awaiter
+    # keeps ``run_status`` for watchers that distinguish cancelled from errored).
+    is_error = run.status in ("errored", "cancelled")
     error: dict[str, Any] | None = None
-    if is_error:
+    if run.status == "errored":
         # ``error.kind`` lives only in the run_completed payload, not on the run row.
         async with pool.acquire() as conn:
             error = await wf_queries.resolve_run_error(conn, run_id)
+    elif run.status == "cancelled":
+        error = {"kind": "cancelled"}
     return WfRunWaitResponse(
         run_status=run.status, done=done, output=run.output, is_error=is_error, error=error
     )

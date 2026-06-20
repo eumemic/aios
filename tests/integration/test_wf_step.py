@@ -3814,6 +3814,24 @@ async def test_await_run_returns_when_already_completed(
     assert resp.output == 1 and resp.is_error is False and resp.error is None
 
 
+async def test_await_run_surfaces_cancelled_as_error_not_false_success(
+    wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
+) -> None:
+    """A cancelled run resolves as an ERROR (``error.kind='cancelled'``), not the
+    ``{ok: null}`` false-success a status-blind awaiter would surface — a cancelled
+    run deliberately writes no ``request_response``. ``run_status`` still carries
+    ``cancelled`` for watchers that distinguish it from ``errored``."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    await wf_service.cancel_run(pool, run_id=run_id, account_id="acc_wf")
+    await run_workflow_step(run_id)  # harvest the cancel signal → finalize cancelled
+    resp = await wf_service.await_run(
+        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
+    )
+    assert resp.done is True and resp.run_status == "cancelled"
+    assert resp.is_error is True and resp.error == {"kind": "cancelled"}
+
+
 async def test_await_run_surfaces_sync_def_author_error_message(
     wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
 ) -> None:
