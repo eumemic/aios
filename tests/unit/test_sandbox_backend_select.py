@@ -47,9 +47,7 @@ def test_select_sandbox_backend_unknown_raises(
         select_sandbox_backend(settings)
 
 
-def test_sandbox_backend_default_is_docker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_sandbox_backend_default_is_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The seam is invisible unless overridden: the default value is 'docker'."""
     settings = _settings(tmp_path, monkeypatch)
 
