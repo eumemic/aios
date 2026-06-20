@@ -1720,7 +1720,7 @@ async def test_idle_with_open_request_is_nudged(
 
     assistant = await _idle_assistant_turn(pool, cid)
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, assistant, account_id="acc_wf", parent_run_id=_run_id
+        pool, cid, assistant, account_id="acc_wf"
     )
     assert result.nudged and result.autoerror_caller_run_id is None
 
@@ -1765,7 +1765,7 @@ async def test_tell_spawned_child_reaches_idle_with_zero_nudges(
 
     assistant = await _idle_assistant_turn(pool, cid)
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, assistant, account_id="acc_wf", parent_run_id=run_id
+        pool, cid, assistant, account_id="acc_wf"
     )
     assert not result.nudged and result.autoerror_caller_run_id is None  # no nudge, no auto-error
 
@@ -1802,7 +1802,7 @@ async def test_quiescence_guard_is_noop_for_non_child(
     )
     assistant = await _idle_assistant_turn(pool, fg.id)
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, fg.id, assistant, account_id="acc_wf", parent_run_id=None
+        pool, fg.id, assistant, account_id="acc_wf"
     )
     assert not result.nudged and result.autoerror_caller_run_id is None
     async with pool.acquire() as conn:
@@ -1832,14 +1832,13 @@ async def test_open_request_is_auto_errored_after_nudge_budget(
             cid,
             await _idle_assistant_turn(pool, cid),
             account_id="acc_wf",
-            parent_run_id=run_id,
         )
         nudged = _qresult.nudged
         assert nudged  # still under budget — keep nudging
 
     # Budget spent: the next pure-text turn auto-errors the request instead.
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
+        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf"
     )
     assert not result.nudged
     # auto-errored → the caller run is woken to harvest the no_return
@@ -1886,7 +1885,6 @@ async def test_non_answering_child_resolves_run_via_agent_no_return_error(
             child_id,
             await _idle_assistant_turn(pool, child_id),
             account_id="acc_wf",
-            parent_run_id=run_id,
         )
 
     await run_workflow_step(run_id)  # harvest no_return -> AgentNoReturnError -> caught -> return
@@ -1997,7 +1995,7 @@ async def test_child_reclaimed_on_quiescence_and_parent_still_harvests(
     the answer, because ``derive_response`` reads the response *event* (which survives
     archival), not the live row."""
     pool = wf_runtime
-    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:reclaim#0")
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:reclaim#0")
 
     # Born ephemeral — the workflow-child wiring, no per-call plumbing.
     born = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
@@ -2016,7 +2014,7 @@ async def test_child_reclaimed_on_quiescence_and_parent_still_harvests(
             error=None,
         )
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
+        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf"
     )
     assert not result.nudged and result.autoerror_caller_run_id is None
 

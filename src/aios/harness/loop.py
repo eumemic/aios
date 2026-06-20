@@ -703,7 +703,6 @@ async def _run_session_step_body(
         session_id,
         assistant_msg,
         account_id=account_id,
-        parent_run_id=session.parent_run_id,
     )
     # Charge now that the assistant message is durably persisted (see _charge_usage).
     new_spent_microusd = await _charge_usage()

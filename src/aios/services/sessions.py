@@ -1406,6 +1406,98 @@ async def fail_open_child_requests_conn(
     return parent_run_id if wrote_any else None
 
 
+class RequestResponseWrite(NamedTuple):
+    """Outcome of :func:`respond_to_request_conn` — the write + the post-commit wakes.
+
+    ``outcome`` ∈ ``responded`` | ``duplicate`` | ``not_a_child`` | ``unknown_request``.
+    ``wake_run_id`` / ``wake_session_id`` are the caller to wake AFTER the caller's
+    transaction commits (at most one is set, and only when this call actually wrote);
+    ``account_id`` is the servicer's account (for the session ``defer_wake``), ``None``
+    only when the session row is gone.
+    """
+
+    outcome: str
+    wake_run_id: str | None
+    wake_session_id: str | None
+    account_id: str | None
+
+
+async def respond_to_request_conn(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    request_id: str,
+    is_error: bool,
+    result: Any,
+    error: dict[str, Any] | None,
+) -> RequestResponseWrite:
+    """THE conn-level request-response writer + caller-kind router.
+
+    Reads the trusted caller off the ``request_opened`` edge and routes the response
+    on the OPEN connection — so it can ride the caller's transaction (e.g. a cancel
+    kill-leaf fusing the answer with the archive, or the no_return backstop): a
+    ``run`` caller keeps the fused ``write_child_response`` (``child_done``) marker +
+    the run to wake; a ``session`` caller writes the plain response edge + the session
+    to wake; an ``api`` caller writes the edge and wakes nobody (the ephemeral awaiter
+    long-polls). Ownership (``caller.kind``) — not child-ness — is the gate; exactly-once
+    is ``write_response_if_absent``'s first-writer-wins. The pool-level
+    :func:`aios.tools.workflow_completion.respond_to_request` wraps this with
+    acquire+transaction and fires the returned wakes post-commit.
+    """
+    ctx = await queries.get_session_workflow_context(conn, session_id)
+    if ctx is None:
+        return RequestResponseWrite("not_a_child", None, None, None)
+    account_id, parent_run_id = ctx
+    caller = await queries.get_request_caller(conn, session_id, request_id=request_id)
+    caller_kind = caller.get("kind") if caller else None
+    if request_id not in await queries.get_open_request_ids(
+        conn, session_id, account_id=account_id
+    ):
+        # Not open: a session/api re-answer is an idempotent ``duplicate``; a run
+        # re-answer to a closed request stays ``unknown_request`` so the model gets a
+        # tool error and self-corrects (a genuine race is still caught at the write).
+        if caller is not None and caller_kind in ("session", "api"):
+            return RequestResponseWrite("duplicate", None, None, account_id)
+        return RequestResponseWrite("unknown_request", None, None, account_id)
+    if caller_kind == "run":
+        # Fail closed if the session lost its parent_run_id (never signal a NULL run).
+        if parent_run_id is None:
+            return RequestResponseWrite("not_a_child", None, None, account_id)
+        wrote = await write_child_response(
+            conn,
+            session_id,
+            account_id=account_id,
+            parent_run_id=parent_run_id,
+            request_id=request_id,
+            is_error=is_error,
+            result=result,
+            error=error,
+        )
+        return RequestResponseWrite(
+            "responded" if wrote else "duplicate",
+            parent_run_id if wrote else None,
+            None,
+            account_id,
+        )
+    wrote = await queries.write_response_if_absent(
+        conn,
+        session_id,
+        account_id=account_id,
+        request_id=request_id,
+        is_error=is_error,
+        result=result,
+        error=error,
+    )
+    wake_session_id = (
+        caller["id"]
+        if (wrote and caller_kind == "session" and caller and caller.get("id"))
+        else None
+    )
+    return RequestResponseWrite(
+        "responded" if wrote else "duplicate", None, wake_session_id, account_id
+    )
+
+
 class AssistantAppendResult(NamedTuple):
     """Outcome of :func:`append_assistant_and_guard_quiescence`.
 
@@ -1441,7 +1533,6 @@ async def append_assistant_and_guard_quiescence(
     assistant_msg: dict[str, Any],
     *,
     account_id: str,
-    parent_run_id: str | None,
 ) -> AssistantAppendResult:
     """Append the model's assistant message and, **atomically**, enforce the
     request-totality invariant: a session may not go idle while it owes a response.
@@ -1512,36 +1603,21 @@ async def append_assistant_and_guard_quiescence(
                 conn, session_id, account_id=account_id, request_id=request_id
             )
             if nudges >= REQUEST_NUDGE_BUDGET:
-                # Auto-error past budget. Route the response-write + caller-wake by the
-                # trusted edge's caller kind (#1127): a run caller keeps the fused
-                # child_done marker; a session/api caller writes the plain response edge.
-                # The run path stays byte-for-byte behavior-preserved.
-                caller = await queries.get_request_caller(conn, session_id, request_id=request_id)
-                caller_kind = caller.get("kind") if caller else None
-                if caller_kind == "run" and parent_run_id is not None:
-                    if await write_child_response(
-                        conn,
-                        session_id,
-                        account_id=account_id,
-                        parent_run_id=parent_run_id,
-                        request_id=request_id,
-                        is_error=True,
-                        result=None,
-                        error={"kind": "no_return"},
-                    ):
-                        autoerror_caller_run_id = parent_run_id
-                else:
-                    wrote = await queries.write_response_if_absent(
-                        conn,
-                        session_id,
-                        account_id=account_id,
-                        request_id=request_id,
-                        is_error=True,
-                        result=None,
-                        error={"kind": "no_return"},
-                    )
-                    if wrote and caller_kind == "session" and caller and caller.get("id"):
-                        autoerror_caller_session_ids.append(caller["id"])
+                # Auto-error past budget through the one conn-level response writer
+                # (run caller → fused child_done marker; session/api → plain edge),
+                # collecting the post-commit caller-wake the harness loop fires.
+                write = await respond_to_request_conn(
+                    conn,
+                    session_id,
+                    request_id=request_id,
+                    is_error=True,
+                    result=None,
+                    error={"kind": "no_return"},
+                )
+                if write.wake_run_id is not None:
+                    autoerror_caller_run_id = write.wake_run_id
+                elif write.wake_session_id is not None:
+                    autoerror_caller_session_ids.append(write.wake_session_id)
             else:
                 to_nudge.append(request_id)
         if to_nudge:

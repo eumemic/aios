@@ -118,77 +118,31 @@ async def respond_to_request(
     legacy run path: a request whose edge names a run caller but whose session lost
     its ``parent_run_id`` fails closed rather than signal a NULL run.
     """
-    caller_session_id: str | None = None
-    wake_run_id: str | None = None
-    async with pool.acquire() as conn:
-        ctx = await queries.get_session_workflow_context(conn, session_id)
-        if ctx is None:
-            return "not_a_child"  # the session row is gone — nothing to respond to
-        account_id, parent_run_id = ctx
-        caller = await queries.get_request_caller(conn, session_id, request_id=request_id)
-        caller_kind = caller.get("kind") if caller else None
-        if request_id not in await queries.get_open_request_ids(
-            conn, session_id, account_id=account_id
-        ):
-            # The request isn't open. Either it was genuinely asked and is now
-            # answered, or it was never a request of this session. The trusted
-            # ``request_opened`` edge disambiguates: a caller edge exists iff it
-            # was asked.
-            #
-            # For a *session*/*api* caller the answer is idempotent — a sequential
-            # re-answer collapses to the one already-captured response, so report
-            # ``duplicate`` (first-writer-wins, no second wake). For the *run*
-            # path (the model's own ``return``/``error`` on a workflow child) a
-            # sequential re-answer to a closed request stays ``unknown_request``
-            # so the model gets a tool error and self-corrects (legacy behaviour;
-            # a genuinely-concurrent race is still caught one layer down at
-            # ``write_child_response``/``write_response_if_absent`` → ``duplicate``).
-            if caller is not None and caller_kind in ("session", "api"):
-                return "duplicate"
-            return "unknown_request"
-        async with conn.transaction():
-            if caller_kind == "run":
-                # Legacy run path: keep the fused child_done marker. Fail closed if the
-                # session has lost its parent_run_id (never signal a NULL run).
-                if parent_run_id is None:
-                    return "not_a_child"
-                wrote = await sessions_service.write_child_response(
-                    conn,
-                    session_id,
-                    account_id=account_id,
-                    parent_run_id=parent_run_id,
-                    request_id=request_id,
-                    is_error=is_error,
-                    result=result,
-                    error=error,
-                )
-                if wrote:
-                    wake_run_id = parent_run_id
-            else:
-                # Session/api caller (#1127): a plain response edge, no run signal.
-                wrote = await queries.write_response_if_absent(
-                    conn,
-                    session_id,
-                    account_id=account_id,
-                    request_id=request_id,
-                    is_error=is_error,
-                    result=result,
-                    error=error,
-                )
-                if caller_kind == "session" and caller and caller.get("id"):
-                    caller_session_id = caller["id"]
-    if wake_run_id is not None:
+    # All routing lives in the one conn-level writer (sessions.respond_to_request_conn);
+    # here we just provide the transaction and fire the returned wakes post-commit.
+    async with pool.acquire() as conn, conn.transaction():
+        write = await sessions_service.respond_to_request_conn(
+            conn,
+            session_id,
+            request_id=request_id,
+            is_error=is_error,
+            result=result,
+            error=error,
+        )
+    if write.wake_run_id is not None:
         # batch: child completions are the high-frequency wake source — a fan-out's
         # burst coalesces into one re-drive when the window setting is on.
-        await defer_run_wake(wake_run_id, batch=True)
-    elif wrote and caller_session_id is not None:
+        await defer_run_wake(write.wake_run_id, batch=True)
+    elif write.wake_session_id is not None and write.account_id is not None:
         # Wake the caller session so its parked invoke() tool task harvests the answer
         # (its await_session is also self-subscribed to this channel — wake or NOTIFY,
         # whichever lands first, drives the harvest).
         from aios.services.wake import defer_wake
 
-        await defer_wake(pool, caller_session_id, cause="invoke_response", account_id=account_id)
-    return "responded" if wrote else "duplicate"
+        await defer_wake(
+            pool, write.wake_session_id, cause="invoke_response", account_id=write.account_id
+        )
+    return write.outcome
 
 
 async def fail_all_open_requests(
