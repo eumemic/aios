@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from dataclasses import dataclass
+from enum import StrEnum
 from functools import cache
 from typing import TYPE_CHECKING, Any
 
@@ -172,74 +174,105 @@ def _set_content_block_cache(msg: dict[str, Any]) -> None:
 _ANTHROPIC_PROXY_PROVIDERS = frozenset({"openrouter", "bedrock", "vertex_ai"})
 
 
-@cache
-def _supports_anthropic_cache_control(model: str) -> bool:
-    """True when ``model`` accepts Anthropic ``cache_control`` markers.
-
-    Used to gate ``inject_cache_breakpoints`` — see its docstring for why
-    the gate is necessary. Unknown model strings return ``False`` so we
-    default to the safe no-op.
-
-    Covers direct Anthropic plus Anthropic-backed routes through
-    OpenRouter / Bedrock / Vertex (all of which preserve ``cache_control``
-    for Claude models). Non-Claude models on those same proxies stay
-    gated out because they don't necessarily handle the content-block
-    content shape that applying cache markers forces us into.
-
-    Cached: called once per inference step, result is a pure function of
-    the model string, and the distinct-model-string cardinality is low
-    (agents typically reuse one or two).
-    """
-    try:
-        model_name, provider, _, _ = litellm.get_llm_provider(model)
-    except Exception:
-        return False
-    if provider == "anthropic":
-        return True
-    if provider in _ANTHROPIC_PROXY_PROVIDERS:
-        lower = (model_name or model).lower()
-        return "claude" in lower or "anthropic" in lower
-    return False
-
-
 _OPENAI_NATIVE_PROVIDERS = frozenset({"openai", "azure"})
 _OPENAI_PROXY_PROVIDERS = frozenset({"openrouter"})
 
 
+class CacheChannel(StrEnum):
+    """Which prompt-cache channel a model's provider speaks, if any.
+
+    The two cache channels are **mutually exclusive by construction** — a
+    model uses the Anthropic content-block ``cache_control`` markers *or*
+    the OpenAI ``extra_body.prompt_cache_key`` field, never both. Encoding
+    them as a single discriminated arm (rather than two independent
+    booleans) makes the structurally-impossible "both" state
+    unrepresentable.
+    """
+
+    ANTHROPIC = "anthropic"  # content-block cache_control markers
+    OPENAI = "openai"  # extra_body.prompt_cache_key
+    NONE = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelDescriptor:
+    """The provider-quirk verdicts for a model string.
+
+    Flat by design — two orthogonal axes only:
+
+    * ``cache_channel`` — a discriminator (which cache channel, if any).
+    * ``supports_thinking`` — an orthogonal capability axis (a Claude
+      model can be on either cache channel *and* do thinking), so it stays
+      a separate ``bool`` rather than being folded into the discriminator.
+    """
+
+    cache_channel: CacheChannel
+    supports_thinking: bool
+
+
 @cache
-def _supports_openai_prompt_cache_key(model: str) -> bool:
-    """True when ``model`` accepts OpenAI's ``prompt_cache_key`` field.
+def model_descriptor(model: str) -> ModelDescriptor:
+    """Resolve the provider-quirk verdicts for ``model``.
 
-    OpenAI's Responses / Chat Completions APIs group requests by an
-    explicit ``prompt_cache_key`` for cache eligibility. Anthropic uses
-    ``cache_control`` content-block markers instead, so the two cache
-    channels are mutually exclusive — the gate here mirrors
-    :func:`_supports_anthropic_cache_control`, scoped to the OpenAI
-    side: native OpenAI (direct ``openai`` plus Azure OpenAI, which is
-    the same Responses / Chat Completions API on Microsoft infra and
-    [documents the field](https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/prompt-caching)
-    natively) plus OpenAI-backed routes through OpenRouter (which
-    forwards unknown ``extra_body`` params to the backing provider).
-    Non-OpenAI models on OpenRouter stay gated out — the field is
-    silently dropped by OpenRouter for non-OpenAI backends and could
-    trip parameter validation on some adapter versions.
+    One ``litellm.get_llm_provider`` sniff feeds both projections. Pure
+    function of the model string; cached because it's called once per
+    inference step and the distinct-model-string cardinality is low
+    (agents typically reuse one or two).
 
-    Unknown model strings return False (safe no-op) — same posture as
-    the Anthropic gate.
+    **Cache channel.** The two channels are mutually exclusive (see
+    :class:`CacheChannel`):
 
-    Cached for the same reason as the Anthropic counterpart: pure
-    function of the model string, low cardinality.
+    * ``ANTHROPIC`` — gates the Anthropic ``cache_control`` content-block
+      markers placed by :func:`inject_cache_breakpoints`. Covers direct
+      Anthropic plus Anthropic-backed routes through OpenRouter / Bedrock
+      / Vertex (all of which preserve ``cache_control`` for Claude
+      models — the proxies enumerated in :data:`_ANTHROPIC_PROXY_PROVIDERS`).
+      Matching on provider alone isn't sufficient: those same providers
+      also host non-Anthropic models (``openrouter/openai/*``,
+      ``bedrock/amazon.titan-*``) that break on the content-block format,
+      so the model name must carry ``claude`` or ``anthropic``.
+    * ``OPENAI`` — gates OpenAI's ``prompt_cache_key`` field. OpenAI's
+      Responses / Chat Completions APIs group requests by an explicit
+      ``prompt_cache_key`` for cache eligibility. Covers native OpenAI
+      (direct ``openai`` plus Azure OpenAI, the same Responses / Chat
+      Completions API on Microsoft infra, which
+      [documents the field](https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/prompt-caching)
+      natively) plus OpenAI-backed routes through OpenRouter (which
+      forwards unknown ``extra_body`` params to the backing provider).
+      Non-OpenAI models on OpenRouter stay ``NONE`` — the field is
+      silently dropped by OpenRouter for non-OpenAI backends and could
+      trip parameter validation on some adapter versions.
+
+    Unknown model strings (``get_llm_provider`` raises) collapse to a
+    safe ``NONE`` — the no-op posture for both cache gates.
+
+    **Thinking.** ``supports_thinking`` reproduces the prior inline gate
+    exactly: any Claude family is assumed thinking-capable (extended
+    thinking is Claude 4.x+; over-broad for <= 3.5, which aios doesn't
+    run), short-circuiting before litellm so a Claude newer than this
+    worker's catalog snapshot — or a proxy-routed one litellm
+    under-reports — keeps its ``thinking_blocks``. Note it matches on the
+    **full ``model`` string** (not ``model_name``), matching the prior
+    expression. Unknown models default to litellm's verdict (safe
+    ``False`` when it can't tell).
     """
     try:
         model_name, provider, _, _ = litellm.get_llm_provider(model)
     except Exception:
-        return False
-    if provider in _OPENAI_NATIVE_PROVIDERS:
-        return True
-    if provider in _OPENAI_PROXY_PROVIDERS:
-        lower = (model_name or model).lower()
-        return lower.startswith("openai/")
-    return False
+        provider, model_name = "", model
+    lower = (model_name or model).lower()
+    if provider == "anthropic" or (
+        provider in _ANTHROPIC_PROXY_PROVIDERS and ("claude" in lower or "anthropic" in lower)
+    ):
+        channel = CacheChannel.ANTHROPIC
+    elif provider in _OPENAI_NATIVE_PROVIDERS or (
+        provider in _OPENAI_PROXY_PROVIDERS and lower.startswith("openai/")
+    ):
+        channel = CacheChannel.OPENAI
+    else:
+        channel = CacheChannel.NONE
+    supports_thinking = "claude" in model.lower() or litellm.supports_reasoning(model)
+    return ModelDescriptor(cache_channel=channel, supports_thinking=supports_thinking)
 
 
 def _apply_provider_cache_hints(
@@ -280,7 +313,7 @@ def _apply_provider_cache_hints(
     """
     if session_id is None:
         return
-    if _supports_openai_prompt_cache_key(model):
+    if model_descriptor(model).cache_channel is CacheChannel.OPENAI:
         extra_body = kwargs.setdefault("extra_body", {})
         extra_body.setdefault("prompt_cache_key", session_id)
 
@@ -327,7 +360,7 @@ def inject_cache_breakpoints(
     """
     if not messages:
         return
-    if not _supports_anthropic_cache_control(model):
+    if model_descriptor(model).cache_channel is not CacheChannel.ANTHROPIC:
         return
 
     if messages[0].get("role") == "system":

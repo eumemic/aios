@@ -27,6 +27,20 @@ from aios.harness.window import WindowOmission
 from aios.models.events import Event
 
 
+@pytest.fixture(autouse=True)
+def _clear_model_descriptor_cache() -> None:
+    """Reset the ``@cache``'d resolver before each test.
+
+    ``build_messages``' thinking gate routes through the ``@cache``'d
+    ``model_descriptor``. Several tests below monkeypatch
+    ``litellm.supports_reasoning``; without clearing the cache the resolver's
+    verdicts would stick across tests, producing order-dependent failures.
+    """
+    from aios.harness.completion import model_descriptor
+
+    model_descriptor.cache_clear()
+
+
 def _full_pipeline(
     events: list[Event],
     channels: list[str],
@@ -2404,3 +2418,69 @@ class TestApproxCount:
     )
     def test_rounding(self, n: int, expected: str) -> None:
         assert _approx_count(n) == expected
+
+
+class TestThinkingGateShortCircuit:
+    """The thinking gate in ``build_messages`` preserves the empty-model
+    short-circuit and matches the prior inline verdict.
+    """
+
+    def test_empty_model_does_not_call_resolver(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``bool(model) and …`` short-circuits for an empty model string,
+        so ``model_descriptor`` is never called (and a falsy thinking verdict
+        results)."""
+        import aios.harness.completion as completion
+
+        called = False
+        real = completion.model_descriptor
+
+        def _tracking(model: str):  # type: ignore[no-untyped-def]
+            nonlocal called
+            called = True
+            return real(model)
+
+        monkeypatch.setattr(completion, "model_descriptor", _tracking)
+
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["thinking_blocks"] = [{"type": "thinking", "thinking": "x"}]
+        msgs = build_messages(events, system_prompt=None, model="").messages
+        assert called is False
+        # supports_thinking falsy -> thinking_blocks stripped
+        assert "thinking_blocks" not in msgs[1]
+
+    def test_openai_model_strips_thinking(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``openai/gpt-4o`` is non-Claude; with litellm reporting no reasoning
+        support the old inline verdict was False, so thinking blocks strip."""
+        monkeypatch.setattr("litellm.supports_reasoning", lambda *a, **k: False)
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["thinking_blocks"] = [{"type": "thinking", "thinking": "x"}]
+        msgs = build_messages(events, system_prompt=None, model="openai/gpt-4o").messages
+        assert "thinking_blocks" not in msgs[1]
+
+
+class TestLazyLitellmBoundary:
+    """Importing ``aios.harness.context`` must NOT pull in ``litellm`` at
+    module import — the function-local import of ``model_descriptor`` keeps
+    the ~1.18s litellm bootstrap deferred."""
+
+    def test_context_import_does_not_import_litellm(self) -> None:
+        import subprocess
+        import sys
+
+        code = (
+            "import sys\n"
+            "import aios.harness.context  # noqa: F401\n"
+            "assert 'litellm' not in sys.modules, sorted(m for m in sys.modules if 'litellm' in m)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
