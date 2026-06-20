@@ -1271,9 +1271,13 @@ async def append_event(
         )
 
 
-# A session gets this many nudges to answer an owed request before the harness
-# answers it on the model's behalf with a ``no_return`` error. Derived per request
-# from the count of nudge messages (see ``queries.count_request_nudges``).
+# A session gets this many CONSECUTIVE idle nudges to answer an owed request before
+# the harness answers it on the model's behalf with a ``no_return`` error. Derived
+# per request from the count of nudge messages SINCE the last tool-call turn (see
+# ``queries.count_request_nudges``) — a stuck-detector that bounds consecutive
+# inaction, not a loop-limiter that bounds lifetime idle work (#1412). Any activity
+# (tool-call) turn resets the count, so a working servicer never trips the budget;
+# only one stuck doing nothing N turns running gets ``no_return``'d.
 REQUEST_NUDGE_BUDGET = 3
 
 
