@@ -1496,15 +1496,30 @@ async def harvest_session_cancel_markers(
     the open set AND latches first-writer-wins, so a late ``return(R)`` no-ops; the caller is
     woken (run / session) so it re-resolves ``cancelled`` promptly.
 
+    **Recursive propagation (§2.3):** once the session owes NO remaining open inbound awaited
+    request — the dominant owned/fresh-node case (a ``call_agent`` spawn serving only the
+    cancelled request) — its outbound awaited children are orphaned, so the leaf seeds a
+    cancel-marker on each (a run via the ``wf_run_signals`` cancel, a session via a
+    ``session_cancel_markers`` row) in the SAME transaction, and each child's own step repeats.
+    A still-multiply-inbound **shared** session does NOT propagate (it still owes a surviving
+    request — over-cancelling its work would be unsound).
+
+    The "no open inbound ⇒ orphaned" heuristic is **slightly over-broad until §7**: the
+    ``call_session(existing)`` path lets a session close its sole inbound (an early ``return``)
+    while an outbound child stays legitimately live, and that child is cancelled here. The
+    over-cancel is **bounded — intent only, never state**: an already-answered child is a
+    first-writer-wins no-op (no outcome corruption); only a genuinely-live child is reclaimed
+    early. The precise per-edge ``attributed_to`` reclaim (§7) is a later slice.
+
     Minimal cut: the owned-session teardown (request-scoped interrupt + drain + archive +
-    sandbox release, §4) and the recursive propagation to this session's own children (§2.3)
-    are deferred (the §4.1/§4.4 residuals — the cancelled request's in-flight tool tasks run to
-    completion and the session lingers idle-but-answered). The caller has already learned
-    ``cancelled``; the cascade's reclaim + recursion land in a later slice.
+    sandbox release, §4/C1) and the §9 quiescence counter are deferred residuals — the cancelled
+    request's in-flight tool tasks run to completion and the session lingers idle-but-answered.
+    The caller has already learned ``cancelled`` and the subtree is marked.
     """
     from aios.services.wake import defer_wake
 
     wakes: list[RequestResponseWrite] = []
+    propagated: list[queries.ChildNode] = []
     async with pool.acquire() as conn, conn.transaction():
         markers = await queries.list_unharvested_session_cancel_markers(conn, session_id)
         if not markers:
@@ -1522,7 +1537,32 @@ async def harvest_session_cancel_markers(
             await queries.mark_session_cancel_marker_harvested(
                 conn, session_id=session_id, request_id=marker.request_id
             )
-    # Fire the caller wakes AFTER commit so each caller re-resolves the cancelled outcome.
+        # §2.3: propagate ONLY when no awaited inbound survives (over-cancel-safe). A child
+        # marker is a side-table write keyed by the CHILD id — never its log — so the child
+        # harvests its own exit under its own lock (the single-writer invariant).
+        if not await queries.get_open_request_ids(conn, session_id, account_id=account_id):
+            for child in await queries.children_of(
+                conn, caller_kind="session", caller_id=session_id, account_id=account_id
+            ):
+                if not child.awaited:
+                    continue  # a Tell child is detached — an exit never crosses
+                if child.kind == "run":
+                    await wf_queries.insert_run_signal(
+                        conn,
+                        run_id=child.id,
+                        call_key=wf_queries.CANCEL_SIGNAL_CALL_KEY,
+                        kind="cancel",
+                    )
+                elif child.request_id is not None:
+                    await queries.insert_session_cancel_marker(
+                        conn,
+                        session_id=child.id,
+                        request_id=child.request_id,
+                        account_id=account_id,
+                    )
+                propagated.append(child)
+    # AFTER commit: re-resolve each cancelled caller, and prompt each marked child to run its
+    # own leaf (the C2 sweep / the run cancel-signal clause is the durable backstop).
     for write in wakes:
         if write.wake_run_id is not None:
             await defer_run_wake(write.wake_run_id, batch=True)
@@ -1530,6 +1570,11 @@ async def harvest_session_cancel_markers(
             await defer_wake(
                 pool, write.wake_session_id, cause="invoke_response", account_id=write.account_id
             )
+    for child in propagated:
+        if child.kind == "run":
+            await defer_run_wake(child.id, batch=True)
+        elif child.request_id is not None:
+            await defer_wake(pool, child.id, cause="cancel", account_id=account_id)
     return True
 
 
