@@ -119,7 +119,5 @@ def test_downgrade_drops_table_and_constraint(postgres: object) -> None:
     down = _run_alembic(["downgrade", "0111"], db_url)
     assert down.returncode == 0, f"downgrade failed:\n{down.stderr}\n{down.stdout}"
 
-    exists = asyncio.run(
-        _fetch(db_url, "SELECT to_regclass('public.workflow_versions') AS t")
-    )
+    exists = asyncio.run(_fetch(db_url, "SELECT to_regclass('public.workflow_versions') AS t"))
     assert exists[0]["t"] is None

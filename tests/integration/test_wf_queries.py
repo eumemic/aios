@@ -535,15 +535,16 @@ async def test_archived_workflow_versions_still_readable(
 async def test_version_reads_account_scoped(wf_conn: asyncpg.Connection[Any]) -> None:
     """A foreign account's version reads miss (NotFound), like the parent reads."""
     wf = await wf_queries.insert_workflow(wf_conn, account_id="acc_root", name="ver", script="A")
+    # A second tenant must be a CHILD of the root: ``accounts_one_active_root``
+    # permits only one active root (can_mint_children=TRUE, parent_account_id=NULL),
+    # and the fixture already seeded ``acc_root`` as that root.
     await wf_conn.execute(
         "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
-        "VALUES ('acc_other', NULL, TRUE, 'other')"
+        "VALUES ('acc_other', 'acc_root', FALSE, 'other')"
     )
     with pytest.raises(NotFoundError):
         await wf_queries.get_workflow_version(wf_conn, wf.id, 1, account_id="acc_other")
-    assert (
-        await wf_queries.list_workflow_versions(wf_conn, wf.id, account_id="acc_other")
-    ) == []
+    assert (await wf_queries.list_workflow_versions(wf_conn, wf.id, account_id="acc_other")) == []
 
 
 # ─── list_wf_runs — launcher filter (the agent list_runs default scoping) ─────
