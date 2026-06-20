@@ -286,9 +286,7 @@ class TestRuntimeSessionLifecycleDeliveryAck:
         from aios.db.queries.events import read_windowed_context_events
 
         async with pool.acquire() as conn:
-            windowed = await read_windowed_context_events(
-                conn, session_id, account_id=account_id
-            )
+            windowed = await read_windowed_context_events(conn, session_id, account_id=account_id)
         acks = [e for e in windowed if e.kind == "lifecycle"]
         assert len(acks) == 1
         assert acks[0].data["event"] == "connector_message_delivered"
@@ -370,9 +368,7 @@ class TestRuntimeSessionLifecycleDeliveryAck:
         )
 
         async with pool.acquire() as conn:
-            windowed = await read_windowed_context_events(
-                conn, session_id, account_id=account_id
-            )
+            windowed = await read_windowed_context_events(conn, session_id, account_id=account_id)
         lifecycle_events = [e.data["event"] for e in windowed if e.kind == "lifecycle"]
         assert "connector_message_delivered" in lifecycle_events
         assert "some_unknown_connector_event" not in lifecycle_events
