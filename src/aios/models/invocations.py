@@ -14,6 +14,7 @@ string.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -114,3 +115,39 @@ class AwaitResponse(BaseModel):
         default=None,
         description="On outcome 'errored'/'cancelled', the {kind, message, …} detail; null otherwise.",
     )
+
+
+# ─── cancel supervision side-table rows (cancel-design §0/§9) ─────────────────
+
+
+class CancelIntent(BaseModel):
+    """The durable cancel **tombstone** — one row per ``cancel_invocation`` call, keyed by
+    the cancelled edge handle ``(servicer_kind, servicer_id, request_id)``.
+
+    Written first, independent of cascade progress. ``outstanding`` is the §9 monotone
+    quiescence counter (seed 1; each node adjusts it in its own terminal/withdraw txn);
+    ``quiesced_at`` is set the instant it reaches 0 — the cascade is then complete.
+    """
+
+    servicer_kind: Literal["session", "run"]
+    servicer_id: str
+    request_id: str
+    account_id: str
+    outstanding: int
+    quiesced_at: datetime | None = None
+    created_at: datetime
+
+
+class SessionCancelMarker(BaseModel):
+    """A session-side **exit-marker** — a durable cancel signal the target session's own
+    step harvests under its lock (the run side reuses ``wf_run_signals kind='cancel'``).
+
+    Keyed by the target edge ``(session_id, request_id)``; ``harvested_at`` flips once the
+    session's step has applied it, so the sweep wakes only still-unharvested markers (C2).
+    """
+
+    session_id: str
+    request_id: str
+    account_id: str
+    harvested_at: datetime | None = None
+    created_at: datetime
