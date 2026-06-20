@@ -34,6 +34,7 @@ from aios.models.workflows import (
     WfRunEvent,
     WfRunUsage,
     Workflow,
+    WorkflowVersion,
 )
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
@@ -53,9 +54,11 @@ __all__ = [
     "create_workflow",
     "get_run",
     "get_workflow",
+    "get_workflow_version",
     "launch_awaited_run",
     "list_run_events",
     "list_runs",
+    "list_workflow_versions",
     "list_workflows",
     "resume_gate",
     "resume_gate_by_nonce",
@@ -453,6 +456,29 @@ async def list_workflows(
     async with pool.acquire() as conn:
         return await wf_queries.list_workflows(
             conn, account_id=account_id, limit=limit, after=after, name=name
+        )
+
+
+async def get_workflow_version(
+    pool: asyncpg.Pool[Any], workflow_id: str, version: int, *, account_id: str
+) -> WorkflowVersion:
+    async with pool.acquire() as conn:
+        return await wf_queries.get_workflow_version(
+            conn, workflow_id, version, account_id=account_id
+        )
+
+
+async def list_workflow_versions(
+    pool: asyncpg.Pool[Any],
+    workflow_id: str,
+    *,
+    account_id: str,
+    limit: int = 50,
+    after: int | None = None,
+) -> list[WorkflowVersion]:
+    async with pool.acquire() as conn:
+        return await wf_queries.list_workflow_versions(
+            conn, workflow_id, limit=limit, after=after, account_id=account_id
         )
 
 

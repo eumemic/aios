@@ -233,6 +233,11 @@ class Settings(BaseSettings):
         "Emergency rollback ONLY: set AIOS_SANDBOX_SECCOMP_PROFILE=unconfined to "
         "disable seccomp filtering. Never defaults to unconfined; the flag is always emitted.",
     )
+    sandbox_backend: str = Field(
+        default="docker",
+        description="Sandbox backend implementation. 'docker' (default) runs "
+        "DockerBackend. Override only where an alternate SandboxBackend impl is installed.",
+    )
     sandbox_runtime: str | None = Field(
         default=None,
         description="Optional Docker container runtime for sandboxes and their "

@@ -213,7 +213,13 @@ class RuntimeToolResultRequest(BaseModel):
     has to name the target connection.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore" (forward-tolerant): a connector deployed AHEAD of the api
+    # on a coupled-schema change can send a field this api does not yet know;
+    # ignore it (known fields still validated/processed) instead of 422-ing,
+    # which would crash-loop the connector and wedge the session. This is the
+    # forward half of the #1398 deploy-skew symmetry (the backward half:
+    # defaulting an omitted field for an older connector).
+    model_config = ConfigDict(extra="ignore")
 
     connection_id: str
     session_id: str
@@ -249,7 +255,13 @@ class RuntimeLifecycleRequest(BaseModel):
     context (current device count, last successful timestamp, etc.).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore" (forward-tolerant): a connector deployed AHEAD of the api
+    # on a coupled-schema change can send a field this api does not yet know;
+    # ignore it (known fields still validated/processed) instead of 422-ing,
+    # which would crash-loop the connector and wedge the session. This is the
+    # forward half of the #1398 deploy-skew symmetry (the backward half:
+    # defaulting an omitted field for an older connector).
+    model_config = ConfigDict(extra="ignore")
 
     connection_id: str
     event: str
@@ -274,7 +286,13 @@ class RuntimeSessionLifecycleRequest(BaseModel):
     caller opts into the wake.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore" (forward-tolerant): a connector deployed AHEAD of the api
+    # on a coupled-schema change can send a field this api does not yet know;
+    # ignore it (known fields still validated/processed) instead of 422-ing,
+    # which would crash-loop the connector and wedge the session. This is the
+    # forward half of the #1398 deploy-skew symmetry (the backward half:
+    # defaulting an omitted field for an older connector).
+    model_config = ConfigDict(extra="ignore")
 
     connection_id: str
     session_id: str
@@ -314,7 +332,13 @@ class RuntimeChatLifecycleRequest(BaseModel):
     defaults ``False`` (visible-on-next-turn).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore" (forward-tolerant): a connector deployed AHEAD of the api
+    # on a coupled-schema change can send a field this api does not yet know;
+    # ignore it (known fields still validated/processed) instead of 422-ing,
+    # which would crash-loop the connector and wedge the session. This is the
+    # forward half of the #1398 deploy-skew symmetry (the backward half:
+    # defaulting an omitted field for an older connector).
+    model_config = ConfigDict(extra="ignore")
 
     connection_id: str
     chat_id: str
@@ -610,6 +634,14 @@ async def post_runtime_session_lifecycle(
     When ``body.wake`` is set, a ``defer_wake`` is enqueued after the append
     (the exact pattern as the tool-result intake) so the failure wakes the
     session rather than merely being visible on its next turn.
+
+    Reserved model-visible ``event`` values a connector may post here:
+    ``connector_delivery_failed`` (#1308, the failure path), and its
+    success-path complements ``connector_message_delivered`` /
+    ``connector_message_edited`` (#1341, informational acks emitted with
+    ``wake=False``). All three render as a bracketed user-role notice; any
+    other ``event`` string is appended but filtered out of the model context
+    by the ``MODEL_VISIBLE_LIFECYCLE_EVENTS`` allowlist.
     """
     _, auth_connector, account_id, auth_connection_ids = auth
     async with pool.acquire() as conn:
@@ -698,6 +730,11 @@ async def post_runtime_chat_lifecycle(
     (the same pattern as the session-lifecycle and tool-result intakes) so
     the failure wakes the originating session rather than merely being
     visible on its next turn.
+
+    Reserved model-visible ``event`` values mirror the session-lifecycle
+    route: ``connector_delivery_failed`` (#1308) and its success-path
+    complements ``connector_message_delivered`` / ``connector_message_edited``
+    (#1341, informational acks emitted with ``wake=False``).
     """
     _, auth_connector, account_id, auth_connection_ids = auth
     async with pool.acquire() as conn:

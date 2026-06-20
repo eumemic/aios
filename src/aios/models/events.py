@@ -51,6 +51,16 @@ MODEL_VISIBLE_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
         "sandbox_fs_expired",
         "sandbox_fs_over_limit",
         "connector_delivery_failed",
+        # ``connector_message_delivered`` / ``connector_message_edited`` (#1341):
+        # the success-path complement to ``connector_delivery_failed``. A
+        # connector appends one of these (via the session-/chat-lifecycle route)
+        # when the platform confirmed an outbound the model consciously sent was
+        # delivered, or that an edit landed. Informational (non-stimulus-bearing,
+        # ``wake=False``): the model reads the ack on its next turn. Connector
+        # specifics (``platform_message_id``/``tool_call_id``) ride in ``data``
+        # so core stays transport-agnostic.
+        "connector_message_delivered",
+        "connector_message_edited",
     }
 )
 

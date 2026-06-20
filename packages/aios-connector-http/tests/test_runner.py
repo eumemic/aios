@@ -1568,3 +1568,110 @@ class TestEmitChatLifecycle:
         assert len(failed) == 1
         assert failed[0]["status_code"] == 404
         assert failed[0]["chat_id"] == "+19999999"
+
+
+class TestDeliveryAcks:
+    """``ack_delivered`` / ``ack_edited`` (#1341) are thin wrappers over the
+    session-/chat-lifecycle emitters: they supply the reserved ``event`` string
+    and pass the platform correlation ids through ``data``, inheriting the
+    drop-don't-raise posture."""
+
+    async def test_ack_delivered_posts_reserved_event(self, probe: _ProbeConnector) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = False
+        mock_response.json = MagicMock(return_value={"appended_session_ids": ["sess_1"]})
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        result = await probe.ack_delivered(
+            connection_id="conn_1",
+            session_id="sess_1",
+            platform_message_id="SM123",
+            tool_call_id="call_1",
+        )
+
+        assert result == {"appended_session_ids": ["sess_1"]}
+        url = mock_post.call_args.args[0]
+        assert url == "/v1/connectors/runtime/session-lifecycle"
+        body = mock_post.call_args.kwargs["json"]
+        assert body == {
+            "connection_id": "conn_1",
+            "session_id": "sess_1",
+            "event": "connector_message_delivered",
+            "wake": False,
+            "data": {"platform_message_id": "SM123", "tool_call_id": "call_1"},
+        }
+
+    async def test_ack_edited_posts_reserved_event(self, probe: _ProbeConnector) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = False
+        mock_response.json = MagicMock(return_value={"appended_session_ids": ["sess_1"]})
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        await probe.ack_edited(
+            connection_id="conn_1",
+            session_id="sess_1",
+            platform_message_id="SM123",
+        )
+
+        body = mock_post.call_args.kwargs["json"]
+        assert body["event"] == "connector_message_edited"
+        assert body["wake"] is False
+        assert body["data"] == {"platform_message_id": "SM123", "tool_call_id": None}
+
+    async def test_ack_delivered_chat_posts_chat_route(self, probe: _ProbeConnector) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = False
+        mock_response.json = MagicMock(return_value={"appended_session_ids": ["sess_1"]})
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        await probe.ack_delivered_chat(
+            connection_id="conn_1",
+            chat_id="+15550123",
+            platform_message_id="SM123",
+        )
+
+        url = mock_post.call_args.args[0]
+        assert url == "/v1/connectors/runtime/chat-lifecycle"
+        body = mock_post.call_args.kwargs["json"]
+        assert body["chat_id"] == "+15550123"
+        assert body["event"] == "connector_message_delivered"
+
+    async def test_ack_non_fatal_4xx_drops_returns_none(self, probe: _ProbeConnector) -> None:
+        """A non-fatal 4xx is dropped to ``None`` (inherited from
+        ``emit_session_lifecycle``)."""
+        mock_response = MagicMock()
+        mock_response.is_error = True
+        mock_response.status_code = 422
+        mock_response.text = '{"error":"bad"}'
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        with structlog.testing.capture_logs():
+            result = await probe.ack_delivered(
+                connection_id="conn_1",
+                session_id="sess_1",
+                platform_message_id="SM123",
+            )
+        assert result is None
+
+    async def test_ack_fatal_status_reraises(self, probe: _ProbeConnector) -> None:
+        """A fatal status re-raises, matching ``emit_session_lifecycle``."""
+        mock_response = MagicMock()
+        mock_response.is_error = True
+        mock_response.status_code = 500
+        mock_response.text = "boom"
+        mock_response.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError("boom", request=MagicMock(), response=mock_response)
+        )
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        with structlog.testing.capture_logs(), pytest.raises(httpx.HTTPStatusError):
+            await probe.ack_delivered(
+                connection_id="conn_1",
+                session_id="sess_1",
+                platform_message_id="SM123",
+            )

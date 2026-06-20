@@ -52,7 +52,7 @@ from aios.harness.trigger_runner import sweep_trigger_fires
 from aios.harness.workspace_reaper import sweep_archived_workspaces
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
-from aios.sandbox.backends.docker import DockerBackend
+from aios.sandbox.backends import select_sandbox_backend
 from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.tool_broker import ToolBroker
@@ -228,7 +228,7 @@ async def worker_main() -> None:
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-        sandbox_registry = SandboxRegistry(backend=DockerBackend())
+        sandbox_registry = SandboxRegistry(backend=select_sandbox_backend(settings))
         task_registry = TaskRegistry()
         mcp_session_pool = McpSessionPool()
         await ensure_sandbox_network()

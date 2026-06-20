@@ -34,6 +34,7 @@ from aios.models.workflows import (
     Workflow,
     WorkflowCreate,
     WorkflowUpdate,
+    WorkflowVersion,
 )
 from aios.services import trace as trace_service
 from aios.services import workflows as service
@@ -137,6 +138,42 @@ async def archive_workflow(workflow_id: str, pool: PoolDep, account_id: AccountI
 @router.post("/{workflow_id}/unarchive", operation_id="unarchive_workflow")
 async def unarchive_workflow(workflow_id: str, pool: PoolDep, account_id: AccountIdDep) -> Workflow:
     return await service.unarchive_workflow(pool, workflow_id, account_id=account_id)
+
+
+@router.get("/{workflow_id}/versions", operation_id="list_workflow_versions")
+async def list_workflow_versions(
+    workflow_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    cursor: str | None = None,
+    limit: PageLimit = None,
+) -> ListResponse[WorkflowVersion]:
+    """List a workflow's immutable definition history, newest first.
+
+    First page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each
+    version is a complete snapshot of the workflow's definition at the time it
+    was written (``name`` is versioned — a rename mints a new version). An
+    archived workflow's versions remain readable (post-mortem audit).
+    """
+    st = page_cursor(cursor, {"limit": limit})
+    after = cursor_as_int(st.cursor) if st is not None else None
+    page_limit = resolve_page_limit(st, limit)
+    items = await service.list_workflow_versions(
+        pool, workflow_id, limit=page_limit + 1, after=after, account_id=account_id
+    )
+    return ListResponse[WorkflowVersion].paginate(items, page_limit, cursor=lambda x: x.version)
+
+
+@router.get("/{workflow_id}/versions/{version}", operation_id="get_workflow_version")
+async def get_workflow_version(
+    workflow_id: str, version: int, pool: PoolDep, account_id: AccountIdDep
+) -> WorkflowVersion:
+    """Fetch one historical version's definition snapshot.
+
+    The snapshot reflects the workflow's definition at the time the version was
+    written and is unaffected by subsequent updates or archival.
+    """
+    return await service.get_workflow_version(pool, workflow_id, version, account_id=account_id)
 
 
 # ─── /v1/runs (execution instances) ──────────────────────────────────────────

@@ -7638,7 +7638,7 @@
           "connectors"
         ],
         "summary": "Post Runtime Session Lifecycle",
-        "description": "Append a ``kind=lifecycle`` event onto **one** session bound to\n``body.connection_id`` (#1261), optionally waking it.\n\nThe per-session-targeted sibling of the broadcast ``/runtime/lifecycle``\nroute: where that fans a notice across every bound session, this targets\nthe single ``body.session_id`` \u2014 the SMS design's \u00a73.5 req 1 (a delivery\nfailure must reach the *originating* session, not be broadcast).\n\nAuthorization mirrors ``post_runtime_tool_result`` exactly: the bearer's\nconnector must match ``body.connection_id``'s connector, any bearer-side\n``connection_ids`` allowlist must include it (#350), and the session must\nbe genuinely bound to that connection \u2014 so a runtime bearer can only\ntarget a session within its own connections.\n\nWhen ``body.wake`` is set, a ``defer_wake`` is enqueued after the append\n(the exact pattern as the tool-result intake) so the failure wakes the\nsession rather than merely being visible on its next turn.",
+        "description": "Append a ``kind=lifecycle`` event onto **one** session bound to\n``body.connection_id`` (#1261), optionally waking it.\n\nThe per-session-targeted sibling of the broadcast ``/runtime/lifecycle``\nroute: where that fans a notice across every bound session, this targets\nthe single ``body.session_id`` \u2014 the SMS design's \u00a73.5 req 1 (a delivery\nfailure must reach the *originating* session, not be broadcast).\n\nAuthorization mirrors ``post_runtime_tool_result`` exactly: the bearer's\nconnector must match ``body.connection_id``'s connector, any bearer-side\n``connection_ids`` allowlist must include it (#350), and the session must\nbe genuinely bound to that connection \u2014 so a runtime bearer can only\ntarget a session within its own connections.\n\nWhen ``body.wake`` is set, a ``defer_wake`` is enqueued after the append\n(the exact pattern as the tool-result intake) so the failure wakes the\nsession rather than merely being visible on its next turn.\n\nReserved model-visible ``event`` values a connector may post here:\n``connector_delivery_failed`` (#1308, the failure path), and its\nsuccess-path complements ``connector_message_delivered`` /\n``connector_message_edited`` (#1341, informational acks emitted with\n``wake=False``). All three render as a bracketed user-role notice; any\nother ``event`` string is appended but filtered out of the model context\nby the ``MODEL_VISIBLE_LIFECYCLE_EVENTS`` allowlist.",
         "operationId": "post_connector_runtime_session_lifecycle",
         "parameters": [
           {
@@ -7700,7 +7700,7 @@
           "connectors"
         ],
         "summary": "Post Runtime Chat Lifecycle",
-        "description": "Append a ``kind=lifecycle`` event onto the single session that\n``body.chat_id`` resolves to on ``body.connection_id`` (#1260),\noptionally waking it.\n\nThe routing-key sibling of ``/runtime/session-lifecycle``: where that\nneeds the resolved ``session_id``, this carries the connector's per-peer\nrouting key (``chat_id``) and resolves it through the connection's\nper-chat binding server-side \u2014 the SMS design's \u00a73.5 req 1 second option\n(\"route the per-peer failure through the resolver on the callback's\n``To``\").  Like the session-lifecycle route it targets exactly one\nsession, NOT the broadcast fan-out: a per-peer delivery failure must not\npollute unrelated ``per_chat`` sessions.\n\nAuthorization mirrors the session-lifecycle route: the bearer's\nconnector must match ``body.connection_id``'s connector and any\nbearer-side ``connection_ids`` allowlist must include it (#350).  The\nbinding lookup itself is the per-session authorization \u2014 a ``chat_id``\nthat has no per-chat session on this connection 404s (no spurious\ncross-peer append), and the resolution is scoped to the bearer's\n``account_id``.\n\nWhen ``body.wake`` is set, a ``defer_wake`` is enqueued after the append\n(the same pattern as the session-lifecycle and tool-result intakes) so\nthe failure wakes the originating session rather than merely being\nvisible on its next turn.",
+        "description": "Append a ``kind=lifecycle`` event onto the single session that\n``body.chat_id`` resolves to on ``body.connection_id`` (#1260),\noptionally waking it.\n\nThe routing-key sibling of ``/runtime/session-lifecycle``: where that\nneeds the resolved ``session_id``, this carries the connector's per-peer\nrouting key (``chat_id``) and resolves it through the connection's\nper-chat binding server-side \u2014 the SMS design's \u00a73.5 req 1 second option\n(\"route the per-peer failure through the resolver on the callback's\n``To``\").  Like the session-lifecycle route it targets exactly one\nsession, NOT the broadcast fan-out: a per-peer delivery failure must not\npollute unrelated ``per_chat`` sessions.\n\nAuthorization mirrors the session-lifecycle route: the bearer's\nconnector must match ``body.connection_id``'s connector and any\nbearer-side ``connection_ids`` allowlist must include it (#350).  The\nbinding lookup itself is the per-session authorization \u2014 a ``chat_id``\nthat has no per-chat session on this connection 404s (no spurious\ncross-peer append), and the resolution is scoped to the bearer's\n``account_id``.\n\nWhen ``body.wake`` is set, a ``defer_wake`` is enqueued after the append\n(the same pattern as the session-lifecycle and tool-result intakes) so\nthe failure wakes the originating session rather than merely being\nvisible on its next turn.\n\nReserved model-visible ``event`` values mirror the session-lifecycle\nroute: ``connector_delivery_failed`` (#1308) and its success-path\ncomplements ``connector_message_delivered`` / ``connector_message_edited``\n(#1341, informational acks emitted with ``wake=False``).",
         "operationId": "post_connector_runtime_chat_lifecycle",
         "parameters": [
           {
@@ -9146,6 +9146,167 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workflows/{workflow_id}/versions": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "List Workflow Versions",
+        "description": "List a workflow's immutable definition history, newest first.\n\nFirst page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each\nversion is a complete snapshot of the workflow's definition at the time it\nwas written (``name`` is versioned \u2014 a rename mints a new version). An\narchived workflow's versions remain readable (post-mortem audit).",
+        "operationId": "list_workflow_versions",
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workflow Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_WorkflowVersion_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workflows/{workflow_id}/versions/{version}": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Get Workflow Version",
+        "description": "Fetch one historical version's definition snapshot.\n\nThe snapshot reflects the workflow's definition at the time the version was\nwritten and is unaffected by subsequent updates or archival.",
+        "operationId": "get_workflow_version",
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workflow Id"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Version"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowVersion"
                 }
               }
             }
@@ -12843,6 +13004,38 @@
         ],
         "title": "ListResponse[WfRun]"
       },
+      "ListResponse_WorkflowVersion_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowVersion"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[WorkflowVersion]"
+      },
       "ListResponse_Workflow_": {
         "properties": {
           "data": {
@@ -13909,7 +14102,6 @@
             "default": false
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
           "connection_id",
@@ -13953,7 +14145,6 @@
             "title": "Data"
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
           "connection_id",
@@ -14028,7 +14219,6 @@
             "default": false
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
           "connection_id",
@@ -14251,7 +14441,6 @@
             "default": false
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
           "connection_id",
@@ -18410,7 +18599,98 @@
           "version"
         ],
         "title": "WorkflowUpdate",
-        "description": "Request body for ``PUT /v1/workflows/{id}`` \u2014 update in place, bumping ``version``.\n\n``version`` is the optimistic-concurrency token: it must match the workflow's\ncurrent version or the update 409s (re-fetch and retry). Omitted fields are\npreserved \u2014 nullable fields (``input_schema``/``output_schema``/``description``)\ncan therefore be replaced but never cleared back to null, as on ``AgentUpdate``.\nAn identical update is a no-op (no bump). There is no version-snapshot table \u2014\na run pins ``script`` + the declared surface onto itself at launch, so in-flight\nruns never observe an update. (The ``AgentUpdate`` shape, minus history.)"
+        "description": "Request body for ``PUT /v1/workflows/{id}`` \u2014 update in place, bumping ``version``.\n\n``version`` is the optimistic-concurrency token: it must match the workflow's\ncurrent version or the update 409s (re-fetch and retry). Omitted fields are\npreserved \u2014 nullable fields (``input_schema``/``output_schema``/``description``)\ncan therefore be replaced but never cleared back to null, as on ``AgentUpdate``.\nAn identical update is a no-op (no bump). Each real bump is snapshotted into the\nimmutable ``workflow_versions`` history (see :class:`WorkflowVersion`) in the same\ntransaction, copy-on-write like ``agent_versions``. A run additionally pins\n``script`` + the declared surface onto itself at launch, so in-flight runs never\nobserve an update. (The ``AgentUpdate`` shape.)"
+      },
+      "WorkflowVersion": {
+        "properties": {
+          "workflow_id": {
+            "type": "string",
+            "title": "Workflow Id"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "script": {
+            "type": "string",
+            "title": "Script"
+          },
+          "input_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Schema"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Schema"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": "array",
+            "title": "Tools"
+          },
+          "mcp_servers": {
+            "items": {
+              "$ref": "#/components/schemas/McpServerSpec"
+            },
+            "type": "array",
+            "title": "Mcp Servers"
+          },
+          "http_servers": {
+            "items": {
+              "$ref": "#/components/schemas/HttpServerSpec"
+            },
+            "type": "array",
+            "title": "Http Servers"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "workflow_id",
+          "version",
+          "name",
+          "script",
+          "created_at"
+        ],
+        "title": "WorkflowVersion",
+        "description": "Read view of a specific workflow version from the immutable history.\n\nThe workflow analog of :class:`aios.models.agents.AgentVersion`: a complete,\nimmutable snapshot of a workflow's definition at one ``version``. ``name`` IS\nversioned \u2014 a rename mints a new version \u2014 so this carries it alongside the\nscript + declared surface. Snapshots exactly ``update_workflow``'s no-op\ncomparison set (``name, script, input_schema, output_schema, description,\ntools, mcp_servers, http_servers``)."
       }
     }
   }

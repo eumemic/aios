@@ -245,3 +245,130 @@ class TestRuntimeSessionLifecycle:
                 _auth(account_id, connector="whatsapp"),
             )
         assert patched_defer_wake.await_count == 0
+
+
+class TestRuntimeSessionLifecycleDeliveryAck:
+    """The success-path delivered/edited acks (#1341) ride the same route as
+    ``connector_delivery_failed``: append a targeted ``kind=lifecycle`` row
+    with the reserved ``event`` and a ``platform_message_id``/``tool_call_id``
+    ``data`` payload, ``wake=False`` by default (informational)."""
+
+    async def test_session_lifecycle_delivered_ack_visible(
+        self,
+        pool_with_bound_session: tuple[asyncpg.Pool[Any], str, str, str],
+        patched_defer_wake: AsyncMock,
+    ) -> None:
+        pool, account_id, connection_id, session_id = pool_with_bound_session
+
+        result = await post_runtime_session_lifecycle(
+            RuntimeSessionLifecycleRequest(
+                connection_id=connection_id,
+                session_id=session_id,
+                event="connector_message_delivered",
+                data={"platform_message_id": "x", "tool_call_id": "call_1"},
+                wake=False,
+            ),
+            pool,
+            _auth(account_id),
+        )
+
+        assert result["appended_session_ids"] == [session_id]
+        assert result["woke"] is False
+        assert patched_defer_wake.await_count == 0
+        rows = await _lifecycle_rows(pool, session_id)
+        assert len(rows) == 1
+        payload = rows[0]
+        assert payload["event"] == "connector_message_delivered"
+        assert payload["connection_id"] == connection_id
+        assert payload["data"] == {"platform_message_id": "x", "tool_call_id": "call_1"}
+
+        # The windowed read (which feeds build_messages) admits the ack row.
+        from aios.db.queries.events import read_windowed_context_events
+
+        async with pool.acquire() as conn:
+            windowed = await read_windowed_context_events(conn, session_id, account_id=account_id)
+        acks = [e for e in windowed if e.kind == "lifecycle"]
+        assert len(acks) == 1
+        assert acks[0].data["event"] == "connector_message_delivered"
+
+    async def test_session_lifecycle_ack_wake_defers(
+        self,
+        pool_with_bound_session: tuple[asyncpg.Pool[Any], str, str, str],
+        patched_defer_wake: AsyncMock,
+    ) -> None:
+        """``wake=True`` defers a wake exactly once (the route's path, not the
+        renderer's) — acks default to ``wake=False`` but the param still works."""
+        pool, account_id, connection_id, session_id = pool_with_bound_session
+
+        await post_runtime_session_lifecycle(
+            RuntimeSessionLifecycleRequest(
+                connection_id=connection_id,
+                session_id=session_id,
+                event="connector_message_delivered",
+                data={"platform_message_id": "x"},
+                wake=True,
+            ),
+            pool,
+            _auth(account_id),
+        )
+        assert patched_defer_wake.await_count == 1
+
+    async def test_session_lifecycle_ack_unbound_403(
+        self,
+        pool_with_bound_session: tuple[asyncpg.Pool[Any], str, str, str],
+        patched_defer_wake: AsyncMock,
+    ) -> None:
+        """An ack targeting a session not bound to the connection is rejected
+        by the shipped bound-session gate."""
+        pool, account_id, connection_id, _session_id = pool_with_bound_session
+        from tests.integration.conftest import seed_agent_env_session
+
+        _agent, _env, unbound = await seed_agent_env_session(
+            pool, account_id=account_id, prefix="sl-ack-unbound"
+        )
+
+        with pytest.raises(ForbiddenError):
+            await post_runtime_session_lifecycle(
+                RuntimeSessionLifecycleRequest(
+                    connection_id=connection_id,
+                    session_id=unbound.id,
+                    event="connector_message_delivered",
+                    data={"platform_message_id": "x"},
+                ),
+                pool,
+                _auth(account_id),
+            )
+        assert await _lifecycle_rows(pool, unbound.id) == []
+
+    async def test_windowed_read_admits_ack_drops_unknown(
+        self,
+        pool_with_bound_session: tuple[asyncpg.Pool[Any], str, str, str],
+        patched_defer_wake: AsyncMock,
+    ) -> None:
+        """The windowed read admits the allowlisted ack but drops a
+        non-allowlisted ``event`` (the load-bearing allowlist edit)."""
+        from aios.db.queries.events import read_windowed_context_events
+        from aios.services import sessions as sessions_service
+
+        pool, account_id, _connection_id, session_id = pool_with_bound_session
+
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "lifecycle",
+            {"event": "connector_message_delivered", "data": {"platform_message_id": "x"}},
+            account_id=account_id,
+        )
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "lifecycle",
+            {"event": "some_unknown_connector_event"},
+            account_id=account_id,
+        )
+
+        async with pool.acquire() as conn:
+            windowed = await read_windowed_context_events(conn, session_id, account_id=account_id)
+        lifecycle_events = [e.data["event"] for e in windowed if e.kind == "lifecycle"]
+        assert "connector_message_delivered" in lifecycle_events
+        assert "some_unknown_connector_event" not in lifecycle_events
