@@ -43,6 +43,7 @@ from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
     AwaitingToolCall,
+    OwedRequest,
     Session,
     SessionAwaitResponse,
     SessionResource,
@@ -527,6 +528,22 @@ async def stimulate(pool: asyncpg.Pool[Any], stim: Stimulus, *, account_id: str)
     return await _stimulate_existing_tell(pool, stim, account_id=account_id)
 
 
+# Max length of the ``summary`` preview carried on the ``request_opened`` frame
+# (#1413). Matches the 60-char truncation the obligations tail block renders; a
+# slightly larger store budget is pointless since the renderer re-truncates.
+_OBLIGATION_SUMMARY_MAX = 60
+
+
+def _obligation_summary(content: str) -> str:
+    """A short single-line preview of a request input, for the #1413 obligations
+    block. Collapses newlines and truncates to ``_OBLIGATION_SUMMARY_MAX`` chars
+    (ellipsis when clipped) -- mirrors the channels-tail preview clause."""
+    preview = content.replace("\n", " ").strip()
+    if len(preview) > _OBLIGATION_SUMMARY_MAX:
+        preview = preview[:_OBLIGATION_SUMMARY_MAX] + "…"
+    return preview
+
+
 async def _stimulate_new_session(
     pool: asyncpg.Pool[Any],
     stim: AskNewSession | TellNewSession,
@@ -610,6 +627,7 @@ async def _stimulate_new_session(
             },
             vault_ids=stim.vault_ids,
             awaited=awaited,
+            summary=_obligation_summary(content),
         )
         return True
 
@@ -665,6 +683,7 @@ async def _stimulate_existing_ask(
             },
             vault_ids=vault_ids,
             awaited=True,
+            summary=_obligation_summary(content),
         )
     await defer_wake(pool, session.id, cause="api_invoke", account_id=account_id)
     return True
@@ -1040,6 +1059,40 @@ async def compute_awaiting(
     return out
 
 
+async def compute_owed_requests(
+    pool: asyncpg.Pool[Any], sessions: list[Session], *, account_id: str
+) -> dict[str, list[OwedRequest]]:
+    """Compute the ``owed_requests`` read-model view for a batch of sessions (#1413).
+
+    The dual of :func:`compute_awaiting`: that view lists tool calls a session is
+    blocked on; this lists the still-open **awaited** request edges the session
+    owes a response to, projected from the same ``get_open_obligations`` rows the
+    step builder uses. One indexed anti-join per session (the open set is ``[]``
+    or a single id in v1), oldest-first. Load-bearing for the #1414 operator-cancel
+    path, which enumerates a session's open goal_ids from here.
+    """
+    if not sessions:
+        return {}
+    out: dict[str, list[OwedRequest]] = {}
+    async with pool.acquire() as conn:
+        for session in sessions:
+            obligations = await queries.get_open_obligations(
+                conn, session.id, account_id=account_id
+            )
+            if obligations:
+                out[session.id] = [
+                    OwedRequest(
+                        request_id=o.request_id,
+                        caller_kind=o.caller_kind,
+                        caller_id=o.caller_id,
+                        opened_at=o.opened_at,
+                        summary=o.summary,
+                    )
+                    for o in obligations
+                ]
+    return out
+
+
 async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:
     # REPEATABLE READ snapshot pins all three enrichment reads to one
     # moment in time so a concurrent ``update_session`` committing
@@ -1051,7 +1104,13 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: s
         session = await queries.get_session(conn, session_id, account_id=account_id)
         session = await _enrich_session(conn, session, account_id=account_id)
     awaiting_by_sid = await compute_awaiting(pool, [session], account_id=account_id)
-    return session.model_copy(update={"awaiting": awaiting_by_sid.get(session_id, [])})
+    owed_by_sid = await compute_owed_requests(pool, [session], account_id=account_id)
+    return session.model_copy(
+        update={
+            "awaiting": awaiting_by_sid.get(session_id, []),
+            "owed_requests": owed_by_sid.get(session_id, []),
+        }
+    )
 
 
 async def await_session(
@@ -1202,6 +1261,7 @@ async def list_sessions(
             conn, sid_list, account_id=account_id
         )
     awaiting_by_sid = await compute_awaiting(pool, sessions, account_id=account_id)
+    owed_by_sid = await compute_owed_requests(pool, sessions, account_id=account_id)
     enriched: list[Session] = [
         s.model_copy(
             update={
@@ -1209,6 +1269,7 @@ async def list_sessions(
                 "resources": echoes_map[s.id],
                 "triggers": trigger_map[s.id],
                 "awaiting": awaiting_by_sid.get(s.id, []),
+                "owed_requests": owed_by_sid.get(s.id, []),
             }
         )
         for s in sessions
@@ -1416,20 +1477,6 @@ class AssistantAppendResult(NamedTuple):
     autoerror_caller_run_id: str | None
     assistant_focal_at_arrival: str | None
     autoerror_caller_session_ids: tuple[str, ...] = ()
-
-
-async def session_owns_open_request(
-    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
-) -> bool:
-    """True iff the session owns at least one still-open request edge (#1127).
-
-    The gate the step builder uses to decide whether to inject the ``return``/``error``
-    completion tools: a session that owes a response — a workflow child OR a
-    session-caller ``invoke`` target — must be handed the means to answer. One indexed
-    anti-join (``get_open_request_ids``); ``False`` for any ordinary session.
-    """
-    async with pool.acquire() as conn:
-        return bool(await queries.get_open_request_ids(conn, session_id, account_id=account_id))
 
 
 async def append_assistant_and_guard_quiescence(

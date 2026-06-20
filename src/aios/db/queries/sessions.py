@@ -34,7 +34,7 @@ from aios.ids import (
 )
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.attenuation import Surface
-from aios.models.sessions import Session, SessionStatus, SessionUsage
+from aios.models.sessions import Obligation, Session, SessionStatus, SessionUsage
 
 # ─── sessions ─────────────────────────────────────────────────────────────────
 
@@ -521,6 +521,60 @@ async def get_open_request_ids(
     return [r["rid"] for r in rows]
 
 
+async def get_open_obligations(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[Obligation]:
+    """The session's still-open **awaited** obligations, oldest first (#1413).
+
+    Modeled 1:1 on :func:`get_open_request_ids` — same
+    ``asked(request_opened) MINUS answered(request_response)`` anti-join, same
+    ``awaited=true`` COALESCE filter (so a fire-and-forget ``Tell`` edge is
+    excluded), same ``ORDER BY req.seq ASC`` (oldest-first, deterministic). But
+    instead of bare ``request_id``s it projects a full :class:`Obligation` per open
+    edge so the tail-injected obligations block (and the ``owed_requests`` read
+    model) can render it: ``caller_kind`` (``req.data->'caller'->>'kind'`` — the
+    **trusted** frame, not the forgeable ``metadata.request`` blob), ``opened_at``
+    (``req.created_at``, for age), and a short ``summary`` (``req.data->>'summary'``,
+    additive — absent on pre-#1413 frames -> ``None`` -> an id-only render line, no
+    migration).
+
+    This is the data source for the always-on obligations reminder that survives
+    context-windowing erasure of the original request user message (the defect
+    #1413 fixes): a full-log query, not a slate-derived render-time marker.
+    """
+    rows: list[asyncpg.Record] = await conn.fetch(
+        "SELECT req.data->>'request_id' AS rid, "
+        "req.data->'caller'->>'kind' AS caller_kind, "
+        "req.data->'caller'->>'id' AS caller_id, "
+        "req.created_at AS opened_at, "
+        "req.data->>'summary' AS summary "
+        "FROM events req "
+        "WHERE req.session_id = $1 AND req.account_id = $2 "
+        "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+        "AND req.data->>'request_id' IS NOT NULL "
+        # #1197 awaited-triad filter -- lockstep with get_open_request_ids: an
+        # unawaited Tell edge owes no response. Absent reads as awaited=true.
+        "AND COALESCE((req.data->>'awaited')::boolean, TRUE) "
+        "AND NOT EXISTS (SELECT 1 FROM events resp "
+        "    WHERE resp.session_id = $1 AND resp.account_id = $2 "
+        "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
+        "    AND resp.data->>'request_id' = req.data->>'request_id') "
+        "ORDER BY req.seq ASC",
+        session_id,
+        account_id,
+    )
+    return [
+        Obligation(
+            request_id=r["rid"],
+            caller_kind=r["caller_kind"] or "",
+            caller_id=r["caller_id"],
+            opened_at=r["opened_at"],
+            summary=r["summary"],
+        )
+        for r in rows
+    ]
+
+
 async def get_request_caller(
     conn: asyncpg.Connection[Any], session_id: str, *, request_id: str
 ) -> dict[str, Any] | None:
@@ -762,6 +816,7 @@ async def append_request_opened(
     frozen_surface: dict[str, Any],
     vault_ids: list[str],
     awaited: bool = True,
+    summary: str | None = None,
 ) -> None:
     """Append the trusted ``request_opened`` lifecycle event — the *ask* half of
     the request edge (#1123).
@@ -800,22 +855,33 @@ async def append_request_opened(
     path gates this behind its first-spawn ``ON CONFLICT`` check, so a replayed
     wake opens the edge exactly once (see :func:`get_open_request_ids` for the
     asked-minus-answered derivation this feeds).
+
+    ``summary`` (#1413) is a short (~60-char) truncated preview of the request
+    input, carried so the always-on tail-injected obligations block can render a
+    human-readable line for an obligation whose original request user message has
+    been windowed out of context. **Purely additive**: omitted (the legacy/None
+    case) it is simply not written to the frame, and the obligations reader treats
+    an absent field as ``None`` -> an id-only render line (no migration, #1131-proof
+    -- frame-extension rather than a LEFT-JOIN on the soon-retired ``metadata`` blob).
     """
+    data: dict[str, Any] = {
+        "event": "request_opened",
+        "request_id": request_id,
+        "caller": caller,
+        "depth": depth,
+        "environment_id": environment_id,
+        "frozen_surface": frozen_surface,
+        "vault_ids": vault_ids,
+        "awaited": awaited,
+    }
+    if summary is not None:
+        data["summary"] = summary
     await queries.append_event(
         conn,
         account_id=account_id,
         session_id=session_id,
         kind="lifecycle",
-        data={
-            "event": "request_opened",
-            "request_id": request_id,
-            "caller": caller,
-            "depth": depth,
-            "environment_id": environment_id,
-            "frozen_surface": frozen_surface,
-            "vault_ids": vault_ids,
-            "awaited": awaited,
-        },
+        data=data,
     )
 
 

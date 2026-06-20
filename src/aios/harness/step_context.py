@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     )
     from aios.models.events import Event
     from aios.models.memory_stores import MemoryStoreResourceEcho
-    from aios.models.sessions import Session
+    from aios.models.sessions import Obligation, Session
     from aios.models.skills import SkillVersion
 
 
@@ -122,12 +122,22 @@ class StepPrelude:
     unread counts).  Reserving this ahead of time keeps the send-time
     payload under ``window_max`` even when the tail renders at its
     fattest (every channel at 9999 unread with a maxed-out preview).
+
+    ``obligations`` is the session's open **awaited** obligations (#1413),
+    fetched once here (the unconditional ``get_open_obligations`` that also
+    decides the ``return``/``error`` tool gate) and reused by the composer to
+    render the obligations tail block — no second query.
+    ``obligations_block_upper_bound_local`` is the worst-case size of that
+    block, bounded from the actual fetched obligations (real count + each real
+    summary, capped) so reserving it keeps the payload under ``window_max``.
     """
 
     system_prompt: str
     tools: list[dict[str, Any]]
     skill_versions: list[SkillVersion]
     tail_block_upper_bound_local: int
+    obligations: list[Obligation]
+    obligations_block_upper_bound_local: int
 
 
 def prelude_overhead_local(prelude: StepPrelude) -> int:
@@ -136,9 +146,10 @@ def prelude_overhead_local(prelude: StepPrelude) -> int:
     ``read_windowed_events``.
 
     System prompt + tool schemas, plus the reserved upper bounds for the
-    two post-windowing additions: the channels tail block and the
-    omission marker (#738). Both are reserved unconditionally — either
-    may not render, but the budget must hold when they do.
+    post-windowing additions: the channels tail block, the obligations
+    tail block (#1413), and the omission marker (#738). All are reserved
+    unconditionally — any may not render, but the budget must hold when
+    they do.
     """
     return (
         approx_tokens(
@@ -146,6 +157,7 @@ def prelude_overhead_local(prelude: StepPrelude) -> int:
             tools=prelude.tools,
         )
         + prelude.tail_block_upper_bound_local
+        + prelude.obligations_block_upper_bound_local
         + OMISSION_MARKER_UPPER_BOUND_LOCAL
     )
 
@@ -178,6 +190,7 @@ async def compute_step_prelude(
     :func:`compose_step_context` unchanged, so the composed prompt stays
     byte-identical to what it was before the split.
     """
+    from aios.db import queries
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,
@@ -187,8 +200,8 @@ async def compute_step_prelude(
         discover_session_mcp_tools,
     )
     from aios.harness.memory_stores import augment_with_memory_stores
+    from aios.harness.obligations import max_obligations_block_local
     from aios.harness.skills import augment_system_prompt
-    from aios.services import sessions as sessions_service
     from aios.services import skills as skills_service
 
     tools = to_openai_tools(agent.tools)
@@ -199,14 +212,21 @@ async def compute_step_prelude(
     # return/error are how a session ANSWERS a request it owes — a background child
     # of a run (§3.5), OR a session-caller invoke target (#1127). The gate is owning
     # an open request edge (#1123), not child-ness: a plain foreground session that
-    # was invoked owes a response and must be handed the means to give one. The
-    # background-child fast-path avoids the query on the run hot path; otherwise one
-    # indexed open-request lookup decides it.
-    owes_request = session.origin == "background" and session.parent_run_id is not None
-    if not owes_request:
-        owes_request = await sessions_service.session_owns_open_request(
-            pool, session_id, account_id=account_id
+    # was invoked owes a response and must be handed the means to give one.
+    #
+    # #1413: run ``get_open_obligations`` UNCONDITIONALLY (the prior background-child
+    # fast-path short-circuit is gone). The obligations tail block MUST be computed
+    # for background children too — their obligation is exactly what windowing
+    # erases, so they are the headline beneficiary of the always-on reminder. The
+    # ``return``/``error`` tool gate is preserved EXACTLY: ``owes_request`` is now
+    # ``bool(obligations)``, correctness-equivalent to the old gate (the same
+    # awaited anti-join), trading the fast-path for one indexed anti-join per
+    # background-child step (a stated, accepted cost).
+    async with pool.acquire() as conn:
+        obligations = await queries.get_open_obligations(
+            conn, session_id, account_id=account_id
         )
+    owes_request = bool(obligations)
     if owes_request:
         from aios.tools.workflow_completion import workflow_completion_tool_specs
 
@@ -255,6 +275,8 @@ async def compute_step_prelude(
         tools=tools,
         skill_versions=skill_versions,
         tail_block_upper_bound_local=max_tail_block_local(channels),
+        obligations=obligations,
+        obligations_block_upper_bound_local=max_obligations_block_local(obligations),
     )
 
 
@@ -361,6 +383,7 @@ async def compose_step_context(
     (custom, awaiting-confirm) gets the "external action" wording.
     """
     from aios.harness.channels import build_channels_tail_block
+    from aios.harness.obligations import build_obligations_tail_block
     from aios.services import accounts as accounts_service
     from aios.services import sessions as sessions_service
 
@@ -408,6 +431,25 @@ async def compose_step_context(
     tail = build_channels_tail_block(channels, events, session.focal_channel)
     if tail is not None and not _agent_owes_response(ctx.messages):
         ctx.messages.append(tail)
+
+    # Obligations tail block (#1413): the always-on reminder of every open
+    # awaited request the session owes a response to, rebuilt each step from the
+    # full log (``prelude.obligations``) so it survives windowing erasure of the
+    # original request user message. Appended AFTER the channels tail and BEFORE
+    # the merge so an unanswered obligation is the FINAL user-role line — the
+    # higher-priority stimulus (literal-minded models anchor on the last line).
+    #
+    # Gated on the open set being non-empty ALONE — deliberately NOT
+    # ``_agent_owes_response`` (which suppresses the channels tail on a trailing
+    # direct stimulus). The obligations block needs the OPPOSITE bias: an open
+    # obligation IS the stimulus to act on, so it renders even after a tool
+    # result (where ``build_obligations_tail_block`` returning non-None already
+    # encodes "non-empty").
+    obligations_block = build_obligations_tail_block(
+        prelude.obligations, session_id=session.id
+    )
+    if obligations_block is not None:
+        ctx.messages.append(obligations_block)
 
     # Merge consecutive user inbounds into one turn (Anthropic requires
     # alternating roles). This replaces the old "." placeholder separator,

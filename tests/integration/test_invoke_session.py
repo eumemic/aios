@@ -11,8 +11,9 @@ caller (#1128, ``test_invocations.py``) does not:
   ``respond_to_request`` — the return/error gate re-key (#1123/#1131 fold): the
   response edge is written and ``derive_response`` resolves it.
 * A cross-account ``session_id`` **404s before any edge is written**.
-* ``session_owns_open_request`` flips True exactly when a session owes a request
-  (the step_context return/error injection gate).
+* the return/error injection gate (``bool(get_open_obligations(...))`` since #1413
+  superseded ``session_owns_open_request``) flips True exactly when a session owes
+  a request.
 * The totality backstop auto-errors a non-child session that idles while owing,
   routing the wake to its session caller (no run involved).
 """
@@ -194,21 +195,32 @@ async def test_non_child_session_answers_via_respond_to_request(
 async def test_session_owns_open_request_gate(
     pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
 ) -> None:
-    """The return/error injection gate flips on exactly while a request is open."""
+    """The return/error injection gate flips on exactly while a request is open.
+
+    #1413 deleted ``session_owns_open_request``; the gate is now ``bool(obligations)``
+    where ``obligations = get_open_obligations(...)`` (the same awaited anti-join,
+    correctness-equivalent). Assert the gate semantics on the open-obligations set.
+    """
     pool, account_id, _agent_id, _env_id, session_id = pool_env
     _, _, target = await seed_agent_env_session(pool, account_id=account_id, prefix="invsess_gate")
 
-    assert not await service.session_owns_open_request(pool, target.id, account_id=account_id)
+    async def _owes() -> bool:
+        async with pool.acquire() as conn:
+            return bool(
+                await queries.get_open_obligations(conn, target.id, account_id=account_id)
+            )
+
+    assert not await _owes()
 
     handle = await _invoke_session(
         pool, account_id=account_id, caller_session_id=session_id, target=target.id
     )
-    assert await service.session_owns_open_request(pool, target.id, account_id=account_id)
+    assert await _owes()
 
     await workflow_completion.respond_to_request(
         pool, target.id, request_id=handle.request_id, is_error=False, result="ok", error=None
     )
-    assert not await service.session_owns_open_request(pool, target.id, account_id=account_id)
+    assert not await _owes()
 
 
 async def test_duplicate_answer_is_idempotent(
