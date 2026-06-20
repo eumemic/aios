@@ -255,3 +255,63 @@ def test_stimulate_is_not_model_callable() -> None:
     # Ask|Tell type, not a `deliver()` bool. Assert no `deliver` public function
     # leaked onto the service module.
     assert not hasattr(sessions_svc, "deliver"), "no public deliver(); spine is private"
+
+
+# ─── #1413: get_open_obligations + the additive summary on the frame ──────────
+
+
+def test_get_open_obligations_reads_request_opened_not_metadata_blob() -> None:
+    """The obligations reader derives from the same trusted ``request_opened`` frame
+    as ``get_open_request_ids`` — never the forgeable ``metadata.request`` blob."""
+    sql = _sql_literals(sessions_q.get_open_obligations)
+    assert "request_opened" in sql, "obligations must read the request_opened frame"
+    assert "request_response" in sql, "obligations must MINUS the answered set"
+    assert "'metadata'->'request'" not in sql, "must not read the forgeable metadata blob"
+
+
+def test_get_open_obligations_filters_awaited_and_orders_oldest_first() -> None:
+    """Lockstep with ``get_open_request_ids``: awaited filter (COALESCE TRUE) and
+    oldest-first ordering so the rendered block is deterministic."""
+    sql = _sql_literals(sessions_q.get_open_obligations)
+    assert "awaited" in sql, "obligations must filter the awaited bit (#1197 triad)"
+    assert "COALESCE" in sql.upper(), "absent awaited ⇒ TRUE"
+    assert "ORDER BY req.seq ASC" in sql, "oldest-first like get_open_request_ids"
+
+
+def test_get_open_obligations_projects_caller_kind_opened_at_summary() -> None:
+    """The reader projects the per-obligation fields the block + read-model need:
+    caller kind (trusted frame), opened_at (age), and the additive summary."""
+    sql = _sql_literals(sessions_q.get_open_obligations)
+    assert "'caller'->>'kind'" in sql, "caller_kind from the trusted caller frame"
+    assert "created_at" in sql, "opened_at = the edge's created_at (for age)"
+    assert "'summary'" in sql, "summary preview projection"
+
+
+def _writer_passes_summary(obj: Callable[..., object]) -> bool:
+    """True iff the function passes a ``summary=`` keyword to ``append_request_opened``."""
+    func = _func_def(obj, getattr(obj, "__name__", "?"))
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and _call_name(node) == "append_request_opened"
+            and any(kw.arg == "summary" for kw in node.keywords)
+        ):
+            return True
+    return False
+
+
+def test_both_writers_pass_summary_to_append_request_opened() -> None:
+    """Both edge writers — the workflow-child (``_stimulate_new_session``) and the
+    peer/api-invoke (``_stimulate_existing_ask``) — feed the additive #1413 summary
+    so the obligations block has a human-readable preview (Issue C's set_goal
+    inherits it free through ``_stimulate_existing_ask``)."""
+    assert _writer_passes_summary(sessions_svc._stimulate_new_session)
+    assert _writer_passes_summary(sessions_svc._stimulate_existing_ask)
+
+
+def test_append_request_opened_summary_is_additive() -> None:
+    """The summary is written only when present (absent ⇒ no key ⇒ id-only render,
+    no migration). The frame data dict is built conditionally, not unconditionally."""
+    func_src = _src(sessions_q.append_request_opened)
+    assert 'data["summary"] = summary' in func_src
+    assert "if summary is not None" in func_src

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ..models.awaiting_tool_call import AwaitingToolCall
     from ..models.github_repository_resource_echo import GithubRepositoryResourceEcho
     from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
+    from ..models.owed_request import OwedRequest
     from ..models.session_metadata import SessionMetadata
     from ..models.session_stop_reason_type_0 import SessionStopReasonType0
     from ..models.session_usage import SessionUsage
@@ -35,7 +36,9 @@ class Session:
     ended. Possible ``type`` values: ``"end_turn"``, ``"interrupt"``,
     ``"rescheduling"``, ``"error"`` (``idle`` + ``error`` = the errored
     landing pad). ``awaiting`` lists tool calls the session is blocked on
-    (derived per read from the event log + agent tool specs).
+    (derived per read from the event log + agent tool specs). ``owed_requests``
+    lists the still-open **awaited** request edges the session owes a response to
+    (derived per read from the ``request_opened`` lifecycle frame — #1413).
 
         Attributes:
             id (str):
@@ -51,6 +54,7 @@ class Session:
             updated_at (datetime.datetime):
             model (None | str | Unset):
             awaiting (list[AwaitingToolCall] | Unset):
+            owed_requests (list[OwedRequest] | Unset):
             vault_ids (list[str] | Unset):
             usage (SessionUsage | Unset): Cumulative token usage across all model calls in a session.
             resources (list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset):
@@ -79,6 +83,7 @@ class Session:
     updated_at: datetime.datetime
     model: None | str | Unset = UNSET
     awaiting: list[AwaitingToolCall] | Unset = UNSET
+    owed_requests: list[OwedRequest] | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
     usage: SessionUsage | Unset = UNSET
     resources: list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset = (
@@ -143,6 +148,13 @@ class Session:
             for awaiting_item_data in self.awaiting:
                 awaiting_item = awaiting_item_data.to_dict()
                 awaiting.append(awaiting_item)
+
+        owed_requests: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.owed_requests, Unset):
+            owed_requests = []
+            for owed_requests_item_data in self.owed_requests:
+                owed_requests_item = owed_requests_item_data.to_dict()
+                owed_requests.append(owed_requests_item)
 
         vault_ids: list[str] | Unset = UNSET
         if not isinstance(self.vault_ids, Unset):
@@ -234,6 +246,8 @@ class Session:
             field_dict["model"] = model
         if awaiting is not UNSET:
             field_dict["awaiting"] = awaiting
+        if owed_requests is not UNSET:
+            field_dict["owed_requests"] = owed_requests
         if vault_ids is not UNSET:
             field_dict["vault_ids"] = vault_ids
         if usage is not UNSET:
@@ -270,6 +284,7 @@ class Session:
             GithubRepositoryResourceEcho,
         )
         from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
+        from ..models.owed_request import OwedRequest
         from ..models.session_metadata import SessionMetadata
         from ..models.session_stop_reason_type_0 import SessionStopReasonType0
         from ..models.session_usage import SessionUsage
@@ -343,6 +358,15 @@ class Session:
                 awaiting_item = AwaitingToolCall.from_dict(awaiting_item_data)
 
                 awaiting.append(awaiting_item)
+
+        _owed_requests = d.pop("owed_requests", UNSET)
+        owed_requests: list[OwedRequest] | Unset = UNSET
+        if _owed_requests is not UNSET:
+            owed_requests = []
+            for owed_requests_item_data in _owed_requests:
+                owed_requests_item = OwedRequest.from_dict(owed_requests_item_data)
+
+                owed_requests.append(owed_requests_item)
 
         vault_ids = cast(list[str], d.pop("vault_ids", UNSET))
 
@@ -477,6 +501,7 @@ class Session:
             updated_at=updated_at,
             model=model,
             awaiting=awaiting,
+            owed_requests=owed_requests,
             vault_ids=vault_ids,
             usage=usage,
             resources=resources,
