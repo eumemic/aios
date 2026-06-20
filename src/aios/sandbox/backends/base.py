@@ -123,6 +123,15 @@ class SandboxSpec:
     cpu_quota: float | None = None
     memory_bytes: int | None = None
     pids_limit: int | None = None
+    # Run the container under ``docker --init`` (issue #1421). When True the
+    # backend injects ``--init`` so Docker runs the bundled ``docker-init``
+    # (tini) as PID 1 and execs the keepalive CMD (``tail -f /dev/null``) as
+    # its child. tini reaps orphaned zombies automatically, so PID-cgroup
+    # slots free as soon as a process dies — even after an OOM-kill orphans a
+    # process tree — preventing the zombie pile-up that exhausts
+    # ``--pids-limit`` and wedges the sandbox with ``fork() → EAGAIN``.
+    # Defaults to True: every session sandbox should run with a reaping PID 1.
+    init: bool = True
     # Per-session snapshot budget in unique bytes (durable session
     # sandboxes, §5.7). Drives the release-time flatten trigger: when a
     # session's unique snapshot bytes would exceed this, the snapshot verb

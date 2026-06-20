@@ -184,6 +184,16 @@ class DockerBackend:
             argv.extend(["--memory-swap", str(spec.memory_bytes)])
         if spec.pids_limit is not None:
             argv.extend(["--pids-limit", str(spec.pids_limit)])
+        # --init (issue #1421): run the bundled docker-init (tini) as PID 1.
+        # The keepalive CMD (``tail -f /dev/null``) execs as tini's child;
+        # tini reaps orphaned zombies automatically. Without this, orphaned
+        # children re-parent to the non-reaping ``tail`` PID 1 and pile up as
+        # permanent Z-state zombies that hold PID-cgroup slots until
+        # ``--pids-limit`` is exhausted, wedging the box with fork() → EAGAIN
+        # (no in-band recovery is possible once that happens). Composes with
+        # --pids-limit; the slot frees as soon as the process dies.
+        if spec.init:
+            argv.append("--init")
         # NB: NO ``--storage-opt size=`` (durable session sandboxes, §5.7).
         # The writable-layer quota required overlay2-on-xfs+pquota and was
         # rejected at ``docker run`` on prod's ext4 daemon — it never
