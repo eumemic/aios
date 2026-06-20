@@ -44,7 +44,8 @@ def postgres() -> Iterator[object]:
 async def _fetch(db_url: str, sql: str, *args: object) -> list[asyncpg.Record]:
     conn = await asyncpg.connect(db_url)
     try:
-        return await conn.fetch(sql, *args)
+        rows: list[asyncpg.Record] = list(await conn.fetch(sql, *args))
+        return rows
     finally:
         await conn.close()
 
