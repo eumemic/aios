@@ -1242,6 +1242,14 @@ async def _check_completion_injection(
     )
     child_tools = {t["function"]["name"] for t in child_prelude.tools}
     assert {"return", "error"} <= child_tools
+    # #1413 background-child path: get_open_obligations now runs UNCONDITIONALLY
+    # (the background-child fast-path short-circuit was removed), so the child's
+    # open `run` obligation is fetched onto the prelude -- the data the always-on
+    # obligations tail block renders. The fast-path removal did NOT regress the
+    # return/error gate (it stayed bool(obligations), asserted above).
+    assert child_prelude.obligations, "background child's run obligation must be computed"
+    assert child_prelude.obligations[0].caller_kind == "run"
+    assert child_prelude.obligations_block_upper_bound_local > 0
 
     fg = await sessions_service.create_session(
         pool,
@@ -1264,6 +1272,10 @@ async def _check_completion_injection(
     )
     fg_tools = {t["function"]["name"] for t in fg_prelude.tools}
     assert "return" not in fg_tools and "error" not in fg_tools
+    # An ordinary foreground session owes nothing -> no obligations, no reserved
+    # tail budget (the unconditional query returns []).
+    assert fg_prelude.obligations == []
+    assert fg_prelude.obligations_block_upper_bound_local == 0
 
 
 async def test_return_writes_response_and_wakes_caller_without_archiving(

@@ -560,3 +560,149 @@ async def test_session_to_session_cycle_bounded_by_construction(
             account_id,
         )
     assert total == INVOKE_MAX_DEPTH
+
+
+# ─── #1413: get_open_obligations — the tail-injected obligations data source ──
+
+
+async def test_get_open_obligations_empty_for_no_edge_session(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    pool, account_id, _agent_id, _env_id = pool_env
+    _agent, _env, session = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="obl_empty"
+    )
+    async with pool.acquire() as conn:
+        assert await queries.get_open_obligations(conn, session.id, account_id=account_id) == []
+
+
+async def test_get_open_obligations_projects_caller_kind_opened_at_summary(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    pool, account_id, _agent_id, env_id = pool_env
+    _agent, _env, session = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="obl_proj"
+    )
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.append_request_opened(
+            conn,
+            session_id=session.id,
+            account_id=account_id,
+            request_id="req-proj",
+            caller={"kind": "run", "id": "run_xyz"},
+            depth=1,
+            environment_id=env_id,
+            frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+            vault_ids=[],
+            summary="research the topic",
+        )
+    async with pool.acquire() as conn:
+        obs = await queries.get_open_obligations(conn, session.id, account_id=account_id)
+    assert len(obs) == 1
+    o = obs[0]
+    assert o.request_id == "req-proj"
+    assert o.caller_kind == "run"
+    assert o.caller_id == "run_xyz"
+    assert o.summary == "research the topic"
+    assert o.opened_at is not None
+
+
+async def test_get_open_obligations_oldest_first_and_excludes_answered(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    pool, account_id, _agent_id, env_id = pool_env
+    _agent, _env, session = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="obl_order"
+    )
+    for rid in ("req-1", "req-2", "req-3"):
+        async with pool.acquire() as conn, conn.transaction():
+            await queries.append_request_opened(
+                conn,
+                session_id=session.id,
+                account_id=account_id,
+                request_id=rid,
+                caller={"kind": "session", "id": "ses_caller"},
+                depth=0,
+                environment_id=env_id,
+                frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+                vault_ids=[],
+                summary=f"summary {rid}",
+            )
+    # Answer the middle one — it drops out of the open set.
+    async with pool.acquire() as conn:
+        await queries.write_response_if_absent(
+            conn,
+            session.id,
+            account_id=account_id,
+            request_id="req-2",
+            is_error=False,
+            result={"ok": True},
+            error=None,
+        )
+    async with pool.acquire() as conn:
+        obs = await queries.get_open_obligations(conn, session.id, account_id=account_id)
+    assert [o.request_id for o in obs] == ["req-1", "req-3"]  # oldest-first, answered excluded
+
+
+async def test_get_open_obligations_excludes_unawaited_tell_edge(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A ``Tell`` (``awaited=False``) edge owes no response — excluded from the
+    obligations set, in lockstep with ``get_open_request_ids``."""
+    pool, account_id, _agent_id, env_id = pool_env
+    _agent, _env, session = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="obl_tell"
+    )
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.append_request_opened(
+            conn,
+            session_id=session.id,
+            account_id=account_id,
+            request_id="req-tell",
+            caller={"kind": "run", "id": "run_t"},
+            depth=0,
+            environment_id=env_id,
+            frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+            vault_ids=[],
+            awaited=False,
+            summary="fire and forget",
+        )
+    async with pool.acquire() as conn:
+        assert await queries.get_open_obligations(conn, session.id, account_id=account_id) == []
+
+
+async def test_get_open_obligations_summary_absent_reads_as_none(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A pre-#1413 frame written WITHOUT a summary reads back with ``summary=None``
+    (additive — id-only render line, no crash, no migration)."""
+    pool, account_id, _agent_id, env_id = pool_env
+    _agent, _env, session = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="obl_nosum"
+    )
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.append_request_opened(
+            conn,
+            session_id=session.id,
+            account_id=account_id,
+            request_id="req-nosum",
+            caller={"kind": "api", "id": "api_caller"},
+            depth=0,
+            environment_id=env_id,
+            frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+            vault_ids=[],
+            # summary omitted → not written to the frame
+        )
+        # Confirm the key is genuinely absent on the persisted frame.
+        row = await conn.fetchrow(
+            "SELECT data FROM events WHERE session_id = $1 "
+            "AND kind = 'lifecycle' AND data->>'event' = 'request_opened'",
+            session.id,
+        )
+    data = queries.parse_jsonb(row["data"])
+    assert "summary" not in data
+    async with pool.acquire() as conn:
+        obs = await queries.get_open_obligations(conn, session.id, account_id=account_id)
+    assert len(obs) == 1
+    assert obs[0].summary is None
+    assert obs[0].caller_kind == "api"
