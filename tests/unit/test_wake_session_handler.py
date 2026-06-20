@@ -26,6 +26,17 @@ from aios.tools.wake_session import (
 )
 
 
+class _TxnCM:
+    """No-op stand-in for ``conn.transaction()`` (deliver_cross_session_wake now
+    wraps its span+message appends in one transaction)."""
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
+
+
 def _make_pool(*, target_row: dict[str, Any] | None, depth: int, recent_wakes: int) -> MagicMock:
     """Build a mock pool whose ``pool.acquire()`` yields a single shared
     conn whose ``fetchrow``/``fetchval`` walk through the handler's call
@@ -47,6 +58,7 @@ def _make_pool(*, target_row: dict[str, Any] | None, depth: int, recent_wakes: i
     conn.fetchrow = AsyncMock(side_effect=[{"depth": depth}, target_row])
     conn.fetchval = AsyncMock(side_effect=[recent_wakes])
     conn.execute = AsyncMock()
+    conn.transaction = lambda: _TxnCM()
 
     class _PoolAcquireCM:
         async def __aenter__(self) -> MagicMock:
@@ -363,6 +375,7 @@ class TestWakeSessionTrustedLineage:
 
         conn.fetchval = AsyncMock(side_effect=_fetchval)
         conn.execute = AsyncMock()
+        conn.transaction = lambda: _TxnCM()
 
         class _CM:
             async def __aenter__(self) -> MagicMock:

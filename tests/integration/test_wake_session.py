@@ -184,6 +184,58 @@ class TestWakeSessionIntegration:
         assert patched_defer_wake.await_args.kwargs["account_id"] == "acc_wake_a"
         assert patched_defer_wake.await_args.kwargs["cause"] == "agent_wake"
 
+    async def test_span_precedes_message_atomically(
+        self,
+        pool_with_runtime: asyncpg.Pool[Any],
+        patched_defer_wake: AsyncMock,
+    ) -> None:
+        """The trusted ``wake_lineage`` span and its user message land in ONE
+        transaction, span FIRST: the span's seq is exactly one below the message's.
+
+        This is the observable proof of the atomicity fix — nothing can interleave
+        between them (the session row is locked for the whole transaction, so the
+        seqs are adjacent), and the trusted depth carrier is never visible later than
+        the message that makes the target sweep-wakeable. A non-atomic message-first
+        append would leave a window where the sweep wakes the target into a step that
+        reads a stale wake-depth and undercounts the chain."""
+        pool = pool_with_runtime
+        await _seed_account(pool, "acc_wake_atomic", "wake-test-atomic")
+        _, _, source = await seed_agent_env_session(
+            pool, account_id="acc_wake_atomic", prefix="src"
+        )
+        _, _, target = await seed_agent_env_session(
+            pool, account_id="acc_wake_atomic", prefix="dst"
+        )
+
+        await wake_session_handler(
+            source.id,
+            {"target_session_id": target.id, "prompt": "escalate"},
+        )
+
+        async with pool.acquire() as conn:
+            span_seq = await conn.fetchval(
+                """
+                SELECT seq FROM events
+                WHERE session_id = $1 AND kind = 'span'
+                  AND data->>'event' = 'wake_lineage'
+                ORDER BY seq DESC LIMIT 1
+                """,
+                target.id,
+            )
+            msg_seq = await conn.fetchval(
+                """
+                SELECT seq FROM events
+                WHERE session_id = $1 AND kind = 'message' AND data->>'role' = 'user'
+                ORDER BY seq DESC LIMIT 1
+                """,
+                target.id,
+            )
+        assert span_seq is not None and msg_seq is not None
+        assert span_seq == msg_seq - 1, (
+            f"span seq {span_seq} must immediately precede message seq {msg_seq} "
+            "(span-first, one transaction, nothing interleaved)"
+        )
+
     async def test_cross_account_rejected(
         self,
         pool_with_runtime: asyncpg.Pool[Any],

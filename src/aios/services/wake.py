@@ -315,12 +315,14 @@ async def deliver_cross_session_wake(
 
     Validate the target (same ``account_id``, not archived) → enforce
     ``WAKE_SESSION_MAX_DEPTH`` (chain) and ``WAKE_SESSION_MAX_PER_HOUR``
-    (per ``(root.source_id, target)`` pair) BEFORE any side effect → append
-    ``content`` as a user-role message to the target (display-only wake
-    metadata) → stamp the non-forgeable ``wake_lineage`` span
+    (per ``(root.source_id, target)`` pair) BEFORE any side effect → in ONE
+    transaction stamp the non-forgeable ``wake_lineage`` span
     (``wake_depth = root.source_depth + 1``,
-    ``wake_source_session_id = root.source_id``) → ``defer_wake(cause=cause)``.
-    Returns the new depth.
+    ``wake_source_session_id = root.source_id``) THEN append ``content`` as a
+    user-role message to the target (display-only wake metadata) →
+    ``defer_wake(cause=cause)``. Span-first-and-atomic so the trusted depth
+    carrier is never visible later than the message that makes the target
+    wakeable. Returns the new depth.
 
     Raises :class:`WakeSessionPermissionError` (cross-account target — same
     shape an attacker would see for an unknown id, no existence leak),
@@ -396,7 +398,8 @@ async def deliver_cross_session_wake(
             },
         )
 
-    # Append the user message to the TARGET, then defer a wake there.
+    # Append the lineage span + the user message to the TARGET atomically,
+    # then defer a wake there.
     #
     # The ``metadata`` on the user message is DISPLAY-ONLY: it drives the
     # model-visible wake header (``_wake_header`` in harness/context.py).
@@ -416,20 +419,28 @@ async def deliver_cross_session_wake(
         "wake_source_session_id": root.source_id,
         "wake_depth": new_depth,
     }
-    async with pool.acquire() as conn:
-        await queries.append_event(
-            conn,
-            account_id=target_account_id,
-            session_id=target_session_id,
-            kind="message",
-            data={"role": "user", "content": content, "metadata": metadata},
-        )
+    # ONE transaction, span FIRST: the trusted depth carrier must never lag its
+    # message. The message append bumps ``last_stimulus_seq`` and makes the target
+    # sweep-wakeable; if it committed before the span, the periodic sweep could wake
+    # the target into a step whose own cross-session wake reads a stale wake-depth
+    # (the span the cap trusts not yet visible) and undercounts the chain. Atomic
+    # commit closes that window — the same append+request_opened pattern the Ask arm
+    # uses (``_stimulate_existing_ask``). NOTIFY is queued to the outermost COMMIT, so
+    # the nested per-append ``pg_notify`` fires once, after commit (invariant #6).
+    async with pool.acquire() as conn, conn.transaction():
         await queries.append_event(
             conn,
             account_id=target_account_id,
             session_id=target_session_id,
             kind="span",
             data=lineage_span,
+        )
+        await queries.append_event(
+            conn,
+            account_id=target_account_id,
+            session_id=target_session_id,
+            kind="message",
+            data={"role": "user", "content": content, "metadata": metadata},
         )
     await defer_wake(
         pool,

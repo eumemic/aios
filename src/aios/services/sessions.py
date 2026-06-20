@@ -698,9 +698,11 @@ async def tell_existing_session(
     """THE channel-less ``Tell(ExistingSession)`` writer: append a user-role message
     + defer a wake, opening NO request edge (no response obligation). Returns the
     appended event. The spine's ``TellExistingSession`` arm, the ``wake_self`` tool,
-    and the trigger failure-surface path all project from this one writer (the
-    *cross-session* ``deliver_cross_session_wake`` adds its depth/rate caps + lineage
-    span on top, and folds onto this arm with the Stage-6 edge-depth reconciliation)."""
+    and the trigger failure-surface path all project from this one writer. The
+    *cross-session* ``deliver_cross_session_wake`` is a policy-bearing **sibling**, not
+    a projection: it shares this writer's atomic append+defer shape but legitimately
+    owns its own depth/rate caps + the non-forgeable ``wake_lineage`` span, so it stays
+    a distinct writer rather than folding through here."""
     from aios.services.wake import defer_wake
 
     event = await append_user_message(pool, session_id, content, account_id=account_id)
