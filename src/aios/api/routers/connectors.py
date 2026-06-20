@@ -213,7 +213,13 @@ class RuntimeToolResultRequest(BaseModel):
     has to name the target connection.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore" (forward-tolerant): a connector deployed AHEAD of the api
+    # on a coupled-schema change can send a field this api does not yet know;
+    # ignore it (known fields still validated/processed) instead of 422-ing,
+    # which would crash-loop the connector and wedge the session. This is the
+    # forward half of the #1398 deploy-skew symmetry (the backward half:
+    # defaulting an omitted field for an older connector).
+    model_config = ConfigDict(extra="ignore")
 
     connection_id: str
     session_id: str
@@ -249,7 +255,13 @@ class RuntimeLifecycleRequest(BaseModel):
     context (current device count, last successful timestamp, etc.).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore" (forward-tolerant): a connector deployed AHEAD of the api
+    # on a coupled-schema change can send a field this api does not yet know;
+    # ignore it (known fields still validated/processed) instead of 422-ing,
+    # which would crash-loop the connector and wedge the session. This is the
+    # forward half of the #1398 deploy-skew symmetry (the backward half:
+    # defaulting an omitted field for an older connector).
+    model_config = ConfigDict(extra="ignore")
 
     connection_id: str
     event: str
@@ -274,7 +286,13 @@ class RuntimeSessionLifecycleRequest(BaseModel):
     caller opts into the wake.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore" (forward-tolerant): a connector deployed AHEAD of the api
+    # on a coupled-schema change can send a field this api does not yet know;
+    # ignore it (known fields still validated/processed) instead of 422-ing,
+    # which would crash-loop the connector and wedge the session. This is the
+    # forward half of the #1398 deploy-skew symmetry (the backward half:
+    # defaulting an omitted field for an older connector).
+    model_config = ConfigDict(extra="ignore")
 
     connection_id: str
     session_id: str
@@ -314,7 +332,13 @@ class RuntimeChatLifecycleRequest(BaseModel):
     defaults ``False`` (visible-on-next-turn).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore" (forward-tolerant): a connector deployed AHEAD of the api
+    # on a coupled-schema change can send a field this api does not yet know;
+    # ignore it (known fields still validated/processed) instead of 422-ing,
+    # which would crash-loop the connector and wedge the session. This is the
+    # forward half of the #1398 deploy-skew symmetry (the backward half:
+    # defaulting an omitted field for an older connector).
+    model_config = ConfigDict(extra="ignore")
 
     connection_id: str
     chat_id: str

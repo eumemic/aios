@@ -13797,7 +13797,6 @@
             "default": false
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
           "connection_id",
@@ -13841,7 +13840,6 @@
             "title": "Data"
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
           "connection_id",
@@ -13916,7 +13914,6 @@
             "default": false
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
           "connection_id",
@@ -14139,7 +14136,6 @@
             "default": false
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
           "connection_id",
