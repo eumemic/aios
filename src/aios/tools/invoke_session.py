@@ -53,6 +53,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.harness import runtime
+from aios.ids import REQUEST, make_id
 from aios.models.sessions import SessionAwaitResponse
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
@@ -268,6 +269,9 @@ async def invoke_workflow_handler(
         input=args.input,
         launcher_session_id=session_id,
         parent_run_id=session.parent_run_id,
+        request_id=make_id(REQUEST),
+        caller={"kind": "session", "id": session_id, "awaited": True},
+        request_output_schema=args.output_schema,
     )
     resp = await _park_on_run(pool, run_id=run.id, account_id=account_id)
     if resp.is_error:

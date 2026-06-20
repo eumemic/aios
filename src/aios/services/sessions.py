@@ -886,25 +886,28 @@ async def invoke(
                 detail={"target_kind": target_kind},
             )
         # create_run account-scopes both workflow_id and environment_id (404s a
-        # foreign id before the run row is written). The run→run request edge's
-        # ``request_opened`` is deferred to #1126 (a run has no session-scoped
-        # events log to key it on yet), so the run resolves via GET /runs/{id}/wait;
-        # the handle's request_id is the minted correlation id (table-free).
+        # foreign id before the run row is written). The run's inbound edge is its
+        # ``wf_runs`` row-columns (``request_id``/``caller``/``request_output_schema``)
+        # — a run has no session ``events`` log, so the edge is row-state rather than
+        # a ``request_opened`` lifecycle event (#1126/#1129). ``caller`` carries the
+        # ``awaited`` bit so the cut/trace can read this edge per child.
         #
         # Late import: ``services.workflows`` imports this module at load time,
         # so a module-level import would be circular.
         from aios.services import workflows as wf_service
 
+        request_id = make_id(REQUEST)
         run = await wf_service.create_run(
             pool,
             account_id=account_id,
             workflow_id=target,
             environment_id=environment_id,
             input=input,
+            request_id=request_id,
+            caller={**caller, "awaited": True},
+            request_output_schema=output_schema,
         )
-        return InvocationHandle(
-            servicer_kind="run", servicer_id=run.id, request_id=make_id(REQUEST)
-        )
+        return InvocationHandle(servicer_kind="run", servicer_id=run.id, request_id=request_id)
 
     raise ValidationError(
         f"unknown target_kind {target_kind!r}",

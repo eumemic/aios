@@ -1141,7 +1141,7 @@ async def _open_invoke_workflow_capability(
             run_id=sub_run_id,
             parent_run_id=run.id,
             request_id=cap.call_key,  # the invoke_workflow() call IS the request
-            caller={"kind": "run", "id": run.id},
+            caller={"kind": "run", "id": run.id, "awaited": True},
             request_output_schema=output_schema,
         )
     except NotFoundError:

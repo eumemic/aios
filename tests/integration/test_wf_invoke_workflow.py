@@ -129,7 +129,7 @@ async def test_invoke_workflow_happy_path_spawns_and_harvests(
     sub = await _run(pool, sub_run_id)
     assert sub.parent_run_id == run_id
     assert sub.request_id == cs.call_key
-    assert sub.caller == {"kind": "run", "id": run_id}
+    assert sub.caller == {"kind": "run", "id": run_id, "awaited": True}
 
     # Step 2: drive the sub-run to completion; it emits request_response.
     await run_workflow_step(sub_run_id)
