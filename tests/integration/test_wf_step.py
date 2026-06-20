@@ -1709,6 +1709,44 @@ async def _idle_assistant_turn(pool: asyncpg.Pool[Any], session_id: str) -> dict
     return {"role": "assistant", "content": "thinking…", "reacting_to": child.last_event_seq}
 
 
+_TOOLCALL_SEQ = 0
+
+
+async def _activity_turn(pool: asyncpg.Pool[Any], session_id: str) -> None:
+    """Simulate one ACTIVITY (tool-call) turn and resolve it — the #1412 reset
+    anchor for ``count_request_nudges``.
+
+    Goes through the real guard (which short-circuits on ``tool_calls`` without
+    nudging) to append the assistant tool-call event, then appends the matching
+    tool-role result so ``open_tool_call_count`` returns to 0 and the session can
+    idle again on the next pure-text turn. After this, the consecutive-inaction
+    nudge count for any request resets to 0."""
+    global _TOOLCALL_SEQ
+    _TOOLCALL_SEQ += 1
+    call_id = f"call_act_{_TOOLCALL_SEQ}"
+    child = await sessions_service.get_session_basic(pool, session_id, account_id="acc_wf")
+    assistant = {
+        "role": "assistant",
+        "content": "",
+        "reacting_to": child.last_event_seq,
+        "tool_calls": [{"id": call_id, "function": {"name": "noop", "arguments": "{}"}}],
+    }
+    # The guard appends the assistant event and short-circuits (tool_calls present
+    # -> never idle, no nudge). The tool result then balances the open count.
+    result = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, session_id, assistant, account_id="acc_wf", parent_run_id=None
+    )
+    assert not result.nudged  # an activity turn is never nudged
+    async with pool.acquire() as conn:
+        await db_queries.append_event(
+            conn,
+            account_id="acc_wf",
+            session_id=session_id,
+            kind="message",
+            data={"role": "tool", "tool_call_id": call_id, "name": "noop", "content": "ok"},
+        )
+
+
 async def test_idle_with_open_request_is_nudged(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
@@ -1858,6 +1896,240 @@ async def test_open_request_is_auto_errored_after_nudge_budget(
     # The backstop is the SECOND response writer — it too leaves the child_done
     # marker, so a lost post-commit caller wake stays sweep-visible (#780).
     assert [(s.call_key, s.kind) for s in signals] == [("sha:nr#0", "child_done")]
+
+
+async def test_activity_turn_resets_consecutive_nudge_count(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1412: ``count_request_nudges`` counts nudges SINCE the last tool-call turn,
+    not over the request's lifetime. An activity (tool-call) turn is the reset
+    anchor — after it, the consecutive count drops back to 0 even though earlier
+    nudges still exist in the log."""
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:reset#0")
+
+    # Two idle turns while owing the request -> two nudges accumulate.
+    for _ in range(2):
+        r = await sessions_service.append_assistant_and_guard_quiescence(
+            pool,
+            cid,
+            await _idle_assistant_turn(pool, cid),
+            account_id="acc_wf",
+            parent_run_id=run_id,
+        )
+        assert r.nudged
+    async with pool.acquire() as conn:
+        assert (
+            await db_queries.count_request_nudges(
+                conn, cid, account_id="acc_wf", request_id="sha:reset#0"
+            )
+            == 2
+        )
+
+    # An activity turn resets the consecutive count to 0 (the lifetime count is 2).
+    await _activity_turn(pool, cid)
+    async with pool.acquire() as conn:
+        assert (
+            await db_queries.count_request_nudges(
+                conn, cid, account_id="acc_wf", request_id="sha:reset#0"
+            )
+            == 0
+        )
+        # The earlier nudge user messages were NOT deleted — only excluded by seq.
+        lifetime = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'message' AND role = 'user' "
+            "AND data->'metadata'->'nudged_request_ids' @> to_jsonb($3::text)",
+            cid,
+            "acc_wf",
+            "sha:reset#0",
+        )
+    assert lifetime == 2  # the prior nudges remain in the log, just past the anchor
+
+
+async def test_interleaved_activity_never_trips_nudge_budget(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1412: a working agent that interleaves tool-call turns with idle turns
+    NEVER hits ``no_return`` — each activity turn resets the consecutive count, so
+    the budget is never reached even after far more than BUDGET total idle turns."""
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:work#0")
+
+    for _ in range(sessions_service.REQUEST_NUDGE_BUDGET * 3):
+        r = await sessions_service.append_assistant_and_guard_quiescence(
+            pool,
+            cid,
+            await _idle_assistant_turn(pool, cid),
+            account_id="acc_wf",
+            parent_run_id=run_id,
+        )
+        assert r.nudged  # always under budget -> nudged, never auto-errored
+        assert r.autoerror_caller_run_id is None
+        await _activity_turn(pool, cid)  # reset before the next idle turn
+
+    async with pool.acquire() as conn:
+        open_ids = await db_queries.get_open_request_ids(conn, cid, account_id="acc_wf")
+        resp = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="sha:work#0"
+        )
+    assert open_ids == ["sha:work#0"]  # still open — never abandoned
+    assert resp is None  # no no_return backstop was ever written
+
+
+async def test_no_return_after_exactly_n_consecutive_idle_turns(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1412: a session idle exactly N=BUDGET consecutive turns while owing a
+    request is ``no_return``'d on turn N+1 — and the count survives an EARLIER
+    activity turn (the consecutive run starts after the last tool-call turn)."""
+    pool = wf_runtime
+    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:stuck#0")
+
+    # An early activity turn: proves a stale reset anchor doesn't grant extra slack.
+    await _activity_turn(pool, cid)
+
+    for _ in range(sessions_service.REQUEST_NUDGE_BUDGET):
+        r = await sessions_service.append_assistant_and_guard_quiescence(
+            pool,
+            cid,
+            await _idle_assistant_turn(pool, cid),
+            account_id="acc_wf",
+            parent_run_id=run_id,
+        )
+        assert r.nudged and r.autoerror_caller_run_id is None
+
+    # Turn N+1: budget spent on the consecutive run -> auto-error.
+    r = await sessions_service.append_assistant_and_guard_quiescence(
+        pool,
+        cid,
+        await _idle_assistant_turn(pool, cid),
+        account_id="acc_wf",
+        parent_run_id=run_id,
+    )
+    assert not r.nudged and r.autoerror_caller_run_id == run_id
+    async with pool.acquire() as conn:
+        resp = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="sha:stuck#0"
+        )
+    assert resp is not None and resp["is_error"] and resp["error"] == {"kind": "no_return"}
+
+
+async def test_per_request_count_is_independent_stuck_sibling_still_no_returns(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1412 (multi-request reset = per-request): the consecutive count is filtered
+    by ``nudged_request_ids``, so it is PER-REQUEST. Answering one obligation (which
+    stops it being nudged) does not spare a still-stuck SIBLING — the sibling keeps
+    its own consecutive count and still hits ``no_return`` — and a nudge naming only
+    the answered request never bled into the sibling's budget."""
+    pool = wf_runtime
+    # One run owing TWO awaited requests from the same child session.
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    cid = child_session_id(run_id, "sha:a#0")
+    await sessions_service.create_child_session(
+        pool,
+        session_id=cid,
+        account_id="acc_wf",
+        agent_id=wf_agent_id,
+        environment_id="env_wf",
+        agent_version=1,
+        model=None,
+        parent_run_id=run_id,
+        surface=Surface([], [], []),
+        vault_ids=[],
+        request_id="sha:a#0",
+        input="hi",
+    )
+    async with pool.acquire() as conn:
+        # A second open awaited request edge + its delivered user message.
+        await db_queries.append_event(
+            conn,
+            account_id="acc_wf",
+            session_id=cid,
+            kind="lifecycle",
+            data={
+                "event": "request_opened",
+                "request_id": "sha:b#0",
+                "awaited": True,
+                "caller": {"kind": "run", "id": run_id},
+            },
+        )
+        await db_queries.append_event(
+            conn,
+            account_id="acc_wf",
+            session_id=cid,
+            kind="message",
+            data={
+                "role": "user",
+                "content": "second",
+                "metadata": {
+                    "request": {"request_id": "sha:b#0", "caller": {"kind": "run", "id": run_id}}
+                },
+            },
+        )
+        open_ids = await db_queries.get_open_request_ids(conn, cid, account_id="acc_wf")
+    assert set(open_ids) == {"sha:a#0", "sha:b#0"}  # two obligations open
+
+    # One idle turn nudges BOTH open requests together.
+    r = await sessions_service.append_assistant_and_guard_quiescence(
+        pool,
+        cid,
+        await _idle_assistant_turn(pool, cid),
+        account_id="acc_wf",
+        parent_run_id=run_id,
+    )
+    assert r.nudged
+    async with pool.acquire() as conn:
+        # Answer A. From now on only B is open, so only B is nudged.
+        wrote = await db_queries.write_response_if_absent(
+            conn,
+            cid,
+            account_id="acc_wf",
+            request_id="sha:a#0",
+            is_error=False,
+            result="done-A",
+            error=None,
+        )
+        assert wrote
+        count_a = await db_queries.count_request_nudges(
+            conn, cid, account_id="acc_wf", request_id="sha:a#0"
+        )
+        count_b = await db_queries.count_request_nudges(
+            conn, cid, account_id="acc_wf", request_id="sha:b#0"
+        )
+    assert count_a == 1 and count_b == 1  # each counts only nudges naming ITSELF
+
+    # B is now the lone obligation. It needs BUDGET-1 MORE nudges to reach budget,
+    # then the next idle turn auto-errors B alone. Crucially, no activity turn ever
+    # resets B, and A's earlier resolution does not reset B's count.
+    for _ in range(sessions_service.REQUEST_NUDGE_BUDGET - 1):
+        r = await sessions_service.append_assistant_and_guard_quiescence(
+            pool,
+            cid,
+            await _idle_assistant_turn(pool, cid),
+            account_id="acc_wf",
+            parent_run_id=run_id,
+        )
+        assert r.nudged  # still under budget for B
+
+    r = await sessions_service.append_assistant_and_guard_quiescence(
+        pool,
+        cid,
+        await _idle_assistant_turn(pool, cid),
+        account_id="acc_wf",
+        parent_run_id=run_id,
+    )
+    assert not r.nudged  # B's budget spent -> auto-error
+    async with pool.acquire() as conn:
+        resp_a = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="sha:a#0"
+        )
+        resp_b = await db_queries.read_request_response(
+            conn, cid, account_id="acc_wf", request_id="sha:b#0"
+        )
+    assert resp_a is not None and resp_a["is_error"] is False  # A's real answer stands
+    assert resp_b is not None and resp_b["error"] == {"kind": "no_return"}  # sibling not spared
 
 
 async def test_non_answering_child_resolves_run_via_agent_no_return_error(

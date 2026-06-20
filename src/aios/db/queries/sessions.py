@@ -576,17 +576,45 @@ async def get_request_output_schema(
 async def count_request_nudges(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
 ) -> int:
-    """How many times this request has been nudged — the count of nudge user
-    messages whose ``metadata.nudged_request_ids`` include it.
+    """How many times this request has been nudged **since the most recent
+    activity turn** — the count of nudge user messages whose
+    ``metadata.nudged_request_ids`` include it and whose ``seq`` is greater than
+    the latest assistant tool-call turn in this session.
 
-    The per-request retry budget is *derived* from the log, not stored — so it is
-    crash-safe and needs no counter to keep in sync (the same stance as
-    ``_count_consecutive_rescheduling`` for model-error backoff).
+    This is a **consecutive-inaction** count, not a lifetime one (#1412): the
+    request-totality quiescence guard short-circuits on any assistant turn that
+    carries ``tool_calls`` (``services/sessions.py``), so that tool-call turn is
+    the natural reset anchor. Counting nudges only *after* it turns the retry
+    budget from a **loop-limiter** (bounds total idle work → fights always-on)
+    into a **stuck-detector** (bounds *consecutive* idle turns → enables
+    always-on): an agent that interleaves tool calls never trips the budget,
+    while one stuck doing nothing N turns running still gets ``no_return``'d.
+
+    The reset anchor is **session-wide** (the latest tool-call turn), but the
+    nudge count is **per-request** (filtered by ``nudged_request_ids``): a
+    session working one obligation does not reset a stuck sibling's count —
+    each open request keeps its own consecutive count, so a stuck sibling still
+    hits ``no_return`` (#1412, multi-request reset = per-request).
+
+    The budget stays *derived* from the log, not stored — so it is crash-safe
+    and needs no counter to keep in sync (the same stance as
+    ``_count_consecutive_rescheduling`` for model-error backoff). The
+    ``data ? 'tool_calls'`` / ``role = 'assistant'`` anchor subquery matches
+    ``events_assistant_tool_calls_idx`` (migration 0011/0023); the extra
+    ``jsonb_array_length > 0`` guard excludes a present-but-empty array so the
+    anchor agrees byte-for-byte with the guard's ``assistant_msg.get('tool_calls')``
+    truthiness short-circuit.
     """
     n: int | None = await conn.fetchval(
         "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
         "AND kind = 'message' AND role = 'user' "
-        "AND data->'metadata'->'nudged_request_ids' @> to_jsonb($3::text)",
+        "AND data->'metadata'->'nudged_request_ids' @> to_jsonb($3::text) "
+        "AND seq > COALESCE("
+        "    (SELECT max(seq) FROM events "
+        "     WHERE session_id = $1 AND account_id = $2 "
+        "     AND kind = 'message' AND role = 'assistant' "
+        "     AND data ? 'tool_calls' "
+        "     AND jsonb_array_length(data->'tool_calls') > 0), 0)",
         session_id,
         account_id,
         request_id,
