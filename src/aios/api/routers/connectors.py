@@ -634,6 +634,14 @@ async def post_runtime_session_lifecycle(
     When ``body.wake`` is set, a ``defer_wake`` is enqueued after the append
     (the exact pattern as the tool-result intake) so the failure wakes the
     session rather than merely being visible on its next turn.
+
+    Reserved model-visible ``event`` values a connector may post here:
+    ``connector_delivery_failed`` (#1308, the failure path), and its
+    success-path complements ``connector_message_delivered`` /
+    ``connector_message_edited`` (#1341, informational acks emitted with
+    ``wake=False``). All three render as a bracketed user-role notice; any
+    other ``event`` string is appended but filtered out of the model context
+    by the ``MODEL_VISIBLE_LIFECYCLE_EVENTS`` allowlist.
     """
     _, auth_connector, account_id, auth_connection_ids = auth
     async with pool.acquire() as conn:
@@ -722,6 +730,11 @@ async def post_runtime_chat_lifecycle(
     (the same pattern as the session-lifecycle and tool-result intakes) so
     the failure wakes the originating session rather than merely being
     visible on its next turn.
+
+    Reserved model-visible ``event`` values mirror the session-lifecycle
+    route: ``connector_delivery_failed`` (#1308) and its success-path
+    complements ``connector_message_delivered`` / ``connector_message_edited``
+    (#1341, informational acks emitted with ``wake=False``).
     """
     _, auth_connector, account_id, auth_connection_ids = auth
     async with pool.acquire() as conn:

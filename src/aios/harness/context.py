@@ -151,6 +151,26 @@ def _render_delivery_failure_notice(data: dict[str, Any]) -> str:
     )
 
 
+def _render_ack_notice(data: dict[str, Any]) -> str:
+    """Render a ``connector_message_delivered`` / ``connector_message_edited``
+    lifecycle event (#1341) as a bracketed user-role notice.
+
+    The success-path complement to ``_render_delivery_failure_notice``: a
+    connector appends one of these when the platform confirmed an outbound the
+    model consciously sent was delivered, or that an edit landed. Like the
+    delivery-failure renderer it is total by contract — a pure function of
+    ``data`` that never raises, since it runs inside the per-wake replay where a
+    raise would brick the session. Connector specifics
+    (``platform_message_id``/``tool_call_id``) ride in ``data`` so core renders
+    the fact without knowing about any specific transport.
+    """
+    event = data.get("event")
+    connector = data.get("connector") or data.get("connection_id") or "a connector"
+    if event == "connector_message_edited":
+        return f"[Your edit via {connector} landed.]"
+    return f"[Your message via {connector} was delivered.]"
+
+
 # Notification markers truncate the source content to this many chars
 # (plus an ellipsis when truncated) so a busy non-focal channel
 # contributes O(tens-of-tokens) per inbound to the context — cheap
@@ -999,6 +1019,14 @@ def build_messages(
             # produced by the session-targeted lifecycle route, not by render.
             if e.data.get("event") == "connector_delivery_failed":
                 content = _render_delivery_failure_notice(e.data)
+            elif e.data.get("event") in (
+                "connector_message_delivered",
+                "connector_message_edited",
+            ):
+                # #1341: the success-path acks (delivered / edit-landed). Like
+                # the delivery-failure arm they are NON-stimulus-bearing here;
+                # the optional wake comes from the lifecycle route, not render.
+                content = _render_ack_notice(e.data)
             else:
                 content = _render_fs_lifecycle_notice(e.data)
             messages.append({"role": "user", "content": content})
