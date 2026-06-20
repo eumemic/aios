@@ -99,3 +99,32 @@ async def await_invocation(
         account_id=account_id,
         timeout_seconds=timeout_seconds,
     )
+
+
+@router.post(
+    "/{task_id}/cancel",
+    operation_id="cancel_invocation",
+    status_code=status.HTTP_202_ACCEPTED,
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
+async def cancel_invocation(
+    task_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    request_id: str,
+) -> None:
+    """Cancel the invocation identified by ``task_id`` (the servicer id) + ``request_id``.
+
+    Seeds the cancel on the servicer (a run via its cancel signal, a session via its
+    cancel-marker); the servicer harvests it under its own single-writer step lock and answers
+    the request ``cancelled``. **202 Accepted**: the cancel is *requested*, finalized on the
+    servicer's next step. Account-scoped; idempotent (re-cancel is a no-op); a cross-tenant or
+    missing servicer 404s. ``task_id``'s kind is read off the id prefix (``wfr``/``sess``).
+    """
+    await invocations_service.cancel_invocation(
+        pool,
+        servicer_kind=_servicer_kind(task_id),
+        servicer_id=task_id,
+        request_id=request_id,
+        account_id=account_id,
+    )

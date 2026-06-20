@@ -9918,6 +9918,77 @@
           }
         }
       }
+    },
+    "/v1/invocations/{task_id}/cancel": {
+      "post": {
+        "tags": [
+          "invocations"
+        ],
+        "summary": "Cancel Invocation",
+        "description": "Cancel the invocation identified by ``task_id`` (the servicer id) + ``request_id``.\n\nSeeds the cancel on the servicer (a run via its cancel signal, a session via its\ncancel-marker); the servicer harvests it under its own single-writer step lock and answers\nthe request ``cancelled``. **202 Accepted**: the cancel is *requested*, finalized on the\nservicer's next step. Account-scoped; idempotent (re-cancel is a no-op); a cross-tenant or\nmissing servicer 404s. ``task_id``'s kind is read off the id prefix (``wfr``/``sess``).",
+        "operationId": "cancel_invocation",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
+        }
+      }
     }
   },
   "components": {
