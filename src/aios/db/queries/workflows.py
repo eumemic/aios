@@ -1009,46 +1009,52 @@ async def resolve_run_error(conn: asyncpg.Connection[Any], run_id: str) -> dict[
 
 
 async def derive_run_response(
-    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str, request_id: str
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
 ) -> dict[str, Any] | None:
-    """A run-servicer's **terminal outcome** for an inbound request, or ``None``.
+    """A run-servicer's **terminal outcome** for its inbound request, or ``None`` if pending.
 
-    The run-kind branch of the **one** kind-agnostic resolver (the dual of the
-    session-side :func:`aios.db.queries.sessions.derive_response`): a sub-run
-    invoked ``in service of a request`` answers identically to a session —
+    The run-kind branch of the kind-agnostic resolver (the dual of the session-side
+    :func:`aios.db.queries.sessions.derive_response`). A run is **singly-inbound** — its
+    terminal state *is* the answer to its one request — so the outcome reads off the run's
+    terminal record, not a per-request event:
 
-    * a **written response** (the ``request_response`` journal event the run emits
-      at its terminal ``_complete_run`` chokepoint, #1126) → that outcome;
-    * else, if the run is **gone** — ``wf_runs`` terminal/archived with no written
-      response (so it can never answer) → a Failed ``child_gone`` outcome;
+    * **terminal** (``wf_runs.status``): ``cancelled`` → a clean ``cancelled`` outcome (a
+      cancelled run writes no success, and its caller must learn ``cancelled``, never the
+      ``child_gone`` a missing response would imply); ``completed``/``errored`` → the
+      ``run_completed`` bookend payload's ``{output, is_error, error}``;
+    * else **gone** (missing, or archived before completing — so it can never answer) →
+      a Failed ``child_gone`` outcome;
     * else → ``None`` (alive and unanswered — still pending).
 
-    The **response arm is the log** (the ``request_response`` event in
-    ``wf_run_events``), and the **liveness arm is the run row** (``wf_runs``
-    terminal status / ``archived_at``) — the run-kind dispatch of
-    ``derive_response``'s liveness arm (session uses ``sessions.archived_at``).
-    Both are read in one snapshot, so a written response always dominates "gone".
+    Row status + the ``run_completed`` payload are read in one snapshot. This replaces the
+    former separate ``request_response`` journal event (§3.6): the run's terminal record
+    already carries the answer, so a second per-request event was redundant — and folding
+    the read here is what makes a cancelled sub-run resolve as ``cancelled`` (the old event
+    was gated off for cancellation, leaving the liveness arm to mislabel it ``child_gone``).
     """
     row = await conn.fetchrow(
-        "SELECT (SELECT e.payload FROM wf_run_events e "
-        "        WHERE e.run_id = $1 AND e.type = 'request_response' "
-        "        AND e.payload->>'request_id' = $2 ORDER BY e.seq DESC LIMIT 1) AS response, "
-        "       EXISTS (SELECT 1 FROM wf_runs r WHERE r.id = $1 AND r.account_id = $3 "
-        "               AND r.archived_at IS NULL "
-        "               AND r.status NOT IN ('completed','errored','cancelled')) AS live",
+        "SELECT r.status, (r.archived_at IS NOT NULL) AS archived, "
+        "       (SELECT e.payload FROM wf_run_events e "
+        "        WHERE e.run_id = r.id AND e.type = 'run_completed' "
+        "        ORDER BY e.seq DESC LIMIT 1) AS completed "
+        "FROM wf_runs r WHERE r.id = $1 AND r.account_id = $2",
         run_id,
-        request_id,
         account_id,
     )
-    assert row is not None
-    if row["response"] is not None:
-        response = parse_jsonb(row["response"])
+    if row is None:  # the run vanished entirely → can never answer
+        return {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
+    status = row["status"]
+    if status == "cancelled":
+        return {"result": None, "is_error": True, "error": {"kind": "cancelled"}}
+    if status in ("completed", "errored"):
+        completed = parse_jsonb(row["completed"]) if row["completed"] is not None else {}
+        is_error = bool(completed.get("is_error"))
         return {
-            "result": response.get("result"),
-            "is_error": bool(response.get("is_error")),
-            "error": response.get("error"),
+            "result": None if is_error else completed.get("output"),
+            "is_error": is_error,
+            "error": completed.get("error"),
         }
-    if not row["live"]:
+    if row["archived"]:  # non-terminal but archived → can never answer
         return {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
     return None
 

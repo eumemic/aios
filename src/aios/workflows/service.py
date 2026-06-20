@@ -254,10 +254,11 @@ async def create_run(
         # The run→run request edge (#1126/#1129) needs no session-scoped
         # ``request_opened`` event here: a run has no session ``events`` log, and
         # the *ask* half is already carried by the launching run's
-        # ``call_started{capability:'invoke_workflow'}`` journal frame, whose
-        # symmetric *answer* — the sub-run's ``request_response`` (#1126), keyed
-        # on the same ``request_id``/``caller`` recorded on this row — is resolved
-        # by ``derive_run_response``. (The session-creating launch sites
+        # ``call_started{capability:'invoke_workflow'}`` journal frame. The
+        # symmetric *answer* is the sub-run's own terminal record (``run_completed``
+        # + ``status``) — a run is singly-inbound, so its terminal state IS the
+        # answer — read back by ``derive_run_response`` (§3.6; no separate
+        # ``request_response`` event). (The session-creating launch sites
         # ``create_child_session`` / ``_open_agent_capability`` still emit the
         # session ``request_opened`` for their session-scoped edges, #1123.)
     await defer_run_wake(run.id)

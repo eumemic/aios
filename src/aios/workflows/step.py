@@ -403,7 +403,6 @@ async def _run_workflow_step_body(
                     conn,
                     cap_payload["child_run_id"],
                     account_id=account_id,
-                    request_id=call_key,
                 )
                 if result_payload is None:
                     continue  # sub-run still in-flight and unanswered — stay suspended
@@ -1173,10 +1172,7 @@ async def _open_invoke_workflow_capability(
     # sweep tick — resolved through the SAME ``derive_run_response`` seam the harvest
     # uses, so an already-gone sub-run triggers the prompt re-wake too.
     needs_rewake = (
-        await wf_queries.derive_run_response(
-            conn, sub_run.id, account_id=account_id, request_id=cap.call_key
-        )
-        is not None
+        await wf_queries.derive_run_response(conn, sub_run.id, account_id=account_id) is not None
     )
     return _SpawnResult(rejected=False, needs_rewake=needs_rewake)
 
@@ -1307,32 +1303,12 @@ async def _commit_terminal_and_dispatch(
             kind = error.get("kind")
             if kind in {"engine_semantics_changed", "nondeterministic_replay"}:
                 await _fail_child_requests_for_terminal_error(conn, run, error_kind=kind)
-        # The "one missing edge" (#1126): a run completing IN SERVICE OF A REQUEST
-        # emits a ``request_response`` keyed on its inbound ``request_id`` — the
-        # run-side mirror of the session ``respond_to_request`` writer, same data
-        # shape so ``derive_run_response``'s response arm reads it uniformly. It
-        # rides this SAME transaction so the answer commits atomically with the
-        # terminal transition, and inherits the run's exactly-once latch — keyed
-        # on ``call_key=request_id``, the existing ``(run_id, call_key, type)``
-        # unique index makes a replay / procrastinate dual-execution loser a no-op
-        # (no double-emit). Gated on the inbound edge: an edgeless operator/HTTP
-        # run (``request_id is None``) emits nothing. Cancellation answers via the
-        # liveness arm (terminal-with-no-response → ``child_gone``), not here.
-        if run.request_id is not None and status != "cancelled":
-            await wf_queries.append_run_event(
-                conn,
-                account_id=run.account_id,
-                run_id=run.id,
-                type="request_response",
-                call_key=run.request_id,
-                payload={
-                    "event": "request_response",
-                    "request_id": run.request_id,
-                    "is_error": payload["is_error"],
-                    "result": None if payload["is_error"] else output,
-                    "error": payload.get("error"),
-                },
-            )
+        # A run in service of a request answers via its terminal record itself (#1126):
+        # the ``run_completed`` bookend (above) + the ``status`` flip (below) ARE the
+        # answer, read back by ``derive_run_response``. No separate ``request_response``
+        # event is written — the run is singly-inbound, so its terminal state already
+        # carries the one outcome (§3.6); this also lets a cancelled run resolve as
+        # ``cancelled`` rather than the ``child_gone`` a gated-off response implied.
         await wf_queries.set_run_terminal(
             conn, run.id, status=status, output=output, account_id=run.account_id
         )

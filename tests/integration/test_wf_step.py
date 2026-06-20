@@ -107,9 +107,11 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
         )
 
 
-async def _make_run(pool: asyncpg.Pool[Any], script: str, *, input: Any = None) -> str:
+async def _make_run(
+    pool: asyncpg.Pool[Any], script: str, *, input: Any = None, name: str = "w"
+) -> str:
     async with pool.acquire() as conn:
-        wf = await wf_queries.insert_workflow(conn, account_id="acc_wf", name="w", script=script)
+        wf = await wf_queries.insert_workflow(conn, account_id="acc_wf", name=name, script=script)
     run = await service.create_run(
         pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", input=input
     )
@@ -3923,6 +3925,42 @@ async def test_await_run_cross_tenant_404(
     run_id = await _make_run(pool, "async def main(input):\n    return 1")
     with pytest.raises(NotFoundError):
         await _await_run(pool, migrated_db_url, run_id, account_id="acc_other", timeout_seconds=1)
+
+
+async def test_derive_run_response_reads_the_terminal_record(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The harvest resolver reads a sub-run's outcome off its terminal record (§3.6).
+
+    No separate ``request_response`` event: ``completed → ok`` (the run_completed
+    output), ``errored → error``, ``cancelled → cancelled`` (the load-bearing case — a
+    cancelled sub-run must NOT resolve as the ``child_gone`` a gated-off response implied,
+    nor as a false-success ``{ok: null}``), and a still-running sub-run → ``None`` (pending).
+    """
+    pool = wf_runtime
+    ok_run = await _make_run(pool, "async def main(input):\n    return 7", name="ok")
+    await run_workflow_step(ok_run)
+    err_run = await _make_run(pool, "def main(input):\n    return 1", name="err")  # sync → errored
+    await run_workflow_step(err_run)
+    cancelled_run = await _make_run(pool, "async def main(input):\n    return 1", name="cancel")
+    await wf_service.cancel_run(pool, run_id=cancelled_run, account_id="acc_wf")
+    await run_workflow_step(cancelled_run)  # harvest the cancel → finalize cancelled
+    pending_run = await _make_run(
+        pool, "async def main(input):\n    return 1", name="pending"
+    )  # never stepped
+
+    async with pool.acquire() as conn:
+        ok = await wf_queries.derive_run_response(conn, ok_run, account_id="acc_wf")
+        err = await wf_queries.derive_run_response(conn, err_run, account_id="acc_wf")
+        cancelled = await wf_queries.derive_run_response(conn, cancelled_run, account_id="acc_wf")
+        pending = await wf_queries.derive_run_response(conn, pending_run, account_id="acc_wf")
+
+    assert ok == {"result": 7, "is_error": False, "error": None}
+    assert err is not None and err["is_error"] is True and err["result"] is None
+    assert err["error"]["kind"] == "author_exception"
+    # The cancel semantic the §3.6 merge had to preserve: cancelled, not child_gone.
+    assert cancelled == {"result": None, "is_error": True, "error": {"kind": "cancelled"}}
+    assert pending is None
 
 
 # ─── tool() — a run invokes its declared network/credential tools (slice 2) ───

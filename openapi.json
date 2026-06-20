@@ -17649,8 +17649,7 @@
               "call_result",
               "run_completed",
               "annotation",
-              "frontier_deferred",
-              "request_response"
+              "frontier_deferred"
             ],
             "title": "Type"
           },

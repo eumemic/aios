@@ -35,11 +35,6 @@ WfRunEventType = Literal[
     "run_completed",
     "annotation",
     "frontier_deferred",
-    # The run-side mirror of the session ``request_response``: emitted at the
-    # terminal ``_complete_run`` chokepoint when the run services an inbound
-    # request (#1126), keyed on the request_id via ``call_key`` so the existing
-    # ``(run_id, call_key, type)`` unique index latches it exactly-once.
-    "request_response",
 ]
 WfRunSignalKind = Literal["gate_resume", "child_done", "cancel", "tool_result"]
 

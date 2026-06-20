@@ -1,13 +1,13 @@
-"""``invoke_workflow()`` — the run-caller surface (#1129) + the run-side
-``request_response`` answer edge (#1126), end to end against a real Postgres.
+"""``invoke_workflow()`` — the run-caller surface (#1129), end to end against a
+real Postgres.
 
 A workflow run invoking another workflow as a sub-run is the run dual of
 ``agent()``: the parent suspends on a journaled ``call_started`` carrying a
-DETERMINISTIC ``child_run_id``; the sub-run completes and emits a
-``request_response`` keyed on the inbound ``request_id``; the parent's next step
-resolves that answer through ``derive_run_response`` and fast-forwards it into
-the ``await``. These tests drive the harvest manually (``run_workflow_step``),
-reusing ``test_wf_step``'s runtime fixture.
+DETERMINISTIC ``child_run_id``; the sub-run completes and its terminal record
+(``run_completed`` + ``status``) IS the answer; the parent's next step resolves it
+through ``derive_run_response`` and fast-forwards it into the ``await`` (§3.6 — no
+separate ``request_response`` event). These tests drive the harvest manually
+(``run_workflow_step``), reusing ``test_wf_step``'s runtime fixture.
 """
 
 from __future__ import annotations
@@ -104,8 +104,8 @@ _PARENT = (
 async def test_invoke_workflow_happy_path_spawns_and_harvests(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
-    """Parent suspends on ``call_started`` → sub-run completes + emits
-    ``request_response`` → parent's next step harvests the answer and completes."""
+    """Parent suspends on ``call_started`` → sub-run completes → parent's next step
+    harvests the sub-run's terminal answer (via ``derive_run_response``) and completes."""
     pool = wf_runtime
     child_wf = await _insert_workflow(
         pool, "child", "async def main(input):\n    return input['n'] + 1\n"
@@ -131,12 +131,13 @@ async def test_invoke_workflow_happy_path_spawns_and_harvests(
     assert sub.request_id == cs.call_key
     assert sub.caller == {"kind": "run", "id": run_id, "awaited": True}
 
-    # Step 2: drive the sub-run to completion; it emits request_response.
+    # Step 2: drive the sub-run to completion. Its terminal record (run_completed +
+    # status) IS the answer — no separate request_response event (§3.6).
     await run_workflow_step(sub_run_id)
     sub = await _run(pool, sub_run_id)
     assert sub.status == "completed" and sub.output == 42
     sub_types = [t for t, _ in await _events(pool, sub_run_id)]
-    assert "request_response" in sub_types
+    assert "request_response" not in sub_types and "run_completed" in sub_types
 
     # Step 3: parent harvests the answer and completes.
     await run_workflow_step(run_id)

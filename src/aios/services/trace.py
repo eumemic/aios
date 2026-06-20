@@ -47,9 +47,7 @@ from aios.services import trace_normalizer
 _ABBREVIATED_LIFECYCLE_EVENTS = frozenset({"request_opened", "request_response", "turn_ended"})
 # Run-journal frame types kept in the abbreviated view (the run journal is
 # already sparse; gates + the request/run bookends + errors carry the signal).
-_ABBREVIATED_RUN_TYPES = frozenset(
-    {"run_started", "run_completed", "request_response", "annotation"}
-)
+_ABBREVIATED_RUN_TYPES = frozenset({"run_started", "run_completed", "annotation"})
 
 
 class _Node:
@@ -119,7 +117,7 @@ async def get_trace(
                 )
             else:
                 responses[n.id] = await wf_queries.derive_run_response(
-                    conn, n.id, account_id=account_id, request_id=n.request_id
+                    conn, n.id, account_id=account_id
                 )
 
     entries = build_entries(
@@ -463,6 +461,4 @@ def _classify_run_frame(etype: str, payload: dict[str, Any]) -> tuple[str, str]:
         return "annotation", "run completed"
     if etype == "run_started":
         return "annotation", "run started"
-    if etype == "request_response":
-        return "response", "response"
     return "annotation", etype
