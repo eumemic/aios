@@ -1,17 +1,17 @@
-"""The **session caller surface** (#1127) — model-only ``invoke*`` builtins.
+"""The **session caller surface** (#1127) — model-only ``call_*`` builtins.
 
-The building block is **"invoke a session"**: write a trusted request edge
+The building block is **"call a session"**: write a trusted request edge
 (#1123 ``request_opened`` with ``caller={kind:"session", id:<this session>}``)
 into an **existing same-account session** and **park** until it answers
-``{ok | error}``. Invoking an **agent** or a **workflow** is thin porcelain on
-top — *create the servicer, then invoke it*:
+``{ok | error}``. Calling an **agent** or a **workflow** is thin porcelain on
+top — *create the servicer, then call it*:
 
-* ``invoke(session_id, input, output_schema)`` — the primitive: inject the edge
-  into an existing same-account session, park, resolve via the kind-agnostic
+* ``call_session(session_id, input, output_schema)`` — the primitive: inject the
+  edge into an existing same-account session, park, resolve via the kind-agnostic
   resolver (#1126, ``derive_response``) to a schema-conforming ``{ok | error}``.
-* ``invoke_agent(agent_id, input, output_schema)`` — ``create_session`` from the
-  agent **then** invoke it (the two steps stay fused in ``service.invoke``).
-* ``invoke_workflow(workflow_id, input, output_schema)`` — ``create_run`` then
+* ``call_agent(agent_id, input, output_schema)`` — ``create_session`` from the
+  agent **then** call it (the two steps stay fused in ``service.invoke``).
+* ``call_workflow(workflow_id, input, output_schema)`` — ``create_run`` then
   await it (a run is the servicer; single-shot by nature).
 
 All three return a **single-shot handle** (one ``request_id``, one resolution;
@@ -70,7 +70,7 @@ _AWAIT_POLL_SECONDS = 300.0
 # ─── argument models ─────────────────────────────────────────────────────────
 
 
-class _InvokeArgs(BaseModel):
+class _CallSessionArgs(BaseModel):
     """``invoke`` arguments — the **target** session id plus the request payload.
 
     ``extra="forbid"``: the trusted *caller* id is the executing session the
@@ -90,7 +90,7 @@ class _InvokeArgs(BaseModel):
     )
 
 
-class _InvokeAgentArgs(BaseModel):
+class _CallAgentArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_id: str = Field(description="The id of the same-account agent to spawn and invoke.")
@@ -101,7 +101,7 @@ class _InvokeAgentArgs(BaseModel):
     )
 
 
-class _InvokeWorkflowArgs(BaseModel):
+class _CallWorkflowArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     workflow_id: str = Field(description="The id of the same-account workflow to run and await.")
@@ -198,10 +198,12 @@ async def _park_on_run(pool: Any, *, run_id: str, account_id: str) -> Any:
 # ─── handlers ────────────────────────────────────────────────────────────────
 
 
-async def invoke_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any] | ToolResult:
+async def call_session_handler(
+    session_id: str, arguments: dict[str, Any]
+) -> dict[str, Any] | ToolResult:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_InvokeArgs, arguments)
+    args = _parse(_CallSessionArgs, arguments)
     # Write the trusted edge into the EXISTING same-account session (404s a foreign
     # target before any edge is written). caller names THIS session.
     handle = await sessions_service.invoke(
@@ -222,12 +224,12 @@ async def invoke_handler(session_id: str, arguments: dict[str, Any]) -> dict[str
     return violation if violation is not None else _ok_result(resp.result)
 
 
-async def invoke_agent_handler(
+async def call_agent_handler(
     session_id: str, arguments: dict[str, Any]
 ) -> dict[str, Any] | ToolResult:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_InvokeAgentArgs, arguments)
+    args = _parse(_CallAgentArgs, arguments)
     # Porcelain = create_session(from the agent) + invoke that fresh session. The
     # child inherits THIS session's environment (a caller-chosen env id would be a
     # cross-tenant attack surface — same stance as create_run).
@@ -252,12 +254,12 @@ async def invoke_agent_handler(
     return violation if violation is not None else _ok_result(resp.result)
 
 
-async def invoke_workflow_handler(
+async def call_workflow_handler(
     session_id: str, arguments: dict[str, Any]
 ) -> dict[str, Any] | ToolResult:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_InvokeWorkflowArgs, arguments)
+    args = _parse(_CallWorkflowArgs, arguments)
     # Porcelain = create_run + await it (the run is the servicer; single-shot). The
     # run inherits THIS session's environment + lineage and is launched by it.
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
@@ -282,20 +284,20 @@ async def invoke_workflow_handler(
 
 # ─── descriptions + registration ─────────────────────────────────────────────
 
-INVOKE_DESCRIPTION = (
-    "Invoke an existing same-account session: deliver `input` to it as a trusted "
+CALL_SESSION_DESCRIPTION = (
+    "Call an existing same-account session: deliver `input` to it as a trusted "
     "request and wait for its single answer ({ok: value} on success, an error "
     "otherwise). The request is invisible to any human chatting in that session. "
     "Optionally pass `output_schema` (JSON Schema) the answer's value must satisfy. "
     "Single-shot: each call is a fresh request. You stay responsive while waiting."
 )
-INVOKE_AGENT_DESCRIPTION = (
-    "Spawn a fresh session from one of your agents and invoke it with `input`, "
+CALL_AGENT_DESCRIPTION = (
+    "Spawn a fresh session from one of your agents and call it with `input`, "
     "waiting for its single answer ({ok: value} or an error). The new session runs "
     "in your own environment. Optionally constrain the answer with `output_schema`. "
     "Single-shot; you stay responsive while waiting."
 )
-INVOKE_WORKFLOW_DESCRIPTION = (
+CALL_WORKFLOW_DESCRIPTION = (
     "Launch a run of one of your workflows with `input` and wait for its result "
     "({ok: output} on completion, an error if it errored/was cancelled). The run "
     "uses your own environment. Optionally constrain the output with `output_schema` "
@@ -305,24 +307,24 @@ INVOKE_WORKFLOW_DESCRIPTION = (
 
 def _register() -> None:
     registry.register(
-        name="invoke",
-        description=INVOKE_DESCRIPTION,
-        parameters_schema=_InvokeArgs.model_json_schema(),
-        handler=invoke_handler,
+        name="call_session",
+        description=CALL_SESSION_DESCRIPTION,
+        parameters_schema=_CallSessionArgs.model_json_schema(),
+        handler=call_session_handler,
         transport="agent_tool",
     )
     registry.register(
-        name="invoke_agent",
-        description=INVOKE_AGENT_DESCRIPTION,
-        parameters_schema=_InvokeAgentArgs.model_json_schema(),
-        handler=invoke_agent_handler,
+        name="call_agent",
+        description=CALL_AGENT_DESCRIPTION,
+        parameters_schema=_CallAgentArgs.model_json_schema(),
+        handler=call_agent_handler,
         transport="agent_tool",
     )
     registry.register(
-        name="invoke_workflow",
-        description=INVOKE_WORKFLOW_DESCRIPTION,
-        parameters_schema=_InvokeWorkflowArgs.model_json_schema(),
-        handler=invoke_workflow_handler,
+        name="call_workflow",
+        description=CALL_WORKFLOW_DESCRIPTION,
+        parameters_schema=_CallWorkflowArgs.model_json_schema(),
+        handler=call_workflow_handler,
         transport="agent_tool",
     )
 

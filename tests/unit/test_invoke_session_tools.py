@@ -1,4 +1,4 @@
-"""Unit tests for the session-caller ``invoke*`` builtins (#1127).
+"""Unit tests for the session-caller ``call_*`` builtins (#1127).
 
 These stub the worker pool + services so they need no live Postgres. They cover:
 
@@ -9,7 +9,7 @@ These stub the worker pool + services so they need no live Postgres. They cover:
   ``caller={kind:session, id:<this session>}``, parks via ``await_session`` /
   ``await_run``, and shapes ``{ok | error}``.
 * **output_schema** — a non-conforming answer is reported fail-loud as an error.
-* **porcelain wiring** — ``invoke_agent`` (create+invoke) and ``invoke_workflow``
+* **porcelain wiring** — ``call_agent`` (create+invoke) and ``call_workflow``
   (create_run+await) call the right services with the caller's env / lineage.
 """
 
@@ -58,7 +58,7 @@ async def test_invoke_arg_schema_forbids_caller(monkeypatch: Any) -> None:
     with pytest.raises(ToolBail):
         await invoke_builtin(
             _CALLER,
-            "invoke",
+            "call_session",
             {"session_id": "ses_target", "caller": {"kind": "session", "id": "evil"}},
         )
 
@@ -74,7 +74,7 @@ async def test_invoke_parks_and_returns_ok(monkeypatch: Any) -> None:
             )
         ),
     )
-    out = await invoke_builtin(_CALLER, "invoke", {"session_id": "ses_target", "input": "hi"})
+    out = await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target", "input": "hi"})
     assert out == {"ok": {"v": 1}}
     # caller names THIS session, target_kind=session, target is the model-supplied id.
     assert inv_mock.await_args is not None
@@ -94,7 +94,7 @@ async def test_invoke_returns_error_outcome(monkeypatch: Any) -> None:
             )
         ),
     )
-    out = await invoke_builtin(_CALLER, "invoke", {"session_id": "ses_target"})
+    out = await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target"})
     assert isinstance(out, ToolResult)
     assert out.is_error
     assert out.content == {"error": {"kind": "boom"}}
@@ -113,7 +113,7 @@ async def test_invoke_output_schema_violation(monkeypatch: Any) -> None:
     )
     out = await invoke_builtin(
         _CALLER,
-        "invoke",
+        "call_session",
         {"session_id": "ses_target", "output_schema": {"type": "object"}},
     )
     assert isinstance(out, ToolResult)
@@ -133,7 +133,7 @@ async def test_invoke_output_schema_conforms(monkeypatch: Any) -> None:
     )
     out = await invoke_builtin(
         _CALLER,
-        "invoke",
+        "call_session",
         {"session_id": "ses_target", "output_schema": {"type": "object"}},
     )
     assert out == {"ok": {"a": 1}}
@@ -149,7 +149,7 @@ async def test_invoke_repolls_until_done(monkeypatch: Any) -> None:
         ]
     )
     monkeypatch.setattr("aios.services.sessions.await_session", await_mock)
-    out = await invoke_builtin(_CALLER, "invoke", {"session_id": "ses_target"})
+    out = await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target"})
     assert out == {"ok": "ok"}
     assert await_mock.await_count == 2
 
@@ -165,7 +165,7 @@ async def test_invoke_agent_create_then_invoke(monkeypatch: Any) -> None:
             )
         ),
     )
-    out = await invoke_builtin(_CALLER, "invoke_agent", {"agent_id": "agt_1", "input": "go"})
+    out = await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", "input": "go"})
     assert out == {"ok": "r"}
     assert inv_mock.await_args is not None
     kwargs = inv_mock.await_args.kwargs
@@ -186,9 +186,7 @@ async def test_invoke_workflow_create_run_then_await(monkeypatch: Any) -> None:
             )
         ),
     )
-    out = await invoke_builtin(
-        _CALLER, "invoke_workflow", {"workflow_id": "wf_1", "input": {"x": 1}}
-    )
+    out = await invoke_builtin(_CALLER, "call_workflow", {"workflow_id": "wf_1", "input": {"x": 1}})
     assert out == {"ok": {"k": "v"}}
     assert run_mock.await_args is not None
     kwargs = run_mock.await_args.kwargs
@@ -209,7 +207,7 @@ async def test_invoke_workflow_error_outcome(monkeypatch: Any) -> None:
             )
         ),
     )
-    out = await invoke_builtin(_CALLER, "invoke_workflow", {"workflow_id": "wf_1"})
+    out = await invoke_builtin(_CALLER, "call_workflow", {"workflow_id": "wf_1"})
     assert isinstance(out, ToolResult)
     assert out.is_error
     assert out.content == {"error": {"kind": "x"}}
@@ -228,7 +226,7 @@ async def test_invoke_workflow_output_schema_violation(monkeypatch: Any) -> None
         ),
     )
     out = await invoke_builtin(
-        _CALLER, "invoke_workflow", {"workflow_id": "wf_1", "output_schema": {"type": "object"}}
+        _CALLER, "call_workflow", {"workflow_id": "wf_1", "output_schema": {"type": "object"}}
     )
     assert isinstance(out, ToolResult)
     assert out.is_error

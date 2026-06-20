@@ -15572,9 +15572,9 @@
                   "get_run",
                   "list_runs",
                   "list_run_events",
-                  "invoke",
-                  "invoke_agent",
-                  "invoke_workflow"
+                  "call_session",
+                  "call_agent",
+                  "call_workflow"
                 ]
               },
               {
