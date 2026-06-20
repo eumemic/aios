@@ -97,9 +97,9 @@ def compose_workflow_run_input(
     and there is no placeholder language to fail at fire time. For
     run_completion fires the completing run rides BY VALUE under
     ``trigger.run`` — a workflow script has no capability to read another run,
-    so by-reference would strand the data. ``trigger.run.error`` mirrors the
-    ``WfRunWaitResponse`` shape: the ``{'kind': …}`` from the run_completed
-    journal event, ``None`` unless the watched run errored. For external_event
+    so by-reference would strand the data. ``trigger.run.error`` carries the
+    ``{'kind': …}`` from the run_completed journal event (the same shape the
+    awaiter surfaces), ``None`` unless the watched run errored. For external_event
     fires the inbound webhook body rides verbatim under ``trigger.event`` so
     the workflow reads ``input["trigger"]["event"]``.
     """

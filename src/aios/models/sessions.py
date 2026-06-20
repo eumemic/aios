@@ -445,15 +445,12 @@ class WaitResponse(BaseModel):
 
 
 class SessionAwaitResponse(BaseModel):
-    """Response for GET /v1/sessions/{id}/await — the await-a-completion primitive,
-    session backing. One envelope over two monotonic predicates (request_id
-    correlation, or reacted>=watermark). Poll until `done`."""
+    """Response for GET /v1/sessions/{id}/await — the session **quiescence
+    drive-and-join** alias. Poll until `done` (`last_reacted_seq >= watermark`).
+    Request correlation is the unified awaiter's job (`AwaitResponse`)."""
 
     done: bool
     last_reacted_seq: int
-    result: Any = None
-    is_error: bool = False
-    error: dict[str, Any] | None = None
 
 
 class ContextResponse(BaseModel):

@@ -212,7 +212,7 @@ async def create_run(
             if outstanding >= launcher_cap:
                 raise RateLimitedError(
                     f"launcher at outstanding-run cap ({outstanding}/{launcher_cap}); "
-                    "wait for runs you launched to finish (await_run) or cancel one "
+                    "wait for runs you launched to finish or cancel one "
                     "you no longer need (cancel_run) to free a slot",
                     detail={"outstanding": outstanding, "max": launcher_cap},
                 )

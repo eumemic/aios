@@ -30,6 +30,7 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import NotFoundError, ValidationError
 from aios.harness import runtime
+from aios.services import invocations as invocations_service
 from aios.services import sessions as service
 from aios.services import workflows as wf_service
 from tests.integration.conftest import seed_agent_env_session
@@ -155,18 +156,17 @@ async def test_agent_request_correlates_await_to_response(
             error=None,
         )
 
-    resp = await service.await_session(
+    resp = await invocations_service.await_invocation(
         pool,
         migrated_db_url,
-        handle.servicer_id,
-        account_id=account_id,
+        servicer_kind="session",
+        servicer_id=handle.servicer_id,
         request_id=handle.request_id,
-        watermark=None,
+        account_id=account_id,
         timeout_seconds=5,
     )
-    assert resp.done is True
+    assert resp.outcome == "ok"
     assert resp.result == {"answer": 42}
-    assert resp.is_error is False
 
 
 async def test_agent_output_schema_rides_the_edge(

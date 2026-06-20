@@ -35,6 +35,7 @@ from aios.models.sessions import Session
 from aios.models.vaults import VaultCredentialCreate
 from aios.models.workflows import WfRunStatus
 from aios.services import agents as agents_service
+from aios.services import invocations as invocations_service
 from aios.services import sessions as sessions_service
 from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
@@ -3800,40 +3801,49 @@ async def test_defer_wake_priority_reflects_real_origin(
     assert priorities[cid] == _BACKGROUND_PRIORITY  # real background child → demoted
 
 
-# ─── await_run — the await-a-completion primitive, runs backing ──────────────
+# ─── await_invocation (run arm) — the one awaiter, runs backing ──────────────
+
+
+async def _await_run(
+    pool: asyncpg.Pool[Any], db_url: str, run_id: str, *, account_id: str, timeout_seconds: float
+) -> Any:
+    """Drive the unified awaiter on a run servicer (request_id is run-irrelevant)."""
+    return await invocations_service.await_invocation(
+        pool,
+        db_url,
+        servicer_kind="run",
+        servicer_id=run_id,
+        request_id=None,
+        account_id=account_id,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 async def test_await_run_returns_when_already_completed(
     wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
 ) -> None:
     """A terminal run is returned immediately (the first post-subscribe read sees it):
-    ``done`` + the script's ``output``, no error."""
+    ``outcome='ok'`` + the script's ``result``, no error."""
     pool = wf_runtime
     run_id = await _make_run(pool, "async def main(input):\n    return 1")
     await run_workflow_step(run_id)  # pure script → completed in one wake
-    resp = await wf_service.await_run(
-        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
-    )
-    assert resp.done is True and resp.run_status == "completed"
-    assert resp.output == 1 and resp.is_error is False and resp.error is None
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5)
+    assert resp.outcome == "ok"
+    assert resp.result == 1 and resp.error is None
 
 
-async def test_await_run_surfaces_cancelled_as_error_not_false_success(
+async def test_await_run_surfaces_cancelled_as_cancelled_not_false_success(
     wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
 ) -> None:
-    """A cancelled run resolves as an ERROR (``error.kind='cancelled'``), not the
-    ``{ok: null}`` false-success a status-blind awaiter would surface — a cancelled
-    run deliberately writes no ``request_response``. ``run_status`` still carries
-    ``cancelled`` for watchers that distinguish it from ``errored``."""
+    """A cancelled run resolves as ``outcome='cancelled'`` (``error.kind='cancelled'``), not
+    the ``{ok: null}`` false-success a status-blind awaiter would surface — a cancelled run
+    deliberately writes no ``request_response``."""
     pool = wf_runtime
     run_id = await _make_run(pool, "async def main(input):\n    return 1")
     await wf_service.cancel_run(pool, run_id=run_id, account_id="acc_wf")
     await run_workflow_step(run_id)  # harvest the cancel signal → finalize cancelled
-    resp = await wf_service.await_run(
-        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
-    )
-    assert resp.done is True and resp.run_status == "cancelled"
-    assert resp.is_error is True and resp.error == {"kind": "cancelled"}
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5)
+    assert resp.outcome == "cancelled" and resp.error == {"kind": "cancelled"}
 
 
 async def test_await_run_surfaces_sync_def_author_error_message(
@@ -3844,11 +3854,8 @@ async def test_await_run_surfaces_sync_def_author_error_message(
     pool = wf_runtime
     run_id = await _make_run(pool, "def main(input):\n    return 1")
     await run_workflow_step(run_id)  # sync def → errored
-    resp = await wf_service.await_run(
-        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
-    )
-    assert resp.done is True and resp.run_status == "errored" and resp.is_error is True
-    assert resp.output == "WorkflowScriptError: workflow script must define `async def main(input)`"
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5)
+    assert resp.outcome == "errored" and resp.result is None
     assert resp.error == {
         "kind": "author_exception",
         "message": "WorkflowScriptError: workflow script must define `async def main(input)`",
@@ -3866,11 +3873,8 @@ async def test_await_run_surfaces_runtime_author_traceback_line(
         "async def main(input):\n    x = 1\n    raise ValueError('boom')\n    return x\n",
     )
     await run_workflow_step(run_id)  # raise → errored
-    resp = await wf_service.await_run(
-        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
-    )
-    assert resp.done is True and resp.run_status == "errored" and resp.is_error is True
-    assert resp.output == "ValueError: boom"
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5)
+    assert resp.outcome == "errored" and resp.result is None
     assert resp.error is not None
     assert resp.error["kind"] == "author_exception"
     assert resp.error["message"] == "ValueError: boom"
@@ -3884,14 +3888,11 @@ async def test_await_run_times_out_on_non_terminal_run(
     wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
 ) -> None:
     """A never-stepped (``pending``) run that doesn't finish within the budget returns
-    ``done=False`` with its live status — the re-poll contract, no archive/mutation."""
+    ``outcome=None`` (still pending) — the re-poll contract, no archive/mutation."""
     pool = wf_runtime
     run_id = await _make_run(pool, "async def main(input):\n    return 1")  # created, not stepped
-    resp = await wf_service.await_run(
-        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=0.1
-    )
-    assert resp.done is False and resp.run_status == "pending"
-    assert resp.output is None and resp.is_error is False and resp.error is None
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=0.1)
+    assert resp.outcome is None and resp.result is None and resp.error is None
 
 
 async def test_await_run_wakes_on_completion_during_wait(
@@ -3904,16 +3905,14 @@ async def test_await_run_wakes_on_completion_during_wait(
     run_id = await _make_run(pool, "async def main(input):\n    return 7")
 
     async def _complete_soon() -> None:
-        await asyncio.sleep(0.1)  # let await_run subscribe + first-read (pending) first
+        await asyncio.sleep(0.1)  # let the awaiter subscribe + first-read (pending) first
         await run_workflow_step(run_id)
 
     resp, _ = await asyncio.gather(
-        wf_service.await_run(
-            pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=10
-        ),
+        _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=10),
         _complete_soon(),
     )
-    assert resp.done is True and resp.run_status == "completed" and resp.output == 7
+    assert resp.outcome == "ok" and resp.result == 7
 
 
 async def test_await_run_cross_tenant_404(
@@ -3923,9 +3922,7 @@ async def test_await_run_cross_tenant_404(
     pool = wf_runtime
     run_id = await _make_run(pool, "async def main(input):\n    return 1")
     with pytest.raises(NotFoundError):
-        await wf_service.await_run(
-            pool, migrated_db_url, run_id, account_id="acc_other", timeout_seconds=1
-        )
+        await _await_run(pool, migrated_db_url, run_id, account_id="acc_other", timeout_seconds=1)
 
 
 # ─── tool() — a run invokes its declared network/credential tools (slice 2) ───

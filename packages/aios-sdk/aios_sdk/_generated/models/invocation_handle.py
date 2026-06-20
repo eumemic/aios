@@ -16,9 +16,11 @@ class InvocationHandle:
     """Structured handle returned by ``POST /v1/invocations``.
 
     Plain JSON fields, no opaque encoding: the handle is **not** an auth boundary
-    (``await`` re-authorizes by ``account_id``). The caller picks the matching
-    awaiter off ``servicer_kind`` — ``session`` → ``GET /sessions/{servicer_id}/await``
-    with ``request_id``, ``run`` → ``GET /runs/{servicer_id}/wait``.
+    (``await`` re-authorizes by ``account_id``). Await the invocation at the one
+    unified awaiter ``GET /v1/invocations/{servicer_id}/await`` — the ``task_id``
+    path segment is the ``servicer_id`` and its kind is read off the id prefix; a
+    ``session`` servicer additionally needs ``?request_id=`` to correlate the
+    response, a ``run`` servicer resolves off its terminal row.
 
         Attributes:
             servicer_kind (InvocationHandleServicerKind):

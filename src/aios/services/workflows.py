@@ -17,7 +17,6 @@ from typing import Any
 
 import asyncpg
 
-from aios.db.listen import open_listen_for_run_events
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from aios.models.agents import (
@@ -33,13 +32,11 @@ from aios.models.workflows import (
     WfRun,
     WfRunEvent,
     WfRunUsage,
-    WfRunWaitResponse,
     Workflow,
 )
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
 from aios.services import sessions as sessions_service
-from aios.services.await_completion import await_completion
 from aios.services.wake import defer_run_wake
 from aios.workflows.script_validation import (
     declared_tool_names,
@@ -50,7 +47,6 @@ from aios.workflows.service import create_run, resume_gate
 
 __all__ = [
     "archive_workflow",
-    "await_run",
     "cancel_run",
     "create_run",
     "create_workflow",
@@ -496,60 +492,6 @@ async def list_run_events(
         return await wf_queries.list_run_events_scoped(
             conn, run_id, account_id=account_id, after_seq=after_seq, limit=limit
         )
-
-
-async def await_run(
-    pool: asyncpg.Pool[Any],
-    db_url: str,
-    run_id: str,
-    *,
-    account_id: str,
-    timeout_seconds: float,
-) -> WfRunWaitResponse:
-    """Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
-
-    The run backing of the ``await``-a-completion primitive. Account-scopes the run FIRST (so a
-    cross-tenant/missing ``run_id`` 404s before we open any connection — mirroring ``/stream``,
-    and so an unauthorized caller can neither open a LISTEN on a foreign run's channel nor churn
-    connections), then subscribes to the run's ``wf_run_events`` channel BEFORE the predicate's
-    first status read (LISTEN-before-read: a completion landing between subscribe and read has
-    already queued its notify, so it can't be missed), drives :func:`await_completion` with the
-    terminal predicate, and returns the completion record — or, on timeout, the run's current
-    (non-terminal) status so the caller re-polls.
-    """
-    await get_run(pool, run_id, account_id=account_id)  # 404s cross-tenant before we subscribe
-
-    async def _read_run() -> WfRun:
-        async with pool.acquire() as conn:
-            return await wf_queries.get_wf_run(conn, run_id, account_id=account_id)
-
-    subscription = await open_listen_for_run_events(db_url, run_id)
-    try:
-        run = await await_completion(
-            subscription.queue,
-            read_state=_read_run,
-            is_done=lambda r: r.status in TERMINAL_RUN_STATUSES,
-            timeout_seconds=timeout_seconds,
-        )
-    finally:
-        subscription.terminate()
-
-    done = run.status in TERMINAL_RUN_STATUSES
-    # A cancelled run is an ERROR outcome to its awaiter, not a false success: it
-    # deliberately writes no request_response, so a status-blind awaiter would
-    # surface ``{ok: null}``. Surface it as ``error.kind='cancelled'`` (the awaiter
-    # keeps ``run_status`` for watchers that distinguish cancelled from errored).
-    is_error = run.status in ("errored", "cancelled")
-    error: dict[str, Any] | None = None
-    if run.status == "errored":
-        # ``error.kind`` lives only in the run_completed payload, not on the run row.
-        async with pool.acquire() as conn:
-            error = await wf_queries.resolve_run_error(conn, run_id)
-    elif run.status == "cancelled":
-        error = {"kind": "cancelled"}
-    return WfRunWaitResponse(
-        run_status=run.status, done=done, output=run.output, is_error=is_error, error=error
-    )
 
 
 async def resume_gate_by_nonce(

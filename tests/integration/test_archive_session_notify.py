@@ -29,6 +29,7 @@ import pytest
 from aios.db.listen import EVENTS_ARCHIVED_NOTIFY, open_listen_for_events
 from aios.db.pool import create_pool
 from aios.errors import NotFoundError
+from aios.services import invocations as invocations_service
 from aios.services import sessions as service
 from tests.integration.conftest import seed_agent_env_session
 
@@ -89,21 +90,20 @@ async def test_mode1_await_wakes_promptly_on_mid_flight_archive(
     loop = asyncio.get_running_loop()
     start = loop.time()
     resp, _ = await asyncio.gather(
-        service.await_session(
+        invocations_service.await_invocation(
             pool,
             migrated_db_url,
-            session_id,
-            account_id=account_id,
+            servicer_kind="session",
+            servicer_id=session_id,
             request_id="req_archived",
-            watermark=None,
+            account_id=account_id,
             timeout_seconds=30,
         ),
         archive_late(),
     )
     elapsed = loop.time() - start
 
-    assert resp.done is True
-    assert resp.is_error is True
+    assert resp.outcome == "errored"
     assert resp.error == {"kind": "child_gone"}
     # The poke woke the await; it must not have waited out the 30s timeout.
     assert elapsed < 10

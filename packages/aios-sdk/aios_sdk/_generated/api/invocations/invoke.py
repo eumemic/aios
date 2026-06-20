@@ -75,11 +75,11 @@ def sync_detailed(
 
     ``target_kind=agent`` creates a **session** servicer (env-bound) and injects a
     channel-less request; ``target_kind=workflow`` creates a **run** servicer;
-    ``target_kind=session`` invokes an existing same-account session by id. The
-    returned ``request_id`` correlates the matching awaiter
-    (``GET /v1/sessions/{id}/await?request_id=`` for sessions, ``GET /v1/runs/{id}/wait``
-    for runs). A cross-tenant ``target`` 404s before any edge is written; a supplied
-    ``environment_id`` is ownership-checked against the caller's account.
+    ``target_kind=session`` invokes an existing same-account session by id. Await the
+    handle at ``GET /v1/invocations/{servicer_id}/await`` — for a session servicer pass
+    ``?request_id=`` to correlate the response; a run resolves off its terminal row. A
+    cross-tenant ``target`` 404s before any edge is written; a supplied ``environment_id``
+    is ownership-checked against the caller's account.
 
     Args:
         authorization (None | str | Unset):
@@ -134,11 +134,11 @@ def sync(
 
     ``target_kind=agent`` creates a **session** servicer (env-bound) and injects a
     channel-less request; ``target_kind=workflow`` creates a **run** servicer;
-    ``target_kind=session`` invokes an existing same-account session by id. The
-    returned ``request_id`` correlates the matching awaiter
-    (``GET /v1/sessions/{id}/await?request_id=`` for sessions, ``GET /v1/runs/{id}/wait``
-    for runs). A cross-tenant ``target`` 404s before any edge is written; a supplied
-    ``environment_id`` is ownership-checked against the caller's account.
+    ``target_kind=session`` invokes an existing same-account session by id. Await the
+    handle at ``GET /v1/invocations/{servicer_id}/await`` — for a session servicer pass
+    ``?request_id=`` to correlate the response; a run resolves off its terminal row. A
+    cross-tenant ``target`` 404s before any edge is written; a supplied ``environment_id``
+    is ownership-checked against the caller's account.
 
     Args:
         authorization (None | str | Unset):
@@ -188,11 +188,11 @@ async def asyncio_detailed(
 
     ``target_kind=agent`` creates a **session** servicer (env-bound) and injects a
     channel-less request; ``target_kind=workflow`` creates a **run** servicer;
-    ``target_kind=session`` invokes an existing same-account session by id. The
-    returned ``request_id`` correlates the matching awaiter
-    (``GET /v1/sessions/{id}/await?request_id=`` for sessions, ``GET /v1/runs/{id}/wait``
-    for runs). A cross-tenant ``target`` 404s before any edge is written; a supplied
-    ``environment_id`` is ownership-checked against the caller's account.
+    ``target_kind=session`` invokes an existing same-account session by id. Await the
+    handle at ``GET /v1/invocations/{servicer_id}/await`` — for a session servicer pass
+    ``?request_id=`` to correlate the response; a run resolves off its terminal row. A
+    cross-tenant ``target`` 404s before any edge is written; a supplied ``environment_id``
+    is ownership-checked against the caller's account.
 
     Args:
         authorization (None | str | Unset):
@@ -245,11 +245,11 @@ async def asyncio(
 
     ``target_kind=agent`` creates a **session** servicer (env-bound) and injects a
     channel-less request; ``target_kind=workflow`` creates a **run** servicer;
-    ``target_kind=session`` invokes an existing same-account session by id. The
-    returned ``request_id`` correlates the matching awaiter
-    (``GET /v1/sessions/{id}/await?request_id=`` for sessions, ``GET /v1/runs/{id}/wait``
-    for runs). A cross-tenant ``target`` 404s before any edge is written; a supplied
-    ``environment_id`` is ownership-checked against the caller's account.
+    ``target_kind=session`` invokes an existing same-account session by id. Await the
+    handle at ``GET /v1/invocations/{servicer_id}/await`` — for a session servicer pass
+    ``?request_id=`` to correlate the response; a run resolves off its terminal row. A
+    cross-tenant ``target`` 404s before any edge is written; a supplied ``environment_id``
+    is ownership-checked against the caller's account.
 
     Args:
         authorization (None | str | Unset):

@@ -984,7 +984,7 @@ async def get_run_completed_event(conn: asyncpg.Connection[Any], run_id: str) ->
 
     Its payload carries the authoritative ``{output, is_error, error}`` completion detail —
     in particular ``error.kind``, which ``wf_runs`` does not store (the row keeps only
-    ``status`` + ``output``). Unscoped by account: every caller (``await_run``) pre-checks the
+    ``status`` + ``output``). Unscoped by account: every caller pre-checks the
     run with :func:`get_wf_run`. Exactly one ``run_completed`` bookend exists per run (the
     ``UNIQUE NULLS NOT DISTINCT (run_id, call_key, type)`` memo), so a bare fetch is exact."""
     row = await conn.fetchrow(
@@ -997,7 +997,7 @@ async def resolve_run_error(conn: asyncpg.Connection[Any], run_id: str) -> dict[
     """An errored run's ``{kind, …}`` error detail, or ``None``.
 
     THE extraction of ``error`` from the ``run_completed`` journal payload —
-    shared by ``await_run``'s completion record and the trigger fire path's
+    shared by the run awaiter's completion record and the trigger fire path's
     composed envelope (#819), so the two surfaces can never drift on where
     ``error.kind`` lives (the row stores only ``status`` + ``output``).
     """

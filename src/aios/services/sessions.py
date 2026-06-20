@@ -1080,23 +1080,23 @@ async def await_session(
     session_id: str,
     *,
     account_id: str,
-    request_id: str | None,
     watermark: int | None,
     timeout_seconds: float,
 ) -> SessionAwaitResponse:
-    """Block until a correlated response lands (request_id mode) or the session has fully
-    reacted to a fixed stimulus (watermark mode; watermark defaults to last_stimulus_seq
-    captured at call time), or timeout. The session backing of the await primitive.
+    """Block until the session has fully reacted to a fixed stimulus, or timeout.
+
+    The session **quiescence drive-and-join** — an orthogonal, session-only alias kept
+    distinct from the unified request/run awaiter (``await_invocation``): it resolves on
+    ``last_reacted_seq >= watermark`` (defaulting to ``last_stimulus_seq`` captured at call
+    time), which has no run analog. Correlating a *request* response is the unified awaiter's
+    job, not this one.
 
     Account-scopes the session FIRST (cross-tenant/missing 404s before any LISTEN opens),
     then subscribes to events_<session_id> BEFORE the first predicate read (LISTEN-before-read),
-    drives await_completion with the monotonic done-predicate, and returns the completion
-    envelope — or, on timeout, done=False so the caller re-polls. Never waits on bare idle:
-    both modes are monotonic w.r.t. a fixed stimulus (request_id, or reacted>=watermark).
+    drives await_completion with the monotonic done-predicate, and returns ``done`` /
+    ``last_reacted_seq`` — or, on timeout, done=False so the caller re-polls. Never waits on
+    bare idle: the predicate is monotonic w.r.t. the fixed watermark.
     """
-    if request_id is not None and watermark is not None:
-        raise ValidationError("provide request_id or watermark, not both")
-
     # Scope-check FIRST (404s cross-tenant before any LISTEN opens) and capture the
     # default watermark's ``last_stimulus_seq`` in the same read. ``read_session_watermarks``
     # already enforces ``WHERE id = $1 AND account_id = $2`` and returns None when the row is
@@ -1108,25 +1108,10 @@ async def await_session(
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     effective_watermark = watermark if watermark is not None else captured[1]  # last_stimulus_seq
 
-    if request_id is not None:
-
-        async def _read() -> Any:
-            async with pool.acquire() as conn:
-                return await queries.derive_response(
-                    conn, session_id, account_id=account_id, request_id=request_id
-                )
-
-        def _is_done(state: Any) -> bool:
-            return state is not None  # a response (or child_gone) has landed
-    else:
-
-        async def _read() -> Any:
-            async with pool.acquire() as conn:
-                wm = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
-                return wm[0] if wm is not None else 0  # last_reacted_seq
-
-        def _is_done(state: Any) -> bool:
-            return bool(state >= effective_watermark)
+    async def _read() -> int:
+        async with pool.acquire() as conn:
+            wm = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
+            return wm[0] if wm is not None else 0  # last_reacted_seq
 
     # An await poller consumes only the terminal completion state, never the
     # token-by-token deltas, so it must NOT acquire the subscriber lock: doing
@@ -1136,29 +1121,14 @@ async def await_session(
     # open_listen_for_run_events omits the lock (issue #81).
     subscription = await open_listen_for_events(db_url, session_id, on_connected=None)
     try:
-        state = await await_completion(
+        last_reacted_seq = await await_completion(
             subscription.queue,
             read_state=_read,
-            is_done=_is_done,
+            is_done=lambda reacted: reacted >= effective_watermark,
             timeout_seconds=timeout_seconds,
         )
     finally:
         subscription.terminate()
-
-    async with pool.acquire() as conn:
-        wm = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
-    last_reacted_seq = wm[0] if wm is not None else 0
-
-    if request_id is not None:
-        if state is not None:
-            return SessionAwaitResponse(
-                done=True,
-                last_reacted_seq=last_reacted_seq,
-                result=state["result"],
-                is_error=state["is_error"],
-                error=state["error"],
-            )
-        return SessionAwaitResponse(done=False, last_reacted_seq=last_reacted_seq)
 
     return SessionAwaitResponse(
         done=last_reacted_seq >= effective_watermark, last_reacted_seq=last_reacted_seq

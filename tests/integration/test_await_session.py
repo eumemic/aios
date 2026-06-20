@@ -1,15 +1,16 @@
-"""Integration tests for ``await_session`` — the session backing of the await primitive.
+"""Integration tests for the session-backed awaits.
 
-Two monotonic modes over one endpoint:
+Two monotonic awaits over a session, now split across two services:
 
-* **Mode 1 (request_id)**: correlate a posted request to its response via
-  ``derive_response`` — ``done`` once a response (or a ``child_gone`` outcome) lands.
-* **Mode 2 (watermark)**: block until ``last_reacted_seq >= watermark`` (watermark
-  defaults to ``last_stimulus_seq`` captured at call time).
+* **request correlation** is the session arm of the unified awaiter
+  ``await_invocation`` — correlate a posted request to its response via
+  ``derive_response``, resolving once a response (or a ``child_gone`` outcome) lands.
+* **watermark quiescence** is ``await_session`` (the orthogonal session-only alias):
+  block until ``last_reacted_seq >= watermark`` (defaulting to ``last_stimulus_seq``
+  captured at call time).
 
-DB-backed (testcontainer Postgres). Exercises the service (scope-check, LISTEN
-subscribe, predicate, response build) end to end against real session rows; the pure
-loop behavior is covered in ``tests/unit/test_await_session_predicates.py``.
+DB-backed (testcontainer Postgres). Exercises the services (scope-check, LISTEN
+subscribe, predicate, response build) end to end against real session rows.
 """
 
 from __future__ import annotations
@@ -25,7 +26,9 @@ from aios.db import queries
 from aios.db.listen import open_listen_for_events
 from aios.db.pool import create_pool
 from aios.db.sse_lock import has_subscriber
-from aios.errors import NotFoundError, ValidationError
+from aios.errors import NotFoundError
+from aios.models.invocations import AwaitResponse
+from aios.services import invocations as invocations_service
 from aios.services import sessions as service
 from tests.integration.conftest import seed_agent_env_session
 
@@ -54,10 +57,31 @@ async def pool_and_session(
         await pool.close()
 
 
-# ─── Mode 1: request_id correlation ──────────────────────────────────────────
+async def _await_request(
+    pool: asyncpg.Pool[Any],
+    db_url: str,
+    session_id: str,
+    *,
+    account_id: str,
+    request_id: str,
+    timeout_seconds: float,
+) -> AwaitResponse:
+    """Drive the unified awaiter's session arm (request correlation)."""
+    return await invocations_service.await_invocation(
+        pool,
+        db_url,
+        servicer_kind="session",
+        servicer_id=session_id,
+        request_id=request_id,
+        account_id=account_id,
+        timeout_seconds=timeout_seconds,
+    )
 
 
-async def test_mode1_already_responded_done_with_result(
+# ─── request correlation (await_invocation, session arm) ─────────────────────
+
+
+async def test_request_already_responded_ok_with_result(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
     migrated_db_url: str,
 ) -> None:
@@ -73,41 +97,37 @@ async def test_mode1_already_responded_done_with_result(
             error=None,
         )
 
-    resp = await service.await_session(
+    resp = await _await_request(
         pool,
         migrated_db_url,
         session_id,
         account_id=account_id,
         request_id="req1",
-        watermark=None,
         timeout_seconds=5,
     )
-    assert resp.done is True
+    assert resp.outcome == "ok"
     assert resp.result == {"answer": 7}
-    assert resp.is_error is False
     assert resp.error is None
 
 
-async def test_mode1_pending_times_out_done_false(
+async def test_request_pending_times_out_outcome_none(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
     migrated_db_url: str,
 ) -> None:
     pool, account_id, session_id = pool_and_session
-    resp = await service.await_session(
+    resp = await _await_request(
         pool,
         migrated_db_url,
         session_id,
         account_id=account_id,
         request_id="reqX",
-        watermark=None,
         timeout_seconds=0.1,
     )
-    assert resp.done is False
-    assert resp.result is None
-    assert resp.is_error is False
+    assert resp.outcome is None
+    assert resp.result is None and resp.error is None
 
 
-async def test_mode1_child_gone_is_error(
+async def test_request_child_gone_is_errored(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
     migrated_db_url: str,
 ) -> None:
@@ -115,21 +135,19 @@ async def test_mode1_child_gone_is_error(
     async with pool.acquire() as conn:
         await queries.archive_session(conn, session_id, account_id=account_id)
 
-    resp = await service.await_session(
+    resp = await _await_request(
         pool,
         migrated_db_url,
         session_id,
         account_id=account_id,
         request_id="req_gone",
-        watermark=None,
         timeout_seconds=5,
     )
-    assert resp.done is True
-    assert resp.is_error is True
+    assert resp.outcome == "errored"
     assert resp.error == {"kind": "child_gone"}
 
 
-async def test_mode1_wakes_on_response_during_wait(
+async def test_request_wakes_on_response_during_wait(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
     migrated_db_url: str,
 ) -> None:
@@ -149,25 +167,40 @@ async def test_mode1_wakes_on_response_during_wait(
             )
 
     resp, _ = await asyncio.gather(
-        service.await_session(
+        _await_request(
             pool,
             migrated_db_url,
             session_id,
             account_id=account_id,
             request_id="req_race",
-            watermark=None,
             timeout_seconds=10,
         ),
         write_late(),
     )
-    assert resp.done is True
+    assert resp.outcome == "ok"
     assert resp.result == "hi"
 
 
-# ─── Mode 2: watermark ───────────────────────────────────────────────────────
+async def test_request_cross_tenant_404_before_subscribe(
+    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+    migrated_db_url: str,
+) -> None:
+    pool, _account_id, session_id = pool_and_session
+    with pytest.raises(NotFoundError):
+        await _await_request(
+            pool,
+            migrated_db_url,
+            session_id,
+            account_id="acc_other",
+            request_id="x",
+            timeout_seconds=1,
+        )
 
 
-async def test_mode2_reacted_at_or_above_watermark_done(
+# ─── watermark quiescence (await_session, the session-only alias) ─────────────
+
+
+async def test_watermark_reacted_at_or_above_watermark_done(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
     migrated_db_url: str,
 ) -> None:
@@ -195,7 +228,6 @@ async def test_mode2_reacted_at_or_above_watermark_done(
         migrated_db_url,
         session_id,
         account_id=account_id,
-        request_id=None,
         watermark=1,
         timeout_seconds=5,
     )
@@ -203,7 +235,7 @@ async def test_mode2_reacted_at_or_above_watermark_done(
     assert resp.last_reacted_seq >= 1
 
 
-async def test_mode2_default_watermark_blocks(
+async def test_watermark_default_watermark_blocks(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
     migrated_db_url: str,
 ) -> None:
@@ -223,7 +255,6 @@ async def test_mode2_default_watermark_blocks(
         migrated_db_url,
         session_id,
         account_id=account_id,
-        request_id=None,
         watermark=None,
         timeout_seconds=0.1,
     )
@@ -231,7 +262,7 @@ async def test_mode2_default_watermark_blocks(
     assert resp.last_reacted_seq == 0
 
 
-async def test_mode2_explicit_watermark_below_reacted_immediate(
+async def test_watermark_explicit_below_reacted_immediate(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
     migrated_db_url: str,
 ) -> None:
@@ -275,7 +306,6 @@ async def test_mode2_explicit_watermark_below_reacted_immediate(
         migrated_db_url,
         session_id,
         account_id=account_id,
-        request_id=None,
         watermark=1,
         timeout_seconds=5,
     )
@@ -312,40 +342,3 @@ async def test_await_listen_does_not_acquire_subscriber_lock(
         assert await has_subscriber(pool, session_id) is True
     finally:
         sub.terminate()
-
-
-# ─── validation + scoping ────────────────────────────────────────────────────
-
-
-async def test_both_params_rejected(
-    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
-    migrated_db_url: str,
-) -> None:
-    pool, account_id, session_id = pool_and_session
-    with pytest.raises(ValidationError):
-        await service.await_session(
-            pool,
-            migrated_db_url,
-            session_id,
-            account_id=account_id,
-            request_id="r",
-            watermark=1,
-            timeout_seconds=1,
-        )
-
-
-async def test_cross_tenant_404_before_subscribe(
-    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
-    migrated_db_url: str,
-) -> None:
-    pool, _account_id, session_id = pool_and_session
-    with pytest.raises(NotFoundError):
-        await service.await_session(
-            pool,
-            migrated_db_url,
-            session_id,
-            account_id="acc_other",
-            request_id="x",
-            watermark=None,
-            timeout_seconds=1,
-        )

@@ -218,42 +218,6 @@ class WfRunSignal(BaseModel):
     delivered_at: datetime
 
 
-class WfRunWaitResponse(BaseModel):
-    """Response for ``GET /v1/runs/{run_id}/wait`` — the run's completion record, or its
-    current (non-terminal) state if the wait timed out.
-
-    Deliberately mirrors the ``{result, is_error, error}`` shape of a request response
-    (``derive_response``) so the ``await`` primitive's two backings (run-terminal and, later,
-    session-request) share one envelope. Poll until ``done``: a still-running run returns
-    ``done=False`` with its live ``run_status`` (``running``/``suspended``/…); call again to
-    keep blocking.
-    """
-
-    run_status: WfRunStatus = Field(
-        description=(
-            "The run's terminal-or-current lifecycle status (the run row's "
-            "`status` field). This is the field to poll — there is no `state` "
-            "field. Terminal values: `completed`/`errored`/`cancelled`."
-        )
-    )
-    done: bool = Field(
-        description=(
-            "True once `run_status` is terminal "
-            "(completed/errored/cancelled). Poll `done` (or `run_status`); "
-            "there is no `state` field on this response (#1140)."
-        )
-    )
-    output: Any = Field(
-        default=None,
-        description="The run's return value, set when `done` and not `is_error`; None otherwise.",
-    )
-    is_error: bool = Field(default=False, description="True when run_status == errored.")
-    error: dict[str, Any] | None = Field(
-        default=None,
-        description="On is_error, the run_completed event's {kind,message,traceback}; None otherwise.",
-    )
-
-
 # ─── request models (the public HTTP surface) ────────────────────────────────
 
 WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:

@@ -19,7 +19,7 @@ from aios.cli.commands._shared import with_client
 from aios.cli.coverage import covers
 from aios.cli.output import dim, print_json
 from aios.cli.runtime import run_or_die
-from aios.ids import SESSION, WORKFLOW_RUN, split_id
+from aios.ids import servicer_kind
 
 _STATE_GLYPH = {
     "ok": "✓",
@@ -67,14 +67,11 @@ def register(app: typer.Typer) -> None:
 
 
 def _trace_path(resource_id: str) -> str:
-    prefix, _ = split_id(resource_id)
-    if prefix == WORKFLOW_RUN:
-        return f"/v1/runs/{resource_id}/trace"
-    if prefix == SESSION:
-        return f"/v1/sessions/{resource_id}/trace"
-    raise typer.BadParameter(
-        f"{resource_id!r} is neither a run ({WORKFLOW_RUN}_…) nor a session ({SESSION}_…) id"
-    )
+    try:
+        kind = servicer_kind(resource_id)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    return f"/v1/runs/{resource_id}/trace" if kind == "run" else f"/v1/sessions/{resource_id}/trace"
 
 
 def _render_tree(resp: dict[str, Any], *, chronological: bool) -> None:

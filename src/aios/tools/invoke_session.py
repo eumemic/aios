@@ -17,9 +17,9 @@ top — *create the servicer, then call it*:
 All three return a **single-shot handle** (one ``request_id``, one resolution;
 re-asking = a fresh invoke) and **park as an implicit-async tool task** — the
 caller session stays responsive to user messages while parked (never #772's
-blocking long-poll). The park reuses the existing await primitives
-(``await_session`` for a session servicer, ``await_run`` for a run) re-polled in
-a loop; the response-write NOTIFYs the servicer's channel the park subscribes to.
+blocking long-poll). The park rides the one awaiter (``await_invocation``,
+dispatching session vs run) re-polled in a loop; the response-write NOTIFYs the
+servicer's channel the park subscribes to.
 
 **Authorization = same-account.** A cross-account ``session_id``/``agent_id``/
 ``workflow_id`` 404s (``NotFoundError``) before any edge is written — the
@@ -54,7 +54,8 @@ from pydantic import ValidationError as PydanticValidationError
 from aios.config import get_settings
 from aios.harness import runtime
 from aios.ids import REQUEST, make_id
-from aios.models.sessions import SessionAwaitResponse
+from aios.models.invocations import AwaitResponse
+from aios.services import invocations as invocations_service
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail
@@ -166,39 +167,33 @@ def _error_result(error: dict[str, Any] | None) -> ToolResult:
 # ─── park loops ──────────────────────────────────────────────────────────────
 
 
-async def _park_on_session(
-    pool: Any, *, session_id: str, account_id: str, request_id: str
-) -> SessionAwaitResponse:
-    """Park (implicit-async) until the servicer session answers ``request_id``.
+async def _park_on_invocation(
+    pool: Any,
+    *,
+    servicer_kind: invocations_service.ServicerKind,
+    servicer_id: str,
+    request_id: str | None,
+    account_id: str,
+) -> AwaitResponse:
+    """Park (implicit-async) until the servicer answers, via the one awaiter.
 
-    Re-polls the existing ``await_session`` primitive (request_id mode → resolves
-    via ``derive_response``, #1126) so a single LISTEN drop can't strand us. As a
-    fire-and-forget tool task the caller stays responsive to user messages while
-    parked. No new blocking long-poll is introduced — this rides the shipped await.
+    Re-polls :func:`await_invocation` (session → ``derive_response`` on
+    ``request_id``; run → terminal row) so a single LISTEN drop can't strand us. As
+    a fire-and-forget tool task the caller stays responsive to user messages while
+    parked. ``outcome`` is non-None exactly when the invocation is terminal.
     """
     db_url = get_settings().db_url
     while True:
-        resp = await sessions_service.await_session(
+        resp = await invocations_service.await_invocation(
             pool,
             db_url,
-            session_id,
-            account_id=account_id,
+            servicer_kind=servicer_kind,
+            servicer_id=servicer_id,
             request_id=request_id,
-            watermark=None,
+            account_id=account_id,
             timeout_seconds=_AWAIT_POLL_SECONDS,
         )
-        if resp.done:
-            return resp
-
-
-async def _park_on_run(pool: Any, *, run_id: str, account_id: str) -> Any:
-    """Park (implicit-async) until the run reaches a terminal state."""
-    db_url = get_settings().db_url
-    while True:
-        resp = await wf_service.await_run(
-            pool, db_url, run_id, account_id=account_id, timeout_seconds=_AWAIT_POLL_SECONDS
-        )
-        if resp.done:
+        if resp.outcome is not None:
             return resp
 
 
@@ -222,10 +217,14 @@ async def call_session_handler(
         output_schema=args.output_schema,
         caller={"kind": "session", "id": session_id},
     )
-    resp = await _park_on_session(
-        pool, session_id=handle.servicer_id, account_id=account_id, request_id=handle.request_id
+    resp = await _park_on_invocation(
+        pool,
+        servicer_kind="session",
+        servicer_id=handle.servicer_id,
+        request_id=handle.request_id,
+        account_id=account_id,
     )
-    if resp.is_error:
+    if resp.outcome != "ok":
         return _error_result(resp.error)
     violation = _validate_output(resp.result, args.output_schema)
     return violation if violation is not None else _ok_result(resp.result)
@@ -252,10 +251,14 @@ async def call_agent_handler(
         crypto_box=runtime.require_crypto_box(),
         caller={"kind": "session", "id": session_id},
     )
-    resp = await _park_on_session(
-        pool, session_id=handle.servicer_id, account_id=account_id, request_id=handle.request_id
+    resp = await _park_on_invocation(
+        pool,
+        servicer_kind="session",
+        servicer_id=handle.servicer_id,
+        request_id=handle.request_id,
+        account_id=account_id,
     )
-    if resp.is_error:
+    if resp.outcome != "ok":
         return _error_result(resp.error)
     violation = _validate_output(resp.result, args.output_schema)
     return violation if violation is not None else _ok_result(resp.result)
@@ -284,11 +287,17 @@ async def call_workflow_handler(
         request_output_schema=args.output_schema,
         budget_usd=args.budget_usd,
     )
-    resp = await _park_on_run(pool, run_id=run.id, account_id=account_id)
-    if resp.is_error:
+    resp = await _park_on_invocation(
+        pool,
+        servicer_kind="run",
+        servicer_id=run.id,
+        request_id=None,
+        account_id=account_id,
+    )
+    if resp.outcome != "ok":
         return _error_result(resp.error)
-    violation = _validate_output(resp.output, args.output_schema)
-    return violation if violation is not None else _ok_result(resp.output)
+    violation = _validate_output(resp.result, args.output_schema)
+    return violation if violation is not None else _ok_result(resp.result)
 
 
 # ─── descriptions + registration ─────────────────────────────────────────────

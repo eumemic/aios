@@ -20,8 +20,8 @@ from aios.cli.coverage import covers
 from aios.cli.files import PayloadError, load_payload
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk import stream_run
+from aios_sdk._generated.api.invocations import await_invocation
 from aios_sdk._generated.api.runs import (
-    await_run,
     cancel_run,
     create_run,
     get_run,
@@ -182,7 +182,7 @@ def get_run_(ctx: typer.Context, run_id: str) -> None:
 
 
 @runs_app.command("wait", help="Block until a run completes, then print its result.")
-@covers("await_run")
+@covers("await_invocation")
 def wait_run_(
     ctx: typer.Context,
     run_id: str,
@@ -197,14 +197,15 @@ def wait_run_(
     ] = 30,
 ) -> None:
     def _run() -> None:
-        # The endpoint blocks up to --timeout then returns done|current; re-poll the
-        # bounded call until the run is terminal so the command blocks end-to-end.
+        # The unified awaiter blocks up to --timeout then returns the terminal outcome or
+        # null (still pending); re-poll the bounded call until ``outcome`` is set so the
+        # command blocks end-to-end. The run id is the awaiter's task id.
         with get_state(ctx).sdk_client() as client:
             while True:
                 resp = unwrap(
-                    await_run.sync_detailed(run_id=run_id, client=client, timeout=timeout)
+                    await_invocation.sync_detailed(task_id=run_id, client=client, timeout=timeout)
                 )
-                if resp.done:
+                if resp.outcome:
                     break
         render_single(resp.to_dict())
 

@@ -13,7 +13,7 @@ Example::
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, Literal
 
 from ulid import ULID
 
@@ -152,3 +152,19 @@ def split_id(value: str) -> tuple[str, str]:
     if not sep or prefix not in _PREFIXES or len(ulid_part) != 26:
         raise ValueError(f"malformed prefixed id: {value!r}")
     return prefix, ulid_part
+
+
+def servicer_kind(value: str) -> Literal["session", "run"]:
+    """The invocation servicer kind of an id — ``session`` (``sess_…``) or ``run`` (``wfr_…``).
+
+    The single source for "what kind of servicer is this id," shared by the unified
+    awaiter (``GET /v1/invocations/{task_id}/await``) and the trace CLI to route on a
+    servicer reference. Raises ``ValueError`` for a malformed id or a non-servicer prefix
+    (an agent/vault/… id is not an awaitable or traceable servicer).
+    """
+    prefix, _ = split_id(value)  # raises ValueError on a malformed id
+    if prefix == WORKFLOW_RUN:
+        return "run"
+    if prefix == SESSION:
+        return "session"
+    raise ValueError(f"{value!r} is not a servicer id (expected a session or run id)")

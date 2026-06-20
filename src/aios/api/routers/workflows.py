@@ -9,9 +9,7 @@ Two routers in one module: ``/v1/workflows`` (the definition resource, mirroring
 
 from __future__ import annotations
 
-from typing import Annotated
-
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, status
 from sse_starlette import EventSourceResponse
 
 from aios.api.deps import AccountIdDep, DbUrlDep, PoolDep
@@ -33,7 +31,6 @@ from aios.models.workflows import (
     WfRun,
     WfRunCreate,
     WfRunEvent,
-    WfRunWaitResponse,
     Workflow,
     WorkflowCreate,
     WorkflowUpdate,
@@ -213,31 +210,6 @@ async def list_runs(
 async def get_run(run_id: str, pool: PoolDep, account_id: AccountIdDep) -> WfRun:
     """Fetch one run by id (status, output, last_event_seq, …)."""
     return await service.get_run(pool, run_id, account_id=account_id)
-
-
-@runs_router.get("/{run_id}/wait", operation_id="await_run")
-async def await_run(
-    run_id: str,
-    db_url: DbUrlDep,
-    pool: PoolDep,
-    account_id: AccountIdDep,
-    timeout_seconds: Annotated[int, Query(alias="timeout", ge=0, le=60)] = 30,
-) -> WfRunWaitResponse:
-    """Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
-
-    The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
-    completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running
-    after ``timeout`` seconds returns ``done=false`` with its current status; call again to keep
-    blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
-    tool — an agent can await a sub-run and join. A cross-tenant run 404s.
-
-    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
-    response has NO ``state`` field, so a watcher keying on ``.state`` reads
-    ``None`` forever even after ``output`` is populated.
-    """
-    return await service.await_run(
-        pool, db_url, run_id, account_id=account_id, timeout_seconds=timeout_seconds
-    )
 
 
 @runs_router.get("/{run_id}/events", operation_id="list_run_events")
