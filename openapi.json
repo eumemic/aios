@@ -9179,6 +9179,167 @@
         }
       }
     },
+    "/v1/workflows/{workflow_id}/versions": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "List Workflow Versions",
+        "description": "List a workflow's immutable definition history, newest first.\n\nFirst page: ``?limit=``. Subsequent pages: ``?cursor=<next_cursor>``. Each\nversion is a complete snapshot of the workflow's definition at the time it\nwas written (``name`` is versioned \u2014 a rename mints a new version). An\narchived workflow's versions remain readable (post-mortem audit).",
+        "operationId": "list_workflow_versions",
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workflow Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_WorkflowVersion_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workflows/{workflow_id}/versions/{version}": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Get Workflow Version",
+        "description": "Fetch one historical version's definition snapshot.\n\nThe snapshot reflects the workflow's definition at the time the version was\nwritten and is unaffected by subsequent updates or archival.",
+        "operationId": "get_workflow_version",
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workflow Id"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Version"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowVersion"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/runs": {
       "post": {
         "tags": [
@@ -12730,6 +12891,38 @@
           "data"
         ],
         "title": "ListResponse[WfRun]"
+      },
+      "ListResponse_WorkflowVersion_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowVersion"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[WorkflowVersion]"
       },
       "ListResponse_Workflow_": {
         "properties": {
@@ -18369,7 +18562,98 @@
           "version"
         ],
         "title": "WorkflowUpdate",
-        "description": "Request body for ``PUT /v1/workflows/{id}`` \u2014 update in place, bumping ``version``.\n\n``version`` is the optimistic-concurrency token: it must match the workflow's\ncurrent version or the update 409s (re-fetch and retry). Omitted fields are\npreserved \u2014 nullable fields (``input_schema``/``output_schema``/``description``)\ncan therefore be replaced but never cleared back to null, as on ``AgentUpdate``.\nAn identical update is a no-op (no bump). There is no version-snapshot table \u2014\na run pins ``script`` + the declared surface onto itself at launch, so in-flight\nruns never observe an update. (The ``AgentUpdate`` shape, minus history.)"
+        "description": "Request body for ``PUT /v1/workflows/{id}`` \u2014 update in place, bumping ``version``.\n\n``version`` is the optimistic-concurrency token: it must match the workflow's\ncurrent version or the update 409s (re-fetch and retry). Omitted fields are\npreserved \u2014 nullable fields (``input_schema``/``output_schema``/``description``)\ncan therefore be replaced but never cleared back to null, as on ``AgentUpdate``.\nAn identical update is a no-op (no bump). Each real bump is snapshotted into the\nimmutable ``workflow_versions`` history (see :class:`WorkflowVersion`) in the same\ntransaction, copy-on-write like ``agent_versions``. A run additionally pins\n``script`` + the declared surface onto itself at launch, so in-flight runs never\nobserve an update. (The ``AgentUpdate`` shape.)"
+      },
+      "WorkflowVersion": {
+        "properties": {
+          "workflow_id": {
+            "type": "string",
+            "title": "Workflow Id"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "script": {
+            "type": "string",
+            "title": "Script"
+          },
+          "input_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Schema"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Schema"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": "array",
+            "title": "Tools"
+          },
+          "mcp_servers": {
+            "items": {
+              "$ref": "#/components/schemas/McpServerSpec"
+            },
+            "type": "array",
+            "title": "Mcp Servers"
+          },
+          "http_servers": {
+            "items": {
+              "$ref": "#/components/schemas/HttpServerSpec"
+            },
+            "type": "array",
+            "title": "Http Servers"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "workflow_id",
+          "version",
+          "name",
+          "script",
+          "created_at"
+        ],
+        "title": "WorkflowVersion",
+        "description": "Read view of a specific workflow version from the immutable history.\n\nThe workflow analog of :class:`aios.models.agents.AgentVersion`: a complete,\nimmutable snapshot of a workflow's definition at one ``version``. ``name`` IS\nversioned \u2014 a rename mints a new version \u2014 so this carries it alongside the\nscript + declared surface. Snapshots exactly ``update_workflow``'s no-op\ncomparison set (``name, script, input_schema, output_schema, description,\ntools, mcp_servers, http_servers``)."
       }
     }
   }

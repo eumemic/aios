@@ -33,6 +33,8 @@ from aios_sdk._generated.api.workflows import (
     archive_workflow,
     create_workflow,
     get_workflow,
+    get_workflow_version,
+    list_workflow_versions,
     list_workflows,
     unarchive_workflow,
     update_workflow,
@@ -44,6 +46,12 @@ from aios_sdk._generated.models.workflow_update import WorkflowUpdate
 
 app = typer.Typer(name="workflows", help="Manage workflow definitions.", no_args_is_help=True)
 runs_app = typer.Typer(name="runs", help="Launch and observe workflow runs.", no_args_is_help=True)
+versions_app = typer.Typer(
+    name="versions",
+    help="Inspect a workflow's immutable definition-version history.",
+    no_args_is_help=True,
+)
+app.add_typer(versions_app, name="versions")
 
 
 def _json_arg(value: str | None) -> Any:
@@ -142,6 +150,45 @@ def archive_workflow_(ctx: typer.Context, workflow_id: str) -> None:
 def unarchive_workflow_(ctx: typer.Context, workflow_id: str) -> None:
     def _run() -> None:
         call_single(ctx, unarchive_workflow.sync_detailed, workflow_id=workflow_id)
+
+    run_or_die(_run)
+
+
+# ─── aios workflows versions (definition-version history) ────────────────────
+
+
+@versions_app.command("list", help="List a workflow's definition versions (newest first).")
+@covers("list_workflow_versions")
+def list_workflow_versions_(
+    ctx: typer.Context,
+    workflow_id: str,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
+    all_: Annotated[bool, typer.Option("--all", help="Fetch every page.")] = False,
+) -> None:
+    def _run() -> None:
+        render_paginated(
+            ctx,
+            list_workflow_versions.sync_detailed,
+            columns=("version", "name", "created_at"),
+            max_widths={"name": 32},
+            all_=all_,
+            limit=limit,
+            path_params={"workflow_id": workflow_id},
+        )
+
+    run_or_die(_run)
+
+
+@versions_app.command("get", help="Fetch one historical version's definition snapshot.")
+@covers("get_workflow_version")
+def get_workflow_version_(ctx: typer.Context, workflow_id: str, version: int) -> None:
+    def _run() -> None:
+        call_single(
+            ctx,
+            get_workflow_version.sync_detailed,
+            workflow_id=workflow_id,
+            version=version,
+        )
 
     run_or_die(_run)
 

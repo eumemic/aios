@@ -129,9 +129,7 @@ def downgrade() -> None:
     # predicate and not reconstructible (the 0086 wake_owner/workflow stance).
     n = (
         op.get_bind()
-        .execute(
-            sa.text("SELECT count(*) FROM triggers WHERE action ->> 'kind' = 'wake_session'")
-        )
+        .execute(sa.text("SELECT count(*) FROM triggers WHERE action ->> 'kind' = 'wake_session'"))
         .scalar()
     )
     if n:

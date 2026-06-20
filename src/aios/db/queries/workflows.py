@@ -21,7 +21,14 @@ from typing import Any, NamedTuple
 
 import asyncpg
 
-from aios.db.queries import _archive_scoped, _get_scoped, _list_scoped, parse_jsonb
+from aios.db.queries import (
+    _archive_scoped,
+    _get_scoped,
+    _get_versioned,
+    _list_scoped,
+    _list_versioned,
+    parse_jsonb,
+)
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
@@ -33,6 +40,7 @@ from aios.models.workflows import (
     WfRunSignalKind,
     WfRunStatus,
     Workflow,
+    WorkflowVersion,
 )
 
 # A reserved ``call_key`` for the run-cancel side-marker. Real call_keys are
@@ -58,6 +66,22 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
+    )
+
+
+def _row_to_workflow_version(row: asyncpg.Record) -> WorkflowVersion:
+    return WorkflowVersion(
+        workflow_id=row["workflow_id"],
+        version=row["version"],
+        name=row["name"],
+        script=row["script"],
+        input_schema=parse_jsonb(row["input_schema"]),
+        output_schema=parse_jsonb(row["output_schema"]),
+        description=row["description"],
+        tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
+        mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
+        http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
+        created_at=row["created_at"],
     )
 
 
@@ -133,36 +157,79 @@ async def insert_workflow(
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
 ) -> Workflow:
-    """Insert a workflow definition at version 1. Raises ``ConflictError`` on a
-    duplicate ``(account_id, name)``."""
+    """Insert a workflow definition at version 1 **and** snapshot it into
+    ``workflow_versions(v1)`` in the same transaction. Raises ``ConflictError``
+    on a duplicate ``(account_id, name)``.
+
+    Copy-on-write (mirror of ``insert_agent``): the two writes are wrapped in a
+    single ``conn.transaction()`` so a fresh workflow can never exist without its
+    matching v1 history row. The version snapshot is driven off the ``workflows``
+    write's ``RETURNING *`` row, so the two rows cannot disagree."""
     new_id = make_id(WORKFLOW)
     try:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO workflows
-                (id, account_id, name, version, script, input_schema, output_schema,
-                 description, tools, mcp_servers, http_servers)
-            VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6::jsonb, $7, $8::jsonb, $9::jsonb, $10::jsonb)
-            RETURNING *
-            """,
-            new_id,
-            account_id,
-            name,
-            script,
-            json.dumps(input_schema) if input_schema is not None else None,
-            json.dumps(output_schema) if output_schema is not None else None,
-            description,
-            json.dumps([t.model_dump() for t in (tools or [])]),
-            json.dumps([s.model_dump() for s in (mcp_servers or [])]),
-            json.dumps([s.model_dump() for s in (http_servers or [])]),
-        )
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO workflows
+                    (id, account_id, name, version, script, input_schema, output_schema,
+                     description, tools, mcp_servers, http_servers)
+                VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6::jsonb, $7,
+                        $8::jsonb, $9::jsonb, $10::jsonb)
+                RETURNING *
+                """,
+                new_id,
+                account_id,
+                name,
+                script,
+                json.dumps(input_schema) if input_schema is not None else None,
+                json.dumps(output_schema) if output_schema is not None else None,
+                description,
+                json.dumps([t.model_dump() for t in (tools or [])]),
+                json.dumps([s.model_dump() for s in (mcp_servers or [])]),
+                json.dumps([s.model_dump() for s in (http_servers or [])]),
+            )
+            assert row is not None
+            await _insert_workflow_version(conn, row)
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
             f"workflow {name!r} already exists",
             detail={"name": name},
         ) from exc
-    assert row is not None
     return _row_to_workflow(row)
+
+
+async def _insert_workflow_version(conn: asyncpg.Connection[Any], wf_row: asyncpg.Record) -> None:
+    """Snapshot a ``workflows`` row into ``workflow_versions`` (copy-on-write).
+
+    Driven off the ``workflows`` write's ``RETURNING *`` row so the version row
+    cannot disagree with the head it snapshots. The jsonb columns are re-dumped
+    from the (already-parsed) record values; ``input_schema``/``output_schema``
+    pass through as ``None`` when absent. Called inside the caller's transaction
+    (``insert_workflow`` / ``update_workflow``); a torn write — a bumped
+    ``workflows.version`` with no version row — would leave the head FK-dead in
+    later phases, so the two writes must commit or roll back together."""
+    input_schema = parse_jsonb(wf_row["input_schema"])
+    output_schema = parse_jsonb(wf_row["output_schema"])
+    await conn.execute(
+        """
+        INSERT INTO workflow_versions (
+            workflow_id, account_id, version, name, script,
+            input_schema, output_schema, description, tools, mcp_servers, http_servers
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11::jsonb)
+        """,
+        wf_row["id"],
+        wf_row["account_id"],
+        wf_row["version"],
+        wf_row["name"],
+        wf_row["script"],
+        json.dumps(input_schema) if input_schema is not None else None,
+        json.dumps(output_schema) if output_schema is not None else None,
+        wf_row["description"],
+        json.dumps(parse_jsonb(wf_row["tools"])),
+        json.dumps(parse_jsonb(wf_row["mcp_servers"])),
+        json.dumps(parse_jsonb(wf_row["http_servers"])),
+    )
 
 
 async def update_workflow(
@@ -229,48 +296,58 @@ async def update_workflow(
     ):
         return current
 
+    # Copy-on-write: the version bump and the matching ``workflow_versions``
+    # INSERT are wrapped in ONE ``conn.transaction()`` (the table ran autocommit
+    # before this — unlike ``insert_agent``, already transaction-wrapped). A torn
+    # write (bumped ``workflows.version`` with no version row) is corruption that
+    # would leave the head FK-dead in later phases, so the two writes commit or
+    # roll back together. The snapshot is driven off the UPDATE's ``RETURNING *``
+    # row so the two rows cannot disagree.
     try:
-        row = await conn.fetchrow(
-            """
-            UPDATE workflows
-               SET version = workflows.version + 1, name = $3, script = $4,
-                   input_schema = $5::jsonb, output_schema = $6::jsonb, description = $7,
-                   tools = $8::jsonb, mcp_servers = $9::jsonb, http_servers = $10::jsonb,
-                   updated_at = now()
-             WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND version = $11
-            RETURNING *
-            """,
-            workflow_id,
-            account_id,
-            new_name,
-            new_script,
-            json.dumps(new_input_schema) if new_input_schema is not None else None,
-            json.dumps(new_output_schema) if new_output_schema is not None else None,
-            new_desc,
-            json.dumps([t.model_dump() for t in new_tools]),
-            json.dumps([s.model_dump() for s in new_mcp]),
-            json.dumps([s.model_dump() for s in new_http]),
-            expected_version,
-        )
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE workflows
+                   SET version = workflows.version + 1, name = $3, script = $4,
+                       input_schema = $5::jsonb, output_schema = $6::jsonb, description = $7,
+                       tools = $8::jsonb, mcp_servers = $9::jsonb, http_servers = $10::jsonb,
+                       updated_at = now()
+                 WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND version = $11
+                RETURNING *
+                """,
+                workflow_id,
+                account_id,
+                new_name,
+                new_script,
+                json.dumps(new_input_schema) if new_input_schema is not None else None,
+                json.dumps(new_output_schema) if new_output_schema is not None else None,
+                new_desc,
+                json.dumps([t.model_dump() for t in new_tools]),
+                json.dumps([s.model_dump() for s in new_mcp]),
+                json.dumps([s.model_dump() for s in new_http]),
+                expected_version,
+            )
+            if row is None:
+                # No row matched (id, account_id, version): a stale/raced
+                # ``expected_version``. The re-read makes the 409 message accurate
+                # (and would 404 a vanished row, though workflows have no delete
+                # path today). Raising rolls back the (empty) transaction.
+                fresh = await get_workflow(conn, workflow_id, account_id=account_id)
+                raise ConflictError(
+                    f"version mismatch: expected {expected_version}, current is {fresh.version}",
+                    detail={
+                        "expected": expected_version,
+                        "current": fresh.version,
+                        "id": workflow_id,
+                    },
+                )
+            await _insert_workflow_version(conn, row)
     except asyncpg.UniqueViolationError as exc:
         # A rename onto another live workflow's name (UNIQUE(account_id, name)).
         raise ConflictError(
             f"workflow {new_name!r} already exists",
             detail={"name": new_name},
         ) from exc
-    if row is None:
-        # No row matched (id, account_id, version): a stale/raced ``expected_version``.
-        # The re-read makes the 409 message accurate (and would 404 a vanished row,
-        # though workflows have no delete path today).
-        fresh = await get_workflow(conn, workflow_id, account_id=account_id)
-        raise ConflictError(
-            f"version mismatch: expected {expected_version}, current is {fresh.version}",
-            detail={
-                "expected": expected_version,
-                "current": fresh.version,
-                "id": workflow_id,
-            },
-        )
     return _row_to_workflow(row)
 
 
@@ -344,6 +421,53 @@ async def unarchive_workflow(
             f"workflow {workflow_id} not found or not archived", detail={"id": workflow_id}
         )
     return _row_to_workflow(row)
+
+
+# ─── workflow_versions (immutable definition history) ────────────────────────
+
+
+async def get_workflow_version(
+    conn: asyncpg.Connection[Any],
+    workflow_id: str,
+    version: int,
+    *,
+    account_id: str,
+) -> WorkflowVersion:
+    """Read one historical version snapshot. Archived-blind on the parent (the
+    correct behavior for post-mortem audit of an archived workflow — matches the
+    agent version reads)."""
+    return await _get_versioned(
+        conn,
+        table="workflow_versions",
+        parent_column="workflow_id",
+        parent_id=workflow_id,
+        version=version,
+        account_id=account_id,
+        row=_row_to_workflow_version,
+        noun="workflow",
+    )
+
+
+async def list_workflow_versions(
+    conn: asyncpg.Connection[Any],
+    workflow_id: str,
+    *,
+    account_id: str,
+    limit: int = 50,
+    after: int | None = None,
+) -> list[WorkflowVersion]:
+    """List a workflow's versions in descending order (newest first). Archived-blind
+    on the parent (post-mortem audit of an archived workflow — matches agents)."""
+    return await _list_versioned(
+        conn,
+        table="workflow_versions",
+        parent_column="workflow_id",
+        parent_id=workflow_id,
+        account_id=account_id,
+        row=_row_to_workflow_version,
+        limit=limit,
+        after=after,
+    )
 
 
 # ─── wf_runs (execution instances) ───────────────────────────────────────────
