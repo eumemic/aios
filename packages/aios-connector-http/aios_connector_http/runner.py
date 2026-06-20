@@ -729,6 +729,103 @@ class HttpConnector:
             return None
         return dict(response.json())
 
+    # ─── delivery / edit acks (#1341) ────────────────────────────────
+
+    async def ack_delivered(
+        self,
+        *,
+        connection_id: str,
+        session_id: str,
+        platform_message_id: str,
+        tool_call_id: str | None = None,
+        wake: bool = False,
+    ) -> dict[str, Any] | None:
+        """Tell the originating ``session_id`` that an outbound the model
+        consciously sent was confirmed delivered by the platform (#1341).
+
+        The success-path complement to a ``connector_delivery_failed`` emit: a
+        thin wrapper over :meth:`emit_session_lifecycle` that supplies the
+        reserved ``event="connector_message_delivered"`` and carries the
+        platform correlation ids in ``data``. Informational by default
+        (``wake=False``) — the model reads the ack on its next turn rather than
+        being woken. Inherits the drop-don't-raise posture: a non-fatal 4xx →
+        ``None``; a fatal status re-raises.
+        """
+        return await self.emit_session_lifecycle(
+            connection_id=connection_id,
+            session_id=session_id,
+            event="connector_message_delivered",
+            data={"platform_message_id": platform_message_id, "tool_call_id": tool_call_id},
+            wake=wake,
+        )
+
+    async def ack_edited(
+        self,
+        *,
+        connection_id: str,
+        session_id: str,
+        platform_message_id: str,
+        tool_call_id: str | None = None,
+        wake: bool = False,
+    ) -> dict[str, Any] | None:
+        """Tell the originating ``session_id`` that an edit the model made to a
+        prior outbound landed on the platform (#1341).
+
+        Identical to :meth:`ack_delivered` but supplies the reserved
+        ``event="connector_message_edited"``. Informational by default
+        (``wake=False``); the edit-FAILED case is expressed as
+        ``connector_delivery_failed`` + ``wake=True`` (#1308), not here.
+        """
+        return await self.emit_session_lifecycle(
+            connection_id=connection_id,
+            session_id=session_id,
+            event="connector_message_edited",
+            data={"platform_message_id": platform_message_id, "tool_call_id": tool_call_id},
+            wake=wake,
+        )
+
+    async def ack_delivered_chat(
+        self,
+        *,
+        connection_id: str,
+        chat_id: str,
+        platform_message_id: str,
+        tool_call_id: str | None = None,
+        wake: bool = False,
+    ) -> dict[str, Any] | None:
+        """Routing-key (``chat_id``) variant of :meth:`ack_delivered` (#1341).
+
+        A thin wrapper over :meth:`emit_chat_lifecycle` for connectors that
+        know the per-peer routing key but not the resolved ``session_id`` (e.g.
+        a Twilio status callback). A ``chat_id`` with no bound session 404s,
+        dropped to ``None`` (drop-don't-raise).
+        """
+        return await self.emit_chat_lifecycle(
+            connection_id=connection_id,
+            chat_id=chat_id,
+            event="connector_message_delivered",
+            data={"platform_message_id": platform_message_id, "tool_call_id": tool_call_id},
+            wake=wake,
+        )
+
+    async def ack_edited_chat(
+        self,
+        *,
+        connection_id: str,
+        chat_id: str,
+        platform_message_id: str,
+        tool_call_id: str | None = None,
+        wake: bool = False,
+    ) -> dict[str, Any] | None:
+        """Routing-key (``chat_id``) variant of :meth:`ack_edited` (#1341)."""
+        return await self.emit_chat_lifecycle(
+            connection_id=connection_id,
+            chat_id=chat_id,
+            event="connector_message_edited",
+            data={"platform_message_id": platform_message_id, "tool_call_id": tool_call_id},
+            wake=wake,
+        )
+
     # ─── runner ──────────────────────────────────────────────────────
 
     async def run_until_stopped(self, *, install_signal_handlers: bool = True) -> None:

@@ -243,3 +243,43 @@ class TestRuntimeChatLifecycle:
                 _auth(account_id, connector="whatsapp"),
             )
         assert patched_defer_wake.await_count == 0
+
+    async def test_chat_lifecycle_edited_ack(
+        self,
+        pool_with_chat_session: tuple[asyncpg.Pool[Any], str, str, str, str],
+        patched_defer_wake: AsyncMock,
+    ) -> None:
+        """A ``connector_message_edited`` ack keyed by ``chat_id`` (#1341)
+        resolves to the bound session and lands the reserved event; an
+        unresolvable ``chat_id`` still 404s (shipped behavior)."""
+        pool, account_id, connection_id, chat_id, session_id = pool_with_chat_session
+
+        result = await post_runtime_chat_lifecycle(
+            RuntimeChatLifecycleRequest(
+                connection_id=connection_id,
+                chat_id=chat_id,
+                event="connector_message_edited",
+                data={"platform_message_id": "x", "tool_call_id": "call_1"},
+                wake=False,
+            ),
+            pool,
+            _auth(account_id),
+        )
+        assert result["appended_session_ids"] == [session_id]
+        assert patched_defer_wake.await_count == 0
+        rows = await _lifecycle_rows(pool, session_id)
+        assert len(rows) == 1
+        assert rows[0]["event"] == "connector_message_edited"
+        assert rows[0]["data"] == {"platform_message_id": "x", "tool_call_id": "call_1"}
+
+        with pytest.raises(NotFoundError):
+            await post_runtime_chat_lifecycle(
+                RuntimeChatLifecycleRequest(
+                    connection_id=connection_id,
+                    chat_id="+19999999",
+                    event="connector_message_edited",
+                    data={"platform_message_id": "x"},
+                ),
+                pool,
+                _auth(account_id),
+            )

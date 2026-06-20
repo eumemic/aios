@@ -111,6 +111,11 @@ def sync_detailed(
     the failure wakes the originating session rather than merely being
     visible on its next turn.
 
+    Reserved model-visible ``event`` values mirror the session-lifecycle
+    route: ``connector_delivery_failed`` (#1308) and its success-path
+    complements ``connector_message_delivered`` / ``connector_message_edited``
+    (#1341, informational acks emitted with ``wake=False``).
+
     Args:
         authorization (None | str | Unset):
         body (RuntimeChatLifecycleRequest): Body for ``POST /v1/connectors/runtime/chat-
@@ -200,6 +205,11 @@ def sync(
     the failure wakes the originating session rather than merely being
     visible on its next turn.
 
+    Reserved model-visible ``event`` values mirror the session-lifecycle
+    route: ``connector_delivery_failed`` (#1308) and its success-path
+    complements ``connector_message_delivered`` / ``connector_message_edited``
+    (#1341, informational acks emitted with ``wake=False``).
+
     Args:
         authorization (None | str | Unset):
         body (RuntimeChatLifecycleRequest): Body for ``POST /v1/connectors/runtime/chat-
@@ -282,6 +292,11 @@ async def asyncio_detailed(
     (the same pattern as the session-lifecycle and tool-result intakes) so
     the failure wakes the originating session rather than merely being
     visible on its next turn.
+
+    Reserved model-visible ``event`` values mirror the session-lifecycle
+    route: ``connector_delivery_failed`` (#1308) and its success-path
+    complements ``connector_message_delivered`` / ``connector_message_edited``
+    (#1341, informational acks emitted with ``wake=False``).
 
     Args:
         authorization (None | str | Unset):
@@ -369,6 +384,11 @@ async def asyncio(
     (the same pattern as the session-lifecycle and tool-result intakes) so
     the failure wakes the originating session rather than merely being
     visible on its next turn.
+
+    Reserved model-visible ``event`` values mirror the session-lifecycle
+    route: ``connector_delivery_failed`` (#1308) and its success-path
+    complements ``connector_message_delivered`` / ``connector_message_edited``
+    (#1341, informational acks emitted with ``wake=False``).
 
     Args:
         authorization (None | str | Unset):
