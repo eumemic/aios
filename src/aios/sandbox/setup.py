@@ -533,7 +533,20 @@ def build_lockdown_verify_script(
     verify always carries a positive nat-DNAT assertion and never degenerates
     to a no-op.
     """
-    lines = [_IPTABLES_BACKEND_SELECT]
+    # ``set -e`` so EVERY assertion is independently fatal regardless of order.
+    # The sidecar runs this via ``bash -c <script>`` with NO ``-e``, so without
+    # this the script's exit status is its LAST command — and the v6 read-back
+    # block below ends in a guarded ``if ...; then ...; fi`` that returns 0 when
+    # the v6 ``filter`` table is unavailable (the common CI / IPv6-disabled-host
+    # case). That trailing 0 would MASK a failed earlier v4 ``-P OUTPUT DROP``
+    # assertion: verify passes GREEN while the box is open over IPv4 — a fail-open
+    # regression on the load-bearing v4 lockdown. ``set -e`` makes the v4 (and
+    # nat) assertions abort the script the instant they fail, before the v6 block
+    # can overwrite the exit status. The v6 block keeps its own internal ``if``
+    # guard so a missing v6 table is still a graceful skip (the guard's condition
+    # being false leaves ``$?`` at 0 and ``set -e`` does NOT fire on a tested
+    # condition), not a failure.
+    lines = ["set -e", _IPTABLES_BACKEND_SELECT]
     if assert_drop:
         lines.append("\"$IPT\" -S OUTPUT | grep -qx -- '-P OUTPUT DROP'")
         # Extend the read-back verify to v6 (#1207): without asserting the

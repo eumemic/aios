@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -627,6 +631,83 @@ class TestBuildLockdownVerifyScript:
         # Backward-compat: the Limited callers pass no assert_drop and must keep
         # getting the DROP assertion.
         assert "OUTPUT DROP" in build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
+
+    def test_emits_set_e_first(self) -> None:
+        """Every assertion must be independently fatal. The sidecar runs the
+        script via ``bash -c`` with NO ``-e`` flag, so the script's exit status
+        defaults to its LAST command — the trailing guarded v6 ``if`` that
+        returns 0 when the v6 table is unavailable. Without ``set -e`` at the top
+        that trailing 0 masks a failed earlier v4 DROP assertion (fail-open).
+        ``set -e`` must be the first line so the v4 (and nat) assertions abort the
+        script the instant they fail."""
+        for script in (
+            build_lockdown_verify_script(),
+            build_lockdown_verify_script(dnat_hosts=["api.secret.com"]),
+            build_lockdown_verify_script(dnat_hosts=["api.secret.com"], assert_drop=False),
+        ):
+            assert script.splitlines()[0] == "set -e"
+
+    def _run_verify(self, *, v4_policy: str, v6_mode: str, dnat_hosts: Sequence[str] = ()) -> int:
+        """Run the generated verify script under ``bash -c`` (exactly as the
+        sidecar does — no ``-e`` on the invocation) against fake legacy
+        binaries, returning its exit code.
+
+        ``v4_policy``/``v6_mode`` are the ``-S OUTPUT`` policies the fakes report
+        (``"DROP"``/``"ACCEPT"``); ``v6_mode="unavailable"`` makes ``ip6tables-S
+        OUTPUT`` fail to initialize (the no-``ip6_tables``-module / CI case).
+        """
+        script = build_lockdown_verify_script(dnat_hosts=dnat_hosts)
+        bindir = tempfile.mkdtemp()
+        v4 = (
+            f"#!/usr/bin/env bash\n"
+            f"if [ \"$1\" = '-S' ] && [ \"$2\" = 'OUTPUT' ]; then echo '-P OUTPUT {v4_policy}'; exit 0; fi\n"
+            f"# nat -S OUTPUT carries a DNAT rule so the nat assertion (if any) passes\n"
+            f"if [ \"$1\" = '-t' ] && [ \"$2\" = 'nat' ]; then echo '-A OUTPUT -j DNAT --to-destination 1.2.3.4:443'; exit 0; fi\n"
+            f"exit 0\n"
+        )
+        if v6_mode == "unavailable":
+            v6_body = "echo \"ip6tables: can't initialize table 'filter'\" >&2; exit 3;"
+        else:
+            v6_body = f"echo '-P OUTPUT {v6_mode}'; exit 0;"
+        v6 = (
+            f"#!/usr/bin/env bash\n"
+            f"if [ \"$1\" = '-S' ] && [ \"$2\" = 'OUTPUT' ]; then {v6_body} fi\n"
+            f"exit 0\n"
+        )
+        for name, body in (("iptables-legacy", v4), ("ip6tables-legacy", v6)):
+            p = os.path.join(bindir, name)
+            with open(p, "w") as f:
+                f.write(body)
+            os.chmod(p, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + env["PATH"]
+        return subprocess.run(
+            ["bash", "-c", script], env=env, capture_output=True, text=True
+        ).returncode
+
+    def test_v4_drop_absent_fails_even_when_v6_table_unavailable(self) -> None:
+        """REGRESSION (#1207 verify-ordering fail-open): when the v6 ``filter``
+        table is unavailable (no ``ip6_tables`` module — the common CI /
+        IPv6-disabled-host case) the trailing guarded v6 ``if`` returns 0. Without
+        ``set -e`` that trailing 0 OVERWRITES a failed earlier v4 ``-P OUTPUT
+        DROP`` assertion, so verify passes GREEN while the box is open over IPv4.
+        With ``set -e`` the v4 assertion aborts the script before the v6 block can
+        mask it — fail-closed."""
+        assert self._run_verify(v4_policy="ACCEPT", v6_mode="unavailable") != 0
+
+    def test_v4_drop_present_passes_when_v6_table_unavailable(self) -> None:
+        """The graceful-skip path still passes: v4 locked down + no v6 stack to
+        secure → verify is GREEN (the v6 ``if`` guard skips, ``set -e`` does not
+        fire on a tested condition)."""
+        assert self._run_verify(v4_policy="DROP", v6_mode="unavailable") == 0
+
+    def test_v6_drop_absent_fails_when_v6_table_present(self) -> None:
+        """When the v6 table IS present (the case the v6 DROP defends), a missing
+        v6 ``-P OUTPUT DROP`` still fails the verify."""
+        assert self._run_verify(v4_policy="DROP", v6_mode="ACCEPT") != 0
+
+    def test_both_drop_present_passes(self) -> None:
+        assert self._run_verify(v4_policy="DROP", v6_mode="DROP") == 0
 
 
 # ── docker backend translates network policy to docker run argv ────────────────
