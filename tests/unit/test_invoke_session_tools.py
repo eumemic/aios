@@ -175,6 +175,9 @@ async def test_invoke_workflow_create_run_then_await(monkeypatch: Any) -> None:
     # (vault attenuation + spend ceiling) now ride on call_workflow itself.
     assert kwargs["vault_ids"] == ["vlt_1"]
     assert kwargs["budget_usd"] == 2.5
+    # launch_awaited_run stamps the awaited contract onto the caller before create_run.
+    assert kwargs["caller"] == {"kind": "session", "id": _CALLER, "awaited": True}
+    assert isinstance(kwargs["request_id"], str)
     # the park dispatches the one awaiter on the run servicer it just created.
     assert await_mock.await_args is not None
     assert await_mock.await_args.kwargs["servicer_kind"] == "run"

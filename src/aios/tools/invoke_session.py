@@ -53,7 +53,6 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.harness import runtime
-from aios.ids import REQUEST, make_id
 from aios.models.invocations import AwaitResponse
 from aios.services import invocations as invocations_service
 from aios.services import sessions as sessions_service
@@ -270,21 +269,20 @@ async def call_workflow_handler(
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_CallWorkflowArgs, arguments)
-    # Porcelain = create_run + await it (the run is the servicer; single-shot). The
+    # Porcelain = launch the run as an awaited servicer + park on it (single-shot). The
     # run inherits THIS session's environment + lineage and is launched by it.
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
-    run = await wf_service.create_run(
+    run, _request_id = await wf_service.launch_awaited_run(
         pool,
         account_id=account_id,
         workflow_id=args.workflow_id,
         environment_id=session.environment_id,
         input=args.input,
-        vault_ids=args.vault_ids,
+        caller={"kind": "session", "id": session_id},
+        output_schema=args.output_schema,
         launcher_session_id=session_id,
         parent_run_id=session.parent_run_id,
-        request_id=make_id(REQUEST),
-        caller={"kind": "session", "id": session_id, "awaited": True},
-        request_output_schema=args.output_schema,
+        vault_ids=args.vault_ids,
         budget_usd=args.budget_usd,
     )
     resp = await _park_on_invocation(

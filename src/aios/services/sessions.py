@@ -913,16 +913,14 @@ async def invoke(
         # so a module-level import would be circular.
         from aios.services import workflows as wf_service
 
-        request_id = make_id(REQUEST)
-        run = await wf_service.create_run(
+        run, request_id = await wf_service.launch_awaited_run(
             pool,
             account_id=account_id,
             workflow_id=target,
             environment_id=environment_id,
             input=input,
-            request_id=request_id,
-            caller={**caller, "awaited": True},
-            request_output_schema=output_schema,
+            caller=caller,
+            output_schema=output_schema,
         )
         return InvocationHandle(servicer_kind="run", servicer_id=run.id, request_id=request_id)
 

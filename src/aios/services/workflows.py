@@ -19,6 +19,7 @@ import asyncpg
 
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
+from aios.ids import REQUEST, make_id
 from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,
@@ -52,6 +53,7 @@ __all__ = [
     "create_workflow",
     "get_run",
     "get_workflow",
+    "launch_awaited_run",
     "list_run_events",
     "list_runs",
     "list_workflows",
@@ -60,6 +62,51 @@ __all__ = [
     "unarchive_workflow",
     "update_workflow",
 ]
+
+
+# ─── run launch ──────────────────────────────────────────────────────────────
+
+
+async def launch_awaited_run(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    workflow_id: str,
+    environment_id: str,
+    input: Any = None,
+    caller: dict[str, Any],
+    output_schema: dict[str, Any] | None = None,
+    launcher_session_id: str | None = None,
+    parent_run_id: str | None = None,
+    vault_ids: list[str] | None = None,
+    budget_usd: float | None = None,
+) -> tuple[WfRun, str]:
+    """Launch a run as an **awaited** servicer — the one place the run-as-Ask contract lives.
+
+    Both Ask-shaped callers (the model ``call_workflow`` builtin and the API
+    ``POST /v1/invocations`` workflow arm) go through here, so the contract — mint a fresh
+    ``request_id`` and stamp ``caller.awaited=True`` so the run carries a response obligation —
+    is correct-by-construction at one site rather than re-typed (and forgettable) at each.
+    Returns ``(run, request_id)``; the caller awaits the run via the unified awaiter. The
+    Tell-shaped trigger fire is deliberately NOT routed here — it launches fire-and-forget
+    (no ``request_id``/``caller``) and calls :func:`create_run` directly.
+    """
+    request_id = make_id(REQUEST)
+    run = await create_run(
+        pool,
+        account_id=account_id,
+        workflow_id=workflow_id,
+        environment_id=environment_id,
+        input=input,
+        vault_ids=vault_ids,
+        launcher_session_id=launcher_session_id,
+        parent_run_id=parent_run_id,
+        request_id=request_id,
+        caller={**caller, "awaited": True},
+        request_output_schema=output_schema,
+        budget_usd=budget_usd,
+    )
+    return run, request_id
 
 
 # ─── workflow definitions ────────────────────────────────────────────────────
