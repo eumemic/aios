@@ -59,6 +59,7 @@ from aios.errors import (
 )
 from aios.logging import get_logger
 from aios.models.connections import ConnectorSecrets
+from aios.models.connectors import ConnectorCapabilities
 from aios.services import connections as connections_service
 from aios.services import connectors as connectors_service
 from aios.services import inbound as inbound_service
@@ -203,6 +204,19 @@ class ToolsSchemaUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tools: list[dict[str, Any]]
+
+
+class CapabilitiesUpdate(BaseModel):
+    """Body for ``PUT /v1/connectors/{connector}/capabilities``.
+
+    A sibling to :class:`ToolsSchemaUpdate` — kept separate so capability churn
+    is decoupled from a full ``tools_schema`` republish and the shipped
+    ``tools_schema`` body contract stays untouched.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    capabilities: ConnectorCapabilities
 
 
 class RuntimeToolResultRequest(BaseModel):
@@ -413,6 +427,39 @@ async def put_tools_schema(
     # service layer so the route stays a thin shim.
     await connectors_service.update_tools_schema(
         pool, connector=connector, account_id=account_id, tools_schema=body.tools
+    )
+
+
+@router.put(
+    "/{connector}/capabilities",
+    operation_id="put_connector_capabilities",
+)
+async def put_capabilities(
+    connector: str,
+    body: CapabilitiesUpdate,
+    pool: PoolDep,
+    auth: RuntimeAuthDep,
+) -> None:
+    """Publish the runtime container's typed capability descriptor for a
+    connector type.
+
+    A sibling to :func:`put_tools_schema` (same root-only publication path),
+    kept on its own route so capability churn is decoupled from a full
+    ``tools_schema`` republish.  The runtime container is the source of truth
+    for what richer renderings it supports; it publishes the descriptor at
+    startup, replacing whatever was on the ``connectors.capabilities`` row
+    wholesale.
+
+    Authorization: the runtime bearer's ``connector`` must match the path's
+    ``connector``; publication itself is root-only (enforced in the service
+    layer — connectors are root-owned, the same cross-tenant rationale as
+    ``tools_schema``).  Capabilities declare NO authority: they constrain
+    RENDERING, never what any principal may invoke.
+    """
+    _, auth_connector, account_id, _scope = auth
+    _check_runtime_scope(auth_connector, connector)
+    await connectors_service.update_capabilities(
+        pool, connector=connector, account_id=account_id, capabilities=body.capabilities
     )
 
 

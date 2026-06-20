@@ -15,6 +15,8 @@ from typing import Any, Protocol, runtime_checkable
 
 import asyncpg
 
+from aios.models.connectors import ConnectorCapabilities
+
 
 @runtime_checkable
 class ToolProvider(Protocol):
@@ -28,5 +30,20 @@ class ToolProvider(Protocol):
         Each dict is a ToolSpec ready for ``ToolSpec.model_validate`` —
         the same shape ``services.connections.list_tools_for_session``
         returns today.
+        """
+        ...
+
+    async def list_capabilities_for_session(
+        self, pool: asyncpg.Pool[Any], session_id: str
+    ) -> dict[str, ConnectorCapabilities]:
+        """Return the typed capability descriptors for ``session_id``,
+        keyed by connector type.
+
+        The capability sibling to :meth:`list_tools_for_session`.  Shared
+        rendering code branches on a declared KIND
+        (``caps.draft_streaming is not None``) instead of a
+        ``connector == '<type>'`` identity shim.  The only consumer (the #1335
+        outbound delta renderer) is not yet in-tree; this is the seam it plugs
+        into when it lands.
         """
         ...
