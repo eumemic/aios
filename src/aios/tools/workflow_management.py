@@ -1,25 +1,26 @@
 """Agent-acting workflow builtins — the strange loop.
 
-Model-callable tools that let an agent author, edit, launch, await, and cancel
-workflows the way a human operator (or the ``aios`` CLI) does. Each is a thin
-wrapper over the existing workflow services; the agent's authority is bounded by
-the attenuations those services already enforce, keyed on the **executing
-session id** the harness supplies (``invoke_builtin(session_id, …)``,
-``tools/invoke.py``) — never model input:
+Model-callable tools that let an agent author, edit, and steer workflows the way a
+human operator (or the ``aios`` CLI) does. Each is a thin wrapper over the existing
+workflow services; the agent's authority is bounded by the attenuations those services
+already enforce, keyed on the **executing session id** the harness supplies
+(``invoke_builtin(session_id, …)``, ``tools/invoke.py``) — never model input:
 
 * ``create_workflow`` — surface attenuation: the declared tool/server surface must
   be a subset of the *creating agent's* own.
 * ``update_workflow`` — merged-surface attenuation + an optimistic ``version`` pin.
-* ``create_run`` — vault attenuation (bound vaults ⊆ the *launching session's*) plus
-  the vertical run-depth cap and the horizontal fan-out caps (outstanding runs per
-  launcher and per account); the run inherits the caller's environment.
-* ``await_run`` — a bounded long-poll that blocks (as a fire-and-forget tool task,
-  so the session stays responsive) until the run is terminal or the timeout lapses.
 * ``cancel_run`` — cancel-time attenuation: a session may cancel only runs *it
   launched* (the self-service escape for the fan-out cap; operator-launched runs
   need the operator).
 * ``resume_gate`` — gate-resume attenuation: a session may resume only gates in
   runs *it launched*; operator-launched runs stay on the operator HTTP plane.
+
+Launching-and-awaiting a run is **not** here: it is the unified ``call_workflow``
+builtin (the ``call_*`` family in ``tools/invoke_session.py``) — a single-shot
+create-run-then-await that carries the vault attenuation (bound vaults ⊆ the
+*launching session's*), the run-depth cap, and the per-launcher/per-account fan-out
+caps. This module keeps only the author/edit tools and the tools that steer or read an
+already-launched run.
 
 **Identity is load-bearing, so two invariants hold (see F1 in the review):**
 1. The trusted ids (``creator_session_id``/``actor_session_id``/``launcher_session_id``,
@@ -43,7 +44,6 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
-from aios.config import get_settings
 from aios.harness import runtime
 from aios.models.workflows import (
     WORKFLOW_SCRIPT_CONTRACT,
@@ -91,30 +91,6 @@ class _WorkflowIdArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     workflow_id: str
-
-
-class _CreateRunArgs(BaseModel):
-    """``create_run`` arguments. No ``environment_id`` — the run always inherits the
-    caller session's env (a caller-chosen env id would be a cross-tenant attack surface)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    workflow_id: str
-    input: Any = None
-    vault_ids: list[str] = Field(default_factory=list)
-    budget_usd: float | None = Field(
-        default=None, gt=0, description="Optional shared USD spend ceiling for the run."
-    )
-
-
-class _AwaitRunArgs(BaseModel):
-    """``await_run`` arguments. ``timeout_seconds`` is a bounded per-call long-poll
-    budget; re-call to keep waiting (each call holds one LISTEN connection)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    run_id: str
-    timeout_seconds: int = Field(default=300, ge=1, le=1800)
 
 
 class _CancelRunArgs(BaseModel):
@@ -255,39 +231,6 @@ async def unarchive_workflow_handler(session_id: str, arguments: dict[str, Any])
     return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
 
 
-async def create_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    pool = runtime.require_pool()
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_CreateRunArgs, arguments)
-    session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
-    run = await wf_service.create_run(
-        pool,
-        account_id=account_id,
-        workflow_id=args.workflow_id,
-        environment_id=session.environment_id,  # inherit caller's env (F2)
-        input=args.input,
-        vault_ids=args.vault_ids,
-        launcher_session_id=session_id,
-        parent_run_id=session.parent_run_id,  # lineage + depth cap
-        budget_usd=args.budget_usd,
-    )
-    return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
-
-
-async def await_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    pool = runtime.require_pool()
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_AwaitRunArgs, arguments)
-    resp = await wf_service.await_run(
-        pool,
-        get_settings().db_url,
-        args.run_id,
-        account_id=account_id,
-        timeout_seconds=args.timeout_seconds,
-    )
-    return resp.model_dump(mode="json")
-
-
 async def cancel_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
@@ -400,27 +343,13 @@ UPDATE_WORKFLOW_DESCRIPTION = (
 )
 ARCHIVE_WORKFLOW_DESCRIPTION = (
     "Archive one of your workflows. Archived workflows disappear from list_workflows and "
-    "refuse new create_run launches, but remain fetchable by id and keep their run/journal "
+    "refuse new call_workflow launches, but remain fetchable by id and keep their run/journal "
     "history. Archiving releases the workflow name for a fresh create_workflow."
 )
 UNARCHIVE_WORKFLOW_DESCRIPTION = (
     "Restore an archived workflow so it appears in list_workflows and can launch new runs "
     "again. If another live workflow has reclaimed the same name, unarchive is rejected; "
     "rename or archive the conflicting live workflow first."
-)
-CREATE_RUN_DESCRIPTION = (
-    "Launch a run of a workflow you can access. The run executes with the workflow's "
-    "declared surface but only the vaults you attach via 'vault_ids' — which must be a "
-    "subset of the vaults bound to you. It runs in your own environment. Returns the run "
-    "id and status; use await_run to block for its result. The number of runs you may "
-    "have outstanding at once is capped — check your outstanding runs with list_runs, and "
-    "finish (await_run) or cancel (cancel_run) them to free slots. Optionally pass "
-    "budget_usd to set a shared USD spend ceiling for direct agent() children."
-)
-AWAIT_RUN_DESCRIPTION = (
-    "Block until a run reaches a terminal state (completed/errored/cancelled), or until "
-    "'timeout_seconds' elapses. Returns {done, run_status, output, is_error, error}; if "
-    "not yet done, call again to keep waiting. The session stays responsive while you wait."
 )
 CANCEL_RUN_DESCRIPTION = (
     "Cancel a run YOU launched (you cannot cancel runs launched by others or by the "
@@ -493,20 +422,6 @@ def _register() -> None:
         description=UNARCHIVE_WORKFLOW_DESCRIPTION,
         parameters_schema=_WorkflowIdArgs.model_json_schema(),
         handler=unarchive_workflow_handler,
-        transport="agent_tool",
-    )
-    registry.register(
-        name="create_run",
-        description=CREATE_RUN_DESCRIPTION,
-        parameters_schema=_CreateRunArgs.model_json_schema(),
-        handler=create_run_handler,
-        transport="agent_tool",
-    )
-    registry.register(
-        name="await_run",
-        description=AWAIT_RUN_DESCRIPTION,
-        parameters_schema=_AwaitRunArgs.model_json_schema(),
-        handler=await_run_handler,
         transport="agent_tool",
     )
     registry.register(

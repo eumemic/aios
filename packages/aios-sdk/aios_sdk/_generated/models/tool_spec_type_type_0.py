@@ -3,14 +3,12 @@ from enum import Enum
 
 class ToolSpecTypeType0(str, Enum):
     ARCHIVE_WORKFLOW = "archive_workflow"
-    AWAIT_RUN = "await_run"
     BASH = "bash"
     CALL_AGENT = "call_agent"
     CALL_SESSION = "call_session"
     CALL_WORKFLOW = "call_workflow"
     CANCEL = "cancel"
     CANCEL_RUN = "cancel_run"
-    CREATE_RUN = "create_run"
     CREATE_WORKFLOW = "create_workflow"
     EDIT = "edit"
     GET_RUN = "get_run"

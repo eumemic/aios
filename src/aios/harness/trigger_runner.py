@@ -659,10 +659,10 @@ async def _run_workflow(
             parent_run_id = None
         else:
             # Timer fires (cron / one_shot) inherit the owner session's own
-            # (immutable) lineage — exactly what the create_run builtin threads,
+            # (immutable) lineage — exactly what the call_workflow builtin threads,
             # projected onto the TriggerRow off its sessions JOIN. None for
             # normal sessions (root run); for a workflow-child owner this closes
-            # the depth-laundering bypass (a past-fire_at one-shot is create_run
+            # the depth-laundering bypass (a past-fire_at one-shot is a run-launch
             # with a 0s delay).
             parent_run_id = trigger.session_parent_run_id
         composed = compose_workflow_run_input(

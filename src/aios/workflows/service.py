@@ -167,7 +167,7 @@ async def create_run(
             child_depth = INVOKE_MAX_DEPTH
         else:
             # ``parent_run_id`` is trusted same-account. Two callers set it: the
-            # ``create_run`` builtin, threading the launcher session's own
+            # ``call_workflow`` builtin, threading the launcher session's own
             # ``parent_run_id`` (set by the run-spawn machinery to a same-account
             # run), and the trigger fire path (#819), threading either the
             # completing run's id (same-account by the completion matcher's

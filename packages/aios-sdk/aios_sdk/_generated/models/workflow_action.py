@@ -32,7 +32,7 @@ class WorkflowAction:
     immutable, so write-time freeze equals fire-time resolution). Anything on
     this model is agent-reachable through the ``trigger_create`` tool — a
     caller-chosen environment would bypass the same-stance refusal on the
-    ``create_run`` builtin.
+    ``call_workflow`` builtin.
 
     ``workflow_version``: ``None`` = run the workflow's CURRENT version at
     each fire (float); an integer is a DRIFT ASSERTION — it must equal the

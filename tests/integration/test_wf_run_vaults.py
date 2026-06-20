@@ -60,6 +60,28 @@ ENV = "env_v"
 _SCRIPT = "async def main(i):\n    return i\n"
 
 
+async def _create_run_via_session(
+    pool: asyncpg.Pool[Any], session_id: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    """Launch a run inheriting the caller session's env + lineage — the wiring the
+    removed ``create_run`` builtin did — so these vault-attenuation tests still
+    exercise the same ``wf_service.create_run`` clamp (now reached via call_workflow)."""
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
+    run = await wf_service.create_run(
+        pool,
+        account_id=account_id,
+        workflow_id=args["workflow_id"],
+        environment_id=session.environment_id,
+        input=args.get("input"),
+        vault_ids=args.get("vault_ids", []),
+        launcher_session_id=session_id,
+        parent_run_id=session.parent_run_id,
+        budget_usd=args.get("budget_usd"),
+    )
+    return run.model_dump(mode="json")
+
+
 @pytest.fixture
 def crypto_box() -> CryptoBox:
     return CryptoBox(os.urandom(32))
@@ -805,7 +827,7 @@ async def test_create_run_builtin_vault_attenuation_and_env(
     sess = await _make_session(pool, agent, vault_ids=[vx])
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-bi-run", script=_SCRIPT)
 
-    out = await wm.create_run_handler(sess, {"workflow_id": wf.id, "vault_ids": [vx]})
+    out = await _create_run_via_session(pool, sess, {"workflow_id": wf.id, "vault_ids": [vx]})
     assert out["status"] == "pending"
     assert out["environment_id"] == ENV  # inherited from the caller session (not model input)
     assert out["parent_run_id"] is None  # a foreground session launches a root run
@@ -816,7 +838,7 @@ async def test_create_run_builtin_vault_attenuation_and_env(
     # no run row leaks.
     before = await _run_count(pool)
     with pytest.raises(ForbiddenError):
-        await wm.create_run_handler(sess, {"workflow_id": wf.id, "vault_ids": [vy]})
+        await _create_run_via_session(pool, sess, {"workflow_id": wf.id, "vault_ids": [vy]})
     assert await _run_count(pool) == before
 
 
@@ -840,7 +862,7 @@ async def test_create_run_builtin_threads_parent_run_id(vault_pool: asyncpg.Pool
             sess,
         )
 
-    out = await wm.create_run_handler(sess, {"workflow_id": wf.id})
+    out = await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
     assert out["parent_run_id"] == root.id
 
 
@@ -956,18 +978,18 @@ async def test_launcher_fanout_cap(
     sess = await _make_session(pool, agent)
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-cap", script=_SCRIPT)
 
-    first = await wm.create_run_handler(sess, {"workflow_id": wf.id})
+    first = await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
     assert first["launcher_session_id"] == sess  # persisted lineage (the cap's count key)
-    await wm.create_run_handler(sess, {"workflow_id": wf.id})
+    await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
 
     before = await _run_count(pool)
     with pytest.raises(RateLimitedError, match="outstanding-run cap"):
-        await wm.create_run_handler(sess, {"workflow_id": wf.id})
+        await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
     assert await _run_count(pool) == before  # refusal leaves no row
 
     # Self-healing: a run reaching terminal frees the slot.
     await _force_terminal(pool, first["id"])
-    await wm.create_run_handler(sess, {"workflow_id": wf.id})
+    await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
 
     # Operator launches carry no launcher (and are exempt from the launcher cap).
     op = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
@@ -985,13 +1007,13 @@ async def test_account_fanout_cap_binds_every_launch(
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-acap", script=_SCRIPT)
 
     await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
-    await wm.create_run_handler(sess, {"workflow_id": wf.id})  # agent launch counts too
+    await _create_run_via_session(pool, sess, {"workflow_id": wf.id})  # agent launch counts too
 
     # Third launch refused on BOTH paths.
     with pytest.raises(RateLimitedError, match="account at outstanding-run cap"):
         await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
     with pytest.raises(RateLimitedError, match="account at outstanding-run cap"):
-        await wm.create_run_handler(sess, {"workflow_id": wf.id})
+        await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
 
 
 async def test_cancel_run_builtin_only_own_runs(vault_pool: asyncpg.Pool[Any]) -> None:
@@ -1003,7 +1025,7 @@ async def test_cancel_run_builtin_only_own_runs(vault_pool: asyncpg.Pool[Any]) -
     other = await _make_session(pool, agent)
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-cxl", script=_SCRIPT)
 
-    own = await wm.create_run_handler(sess, {"workflow_id": wf.id})
+    own = await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
     out = await wm.cancel_run_handler(sess, {"run_id": own["id"]})
     assert out["id"] == own["id"]  # accepted; the run finalizes on its next wake
     async with pool.acquire() as conn:

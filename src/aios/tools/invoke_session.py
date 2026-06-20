@@ -110,6 +110,13 @@ class _CallWorkflowArgs(BaseModel):
         default=None,
         description="Optional JSON Schema the run output must satisfy (validated fail-loud).",
     )
+    vault_ids: list[str] = Field(
+        default_factory=list,
+        description="Vault ids to bind to the run — a subset of the vaults bound to you.",
+    )
+    budget_usd: float | None = Field(
+        default=None, gt=0, description="Optional shared USD spend ceiling for the run."
+    )
 
 
 def _parse[M: BaseModel](model: type[M], arguments: dict[str, Any]) -> M:
@@ -269,11 +276,13 @@ async def call_workflow_handler(
         workflow_id=args.workflow_id,
         environment_id=session.environment_id,
         input=args.input,
+        vault_ids=args.vault_ids,
         launcher_session_id=session_id,
         parent_run_id=session.parent_run_id,
         request_id=make_id(REQUEST),
         caller={"kind": "session", "id": session_id, "awaited": True},
         request_output_schema=args.output_schema,
+        budget_usd=args.budget_usd,
     )
     resp = await _park_on_run(pool, run_id=run.id, account_id=account_id)
     if resp.is_error:
@@ -300,8 +309,9 @@ CALL_AGENT_DESCRIPTION = (
 CALL_WORKFLOW_DESCRIPTION = (
     "Launch a run of one of your workflows with `input` and wait for its result "
     "({ok: output} on completion, an error if it errored/was cancelled). The run "
-    "uses your own environment. Optionally constrain the output with `output_schema` "
-    "(a non-conforming output is reported as an error). Single-shot per call."
+    "uses your own environment. Optionally attach `vault_ids` (a subset of your own "
+    "vaults), set a shared `budget_usd` spend ceiling, and constrain the output with "
+    "`output_schema` (a non-conforming output is reported as an error). Single-shot per call."
 )
 
 

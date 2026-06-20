@@ -186,13 +186,30 @@ async def test_invoke_workflow_create_run_then_await(monkeypatch: Any) -> None:
             )
         ),
     )
-    out = await invoke_builtin(_CALLER, "call_workflow", {"workflow_id": "wf_1", "input": {"x": 1}})
+    out = await invoke_builtin(
+        _CALLER,
+        "call_workflow",
+        {"workflow_id": "wf_1", "input": {"x": 1}, "vault_ids": ["vlt_1"], "budget_usd": 2.5},
+    )
     assert out == {"ok": {"k": "v"}}
     assert run_mock.await_args is not None
     kwargs = run_mock.await_args.kwargs
     assert kwargs["workflow_id"] == "wf_1"
     assert kwargs["environment_id"] == "env_1"
     assert kwargs["launcher_session_id"] == _CALLER
+    # Stage-5b: the dropped create_run/await_run model tools' run-shaping args
+    # (vault attenuation + spend ceiling) now ride on call_workflow itself.
+    assert kwargs["vault_ids"] == ["vlt_1"]
+    assert kwargs["budget_usd"] == 2.5
+
+
+async def test_call_workflow_rejects_injected_environment_id(monkeypatch: Any) -> None:
+    """F2: the run inherits the caller's env — ``environment_id`` is not a field, so a
+    smuggled one is rejected by the schema before the handler runs."""
+    with pytest.raises(ToolBail):
+        await invoke_builtin(
+            _CALLER, "call_workflow", {"workflow_id": "wf_1", "environment_id": "env_other"}
+        )
 
 
 async def test_invoke_workflow_error_outcome(monkeypatch: Any) -> None:
