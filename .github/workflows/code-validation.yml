@@ -223,6 +223,7 @@ jobs:
           uv run pytest connectors/telegram/tests -q
           uv run pytest connectors/whatsapp/tests -q
           uv run pytest packages/aios-connector-http/tests -q
+          uv run pytest packages/aios-sdk/tests -q
 
       - name: Slack connector isolated-install smoke test
         # ``uv sync --dev`` above resolves the *unified workspace* env, where
