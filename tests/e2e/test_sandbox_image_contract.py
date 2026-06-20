@@ -103,6 +103,12 @@ def _docker_run(
         # lockdown sidecar selects iptables-legacy when present (#1022), so the
         # image MUST ship it. It's the iptables package's legacy alternative.
         "iptables-legacy",
+        # IPv6 belt-and-suspenders egress DROP (#1207). The Limited lockdown
+        # sidecar mirrors the v4 -P OUTPUT DROP on ip6tables, selecting the
+        # legacy backend (runsc netstack speaks the legacy ABI, not nft), so the
+        # operator image MUST ship both ip6tables and its legacy alternative.
+        "ip6tables",
+        "ip6tables-legacy",
         "update-ca-certificates",  # egress-CA trust install (sandbox/setup.py)
         "jq",  # JSON-from-bash composition, esp. piping `tool <name> '{...}'`
         "tool",  # sandbox-native broker CLI (baked from repo bin/tool; #635)
