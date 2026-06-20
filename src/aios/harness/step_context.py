@@ -223,9 +223,7 @@ async def compute_step_prelude(
     # awaited anti-join), trading the fast-path for one indexed anti-join per
     # background-child step (a stated, accepted cost).
     async with pool.acquire() as conn:
-        obligations = await queries.get_open_obligations(
-            conn, session_id, account_id=account_id
-        )
+        obligations = await queries.get_open_obligations(conn, session_id, account_id=account_id)
     owes_request = bool(obligations)
     if owes_request:
         from aios.tools.workflow_completion import workflow_completion_tool_specs
@@ -445,9 +443,7 @@ async def compose_step_context(
     # obligation IS the stimulus to act on, so it renders even after a tool
     # result (where ``build_obligations_tail_block`` returning non-None already
     # encodes "non-empty").
-    obligations_block = build_obligations_tail_block(
-        prelude.obligations, session_id=session.id
-    )
+    obligations_block = build_obligations_tail_block(prelude.obligations, session_id=session.id)
     if obligations_block is not None:
         ctx.messages.append(obligations_block)
 

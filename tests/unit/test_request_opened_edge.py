@@ -291,9 +291,12 @@ def _writer_passes_summary(obj: Callable[..., object]) -> bool:
     """True iff the function passes a ``summary=`` keyword to ``append_request_opened``."""
     func = _func_def(obj, getattr(obj, "__name__", "?"))
     for node in ast.walk(func):
-        if isinstance(node, ast.Call) and _call_name(node) == "append_request_opened":
-            if any(kw.arg == "summary" for kw in node.keywords):
-                return True
+        if (
+            isinstance(node, ast.Call)
+            and _call_name(node) == "append_request_opened"
+            and any(kw.arg == "summary" for kw in node.keywords)
+        ):
+            return True
     return False
 
 

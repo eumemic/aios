@@ -206,9 +206,7 @@ async def test_session_owns_open_request_gate(
 
     async def _owes() -> bool:
         async with pool.acquire() as conn:
-            return bool(
-                await queries.get_open_obligations(conn, target.id, account_id=account_id)
-            )
+            return bool(await queries.get_open_obligations(conn, target.id, account_id=account_id))
 
     assert not await _owes()
 

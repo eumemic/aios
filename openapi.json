@@ -14001,6 +14001,53 @@
         "title": "OneShotSource",
         "description": "One-shot source: fires once at an absolute UTC time, then self-deletes."
       },
+      "OwedRequest": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "caller_kind": {
+            "type": "string",
+            "title": "Caller Kind"
+          },
+          "caller_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caller Id"
+          },
+          "opened_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Opened At"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "caller_kind",
+          "opened_at"
+        ],
+        "title": "OwedRequest",
+        "description": "Read-model projection of an open obligation on the :class:`Session` view (#1413).\n\nParallel to ``Session.awaiting`` (tool-call-only), but for the request edges\nthe session owes a response to. Projected from the same ``get_open_obligations``\nrows. Load-bearing for the operator-cancel path (#1414) \u2014 it cannot enumerate\na session's open goal_ids otherwise."
+      },
       "RecentChat": {
         "properties": {
           "chat_id": {
@@ -14643,6 +14690,13 @@
             "type": "array",
             "title": "Awaiting"
           },
+          "owed_requests": {
+            "items": {
+              "$ref": "#/components/schemas/OwedRequest"
+            },
+            "type": "array",
+            "title": "Owed Requests"
+          },
           "vault_ids": {
             "items": {
               "type": "string"
@@ -14790,7 +14844,7 @@
           "updated_at"
         ],
         "title": "Session",
-        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``status`` ({active, idle}) is derived per read from the event log; see\n:data:`SessionStatus`. ``stop_reason`` records why the most recent step\nended. Possible ``type`` values: ``\"end_turn\"``, ``\"interrupt\"``,\n``\"rescheduling\"``, ``\"error\"`` (``idle`` + ``error`` = the errored\nlanding pad). ``awaiting`` lists tool calls the session is blocked on\n(derived per read from the event log + agent tool specs)."
+        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``status`` ({active, idle}) is derived per read from the event log; see\n:data:`SessionStatus`. ``stop_reason`` records why the most recent step\nended. Possible ``type`` values: ``\"end_turn\"``, ``\"interrupt\"``,\n``\"rescheduling\"``, ``\"error\"`` (``idle`` + ``error`` = the errored\nlanding pad). ``awaiting`` lists tool calls the session is blocked on\n(derived per read from the event log + agent tool specs). ``owed_requests``\nlists the still-open **awaited** request edges the session owes a response to\n(derived per read from the ``request_opened`` lifecycle frame \u2014 #1413)."
       },
       "SessionAwaitResponse": {
         "properties": {

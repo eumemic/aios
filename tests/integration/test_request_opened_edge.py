@@ -631,8 +631,13 @@ async def test_get_open_obligations_oldest_first_and_excludes_answered(
     # Answer the middle one — it drops out of the open set.
     async with pool.acquire() as conn:
         await queries.write_response_if_absent(
-            conn, session.id, account_id=account_id, request_id="req-2",
-            is_error=False, result={"ok": True}, error=None,
+            conn,
+            session.id,
+            account_id=account_id,
+            request_id="req-2",
+            is_error=False,
+            result={"ok": True},
+            error=None,
         )
     async with pool.acquire() as conn:
         obs = await queries.get_open_obligations(conn, session.id, account_id=account_id)

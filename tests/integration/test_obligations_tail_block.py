@@ -162,7 +162,9 @@ async def test_no_obligation_block_for_session_owing_nothing(
         pool, account_id=account_id, session_id=session.id, events=[]
     )
     joined = "\n".join(
-        m["content"] for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)
+        m["content"]
+        for m in messages
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
     )
     assert "request_id" not in joined.lower() or "req-" not in joined
 
@@ -195,8 +197,13 @@ async def test_answering_drops_the_block_on_next_compose(
 
     async with pool.acquire() as conn:
         await queries.write_response_if_absent(
-            conn, session.id, account_id=account_id, request_id="req-drop",
-            is_error=False, result={"ok": True}, error=None,
+            conn,
+            session.id,
+            account_id=account_id,
+            request_id="req-drop",
+            is_error=False,
+            result={"ok": True},
+            error=None,
         )
 
     after = await _prelude_and_compose(
