@@ -267,6 +267,7 @@ def assert_tool_called(events: list[Event], name: str) -> dict[str, Any]:
     the FIRST matching tool_call dict."""
     for e in events:
         if e.kind == "message" and e.data.get("role") == "assistant":
+            tc: dict[str, Any]
             for tc in e.data.get("tool_calls") or []:
                 if tc.get("function", {}).get("name") == name:
                     return tc
