@@ -14,7 +14,7 @@ never reads the new column, and there is no expand/contract.  Reversible via
 ``DROP COLUMN``.  (No ``@dataclass`` in the migration body — alembic loads
 versions under synthetic module names and a dataclass there crashes.)
 
-Revision ID: 0113
+Revision ID: 0114
 Revises: 0112
 """
 
@@ -24,7 +24,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0113"
+revision: str = "0114"
 down_revision: str = "0112"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
