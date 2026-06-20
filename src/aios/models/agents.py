@@ -50,6 +50,8 @@ BuiltinToolType = Literal[
     "get_run",
     "list_runs",
     "list_run_events",
+    "skill_upsert",
+    "skill_archive",
     "invoke",
     "invoke_agent",
     "invoke_workflow",
