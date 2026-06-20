@@ -1021,9 +1021,7 @@ async def count_open_self_goals(
     """
     async with pool.acquire() as conn:
         obligations = await queries.get_open_obligations(conn, session_id, account_id=account_id)
-    return sum(
-        1 for o in obligations if o.caller_kind == "session" and o.caller_id == session_id
-    )
+    return sum(1 for o in obligations if o.caller_kind == "session" and o.caller_id == session_id)
 
 
 async def set_goal(

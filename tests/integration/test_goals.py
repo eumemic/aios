@@ -32,6 +32,24 @@ _ACCOUNT = "acc_goals"
 _OTHER_ACCOUNT = "acc_goals_other"
 
 
+@pytest.fixture(autouse=True)
+def _stub_defer_wake(monkeypatch: Any) -> None:
+    """Run the goal-writing paths without a live procrastinate worker.
+
+    ``set_goal`` (via ``_stimulate_existing_ask``) ``defer_wake``\\ s after the
+    edge write, which would otherwise reach an unopened procrastinate app and
+    raise ``AppNotOpen``. These tests assert on the DB edge state, not on wake
+    delivery, so we stub the enqueue — matching the convention across the rest
+    of ``tests/integration`` (e.g. ``test_request_opened_edge``).
+    """
+    import aios.services.wake as wake_module
+
+    async def _fake_defer_wake(_pool: Any, _sid: str, *, cause: str, account_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(wake_module, "defer_wake", _fake_defer_wake)
+
+
 @pytest.fixture
 async def pool_env(
     migrated_db_url: str, _reset_db_state: None
@@ -39,12 +57,22 @@ async def pool_env(
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
     try:
         async with pool.acquire() as conn:
-            for acct in (_ACCOUNT, _OTHER_ACCOUNT):
-                await conn.execute(
-                    "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
-                    "VALUES ($1, NULL, TRUE, 'goals-test')",
-                    acct,
-                )
+            # ``accounts_one_active_root`` permits only ONE active root
+            # (``parent_account_id IS NULL``) at a time, and
+            # ``accounts_root_name_uniq`` forbids two roots sharing a
+            # ``display_name``. Seed a single root and hang the second
+            # tenant off it as a child with a distinct name.
+            await conn.execute(
+                "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+                "VALUES ($1, NULL, TRUE, 'goals-test')",
+                _ACCOUNT,
+            )
+            await conn.execute(
+                "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+                "VALUES ($1, $2, FALSE, 'goals-test-other')",
+                _OTHER_ACCOUNT,
+                _ACCOUNT,
+            )
         yield pool, _ACCOUNT
     finally:
         await pool.close()
