@@ -238,7 +238,7 @@ async def _execute_tool_async(
         log_prefix="tool",
         on_exception=_evict_session_container,
     ) as tc:
-        result = await invoke_builtin(session_id, tc.name, tc.raw_args)
+        result = await invoke_builtin(session_id, tc.name, tc.raw_args, tc.call_id)
         event_data: dict[str, Any] = {
             "role": "tool",
             "tool_call_id": tc.call_id,

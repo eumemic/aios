@@ -549,6 +549,50 @@ async def interrupt(
 
 
 @router.post(
+    "/{session_id}/goals/{goal_id}/cancel",
+    operation_id="cancel_session_goal",
+)
+async def cancel_goal(
+    session_id: str,
+    goal_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> Session:
+    """Operator-cancel a session's own standing goal (#1414).
+
+    Mirrors ``interrupt`` but targets a single self-issued goal rather than all
+    in-flight work. **SECURITY (mandatory):** account-scope the session FIRST via
+    ``service.get_session`` (404s a cross-tenant ``session_id``) — because the
+    underlying ``respond_to_request`` resolves ``account_id`` UNSCOPED off the
+    target row, so a cross-tenant id would otherwise write into another tenant's
+    session. Then verify ``goal_id`` is a genuine self-goal (``caller=={kind:
+    session, id:session_id}``) and write ``error={kind:\"cancelled\",
+    by:\"operator\"}``; a non-self obligation (peer-invoke / workflow-child) 404s
+    rather than being stamped. **Goals-only for v1** — the generic
+    ``/requests/{id}/cancel`` is deferred (#1152 cancel-cascade). Enumerate a
+    session's open ``goal_id``s via the ``owed_requests`` read-model on
+    ``GET /v1/sessions/{id}``.
+    """
+    from aios.errors import NotFoundError
+    from aios.tools.goals import cancel_goal_response
+
+    # Account-scope FIRST: 404 a cross-tenant session before any write.
+    await service.get_session(pool, session_id, account_id=account_id)
+    outcome = await cancel_goal_response(
+        pool, session_id, account_id=account_id, goal_id=goal_id, by="operator"
+    )
+    if outcome != "cancelled":
+        # Not a self-goal of this session (unknown id, already closed, or owned by
+        # someone else) — a 404, never a silent no-op or a cross-edge stamp.
+        raise NotFoundError(
+            f"no open self-goal {goal_id!r} on session {session_id!r}",
+            detail={"session_id": session_id, "goal_id": goal_id},
+        )
+    await pool.execute("SELECT pg_notify($1, $2)", SESSION_INTERRUPT_CHANNEL, session_id)
+    return await service.get_session(pool, session_id, account_id=account_id)
+
+
+@router.post(
     "/{session_id}/tool-results",
     operation_id="submit_tool_result",
     status_code=status.HTTP_201_CREATED,

@@ -84,6 +84,7 @@ async def invoke_builtin(
     session_id: str,
     tool_name: str,
     raw_arguments: Any,
+    tool_call_id: str | None = None,
 ) -> ToolResult | dict[str, Any]:
     """Run a built-in tool: parse args, look up the handler, validate, call.
 
@@ -96,6 +97,16 @@ async def invoke_builtin(
     Does NOT append events, trigger the sweep, or touch sandbox state.
     The model path wraps this with ``_tool_lifecycle`` + event append +
     sweep; the CLI broker wraps with HTTP response serialisation.
+
+    ``tool_call_id`` (#1414) is the originating assistant ``tool_calls[*].id``,
+    threaded through from the model dispatch path so a handler that needs a
+    **deterministic, dispatch-stable** key (``set_goal`` derives its
+    ``request_id`` from ``(session_id, tool_call_id)`` so a crash-retried
+    dispatch re-keys the *same* goal edge — exactly-once) can read it.
+    Handlers whose signature does not accept ``tool_call_id`` are called the
+    legacy 2-arg way, so the threading is purely additive. The CLI broker
+    passes ``None`` (agent_tool-only tools — ``set_goal`` included — never
+    reach the broker; plumbing only).
     """
     arguments = parse_arguments(raw_arguments)
     if arguments is None:
@@ -107,4 +118,6 @@ async def invoke_builtin(
     schema_error = validate_arguments(arguments, tool.parameters_schema)
     if schema_error is not None:
         raise ToolBail(schema_error)
+    if tool.wants_tool_call_id:
+        return await tool.handler(session_id, arguments, tool_call_id)  # type: ignore[call-arg]
     return await tool.handler(session_id, arguments)

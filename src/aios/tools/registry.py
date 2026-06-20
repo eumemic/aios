@@ -117,6 +117,7 @@ class ToolDefinition:
     transport: ToolTransport = "both"
     executes: Literal["worker", "sandbox"] = "worker"
     classify_permission: ClassifyPermission | None = None
+    wants_tool_call_id: bool = False
 
 
 @dataclass(slots=True)
@@ -135,11 +136,19 @@ class ToolRegistry:
         transport: ToolTransport = "both",
         executes: Literal["worker", "sandbox"] = "worker",
         classify_permission: ClassifyPermission | None = None,
+        wants_tool_call_id: bool = False,
     ) -> None:
         """Register a tool. Raises :class:`DuplicateToolError` on name clash.
 
         Intended to be called at module import time from tool modules
         (e.g. :mod:`aios.tools.bash`).
+
+        ``wants_tool_call_id`` (#1414) opts the handler into a 3-arg
+        ``(session_id, arguments, tool_call_id)`` signature: ``invoke_builtin``
+        threads the originating assistant ``tool_calls[*].id`` through so a
+        tool that needs a dispatch-stable deterministic key (``set_goal``) can
+        derive it. Default ``False`` keeps every existing 2-arg handler
+        unchanged.
         """
         if name in self._tools:
             raise DuplicateToolError(
@@ -154,6 +163,7 @@ class ToolRegistry:
             transport=transport,
             executes=executes,
             classify_permission=classify_permission,
+            wants_tool_call_id=wants_tool_call_id,
         )
 
     def get(self, name: str) -> ToolDefinition:

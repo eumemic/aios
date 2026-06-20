@@ -55,6 +55,7 @@ BuiltinToolType = Literal[
     "invoke",
     "invoke_agent",
     "invoke_workflow",
+    "set_goal",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled

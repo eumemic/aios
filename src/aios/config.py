@@ -582,6 +582,19 @@ class Settings(BaseSettings):
         "semantics; worst-case standing exposure is this many runs each "
         "entitled to ``workflow_max_agent_calls`` children.",
     )
+    open_goals_per_session_max: int = Field(
+        default=10,
+        ge=1,
+        description="Per-session ceiling on OPEN self-issued goals (#1414). A goal "
+        "is a self-edge (``set_goal``): an awaited ``request_opened`` whose caller "
+        "is the session itself. ``set_goal`` rejects (``RateLimitedError``) when the "
+        "session already owns this many open self-goals — slots free as goals are "
+        "answered (``return``/``error``) or retracted (``cancel_goal``). An admission "
+        "cap, not a rate/lifetime budget. Pairs with the obligations-block rendered "
+        "cap (#1413): without it, allow-N ``set_goal`` makes the owned-obligation "
+        "count unbounded so B's reserved tail budget could crash the step. Counts "
+        "self-goals ONLY — peer-invoke / workflow-child obligations don't consume it.",
+    )
     workflow_wake_batch_seconds: float = Field(
         default=0.0,
         ge=0.0,

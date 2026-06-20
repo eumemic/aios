@@ -260,6 +260,22 @@ def interrupt(
     run_or_die(_run)
 
 
+@app.command("cancel-goal", help="Cancel one of a session's own standing goals (#1414).")
+@covers("cancel_session_goal")
+def cancel_goal(
+    ctx: typer.Context,
+    session_id: str,
+    goal_id: Annotated[str, typer.Argument(help="The goal_id (request id) to retract.")],
+) -> None:
+    def _run() -> None:
+        client = just_client(ctx)
+        with client:
+            obj = client.request("POST", f"/v1/sessions/{session_id}/goals/{goal_id}/cancel")
+        render_single(obj)
+
+    run_or_die(_run)
+
+
 @app.command("events", help="List a session's events (backfill).")
 @covers("list_session_events")
 def events(

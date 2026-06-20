@@ -226,9 +226,14 @@ async def compute_step_prelude(
         obligations = await queries.get_open_obligations(conn, session_id, account_id=account_id)
     owes_request = bool(obligations)
     if owes_request:
+        from aios.tools.goals import cancel_goal_tool_spec
         from aios.tools.workflow_completion import workflow_completion_tool_specs
 
         tools.extend(workflow_completion_tool_specs())
+        # #1414: cancel_goal rides the SAME owes_request gate as return/error (the
+        # B-driven obligation gate). A session that owes nothing has no goal to
+        # retract, so it's injected only when it owns an open request edge.
+        tools.append(cancel_goal_tool_spec())
 
     mcp_servers_block = ""
     if agent.mcp_servers:

@@ -13,7 +13,7 @@ def test_agent_tool_type_literal_covers_agent_callable_registry_tools() -> None:
     from aios.tools.registry import registry
 
     grantable_tool_types = set(get_args(BuiltinToolType))
-    harness_injected_tools = {"switch_channel", "return", "error"}
+    harness_injected_tools = {"switch_channel", "return", "error", "cancel_goal"}
     agent_callable_names = {
         name for name in registry.names() if registry.get(name).transport in {"agent_tool", "both"}
     } - harness_injected_tools
@@ -26,7 +26,7 @@ def test_agent_tool_type_literal_entries_resolve_to_registry_tools() -> None:
     import aios.tools  # noqa: F401 - trigger built-in registration side effects
     from aios.tools.registry import registry
 
-    harness_injected_tools = {"switch_channel", "return", "error"}
+    harness_injected_tools = {"switch_channel", "return", "error", "cancel_goal"}
     registered_names = set(registry.names()) | harness_injected_tools
 
     assert set(get_args(BuiltinToolType)) <= registered_names

@@ -470,6 +470,34 @@ async def read_request_response(
     return parse_jsonb(row["data"]) if row is not None else None
 
 
+async def request_opened_exists(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
+) -> bool:
+    """Whether a ``request_opened`` edge with this ``request_id`` already exists.
+
+    A stable point lookup over ``events_request_opened_idx`` (mig 0099, NON-unique)
+    — the EXISTS-recheck half of the idempotent edge write (#1414). ``set_goal``
+    derives a **deterministic** ``request_id`` from ``(session_id, tool_call_id)``,
+    so a crash-retried dispatch produces the same id; this recheck (under the
+    session-row ``FOR UPDATE`` taken by :func:`open_request_if_absent`) makes the
+    first writer win and a re-dispatch a no-op. There is no unique index over
+    ``(session_id, request_id)`` to ride an ``ON CONFLICT`` on, which is why the
+    locked "ON CONFLICT DO NOTHING" phrasing was unsatisfiable; this mirrors
+    :func:`write_response_if_absent`'s response-side recheck instead.
+    """
+    return bool(
+        await conn.fetchval(
+            "SELECT 1 FROM events req "
+            "WHERE req.session_id = $1 AND req.account_id = $2 "
+            "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+            "AND req.data->>'request_id' = $3 LIMIT 1",
+            session_id,
+            account_id,
+            request_id,
+        )
+    )
+
+
 async def get_open_request_ids(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> list[str]:

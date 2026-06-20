@@ -8,6 +8,7 @@ and inject environment variables at container provisioning time.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -483,6 +484,14 @@ class AskExistingSession:
     request_id: str
     input: Any
     output_schema: dict[str, Any] | None = None
+    # #1414: opt-in idempotent edge write. The api/invoke callers mint random
+    # request_ids (intentional at-least-once across a worker crash) and leave
+    # this False, so their behaviour is unchanged. ``set_goal`` derives a
+    # *deterministic* request_id from the tool_call_id and sets this True, so a
+    # crash-retried dispatch re-opens the SAME goal edge exactly once
+    # (first-writer-wins via the FOR-UPDATE + EXISTS recheck) -- a phantom
+    # double-goal would pollute the obligation set / B's block / the guard nudge.
+    idempotent: bool = False
 
 
 @dataclass(frozen=True)
@@ -645,6 +654,15 @@ async def _stimulate_existing_ask(
     trusted ``request_opened`` edge (`awaited=true`). Channel-less (no
     ``orig_channel``) so the injected request never surfaces to a connector. Then
     a deferred wake so the target steps and answers it.
+
+    When ``stim.idempotent`` is set (#1414's ``set_goal`` no-park writer), the
+    edge write is **first-writer-wins**: under a session-row ``FOR UPDATE`` we
+    re-check whether a ``request_opened`` edge with this (deterministic)
+    ``request_id`` already exists and, if so, no-op the whole append (message +
+    edge) and skip the wake — so a crash-retried dispatch re-opens the SAME goal
+    exactly once rather than minting a phantom double-goal. The default
+    (api/invoke) path leaves ``idempotent`` False: those mint random request_ids
+    (intentional at-least-once), so their behaviour is byte-identical.
     """
     from aios.services.wake import defer_wake
 
@@ -656,6 +674,18 @@ async def _stimulate_existing_ask(
     agent = await agents_service.load_for_session(pool, session, account_id=account_id)
     frozen_surface = surface_of(agent)
     async with pool.acquire() as conn, conn.transaction():
+        if stim.idempotent:
+            # FOR-UPDATE on the session row serialises concurrent/retried writers;
+            # the EXISTS recheck is a stable point lookup on the deterministic id.
+            await conn.execute(
+                "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+                session.id,
+                account_id,
+            )
+            if await queries.request_opened_exists(
+                conn, session.id, account_id=account_id, request_id=stim.request_id
+            ):
+                return False  # the goal edge already exists — exactly-once, no-op
         vault_ids = await queries.get_session_vault_ids(conn, session.id, account_id=account_id)
         await queries.append_event(
             conn,
@@ -957,6 +987,89 @@ async def _inject_api_request(
             request_id=request_id,
             input=input,
             output_schema=output_schema,
+        ),
+        account_id=account_id,
+    )
+    return request_id
+
+
+def goal_request_id(session_id: str, tool_call_id: str) -> str:
+    """Deterministic ``request_id`` for a ``set_goal`` self-edge (#1414).
+
+    A pure function of ``(session_id, tool_call_id)`` -- the ``child_id.py``
+    precedent (fold the FULL key opaquely, never a content hash): two deliberate
+    ``set_goal(same text)`` calls carry distinct ``tool_call_id``s -> two distinct
+    goals; a crash-retried dispatch of the SAME tool call reproduces the SAME id ->
+    the idempotent edge write collapses it to one. A content-hash would wrongly
+    coalesce two intentional same-text goals, so the tool_call_id is load-bearing.
+    """
+    seed = hashlib.sha256(f"{session_id}:{tool_call_id}".encode()).digest()
+    return make_id(REQUEST, body=seed[:16])
+
+
+async def count_open_self_goals(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> int:
+    """How many OPEN self-goals (``caller=={kind:session, id:session_id}``) the
+    session owns -- the admission-cap denominator for ``set_goal`` (#1414).
+
+    A self-goal is the reflexive obligation: an open awaited ``request_opened``
+    whose trusted caller is the session itself. Derived from the same
+    ``get_open_obligations`` rows the obligations block reads, filtered to the
+    self arm -- so peer-invoke (``caller.kind == 'session'`` but a DIFFERENT id),
+    api, and workflow-child (``run``) obligations do NOT consume a goal slot.
+    """
+    async with pool.acquire() as conn:
+        obligations = await queries.get_open_obligations(conn, session_id, account_id=account_id)
+    return sum(
+        1 for o in obligations if o.caller_kind == "session" and o.caller_id == session_id
+    )
+
+
+async def set_goal(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    request_id: str,
+    goal: str,
+    output_schema: dict[str, Any] | None = None,
+) -> str:
+    """Open a self-issued awaited goal edge -- the **no-park** writer (#1414).
+
+    A goal is the reflexive fixpoint of the deliver-kernel: a self-issued awaited
+    ``request_opened`` whose ``caller == servicer == this session``. Writes the
+    edge via the ``Ask(ExistingSession)`` arm with ``caller={kind:session,
+    id:session_id}`` and ``idempotent=True`` (so a crash-retried dispatch with the
+    same deterministic ``request_id`` re-opens the SAME goal exactly once) but
+    **without** parking -- a park is an open tool-call, which would keep the
+    session non-idle so the quiescence guard never fires (the self-deadlock the
+    design forbids). The "must ``return()`` before quiescing" obligation is the
+    EXISTING guard, unchanged: the open edge re-wakes the session via the guard
+    nudge (the always-on heartbeat), not via a park.
+
+    Honors the per-session open-goal admission cap
+    (``open_goals_per_session_max``): rejects with ``RateLimitedError`` when the
+    session already owns that many open self-goals. Returns the ``request_id``
+    (the ``goal_id`` the model echoes to ``return``/``error``/``cancel_goal``).
+    """
+    cap = get_settings().open_goals_per_session_max
+    open_goals = await count_open_self_goals(pool, session_id, account_id=account_id)
+    if open_goals >= cap:
+        raise RateLimitedError(
+            f"open-goal cap reached ({open_goals}/{cap}) -- answer or cancel a goal first",
+            detail={"open_goals": open_goals, "cap": cap},
+        )
+    session = await get_session_basic(pool, session_id, account_id=account_id)
+    await _stimulate_existing_ask(
+        pool,
+        AskExistingSession(
+            session=session,
+            caller={"kind": "session", "id": session_id},
+            request_id=request_id,
+            input=goal,
+            output_schema=output_schema,
+            idempotent=True,
         ),
         account_id=account_id,
     )
