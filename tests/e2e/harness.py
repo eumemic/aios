@@ -200,6 +200,122 @@ def msg_text(msg: dict[str, Any]) -> str:
     return str(content)
 
 
+# ─── structural assertion helpers ────────────────────────────────────────────
+#
+# These extend the read-only block above. They never replace
+# first_tool_result/tool_results/last_assistant_content/msg_text. They assert
+# the *shape* of a turn — which tools were called, that each call got a paired
+# result, in what order, and that the turn cleanly ended — by folding over the
+# captured event log. They append nothing and wake nothing.
+#
+# The pairing mechanism is the existing tool_call_id join: an assistant
+# event carries data["tool_calls"][*]["id"]; the matching tool-role event
+# carries data["tool_call_id"] (the same key the context builder uses).
+#
+# events()/all_events() rule (load-bearing): the lifecycle helpers
+# (terminal_lifecycle/assert_ended) MUST be fed all_events() because a
+# turn_ended marker is a kind=="lifecycle" event; Harness.events() returns
+# message-kind events only and will never carry it. The other helpers accept
+# either, but the canonical call site passes all_events() so a test never
+# silently misses a lifecycle.
+
+
+def requested_tool_calls(events: list[Event]) -> list[tuple[str, str, str]]:
+    """(tool_call_id, name, raw_arguments_json) for every assistant tool_call,
+    in log order. Reads e.data['tool_calls'][*].{id, function.name, function.arguments}.
+    arguments is the raw JSON string the model emitted (the harness's tool_call()
+    helper stores it as a JSON string)."""
+    out: list[tuple[str, str, str]] = []
+    for e in events:
+        if e.kind == "message" and e.data.get("role") == "assistant":
+            for tc in e.data.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                out.append((tc["id"], fn.get("name", ""), fn.get("arguments", "")))
+    return out
+
+
+def result_for(events: list[Event], tool_call_id: str) -> dict[str, Any] | None:
+    """The tool-role message event data whose data['tool_call_id'] == tool_call_id,
+    else None (unresolved / in-flight). Last write wins if duplicated."""
+    found: dict[str, Any] | None = None
+    for e in events:
+        if (
+            e.kind == "message"
+            and e.data.get("role") == "tool"
+            and e.data.get("tool_call_id") == tool_call_id
+        ):
+            found = e.data
+    return found
+
+
+def paired_calls(
+    events: list[Event],
+) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    """(assistant tool_call dict, matching tool result data | None) by tool_call_id,
+    in request order. None == genuinely unresolved (in-flight or absent) — never a
+    silent skip."""
+    pairs: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    for e in events:
+        if e.kind == "message" and e.data.get("role") == "assistant":
+            for tc in e.data.get("tool_calls") or []:
+                pairs.append((tc, result_for(events, tc["id"])))
+    return pairs
+
+
+def assert_tool_called(events: list[Event], name: str) -> dict[str, Any]:
+    """Raise AssertionError if no assistant tool_call with that name; else return
+    the FIRST matching tool_call dict."""
+    for e in events:
+        if e.kind == "message" and e.data.get("role") == "assistant":
+            tc: dict[str, Any]
+            for tc in e.data.get("tool_calls") or []:
+                if tc.get("function", {}).get("name") == name:
+                    return tc
+    raise AssertionError(f"tool {name!r} was never called")
+
+
+def assert_tool_result_contains(events: list[Event], name: str, needle: str) -> None:
+    """Assert SOME result of a call to `name` contains `needle` in its content.
+    Raises AssertionError if the tool was never called, never resulted, or no
+    result content contains the needle."""
+    matched_any = False
+    for e in events:
+        if e.kind == "message" and e.data.get("role") == "assistant":
+            for tc in e.data.get("tool_calls") or []:
+                if tc.get("function", {}).get("name") != name:
+                    continue
+                res = result_for(events, tc["id"])
+                if res is None:
+                    continue
+                matched_any = True
+                if needle in msg_text(res):
+                    return
+    if not matched_any:
+        raise AssertionError(f"tool {name!r} produced no result to search")
+    raise AssertionError(f"no {name!r} result contained {needle!r}")
+
+
+def terminal_lifecycle(events: list[Event]) -> dict[str, Any] | None:
+    """The LAST kind=='lifecycle' event data marking turn end, or None.
+    Matches data['event'] in {turn_ended, interrupted} OR data['status']=='terminated'
+    — mirrors chat.py:_is_turn_end. MUST be fed all_events() (kind!='message');
+    events() filters to message kind and will never contain it."""
+    found: dict[str, Any] | None = None
+    for e in events:
+        if e.kind != "lifecycle":
+            continue
+        d = e.data
+        if d.get("event") in {"turn_ended", "interrupted"} or d.get("status") == "terminated":
+            found = d
+    return found
+
+
+def assert_ended(events: list[Event]) -> None:
+    """Assert terminal_lifecycle(events) is present. Feed all_events()."""
+    if terminal_lifecycle(events) is None:
+        raise AssertionError("no terminal lifecycle event (turn_ended/interrupted/terminated)")
+
+
 # ─── the harness ─────────────────────────────────────────────────────────────
 
 
