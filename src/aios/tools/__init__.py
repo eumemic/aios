@@ -30,6 +30,7 @@ from aios.tools import list_related_sessions as _list_related_sessions  # noqa: 
 from aios.tools import read as _read  # noqa: F401
 from aios.tools import schedule_wake as _schedule_wake  # noqa: F401
 from aios.tools import search_events as _search_events  # noqa: F401
+from aios.tools import skill_management as _skill_management  # noqa: F401
 from aios.tools import switch_channel as _switch_channel  # noqa: F401
 from aios.tools import trigger_create as _trigger_create  # noqa: F401
 from aios.tools import trigger_list as _trigger_list  # noqa: F401

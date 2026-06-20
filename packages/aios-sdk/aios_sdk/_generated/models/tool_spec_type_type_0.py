@@ -26,6 +26,8 @@ class ToolSpecTypeType0(str, Enum):
     RESUME_GATE = "resume_gate"
     SCHEDULE_WAKE = "schedule_wake"
     SEARCH_EVENTS = "search_events"
+    SKILL_ARCHIVE = "skill_archive"
+    SKILL_UPSERT = "skill_upsert"
     TRIGGER_CREATE = "trigger_create"
     TRIGGER_LIST = "trigger_list"
     TRIGGER_REMOVE = "trigger_remove"
