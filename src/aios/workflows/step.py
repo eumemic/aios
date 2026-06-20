@@ -1295,6 +1295,18 @@ async def _commit_terminal_and_dispatch(
     rows the periodic sweep re-defers; never a silently dropped event fire.
     """
     fires: list[db_queries.TriggerFireRef] = []
+    # The CALLER run to answer, or None — a run servicing a RUN caller (single-sourced so
+    # the durable signal-write and the prompt wake below can never desync on the gate).
+    run_caller_id = (
+        run.caller["id"]
+        if (
+            run.request_id is not None
+            and isinstance(run.caller, dict)
+            and run.caller.get("kind") == "run"
+            and isinstance(run.caller.get("id"), str)
+        )
+        else None
+    )
     async with conn.transaction():
         inserted = await wf_queries.append_run_event(
             conn, account_id=run.account_id, run_id=run.id, type="run_completed", payload=payload
@@ -1312,6 +1324,21 @@ async def _commit_terminal_and_dispatch(
         await wf_queries.set_run_terminal(
             conn, run.id, status=status, output=output, account_id=run.account_id
         )
+        # Durable run-caller wake (C4/C5): a run answering a RUN caller writes a
+        # ``child_done`` signal into the CALLER's signal side-table (never its journal —
+        # single-writer-safe), keyed by this run's ``request_id`` (= the caller's
+        # ``invoke_workflow`` ``call_key``). It is the run-side analog of
+        # ``write_child_response``'s session→run seam: it makes the best-effort post-commit
+        # ``defer_run_wake`` below recoverable via the unharvested-signal sweep clause —
+        # ``invoke_workflow`` maps to NULL in the staleness CASE, so it has NO other
+        # backstop. Fires for EVERY terminal, including ``cancelled``: this is what stops a
+        # cancelled sub-run stranding its parent (the 6b liveness gap). The harvest journals
+        # the matching ``call_result``, clearing the signal — no hot-loop.
+        if run_caller_id is not None:
+            assert run.request_id is not None  # implied by run_caller_id's gate
+            await wf_queries.insert_run_signal(
+                conn, run_id=run_caller_id, call_key=run.request_id, kind="child_done"
+            )
         if inserted is not None:
             fires = await db_queries.insert_run_completion_fires(
                 conn,
@@ -1320,21 +1347,15 @@ async def _commit_terminal_and_dispatch(
                 run_id=run.id,
                 status=status,
             )
-    # Wake the CALLER run promptly so it harvests this answer on its next step,
-    # rather than waiting out the periodic sweep — mirroring how an agent() child
-    # wakes its run. Only when the request came from a run (caller.kind=='run');
-    # a session/api caller resumes through its own poll path. Best-effort and
-    # post-commit (the answer is durable; a lost wake is recovered by the sweep).
-    if (
-        inserted is not None
-        and run.request_id is not None
-        and status != "cancelled"
-        and isinstance(run.caller, dict)
-        and run.caller.get("kind") == "run"
-        and isinstance(run.caller.get("id"), str)
-    ):
+    # Prompt the CALLER run to harvest this answer on its next step rather than waiting
+    # out the periodic sweep — mirroring how an agent() child wakes its run. Only for a
+    # run caller (caller.kind=='run'); a session/api caller resumes through its own poll
+    # path. Best-effort + post-commit: the answer is durable and the ``child_done`` signal
+    # written above recovers a lost wake, so this fires for EVERY terminal — a cancelled
+    # sub-run wakes its parent just like a completed one.
+    if inserted is not None and run_caller_id is not None:
         with contextlib.suppress(Exception):
-            await defer_run_wake(run.caller["id"], batch=True)
+            await defer_run_wake(run_caller_id, batch=True)
     for fire in fires:
         try:
             await defer_trigger_fire(fire.trigger_id, fire.trigger_run_id)

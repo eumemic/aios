@@ -146,6 +146,51 @@ async def test_invoke_workflow_happy_path_spawns_and_harvests(
     assert parent.output == {"got": 42}
 
 
+async def test_cancelled_sub_run_wakes_its_parent_via_child_done(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A cancelled sub-run writes a durable ``child_done`` into its PARENT's signals (6d).
+
+    ``invoke_workflow`` maps to NULL in the staleness sweep CASE, so a parked parent has NO
+    backstop other than this explicit signal — without it (the 6b gap) a cancelled sub-run
+    stranded its parent forever. The signal makes the parent sweep-visible (durable wake),
+    and the harvested outcome is ``cancelled`` (the await raises, erroring the parent script).
+    """
+    pool = wf_runtime
+    child_wf = await _insert_workflow(pool, "child", "async def main(input):\n    return 1\n")
+    parent_wf = await _insert_workflow(pool, "parent", _PARENT)
+    run_id = await _make_run(pool, parent_wf, input={"wf": child_wf, "n": 1})
+    await run_workflow_step(run_id)  # parent spawns the sub-run and suspends
+    async with pool.acquire() as conn:
+        cs = next(
+            e for e in await wf_queries.list_run_events(conn, run_id) if e.type == "call_started"
+        )
+    sub_run_id = cs.payload["child_run_id"]
+
+    # Cancel the sub-run, then drive its terminal step (harvests the cancel → cancelled).
+    async with pool.acquire() as conn:
+        await wf_queries.insert_run_signal(
+            conn, run_id=sub_run_id, call_key=wf_queries.CANCEL_SIGNAL_CALL_KEY, kind="cancel"
+        )
+    await run_workflow_step(sub_run_id)
+    sub = await _run(pool, sub_run_id)
+    assert sub.status == "cancelled"
+
+    async with pool.acquire() as conn:
+        signals = await wf_queries.list_run_signals(conn, run_id)
+        assert any(s.kind == "child_done" and s.call_key == sub.request_id for s in signals)
+        # The unharvested child_done makes the parent sweep-visible (the durable backstop).
+        needing = await wf_queries.list_run_ids_needing_step(
+            conn, agent_deadline_seconds=999, tool_stale_seconds=999
+        )
+        assert run_id in needing
+
+    # The parent, when stepped, harvests ``cancelled`` — the await raises, erroring the script.
+    await run_workflow_step(run_id)
+    parent = await _run(pool, run_id)
+    assert parent.status == "errored"
+
+
 async def test_invoke_workflow_deterministic_reattach_on_replay(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
