@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 from aios.config import get_settings
 from aios.db.queries import (
     confirmed_unresolved_predicate,
+    list_session_ids_with_unharvested_cancel_marker,
     parse_jsonb,
     session_active_predicate,
     session_errored_predicate,
@@ -708,6 +709,13 @@ async def find_sessions_needing_inference(
         # (subtracted in-process to keep the candidate/confirmed queries free
         # of an anti-join that the perf guard would flag as a SubPlan).
         errored = await _errored_session_ids(conn, session_id=session_id)
+        # C2: a non-archived session with an unharvested cancel-marker must run its cancel
+        # leaf even when idle or errored-parked — it still owes a ``cancelled`` response. The
+        # session-side analog of the run sweep's unharvested-cancel-signal clause; UNIONed
+        # BELOW the errored subtraction so the park can't suppress the exit.
+        cancel_marked = await list_session_ids_with_unharvested_cancel_marker(
+            conn, session_id=session_id
+        )
 
     candidates -= errored
     confirmed_sessions -= errored
@@ -715,7 +723,7 @@ async def find_sessions_needing_inference(
     filtered = (
         await _filter_incomplete_batches(pool, task_registry, to_filter) if to_filter else set()
     )
-    return filtered | confirmed_sessions
+    return filtered | confirmed_sessions | cancel_marked
 
 
 async def _filter_incomplete_batches(

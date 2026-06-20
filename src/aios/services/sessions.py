@@ -1483,6 +1483,56 @@ async def respond_to_request_conn(
     )
 
 
+async def harvest_session_cancel_markers(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> bool:
+    """The session-side cancel **leaf** — answer each unharvested cancel-marker's request with
+    ``outcome=cancelled`` and harvest the marker, atomically (cancel-design §4/§6).
+
+    Run as a pre-inference harvest in the session's own step (the session is the single writer
+    of its own log, under its own procrastinate lock — the supervision-tree invariant). Returns
+    ``True`` iff at least one marker was applied, so the step skips inference this turn: the
+    cancelled request needs no model work. Answering via :func:`respond_to_request_conn` closes
+    the open set AND latches first-writer-wins, so a late ``return(R)`` no-ops; the caller is
+    woken (run / session) so it re-resolves ``cancelled`` promptly.
+
+    Minimal cut: the owned-session teardown (request-scoped interrupt + drain + archive +
+    sandbox release, §4) and the recursive propagation to this session's own children (§2.3)
+    are deferred (the §4.1/§4.4 residuals — the cancelled request's in-flight tool tasks run to
+    completion and the session lingers idle-but-answered). The caller has already learned
+    ``cancelled``; the cascade's reclaim + recursion land in a later slice.
+    """
+    from aios.services.wake import defer_wake
+
+    wakes: list[RequestResponseWrite] = []
+    async with pool.acquire() as conn, conn.transaction():
+        markers = await queries.list_unharvested_session_cancel_markers(conn, session_id)
+        if not markers:
+            return False
+        for marker in markers:
+            write = await respond_to_request_conn(
+                conn,
+                session_id,
+                request_id=marker.request_id,
+                is_error=True,
+                result=None,
+                error={"kind": "cancelled"},
+            )
+            wakes.append(write)
+            await queries.mark_session_cancel_marker_harvested(
+                conn, session_id=session_id, request_id=marker.request_id
+            )
+    # Fire the caller wakes AFTER commit so each caller re-resolves the cancelled outcome.
+    for write in wakes:
+        if write.wake_run_id is not None:
+            await defer_run_wake(write.wake_run_id, batch=True)
+        elif write.wake_session_id is not None and write.account_id is not None:
+            await defer_wake(
+                pool, write.wake_session_id, cause="invoke_response", account_id=write.account_id
+            )
+    return True
+
+
 class AssistantAppendResult(NamedTuple):
     """Outcome of :func:`append_assistant_and_guard_quiescence`.
 

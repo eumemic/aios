@@ -381,6 +381,17 @@ async def _run_session_step_body(
         log.debug("step.early_out", session_id=session_id, cause=cause)
         return _StepResult()
 
+    # Cancel leaf (cancel-design §4/§6): a session carrying an unharvested cancel-marker
+    # answers each cancelled request + harvests the marker under its own lock, then skips
+    # inference this turn — the cancelled request needs no model work. The C2 sweep clause
+    # is what put a marked session into ``needs`` above, so this only runs when there's an
+    # exit to apply; once harvested it no longer re-wakes (no hot-loop).
+    if await sessions_service.harvest_session_cancel_markers(
+        pool, session_id, account_id=account_id
+    ):
+        log.info("step.cancel_harvested", session_id=session_id)
+        return _StepResult()
+
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
 
     from aios.services.channels import list_session_channels

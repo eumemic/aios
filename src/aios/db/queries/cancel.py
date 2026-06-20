@@ -180,3 +180,24 @@ async def mark_session_cancel_marker_harvested(
         session_id,
         request_id,
     )
+
+
+async def list_session_ids_with_unharvested_cancel_marker(
+    conn: asyncpg.Connection[Any], *, session_id: str | None = None
+) -> set[str]:
+    """Non-archived session ids carrying an unharvested cancel-marker (the C2 sweep set).
+
+    The session-side analog of the run sweep's unharvested-cancel-signal clause. Selected
+    OUTSIDE the active/errored filter by its caller (``find_sessions_needing_inference``): a
+    marked session must run its cancel leaf even when idle or errored-parked — it still owes
+    a ``cancelled`` response. Optionally scoped to one ``session_id`` (the targeted sweep).
+    """
+    scope = "AND m.session_id = $1" if session_id else ""
+    params: list[Any] = [session_id] if session_id else []
+    rows = await conn.fetch(
+        "SELECT DISTINCT m.session_id FROM session_cancel_markers m "
+        "JOIN sessions s ON s.id = m.session_id AND s.archived_at IS NULL "
+        f"WHERE m.harvested_at IS NULL {scope}",
+        *params,
+    )
+    return {r["session_id"] for r in rows}

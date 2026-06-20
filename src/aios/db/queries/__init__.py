@@ -300,6 +300,7 @@ from .cancel import (  # noqa: E402
     get_session_cancel_marker,
     insert_cancel_intent,
     insert_session_cancel_marker,
+    list_session_ids_with_unharvested_cancel_marker,
     list_unharvested_session_cancel_markers,
     mark_session_cancel_marker_harvested,
 )
@@ -754,6 +755,7 @@ __all__ = [
     "list_session_github_repo_echoes",
     "list_session_github_repo_ranks",
     "list_session_ids_for_connection",
+    "list_session_ids_with_unharvested_cancel_marker",
     "list_session_memory_store_echoes",
     "list_session_memory_store_ranks",
     "list_session_templates",

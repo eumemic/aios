@@ -123,3 +123,20 @@ def _unit_load_session_account_id_stub() -> Iterator[None]:
         return_value="acc_test_stub",
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _unit_no_session_cancel_harvest() -> Iterator[None]:
+    """Auto-mock the session step's pre-inference cancel leaf.
+
+    ``_run_session_step_body`` now calls the DB-backed ``harvest_session_cancel_markers``
+    before inference. Unit tests drive ``run_session_step`` over a MagicMock pool that can't
+    await ``conn.transaction()``, so default the leaf to a no-op (no markers) — exactly as the
+    sibling ``load_session_account_id`` stub above. The leaf's real behavior is covered by the
+    integration tier (``test_session_cancel_leaf``)."""
+    with mock.patch(
+        "aios.services.sessions.harvest_session_cancel_markers",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
+        yield
