@@ -572,10 +572,13 @@ async def _stimulate_new_session(
             # authoritative gate in ``build_spec_from_session`` catches a
             # mis-scoped child at provision. The advisory 422 stays on the
             # operator-facing API attach paths (create_session/update_session).
-        request_meta: dict[str, Any] = {
-            "request_id": stim.request_id,
-            "caller": {"kind": "run", "id": stim.parent_run_id},
-        }
+        # The user message carries a DISPLAY-only ``metadata.request`` blob: the
+        # context builder renders its ``request_id`` (+ ``output_schema`` shape) into
+        # the message so the model knows which id to echo on ``return``/``error``. It
+        # is NOT the trusted source — enforcement (caller, output_schema) reads the
+        # ``request_opened`` edge below (#1131: the forgeable blob no longer gates
+        # anything; a forged id just fails the open-set check at ``return``).
+        request_meta: dict[str, Any] = {"request_id": stim.request_id}
         if output_schema is not None:
             request_meta["output_schema"] = output_schema
         await queries.append_event(
@@ -583,18 +586,13 @@ async def _stimulate_new_session(
             account_id=account_id,
             session_id=stim.session_id,
             kind="message",
-            data={
-                "role": "user",
-                "content": content,
-                "metadata": {"request": request_meta},
-            },
+            data={"role": "user", "content": content, "metadata": {"request": request_meta}},
         )
-        # #1123/#1197: emit the trusted ``request_opened`` lifecycle edge alongside
-        # the legacy ``metadata.request`` blob (dual-write until #1131 retires the
-        # blob). Gated by the ``child is None`` first-spawn check above, so a
-        # replayed wake (ON CONFLICT → ``child is None`` → early return) never
-        # re-opens the edge — exactly-once per request. ``awaited`` carries the
-        # Ask|Tell distinction: an Ask owes a response, a Tell does not.
+        # #1123/#1197: the trusted ``request_opened`` lifecycle edge carries the
+        # authorization fact (caller, depth, #794 surface, vault_ids, awaited) AND the
+        # ``output_schema`` enforcement reads (#1131). Gated by the ``child is None``
+        # first-spawn check above, so a replayed wake never re-opens the edge —
+        # exactly-once per request. ``awaited`` carries the Ask|Tell distinction.
         await queries.append_request_opened(
             conn,
             session_id=stim.session_id,
@@ -610,6 +608,7 @@ async def _stimulate_new_session(
             },
             vault_ids=stim.vault_ids,
             awaited=awaited,
+            output_schema=output_schema,
         )
         return True
 
@@ -622,17 +621,18 @@ async def _stimulate_existing_ask(
 ) -> bool:
     """The `Ask(ExistingSession)` arm — inject a channel-less awaited request.
 
-    One transaction: append the request's ``user`` message (``metadata.request``
-    carries ``{request_id, caller}`` + optional ``output_schema``) and open the
-    trusted ``request_opened`` edge (`awaited=true`). Channel-less (no
-    ``orig_channel``) so the injected request never surfaces to a connector. Then
-    a deferred wake so the target steps and answers it.
+    One transaction: append the request's channel-less ``user`` message (with a
+    DISPLAY-only ``metadata.request`` blob the context builder renders so the model
+    knows which id to echo) and open the trusted ``request_opened`` edge
+    (`awaited=true`, carrying ``output_schema`` — the enforcement source, #1131).
+    Channel-less (no ``orig_channel``) so the injected request never surfaces to a
+    connector. Then a deferred wake so the target steps and answers it.
     """
     from aios.services.wake import defer_wake
 
     session = stim.session
     content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
-    request_meta: dict[str, Any] = {"request_id": stim.request_id, "caller": stim.caller}
+    request_meta: dict[str, Any] = {"request_id": stim.request_id}
     if stim.output_schema is not None:
         request_meta["output_schema"] = stim.output_schema
     agent = await agents_service.load_for_session(pool, session, account_id=account_id)
@@ -644,11 +644,7 @@ async def _stimulate_existing_ask(
             account_id=account_id,
             session_id=session.id,
             kind="message",
-            data={
-                "role": "user",
-                "content": content,
-                "metadata": {"request": request_meta},
-            },
+            data={"role": "user", "content": content, "metadata": {"request": request_meta}},
         )
         await queries.append_request_opened(
             conn,
@@ -665,6 +661,7 @@ async def _stimulate_existing_ask(
             },
             vault_ids=vault_ids,
             awaited=True,
+            output_schema=stim.output_schema,
         )
     await defer_wake(pool, session.id, cause="api_invoke", account_id=account_id)
     return True

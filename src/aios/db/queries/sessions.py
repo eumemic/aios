@@ -552,7 +552,8 @@ async def get_request_output_schema(
 ) -> dict[str, Any] | None:
     """The JSON Schema a request demands of its response ``value``, or ``None``.
 
-    Reads ``metadata.request.output_schema`` off the request's user message. Keyed on
+    Reads ``output_schema`` off the trusted ``request_opened`` edge (#1131 — no longer
+    the forgeable ``metadata.request`` user-message blob). Keyed on
     ``(session_id, request_id)`` — a child can owe several requests, each with its own
     schema — so the ``return`` enforcement validates a ``value`` against *its* request's
     schema. Like :func:`get_session_workflow_context` (the other return-path read),
@@ -562,10 +563,10 @@ async def get_request_output_schema(
     common case) or the id matches nothing.
     """
     schema = await conn.fetchval(
-        "SELECT req.data->'metadata'->'request'->'output_schema' FROM events req "
+        "SELECT req.data->'output_schema' FROM events req "
         "WHERE req.session_id = $1 "
-        "AND req.kind = 'message' AND req.role = 'user' "
-        "AND req.data->'metadata'->'request'->>'request_id' = $2 "
+        "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+        "AND req.data->>'request_id' = $2 "
         "ORDER BY req.seq ASC LIMIT 1",  # oldest-first, like get_open_request_ids — deterministic
         session_id,
         request_id,
@@ -762,6 +763,7 @@ async def append_request_opened(
     frozen_surface: dict[str, Any],
     vault_ids: list[str],
     awaited: bool = True,
+    output_schema: dict[str, Any] | None = None,
 ) -> None:
     """Append the trusted ``request_opened`` lifecycle event — the *ask* half of
     the request edge (#1123).
@@ -801,21 +803,27 @@ async def append_request_opened(
     wake opens the edge exactly once (see :func:`get_open_request_ids` for the
     asked-minus-answered derivation this feeds).
     """
+    data: dict[str, Any] = {
+        "event": "request_opened",
+        "request_id": request_id,
+        "caller": caller,
+        "depth": depth,
+        "environment_id": environment_id,
+        "frozen_surface": frozen_surface,
+        "vault_ids": vault_ids,
+        "awaited": awaited,
+    }
+    if output_schema is not None:
+        # The per-request schema the answer's ``value`` must satisfy (#1131): carried
+        # on the trusted edge so ``return`` enforcement no longer reads the forgeable
+        # ``metadata.request`` user-message blob.
+        data["output_schema"] = output_schema
     await queries.append_event(
         conn,
         account_id=account_id,
         session_id=session_id,
         kind="lifecycle",
-        data={
-            "event": "request_opened",
-            "request_id": request_id,
-            "caller": caller,
-            "depth": depth,
-            "environment_id": environment_id,
-            "frozen_surface": frozen_surface,
-            "vault_ids": vault_ids,
-            "awaited": awaited,
-        },
+        data=data,
     )
 
 

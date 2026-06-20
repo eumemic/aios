@@ -230,8 +230,12 @@ async def test_create_child_session_idempotent(
     assert user_msgs == 1
     from aios.db.queries import parse_jsonb
 
+    # The display blob carries the correlation id; the trusted caller is on the edge.
     request = parse_jsonb(req["data"])["metadata"]["request"]
-    assert request["request_id"] == "sha:x#0" and request["caller"] == {"kind": "run", "id": run_id}
+    assert request["request_id"] == "sha:x#0"
+    async with pool.acquire() as conn:
+        caller = await db_queries.get_request_caller(conn, cid, request_id="sha:x#0")
+    assert caller == {"kind": "run", "id": run_id}
 
 
 async def test_child_session_origin_and_parent_round_trip(
@@ -3487,18 +3491,20 @@ async def test_get_request_output_schema_is_per_request(
     The workflow path is 1:1 today, but the query is per-request by design."""
     pool = wf_runtime
     schema_b = {"type": "number"}
-    run_id, cid = await _spawn_child(pool, wf_agent_id, "req:a", output_schema=_OBJ_SCHEMA)
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "req:a", output_schema=_OBJ_SCHEMA)
     async with pool.acquire() as conn:
         for rid, schema in (("req:b", schema_b), ("req:none", None)):
-            request: dict[str, Any] = {"request_id": rid, "caller": {"kind": "run", "id": run_id}}
+            # The schema is read off the trusted request_opened edge (#1131), not the
+            # display user-message blob.
+            edge: dict[str, Any] = {"event": "request_opened", "request_id": rid, "awaited": True}
             if schema is not None:
-                request["output_schema"] = schema
+                edge["output_schema"] = schema
             await db_queries.append_event(
                 conn,
                 account_id="acc_wf",
                 session_id=cid,
-                kind="message",
-                data={"role": "user", "content": "x", "metadata": {"request": request}},
+                kind="lifecycle",
+                data=edge,
             )
         get = db_queries.get_request_output_schema
         assert await get(conn, cid, request_id="req:a") == _OBJ_SCHEMA
