@@ -9,11 +9,17 @@ lazily, so constructing it has no daemon dependency.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
+if TYPE_CHECKING:
+    from aios.config import Settings
 
-def _settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str | None = None):
+
+def _settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str | None = None
+) -> Settings:
     from aios.config import Settings
 
     secrets = tmp_path / "secrets.env"
