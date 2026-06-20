@@ -34,13 +34,20 @@ rejected before the handler runs.
 
 All register ``transport="agent_tool"`` (model-only; the CLI broker refuses them).
 
-**At-least-once on worker crash.** Like the API caller (#1128, a retried POST), an
-``invoke*`` call is not idempotent across a worker restart mid-park: the fire-and-forget
-tool task outlives the step body, so a crash before its ``tool_result`` lands re-dispatches
-the handler and writes a *second* request edge into the target. Single-shot is the
-per-call contract, not a crash-exactly-once guarantee — the same stance as every other
-non-deterministic builtin. Deterministic request-id keying (call-key dedup, as the
-workflow ``agent()`` path does) is a future hardening, not v1 scope.
+**Crash recovery = ghost-repair, not re-dispatch.** The request edge is written
+*before* the park, so it is durable; the fire-and-forget tool task is not. On a worker
+crash mid-park the harness does NOT re-run the handler — there is no builtin re-dispatch
+path (only ``always_ask``-confirmed tools are re-dispatched). Instead the periodic
+ghost-repair sweep resolves the lost ``tool_call_id`` to a synthetic *may-have-completed*
+error ("the tool may have completed and side effects may have committed; verify before
+retrying"), because the ``tool_execute_start`` span had committed and the target may in
+fact have been serviced. The servicer's response is still written exactly-once and
+durably, but it is *orphaned* for the crashed caller's ``request_id`` — nothing harvests
+it back into the now-errored tool result. A *second* request edge appears only if the
+**model** retries (its own decision on seeing the error), never from a harness re-dispatch.
+Single-shot is the per-call contract, not a crash-exactly-once guarantee. Deterministic
+request-id keying (call-key dedup, as the workflow ``agent()`` path does) is a future
+hardening, not v1 scope.
 """
 
 from __future__ import annotations
