@@ -203,6 +203,28 @@ class FakeBackend:
             kind="committed", image_id=f"sha256:{tag}", unique_bytes=1024, depth=1
         )
 
+    # ── operator prewarm bake (#1348) ───────────────────────────────────────
+    # ``prewarm_run`` returns this id; ``prewarm_commit`` records the (tag,
+    # labels) it stamped so a test can assert the right labels were applied and
+    # that none of the managed/instance/session labels were.
+    next_prewarm_id: str = "prewarm_container_id"
+    prewarm_commits: list[tuple[str, dict[str, str]]] = field(default_factory=list)
+
+    async def prewarm_run(self, image: str) -> str:
+        self.calls.append(("prewarm_run", {"image": image}))
+        return self.next_prewarm_id
+
+    async def prewarm_commit(
+        self, sandbox_id: str, tag: str, *, labels: dict[str, str]
+    ) -> None:
+        self.calls.append(
+            ("prewarm_commit", {"sandbox_id": sandbox_id, "tag": tag, "labels": dict(labels)})
+        )
+        self.prewarm_commits.append((tag, dict(labels)))
+
+    async def prewarm_remove(self, sandbox_id: str) -> None:
+        self.calls.append(("prewarm_remove", {"sandbox_id": sandbox_id}))
+
     async def list_managed_images(self, *, instance_id: str) -> list[ManagedImage]:
         self.calls.append(("list_managed_images", {"instance_id": instance_id}))
         return list(self.managed_images)

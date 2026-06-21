@@ -451,6 +451,62 @@ class DockerBackend:
             return False
         return stdout_bytes.decode("utf-8", errors="replace").strip() == "true"
 
+    # ── operator prewarm bake (#1348) ───────────────────────────────────────
+
+    async def prewarm_run(self, image: str) -> str:
+        """``docker run --detach`` ``image`` as a transient prewarm container.
+
+        A plain run: keep stdin open and exec the same keepalive CMD a session
+        container uses so the container stays up for the setup execs, but stamp
+        NO ``aios.*`` labels (so the committed image is invisible to the GC) and
+        none of the session resource caps / mounts / network policy (the bake
+        only needs a live shell to install the CA / packages into the rootfs).
+        ``--pull always`` when ``image`` is a registry ref, mirroring create().
+        """
+        argv = ["docker", "run", "--detach", "--interactive"]
+        if _is_registry_image(image):
+            argv.extend(["--pull", "always"])
+        argv.extend([image, "/usr/bin/tail", "-f", "/dev/null"])
+        rc, stdout_bytes, stderr_bytes = await run_docker_cli(argv)
+        if rc != 0:
+            raise SandboxBackendError(
+                f"docker run failed (exit {rc}) for prewarm of {image}: "
+                f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
+            )
+        return stdout_bytes.decode("utf-8", errors="replace").strip()
+
+    async def prewarm_commit(
+        self, sandbox_id: str, tag: str, *, labels: dict[str, str]
+    ) -> None:
+        """``docker commit`` ``sandbox_id`` to ``tag``, stamping exactly ``labels``.
+
+        Stamps only the caller-supplied labels (``BASE_IMAGE_LABEL_KEY`` +
+        ``PREWARM_LABEL_KEY``) via ``--change "LABEL k=v"`` — deliberately NOT
+        the managed/instance/session labels, so the prewarm image never enters
+        the image GC's reapable set.
+        """
+        argv = ["docker", "commit"]
+        for key, value in labels.items():
+            argv.extend(["--change", f"LABEL {key}={value}"])
+        argv.extend([sandbox_id, tag])
+        rc, _stdout, stderr_bytes = await run_docker_cli(argv)
+        if rc != 0:
+            raise SandboxBackendError(
+                f"docker commit failed (exit {rc}) for prewarm {tag}: "
+                f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
+            )
+
+    async def prewarm_remove(self, sandbox_id: str) -> None:
+        """``docker rm -f`` the transient prewarm container (idempotent)."""
+        rc, _stdout, stderr_bytes = await run_docker_cli(
+            ["docker", "rm", "--force", sandbox_id]
+        )
+        if rc != 0:
+            stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+            if _is_no_such_container(stderr):
+                return
+            log.warning("sandbox.prewarm_rm_nonzero", container_id=sandbox_id[:12], stderr=stderr)
+
     # ── durable-session-sandbox verbs (§5.2) ────────────────────────────────
 
     async def stop(self, sandbox_id: str) -> None:

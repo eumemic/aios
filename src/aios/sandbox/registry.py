@@ -45,6 +45,7 @@ from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
     FLATTENED_LABEL_KEY,
     FLATTENED_LABEL_VALUE,
+    PREWARM_LABEL_KEY,
     SESSION_LABEL_KEY,
     CommandResult,
     ManagedImage,
@@ -407,6 +408,27 @@ class SandboxRegistry:
                 pool, session_id, "span", end_payload, account_id=account_id
             )
 
+    async def _prewarmed_setup_satisfied(self, spec: SandboxSpec) -> bool:
+        """True iff the image the container ran from is a prewarm bake of the
+        CURRENT base — then ``install_egress_ca`` / ``install_packages`` are
+        redundant and skippable (#1348).
+
+        Fails toward False (do the work) on any mismatch/absence. Reading off
+        ``run_image`` (``spec.snapshot_image or spec.image``, mirroring
+        ``docker.py:217``) is load-bearing:
+
+        - On a **resume** ``run_image`` is a tenant snapshot tag whose
+          ``PREWARM_LABEL_KEY`` is absent ⇒ False ⇒ the (cheap, idempotent)
+          CA/package execs still run (a resumed rootfs may post-date the bake).
+        - On a **cold start** ``run_image == spec.image``; the gate is True only
+          when that base was itself prewarmed against the CURRENT base ref, so a
+          base change (``PREWARM_LABEL_KEY != spec.image``) disables the skip,
+          identical to the #916 drift gate.
+        """
+        run_image = spec.snapshot_image or spec.image  # mirror docker.py:217
+        labels = await self._backend.image_labels(run_image)
+        return labels is not None and labels.get(PREWARM_LABEL_KEY) == spec.image
+
     async def _provision(self, session_id: str) -> SandboxHandle:
         """Salvage corpses, resolve the snapshot, create the sandbox, run setup.
 
@@ -463,8 +485,13 @@ class SandboxRegistry:
         # sandbox down so we don't leak an empty container alongside
         # the proxy.
         try:
-            await install_egress_ca(self._backend, handle)
-            await install_packages(self._backend, handle, plan.env_config)
+            # Cold-start latency optimization (#1348): skip the idempotent CA /
+            # package execs when the image the container ran from is a prewarm
+            # bake of the CURRENT base. NEVER skip ``_apply_egress_rules`` — the
+            # iptables lockdown is never baked (§5.8 netns-lockdown-not-in-FS).
+            if not await self._prewarmed_setup_satisfied(spec):
+                await install_egress_ca(self._backend, handle)
+                await install_packages(self._backend, handle, plan.env_config)
             await self._apply_egress_rules(handle, plan)
         except BaseException:
             await self._destroy_quietly(handle, session_id)
@@ -558,8 +585,13 @@ class SandboxRegistry:
             raise
 
         try:
-            await install_egress_ca(self._backend, handle)
-            await install_packages(self._backend, handle, plan.env_config)
+            # Same cold-start skip as the session path (#1348). A run never
+            # resolves a snapshot (``plan.spec.snapshot_image is None``), so
+            # ``run_image == plan.spec.image`` and the gate fires only when the
+            # base is itself a prewarm of the current base. Lockdown still runs.
+            if not await self._prewarmed_setup_satisfied(plan.spec):
+                await install_egress_ca(self._backend, handle)
+                await install_packages(self._backend, handle, plan.env_config)
             await self._apply_egress_rules(handle, plan)
         except BaseException:
             await self._destroy_run_quietly(run_id, handle)
