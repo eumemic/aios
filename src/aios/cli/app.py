@@ -99,6 +99,7 @@ from aios.cli.commands import chat as _chat  # noqa: E402
 from aios.cli.commands import connections as _connections  # noqa: E402
 from aios.cli.commands import dev as _dev  # noqa: E402
 from aios.cli.commands import envs as _envs  # noqa: E402
+from aios.cli.commands import init as _init  # noqa: E402
 from aios.cli.commands import ops as _ops  # noqa: E402
 from aios.cli.commands import sandbox as _sandbox  # noqa: E402
 from aios.cli.commands import session_templates as _session_templates  # noqa: E402
@@ -130,6 +131,7 @@ app.add_typer(_tasks.app, name="tasks")
 
 _ops.register(app)
 _sandbox.register(app)
+_init.register(app)
 _status.register(app)
 _chat.register(app)
 _tail.register(app)
