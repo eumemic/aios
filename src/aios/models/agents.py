@@ -83,7 +83,7 @@ _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
 # `mode="before"` validator below maps them so old rows still load; the two-step
 # create_run/await_run launch tools fold into the unified `call_workflow`. The data
 # migration (0116) rewrites the persisted rows to canonical; once it has run everywhere
-# this map + the validator can be removed.
+# this map + the validator can be removed (teardown tracked: #1432).
 _LEGACY_BUILTIN_RENAMES: dict[str, str] = {
     "invoke": "call_session",
     "invoke_agent": "call_agent",
