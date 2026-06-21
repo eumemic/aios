@@ -1,10 +1,9 @@
-"""Integration tests for the cancel-supervision side-tables (cancel-design §0/§9).
+"""Integration tests for the cancel-supervision side-table (cancel-design §2).
 
-DB-backed round-trips over the durable primitives the recursive ``cancel_invocation``
-cascade is built on: the ``cancel_intents`` tombstone (+ its §9 monotone quiescence
-counter) and the session-side ``session_cancel_markers`` exit-marker. The cascade logic
-that drives these (propagation, the leaves, the tool) lands in 6d-6g; here we pin the
-substrate's idempotency + counter semantics in isolation.
+DB-backed round-trips over the durable primitive the recursive ``cancel_invocation``
+cascade is built on: the session-side ``session_cancel_markers`` exit-marker. The cascade
+logic that drives it (propagation, the leaf, the seed) is covered by test_session_cancel_leaf;
+here we pin the marker's idempotency + harvest semantics in isolation.
 """
 
 from __future__ import annotations
@@ -44,41 +43,6 @@ async def pool_and_session(
         await pool.close()
 
 
-async def test_cancel_intent_idempotent_with_monotone_counter(
-    pool_and_session: tuple[asyncpg.Pool[Any], str],
-) -> None:
-    """The tombstone is idempotent (re-cancel never resets the counter) and ``quiesced_at``
-    latches monotonically the first time ``outstanding`` reaches 0."""
-    pool, _session = pool_and_session
-    key = dict(servicer_kind="run", servicer_id="wfr_x", request_id="req_1")
-    async with pool.acquire() as conn:
-        intent = await queries.insert_cancel_intent(conn, account_id=_ACCOUNT, **key)
-        assert intent.outstanding == 1 and intent.quiesced_at is None
-
-        # A node marks 2 children → += (2 - 1). Then a RE-cancel must be a no-op:
-        # the counter keeps its accumulated value, never resets to the seed.
-        await queries.adjust_cancel_outstanding(conn, delta=+1, **key)
-        again = await queries.insert_cancel_intent(conn, account_id=_ACCOUNT, **key)
-        assert again.outstanding == 2  # not reset to 1
-
-        # Drive to 0 → quiesced latches.
-        await queries.adjust_cancel_outstanding(conn, delta=-1, **key)
-        zeroed = await queries.adjust_cancel_outstanding(conn, delta=-1, **key)
-        assert zeroed is not None and zeroed.outstanding == 0 and zeroed.quiesced_at is not None
-        first_quiesce = zeroed.quiesced_at
-
-        # A late delta does NOT un-quiesce (monotone) — the cascade is already complete.
-        bumped = await queries.adjust_cancel_outstanding(conn, delta=+1, **key)
-        assert bumped is not None and bumped.outstanding == 1
-        assert bumped.quiesced_at == first_quiesce
-
-        # A delta against a missing tombstone is a no-op returning None.
-        gone = await queries.adjust_cancel_outstanding(
-            conn, servicer_kind="run", servicer_id="wfr_nope", request_id="r", delta=-1
-        )
-        assert gone is None
-
-
 async def test_session_cancel_marker_idempotent_and_harvest(
     pool_and_session: tuple[asyncpg.Pool[Any], str],
 ) -> None:
@@ -92,7 +56,7 @@ async def test_session_cancel_marker_idempotent_and_harvest(
             )
             is True
         )
-        # Second seed of the same edge is a no-op (the §9 counter must not double-count).
+        # Second seed of the same edge is a no-op (re-propagation must not double-mark).
         assert (
             await queries.insert_session_cancel_marker(
                 conn, session_id=session_id, request_id="req_1", account_id=_ACCOUNT

@@ -151,10 +151,6 @@ async def test_cancel_invocation_session_seeds_tombstone_and_marker_end_to_end(
         account_id=_ACCOUNT,
     )
     async with pool.acquire() as conn:
-        intent = await queries.get_cancel_intent(
-            conn, servicer_kind="session", servicer_id=session_id, request_id="req_x"
-        )
-        assert intent is not None  # durable intent tombstone
         marker = await queries.get_session_cancel_marker(
             conn, session_id=session_id, request_id="req_x"
         )
@@ -229,10 +225,6 @@ async def test_cancel_invocation_run_seeds_signal_and_tombstone(
     async with pool.acquire() as conn:
         signals = await wf_queries.list_run_signals(conn, run.id)
         assert any(s.kind == "cancel" for s in signals)  # cancel_run seeded the signal
-        intent = await queries.get_cancel_intent(
-            conn, servicer_kind="run", servicer_id=run.id, request_id="req_run"
-        )
-        assert intent is not None  # durable intent tombstone
 
 
 async def _open_child_session_edge(

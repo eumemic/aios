@@ -186,45 +186,31 @@ async def cancel_invocation(
     request_id: str,
     account_id: str,
 ) -> None:
-    """Cancel an invocation by its edge handle (cancel-design §0/§2) — the supervisor seed.
+    """Cancel an invocation by its edge handle (cancel-design §2) — the supervisor seed.
 
-    Writes the durable ``cancel_intents`` tombstone, then seeds the exit-marker on the
-    servicer so it harvests the cancel under its OWN single-writer step lock: a **run** via the
-    existing ``wf_run_signals kind='cancel'`` + harvest (``cancel_run``); a **session** via a
-    ``session_cancel_markers`` row that the C2 sweep wakes into its leaf. Account-scoped
-    (cross-tenant/missing 404s before any write); idempotent (tombstone + markers are
-    ON CONFLICT no-ops, so a re-cancel is a no-op).
+    Seeds the exit on the servicer so it harvests the cancel under its OWN single-writer
+    step lock: a **run** via the existing ``wf_run_signals kind='cancel'`` + harvest
+    (``cancel_run``); a **session** via a ``session_cancel_markers`` row that the C2 sweep
+    wakes into its leaf. Account-scoped (cross-tenant/missing 404s before any write);
+    idempotent (the marker is an ON CONFLICT no-op, so a re-cancel is a no-op).
 
-    Minimal cut: seeds the ROOT servicer only. Recursive propagation to the subtree is each
-    marked node's own leaf job (§2.3) and the §9 quiescence counter is wired with it — a later
-    slice. ``cancel_run`` (single-node) is unchanged; this generalizes the seed to sessions.
+    Seeds the ROOT only; the recursion is each marked node's own leaf job. A **session**
+    root cascades DOWN its subtree: ``harvest_session_cancel_markers`` answers ``cancelled``
+    and re-seeds markers on its awaited children (§2.3 — built). The **run-down** cascade —
+    a cancelled run re-seeding its own children — is NOT built: a run root finalizes as a
+    single node (#788/#1152), and the §9 quiescence accounting rides with it.
     """
     if servicer_kind == "run":
         from aios.services import workflows as wf_service
 
         # ``cancel_run`` 404s cross-tenant, seeds the run cancel signal, and wakes the run.
         await wf_service.cancel_run(pool, run_id=servicer_id, account_id=account_id)
-        async with pool.acquire() as conn:
-            await queries.insert_cancel_intent(
-                conn,
-                servicer_kind="run",
-                servicer_id=servicer_id,
-                request_id=request_id,
-                account_id=account_id,
-            )
         return
 
-    # session: scope-check, write the tombstone + the exit-marker in one txn, then wake.
+    # session: scope-check, seed the exit-marker in one txn, then wake the leaf.
     async with pool.acquire() as conn, conn.transaction():
         if await queries.read_session_watermarks(conn, servicer_id, account_id=account_id) is None:
             raise NotFoundError(f"session {servicer_id} not found", detail={"id": servicer_id})
-        await queries.insert_cancel_intent(
-            conn,
-            servicer_kind="session",
-            servicer_id=servicer_id,
-            request_id=request_id,
-            account_id=account_id,
-        )
         await queries.insert_session_cancel_marker(
             conn, session_id=servicer_id, request_id=request_id, account_id=account_id
         )
