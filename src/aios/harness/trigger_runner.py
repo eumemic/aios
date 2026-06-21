@@ -691,6 +691,7 @@ async def _run_workflow(
             launcher_session_id=trigger.owner_session_id,
             parent_run_id=parent_run_id,
             expected_version=action.workflow_version,
+            version=action.version,
         )
         log.info(
             "trigger.fired",

@@ -62,6 +62,7 @@ async def create_run(
     caller: dict[str, Any] | None = None,
     request_output_schema: dict[str, Any] | None = None,
     expected_version: int | None = None,
+    version: int | None = None,
     budget_usd: float | None = None,
     default_child_model: str | None = None,
 ) -> WfRun:
@@ -97,6 +98,20 @@ async def create_run(
     ``update_workflow`` between check and snapshot). ``None`` (every existing
     caller) floats to the current version.
 
+    ``version`` (#1321) is the re-run SELECTOR — orthogonal to ``expected_version``.
+    When set, the run snapshots that **specific historical** ``workflow_versions``
+    row's script + declared surface (default ``None`` resolves to the workflow's
+    current version). Both rows are loaded — never substituted: the **live**
+    ``get_workflow`` still drives the archived gate and the ``expected_version``
+    drift check (a version row has no ``archived_at``, so substituting it would
+    silently drop the gate), while the chosen ``get_workflow_version`` drives the
+    snapshotted script + surface. **Any version of an archived workflow is refused.**
+    The chosen version's declared surface is clamped against the *current* launcher
+    (the clamp is the real bound — a re-run can reproduce an old surface but never
+    exceed the launcher's present authority). The run's ``source_version`` is bound
+    to the snapshotted version via a strict composite FK; the run still execs its
+    own inline ``script`` copy (reading through the FK is deferred Phase 3).
+
     **Horizontal fan-out caps:** outstanding (non-terminal) runs are bounded per
     launcher session (``workflow_runs_per_launcher_max``, agent path only) and per
     account (``workflow_runs_per_account_max``, every launch) — a breach raises
@@ -129,8 +144,15 @@ async def create_run(
             if existing is not None and existing.account_id == account_id:
                 return existing
         await get_environment(conn, environment_id, account_id=account_id)  # 404s foreign/absent
+        # Load the LIVE workflow row: it drives the archived gate and the
+        # expected_version drift check — both must consult the live head, not a
+        # snapshot. (#1321 M2: the version row is loaded ADDITIONALLY below, never
+        # substituted — a version row has no ``archived_at``, so substituting it
+        # would silently drop the archived gate.)
         workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
         if workflow.archived_at is not None:
+            # Refuse launching ANY version of an archived workflow — the live gate
+            # applies even to a historical re-run.
             raise ConflictError(f"workflow {workflow_id} is archived", detail={"id": workflow_id})
         if expected_version is not None and workflow.version != expected_version:
             raise ConflictError(
@@ -141,7 +163,24 @@ async def create_run(
                     "id": workflow_id,
                 },
             )
-        script_sha = hashlib.sha256(workflow.script.encode("utf-8")).hexdigest()
+        # Resolve the SOURCE definition the run snapshots. Default (version=None)
+        # is the current head — use the live row directly (it IS the current
+        # version, and its surface row is identical). A pinned ``version`` loads
+        # the immutable ``workflow_versions`` snapshot for the script + declared
+        # surface; a missing version 404s. ``source`` carries both the snapshotted
+        # script and the chosen surface; ``source_version`` is bound onto the run.
+        if version is None:
+            source_script = workflow.script
+            source_surface = surface_of(workflow)
+            source_version = workflow.version
+        else:
+            source = await wf_queries.get_workflow_version(
+                conn, workflow_id, version, account_id=account_id
+            )
+            source_script = source.script
+            source_surface = surface_of(source)
+            source_version = source.version
+        script_sha = hashlib.sha256(source_script.encode("utf-8")).hexdigest()
         if launcher_session_id is not None:
             launcher_session = await get_session_bare(
                 conn, launcher_session_id, account_id=account_id
@@ -154,9 +193,9 @@ async def create_run(
         # Clamp the snapshot to the launcher's surface (sub-runs compose for free: a
         # child launcher's load_for_session already returns its frozen clamp).
         effective = (
-            attenuation_service.clamp(surface_of(workflow), launcher_surface)
+            attenuation_service.clamp(source_surface, launcher_surface)
             if launcher_surface is not None
-            else surface_of(workflow)
+            else source_surface
         )
         # The DOWN-counting trusted depth budget (#1124). An edgeless root
         # (operator/HTTP ``POST /runs``, a trigger fire with no completing-run
@@ -236,8 +275,9 @@ async def create_run(
             request_id=request_id,
             caller=caller,
             request_output_schema=request_output_schema,
-            script=workflow.script,
+            script=source_script,
             script_sha=script_sha,
+            source_version=source_version,
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
             input=input,
             # Snapshot the launch-clamped surface (like script), so a later

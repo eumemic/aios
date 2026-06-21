@@ -17851,6 +17851,17 @@
             "type": "string",
             "title": "Script Sha"
           },
+          "source_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version"
+          },
           "host_semantics_epoch": {
             "type": "integer",
             "title": "Host Semantics Epoch"
@@ -17980,6 +17991,19 @@
           "environment_id": {
             "type": "string",
             "title": "Environment Id"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version",
+            "description": "Optional historical workflow version to run. `None` (default) launches the workflow's CURRENT version. An integer re-runs that specific version: the run snapshots that version's script + declared surface (clamped against the current launcher's authority) and binds `source_version` to it. Launching ANY version of an archived workflow is refused (409). This is a SELECTOR \u2014 distinct from the trigger's `workflow_version` drift assertion."
           },
           "input": {
             "title": "Input"
@@ -18465,6 +18489,18 @@
             ],
             "title": "Workflow Version"
           },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
           "input_template": {
             "title": "Input Template"
           },
@@ -18509,6 +18545,18 @@
             ],
             "title": "Workflow Version"
           },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
           "input_template": {
             "title": "Input Template"
           },
@@ -18525,6 +18573,7 @@
         "required": [
           "workflow_id",
           "workflow_version",
+          "version",
           "input_template",
           "vault_ids"
         ],

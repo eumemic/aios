@@ -125,6 +125,7 @@ class TestWorkflowAction:
             "kind": "workflow",
             "workflow_id": "wf_target",
             "workflow_version": None,
+            "version": None,
             "input_template": None,
             "vault_ids": [],
         }
@@ -146,6 +147,7 @@ class TestWorkflowAction:
                     "kind": "workflow",
                     "workflow_id": "wf_t",
                     "workflow_version": None,
+                    "version": None,
                     "input_template": None,
                     "vault_ids": [],
                 }
@@ -153,9 +155,49 @@ class TestWorkflowAction:
         )
         assert ok.action is not None
 
+    def test_update_replace_requires_version_selector(self) -> None:
+        """The #1321 ``version`` selector is required on UPDATE too — a partial
+        action omitting it 422s (same as the other optional-at-create fields)."""
+        with pytest.raises(ValidationError):
+            TriggerUpdate.model_validate(
+                {
+                    "action": {
+                        "kind": "workflow",
+                        "workflow_id": "wf_t",
+                        "workflow_version": None,
+                        # version omitted
+                        "input_template": None,
+                        "vault_ids": [],
+                    }
+                }
+            )
+
     def test_pin_must_be_positive_int(self) -> None:
         with pytest.raises(ValidationError):
             _create(action={"kind": "workflow", "workflow_id": "wf_t", "workflow_version": 0})
+
+    def test_version_selector_must_be_positive_int(self) -> None:
+        with pytest.raises(ValidationError):
+            _create(action={"kind": "workflow", "workflow_id": "wf_t", "version": 0})
+
+    def test_version_selector_accepted(self) -> None:
+        spec = _create(action={"kind": "workflow", "workflow_id": "wf_t", "version": 3})
+        assert isinstance(spec.action, WorkflowAction)
+        assert spec.action.version == 3
+        assert spec.action.workflow_version is None
+
+    def test_version_and_workflow_version_both_set_rejected(self) -> None:
+        """F1: ``version`` (selector) and ``workflow_version`` (drift assertion)
+        are orthogonal and contradictory together — the union rejects both-set."""
+        with pytest.raises(ValidationError, match="at most one"):
+            _create(
+                action={
+                    "kind": "workflow",
+                    "workflow_id": "wf_t",
+                    "version": 3,
+                    "workflow_version": 3,
+                }
+            )
 
 
 class TestInputTemplateWriteBound:
@@ -170,6 +212,7 @@ class TestInputTemplateWriteBound:
                         "kind": "workflow",
                         "workflow_id": "wf_t",
                         "workflow_version": None,
+                        "version": None,
                         "input_template": big,
                         "vault_ids": [],
                     }

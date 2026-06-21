@@ -49,6 +49,7 @@ class WorkflowAction:
             workflow_id (str):
             kind (Literal['workflow'] | Unset):  Default: 'workflow'.
             workflow_version (int | None | Unset):
+            version (int | None | Unset):
             input_template (Any | Unset):
             vault_ids (list[str] | Unset):
     """
@@ -56,6 +57,7 @@ class WorkflowAction:
     workflow_id: str
     kind: Literal["workflow"] | Unset = "workflow"
     workflow_version: int | None | Unset = UNSET
+    version: int | None | Unset = UNSET
     input_template: Any | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
 
@@ -69,6 +71,12 @@ class WorkflowAction:
             workflow_version = UNSET
         else:
             workflow_version = self.workflow_version
+
+        version: int | None | Unset
+        if isinstance(self.version, Unset):
+            version = UNSET
+        else:
+            version = self.version
 
         input_template = self.input_template
 
@@ -87,6 +95,8 @@ class WorkflowAction:
             field_dict["kind"] = kind
         if workflow_version is not UNSET:
             field_dict["workflow_version"] = workflow_version
+        if version is not UNSET:
+            field_dict["version"] = version
         if input_template is not UNSET:
             field_dict["input_template"] = input_template
         if vault_ids is not UNSET:
@@ -112,6 +122,15 @@ class WorkflowAction:
 
         workflow_version = _parse_workflow_version(d.pop("workflow_version", UNSET))
 
+        def _parse_version(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        version = _parse_version(d.pop("version", UNSET))
+
         input_template = d.pop("input_template", UNSET)
 
         vault_ids = cast(list[str], d.pop("vault_ids", UNSET))
@@ -120,6 +139,7 @@ class WorkflowAction:
             workflow_id=workflow_id,
             kind=kind,
             workflow_version=workflow_version,
+            version=version,
             input_template=input_template,
             vault_ids=vault_ids,
         )

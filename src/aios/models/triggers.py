@@ -286,8 +286,25 @@ class WorkflowAction(BaseModel):
     kind: Literal["workflow"] = "workflow"
     workflow_id: str = Field(min_length=1)
     workflow_version: int | None = Field(default=None, ge=1)
+    version: int | None = Field(default=None, ge=1)
     input_template: Any = None  # arbitrary JSON, any type; null = no payload
     vault_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _reject_version_and_assertion(self) -> WorkflowAction:
+        # ``version`` (selector) and ``workflow_version`` (drift assertion) are
+        # orthogonal (F1): the only surface where both can be set is this trigger
+        # union, and asserting the head has not moved WHILE pinning a historical
+        # version to re-run is self-contradictory -- reject it here, at the write
+        # edge. (``WfRunCreate`` has no ``expected_version`` field, so its body
+        # needs no analogous guard.)
+        if self.version is not None and self.workflow_version is not None:
+            raise ValueError(
+                "set at most one of `version` (re-run a historical version) or "
+                "`workflow_version` (assert the current version has not drifted); "
+                "they are orthogonal and contradictory together"
+            )
+        return self
 
 
 class WorkflowActionReplace(WorkflowAction):
@@ -296,6 +313,7 @@ class WorkflowActionReplace(WorkflowAction):
     the template, or dropping vault bindings. Explicit null/[] are explicit."""
 
     workflow_version: int | None = Field(ge=1)
+    version: int | None = Field(ge=1)
     input_template: Any
     vault_ids: list[str]
 

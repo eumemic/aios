@@ -200,6 +200,16 @@ _ACTION_SCHEMA: dict[str, Any] = {
                         "and is re-asserted at each fire (drift records an error)."
                     ),
                 },
+                "version": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "description": (
+                        "Required on update — explicit null runs the current version at "
+                        "each fire; an integer is a SELECTOR re-running that specific "
+                        "historical version (script + clamped surface). Distinct from "
+                        "workflow_version (a drift assertion); setting both is rejected."
+                    ),
+                },
                 "input_template": {
                     "description": (
                         "Required on update (explicit null = no payload; at most "
@@ -217,7 +227,14 @@ _ACTION_SCHEMA: dict[str, Any] = {
                     ),
                 },
             },
-            "required": ["kind", "workflow_id", "workflow_version", "input_template", "vault_ids"],
+            "required": [
+                "kind",
+                "workflow_id",
+                "workflow_version",
+                "version",
+                "input_template",
+                "vault_ids",
+            ],
             "additionalProperties": False,
         },
     ],
