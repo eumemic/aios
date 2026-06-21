@@ -229,6 +229,96 @@ async def find_parked_servicer(
     return None
 
 
+@dataclass(frozen=True)
+class CallerInvocation:
+    """One ``call_*`` invocation a session launched, located by its caller edge (#1428).
+
+    The set-returning sibling of :func:`find_parked_servicer`: a servicer edge whose ``caller``
+    names this session and carries a ``tool_call_id`` (so it was a model-launched ``call_*``
+    park). ``request_id`` is the session-servicer's request id (``None`` for a run, which parks
+    on its terminal row). Liveness — open vs answered — is NOT decided here; the service layer
+    resolves it under one MVCC snapshot via the #1126 derive resolvers. ``opened_at`` is the
+    edge's ``created_at``.
+    """
+
+    tool_call_id: str
+    servicer_kind: NodeKind
+    servicer_id: str
+    request_id: str | None
+    opened_at: Any
+
+
+async def list_caller_invocations(
+    conn: asyncpg.Connection[Any],
+    *,
+    caller_session_id: str,
+    account_id: str,
+) -> list[CallerInvocation]:
+    """Every ``call_*`` invocation a session launched — its outbound task roster (#1428).
+
+    The set-returning sibling of :func:`find_parked_servicer`, on the same 0103 reverse-caller
+    indexes (``events_request_opened_caller_idx`` / ``wf_runs_caller_idx``: ``(account_id,
+    caller.kind, caller.id)``). One row per servicer edge whose ``caller`` is
+    ``{kind:'session', id:<this session>}`` AND carries a ``tool_call_id`` — both servicer
+    kinds (events ``request_opened`` + ``wf_runs.caller``).
+
+    The ``tool_call_id`` filter is the SAME discriminant :func:`find_parked_servicer` keys on,
+    so the point and set locators agree by construction. It also subsumes an ``awaited`` filter:
+    only the awaited ``call_*`` parks stamp a ``tool_call_id`` (the detached
+    ``create_run``/``Tell`` launches write none), so an unawaited edge can never appear here.
+    Edge-only by construction — never the broader ``children_of`` FK union, which would surface
+    detached launches that carry no park to list or stop.
+
+    This is the pure locator: it returns BOTH open and already-answered edges (events are
+    append-only). The caller (``services.invocations.list_open_invocations``) resolves liveness
+    under one snapshot and keeps only the open ones. Ordered oldest-first (``opened_at`` then
+    ``tool_call_id`` as a stable tiebreak when two share a transaction timestamp).
+    """
+    sess_rows = await conn.fetch(
+        "SELECT e.data->'caller'->>'tool_call_id' AS tool_call_id, "
+        "e.session_id AS servicer_id, e.data->>'request_id' AS request_id, "
+        "e.created_at AS opened_at FROM events e "
+        "WHERE e.account_id = $1 AND e.kind = 'lifecycle' "
+        "AND e.data->>'event' = 'request_opened' "
+        "AND e.data->'caller'->>'kind' = 'session' AND e.data->'caller'->>'id' = $2 "
+        "AND e.data->'caller'->>'tool_call_id' IS NOT NULL",
+        account_id,
+        caller_session_id,
+    )
+    out: list[CallerInvocation] = [
+        CallerInvocation(
+            tool_call_id=r["tool_call_id"],
+            servicer_kind="session",
+            servicer_id=r["servicer_id"],
+            request_id=r["request_id"],
+            opened_at=r["opened_at"],
+        )
+        for r in sess_rows
+    ]
+
+    run_rows = await conn.fetch(
+        "SELECT r.caller->>'tool_call_id' AS tool_call_id, r.id AS servicer_id, "
+        "r.created_at AS opened_at FROM wf_runs r "
+        "WHERE r.account_id = $1 "
+        "AND r.caller->>'kind' = 'session' AND r.caller->>'id' = $2 "
+        "AND r.caller->>'tool_call_id' IS NOT NULL",
+        account_id,
+        caller_session_id,
+    )
+    out.extend(
+        CallerInvocation(
+            tool_call_id=r["tool_call_id"],
+            servicer_kind="run",
+            servicer_id=r["servicer_id"],
+            request_id=None,
+            opened_at=r["opened_at"],
+        )
+        for r in run_rows
+    )
+    out.sort(key=lambda c: (c.opened_at, c.tool_call_id))
+    return out
+
+
 async def read_session_meta_batched(
     conn: asyncpg.Connection[Any],
     session_ids: list[str],

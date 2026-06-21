@@ -487,9 +487,11 @@ from .skills import (  # noqa: E402
     resolve_skill_refs,
 )
 from .trace import (  # noqa: E402
+    CallerInvocation,
     ChildNode,
     children_of,
     find_parked_servicer,
+    list_caller_invocations,
     read_run_journal_batched,
     read_run_meta_batched,
     read_session_journal_batched,
@@ -566,6 +568,7 @@ __all__ = [
     "_SESSION_ERRORED_EXPR",
     "_SESSION_STATUS_EXPR",
     "ActiveBinding",
+    "CallerInvocation",
     "ChildNode",
     "ClaimedTriggerRun",
     "EnvVarCredentialEcho",
@@ -732,6 +735,7 @@ __all__ = [
     "list_agent_versions",
     "list_agents",
     "list_attachment_paths_for_sessions",
+    "list_caller_invocations",
     "list_chat_sessions_for_connection",
     "list_child_accounts",
     "list_confirmed_unresolved_tool_calls",

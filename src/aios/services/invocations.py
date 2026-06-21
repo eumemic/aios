@@ -36,9 +36,10 @@ import asyncpg
 
 from aios.db import queries
 from aios.db.listen import open_listen_for_events, open_listen_for_run_events
+from aios.db.queries import trace as trace_q
 from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError, ValidationError
-from aios.models.invocations import AwaitResponse
+from aios.models.invocations import AwaitResponse, OpenInvocation
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun
 from aios.services.await_completion import await_completion
 
@@ -183,8 +184,9 @@ async def cancel_invocation(
     *,
     servicer_kind: ServicerKind,
     servicer_id: str,
-    request_id: str,
+    request_id: str | None,
     account_id: str,
+    canceller_session_id: str | None = None,
 ) -> None:
     """Cancel an invocation by its edge handle (cancel-design §2) — the supervisor seed.
 
@@ -199,15 +201,32 @@ async def cancel_invocation(
     and re-seeds markers on its awaited children (§2.3 — built). The **run-down** cascade —
     a cancelled run re-seeding its own children — is NOT built: a run root finalizes as a
     single node (#788/#1152), and the §9 quiescence accounting rides with it.
+
+    ``request_id`` is ``None`` for a **run** servicer (it cancels off its terminal row, not a
+    request edge — same dispatch asymmetry as :func:`await_invocation`); a **session** servicer
+    still requires it (the cancel-marker keys on the request edge). ``canceller_session_id``
+    scopes a **model**-initiated cancel (the ``stop_task`` tool): the run arm threads it into
+    ``cancel_run``'s launcher guard so a session may cancel only runs it launched. The operator
+    HTTP path leaves it ``None`` — account-scoped, unguarded — turning the run-cancel launcher
+    guard from prose-held into construction-held for the model plane.
     """
     if servicer_kind == "run":
         from aios.services import workflows as wf_service
 
         # ``cancel_run`` 404s cross-tenant, seeds the run cancel signal, and wakes the run.
-        await wf_service.cancel_run(pool, run_id=servicer_id, account_id=account_id)
+        # ``canceller_session_id`` (set on the model plane) gates it to runs that session
+        # launched; the operator path passes None (account-scoped).
+        await wf_service.cancel_run(
+            pool,
+            run_id=servicer_id,
+            account_id=account_id,
+            canceller_session_id=canceller_session_id,
+        )
         return
 
     # session: scope-check, seed the exit-marker in one txn, then wake the leaf.
+    if request_id is None:
+        raise ValidationError("cancel of a session servicer requires request_id")
     async with pool.acquire() as conn, conn.transaction():
         if await queries.read_session_watermarks(conn, servicer_id, account_id=account_id) is None:
             raise NotFoundError(f"session {servicer_id} not found", detail={"id": servicer_id})
@@ -217,3 +236,51 @@ async def cancel_invocation(
     from aios.services.wake import defer_wake
 
     await defer_wake(pool, servicer_id, cause="cancel", account_id=account_id)
+
+
+async def list_open_invocations(
+    pool: asyncpg.Pool[Any],
+    *,
+    session_id: str,
+    account_id: str,
+) -> list[OpenInvocation]:
+    """A session's still-open outbound ``call_*`` invocations — backs the ``list_tasks`` tool (#1428).
+
+    Reads the caller's whole edge roster (:func:`aios.db.queries.trace.list_caller_invocations`)
+    under one ``REPEATABLE READ`` readonly snapshot, then resolves each edge's liveness with the
+    same #1126 resolvers the trace/await paths use — ``derive_response`` for a session servicer,
+    ``derive_run_response`` for a run — and keeps only the **open** ones (``resp is None``, i.e.
+    still pending). One snapshot so the roster and the per-edge liveness can't tear (the
+    ``services.trace.get_trace`` pattern). Returns the open invocations keyed by ``tool_call_id``
+    (the handle ``stop_task`` takes), oldest-first. A point-in-time snapshot, independent of the
+    in-context ``_PENDING`` placeholders ``build_messages`` synthesizes — both converge next step.
+    """
+    async with (
+        pool.acquire() as conn,
+        conn.transaction(isolation="repeatable_read", readonly=True),
+    ):
+        edges = await trace_q.list_caller_invocations(
+            conn, caller_session_id=session_id, account_id=account_id
+        )
+        open_invocations: list[OpenInvocation] = []
+        for edge in edges:
+            if edge.servicer_kind == "session":
+                # A session servicer always carries a request_id (the request edge it answers).
+                assert edge.request_id is not None
+                resp = await queries.derive_response(
+                    conn, edge.servicer_id, account_id=account_id, request_id=edge.request_id
+                )
+            else:
+                resp = await wf_queries.derive_run_response(
+                    conn, edge.servicer_id, account_id=account_id
+                )
+            if resp is None:  # alive and unanswered → an open task
+                open_invocations.append(
+                    OpenInvocation(
+                        tool_call_id=edge.tool_call_id,
+                        kind=edge.servicer_kind,
+                        target=edge.servicer_id,
+                        opened_at=edge.opened_at,
+                    )
+                )
+    return open_invocations
