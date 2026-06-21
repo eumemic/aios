@@ -171,6 +171,64 @@ async def children_of(
     )
 
 
+async def find_parked_servicer(
+    conn: asyncpg.Connection[Any],
+    *,
+    caller_session_id: str,
+    tool_call_id: str,
+    account_id: str,
+) -> tuple[NodeKind, str, str | None, dict[str, Any] | None] | None:
+    """Resolve the servicer a session's parked ``call_*`` invocation was awaiting (#1431).
+
+    The durable counterpart of the in-memory park handle: a ``call_*`` handler stamps its
+    own ``tool_call_id`` onto the servicer's edge ``caller`` (``request_opened.data.caller``
+    for a session servicer, ``wf_runs.caller`` for a run), so crash-recovery can re-derive
+    everything ``_park_and_resolve`` needs — ``(servicer_kind, servicer_id, request_id,
+    output_schema)`` — from the edge alone. This is the same trusted "children-of by caller"
+    direction :func:`children_of` walks, narrowed to one ``tool_call_id`` and projecting the
+    per-request ``output_schema`` so the resume re-validates the answer exactly as the live
+    handler would. Returns ``None`` when no such edge exists (the launch crashed before the
+    servicer/edge was durable → recovery errors the call as retryable rather than re-parking
+    on nothing). ``request_id`` is ``None`` for a run servicer (it parks on its terminal row,
+    not a request edge).
+
+    Both lookups key on the 0103 reverse caller indexes
+    (``events_request_opened_caller_idx`` / ``wf_runs_caller_idx``: ``(account_id,
+    caller.kind, caller.id)``) and add the ``tool_call_id`` filter on top; the caller is
+    always ``kind='session'`` here (only the model-facing ``call_*`` handlers stamp a
+    ``tool_call_id``). A session servicer is preferred when — impossibly — both match.
+    """
+    sess = await conn.fetchrow(
+        "SELECT e.session_id AS id, e.data->>'request_id' AS request_id, "
+        "e.data->'output_schema' AS output_schema FROM events e "
+        "WHERE e.account_id = $1 AND e.kind = 'lifecycle' "
+        "AND e.data->>'event' = 'request_opened' "
+        "AND e.data->'caller'->>'kind' = 'session' AND e.data->'caller'->>'id' = $2 "
+        "AND e.data->'caller'->>'tool_call_id' = $3 LIMIT 1",
+        account_id,
+        caller_session_id,
+        tool_call_id,
+    )
+    if sess is not None:
+        schema = sess["output_schema"]
+        return ("session", sess["id"], sess["request_id"], parse_jsonb(schema) if schema else None)
+
+    run = await conn.fetchrow(
+        "SELECT r.id AS id, r.request_output_schema AS output_schema FROM wf_runs r "
+        "WHERE r.account_id = $1 "
+        "AND r.caller->>'kind' = 'session' AND r.caller->>'id' = $2 "
+        "AND r.caller->>'tool_call_id' = $3 LIMIT 1",
+        account_id,
+        caller_session_id,
+        tool_call_id,
+    )
+    if run is not None:
+        schema = run["output_schema"]
+        return ("run", run["id"], None, parse_jsonb(schema) if schema else None)
+
+    return None
+
+
 async def read_session_meta_batched(
     conn: asyncpg.Connection[Any],
     session_ids: list[str],

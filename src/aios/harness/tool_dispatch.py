@@ -30,7 +30,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import EllipsisType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
@@ -41,6 +41,9 @@ from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments
 from aios.tools.registry import ToolResult
+
+if TYPE_CHECKING:
+    from aios.services.invocations import ServicerKind
 
 log = get_logger("aios.harness.tool_dispatch")
 
@@ -108,11 +111,19 @@ async def _tool_lifecycle(
     account_id: str,
     log_prefix: str,
     on_exception: Callable[[str], None] | None = None,
+    write_start_span: bool = True,
 ) -> AsyncIterator[_ToolCall]:
     """Bracket a tool call with the ``tool_execute_*`` span pair plus
     try/except/finally + tail sweep (#78).  ``on_exception`` runs on
     generic ``Exception`` only — built-in passes the sandbox-eviction
     hook; MCP leaves it ``None`` because it doesn't use the sandbox.
+
+    ``write_start_span=False`` skips the ``tool_execute_*`` span pair: the
+    crash-resume re-park (:func:`_resume_parked_async`) is a pure read of durable
+    state, and a fresh ``tool_execute_start`` span would mislead a later ghost
+    classification into the side-effect-conservative "may have completed" branch
+    (the span is the only side-effect evidence ``sweep.find_and_repair_ghosts``
+    has). The dedup-guarded result append + tail sweep are still reused.
     """
     call_id = call.get("id") or "unknown"
     function = call.get("function") or {}
@@ -134,16 +145,20 @@ async def _tool_lifecycle(
     # (see the branch comment in ``sweep.find_and_repair_ghosts``).  This is
     # the conservatively-safe direction; the alternative (suppress the span
     # on cancellation) would risk under-pessimism on real side effects.
-    span_start = await sessions_service.append_event(
-        pool,
-        session_id,
-        "span",
-        {
-            "event": "tool_execute_start",
-            "tool_call_id": call_id,
-            "tool_name": name,
-        },
-        account_id=account_id,
+    span_start = (
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {
+                "event": "tool_execute_start",
+                "tool_call_id": call_id,
+                "tool_name": name,
+            },
+            account_id=account_id,
+        )
+        if write_start_span
+        else None
     )
     bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
     tc = _ToolCall(call_id=call_id, name=name, raw_args=raw_args, bound_log=bound_log)
@@ -168,19 +183,20 @@ async def _tool_lifecycle(
             pool, session_id, call_id, name, account_id=account_id, error=message
         )
     finally:
-        await sessions_service.append_event(
-            pool,
-            session_id,
-            "span",
-            {
-                "event": "tool_execute_end",
-                "tool_execute_start_id": span_start.id,
-                "tool_call_id": call_id,
-                "tool_name": name,
-                "is_error": tc.is_error,
-            },
-            account_id=account_id,
-        )
+        if span_start is not None:
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {
+                    "event": "tool_execute_end",
+                    "tool_execute_start_id": span_start.id,
+                    "tool_call_id": call_id,
+                    "tool_name": name,
+                    "is_error": tc.is_error,
+                },
+                account_id=account_id,
+            )
         await _trigger_sweep(pool, session_id, account_id=account_id)
 
 
@@ -238,24 +254,8 @@ async def _execute_tool_async(
         log_prefix="tool",
         on_exception=_evict_session_container,
     ) as tc:
-        result = await invoke_builtin(session_id, tc.name, tc.raw_args)
-        event_data: dict[str, Any] = {
-            "role": "tool",
-            "tool_call_id": tc.call_id,
-            "name": tc.name,
-        }
-        if isinstance(result, ToolResult):
-            if isinstance(result.content, (str, list)):
-                event_data["content"] = result.content
-            else:
-                event_data["content"] = json.dumps(result.content, ensure_ascii=False)
-            if result.metadata:
-                event_data["metadata"] = result.metadata
-            if result.is_error:
-                event_data["is_error"] = True
-                tc.is_error = True
-        else:
-            event_data["content"] = json.dumps(result, ensure_ascii=False)
+        result = await invoke_builtin(session_id, tc.name, tc.raw_args, tool_call_id=tc.call_id)
+        event_data = _shape_tool_result(tc, result)
         tc.bound_log.info("tool.completed")
         await _append_tool_result_event(
             pool,
@@ -264,6 +264,120 @@ async def _execute_tool_async(
             event_data,
             account_id=account_id,
             tool_parent_channel=parent_focal_at_arrival,
+        )
+
+
+def _shape_tool_result(tc: _ToolCall, result: ToolResult | dict[str, Any]) -> dict[str, Any]:
+    """Shape a handler result into a ``role:"tool"`` event payload, marking ``tc.is_error``.
+
+    Shared by the live dispatch (:func:`_execute_tool_async`) and the crash-resume re-park
+    (:func:`_resume_parked_async`) so both land an identically-shaped tool-role event.
+    """
+    event_data: dict[str, Any] = {
+        "role": "tool",
+        "tool_call_id": tc.call_id,
+        "name": tc.name,
+    }
+    if isinstance(result, ToolResult):
+        if isinstance(result.content, (str, list)):
+            event_data["content"] = result.content
+        else:
+            event_data["content"] = json.dumps(result.content, ensure_ascii=False)
+        if result.metadata:
+            event_data["metadata"] = result.metadata
+        if result.is_error:
+            event_data["is_error"] = True
+            tc.is_error = True
+    else:
+        event_data["content"] = json.dumps(result, ensure_ascii=False)
+    return event_data
+
+
+def relaunch_parked_invocation(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    call: dict[str, Any],
+    servicer_kind: ServicerKind,
+    servicer_id: str,
+    request_id: str | None,
+    output_schema: dict[str, Any] | None,
+    account_id: str,
+) -> None:
+    """Re-park a ``call_*`` invocation whose in-memory park task was lost to a worker
+    crash (#1431). Returns immediately; the resume runs as a fire-and-forget tool task.
+
+    Routed through :func:`_launch_tasks` so the resume registers in the ``TaskRegistry``
+    synchronously — a concurrent sweep then sees it in-flight (``CANDIDATE`` filter) and
+    won't double-launch. The handle ``(servicer_kind, servicer_id, request_id)`` is
+    re-derived from the durable servicer edge (``queries.find_parked_servicer``); ``call``
+    is the original assistant tool_call dict (carries the ``tool_call_id`` + name the
+    tool-role result needs).
+    """
+    _launch_tasks(
+        session_id,
+        [call],
+        lambda c: _resume_parked_async(
+            pool,
+            session_id,
+            c,
+            servicer_kind=servicer_kind,
+            servicer_id=servicer_id,
+            request_id=request_id,
+            output_schema=output_schema,
+            account_id=account_id,
+        ),
+        prefix="repark",
+    )
+
+
+async def _resume_parked_async(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    call: dict[str, Any],
+    *,
+    servicer_kind: ServicerKind,
+    servicer_id: str,
+    request_id: str | None,
+    output_schema: dict[str, Any] | None,
+    account_id: str,
+) -> None:
+    """Re-park on the servicer and append the resolved tool-role result.
+
+    Reuses :func:`_tool_lifecycle` (``write_start_span=False``) for the dedup-guarded
+    result append + tail sweep — the dedup makes a re-park that races a real result safe
+    (first commit wins). :func:`aios.tools.invoke_session._park_and_resolve` is a pure read
+    of durable state, so this is side-effect-free apart from that single result append.
+    """
+    async with _tool_lifecycle(
+        pool,
+        session_id,
+        call,
+        account_id=account_id,
+        log_prefix="repark",
+        write_start_span=False,
+    ) as tc:
+        # Imported inside the bracket (``invoke_session`` ↔ ``tool_dispatch`` import order)
+        # so even an import failure lands a tool-role error result rather than escaping the
+        # task as an unobserved exception with no result.
+        from aios.tools.invoke_session import _park_and_resolve
+
+        result = await _park_and_resolve(
+            pool,
+            servicer_kind=servicer_kind,
+            servicer_id=servicer_id,
+            request_id=request_id,
+            account_id=account_id,
+            output_schema=output_schema,
+        )
+        event_data = _shape_tool_result(tc, result)
+        tc.bound_log.info("repark.completed")
+        await _append_tool_result_event(
+            pool,
+            session_id,
+            tc.call_id,
+            event_data,
+            account_id=account_id,
         )
 
 

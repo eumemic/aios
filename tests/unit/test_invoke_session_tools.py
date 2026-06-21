@@ -221,3 +221,82 @@ async def test_invoke_workflow_output_schema_violation(monkeypatch: Any) -> None
     assert isinstance(out, ToolResult)
     assert out.is_error
     assert isinstance(out.content, str) and "output_schema_violation" in out.content
+
+
+# ─── #1431: caller tool_call_id on the edge (crash-resume link) ───────────────
+
+
+async def test_caller_carries_tool_call_id(monkeypatch: Any) -> None:
+    """The launching ``tool_call_id`` rides onto the servicer edge via ``caller`` so a
+    parked invocation can be re-derived and re-parked after a worker crash (#1431)."""
+    inv_mock = AsyncMock(return_value=_handle())
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.invocations.await_invocation",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+    await invoke_builtin(
+        _CALLER, "call_session", {"session_id": "ses_target"}, tool_call_id="tc_42"
+    )
+    assert inv_mock.await_args is not None
+    assert inv_mock.await_args.kwargs["caller"] == {
+        "kind": "session",
+        "id": _CALLER,
+        "tool_call_id": "tc_42",
+    }
+
+
+async def test_caller_omits_tool_call_id_when_unset(monkeypatch: Any) -> None:
+    """Outside a dispatched tool (no ``tool_call_id``) the caller edge stays clean — the
+    key is omitted, never written as ``null``."""
+    inv_mock = AsyncMock(return_value=_handle())
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.invocations.await_invocation",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+    await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target"})
+    assert inv_mock.await_args is not None
+    assert "tool_call_id" not in inv_mock.await_args.kwargs["caller"]
+
+
+async def test_workflow_caller_carries_tool_call_id(monkeypatch: Any) -> None:
+    """The run servicer's ``caller`` (wf_runs.caller) carries the tool_call_id too — the
+    crash-resume link is kind-uniform."""
+    run_mock = AsyncMock(return_value=SimpleNamespace(id="run_1"))
+    monkeypatch.setattr("aios.services.workflows.create_run", run_mock)
+    monkeypatch.setattr(
+        "aios.services.invocations.await_invocation",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+    await invoke_builtin(_CALLER, "call_workflow", {"workflow_id": "wf_1"}, tool_call_id="tc_7")
+    assert run_mock.await_args is not None
+    caller = run_mock.await_args.kwargs["caller"]
+    assert caller["tool_call_id"] == "tc_7"
+    assert caller["kind"] == "session" and caller["id"] == _CALLER
+    assert caller["awaited"] is True  # launch_awaited_run stamps the Ask bit
+
+
+async def test_current_tool_call_id_scoped_to_call(monkeypatch: Any) -> None:
+    """The contextvar is scoped to the handler call — ``None`` before and after."""
+    from aios.tools.invoke import current_tool_call_id
+
+    monkeypatch.setattr("aios.services.sessions.invoke", AsyncMock(return_value=_handle()))
+    monkeypatch.setattr(
+        "aios.services.invocations.await_invocation",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+    assert current_tool_call_id() is None
+    await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target"}, tool_call_id="tc_9")
+    assert current_tool_call_id() is None
+
+
+def test_parking_tool_names_match_registered() -> None:
+    """``PARKING_TOOL_NAMES`` (the sweep's resumability discriminant) must stay in lockstep
+    with the registered ``call_*`` builtins."""
+    from aios.tools.invoke_session import PARKING_TOOL_NAMES
+    from aios.tools.registry import registry
+
+    assert set(PARKING_TOOL_NAMES) == {"call_session", "call_agent", "call_workflow"}
+    for name in PARKING_TOOL_NAMES:
+        assert registry.get(name).transport == "agent_tool"
