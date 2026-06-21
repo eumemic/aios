@@ -15982,7 +15982,6 @@
                   "update_workflow",
                   "archive_workflow",
                   "unarchive_workflow",
-                  "cancel_run",
                   "resume_gate",
                   "get_workflow",
                   "list_workflows",
@@ -15992,6 +15991,8 @@
                   "call_session",
                   "call_agent",
                   "call_workflow",
+                  "stop_task",
+                  "list_tasks",
                   "skill_upsert",
                   "skill_archive"
                 ]

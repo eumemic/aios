@@ -117,6 +117,22 @@ class AwaitResponse(BaseModel):
     )
 
 
+class OpenInvocation(BaseModel):
+    """One still-open outbound ``call_*`` a session is awaiting — a ``list_tasks`` row (#1428).
+
+    The model-plane roster entry: a parked ``call_session``/``call_agent``/``call_workflow``
+    keyed by the launching ``tool_call_id`` (the same handle ``stop_task`` takes). ``kind`` is
+    the servicer kind (``session`` for ``call_session``/``call_agent``, ``run`` for
+    ``call_workflow``); ``target`` is the servicer id. Only **open** invocations are listed —
+    an answered/cancelled edge is resolved out by the service under one snapshot.
+    """
+
+    tool_call_id: str
+    kind: Literal["session", "run"]
+    target: str
+    opened_at: datetime
+
+
 # ─── cancel supervision side-table row ───────────────────────────────────────
 
 

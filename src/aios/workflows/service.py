@@ -251,8 +251,8 @@ async def create_run(
             if outstanding >= launcher_cap:
                 raise RateLimitedError(
                     f"launcher at outstanding-run cap ({outstanding}/{launcher_cap}); "
-                    "wait for runs you launched to finish or cancel one "
-                    "you no longer need (cancel_run) to free a slot",
+                    "wait for runs you launched to finish or stop one you no longer need "
+                    "(stop_task, passing its tool_call_id) to free a slot",
                     detail={"outstanding": outstanding, "max": launcher_cap},
                 )
         account_cap = settings.workflow_runs_per_account_max

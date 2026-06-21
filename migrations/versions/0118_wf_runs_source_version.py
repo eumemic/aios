@@ -36,7 +36,7 @@ copy — unchanged. Reading the script *through* the FK (and dropping
 ``wf_runs.script``) is the deferred Phase 3.
 
 Revision ID: 0118
-Revises: 0116
+Revises: 0117
 Create Date: 2026-06-21
 """
 
@@ -47,7 +47,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "0118"
-down_revision: str = "0116"
+down_revision: str = "0117"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

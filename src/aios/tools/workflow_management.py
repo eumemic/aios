@@ -9,11 +9,13 @@ already enforce, keyed on the **executing session id** the harness supplies
 * ``create_workflow`` — surface attenuation: the declared tool/server surface must
   be a subset of the *creating agent's* own.
 * ``update_workflow`` — merged-surface attenuation + an optimistic ``version`` pin.
-* ``cancel_run`` — cancel-time attenuation: a session may cancel only runs *it
-  launched* (the self-service escape for the fan-out cap; operator-launched runs
-  need the operator).
 * ``resume_gate`` — gate-resume attenuation: a session may resume only gates in
   runs *it launched*; operator-launched runs stay on the operator HTTP plane.
+
+Cancelling a run is **not** here: it is the model-facing ``stop_task`` builtin (``tools/tasks.py``),
+which cancels any awaited ``call_*`` task by its ``tool_call_id`` — a session servicer or a run —
+and threads the launcher guard (``wf_service.cancel_run``'s "only runs you launched") through
+``cancel_invocation``. The retired ``cancel_run`` model tool is fully covered by it.
 
 Launching-and-awaiting a run is **not** here: it is the unified ``call_workflow``
 builtin (the ``call_*`` family in ``tools/invoke_session.py``) — a single-shot
@@ -91,15 +93,6 @@ class _WorkflowIdArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     workflow_id: str
-
-
-class _CancelRunArgs(BaseModel):
-    """``cancel_run`` arguments — just the run id; the canceller is the trusted
-    executing session (you may cancel only runs you launched)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    run_id: str
 
 
 class _GetWorkflowArgs(_WorkflowIdArgs):
@@ -231,19 +224,6 @@ async def unarchive_workflow_handler(session_id: str, arguments: dict[str, Any])
     return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
 
 
-async def cancel_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    pool = runtime.require_pool()
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_CancelRunArgs, arguments)
-    run = await wf_service.cancel_run(
-        pool,
-        run_id=args.run_id,
-        account_id=account_id,
-        canceller_session_id=session_id,  # cancel only what this session launched
-    )
-    return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
-
-
 async def get_workflow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
@@ -351,12 +331,6 @@ UNARCHIVE_WORKFLOW_DESCRIPTION = (
     "again. If another live workflow has reclaimed the same name, unarchive is rejected; "
     "rename or archive the conflicting live workflow first."
 )
-CANCEL_RUN_DESCRIPTION = (
-    "Cancel a run YOU launched (you cannot cancel runs launched by others or by the "
-    "operator). The run finalizes 'cancelled' on its next wake — usually within moments "
-    "— freeing one of your outstanding-run slots once it does. Idempotent: an "
-    "already-finished run is returned unchanged."
-)
 GET_WORKFLOW_DESCRIPTION = (
     "Fetch one of your workflows in full by id — including its 'script' and current "
     "'version'. Use this to re-read a workflow before retrying an update_workflow whose "
@@ -422,13 +396,6 @@ def _register() -> None:
         description=UNARCHIVE_WORKFLOW_DESCRIPTION,
         parameters_schema=_WorkflowIdArgs.model_json_schema(),
         handler=unarchive_workflow_handler,
-        transport="agent_tool",
-    )
-    registry.register(
-        name="cancel_run",
-        description=CANCEL_RUN_DESCRIPTION,
-        parameters_schema=_CancelRunArgs.model_json_schema(),
-        handler=cancel_run_handler,
         transport="agent_tool",
     )
     registry.register(
