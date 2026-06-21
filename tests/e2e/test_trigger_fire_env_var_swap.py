@@ -82,7 +82,7 @@ _SWAP_SECRET = "ghp_TRIGGER_SWAP_FIRED_REAL_SECRET_DO_NOT_LEAK"
 # chokepoint. The body is written to /tmp (never stdout) so the recorder's
 # echo, not the swapped header, is all that could surface in the audit trail.
 _SWAP_COMMAND = (
-    f'curl -sS --max-time 25 -o /tmp/body '
+    f"curl -sS --max-time 25 -o /tmp/body "
     f'-H "Authorization: Bearer ${_SECRET_NAME}" '
     f"https://{_SWAP_HOST}/trigger-swap-probe"
 )
@@ -195,9 +195,7 @@ async def _provision_swap_session_and_trigger(
         session.id,
         TriggerCreate(
             name=f"swap-{name}"[:64].replace("-", "_"),
-            source=OneShotSource(
-                kind="one_shot", fire_at=datetime.now(UTC) - timedelta(seconds=1)
-            ),
+            source=OneShotSource(kind="one_shot", fire_at=datetime.now(UTC) - timedelta(seconds=1)),
             action=SandboxCommandAction(kind="sandbox_command", command=_SWAP_COMMAND),
         ),
         account_id=_ACCOUNT_ID,
@@ -235,9 +233,7 @@ async def _assert_trigger_swap_fired(
     # The one-shot failure path surfaces a synthetic wake on the owning session
     # via the stimulate spine; patch its defer out (no worker is running) so the
     # fire's own dispatch is what's under test, not the wake plumbing.
-    with mock.patch(
-        "aios.harness.trigger_runner.sessions_service.stimulate", new=AsyncMock()
-    ):
+    with mock.patch("aios.harness.trigger_runner.sessions_service.stimulate", new=AsyncMock()):
         # tick fire: no trigger_run_id (one-shot due tick, not an event carrier).
         await run_trigger_step(trigger_id)
 
