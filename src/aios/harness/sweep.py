@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 from aios.config import get_settings
 from aios.db.queries import (
     confirmed_unresolved_predicate,
+    find_parked_servicer,
     list_session_ids_with_unharvested_cancel_marker,
     parse_jsonb,
     session_active_predicate,
@@ -295,7 +296,7 @@ async def find_and_repair_ghosts(
     *,
     session_id: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Find ghost tool calls and append synthetic error results.
+    """Recover ghost tool calls: re-park resumable invocations, error-repair the rest.
 
     A ghost is a tool_call_id from an assistant message where:
 
@@ -304,6 +305,15 @@ async def find_and_repair_ghosts(
     - The harness would have dispatched the tool (i.e. it's not a
       custom tool or an unconfirmed ``always_ask`` tool still waiting
       for client action).
+
+    A ghost whose tool is a parking ``call_*`` builtin (``PARKING_TOOL_NAMES``) is a
+    **pure-await** that crash-recovery RE-PARKS rather than error-repairs (#1431): its
+    servicer is re-derived from the durable edge (:func:`queries.find_parked_servicer`) and
+    a fresh resume task is launched (a pure read of durable state) so the servicer's
+    exactly-once answer lands in the original tool result. Only a resumable ghost whose edge
+    is absent — the launch crashed before it was durable — falls through to a retryable
+    ``launch_lost`` error. Every other ghost keeps the side-effect-conservative
+    error-repair below.
 
     Plus a second, age-bounded category — **abandoned client-side tool
     calls** (#752). A *client-result-pending* call (the non-MCP,
@@ -452,6 +462,65 @@ async def find_and_repair_ghosts(
             # to wait on the user.
             abandoned.append(c)
 
+    # #1431: a parked ``call_*`` ghost is a PURE-AWAIT, not a side-effectful tool — its
+    # servicer is still running and will answer exactly once. Re-derive the servicer from
+    # the durable edge (the ``tool_call_id`` the handler stamped onto ``caller``) and
+    # RE-PARK it (a pure read), so the answer lands in the original tool result instead of
+    # being orphaned by a synthetic error. Only when no edge exists (the launch crashed
+    # before it was durable) does the call fall through to a retryable ``launch_lost`` error.
+    # Lazy imports: ``sweep`` ↔ ``tool_dispatch`` is a mutual-lazy-import pair (the
+    # symmetric counterpart of ``_trigger_sweep``'s lazy ``sweep`` import); ``invoke_session``
+    # registers tools at import and isn't needed at ``sweep`` module load.
+    from aios.harness.tool_dispatch import relaunch_parked_invocation
+    from aios.tools.invoke_session import PARKING_TOOL_NAMES
+
+    resumable = [c for c in ghosts if c.tool_name in PARKING_TOOL_NAMES]
+    ghosts = [c for c in ghosts if c.tool_name not in PARKING_TOOL_NAMES]
+    launch_lost: list[_Candidate] = []
+    for c in resumable:
+        # Per-ghost isolation, matching the error-repair + wake-defer loops below: this
+        # runs cross-session (boot sweep), so one gone caller (``NotFoundError`` from
+        # ``load_session_account_id``) or a transient DB error must NOT abort recovery of
+        # the other tenants' ghosts. A gone caller has nothing to resume → log + skip.
+        try:
+            c_account_id = await sessions_service.load_session_account_id(pool, c.session_id)
+            async with pool.acquire() as conn:
+                handle = await find_parked_servicer(
+                    conn,
+                    caller_session_id=c.session_id,
+                    tool_call_id=c.tool_call_id,
+                    account_id=c_account_id,
+                )
+            if handle is None:
+                launch_lost.append(c)
+                continue
+            servicer_kind, servicer_id, request_id, output_schema = handle
+            relaunch_parked_invocation(
+                pool,
+                c.session_id,
+                call={
+                    "id": c.tool_call_id,
+                    "function": {"name": c.tool_name, "arguments": c.arguments},
+                },
+                servicer_kind=servicer_kind,
+                servicer_id=servicer_id,
+                request_id=request_id,
+                output_schema=output_schema,
+                account_id=c_account_id,
+            )
+        except Exception:
+            log.exception(
+                "sweep.repark_failed", session_id=c.session_id, tool_call_id=c.tool_call_id
+            )
+            continue
+        log.info(
+            "sweep.invocation_reparked",
+            session_id=c.session_id,
+            tool_call_id=c.tool_call_id,
+            servicer_kind=servicer_kind,
+            servicer_id=servicer_id,
+        )
+
     # ``tool_execute_start`` span presence per (session, tcid) — drives the
     # two-branch recovery message below (#685).  Tcids missing from this set
     # never reached the lifecycle body, so the tool definitely did not run;
@@ -516,6 +585,18 @@ async def find_and_repair_ghosts(
                 f"Tool call abandoned: the client returned no result within "
                 f"{client_max_age}s. The client is no longer connected; do not "
                 f"wait for this result.",
+            )
+        )
+    for c in launch_lost:
+        # #1431: a resumable ``call_*`` ghost with no servicer edge — the launch crashed
+        # before the request reached a servicer, so nothing is running to await. Safe to
+        # retry (no servicer was created or served), unlike the may-have-completed branch.
+        repair_items.append(
+            (
+                c,
+                "launch_lost",
+                "The invocation did not start before the worker restarted; "
+                "nothing was launched. You may retry.",
             )
         )
 

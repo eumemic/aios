@@ -489,6 +489,7 @@ from .skills import (  # noqa: E402
 from .trace import (  # noqa: E402
     ChildNode,
     children_of,
+    find_parked_servicer,
     read_run_journal_batched,
     read_run_meta_batched,
     read_session_journal_batched,
@@ -643,6 +644,7 @@ __all__ = [
     "fetch_and_claim_due_triggers",
     "fetch_next_trigger_event",
     "finalize_trigger_run",
+    "find_parked_servicer",
     "find_tool_confirmed_event",
     "find_tool_result_event",
     "gc_snapshot_session_states",

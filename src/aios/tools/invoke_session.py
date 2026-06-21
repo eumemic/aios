@@ -34,20 +34,17 @@ rejected before the handler runs.
 
 All register ``transport="agent_tool"`` (model-only; the CLI broker refuses them).
 
-**Crash recovery = ghost-repair, not re-dispatch.** The request edge is written
-*before* the park, so it is durable; the fire-and-forget tool task is not. On a worker
-crash mid-park the harness does NOT re-run the handler — there is no builtin re-dispatch
-path (only ``always_ask``-confirmed tools are re-dispatched). Instead the periodic
-ghost-repair sweep resolves the lost ``tool_call_id`` to a synthetic *may-have-completed*
-error ("the tool may have completed and side effects may have committed; verify before
-retrying"), because the ``tool_execute_start`` span had committed and the target may in
-fact have been serviced. The servicer's response is still written exactly-once and
-durably, but it is *orphaned* for the crashed caller's ``request_id`` — nothing harvests
-it back into the now-errored tool result. A *second* request edge appears only if the
-**model** retries (its own decision on seeing the error), never from a harness re-dispatch.
-Single-shot is the per-call contract, not a crash-exactly-once guarantee. Deterministic
-request-id keying (call-key dedup, as the workflow ``agent()`` path does) is a future
-hardening, not v1 scope.
+**Crash recovery = re-park, not error (#1431).** The request edge is written *before* the
+park and carries the launching ``tool_call_id`` on its ``caller`` (via :func:`_caller`), so
+the caller↔servicer link is durable; only the fire-and-forget park task is lost on a worker
+crash. The harness does NOT re-run the handler (no builtin re-dispatch path) — instead the
+ghost-repair sweep re-derives the servicer from that edge
+(``queries.find_parked_servicer``) and **re-parks** the lost ``tool_call_id`` via
+:func:`_park_and_resolve`: a pure read of durable state that re-attaches to the servicer's
+exactly-once response and lands the original tool result. If the launch crashed *before* its
+edge was durable, no servicer is found and the call resolves to a retryable error instead. A
+*second* request edge appears only if the **model** retries that error — never from a harness
+re-dispatch. Single-shot is the per-call contract.
 """
 
 from __future__ import annotations
@@ -64,7 +61,7 @@ from aios.models.invocations import AwaitResponse
 from aios.services import invocations as invocations_service
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
-from aios.tools.invoke import ToolBail
+from aios.tools.invoke import ToolBail, current_tool_call_id
 from aios.tools.registry import ToolResult, registry
 
 # Per-park await budget. The tool task is fire-and-forget (implicit-async), so a
@@ -203,6 +200,53 @@ async def _park_on_invocation(
             return resp
 
 
+async def _park_and_resolve(
+    pool: Any,
+    *,
+    servicer_kind: invocations_service.ServicerKind,
+    servicer_id: str,
+    request_id: str | None,
+    account_id: str,
+    output_schema: dict[str, Any] | None,
+) -> dict[str, Any] | ToolResult:
+    """Park on the servicer, then resolve to a model-visible ``{ok | error}``.
+
+    The shared tail of every ``call_*`` handler AND the crash-resume path
+    (:func:`aios.harness.tool_dispatch.relaunch_parked_invocation`). It is a **pure read**
+    of durable state — re-entrant, so re-parking after a worker restart re-reads the same
+    servicer edge with zero side effects; the resolved tool result is the only write it
+    drives. ``output_schema`` is validated caller-side (a run/peer answer can bypass the
+    servicer's own ``return`` gate).
+    """
+    resp = await _park_on_invocation(
+        pool,
+        servicer_kind=servicer_kind,
+        servicer_id=servicer_id,
+        request_id=request_id,
+        account_id=account_id,
+    )
+    if resp.outcome != "ok":
+        return _error_result(resp.error)
+    violation = _validate_output(resp.result, output_schema)
+    return violation if violation is not None else _ok_result(resp.result)
+
+
+def _caller(session_id: str) -> dict[str, Any]:
+    """Trusted caller provenance for a model-launched invocation: THIS session's id plus
+    the launching ``tool_call_id`` (#1431).
+
+    The ``tool_call_id`` rides onto the servicer's edge ``caller`` so a parked invocation
+    can be re-derived from durable state and re-parked after a worker restart
+    (``queries.find_parked_servicer``). Omitted (not written as ``null``) when no tool
+    context is set — e.g. a non-dispatch caller — keeping the edge clean.
+    """
+    caller: dict[str, Any] = {"kind": "session", "id": session_id}
+    tool_call_id = current_tool_call_id()
+    if tool_call_id is not None:
+        caller["tool_call_id"] = tool_call_id
+    return caller
+
+
 # ─── handlers ────────────────────────────────────────────────────────────────
 
 
@@ -221,19 +265,16 @@ async def call_session_handler(
         target=args.session_id,
         input=args.input,
         output_schema=args.output_schema,
-        caller={"kind": "session", "id": session_id},
+        caller=_caller(session_id),
     )
-    resp = await _park_on_invocation(
+    return await _park_and_resolve(
         pool,
         servicer_kind="session",
         servicer_id=handle.servicer_id,
         request_id=handle.request_id,
         account_id=account_id,
+        output_schema=args.output_schema,
     )
-    if resp.outcome != "ok":
-        return _error_result(resp.error)
-    violation = _validate_output(resp.result, args.output_schema)
-    return violation if violation is not None else _ok_result(resp.result)
 
 
 async def call_agent_handler(
@@ -255,19 +296,16 @@ async def call_agent_handler(
         output_schema=args.output_schema,
         environment_id=session.environment_id,
         crypto_box=runtime.require_crypto_box(),
-        caller={"kind": "session", "id": session_id},
+        caller=_caller(session_id),
     )
-    resp = await _park_on_invocation(
+    return await _park_and_resolve(
         pool,
         servicer_kind="session",
         servicer_id=handle.servicer_id,
         request_id=handle.request_id,
         account_id=account_id,
+        output_schema=args.output_schema,
     )
-    if resp.outcome != "ok":
-        return _error_result(resp.error)
-    violation = _validate_output(resp.result, args.output_schema)
-    return violation if violation is not None else _ok_result(resp.result)
 
 
 async def call_workflow_handler(
@@ -285,27 +323,31 @@ async def call_workflow_handler(
         workflow_id=args.workflow_id,
         environment_id=session.environment_id,
         input=args.input,
-        caller={"kind": "session", "id": session_id},
+        caller=_caller(session_id),
         output_schema=args.output_schema,
         launcher_session_id=session_id,
         parent_run_id=session.parent_run_id,
         vault_ids=args.vault_ids,
         budget_usd=args.budget_usd,
     )
-    resp = await _park_on_invocation(
+    return await _park_and_resolve(
         pool,
         servicer_kind="run",
         servicer_id=run.id,
         request_id=None,
         account_id=account_id,
+        output_schema=args.output_schema,
     )
-    if resp.outcome != "ok":
-        return _error_result(resp.error)
-    violation = _validate_output(resp.result, args.output_schema)
-    return violation if violation is not None else _ok_result(resp.result)
 
 
 # ─── descriptions + registration ─────────────────────────────────────────────
+
+# The model-facing parking builtins: a ``call_*`` tool whose handler parks
+# (:func:`_park_and_resolve`) on a servicer and is therefore a **pure-await** —
+# safe to re-park on crash-recovery rather than error-repair (#1431). The
+# ghost-repair sweep uses this set as the resumability discriminant; it MUST stay
+# in lockstep with the names registered in :func:`_register` below.
+PARKING_TOOL_NAMES = frozenset({"call_session", "call_agent", "call_workflow"})
 
 CALL_SESSION_DESCRIPTION = (
     "Call an existing same-account session: deliver `input` to it as a trusted "

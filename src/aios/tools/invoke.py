@@ -16,12 +16,29 @@ decides what to do with them (log + sandbox eviction on the model path;
 
 from __future__ import annotations
 
+import contextvars
 import json
 from typing import Any
 
 import jsonschema
 
 from aios.tools.registry import ToolNotFoundError, ToolResult, registry
+
+# The id of the tool_call the running handler is servicing, scoped per tool task.
+# Set by :func:`invoke_builtin` around the handler call on the model dispatch path
+# (the sandbox CLI broker and any caller that omits ``tool_call_id`` leave it ``None``).
+# The parking ``call_*`` handlers read it via :func:`current_tool_call_id` to stamp their
+# own ``tool_call_id`` onto the servicer edge, so a parked invocation can be re-derived and
+# re-parked after a worker restart (#1431) — a builtin's only honest channel to its call id,
+# which the ``(session_id, arguments)`` handler signature deliberately doesn't carry.
+_CURRENT_TOOL_CALL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_tool_call_id", default=None
+)
+
+
+def current_tool_call_id() -> str | None:
+    """The id of the tool_call the current handler is servicing, or ``None`` outside one."""
+    return _CURRENT_TOOL_CALL_ID.get()
 
 
 class ToolBail(Exception):
@@ -84,6 +101,8 @@ async def invoke_builtin(
     session_id: str,
     tool_name: str,
     raw_arguments: Any,
+    *,
+    tool_call_id: str | None = None,
 ) -> ToolResult | dict[str, Any]:
     """Run a built-in tool: parse args, look up the handler, validate, call.
 
@@ -96,6 +115,10 @@ async def invoke_builtin(
     Does NOT append events, trigger the sweep, or touch sandbox state.
     The model path wraps this with ``_tool_lifecycle`` + event append +
     sweep; the CLI broker wraps with HTTP response serialisation.
+
+    ``tool_call_id`` (model dispatch path) is exposed to the handler for the
+    duration of the call via :func:`current_tool_call_id` — the parking ``call_*``
+    handlers read it to stamp the servicer edge for crash-resume (#1431).
     """
     arguments = parse_arguments(raw_arguments)
     if arguments is None:
@@ -107,4 +130,8 @@ async def invoke_builtin(
     schema_error = validate_arguments(arguments, tool.parameters_schema)
     if schema_error is not None:
         raise ToolBail(schema_error)
-    return await tool.handler(session_id, arguments)
+    token = _CURRENT_TOOL_CALL_ID.set(tool_call_id)
+    try:
+        return await tool.handler(session_id, arguments)
+    finally:
+        _CURRENT_TOOL_CALL_ID.reset(token)
