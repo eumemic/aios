@@ -522,16 +522,30 @@ class TestPrewarmBake:
 
     def test_egress_ca_already_in_trust_store(self, prewarm_image: str) -> None:
         """The CA is baked into the trust store, so the cold-start CA exec is
-        genuinely redundant for a container started from the prewarm image."""
+        genuinely redundant for a container started from the prewarm image.
+
+        ``update-ca-certificates`` concatenates the raw PEM (DER base64) into
+        the aggregate bundle WITHOUT a human-readable subject comment, so the
+        CA's CN never appears as plaintext there. Match instead on a unique
+        line of the cert's own base64 body, which IS appended verbatim to the
+        bundle — that is the real "the CA is in the trust store" signal.
+        """
+        # Pick a distinctive interior base64 line of the test CA (skip the
+        # PEM armor lines) and assert it is present in the aggregate bundle.
+        body_lines = [
+            ln.strip() for ln in _TEST_CA_PEM.splitlines() if ln.strip() and "-----" not in ln
+        ]
+        assert body_lines, f"test CA PEM has no body lines: {_TEST_CA_PEM!r}"
+        needle = body_lines[len(body_lines) // 2]
         result = _docker_run(
             prewarm_image,
             "grep",
-            "-l",
-            "aios-prewarm-test-ca",
+            "-qF",
+            needle,
             "/etc/ssl/certs/ca-certificates.crt",
             timeout=30,
         )
-        # grep -l prints the filename on a match; a baked CA ⇒ rc 0.
+        # grep -qF: fixed-string match of the cert body ⇒ rc 0 when baked.
         assert result.returncode == 0, (
             "egress CA not found in the prewarm image trust store: "
             f"stdout={result.stdout!r} stderr={result.stderr!r}"
