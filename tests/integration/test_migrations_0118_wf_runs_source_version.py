@@ -1,4 +1,4 @@
-"""Migration 0117 adds ``wf_runs.source_version`` + the strict composite FK to
+"""Migration 0118 adds ``wf_runs.source_version`` + the strict composite FK to
 ``workflow_versions`` (Phase 2 of 3).
 
 Covers the load-bearing halves:
@@ -89,8 +89,8 @@ def test_backfill_sets_unambiguous_and_leaves_ambiguous_null(postgres: object) -
     assert up.returncode == 0, f"upgrade to 0116 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _SEED_SQL))
 
-    up = _run_alembic(["upgrade", "0117"], db_url)
-    assert up.returncode == 0, f"upgrade to 0117 failed:\n{up.stderr}\n{up.stdout}"
+    up = _run_alembic(["upgrade", "0118"], db_url)
+    assert up.returncode == 0, f"upgrade to 0118 failed:\n{up.stderr}\n{up.stdout}"
 
     rows = asyncio.run(_fetch(db_url, "SELECT id, source_version FROM wf_runs ORDER BY id"))
     by_id = {r["id"]: r["source_version"] for r in rows}
@@ -105,8 +105,8 @@ def test_backfill_sets_unambiguous_and_leaves_ambiguous_null(postgres: object) -
 def test_composite_fk_rejects_dangling_pointer(postgres: object) -> None:
     db_url = _alembic_url(postgres)
 
-    up = _run_alembic(["upgrade", "0117"], db_url)
-    assert up.returncode == 0, f"upgrade to 0117 failed:\n{up.stderr}\n{up.stdout}"
+    up = _run_alembic(["upgrade", "0118"], db_url)
+    assert up.returncode == 0, f"upgrade to 0118 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _SEED_SQL))
 
     # A run pointing at a version that does not exist (v99) must be rejected by
@@ -143,7 +143,7 @@ def test_composite_fk_rejects_dangling_pointer(postgres: object) -> None:
 def test_downgrade_drops_column_and_constraint(postgres: object) -> None:
     db_url = _alembic_url(postgres)
 
-    assert _run_alembic(["upgrade", "0117"], db_url).returncode == 0
+    assert _run_alembic(["upgrade", "0118"], db_url).returncode == 0
     down = _run_alembic(["downgrade", "0116"], db_url)
     assert down.returncode == 0, f"downgrade failed:\n{down.stderr}\n{down.stdout}"
 
