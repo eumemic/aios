@@ -218,9 +218,13 @@ async def test_cancel_run_via_invocation_endpoint(http_client: httpx.AsyncClient
     assert (
         await http_client.post(cancel_url, params={"request_id": "operator"})
     ).status_code == 202
-    # Unknown + cross-tenant both 404.
+    # Unknown + cross-tenant both 404. (Well-formed but nonexistent run id — a malformed
+    # id would 422 on the unified endpoint's servicer-kind parse before the not-found check.)
+    unknown_run = "wfr_00000000000000000000000000"
     assert (
-        await http_client.post("/v1/invocations/wfr_nope/cancel", params={"request_id": "operator"})
+        await http_client.post(
+            f"/v1/invocations/{unknown_run}/cancel", params={"request_id": "operator"}
+        )
     ).status_code == 404
     key_b = await _mint_tenant(http_client, f"tenant-b-{_uniq()}")
     cross = await http_client.post(
