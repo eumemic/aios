@@ -41,8 +41,6 @@ BuiltinToolType = Literal[
     "update_workflow",
     "archive_workflow",
     "unarchive_workflow",
-    "create_run",
-    "await_run",
     "cancel_run",
     "resume_gate",
     "get_workflow",
@@ -50,11 +48,11 @@ BuiltinToolType = Literal[
     "get_run",
     "list_runs",
     "list_run_events",
+    "call_session",
+    "call_agent",
+    "call_workflow",
     "skill_upsert",
     "skill_archive",
-    "invoke",
-    "invoke_agent",
-    "invoke_workflow",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled
@@ -77,6 +75,22 @@ ToolTransport = Literal["cli", "agent_tool", "both"]
 HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
+
+# Read-tolerance for the #1419 invoke*→call_* rename. Agent/workflow/run/session rows
+# persisted before the rename carry these pre-rename builtin tool names in their `tools`
+# JSONB; without a map they'd fail `ToolSpec` validation on read (a deploy-breaker —
+# every agent that exposed workflow-launch/session-invoke to its model would 500). The
+# `mode="before"` validator below maps them so old rows still load; the two-step
+# create_run/await_run launch tools fold into the unified `call_workflow`. The data
+# migration (0116) rewrites the persisted rows to canonical; once it has run everywhere
+# this map + the validator can be removed (teardown tracked: #1432).
+_LEGACY_BUILTIN_RENAMES: dict[str, str] = {
+    "invoke": "call_session",
+    "invoke_agent": "call_agent",
+    "invoke_workflow": "call_workflow",
+    "create_run": "call_workflow",
+    "await_run": "call_workflow",
+}
 
 # Header names the MCP streamable-http transport authors on every request
 # (see ``mcp.client.streamable_http._prepare_headers``). A spec header named
@@ -438,6 +452,24 @@ class ToolSpec(BaseModel):
     mcp_server_name: str | None = None
     default_config: McpToolsetConfig | None = None
     configs: list[McpToolConfig] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _map_legacy_builtin_names(cls, data: Any) -> Any:
+        """Map pre-#1419-rename builtin tool names to canonical ones (read-tolerance).
+
+        Runs before field validation so a row persisted with a legacy ``type``
+        (``invoke``/``invoke_agent``/``invoke_workflow``/``create_run``/``await_run``)
+        still validates against the post-rename ``BuiltinToolType`` Literal. The
+        ``create_run``/``await_run`` collapse to ``call_workflow`` is deduped at the list
+        level (``to_openai_tools`` + migration 0116), not here. Temporary shim — remove
+        once 0116 has rewritten all persisted rows. See :data:`_LEGACY_BUILTIN_RENAMES`.
+        """
+        if isinstance(data, dict):
+            t = data.get("type")
+            if isinstance(t, str) and t in _LEGACY_BUILTIN_RENAMES:
+                data = {**data, "type": _LEGACY_BUILTIN_RENAMES[t]}
+        return data
 
     @model_validator(mode="after")
     def _check_type_fields(self) -> ToolSpec:

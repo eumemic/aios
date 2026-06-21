@@ -1,13 +1,13 @@
-"""``invoke_workflow()`` — the run-caller surface (#1129) + the run-side
-``request_response`` answer edge (#1126), end to end against a real Postgres.
+"""``invoke_workflow()`` — the run-caller surface (#1129), end to end against a
+real Postgres.
 
 A workflow run invoking another workflow as a sub-run is the run dual of
 ``agent()``: the parent suspends on a journaled ``call_started`` carrying a
-DETERMINISTIC ``child_run_id``; the sub-run completes and emits a
-``request_response`` keyed on the inbound ``request_id``; the parent's next step
-resolves that answer through ``derive_run_response`` and fast-forwards it into
-the ``await``. These tests drive the harvest manually (``run_workflow_step``),
-reusing ``test_wf_step``'s runtime fixture.
+DETERMINISTIC ``child_run_id``; the sub-run completes and its terminal record
+(``run_completed`` + ``status``) IS the answer; the parent's next step resolves it
+through ``derive_run_response`` and fast-forwards it into the ``await`` (§3.6 — no
+separate ``request_response`` event). These tests drive the harvest manually
+(``run_workflow_step``), reusing ``test_wf_step``'s runtime fixture.
 """
 
 from __future__ import annotations
@@ -104,8 +104,8 @@ _PARENT = (
 async def test_invoke_workflow_happy_path_spawns_and_harvests(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
-    """Parent suspends on ``call_started`` → sub-run completes + emits
-    ``request_response`` → parent's next step harvests the answer and completes."""
+    """Parent suspends on ``call_started`` → sub-run completes → parent's next step
+    harvests the sub-run's terminal answer (via ``derive_run_response``) and completes."""
     pool = wf_runtime
     child_wf = await _insert_workflow(
         pool, "child", "async def main(input):\n    return input['n'] + 1\n"
@@ -129,20 +129,66 @@ async def test_invoke_workflow_happy_path_spawns_and_harvests(
     sub = await _run(pool, sub_run_id)
     assert sub.parent_run_id == run_id
     assert sub.request_id == cs.call_key
-    assert sub.caller == {"kind": "run", "id": run_id}
+    assert sub.caller == {"kind": "run", "id": run_id, "awaited": True}
 
-    # Step 2: drive the sub-run to completion; it emits request_response.
+    # Step 2: drive the sub-run to completion. Its terminal record (run_completed +
+    # status) IS the answer — no separate request_response event (§3.6).
     await run_workflow_step(sub_run_id)
     sub = await _run(pool, sub_run_id)
     assert sub.status == "completed" and sub.output == 42
     sub_types = [t for t, _ in await _events(pool, sub_run_id)]
-    assert "request_response" in sub_types
+    assert "request_response" not in sub_types and "run_completed" in sub_types
 
     # Step 3: parent harvests the answer and completes.
     await run_workflow_step(run_id)
     parent = await _run(pool, run_id)
     assert parent.status == "completed"
     assert parent.output == {"got": 42}
+
+
+async def test_cancelled_sub_run_wakes_its_parent_via_child_done(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A cancelled sub-run writes a durable ``child_done`` into its PARENT's signals (6d).
+
+    ``invoke_workflow`` maps to NULL in the staleness sweep CASE, so a parked parent has NO
+    backstop other than this explicit signal — without it (the 6b gap) a cancelled sub-run
+    stranded its parent forever. The signal makes the parent sweep-visible (durable wake),
+    and the harvested outcome is ``cancelled`` (the await raises, erroring the parent script).
+    """
+    pool = wf_runtime
+    child_wf = await _insert_workflow(pool, "child", "async def main(input):\n    return 1\n")
+    parent_wf = await _insert_workflow(pool, "parent", _PARENT)
+    run_id = await _make_run(pool, parent_wf, input={"wf": child_wf, "n": 1})
+    await run_workflow_step(run_id)  # parent spawns the sub-run and suspends
+    async with pool.acquire() as conn:
+        cs = next(
+            e for e in await wf_queries.list_run_events(conn, run_id) if e.type == "call_started"
+        )
+    sub_run_id = cs.payload["child_run_id"]
+
+    # Cancel the sub-run, then drive its terminal step (harvests the cancel → cancelled).
+    async with pool.acquire() as conn:
+        await wf_queries.insert_run_signal(
+            conn, run_id=sub_run_id, call_key=wf_queries.CANCEL_SIGNAL_CALL_KEY, kind="cancel"
+        )
+    await run_workflow_step(sub_run_id)
+    sub = await _run(pool, sub_run_id)
+    assert sub.status == "cancelled"
+
+    async with pool.acquire() as conn:
+        signals = await wf_queries.list_run_signals(conn, run_id)
+        assert any(s.kind == "child_done" and s.call_key == sub.request_id for s in signals)
+        # The unharvested child_done makes the parent sweep-visible (the durable backstop).
+        needing = await wf_queries.list_run_ids_needing_step(
+            conn, agent_deadline_seconds=999, tool_stale_seconds=999
+        )
+        assert run_id in needing
+
+    # The parent, when stepped, harvests ``cancelled`` — the await raises, erroring the script.
+    await run_workflow_step(run_id)
+    parent = await _run(pool, run_id)
+    assert parent.status == "errored"
 
 
 async def test_invoke_workflow_deterministic_reattach_on_replay(

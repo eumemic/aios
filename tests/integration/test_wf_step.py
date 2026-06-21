@@ -35,6 +35,7 @@ from aios.models.sessions import Session
 from aios.models.vaults import VaultCredentialCreate
 from aios.models.workflows import WfRunStatus
 from aios.services import agents as agents_service
+from aios.services import invocations as invocations_service
 from aios.services import sessions as sessions_service
 from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
@@ -106,9 +107,11 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
         )
 
 
-async def _make_run(pool: asyncpg.Pool[Any], script: str, *, input: Any = None) -> str:
+async def _make_run(
+    pool: asyncpg.Pool[Any], script: str, *, input: Any = None, name: str = "w"
+) -> str:
     async with pool.acquire() as conn:
-        wf = await wf_queries.insert_workflow(conn, account_id="acc_wf", name="w", script=script)
+        wf = await wf_queries.insert_workflow(conn, account_id="acc_wf", name=name, script=script)
     run = await service.create_run(
         pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", input=input
     )
@@ -230,8 +233,12 @@ async def test_create_child_session_idempotent(
     assert user_msgs == 1
     from aios.db.queries import parse_jsonb
 
+    # The display blob carries the correlation id; the trusted caller is on the edge.
     request = parse_jsonb(req["data"])["metadata"]["request"]
-    assert request["request_id"] == "sha:x#0" and request["caller"] == {"kind": "run", "id": run_id}
+    assert request["request_id"] == "sha:x#0"
+    async with pool.acquire() as conn:
+        caller = await db_queries.get_request_caller(conn, cid, request_id="sha:x#0")
+    assert caller == {"kind": "run", "id": run_id}
 
 
 async def test_child_session_origin_and_parent_round_trip(
@@ -1746,7 +1753,7 @@ async def _activity_turn(pool: asyncpg.Pool[Any], session_id: str) -> None:
     # The guard appends the assistant event and short-circuits (tool_calls present
     # -> never idle, no nudge). The tool result then balances the open count.
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, session_id, assistant, account_id="acc_wf", parent_run_id=None
+        pool, session_id, assistant, account_id="acc_wf"
     )
     assert not result.nudged  # an activity turn is never nudged
     async with pool.acquire() as conn:
@@ -1770,7 +1777,7 @@ async def test_idle_with_open_request_is_nudged(
 
     assistant = await _idle_assistant_turn(pool, cid)
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, assistant, account_id="acc_wf", parent_run_id=_run_id
+        pool, cid, assistant, account_id="acc_wf"
     )
     assert result.nudged and result.autoerror_caller_run_id is None
 
@@ -1815,7 +1822,7 @@ async def test_tell_spawned_child_reaches_idle_with_zero_nudges(
 
     assistant = await _idle_assistant_turn(pool, cid)
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, assistant, account_id="acc_wf", parent_run_id=run_id
+        pool, cid, assistant, account_id="acc_wf"
     )
     assert not result.nudged and result.autoerror_caller_run_id is None  # no nudge, no auto-error
 
@@ -1852,7 +1859,7 @@ async def test_quiescence_guard_is_noop_for_non_child(
     )
     assistant = await _idle_assistant_turn(pool, fg.id)
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, fg.id, assistant, account_id="acc_wf", parent_run_id=None
+        pool, fg.id, assistant, account_id="acc_wf"
     )
     assert not result.nudged and result.autoerror_caller_run_id is None
     async with pool.acquire() as conn:
@@ -1882,14 +1889,13 @@ async def test_open_request_is_auto_errored_after_nudge_budget(
             cid,
             await _idle_assistant_turn(pool, cid),
             account_id="acc_wf",
-            parent_run_id=run_id,
         )
         nudged = _qresult.nudged
         assert nudged  # still under budget — keep nudging
 
     # Budget spent: the next pure-text turn auto-errors the request instead.
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
+        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf"
     )
     assert not result.nudged
     # auto-errored → the caller run is woken to harvest the no_return
@@ -1918,7 +1924,7 @@ async def test_activity_turn_resets_consecutive_nudge_count(
     anchor — after it, the consecutive count drops back to 0 even though earlier
     nudges still exist in the log."""
     pool = wf_runtime
-    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:reset#0")
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:reset#0")
 
     # Two idle turns while owing the request -> two nudges accumulate.
     for _ in range(2):
@@ -1927,7 +1933,6 @@ async def test_activity_turn_resets_consecutive_nudge_count(
             cid,
             await _idle_assistant_turn(pool, cid),
             account_id="acc_wf",
-            parent_run_id=run_id,
         )
         assert r.nudged
     async with pool.acquire() as conn:
@@ -1966,7 +1971,7 @@ async def test_interleaved_activity_never_trips_nudge_budget(
     NEVER hits ``no_return`` — each activity turn resets the consecutive count, so
     the budget is never reached even after far more than BUDGET total idle turns."""
     pool = wf_runtime
-    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:work#0")
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:work#0")
 
     for _ in range(sessions_service.REQUEST_NUDGE_BUDGET * 3):
         r = await sessions_service.append_assistant_and_guard_quiescence(
@@ -1974,7 +1979,6 @@ async def test_interleaved_activity_never_trips_nudge_budget(
             cid,
             await _idle_assistant_turn(pool, cid),
             account_id="acc_wf",
-            parent_run_id=run_id,
         )
         assert r.nudged  # always under budget -> nudged, never auto-errored
         assert r.autoerror_caller_run_id is None
@@ -2007,7 +2011,6 @@ async def test_no_return_after_exactly_n_consecutive_idle_turns(
             cid,
             await _idle_assistant_turn(pool, cid),
             account_id="acc_wf",
-            parent_run_id=run_id,
         )
         assert r.nudged and r.autoerror_caller_run_id is None
 
@@ -2017,7 +2020,6 @@ async def test_no_return_after_exactly_n_consecutive_idle_turns(
         cid,
         await _idle_assistant_turn(pool, cid),
         account_id="acc_wf",
-        parent_run_id=run_id,
     )
     assert not r.nudged and r.autoerror_caller_run_id == run_id
     async with pool.acquire() as conn:
@@ -2089,7 +2091,6 @@ async def test_per_request_count_is_independent_stuck_sibling_still_no_returns(
         cid,
         await _idle_assistant_turn(pool, cid),
         account_id="acc_wf",
-        parent_run_id=run_id,
     )
     assert r.nudged
     async with pool.acquire() as conn:
@@ -2121,7 +2122,6 @@ async def test_per_request_count_is_independent_stuck_sibling_still_no_returns(
             cid,
             await _idle_assistant_turn(pool, cid),
             account_id="acc_wf",
-            parent_run_id=run_id,
         )
         assert r.nudged  # still under budget for B
 
@@ -2130,7 +2130,6 @@ async def test_per_request_count_is_independent_stuck_sibling_still_no_returns(
         cid,
         await _idle_assistant_turn(pool, cid),
         account_id="acc_wf",
-        parent_run_id=run_id,
     )
     assert not r.nudged  # B's budget spent -> auto-error
     async with pool.acquire() as conn:
@@ -2170,7 +2169,6 @@ async def test_non_answering_child_resolves_run_via_agent_no_return_error(
             child_id,
             await _idle_assistant_turn(pool, child_id),
             account_id="acc_wf",
-            parent_run_id=run_id,
         )
 
     await run_workflow_step(run_id)  # harvest no_return -> AgentNoReturnError -> caught -> return
@@ -2281,7 +2279,7 @@ async def test_child_reclaimed_on_quiescence_and_parent_still_harvests(
     the answer, because ``derive_response`` reads the response *event* (which survives
     archival), not the live row."""
     pool = wf_runtime
-    run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:reclaim#0")
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:reclaim#0")
 
     # Born ephemeral — the workflow-child wiring, no per-call plumbing.
     born = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
@@ -2300,7 +2298,7 @@ async def test_child_reclaimed_on_quiescence_and_parent_still_harvests(
             error=None,
         )
     result = await sessions_service.append_assistant_and_guard_quiescence(
-        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf", parent_run_id=run_id
+        pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf"
     )
     assert not result.nudged and result.autoerror_caller_run_id is None
 
@@ -3773,18 +3771,20 @@ async def test_get_request_output_schema_is_per_request(
     The workflow path is 1:1 today, but the query is per-request by design."""
     pool = wf_runtime
     schema_b = {"type": "number"}
-    run_id, cid = await _spawn_child(pool, wf_agent_id, "req:a", output_schema=_OBJ_SCHEMA)
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "req:a", output_schema=_OBJ_SCHEMA)
     async with pool.acquire() as conn:
         for rid, schema in (("req:b", schema_b), ("req:none", None)):
-            request: dict[str, Any] = {"request_id": rid, "caller": {"kind": "run", "id": run_id}}
+            # The schema is read off the trusted request_opened edge (#1131), not the
+            # display user-message blob.
+            edge: dict[str, Any] = {"event": "request_opened", "request_id": rid, "awaited": True}
             if schema is not None:
-                request["output_schema"] = schema
+                edge["output_schema"] = schema
             await db_queries.append_event(
                 conn,
                 account_id="acc_wf",
                 session_id=cid,
-                kind="message",
-                data={"role": "user", "content": "x", "metadata": {"request": request}},
+                kind="lifecycle",
+                data=edge,
             )
         get = db_queries.get_request_output_schema
         assert await get(conn, cid, request_id="req:a") == _OBJ_SCHEMA
@@ -4080,22 +4080,49 @@ async def test_defer_wake_priority_reflects_real_origin(
     assert priorities[cid] == _BACKGROUND_PRIORITY  # real background child → demoted
 
 
-# ─── await_run — the await-a-completion primitive, runs backing ──────────────
+# ─── await_invocation (run arm) — the one awaiter, runs backing ──────────────
+
+
+async def _await_run(
+    pool: asyncpg.Pool[Any], db_url: str, run_id: str, *, account_id: str, timeout_seconds: float
+) -> Any:
+    """Drive the unified awaiter on a run servicer (request_id is run-irrelevant)."""
+    return await invocations_service.await_invocation(
+        pool,
+        db_url,
+        servicer_kind="run",
+        servicer_id=run_id,
+        request_id=None,
+        account_id=account_id,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 async def test_await_run_returns_when_already_completed(
     wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
 ) -> None:
     """A terminal run is returned immediately (the first post-subscribe read sees it):
-    ``done`` + the script's ``output``, no error."""
+    ``outcome='ok'`` + the script's ``result``, no error."""
     pool = wf_runtime
     run_id = await _make_run(pool, "async def main(input):\n    return 1")
     await run_workflow_step(run_id)  # pure script → completed in one wake
-    resp = await wf_service.await_run(
-        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
-    )
-    assert resp.done is True and resp.run_status == "completed"
-    assert resp.output == 1 and resp.is_error is False and resp.error is None
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5)
+    assert resp.outcome == "ok"
+    assert resp.result == 1 and resp.error is None
+
+
+async def test_await_run_surfaces_cancelled_as_cancelled_not_false_success(
+    wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
+) -> None:
+    """A cancelled run resolves as ``outcome='cancelled'`` (``error.kind='cancelled'``), not
+    the ``{ok: null}`` false-success a status-blind awaiter would surface — a cancelled run
+    deliberately writes no ``request_response``."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    await wf_service.cancel_run(pool, run_id=run_id, account_id="acc_wf")
+    await run_workflow_step(run_id)  # harvest the cancel signal → finalize cancelled
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5)
+    assert resp.outcome == "cancelled" and resp.error == {"kind": "cancelled"}
 
 
 async def test_await_run_surfaces_sync_def_author_error_message(
@@ -4106,11 +4133,8 @@ async def test_await_run_surfaces_sync_def_author_error_message(
     pool = wf_runtime
     run_id = await _make_run(pool, "def main(input):\n    return 1")
     await run_workflow_step(run_id)  # sync def → errored
-    resp = await wf_service.await_run(
-        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
-    )
-    assert resp.done is True and resp.run_status == "errored" and resp.is_error is True
-    assert resp.output == "WorkflowScriptError: workflow script must define `async def main(input)`"
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5)
+    assert resp.outcome == "errored" and resp.result is None
     assert resp.error == {
         "kind": "author_exception",
         "message": "WorkflowScriptError: workflow script must define `async def main(input)`",
@@ -4128,11 +4152,8 @@ async def test_await_run_surfaces_runtime_author_traceback_line(
         "async def main(input):\n    x = 1\n    raise ValueError('boom')\n    return x\n",
     )
     await run_workflow_step(run_id)  # raise → errored
-    resp = await wf_service.await_run(
-        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5
-    )
-    assert resp.done is True and resp.run_status == "errored" and resp.is_error is True
-    assert resp.output == "ValueError: boom"
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=5)
+    assert resp.outcome == "errored" and resp.result is None
     assert resp.error is not None
     assert resp.error["kind"] == "author_exception"
     assert resp.error["message"] == "ValueError: boom"
@@ -4146,14 +4167,11 @@ async def test_await_run_times_out_on_non_terminal_run(
     wf_runtime: asyncpg.Pool[Any], migrated_db_url: str
 ) -> None:
     """A never-stepped (``pending``) run that doesn't finish within the budget returns
-    ``done=False`` with its live status — the re-poll contract, no archive/mutation."""
+    ``outcome=None`` (still pending) — the re-poll contract, no archive/mutation."""
     pool = wf_runtime
     run_id = await _make_run(pool, "async def main(input):\n    return 1")  # created, not stepped
-    resp = await wf_service.await_run(
-        pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=0.1
-    )
-    assert resp.done is False and resp.run_status == "pending"
-    assert resp.output is None and resp.is_error is False and resp.error is None
+    resp = await _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=0.1)
+    assert resp.outcome is None and resp.result is None and resp.error is None
 
 
 async def test_await_run_wakes_on_completion_during_wait(
@@ -4166,16 +4184,14 @@ async def test_await_run_wakes_on_completion_during_wait(
     run_id = await _make_run(pool, "async def main(input):\n    return 7")
 
     async def _complete_soon() -> None:
-        await asyncio.sleep(0.1)  # let await_run subscribe + first-read (pending) first
+        await asyncio.sleep(0.1)  # let the awaiter subscribe + first-read (pending) first
         await run_workflow_step(run_id)
 
     resp, _ = await asyncio.gather(
-        wf_service.await_run(
-            pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=10
-        ),
+        _await_run(pool, migrated_db_url, run_id, account_id="acc_wf", timeout_seconds=10),
         _complete_soon(),
     )
-    assert resp.done is True and resp.run_status == "completed" and resp.output == 7
+    assert resp.outcome == "ok" and resp.result == 7
 
 
 async def test_await_run_cross_tenant_404(
@@ -4185,9 +4201,43 @@ async def test_await_run_cross_tenant_404(
     pool = wf_runtime
     run_id = await _make_run(pool, "async def main(input):\n    return 1")
     with pytest.raises(NotFoundError):
-        await wf_service.await_run(
-            pool, migrated_db_url, run_id, account_id="acc_other", timeout_seconds=1
-        )
+        await _await_run(pool, migrated_db_url, run_id, account_id="acc_other", timeout_seconds=1)
+
+
+async def test_derive_run_response_reads_the_terminal_record(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The harvest resolver reads a sub-run's outcome off its terminal record (§3.6).
+
+    No separate ``request_response`` event: ``completed → ok`` (the run_completed
+    output), ``errored → error``, ``cancelled → cancelled`` (the load-bearing case — a
+    cancelled sub-run must NOT resolve as the ``child_gone`` a gated-off response implied,
+    nor as a false-success ``{ok: null}``), and a still-running sub-run → ``None`` (pending).
+    """
+    pool = wf_runtime
+    ok_run = await _make_run(pool, "async def main(input):\n    return 7", name="ok")
+    await run_workflow_step(ok_run)
+    err_run = await _make_run(pool, "def main(input):\n    return 1", name="err")  # sync → errored
+    await run_workflow_step(err_run)
+    cancelled_run = await _make_run(pool, "async def main(input):\n    return 1", name="cancel")
+    await wf_service.cancel_run(pool, run_id=cancelled_run, account_id="acc_wf")
+    await run_workflow_step(cancelled_run)  # harvest the cancel → finalize cancelled
+    pending_run = await _make_run(
+        pool, "async def main(input):\n    return 1", name="pending"
+    )  # never stepped
+
+    async with pool.acquire() as conn:
+        ok = await wf_queries.derive_run_response(conn, ok_run, account_id="acc_wf")
+        err = await wf_queries.derive_run_response(conn, err_run, account_id="acc_wf")
+        cancelled = await wf_queries.derive_run_response(conn, cancelled_run, account_id="acc_wf")
+        pending = await wf_queries.derive_run_response(conn, pending_run, account_id="acc_wf")
+
+    assert ok == {"result": 7, "is_error": False, "error": None}
+    assert err is not None and err["is_error"] is True and err["result"] is None
+    assert err["error"]["kind"] == "author_exception"
+    # The cancel semantic the §3.6 merge had to preserve: cancelled, not child_gone.
+    assert cancelled == {"result": None, "is_error": True, "error": {"kind": "cancelled"}}
+    assert pending is None
 
 
 # ─── tool() — a run invokes its declared network/credential tools (slice 2) ───

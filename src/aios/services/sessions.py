@@ -589,10 +589,13 @@ async def _stimulate_new_session(
             # authoritative gate in ``build_spec_from_session`` catches a
             # mis-scoped child at provision. The advisory 422 stays on the
             # operator-facing API attach paths (create_session/update_session).
-        request_meta: dict[str, Any] = {
-            "request_id": stim.request_id,
-            "caller": {"kind": "run", "id": stim.parent_run_id},
-        }
+        # The user message carries a DISPLAY-only ``metadata.request`` blob: the
+        # context builder renders its ``request_id`` (+ ``output_schema`` shape) into
+        # the message so the model knows which id to echo on ``return``/``error``. It
+        # is NOT the trusted source — enforcement (caller, output_schema) reads the
+        # ``request_opened`` edge below (#1131: the forgeable blob no longer gates
+        # anything; a forged id just fails the open-set check at ``return``).
+        request_meta: dict[str, Any] = {"request_id": stim.request_id}
         if output_schema is not None:
             request_meta["output_schema"] = output_schema
         await queries.append_event(
@@ -600,18 +603,13 @@ async def _stimulate_new_session(
             account_id=account_id,
             session_id=stim.session_id,
             kind="message",
-            data={
-                "role": "user",
-                "content": content,
-                "metadata": {"request": request_meta},
-            },
+            data={"role": "user", "content": content, "metadata": {"request": request_meta}},
         )
-        # #1123/#1197: emit the trusted ``request_opened`` lifecycle edge alongside
-        # the legacy ``metadata.request`` blob (dual-write until #1131 retires the
-        # blob). Gated by the ``child is None`` first-spawn check above, so a
-        # replayed wake (ON CONFLICT → ``child is None`` → early return) never
-        # re-opens the edge — exactly-once per request. ``awaited`` carries the
-        # Ask|Tell distinction: an Ask owes a response, a Tell does not.
+        # #1123/#1197: the trusted ``request_opened`` lifecycle edge carries the
+        # authorization fact (caller, depth, #794 surface, vault_ids, awaited) AND the
+        # ``output_schema`` enforcement reads (#1131). Gated by the ``child is None``
+        # first-spawn check above, so a replayed wake never re-opens the edge —
+        # exactly-once per request. ``awaited`` carries the Ask|Tell distinction.
         await queries.append_request_opened(
             conn,
             session_id=stim.session_id,
@@ -627,6 +625,7 @@ async def _stimulate_new_session(
             },
             vault_ids=stim.vault_ids,
             awaited=awaited,
+            output_schema=output_schema,
             summary=_obligation_summary(content),
         )
         return True
@@ -640,17 +639,18 @@ async def _stimulate_existing_ask(
 ) -> bool:
     """The `Ask(ExistingSession)` arm — inject a channel-less awaited request.
 
-    One transaction: append the request's ``user`` message (``metadata.request``
-    carries ``{request_id, caller}`` + optional ``output_schema``) and open the
-    trusted ``request_opened`` edge (`awaited=true`). Channel-less (no
-    ``orig_channel``) so the injected request never surfaces to a connector. Then
-    a deferred wake so the target steps and answers it.
+    One transaction: append the request's channel-less ``user`` message (with a
+    DISPLAY-only ``metadata.request`` blob the context builder renders so the model
+    knows which id to echo) and open the trusted ``request_opened`` edge
+    (`awaited=true`, carrying ``output_schema`` — the enforcement source, #1131).
+    Channel-less (no ``orig_channel``) so the injected request never surfaces to a
+    connector. Then a deferred wake so the target steps and answers it.
     """
     from aios.services.wake import defer_wake
 
     session = stim.session
     content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
-    request_meta: dict[str, Any] = {"request_id": stim.request_id, "caller": stim.caller}
+    request_meta: dict[str, Any] = {"request_id": stim.request_id}
     if stim.output_schema is not None:
         request_meta["output_schema"] = stim.output_schema
     agent = await agents_service.load_for_session(pool, session, account_id=account_id)
@@ -662,11 +662,7 @@ async def _stimulate_existing_ask(
             account_id=account_id,
             session_id=session.id,
             kind="message",
-            data={
-                "role": "user",
-                "content": content,
-                "metadata": {"request": request_meta},
-            },
+            data={"role": "user", "content": content, "metadata": {"request": request_meta}},
         )
         await queries.append_request_opened(
             conn,
@@ -683,6 +679,7 @@ async def _stimulate_existing_ask(
             },
             vault_ids=vault_ids,
             awaited=True,
+            output_schema=stim.output_schema,
             summary=_obligation_summary(content),
         )
     await defer_wake(pool, session.id, cause="api_invoke", account_id=account_id)
@@ -703,11 +700,33 @@ async def _stimulate_existing_tell(
     response obligation, no lineage edge). The service-level mechanism the
     wake/notify policy surfaces call.
     """
+    await tell_existing_session(
+        pool, stim.session_id, content=stim.content, cause=stim.cause, account_id=account_id
+    )
+    return True
+
+
+async def tell_existing_session(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    content: str,
+    cause: str,
+    account_id: str,
+) -> Event:
+    """THE channel-less ``Tell(ExistingSession)`` writer: append a user-role message
+    + defer a wake, opening NO request edge (no response obligation). Returns the
+    appended event. The spine's ``TellExistingSession`` arm, the ``wake_self`` tool,
+    and the trigger failure-surface path all project from this one writer. The
+    *cross-session* ``deliver_cross_session_wake`` is a policy-bearing **sibling**, not
+    a projection: it shares this writer's atomic append+defer shape but legitimately
+    owns its own depth/rate caps + the non-forgeable ``wake_lineage`` span, so it stays
+    a distinct writer rather than folding through here."""
     from aios.services.wake import defer_wake
 
-    await append_user_message(pool, stim.session_id, stim.content, account_id=account_id)
-    await defer_wake(pool, stim.session_id, cause=stim.cause, account_id=account_id)
-    return True
+    event = await append_user_message(pool, session_id, content, account_id=account_id)
+    await defer_wake(pool, session_id, cause=cause, account_id=account_id)
+    return event
 
 
 async def create_child_session(
@@ -905,25 +924,26 @@ async def invoke(
                 detail={"target_kind": target_kind},
             )
         # create_run account-scopes both workflow_id and environment_id (404s a
-        # foreign id before the run row is written). The run→run request edge's
-        # ``request_opened`` is deferred to #1126 (a run has no session-scoped
-        # events log to key it on yet), so the run resolves via GET /runs/{id}/wait;
-        # the handle's request_id is the minted correlation id (table-free).
+        # foreign id before the run row is written). The run's inbound edge is its
+        # ``wf_runs`` row-columns (``request_id``/``caller``/``request_output_schema``)
+        # — a run has no session ``events`` log, so the edge is row-state rather than
+        # a ``request_opened`` lifecycle event (#1126/#1129). ``caller`` carries the
+        # ``awaited`` bit so the cut/trace can read this edge per child.
         #
         # Late import: ``services.workflows`` imports this module at load time,
         # so a module-level import would be circular.
         from aios.services import workflows as wf_service
 
-        run = await wf_service.create_run(
+        run, request_id = await wf_service.launch_awaited_run(
             pool,
             account_id=account_id,
             workflow_id=target,
             environment_id=environment_id,
             input=input,
+            caller=caller,
+            output_schema=output_schema,
         )
-        return InvocationHandle(
-            servicer_kind="run", servicer_id=run.id, request_id=make_id(REQUEST)
-        )
+        return InvocationHandle(servicer_kind="run", servicer_id=run.id, request_id=request_id)
 
     raise ValidationError(
         f"unknown target_kind {target_kind!r}",
@@ -1119,23 +1139,23 @@ async def await_session(
     session_id: str,
     *,
     account_id: str,
-    request_id: str | None,
     watermark: int | None,
     timeout_seconds: float,
 ) -> SessionAwaitResponse:
-    """Block until a correlated response lands (request_id mode) or the session has fully
-    reacted to a fixed stimulus (watermark mode; watermark defaults to last_stimulus_seq
-    captured at call time), or timeout. The session backing of the await primitive.
+    """Block until the session has fully reacted to a fixed stimulus, or timeout.
+
+    The session **quiescence drive-and-join** — an orthogonal, session-only alias kept
+    distinct from the unified request/run awaiter (``await_invocation``): it resolves on
+    ``last_reacted_seq >= watermark`` (defaulting to ``last_stimulus_seq`` captured at call
+    time), which has no run analog. Correlating a *request* response is the unified awaiter's
+    job, not this one.
 
     Account-scopes the session FIRST (cross-tenant/missing 404s before any LISTEN opens),
     then subscribes to events_<session_id> BEFORE the first predicate read (LISTEN-before-read),
-    drives await_completion with the monotonic done-predicate, and returns the completion
-    envelope — or, on timeout, done=False so the caller re-polls. Never waits on bare idle:
-    both modes are monotonic w.r.t. a fixed stimulus (request_id, or reacted>=watermark).
+    drives await_completion with the monotonic done-predicate, and returns ``done`` /
+    ``last_reacted_seq`` — or, on timeout, done=False so the caller re-polls. Never waits on
+    bare idle: the predicate is monotonic w.r.t. the fixed watermark.
     """
-    if request_id is not None and watermark is not None:
-        raise ValidationError("provide request_id or watermark, not both")
-
     # Scope-check FIRST (404s cross-tenant before any LISTEN opens) and capture the
     # default watermark's ``last_stimulus_seq`` in the same read. ``read_session_watermarks``
     # already enforces ``WHERE id = $1 AND account_id = $2`` and returns None when the row is
@@ -1147,25 +1167,10 @@ async def await_session(
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     effective_watermark = watermark if watermark is not None else captured[1]  # last_stimulus_seq
 
-    if request_id is not None:
-
-        async def _read() -> Any:
-            async with pool.acquire() as conn:
-                return await queries.derive_response(
-                    conn, session_id, account_id=account_id, request_id=request_id
-                )
-
-        def _is_done(state: Any) -> bool:
-            return state is not None  # a response (or child_gone) has landed
-    else:
-
-        async def _read() -> Any:
-            async with pool.acquire() as conn:
-                wm = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
-                return wm[0] if wm is not None else 0  # last_reacted_seq
-
-        def _is_done(state: Any) -> bool:
-            return bool(state >= effective_watermark)
+    async def _read() -> int:
+        async with pool.acquire() as conn:
+            wm = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
+            return wm[0] if wm is not None else 0  # last_reacted_seq
 
     # An await poller consumes only the terminal completion state, never the
     # token-by-token deltas, so it must NOT acquire the subscriber lock: doing
@@ -1175,29 +1180,14 @@ async def await_session(
     # open_listen_for_run_events omits the lock (issue #81).
     subscription = await open_listen_for_events(db_url, session_id, on_connected=None)
     try:
-        state = await await_completion(
+        last_reacted_seq = await await_completion(
             subscription.queue,
             read_state=_read,
-            is_done=_is_done,
+            is_done=lambda reacted: reacted >= effective_watermark,
             timeout_seconds=timeout_seconds,
         )
     finally:
         subscription.terminate()
-
-    async with pool.acquire() as conn:
-        wm = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
-    last_reacted_seq = wm[0] if wm is not None else 0
-
-    if request_id is not None:
-        if state is not None:
-            return SessionAwaitResponse(
-                done=True,
-                last_reacted_seq=last_reacted_seq,
-                result=state["result"],
-                is_error=state["is_error"],
-                error=state["error"],
-            )
-        return SessionAwaitResponse(done=False, last_reacted_seq=last_reacted_seq)
 
     return SessionAwaitResponse(
         done=last_reacted_seq >= effective_watermark, last_reacted_seq=last_reacted_seq
@@ -1468,6 +1458,193 @@ async def fail_open_child_requests_conn(
     return parent_run_id if wrote_any else None
 
 
+class RequestResponseWrite(NamedTuple):
+    """Outcome of :func:`respond_to_request_conn` — the write + the post-commit wakes.
+
+    ``outcome`` ∈ ``responded`` | ``duplicate`` | ``not_a_child`` | ``unknown_request``.
+    ``wake_run_id`` / ``wake_session_id`` are the caller to wake AFTER the caller's
+    transaction commits (at most one is set, and only when this call actually wrote);
+    ``account_id`` is the servicer's account (for the session ``defer_wake``), ``None``
+    only when the session row is gone.
+    """
+
+    outcome: str
+    wake_run_id: str | None
+    wake_session_id: str | None
+    account_id: str | None
+
+
+async def respond_to_request_conn(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    request_id: str,
+    is_error: bool,
+    result: Any,
+    error: dict[str, Any] | None,
+) -> RequestResponseWrite:
+    """THE conn-level request-response writer + caller-kind router.
+
+    Reads the trusted caller off the ``request_opened`` edge and routes the response
+    on the OPEN connection — so it can ride the caller's transaction (e.g. a cancel
+    kill-leaf fusing the answer with the archive, or the no_return backstop): a
+    ``run`` caller keeps the fused ``write_child_response`` (``child_done``) marker +
+    the run to wake; a ``session`` caller writes the plain response edge + the session
+    to wake; an ``api`` caller writes the edge and wakes nobody (the ephemeral awaiter
+    long-polls). Ownership (``caller.kind``) — not child-ness — is the gate; exactly-once
+    is ``write_response_if_absent``'s first-writer-wins. The pool-level
+    :func:`aios.tools.workflow_completion.respond_to_request` wraps this with
+    acquire+transaction and fires the returned wakes post-commit.
+    """
+    ctx = await queries.get_session_workflow_context(conn, session_id)
+    if ctx is None:
+        return RequestResponseWrite("not_a_child", None, None, None)
+    account_id, parent_run_id = ctx
+    caller = await queries.get_request_caller(conn, session_id, request_id=request_id)
+    caller_kind = caller.get("kind") if caller else None
+    if request_id not in await queries.get_open_request_ids(
+        conn, session_id, account_id=account_id
+    ):
+        # Not open: a session/api re-answer is an idempotent ``duplicate``; a run
+        # re-answer to a closed request stays ``unknown_request`` so the model gets a
+        # tool error and self-corrects (a genuine race is still caught at the write).
+        if caller is not None and caller_kind in ("session", "api"):
+            return RequestResponseWrite("duplicate", None, None, account_id)
+        return RequestResponseWrite("unknown_request", None, None, account_id)
+    if caller_kind == "run":
+        # Fail closed if the session lost its parent_run_id (never signal a NULL run).
+        if parent_run_id is None:
+            return RequestResponseWrite("not_a_child", None, None, account_id)
+        wrote = await write_child_response(
+            conn,
+            session_id,
+            account_id=account_id,
+            parent_run_id=parent_run_id,
+            request_id=request_id,
+            is_error=is_error,
+            result=result,
+            error=error,
+        )
+        return RequestResponseWrite(
+            "responded" if wrote else "duplicate",
+            parent_run_id if wrote else None,
+            None,
+            account_id,
+        )
+    wrote = await queries.write_response_if_absent(
+        conn,
+        session_id,
+        account_id=account_id,
+        request_id=request_id,
+        is_error=is_error,
+        result=result,
+        error=error,
+    )
+    wake_session_id = (
+        caller["id"]
+        if (wrote and caller_kind == "session" and caller and caller.get("id"))
+        else None
+    )
+    return RequestResponseWrite(
+        "responded" if wrote else "duplicate", None, wake_session_id, account_id
+    )
+
+
+async def harvest_session_cancel_markers(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> bool:
+    """The session-side cancel **leaf** — answer each unharvested cancel-marker's request with
+    ``outcome=cancelled`` and harvest the marker, atomically (cancel-design §4/§6).
+
+    Run as a pre-inference harvest in the session's own step (the session is the single writer
+    of its own log, under its own procrastinate lock — the supervision-tree invariant). Returns
+    ``True`` iff at least one marker was applied, so the step skips inference this turn: the
+    cancelled request needs no model work. Answering via :func:`respond_to_request_conn` closes
+    the open set AND latches first-writer-wins, so a late ``return(R)`` no-ops; the caller is
+    woken (run / session) so it re-resolves ``cancelled`` promptly.
+
+    **Recursive propagation (§2.3):** once the session owes NO remaining open inbound awaited
+    request — the dominant owned/fresh-node case (a ``call_agent`` spawn serving only the
+    cancelled request) — its outbound awaited children are orphaned, so the leaf seeds a
+    cancel-marker on each (a run via the ``wf_run_signals`` cancel, a session via a
+    ``session_cancel_markers`` row) in the SAME transaction, and each child's own step repeats.
+    A still-multiply-inbound **shared** session does NOT propagate (it still owes a surviving
+    request — over-cancelling its work would be unsound).
+
+    The "no open inbound ⇒ orphaned" heuristic is **slightly over-broad until §7**: the
+    ``call_session(existing)`` path lets a session close its sole inbound (an early ``return``)
+    while an outbound child stays legitimately live, and that child is cancelled here. The
+    over-cancel is **bounded — intent only, never state**: an already-answered child is a
+    first-writer-wins no-op (no outcome corruption); only a genuinely-live child is reclaimed
+    early. The precise per-edge ``attributed_to`` reclaim (§7) is a later slice.
+
+    Minimal cut: the owned-session teardown (request-scoped interrupt + drain + archive +
+    sandbox release, §4/C1) and the §9 quiescence counter are deferred residuals — the cancelled
+    request's in-flight tool tasks run to completion and the session lingers idle-but-answered.
+    The caller has already learned ``cancelled`` and the subtree is marked.
+    """
+    from aios.services.wake import defer_wake
+
+    wakes: list[RequestResponseWrite] = []
+    propagated: list[queries.ChildNode] = []
+    async with pool.acquire() as conn, conn.transaction():
+        markers = await queries.list_unharvested_session_cancel_markers(conn, session_id)
+        if not markers:
+            return False
+        for marker in markers:
+            write = await respond_to_request_conn(
+                conn,
+                session_id,
+                request_id=marker.request_id,
+                is_error=True,
+                result=None,
+                error={"kind": "cancelled"},
+            )
+            wakes.append(write)
+            await queries.mark_session_cancel_marker_harvested(
+                conn, session_id=session_id, request_id=marker.request_id
+            )
+        # §2.3: propagate ONLY when no awaited inbound survives (over-cancel-safe). A child
+        # marker is a side-table write keyed by the CHILD id — never its log — so the child
+        # harvests its own exit under its own lock (the single-writer invariant).
+        if not await queries.get_open_request_ids(conn, session_id, account_id=account_id):
+            for child in await queries.children_of(
+                conn, caller_kind="session", caller_id=session_id, account_id=account_id
+            ):
+                if not child.awaited:
+                    continue  # a Tell child is detached — an exit never crosses
+                if child.kind == "run":
+                    await wf_queries.insert_run_signal(
+                        conn,
+                        run_id=child.id,
+                        call_key=wf_queries.CANCEL_SIGNAL_CALL_KEY,
+                        kind="cancel",
+                    )
+                elif child.request_id is not None:
+                    await queries.insert_session_cancel_marker(
+                        conn,
+                        session_id=child.id,
+                        request_id=child.request_id,
+                        account_id=account_id,
+                    )
+                propagated.append(child)
+    # AFTER commit: re-resolve each cancelled caller, and prompt each marked child to run its
+    # own leaf (the C2 sweep / the run cancel-signal clause is the durable backstop).
+    for write in wakes:
+        if write.wake_run_id is not None:
+            await defer_run_wake(write.wake_run_id, batch=True)
+        elif write.wake_session_id is not None and write.account_id is not None:
+            await defer_wake(
+                pool, write.wake_session_id, cause="invoke_response", account_id=write.account_id
+            )
+    for child in propagated:
+        if child.kind == "run":
+            await defer_run_wake(child.id, batch=True)
+        elif child.request_id is not None:
+            await defer_wake(pool, child.id, cause="cancel", account_id=account_id)
+    return True
+
+
 class AssistantAppendResult(NamedTuple):
     """Outcome of :func:`append_assistant_and_guard_quiescence`.
 
@@ -1489,7 +1666,6 @@ async def append_assistant_and_guard_quiescence(
     assistant_msg: dict[str, Any],
     *,
     account_id: str,
-    parent_run_id: str | None,
 ) -> AssistantAppendResult:
     """Append the model's assistant message and, **atomically**, enforce the
     request-totality invariant: a session may not go idle while it owes a response.
@@ -1560,36 +1736,21 @@ async def append_assistant_and_guard_quiescence(
                 conn, session_id, account_id=account_id, request_id=request_id
             )
             if nudges >= REQUEST_NUDGE_BUDGET:
-                # Auto-error past budget. Route the response-write + caller-wake by the
-                # trusted edge's caller kind (#1127): a run caller keeps the fused
-                # child_done marker; a session/api caller writes the plain response edge.
-                # The run path stays byte-for-byte behavior-preserved.
-                caller = await queries.get_request_caller(conn, session_id, request_id=request_id)
-                caller_kind = caller.get("kind") if caller else None
-                if caller_kind == "run" and parent_run_id is not None:
-                    if await write_child_response(
-                        conn,
-                        session_id,
-                        account_id=account_id,
-                        parent_run_id=parent_run_id,
-                        request_id=request_id,
-                        is_error=True,
-                        result=None,
-                        error={"kind": "no_return"},
-                    ):
-                        autoerror_caller_run_id = parent_run_id
-                else:
-                    wrote = await queries.write_response_if_absent(
-                        conn,
-                        session_id,
-                        account_id=account_id,
-                        request_id=request_id,
-                        is_error=True,
-                        result=None,
-                        error={"kind": "no_return"},
-                    )
-                    if wrote and caller_kind == "session" and caller and caller.get("id"):
-                        autoerror_caller_session_ids.append(caller["id"])
+                # Auto-error past budget through the one conn-level response writer
+                # (run caller → fused child_done marker; session/api → plain edge),
+                # collecting the post-commit caller-wake the harness loop fires.
+                write = await respond_to_request_conn(
+                    conn,
+                    session_id,
+                    request_id=request_id,
+                    is_error=True,
+                    result=None,
+                    error={"kind": "no_return"},
+                )
+                if write.wake_run_id is not None:
+                    autoerror_caller_run_id = write.wake_run_id
+                elif write.wake_session_id is not None:
+                    autoerror_caller_session_ids.append(write.wake_session_id)
             else:
                 to_nudge.append(request_id)
         if to_nudge:

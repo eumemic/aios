@@ -1,25 +1,25 @@
-"""The **session caller surface** (#1127) — model-only ``invoke*`` builtins.
+"""The **session caller surface** (#1127) — model-only ``call_*`` builtins.
 
-The building block is **"invoke a session"**: write a trusted request edge
+The building block is **"call a session"**: write a trusted request edge
 (#1123 ``request_opened`` with ``caller={kind:"session", id:<this session>}``)
 into an **existing same-account session** and **park** until it answers
-``{ok | error}``. Invoking an **agent** or a **workflow** is thin porcelain on
-top — *create the servicer, then invoke it*:
+``{ok | error}``. Calling an **agent** or a **workflow** is thin porcelain on
+top — *create the servicer, then call it*:
 
-* ``invoke(session_id, input, output_schema)`` — the primitive: inject the edge
-  into an existing same-account session, park, resolve via the kind-agnostic
+* ``call_session(session_id, input, output_schema)`` — the primitive: inject the
+  edge into an existing same-account session, park, resolve via the kind-agnostic
   resolver (#1126, ``derive_response``) to a schema-conforming ``{ok | error}``.
-* ``invoke_agent(agent_id, input, output_schema)`` — ``create_session`` from the
-  agent **then** invoke it (the two steps stay fused in ``service.invoke``).
-* ``invoke_workflow(workflow_id, input, output_schema)`` — ``create_run`` then
+* ``call_agent(agent_id, input, output_schema)`` — ``create_session`` from the
+  agent **then** call it (the two steps stay fused in ``service.invoke``).
+* ``call_workflow(workflow_id, input, output_schema)`` — ``create_run`` then
   await it (a run is the servicer; single-shot by nature).
 
 All three return a **single-shot handle** (one ``request_id``, one resolution;
 re-asking = a fresh invoke) and **park as an implicit-async tool task** — the
 caller session stays responsive to user messages while parked (never #772's
-blocking long-poll). The park reuses the existing await primitives
-(``await_session`` for a session servicer, ``await_run`` for a run) re-polled in
-a loop; the response-write NOTIFYs the servicer's channel the park subscribes to.
+blocking long-poll). The park rides the one awaiter (``await_invocation``,
+dispatching session vs run) re-polled in a loop; the response-write NOTIFYs the
+servicer's channel the park subscribes to.
 
 **Authorization = same-account.** A cross-account ``session_id``/``agent_id``/
 ``workflow_id`` 404s (``NotFoundError``) before any edge is written — the
@@ -34,13 +34,20 @@ rejected before the handler runs.
 
 All register ``transport="agent_tool"`` (model-only; the CLI broker refuses them).
 
-**At-least-once on worker crash.** Like the API caller (#1128, a retried POST), an
-``invoke*`` call is not idempotent across a worker restart mid-park: the fire-and-forget
-tool task outlives the step body, so a crash before its ``tool_result`` lands re-dispatches
-the handler and writes a *second* request edge into the target. Single-shot is the
-per-call contract, not a crash-exactly-once guarantee — the same stance as every other
-non-deterministic builtin. Deterministic request-id keying (call-key dedup, as the
-workflow ``agent()`` path does) is a future hardening, not v1 scope.
+**Crash recovery = ghost-repair, not re-dispatch.** The request edge is written
+*before* the park, so it is durable; the fire-and-forget tool task is not. On a worker
+crash mid-park the harness does NOT re-run the handler — there is no builtin re-dispatch
+path (only ``always_ask``-confirmed tools are re-dispatched). Instead the periodic
+ghost-repair sweep resolves the lost ``tool_call_id`` to a synthetic *may-have-completed*
+error ("the tool may have completed and side effects may have committed; verify before
+retrying"), because the ``tool_execute_start`` span had committed and the target may in
+fact have been serviced. The servicer's response is still written exactly-once and
+durably, but it is *orphaned* for the crashed caller's ``request_id`` — nothing harvests
+it back into the now-errored tool result. A *second* request edge appears only if the
+**model** retries (its own decision on seeing the error), never from a harness re-dispatch.
+Single-shot is the per-call contract, not a crash-exactly-once guarantee. Deterministic
+request-id keying (call-key dedup, as the workflow ``agent()`` path does) is a future
+hardening, not v1 scope.
 """
 
 from __future__ import annotations
@@ -53,7 +60,8 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.harness import runtime
-from aios.models.sessions import SessionAwaitResponse
+from aios.models.invocations import AwaitResponse
+from aios.services import invocations as invocations_service
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail
@@ -69,7 +77,7 @@ _AWAIT_POLL_SECONDS = 300.0
 # ─── argument models ─────────────────────────────────────────────────────────
 
 
-class _InvokeArgs(BaseModel):
+class _CallSessionArgs(BaseModel):
     """``invoke`` arguments — the **target** session id plus the request payload.
 
     ``extra="forbid"``: the trusted *caller* id is the executing session the
@@ -89,7 +97,7 @@ class _InvokeArgs(BaseModel):
     )
 
 
-class _InvokeAgentArgs(BaseModel):
+class _CallAgentArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_id: str = Field(description="The id of the same-account agent to spawn and invoke.")
@@ -100,7 +108,7 @@ class _InvokeAgentArgs(BaseModel):
     )
 
 
-class _InvokeWorkflowArgs(BaseModel):
+class _CallWorkflowArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     workflow_id: str = Field(description="The id of the same-account workflow to run and await.")
@@ -108,6 +116,13 @@ class _InvokeWorkflowArgs(BaseModel):
     output_schema: dict[str, Any] | None = Field(
         default=None,
         description="Optional JSON Schema the run output must satisfy (validated fail-loud).",
+    )
+    vault_ids: list[str] = Field(
+        default_factory=list,
+        description="Vault ids to bind to the run — a subset of the vaults bound to you.",
+    )
+    budget_usd: float | None = Field(
+        default=None, gt=0, description="Optional shared USD spend ceiling for the run."
     )
 
 
@@ -158,49 +173,45 @@ def _error_result(error: dict[str, Any] | None) -> ToolResult:
 # ─── park loops ──────────────────────────────────────────────────────────────
 
 
-async def _park_on_session(
-    pool: Any, *, session_id: str, account_id: str, request_id: str
-) -> SessionAwaitResponse:
-    """Park (implicit-async) until the servicer session answers ``request_id``.
+async def _park_on_invocation(
+    pool: Any,
+    *,
+    servicer_kind: invocations_service.ServicerKind,
+    servicer_id: str,
+    request_id: str | None,
+    account_id: str,
+) -> AwaitResponse:
+    """Park (implicit-async) until the servicer answers, via the one awaiter.
 
-    Re-polls the existing ``await_session`` primitive (request_id mode → resolves
-    via ``derive_response``, #1126) so a single LISTEN drop can't strand us. As a
-    fire-and-forget tool task the caller stays responsive to user messages while
-    parked. No new blocking long-poll is introduced — this rides the shipped await.
+    Re-polls :func:`await_invocation` (session → ``derive_response`` on
+    ``request_id``; run → terminal row) so a single LISTEN drop can't strand us. As
+    a fire-and-forget tool task the caller stays responsive to user messages while
+    parked. ``outcome`` is non-None exactly when the invocation is terminal.
     """
     db_url = get_settings().db_url
     while True:
-        resp = await sessions_service.await_session(
+        resp = await invocations_service.await_invocation(
             pool,
             db_url,
-            session_id,
-            account_id=account_id,
+            servicer_kind=servicer_kind,
+            servicer_id=servicer_id,
             request_id=request_id,
-            watermark=None,
+            account_id=account_id,
             timeout_seconds=_AWAIT_POLL_SECONDS,
         )
-        if resp.done:
-            return resp
-
-
-async def _park_on_run(pool: Any, *, run_id: str, account_id: str) -> Any:
-    """Park (implicit-async) until the run reaches a terminal state."""
-    db_url = get_settings().db_url
-    while True:
-        resp = await wf_service.await_run(
-            pool, db_url, run_id, account_id=account_id, timeout_seconds=_AWAIT_POLL_SECONDS
-        )
-        if resp.done:
+        if resp.outcome is not None:
             return resp
 
 
 # ─── handlers ────────────────────────────────────────────────────────────────
 
 
-async def invoke_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any] | ToolResult:
+async def call_session_handler(
+    session_id: str, arguments: dict[str, Any]
+) -> dict[str, Any] | ToolResult:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_InvokeArgs, arguments)
+    args = _parse(_CallSessionArgs, arguments)
     # Write the trusted edge into the EXISTING same-account session (404s a foreign
     # target before any edge is written). caller names THIS session.
     handle = await sessions_service.invoke(
@@ -212,21 +223,25 @@ async def invoke_handler(session_id: str, arguments: dict[str, Any]) -> dict[str
         output_schema=args.output_schema,
         caller={"kind": "session", "id": session_id},
     )
-    resp = await _park_on_session(
-        pool, session_id=handle.servicer_id, account_id=account_id, request_id=handle.request_id
+    resp = await _park_on_invocation(
+        pool,
+        servicer_kind="session",
+        servicer_id=handle.servicer_id,
+        request_id=handle.request_id,
+        account_id=account_id,
     )
-    if resp.is_error:
+    if resp.outcome != "ok":
         return _error_result(resp.error)
     violation = _validate_output(resp.result, args.output_schema)
     return violation if violation is not None else _ok_result(resp.result)
 
 
-async def invoke_agent_handler(
+async def call_agent_handler(
     session_id: str, arguments: dict[str, Any]
 ) -> dict[str, Any] | ToolResult:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_InvokeAgentArgs, arguments)
+    args = _parse(_CallAgentArgs, arguments)
     # Porcelain = create_session(from the agent) + invoke that fresh session. The
     # child inherits THIS session's environment (a caller-chosen env id would be a
     # cross-tenant attack surface — same stance as create_run).
@@ -242,83 +257,98 @@ async def invoke_agent_handler(
         crypto_box=runtime.require_crypto_box(),
         caller={"kind": "session", "id": session_id},
     )
-    resp = await _park_on_session(
-        pool, session_id=handle.servicer_id, account_id=account_id, request_id=handle.request_id
+    resp = await _park_on_invocation(
+        pool,
+        servicer_kind="session",
+        servicer_id=handle.servicer_id,
+        request_id=handle.request_id,
+        account_id=account_id,
     )
-    if resp.is_error:
+    if resp.outcome != "ok":
         return _error_result(resp.error)
     violation = _validate_output(resp.result, args.output_schema)
     return violation if violation is not None else _ok_result(resp.result)
 
 
-async def invoke_workflow_handler(
+async def call_workflow_handler(
     session_id: str, arguments: dict[str, Any]
 ) -> dict[str, Any] | ToolResult:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_InvokeWorkflowArgs, arguments)
-    # Porcelain = create_run + await it (the run is the servicer; single-shot). The
+    args = _parse(_CallWorkflowArgs, arguments)
+    # Porcelain = launch the run as an awaited servicer + park on it (single-shot). The
     # run inherits THIS session's environment + lineage and is launched by it.
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
-    run = await wf_service.create_run(
+    run, _request_id = await wf_service.launch_awaited_run(
         pool,
         account_id=account_id,
         workflow_id=args.workflow_id,
         environment_id=session.environment_id,
         input=args.input,
+        caller={"kind": "session", "id": session_id},
+        output_schema=args.output_schema,
         launcher_session_id=session_id,
         parent_run_id=session.parent_run_id,
+        vault_ids=args.vault_ids,
+        budget_usd=args.budget_usd,
     )
-    resp = await _park_on_run(pool, run_id=run.id, account_id=account_id)
-    if resp.is_error:
+    resp = await _park_on_invocation(
+        pool,
+        servicer_kind="run",
+        servicer_id=run.id,
+        request_id=None,
+        account_id=account_id,
+    )
+    if resp.outcome != "ok":
         return _error_result(resp.error)
-    violation = _validate_output(resp.output, args.output_schema)
-    return violation if violation is not None else _ok_result(resp.output)
+    violation = _validate_output(resp.result, args.output_schema)
+    return violation if violation is not None else _ok_result(resp.result)
 
 
 # ─── descriptions + registration ─────────────────────────────────────────────
 
-INVOKE_DESCRIPTION = (
-    "Invoke an existing same-account session: deliver `input` to it as a trusted "
+CALL_SESSION_DESCRIPTION = (
+    "Call an existing same-account session: deliver `input` to it as a trusted "
     "request and wait for its single answer ({ok: value} on success, an error "
     "otherwise). The request is invisible to any human chatting in that session. "
     "Optionally pass `output_schema` (JSON Schema) the answer's value must satisfy. "
     "Single-shot: each call is a fresh request. You stay responsive while waiting."
 )
-INVOKE_AGENT_DESCRIPTION = (
-    "Spawn a fresh session from one of your agents and invoke it with `input`, "
+CALL_AGENT_DESCRIPTION = (
+    "Spawn a fresh session from one of your agents and call it with `input`, "
     "waiting for its single answer ({ok: value} or an error). The new session runs "
     "in your own environment. Optionally constrain the answer with `output_schema`. "
     "Single-shot; you stay responsive while waiting."
 )
-INVOKE_WORKFLOW_DESCRIPTION = (
+CALL_WORKFLOW_DESCRIPTION = (
     "Launch a run of one of your workflows with `input` and wait for its result "
     "({ok: output} on completion, an error if it errored/was cancelled). The run "
-    "uses your own environment. Optionally constrain the output with `output_schema` "
-    "(a non-conforming output is reported as an error). Single-shot per call."
+    "uses your own environment. Optionally attach `vault_ids` (a subset of your own "
+    "vaults), set a shared `budget_usd` spend ceiling, and constrain the output with "
+    "`output_schema` (a non-conforming output is reported as an error). Single-shot per call."
 )
 
 
 def _register() -> None:
     registry.register(
-        name="invoke",
-        description=INVOKE_DESCRIPTION,
-        parameters_schema=_InvokeArgs.model_json_schema(),
-        handler=invoke_handler,
+        name="call_session",
+        description=CALL_SESSION_DESCRIPTION,
+        parameters_schema=_CallSessionArgs.model_json_schema(),
+        handler=call_session_handler,
         transport="agent_tool",
     )
     registry.register(
-        name="invoke_agent",
-        description=INVOKE_AGENT_DESCRIPTION,
-        parameters_schema=_InvokeAgentArgs.model_json_schema(),
-        handler=invoke_agent_handler,
+        name="call_agent",
+        description=CALL_AGENT_DESCRIPTION,
+        parameters_schema=_CallAgentArgs.model_json_schema(),
+        handler=call_agent_handler,
         transport="agent_tool",
     )
     registry.register(
-        name="invoke_workflow",
-        description=INVOKE_WORKFLOW_DESCRIPTION,
-        parameters_schema=_InvokeWorkflowArgs.model_json_schema(),
-        handler=invoke_workflow_handler,
+        name="call_workflow",
+        description=CALL_WORKFLOW_DESCRIPTION,
+        parameters_schema=_CallWorkflowArgs.model_json_schema(),
+        handler=call_workflow_handler,
         transport="agent_tool",
     )
 

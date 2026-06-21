@@ -294,6 +294,13 @@ from .agents import (  # noqa: E402
     list_agents,
     update_agent,
 )
+from .cancel import (  # noqa: E402
+    get_session_cancel_marker,
+    insert_session_cancel_marker,
+    list_session_ids_with_unharvested_cancel_marker,
+    list_unharvested_session_cancel_markers,
+    mark_session_cancel_marker_harvested,
+)
 from .connections import (  # noqa: E402
     ActiveBinding,
     _row_to_connection,
@@ -668,6 +675,7 @@ __all__ = [
     "get_request_output_schema",
     "get_session",
     "get_session_bare",
+    "get_session_cancel_marker",
     "get_session_event_stats",
     "get_session_focal_channel",
     "get_session_frozen_litellm_extra",
@@ -707,6 +715,7 @@ __all__ = [
     "insert_run_completion_fires",
     "insert_runtime_token",
     "insert_session",
+    "insert_session_cancel_marker",
     "insert_session_github_repo",
     "insert_session_memory_store",
     "insert_session_template",
@@ -745,6 +754,7 @@ __all__ = [
     "list_session_github_repo_echoes",
     "list_session_github_repo_ranks",
     "list_session_ids_for_connection",
+    "list_session_ids_with_unharvested_cancel_marker",
     "list_session_memory_store_echoes",
     "list_session_memory_store_ranks",
     "list_session_templates",
@@ -753,6 +763,7 @@ __all__ = [
     "list_skills",
     "list_trigger_runs",
     "list_triggers",
+    "list_unharvested_session_cancel_markers",
     "list_unresolved_tool_calls_batch",
     "list_vault_credentials",
     "list_vaults",
@@ -762,6 +773,7 @@ __all__ = [
     "lookup_chat_session",
     "lookup_tool_name_by_call_id",
     "mark_management_call_resolved",
+    "mark_session_cancel_marker_harvested",
     "model_token_ratio",
     "notify_connection_change",
     "notify_management_call_dispatch",

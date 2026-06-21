@@ -1,10 +1,11 @@
-"""The API caller's request-*writer* surface (#1128).
+"""The API caller's request-*writer* + the one completion *awaiter* (#1128).
 
 ``POST /v1/invocations`` is the one kind-agnostic request-writer for an
 external/operator caller: it materializes the trusted request edge (#1123) and
 constructs-or-resolves a servicer (a session or a run), returning a **structured
-handle** the ephemeral caller awaits via the already-shipped completion
-endpoints (``GET /sessions/{id}/await``, ``GET /runs/{id}/wait``).
+handle**. The ephemeral caller then awaits that handle via the one unified
+awaiter ``GET /v1/invocations/{task_id}/await`` — both servicer kinds, one
+:class:`AwaitResponse` envelope.
 
 The handle is explicitly **not an auth boundary** — ``await`` re-authorizes by
 ``account_id`` — so it ships as plain JSON fields, never an opaque/encoded
@@ -13,6 +14,7 @@ string.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -74,11 +76,60 @@ class InvocationHandle(BaseModel):
     """Structured handle returned by ``POST /v1/invocations``.
 
     Plain JSON fields, no opaque encoding: the handle is **not** an auth boundary
-    (``await`` re-authorizes by ``account_id``). The caller picks the matching
-    awaiter off ``servicer_kind`` — ``session`` → ``GET /sessions/{servicer_id}/await``
-    with ``request_id``, ``run`` → ``GET /runs/{servicer_id}/wait``.
+    (``await`` re-authorizes by ``account_id``). Await the invocation at the one
+    unified awaiter ``GET /v1/invocations/{servicer_id}/await`` — the ``task_id``
+    path segment is the ``servicer_id`` and its kind is read off the id prefix; a
+    ``session`` servicer additionally needs ``?request_id=`` to correlate the
+    response, a ``run`` servicer resolves off its terminal row.
     """
 
     servicer_kind: Literal["session", "run"]
     servicer_id: str
     request_id: str
+
+
+class AwaitResponse(BaseModel):
+    """The one completion envelope — ``GET /v1/invocations/{task_id}/await``.
+
+    Unifies the session and run completion long-polls. ``outcome`` is the
+    terminal state minus liveness (the trace's ``TerminalState`` with
+    ``suspended``/``running`` folded into pending): ``None`` means **still
+    pending** — the long-poll timed out before the invocation reached a terminal
+    state, so re-poll. ``result`` carries the servicer's return value on ``ok``;
+    ``error`` carries the ``{kind, message, …}`` detail on ``errored`` /
+    ``cancelled``.
+    """
+
+    outcome: Literal["ok", "errored", "cancelled"] | None = Field(
+        default=None,
+        description=(
+            "The invocation's terminal outcome, or null while it is still pending "
+            "(the long-poll timed out — call again to keep blocking)."
+        ),
+    )
+    result: Any = Field(
+        default=None,
+        description="The servicer's return value when outcome=='ok'; null otherwise.",
+    )
+    error: dict[str, Any] | None = Field(
+        default=None,
+        description="On outcome 'errored'/'cancelled', the {kind, message, …} detail; null otherwise.",
+    )
+
+
+# ─── cancel supervision side-table row ───────────────────────────────────────
+
+
+class SessionCancelMarker(BaseModel):
+    """A session-side **exit-marker** — a durable cancel signal the target session's own
+    step harvests under its lock (the run side reuses ``wf_run_signals kind='cancel'``).
+
+    Keyed by the target edge ``(session_id, request_id)``; ``harvested_at`` flips once the
+    session's step has applied it, so the sweep wakes only still-unharvested markers (C2).
+    """
+
+    session_id: str
+    request_id: str
+    account_id: str
+    harvested_at: datetime | None = None
+    created_at: datetime

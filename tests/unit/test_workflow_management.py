@@ -10,15 +10,13 @@ two identity-load-bearing invariants that don't depend on the DB:
   propagates unconverted, leaving the dispatch layer (``_classify_tool_error``) to decide
   eviction vs. a clean model-visible result (see ``test_tool_dispatch``).
 
-Plus the ``await_run`` wiring (it sources ``db_url`` from settings) and the
-script-trimming of returned dicts. Full attenuation/depth behavior is covered by the
-integration tests.
+Plus the ``resume_gate`` wiring and the script-trimming of returned dicts. Full
+attenuation/depth behavior is covered by the integration tests.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -29,7 +27,6 @@ from aios.errors import CryptoDecryptError, ForbiddenError, NotFoundError
 from aios.models.workflows import (
     WfRun,
     WfRunEvent,
-    WfRunWaitResponse,
     Workflow,
     WorkflowCreate,
     WorkflowUpdate,
@@ -137,19 +134,6 @@ class TestSchemaRejectsInjectedTrustedIds:
                 "ses_1",
                 "update_workflow",
                 {"workflow_id": "wf_1", "version": 1, "actor_session_id": "ses_victim"},
-            )
-
-    async def test_create_run_environment_id_rejected(self) -> None:
-        # F2: environment_id is deliberately NOT a field — the run inherits the caller's.
-        with pytest.raises(ToolBail):
-            await invoke_builtin(
-                "ses_1", "create_run", {"workflow_id": "wf_1", "environment_id": "env_other"}
-            )
-
-    async def test_create_run_parent_run_id_rejected(self) -> None:
-        with pytest.raises(ToolBail):
-            await invoke_builtin(
-                "ses_1", "create_run", {"workflow_id": "wf_1", "parent_run_id": "wfr_x"}
             )
 
     async def test_cancel_run_canceller_session_id_rejected(self) -> None:
@@ -295,33 +279,6 @@ class TestReturnShape:
         assert out["archived_at"] is None
         assert mock_unarchive.call_args.args[1] == "wf_1"
         assert mock_unarchive.call_args.kwargs["account_id"] == "acc_x"
-
-    async def test_create_run_threads_budget_usd(self, monkeypatch: Any) -> None:
-        monkeypatch.setattr(
-            "aios.services.sessions.get_session_basic",
-            AsyncMock(return_value=SimpleNamespace(environment_id="env_x", parent_run_id=None)),
-        )
-        mock_create = AsyncMock(return_value=_run(budget_usd=1.5))
-        monkeypatch.setattr("aios.services.workflows.create_run", mock_create)
-        out = await wm.create_run_handler("ses_1", {"workflow_id": "wf_1", "budget_usd": 1.5})
-        assert out["budget_usd"] == 1.5
-        assert mock_create.call_args.kwargs["budget_usd"] == 1.5
-
-    async def test_await_run_passes_settings_db_url(self, monkeypatch: Any) -> None:
-        mock_await = AsyncMock(
-            return_value=WfRunWaitResponse(run_status="completed", done=True, output=5)
-        )
-        monkeypatch.setattr("aios.services.workflows.await_run", mock_await)
-        monkeypatch.setattr(
-            "aios.tools.workflow_management.get_settings",
-            lambda: SimpleNamespace(db_url="postgres://test-db"),
-        )
-        out = await wm.await_run_handler("ses_1", {"run_id": "wfr_1", "timeout_seconds": 7})
-        assert out["done"] is True and out["output"] == 5
-        # db_url is sourced from settings (positional arg 2), not model input.
-        pos = mock_await.call_args.args
-        assert pos[1] == "postgres://test-db"
-        assert mock_await.call_args.kwargs["timeout_seconds"] == 7
 
     async def test_resume_gate_passes_launcher_session_id_and_trims_run(
         self, monkeypatch: Any

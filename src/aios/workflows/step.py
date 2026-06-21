@@ -403,7 +403,6 @@ async def _run_workflow_step_body(
                     conn,
                     cap_payload["child_run_id"],
                     account_id=account_id,
-                    request_id=call_key,
                 )
                 if result_payload is None:
                     continue  # sub-run still in-flight and unanswered — stay suspended
@@ -1141,7 +1140,7 @@ async def _open_invoke_workflow_capability(
             run_id=sub_run_id,
             parent_run_id=run.id,
             request_id=cap.call_key,  # the invoke_workflow() call IS the request
-            caller={"kind": "run", "id": run.id},
+            caller={"kind": "run", "id": run.id, "awaited": True},
             request_output_schema=output_schema,
         )
     except NotFoundError:
@@ -1173,10 +1172,7 @@ async def _open_invoke_workflow_capability(
     # sweep tick — resolved through the SAME ``derive_run_response`` seam the harvest
     # uses, so an already-gone sub-run triggers the prompt re-wake too.
     needs_rewake = (
-        await wf_queries.derive_run_response(
-            conn, sub_run.id, account_id=account_id, request_id=cap.call_key
-        )
-        is not None
+        await wf_queries.derive_run_response(conn, sub_run.id, account_id=account_id) is not None
     )
     return _SpawnResult(rejected=False, needs_rewake=needs_rewake)
 
@@ -1299,6 +1295,18 @@ async def _commit_terminal_and_dispatch(
     rows the periodic sweep re-defers; never a silently dropped event fire.
     """
     fires: list[db_queries.TriggerFireRef] = []
+    # The CALLER run to answer, or None — a run servicing a RUN caller (single-sourced so
+    # the durable signal-write and the prompt wake below can never desync on the gate).
+    run_caller_id = (
+        run.caller["id"]
+        if (
+            run.request_id is not None
+            and isinstance(run.caller, dict)
+            and run.caller.get("kind") == "run"
+            and isinstance(run.caller.get("id"), str)
+        )
+        else None
+    )
     async with conn.transaction():
         inserted = await wf_queries.append_run_event(
             conn, account_id=run.account_id, run_id=run.id, type="run_completed", payload=payload
@@ -1307,35 +1315,30 @@ async def _commit_terminal_and_dispatch(
             kind = error.get("kind")
             if kind in {"engine_semantics_changed", "nondeterministic_replay"}:
                 await _fail_child_requests_for_terminal_error(conn, run, error_kind=kind)
-        # The "one missing edge" (#1126): a run completing IN SERVICE OF A REQUEST
-        # emits a ``request_response`` keyed on its inbound ``request_id`` — the
-        # run-side mirror of the session ``respond_to_request`` writer, same data
-        # shape so ``derive_run_response``'s response arm reads it uniformly. It
-        # rides this SAME transaction so the answer commits atomically with the
-        # terminal transition, and inherits the run's exactly-once latch — keyed
-        # on ``call_key=request_id``, the existing ``(run_id, call_key, type)``
-        # unique index makes a replay / procrastinate dual-execution loser a no-op
-        # (no double-emit). Gated on the inbound edge: an edgeless operator/HTTP
-        # run (``request_id is None``) emits nothing. Cancellation answers via the
-        # liveness arm (terminal-with-no-response → ``child_gone``), not here.
-        if run.request_id is not None and status != "cancelled":
-            await wf_queries.append_run_event(
-                conn,
-                account_id=run.account_id,
-                run_id=run.id,
-                type="request_response",
-                call_key=run.request_id,
-                payload={
-                    "event": "request_response",
-                    "request_id": run.request_id,
-                    "is_error": payload["is_error"],
-                    "result": None if payload["is_error"] else output,
-                    "error": payload.get("error"),
-                },
-            )
+        # A run in service of a request answers via its terminal record itself (#1126):
+        # the ``run_completed`` bookend (above) + the ``status`` flip (below) ARE the
+        # answer, read back by ``derive_run_response``. No separate ``request_response``
+        # event is written — the run is singly-inbound, so its terminal state already
+        # carries the one outcome (§3.6); this also lets a cancelled run resolve as
+        # ``cancelled`` rather than the ``child_gone`` a gated-off response implied.
         await wf_queries.set_run_terminal(
             conn, run.id, status=status, output=output, account_id=run.account_id
         )
+        # Durable run-caller wake (C4/C5): a run answering a RUN caller writes a
+        # ``child_done`` signal into the CALLER's signal side-table (never its journal —
+        # single-writer-safe), keyed by this run's ``request_id`` (= the caller's
+        # ``invoke_workflow`` ``call_key``). It is the run-side analog of
+        # ``write_child_response``'s session→run seam: it makes the best-effort post-commit
+        # ``defer_run_wake`` below recoverable via the unharvested-signal sweep clause —
+        # ``invoke_workflow`` maps to NULL in the staleness CASE, so it has NO other
+        # backstop. Fires for EVERY terminal, including ``cancelled``: this is what stops a
+        # cancelled sub-run stranding its parent (the 6b liveness gap). The harvest journals
+        # the matching ``call_result``, clearing the signal — no hot-loop.
+        if run_caller_id is not None:
+            assert run.request_id is not None  # implied by run_caller_id's gate
+            await wf_queries.insert_run_signal(
+                conn, run_id=run_caller_id, call_key=run.request_id, kind="child_done"
+            )
         if inserted is not None:
             fires = await db_queries.insert_run_completion_fires(
                 conn,
@@ -1344,21 +1347,15 @@ async def _commit_terminal_and_dispatch(
                 run_id=run.id,
                 status=status,
             )
-    # Wake the CALLER run promptly so it harvests this answer on its next step,
-    # rather than waiting out the periodic sweep — mirroring how an agent() child
-    # wakes its run. Only when the request came from a run (caller.kind=='run');
-    # a session/api caller resumes through its own poll path. Best-effort and
-    # post-commit (the answer is durable; a lost wake is recovered by the sweep).
-    if (
-        inserted is not None
-        and run.request_id is not None
-        and status != "cancelled"
-        and isinstance(run.caller, dict)
-        and run.caller.get("kind") == "run"
-        and isinstance(run.caller.get("id"), str)
-    ):
+    # Prompt the CALLER run to harvest this answer on its next step rather than waiting
+    # out the periodic sweep — mirroring how an agent() child wakes its run. Only for a
+    # run caller (caller.kind=='run'); a session/api caller resumes through its own poll
+    # path. Best-effort + post-commit: the answer is durable and the ``child_done`` signal
+    # written above recovers a lost wake, so this fires for EVERY terminal — a cancelled
+    # sub-run wakes its parent just like a completed one.
+    if inserted is not None and run_caller_id is not None:
         with contextlib.suppress(Exception):
-            await defer_run_wake(run.caller["id"], batch=True)
+            await defer_run_wake(run_caller_id, batch=True)
     for fire in fires:
         try:
             await defer_trigger_fire(fire.trigger_id, fire.trigger_run_id)

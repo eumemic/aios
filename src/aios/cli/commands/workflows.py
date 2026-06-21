@@ -18,11 +18,11 @@ import typer
 from aios.cli.commands._shared import call_single, render_paginated, render_single, unwrap
 from aios.cli.coverage import covers
 from aios.cli.files import PayloadError, load_payload
+from aios.cli.output import print_success
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk import stream_run
+from aios_sdk._generated.api.invocations import await_invocation, cancel_invocation
 from aios_sdk._generated.api.runs import (
-    await_run,
-    cancel_run,
     create_run,
     get_run,
     list_run_events,
@@ -229,7 +229,7 @@ def get_run_(ctx: typer.Context, run_id: str) -> None:
 
 
 @runs_app.command("wait", help="Block until a run completes, then print its result.")
-@covers("await_run")
+@covers("await_invocation")
 def wait_run_(
     ctx: typer.Context,
     run_id: str,
@@ -244,14 +244,15 @@ def wait_run_(
     ] = 30,
 ) -> None:
     def _run() -> None:
-        # The endpoint blocks up to --timeout then returns done|current; re-poll the
-        # bounded call until the run is terminal so the command blocks end-to-end.
+        # The unified awaiter blocks up to --timeout then returns the terminal outcome or
+        # null (still pending); re-poll the bounded call until ``outcome`` is set so the
+        # command blocks end-to-end. The run id is the awaiter's task id.
         with get_state(ctx).sdk_client() as client:
             while True:
                 resp = unwrap(
-                    await_run.sync_detailed(run_id=run_id, client=client, timeout=timeout)
+                    await_invocation.sync_detailed(task_id=run_id, client=client, timeout=timeout)
                 )
-                if resp.done:
+                if resp.outcome:
                     break
         render_single(resp.to_dict())
 
@@ -305,11 +306,23 @@ def run_events_(
     run_or_die(_run)
 
 
-@runs_app.command("cancel", help="Cancel a run (it finalizes 'cancelled' on its next wake).")
-@covers("cancel_run")
+@runs_app.command(
+    "cancel", help="Request cancellation of a run (it finalizes 'cancelled' on its next wake)."
+)
+@covers("cancel_invocation")
 def cancel_run_(ctx: typer.Context, run_id: str) -> None:
     def _run() -> None:
-        call_single(ctx, cancel_run.sync_detailed, run_id=run_id)
+        # The unified cancel is edge-keyed (task_id + request_id). An operator cancelling a
+        # whole run has no single inbound edge, so pass a stable operator label; the run arm
+        # cancels the run regardless and uses request_id only as the cancel-intent key. 202,
+        # no body — the terminal flip to 'cancelled' lands on the run's next wake.
+        with get_state(ctx).sdk_client() as client:
+            unwrap(
+                cancel_invocation.sync_detailed(
+                    task_id=run_id, request_id="operator", client=client
+                )
+            )
+        print_success("cancel requested", run_id)
 
     run_or_die(_run)
 

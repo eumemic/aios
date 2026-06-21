@@ -14,7 +14,6 @@ from ...types import UNSET, Response, Unset
 def _get_kwargs(
     session_id: str,
     *,
-    request_id: None | str | Unset = UNSET,
     watermark: int | None | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
@@ -24,13 +23,6 @@ def _get_kwargs(
         headers["Authorization"] = authorization
 
     params: dict[str, Any] = {}
-
-    json_request_id: None | str | Unset
-    if isinstance(request_id, Unset):
-        json_request_id = UNSET
-    else:
-        json_request_id = request_id
-    params["request_id"] = json_request_id
 
     json_watermark: int | None | Unset
     if isinstance(watermark, Unset):
@@ -89,24 +81,23 @@ def sync_detailed(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    request_id: None | str | Unset = UNSET,
     watermark: int | None | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | SessionAwaitResponse]:
     """Await Session
 
-     Block until a correlated response lands (``request_id``) or the session has fully
-    reacted to a stimulus (``watermark``; defaults to the session's ``last_stimulus_seq`` at
-    call time), or ``timeout`` seconds elapse — then ``done=false`` so the caller re-polls.
+     Block until the session has fully reacted to a stimulus (``watermark``; defaults to the
+    session's ``last_stimulus_seq`` at call time), or ``timeout`` seconds elapse — then
+    ``done=false`` so the caller re-polls.
 
-    The ``await`` primitive's session backing: one JSON round-trip, MCP-usable so an agent can
-    await a session it drove and join. Provide ``request_id`` XOR ``watermark`` (both → 422).
-    A cross-tenant session 404s before any subscription opens.
+    The session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent
+    can drive a session and join when it has fully reacted. Correlating a *request* response is
+    the unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A
+    cross-tenant session 404s before any subscription opens.
 
     Args:
         session_id (str):
-        request_id (None | str | Unset):
         watermark (int | None | Unset):
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
@@ -121,7 +112,6 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        request_id=request_id,
         watermark=watermark,
         timeout=timeout,
         authorization=authorization,
@@ -138,24 +128,23 @@ def sync(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    request_id: None | str | Unset = UNSET,
     watermark: int | None | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | SessionAwaitResponse | None:
     """Await Session
 
-     Block until a correlated response lands (``request_id``) or the session has fully
-    reacted to a stimulus (``watermark``; defaults to the session's ``last_stimulus_seq`` at
-    call time), or ``timeout`` seconds elapse — then ``done=false`` so the caller re-polls.
+     Block until the session has fully reacted to a stimulus (``watermark``; defaults to the
+    session's ``last_stimulus_seq`` at call time), or ``timeout`` seconds elapse — then
+    ``done=false`` so the caller re-polls.
 
-    The ``await`` primitive's session backing: one JSON round-trip, MCP-usable so an agent can
-    await a session it drove and join. Provide ``request_id`` XOR ``watermark`` (both → 422).
-    A cross-tenant session 404s before any subscription opens.
+    The session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent
+    can drive a session and join when it has fully reacted. Correlating a *request* response is
+    the unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A
+    cross-tenant session 404s before any subscription opens.
 
     Args:
         session_id (str):
-        request_id (None | str | Unset):
         watermark (int | None | Unset):
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
@@ -171,7 +160,6 @@ def sync(
     return sync_detailed(
         session_id=session_id,
         client=client,
-        request_id=request_id,
         watermark=watermark,
         timeout=timeout,
         authorization=authorization,
@@ -182,24 +170,23 @@ async def asyncio_detailed(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    request_id: None | str | Unset = UNSET,
     watermark: int | None | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | SessionAwaitResponse]:
     """Await Session
 
-     Block until a correlated response lands (``request_id``) or the session has fully
-    reacted to a stimulus (``watermark``; defaults to the session's ``last_stimulus_seq`` at
-    call time), or ``timeout`` seconds elapse — then ``done=false`` so the caller re-polls.
+     Block until the session has fully reacted to a stimulus (``watermark``; defaults to the
+    session's ``last_stimulus_seq`` at call time), or ``timeout`` seconds elapse — then
+    ``done=false`` so the caller re-polls.
 
-    The ``await`` primitive's session backing: one JSON round-trip, MCP-usable so an agent can
-    await a session it drove and join. Provide ``request_id`` XOR ``watermark`` (both → 422).
-    A cross-tenant session 404s before any subscription opens.
+    The session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent
+    can drive a session and join when it has fully reacted. Correlating a *request* response is
+    the unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A
+    cross-tenant session 404s before any subscription opens.
 
     Args:
         session_id (str):
-        request_id (None | str | Unset):
         watermark (int | None | Unset):
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
@@ -214,7 +201,6 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         session_id=session_id,
-        request_id=request_id,
         watermark=watermark,
         timeout=timeout,
         authorization=authorization,
@@ -229,24 +215,23 @@ async def asyncio(
     session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    request_id: None | str | Unset = UNSET,
     watermark: int | None | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | SessionAwaitResponse | None:
     """Await Session
 
-     Block until a correlated response lands (``request_id``) or the session has fully
-    reacted to a stimulus (``watermark``; defaults to the session's ``last_stimulus_seq`` at
-    call time), or ``timeout`` seconds elapse — then ``done=false`` so the caller re-polls.
+     Block until the session has fully reacted to a stimulus (``watermark``; defaults to the
+    session's ``last_stimulus_seq`` at call time), or ``timeout`` seconds elapse — then
+    ``done=false`` so the caller re-polls.
 
-    The ``await`` primitive's session backing: one JSON round-trip, MCP-usable so an agent can
-    await a session it drove and join. Provide ``request_id`` XOR ``watermark`` (both → 422).
-    A cross-tenant session 404s before any subscription opens.
+    The session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent
+    can drive a session and join when it has fully reacted. Correlating a *request* response is
+    the unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A
+    cross-tenant session 404s before any subscription opens.
 
     Args:
         session_id (str):
-        request_id (None | str | Unset):
         watermark (int | None | Unset):
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
@@ -263,7 +248,6 @@ async def asyncio(
         await asyncio_detailed(
             session_id=session_id,
             client=client,
-            request_id=request_id,
             watermark=watermark,
             timeout=timeout,
             authorization=authorization,

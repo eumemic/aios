@@ -40,21 +40,18 @@ def mock_services(monkeypatch: Any) -> dict[str, AsyncMock]:
     """
     load_account = AsyncMock(return_value="acct_TEST")
     event = MagicMock(id="evt_TEST")
-    append = AsyncMock(return_value=event)
-    defer = AsyncMock(return_value=None)
+    tell = AsyncMock(return_value=event)
     monkeypatch.setattr(
         "aios.tools.wake_self.sessions_service.load_session_account_id",
         load_account,
     )
     monkeypatch.setattr(
-        "aios.tools.wake_self.sessions_service.append_user_message",
-        append,
+        "aios.tools.wake_self.sessions_service.tell_existing_session",
+        tell,
     )
-    monkeypatch.setattr("aios.tools.wake_self.defer_wake", defer)
     return {
         "load_account": load_account,
-        "append": append,
-        "defer": defer,
+        "tell": tell,
     }
 
 
@@ -67,11 +64,8 @@ class TestWakeSelfHandler:
         result = await wake_self_handler("sess_TEST", {"content": "ping"})
 
         mock_services["load_account"].assert_awaited_once_with(mock_runtime_pool, "sess_TEST")
-        mock_services["append"].assert_awaited_once_with(
-            mock_runtime_pool, "sess_TEST", "ping", account_id="acct_TEST"
-        )
-        mock_services["defer"].assert_awaited_once_with(
-            mock_runtime_pool, "sess_TEST", cause="message", account_id="acct_TEST"
+        mock_services["tell"].assert_awaited_once_with(
+            mock_runtime_pool, "sess_TEST", content="ping", cause="message", account_id="acct_TEST"
         )
         assert result == {
             "woken": True,
@@ -82,8 +76,7 @@ class TestWakeSelfHandler:
     async def test_empty_content_rejected(self, mock_services: dict[str, AsyncMock]) -> None:
         with pytest.raises(WakeSelfArgumentError):
             await wake_self_handler("sess_TEST", {"content": ""})
-        mock_services["append"].assert_not_awaited()
-        mock_services["defer"].assert_not_awaited()
+        mock_services["tell"].assert_not_awaited()
 
     @pytest.mark.parametrize("bad_content", [None, 42, ["a"], {"k": "v"}])
     async def test_non_string_content_rejected(
@@ -93,14 +86,12 @@ class TestWakeSelfHandler:
     ) -> None:
         with pytest.raises(WakeSelfArgumentError):
             await wake_self_handler("sess_TEST", {"content": bad_content})
-        mock_services["append"].assert_not_awaited()
-        mock_services["defer"].assert_not_awaited()
+        mock_services["tell"].assert_not_awaited()
 
     async def test_missing_content_rejected(self, mock_services: dict[str, AsyncMock]) -> None:
         with pytest.raises(WakeSelfArgumentError):
             await wake_self_handler("sess_TEST", {})
-        mock_services["append"].assert_not_awaited()
-        mock_services["defer"].assert_not_awaited()
+        mock_services["tell"].assert_not_awaited()
 
 
 class TestWakeSelfSchema:

@@ -1,4 +1,6 @@
-"""E2E tests for the ``GET /v1/sessions/{id}/wait`` long-poll endpoint (issue #40)."""
+"""E2E tests for the session/run watch endpoints: the ``GET /v1/sessions/{id}/wait`` SSE
+long-poll (issue #40), the unified ``GET /v1/invocations/{task_id}/await`` awaiter, and the
+``GET /v1/sessions/{id}/await`` watermark quiescence alias."""
 
 from __future__ import annotations
 
@@ -214,66 +216,78 @@ async def run_id(pool: Any) -> str:
     return run.id
 
 
-class TestRunWaitEndpoint:
-    """``GET /v1/runs/{id}/wait`` — the await-a-completion endpoint (runs backing).
+class TestInvocationAwaitEndpoint:
+    """``GET /v1/invocations/{task_id}/await`` — the one awaiter over both servicer kinds.
 
     Exercises the HTTP wiring (route registration, the ``timeout`` query alias, the
-    ``WfRunWaitResponse`` serialization, account scoping) over a real ASGI client. The
-    blocking/completion behavior of the service itself is covered in
-    ``tests/integration/test_wf_step.py``; here ``timeout=0`` keeps every case non-blocking."""
+    ``AwaitResponse`` serialization, kind-dispatch off the id prefix, account scoping) over a
+    real ASGI client. The blocking/completion behavior of the service is covered in
+    ``tests/integration/test_wf_step.py`` (run arm) and ``test_await_session.py`` (session arm);
+    here ``timeout=0`` keeps every case non-blocking."""
 
-    async def test_timeout_returns_done_false_for_pending_run(
+    async def test_run_pending_returns_outcome_null(
         self, http_client: httpx.AsyncClient, run_id: str
     ) -> None:
-        """A never-stepped run is non-terminal; ``timeout=0`` returns at once with the live
-        status and ``done=false`` (the re-poll contract) — proving the alias + model wiring."""
-        r = await http_client.get(f"/v1/runs/{run_id}/wait", params={"timeout": 0})
+        """A never-stepped run is non-terminal; ``timeout=0`` returns at once with
+        ``outcome=null`` (the re-poll contract) — proving the run-arm dispatch + model wiring."""
+        r = await http_client.get(f"/v1/invocations/{run_id}/await", params={"timeout": 0})
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["done"] is False
-        assert body["run_status"] == "pending"
-        assert body["is_error"] is False and body["error"] is None
+        assert body["outcome"] is None
+        assert body["result"] is None and body["error"] is None
+
+    async def test_session_request_pending_returns_outcome_null(
+        self, http_client: httpx.AsyncClient, session_id: str
+    ) -> None:
+        """An unanswered ``request_id`` on a session servicer is non-terminal → ``outcome=null``."""
+        r = await http_client.get(
+            f"/v1/invocations/{session_id}/await", params={"request_id": "nope", "timeout": 0}
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["outcome"] is None and body["result"] is None
+
+    async def test_session_without_request_id_422(
+        self, http_client: httpx.AsyncClient, session_id: str
+    ) -> None:
+        """A session servicer needs ``request_id`` to correlate; omitting it is a 422."""
+        r = await http_client.get(f"/v1/invocations/{session_id}/await", params={"timeout": 0})
+        assert r.status_code == 422, r.text
 
     async def test_rejects_timeout_above_cap(
         self, http_client: httpx.AsyncClient, run_id: str
     ) -> None:
         """The ``le=60`` bound on the ``timeout`` query param is enforced (422)."""
-        r = await http_client.get(f"/v1/runs/{run_id}/wait", params={"timeout": 3600})
+        r = await http_client.get(f"/v1/invocations/{run_id}/await", params={"timeout": 3600})
+        assert r.status_code == 422, r.text
+
+    async def test_non_servicer_task_id_422(self, http_client: httpx.AsyncClient) -> None:
+        """A well-formed id of a non-awaitable kind (e.g. an agent) is a 422, not a 404."""
+        r = await http_client.get(
+            "/v1/invocations/agent_0000000000000000000000abcd/await", params={"timeout": 0}
+        )
         assert r.status_code == 422, r.text
 
     async def test_unknown_run_404s_before_subscribing(
         self, http_client: httpx.AsyncClient
     ) -> None:
-        """A run id the caller can't see 404s — and (post-review) the scope check runs BEFORE
-        any LISTEN is opened, so an unauthorized caller never opens a connection on the channel."""
-        r = await http_client.get("/v1/runs/wf_run_nope/wait", params={"timeout": 0})
+        """A run id the caller can't see 404s — and the scope check runs BEFORE any LISTEN is
+        opened, so an unauthorized caller never opens a connection on the channel."""
+        r = await http_client.get(
+            "/v1/invocations/wfr_00000000000000000000000000/await", params={"timeout": 0}
+        )
         assert r.status_code == 404, r.text
 
 
 class TestSessionAwaitEndpoint:
-    """``GET /v1/sessions/{id}/await`` — the await-a-completion endpoint (session backing).
+    """``GET /v1/sessions/{id}/await`` — the session quiescence drive-and-join (watermark only).
 
-    Exercises the HTTP wiring (route registration, the ``timeout`` query alias, the either/or
-    ``request_id``/``watermark`` params, the ``SessionAwaitResponse`` serialization, account
-    scoping) over a real ASGI client. The blocking/completion behavior of the service is covered
-    in ``tests/integration/test_await_session.py``; here ``timeout=0`` keeps each case
-    non-blocking."""
+    Exercises the HTTP wiring (route registration, the ``timeout`` query alias, the ``watermark``
+    param, the ``SessionAwaitResponse`` serialization, account scoping) over a real ASGI client.
+    Request correlation lives on the unified awaiter (``/v1/invocations/{id}/await``); here
+    ``timeout=0`` keeps each case non-blocking."""
 
-    async def test_mode1_timeout_zero_pending_done_false(
-        self, http_client: httpx.AsyncClient, session_id: str
-    ) -> None:
-        """An unanswered request_id is non-terminal; ``timeout=0`` returns at once with
-        ``done=false`` — the re-poll contract."""
-        r = await http_client.get(
-            f"/v1/sessions/{session_id}/await", params={"request_id": "nope", "timeout": 0}
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["done"] is False
-        assert body["is_error"] is False
-        assert body["result"] is None
-
-    async def test_mode2_default_watermark_unmet_done_false(
+    async def test_default_watermark_unmet_done_false(
         self, http_client: httpx.AsyncClient, pool: Any, session_id: str
     ) -> None:
         """A pending user stimulus (last_stimulus_seq > last_reacted_seq) with the default
@@ -288,7 +302,7 @@ class TestSessionAwaitEndpoint:
         assert body["done"] is False
         assert body["last_reacted_seq"] == 0
 
-    async def test_mode2_met_watermark_done_true(
+    async def test_met_watermark_done_true(
         self, http_client: httpx.AsyncClient, session_id: str
     ) -> None:
         """A fresh session has ``last_reacted_seq == 0``; ``watermark=0`` is met → ``done``."""
@@ -298,14 +312,6 @@ class TestSessionAwaitEndpoint:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["done"] is True
-
-    async def test_both_params_422(self, http_client: httpx.AsyncClient, session_id: str) -> None:
-        """``request_id`` and ``watermark`` are mutually exclusive (422)."""
-        r = await http_client.get(
-            f"/v1/sessions/{session_id}/await",
-            params={"request_id": "r", "watermark": 1, "timeout": 0},
-        )
-        assert r.status_code == 422, r.text
 
     async def test_rejects_timeout_above_cap(
         self, http_client: httpx.AsyncClient, session_id: str

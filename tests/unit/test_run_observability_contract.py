@@ -2,9 +2,10 @@
 
 These assert the documented contract for three #1068 dogfood papercuts:
 
-(a) The run ``/wait`` terminal state is carried by ``run_status``/``done`` —
-    there is NO ``state`` field, and the model/schema must say so explicitly so
-    a watcher does not key on a nonexistent ``.state`` and wait forever.
+(a) The unified ``GET /v1/invocations/{task_id}/await`` terminal state is carried
+    by ``outcome`` (null while pending) — there is NO ``state``/``done``/
+    ``run_status`` field, and the model/schema must say so explicitly so a watcher
+    does not key on a nonexistent field and wait forever.
 (b) ``GET /v1/sessions/{id}/events`` (and the run-events twin) can return an
     empty page transiently; the endpoint docs must tell consumers an empty list
     is a paging artifact, not a "session reset."
@@ -29,24 +30,26 @@ def _openapi() -> dict[str, Any]:
 
 
 class TestWaitTerminalStateField:
-    def test_wait_response_has_no_state_field(self) -> None:
-        from aios.models.workflows import WfRunWaitResponse
+    def test_await_response_has_no_state_or_legacy_fields(self) -> None:
+        from aios.models.invocations import AwaitResponse
 
-        # The watcher in #1068 keyed on ``.state`` and waited forever. Guard
-        # that the field genuinely does not exist (so the fix is to document
-        # run_status/done, not to silently add a state alias).
-        assert "state" not in WfRunWaitResponse.model_fields
-        assert "run_status" in WfRunWaitResponse.model_fields
-        assert "done" in WfRunWaitResponse.model_fields
+        # The watcher in #1068 keyed on ``.state`` and waited forever. The unified
+        # awaiter carries the terminal state on ``outcome`` (null while pending);
+        # guard that none of the misleading legacy fields exist (so a stale watcher
+        # gets a clear KeyError, not a silent None-forever).
+        fields = AwaitResponse.model_fields
+        assert "outcome" in fields
+        for absent in ("state", "done", "run_status", "is_error"):
+            assert absent not in fields
 
-    def test_wait_response_fields_describe_terminal_polling(self) -> None:
-        from aios.models.workflows import WfRunWaitResponse
+    def test_await_outcome_field_describes_terminal_and_pending(self) -> None:
+        from aios.models.invocations import AwaitResponse
 
-        run_status_desc = (WfRunWaitResponse.model_fields["run_status"].description or "").lower()
-        done_desc = (WfRunWaitResponse.model_fields["done"].description or "").lower()
-        # The terminal-state field must be self-describing in the schema.
-        assert "terminal" in run_status_desc or "status" in run_status_desc
-        assert "no" in done_desc and "state" in done_desc
+        outcome_desc = (AwaitResponse.model_fields["outcome"].description or "").lower()
+        # The terminal-state field must be self-describing in the schema: it names
+        # both the terminal sense and that null means still pending (re-poll).
+        assert "terminal" in outcome_desc
+        assert "pending" in outcome_desc or "null" in outcome_desc
 
     def test_wfrun_status_field_is_documented(self) -> None:
         from aios.models.workflows import WfRun
@@ -55,11 +58,11 @@ class TestWaitTerminalStateField:
         assert "status" in desc
         assert "state" in desc  # explicitly disambiguates status-vs-state
 
-    def test_openapi_wait_schema_documents_status_not_state(self) -> None:
-        schema = _openapi()["components"]["schemas"]["WfRunWaitResponse"]
+    def test_openapi_await_schema_documents_outcome_not_state(self) -> None:
+        schema = _openapi()["components"]["schemas"]["AwaitResponse"]
         props = schema["properties"]
-        assert "state" not in props
-        assert "run_status" in props and props["run_status"].get("description")
+        assert "state" not in props and "done" not in props
+        assert "outcome" in props and props["outcome"].get("description")
 
 
 class TestTransientEmptyEventsDocumented:
@@ -97,6 +100,6 @@ class TestDualEventSchemasDocumented:
         assert doc.exists(), "expected docs/reference/run-observability.md"
         text = doc.read_text().lower()
         # Must cover all three papercuts.
-        assert "run_status" in text and "state" in text
+        assert "outcome" in text and "state" in text
         assert "empty" in text
         assert "{type" in text or "type, payload" in text or "type,payload" in text

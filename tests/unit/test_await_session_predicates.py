@@ -1,9 +1,9 @@
-"""Unit tests for the await_session done-predicates over ``await_completion``.
+"""Unit tests for the session await done-predicates over ``await_completion``.
 
-Pure: a real ``asyncio.Queue`` + scripted ``read_state``/``is_done``, no DB — the
-session backing's two monotonic modes (request_id correlation, reacted>=watermark)
-exercised against the shared :func:`aios.services.await_completion.await_completion`
-loop without standing up a session row.
+Pure: a real ``asyncio.Queue`` + scripted ``read_state``/``is_done``, no DB — the two
+monotonic session predicates (request_id correlation, now the unified awaiter's session
+arm; reacted>=watermark, the quiescence alias) exercised against the shared
+:func:`aios.services.await_completion.await_completion` loop without standing up a session row.
 
 Mirrors ``tests/unit/test_await_completion.py``: covers the three exit shapes
 (already-done, done-after-notify, timeout) for each mode.

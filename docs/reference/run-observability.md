@@ -4,32 +4,34 @@ Reference for anyone watching a run or session from the outside — an operator
 tailing with `aios`, an SDK consumer, or an agent awaiting a sub-run as an MCP
 tool. It pins down three contracts surfaced by the #1068 dogfood (#1140).
 
-## (a) Terminal state is `status` / `done`, never `state`
+## (a) Terminal state is `status` / `outcome`, never `state`
 
 A run's lifecycle field is **`status`**. There is **no `state` field** anywhere
-on a run row (`WfRun`) or on the `/wait` response (`WfRunWaitResponse`).
+on a run row (`WfRun`) or on the unified awaiter's `AwaitResponse`.
 
 A watcher that keys on `.state` reads `None` forever — even after `output` is
 already populated — because the field simply does not exist in the JSON. This is
-exactly the #1068 symptom: `GET /v1/runs/{id}/wait` "returned `state:None` while
-`output` was already populated."
+exactly the #1068 symptom: the awaiter "returned `state:None` while `output` was
+already populated."
 
 What to poll:
 
 | Surface | Field to poll | Terminal when |
 | --- | --- | --- |
 | `GET /v1/runs/{id}` (`WfRun`) | `status` | `status ∈ {completed, errored, cancelled}` |
-| `GET /v1/runs/{id}/wait` (`WfRunWaitResponse`) | `done` (bool) — or `run_status` | `done == true` (i.e. `run_status` terminal) |
+| `GET /v1/invocations/{task_id}/await` (`AwaitResponse`) | `outcome` | `outcome` is non-null (`ok` / `errored` / `cancelled`) |
 
-`/wait` is the await-a-completion primitive: it blocks until the run is terminal
-or `timeout` seconds elapse. On timeout it returns `done=false` with the live
-`run_status`; call again to keep blocking. The completion payload is
-`{done, output}` (success) or `{is_error, error}` (failure). `run_status`
-deliberately mirrors the run row's `status`; the response carries no `state`.
+`GET /v1/invocations/{task_id}/await` is the one await-a-completion primitive
+(over both a run and a session servicer): it blocks until the invocation is
+terminal or `timeout` seconds elapse. On timeout it returns `outcome=null` (still
+pending); call again to keep blocking. The completion payload is `{outcome:"ok",
+result}` (success) or `{outcome:"errored"|"cancelled", error}` (failure). The
+`task_id` is the servicer id; the response carries no `state`, `done`, or
+`run_status` field — `outcome` alone is the terminal discriminant.
 
 > Sessions, by contrast, expose `status` (`SessionStatus`) and are not
-> persisted the way runs are — but the same rule holds: poll `status`, there is
-> no `state`.
+> persisted the way runs are — but the same rule holds: poll `status` (or, for an
+> invocation, `outcome`), there is no `state`.
 
 ## (b) An empty event page is not a "session/run reset"
 

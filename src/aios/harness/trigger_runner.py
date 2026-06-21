@@ -70,7 +70,6 @@ from aios.services.wake import (
     WakeSessionRateLimitedError,
     WakeSessionTargetUnavailableError,
     defer_trigger_fire,
-    defer_wake,
     deliver_cross_session_wake,
 )
 
@@ -98,9 +97,9 @@ def compose_workflow_run_input(
     and there is no placeholder language to fail at fire time. For
     run_completion fires the completing run rides BY VALUE under
     ``trigger.run`` — a workflow script has no capability to read another run,
-    so by-reference would strand the data. ``trigger.run.error`` mirrors the
-    ``WfRunWaitResponse`` shape: the ``{'kind': …}`` from the run_completed
-    journal event, ``None`` unless the watched run errored. For external_event
+    so by-reference would strand the data. ``trigger.run.error`` carries the
+    ``{'kind': …}`` from the run_completed journal event (the same shape the
+    awaiter surfaces), ``None`` unless the watched run errored. For external_event
     fires the inbound webhook body rides verbatim under ``trigger.event`` so
     the workflow reads ``input["trigger"]["event"]``.
     """
@@ -338,7 +337,7 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
     # risks deadlock on the small pool.
     if auto_disable:
         content = (
-            f"[Scheduled task '{trigger.name}' auto-disabled after "
+            f"[Trigger '{trigger.name}' auto-disabled after "
             f"{MAX_CONSECUTIVE_FAILURES} consecutive failures: "
             f"{error_summary or status}]"
         )
@@ -660,10 +659,10 @@ async def _run_workflow(
             parent_run_id = None
         else:
             # Timer fires (cron / one_shot) inherit the owner session's own
-            # (immutable) lineage — exactly what the create_run builtin threads,
+            # (immutable) lineage — exactly what the call_workflow builtin threads,
             # projected onto the TriggerRow off its sessions JOIN. None for
             # normal sessions (root run); for a workflow-child owner this closes
-            # the depth-laundering bypass (a past-fire_at one-shot is create_run
+            # the depth-laundering bypass (a past-fire_at one-shot is a run-launch
             # with a 0s delay).
             parent_run_id = trigger.session_parent_run_id
         composed = compose_workflow_run_input(
@@ -722,8 +721,9 @@ async def _surface_failure(session_id: str, account_id: str, content: str) -> No
     """
     pool = runtime.require_pool()
     try:
-        await sessions_service.append_user_message(pool, session_id, content, account_id=account_id)
-        await defer_wake(pool, session_id, cause="message", account_id=account_id)
+        await sessions_service.tell_existing_session(
+            pool, session_id, content=content, cause="message", account_id=account_id
+        )
     except Exception:
         log.exception(
             "trigger.surface_failure_failed",

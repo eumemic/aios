@@ -80,9 +80,10 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
         "Long-poll endpoint; use `aios sessions stream` / `aios tail` instead."
     ),
     "await_session": (
-        "Await-a-completion long-poll (the await primitive's session backing); "
-        "MCP-surfaced for agents, but operators watch a session via "
-        "`aios sessions stream` / `aios tail` rather than a blocking poll."
+        "Session quiescence drive-and-join long-poll (watermark only; request "
+        "correlation lives on `await_invocation`). MCP-surfaced for agents, but "
+        "operators watch a session via `aios sessions stream` / `aios tail` rather "
+        "than a blocking poll."
     ),
     # ── External-event webhook ingress ───────────────────────────────
     # The per-trigger inbound webhook edge (#1281). Authenticated by a

@@ -230,6 +230,7 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
     tool resolves to ``"cli"``), returns an empty list.
     """
     result: list[dict[str, Any]] = []
+    seen_builtins: set[str] = set()
     for entry in agent_tools:
         if not entry.enabled:
             continue
@@ -251,6 +252,12 @@ def to_openai_tools(agent_tools: list[AgentToolSpec]) -> list[dict[str, Any]]:
                 }
             )
         else:
+            # A pre-#1419 legacy collapse (invoke_workflow + create_run both →
+            # call_workflow) can leave duplicate builtin entries after the read-tolerance
+            # rename; emit each builtin name once so the model never sees a dup.
+            if entry.type in seen_builtins:
+                continue
+            seen_builtins.add(entry.type)
             tool = registry.get(entry.type)
             effective = entry.transport or tool.transport
             if effective == "cli":

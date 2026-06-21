@@ -6,14 +6,15 @@ import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
+from ...models.await_response import AwaitResponse
 from ...models.http_validation_error import HTTPValidationError
-from ...models.wf_run_wait_response import WfRunWaitResponse
 from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
-    run_id: str,
+    task_id: str,
     *,
+    request_id: None | str | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
@@ -23,14 +24,21 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
+    json_request_id: None | str | Unset
+    if isinstance(request_id, Unset):
+        json_request_id = UNSET
+    else:
+        json_request_id = request_id
+    params["request_id"] = json_request_id
+
     params["timeout"] = timeout
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
         "method": "get",
-        "url": "/v1/runs/{run_id}/wait".format(
-            run_id=quote(str(run_id), safe=""),
+        "url": "/v1/invocations/{task_id}/await".format(
+            task_id=quote(str(task_id), safe=""),
         ),
         "params": params,
     }
@@ -41,9 +49,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> HTTPValidationError | WfRunWaitResponse | None:
+) -> AwaitResponse | HTTPValidationError | None:
     if response.status_code == 200:
-        response_200 = WfRunWaitResponse.from_dict(response.json())
+        response_200 = AwaitResponse.from_dict(response.json())
 
         return response_200
 
@@ -60,7 +68,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[HTTPValidationError | WfRunWaitResponse]:
+) -> Response[AwaitResponse | HTTPValidationError]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -70,28 +78,27 @@ def _build_response(
 
 
 def sync_detailed(
-    run_id: str,
+    task_id: str,
     *,
     client: AuthenticatedClient | Client,
+    request_id: None | str | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | WfRunWaitResponse]:
-    """Await Run
+) -> Response[AwaitResponse | HTTPValidationError]:
+    """Await Invocation
 
-     Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
+     Block until the invocation reaches a terminal state, or ``timeout`` seconds.
 
-    The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
-    completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running
-    after ``timeout`` seconds returns ``done=false`` with its current status; call again to keep
-    blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
-    tool — an agent can await a sub-run and join. A cross-tenant run 404s.
-
-    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
-    response has NO ``state`` field, so a watcher keying on ``.state`` reads
-    ``None`` forever even after ``output`` is populated.
+    The **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``
+    from the POST handle and its kind is read off the id prefix. A ``session``
+    servicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off
+    its terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so
+    the caller re-polls — a plain request/response (MCP-usable) so an agent can await
+    a sub-invocation and join. A cross-tenant/missing servicer 404s.
 
     Args:
-        run_id (str):
+        task_id (str):
+        request_id (None | str | Unset):
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
@@ -100,11 +107,12 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | WfRunWaitResponse]
+        Response[AwaitResponse | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
-        run_id=run_id,
+        task_id=task_id,
+        request_id=request_id,
         timeout=timeout,
         authorization=authorization,
     )
@@ -117,28 +125,27 @@ def sync_detailed(
 
 
 def sync(
-    run_id: str,
+    task_id: str,
     *,
     client: AuthenticatedClient | Client,
+    request_id: None | str | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | WfRunWaitResponse | None:
-    """Await Run
+) -> AwaitResponse | HTTPValidationError | None:
+    """Await Invocation
 
-     Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
+     Block until the invocation reaches a terminal state, or ``timeout`` seconds.
 
-    The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
-    completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running
-    after ``timeout`` seconds returns ``done=false`` with its current status; call again to keep
-    blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
-    tool — an agent can await a sub-run and join. A cross-tenant run 404s.
-
-    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
-    response has NO ``state`` field, so a watcher keying on ``.state`` reads
-    ``None`` forever even after ``output`` is populated.
+    The **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``
+    from the POST handle and its kind is read off the id prefix. A ``session``
+    servicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off
+    its terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so
+    the caller re-polls — a plain request/response (MCP-usable) so an agent can await
+    a sub-invocation and join. A cross-tenant/missing servicer 404s.
 
     Args:
-        run_id (str):
+        task_id (str):
+        request_id (None | str | Unset):
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
@@ -147,40 +154,40 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | WfRunWaitResponse
+        AwaitResponse | HTTPValidationError
     """
 
     return sync_detailed(
-        run_id=run_id,
+        task_id=task_id,
         client=client,
+        request_id=request_id,
         timeout=timeout,
         authorization=authorization,
     ).parsed
 
 
 async def asyncio_detailed(
-    run_id: str,
+    task_id: str,
     *,
     client: AuthenticatedClient | Client,
+    request_id: None | str | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | WfRunWaitResponse]:
-    """Await Run
+) -> Response[AwaitResponse | HTTPValidationError]:
+    """Await Invocation
 
-     Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
+     Block until the invocation reaches a terminal state, or ``timeout`` seconds.
 
-    The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
-    completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running
-    after ``timeout`` seconds returns ``done=false`` with its current status; call again to keep
-    blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
-    tool — an agent can await a sub-run and join. A cross-tenant run 404s.
-
-    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
-    response has NO ``state`` field, so a watcher keying on ``.state`` reads
-    ``None`` forever even after ``output`` is populated.
+    The **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``
+    from the POST handle and its kind is read off the id prefix. A ``session``
+    servicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off
+    its terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so
+    the caller re-polls — a plain request/response (MCP-usable) so an agent can await
+    a sub-invocation and join. A cross-tenant/missing servicer 404s.
 
     Args:
-        run_id (str):
+        task_id (str):
+        request_id (None | str | Unset):
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
@@ -189,11 +196,12 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | WfRunWaitResponse]
+        Response[AwaitResponse | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
-        run_id=run_id,
+        task_id=task_id,
+        request_id=request_id,
         timeout=timeout,
         authorization=authorization,
     )
@@ -204,28 +212,27 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    run_id: str,
+    task_id: str,
     *,
     client: AuthenticatedClient | Client,
+    request_id: None | str | Unset = UNSET,
     timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | WfRunWaitResponse | None:
-    """Await Run
+) -> AwaitResponse | HTTPValidationError | None:
+    """Await Invocation
 
-     Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.
+     Block until the invocation reaches a terminal state, or ``timeout`` seconds.
 
-    The ``await``-a-completion primitive (runs backing): one JSON round-trip returning the
-    completion record — ``done`` + ``output``, or ``is_error`` + ``error``. A run still running
-    after ``timeout`` seconds returns ``done=false`` with its current status; call again to keep
-    blocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP
-    tool — an agent can await a sub-run and join. A cross-tenant run 404s.
-
-    Watch the right field (#1140): poll ``done`` (bool) or ``run_status`` — the
-    response has NO ``state`` field, so a watcher keying on ``.state`` reads
-    ``None`` forever even after ``output`` is populated.
+    The **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``
+    from the POST handle and its kind is read off the id prefix. A ``session``
+    servicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off
+    its terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so
+    the caller re-polls — a plain request/response (MCP-usable) so an agent can await
+    a sub-invocation and join. A cross-tenant/missing servicer 404s.
 
     Args:
-        run_id (str):
+        task_id (str):
+        request_id (None | str | Unset):
         timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
@@ -234,13 +241,14 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | WfRunWaitResponse
+        AwaitResponse | HTTPValidationError
     """
 
     return (
         await asyncio_detailed(
-            run_id=run_id,
+            task_id=task_id,
             client=client,
+            request_id=request_id,
             timeout=timeout,
             authorization=authorization,
         )

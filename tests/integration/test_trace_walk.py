@@ -109,6 +109,51 @@ async def test_children_of_unions_edge_and_fk(
     assert ("run", sub) in ids
 
 
+async def test_children_of_surfaces_the_awaited_cut(
+    pool_env: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """The cancel cut reads ``ChildNode.awaited`` off the run edge — pin all three cases.
+
+    This is the cut-readability prerequisite the supervision-tree cancel is built on
+    (cancel-design §1): an owned (Ask) child carries ``awaited=true`` and dies with its
+    parent; a detached (Tell) child carries ``awaited=false`` and an exit never crosses to
+    it; a legacy/FK edge with no ``awaited`` key COALESCEs to ``true`` (the safe owned
+    default). Held today only by the inline ``COALESCE`` in ``children_of`` — this pins it
+    so a future edit can't silently flip the default and over- or under-cancel.
+    """
+    pool, account_id, env_id = pool_env
+    root = await _seed_run(pool, account_id=account_id, environment_id=env_id)
+    owned = await _seed_run(
+        pool,
+        account_id=account_id,
+        environment_id=env_id,
+        caller={"kind": "run", "id": root, "awaited": True},
+        request_id="req-owned",
+    )
+    detached = await _seed_run(
+        pool,
+        account_id=account_id,
+        environment_id=env_id,
+        caller={"kind": "run", "id": root, "awaited": False},
+        request_id="req-detached",
+    )
+    legacy = await _seed_run(
+        pool,
+        account_id=account_id,
+        environment_id=env_id,
+        caller={"kind": "run", "id": root},  # no awaited key → COALESCE owned default
+        request_id="req-legacy",
+    )
+    async with pool.acquire() as conn:
+        kids = await trace_q.children_of(
+            conn, caller_kind="run", caller_id=root, account_id=account_id
+        )
+    awaited_by_id = {k.id: k.awaited for k in kids}
+    assert awaited_by_id[owned] is True
+    assert awaited_by_id[detached] is False
+    assert awaited_by_id[legacy] is True  # COALESCE legacy → owned
+
+
 async def test_children_of_is_account_scoped(
     pool_env: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:

@@ -154,7 +154,7 @@ async def validate_trigger_spec(
         )
     # Sessions' environment is immutable, so resolving it at write time equals
     # fire-time resolution; environment_id is deliberately NOT a wire field (a
-    # caller-chosen env would bypass the create_run builtin's same refusal).
+    # caller-chosen env would bypass the call_workflow builtin's same refusal).
     return session.environment_id
 
 

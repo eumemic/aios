@@ -36,7 +36,9 @@ class ChildNode:
     ``created_at``); ``label`` is the parent-half ``call_started.label`` for an
     ``agent()`` / ``invoke_workflow`` spawn (``None`` for FK-only / api / session
     callers). ``request_id`` is the edge's request id when the child was invoked
-    *in service of a request* (``None`` for a root-style FK child).
+    *in service of a request* (``None`` for a root-style FK child). ``awaited`` is
+    the edge's ``Ask|Tell`` bit (Ask ⇒ owned/dies-with-parent; Tell ⇒ detached) —
+    defaults ``True`` for legacy/FK rows that carry no bit (the conservative cut).
     """
 
     kind: NodeKind
@@ -44,6 +46,7 @@ class ChildNode:
     spawn_at: Any | None = None
     label: str | None = None
     request_id: str | None = None
+    awaited: bool = True
 
 
 async def children_of(
@@ -67,7 +70,8 @@ async def children_of(
     # run/session → child session: a ``request_opened`` whose caller matches.
     sess_rows = await conn.fetch(
         "SELECT e.session_id AS id, e.created_at AS spawn_at, "
-        "       e.data->>'request_id' AS request_id "
+        "       e.data->>'request_id' AS request_id, "
+        "       COALESCE((e.data->>'awaited')::bool, true) AS awaited "
         "FROM events e "
         "WHERE e.account_id = $1 AND e.kind = 'lifecycle' "
         "AND e.data->>'event' = 'request_opened' "
@@ -85,13 +89,15 @@ async def children_of(
                 id=r["id"],
                 spawn_at=r["spawn_at"],
                 request_id=r["request_id"],
+                awaited=r["awaited"],
             ),
         )
 
     # run → sub-run: a ``wf_runs.caller`` matching (#1129). The spawn order is
     # the sub-run's own ``created_at``.
     subrun_rows = await conn.fetch(
-        "SELECT r.id AS id, r.created_at AS spawn_at, r.request_id AS request_id "
+        "SELECT r.id AS id, r.created_at AS spawn_at, r.request_id AS request_id, "
+        "       COALESCE((r.caller->>'awaited')::bool, true) AS awaited "
         "FROM wf_runs r "
         "WHERE r.account_id = $1 "
         "AND r.caller->>'kind' = $2 AND r.caller->>'id' = $3",
@@ -103,13 +109,21 @@ async def children_of(
         key = ("run", r["id"])
         children.setdefault(
             key,
-            ChildNode(kind="run", id=r["id"], spawn_at=r["spawn_at"], request_id=r["request_id"]),
+            ChildNode(
+                kind="run",
+                id=r["id"],
+                spawn_at=r["spawn_at"],
+                request_id=r["request_id"],
+                awaited=r["awaited"],
+            ),
         )
 
     # ── live FK half (until #1131) ───────────────────────────────────────────
-    # These cover pre-#1123/#1129 subtrees and the session→run launch path
-    # (#1127 writes no caller edge yet). They only ADD nodes the edge missed —
-    # ``setdefault`` keeps the richer edge row when both are present.
+    # These cover pre-#1123/#1129 subtrees and the *detached* session→run launches
+    # (the ``create_run`` tool, the trigger ``workflow`` action) that write no
+    # caller edge — the awaited ``call_workflow``/``invoke_workflow`` path now does
+    # (above). They only ADD nodes the edge missed — ``setdefault`` keeps the
+    # richer edge row (with ``request_id``/``awaited``) when both are present.
     if caller_kind == "run":
         fk_sessions = await conn.fetch(
             "SELECT s.id AS id, s.created_at AS spawn_at FROM sessions s "
@@ -134,8 +148,9 @@ async def children_of(
                 ChildNode(kind="run", id=r["id"], spawn_at=r["spawn_at"]),
             )
     elif caller_kind == "session":
-        # session → run: no caller edge exists yet (#1127 / launch path writes
-        # none), so the launcher FK is the SOLE source today.
+        # session → run: the awaited ``call_workflow`` launch writes the caller
+        # edge (above); the launcher FK still covers detached launches (the
+        # ``create_run`` tool, the trigger ``workflow`` action) that write none.
         fk_launched = await conn.fetch(
             "SELECT r.id AS id, r.created_at AS spawn_at FROM wf_runs r "
             "WHERE r.account_id = $1 AND r.launcher_session_id = $2",

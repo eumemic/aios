@@ -565,12 +565,12 @@ class Settings(BaseSettings):
         default=20,
         ge=1,
         description="Per-launcher-session ceiling on OUTSTANDING (non-terminal) "
-        "runs — the horizontal fan-out bound on the agent's ``create_run`` "
+        "runs — the horizontal fan-out bound on the agent's ``call_workflow`` "
         "builtin (the operator/HTTP path has no launcher and is exempt). A "
         "concurrency cap, not a rate or lifetime budget: slots free as runs "
         "reach a terminal status, so a sequential launch loop is unbounded by "
         "design. Enforced with the per-account cap under one advisory lock; "
-        "on exceed, ``create_run`` raises ``RateLimitedError``.",
+        "on exceed, the launch raises ``RateLimitedError``.",
     )
     workflow_runs_per_account_max: int = Field(
         default=100,

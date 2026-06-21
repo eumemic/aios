@@ -3676,7 +3676,7 @@
           "sessions"
         ],
         "summary": "Await Session",
-        "description": "Block until a correlated response lands (``request_id``) or the session has fully\nreacted to a stimulus (``watermark``; defaults to the session's ``last_stimulus_seq`` at\ncall time), or ``timeout`` seconds elapse \u2014 then ``done=false`` so the caller re-polls.\n\nThe ``await`` primitive's session backing: one JSON round-trip, MCP-usable so an agent can\nawait a session it drove and join. Provide ``request_id`` XOR ``watermark`` (both \u2192 422).\nA cross-tenant session 404s before any subscription opens.",
+        "description": "Block until the session has fully reacted to a stimulus (``watermark``; defaults to the\nsession's ``last_stimulus_seq`` at call time), or ``timeout`` seconds elapse \u2014 then\n``done=false`` so the caller re-polls.\n\nThe session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent\ncan drive a session and join when it has fully reacted. Correlating a *request* response is\nthe unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A\ncross-tenant session 404s before any subscription opens.",
         "operationId": "await_session",
         "parameters": [
           {
@@ -3686,22 +3686,6 @@
             "schema": {
               "type": "string",
               "title": "Session Id"
-            }
-          },
-          {
-            "name": "request_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Request Id"
             }
           },
           {
@@ -9656,77 +9640,6 @@
         }
       }
     },
-    "/v1/runs/{run_id}/wait": {
-      "get": {
-        "tags": [
-          "runs"
-        ],
-        "summary": "Await Run",
-        "description": "Block until the run reaches a terminal status (completed/errored/cancelled), or timeout.\n\nThe ``await``-a-completion primitive (runs backing): one JSON round-trip returning the\ncompletion record \u2014 ``done`` + ``output``, or ``is_error`` + ``error``. A run still running\nafter ``timeout`` seconds returns ``done=false`` with its current status; call again to keep\nblocking. Unlike the SSE ``/stream`` this is a plain request/response, so it works as an MCP\ntool \u2014 an agent can await a sub-run and join. A cross-tenant run 404s.\n\nWatch the right field (#1140): poll ``done`` (bool) or ``run_status`` \u2014 the\nresponse has NO ``state`` field, so a watcher keying on ``.state`` reads\n``None`` forever even after ``output`` is populated.",
-        "operationId": "await_run",
-        "parameters": [
-          {
-            "name": "run_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Run Id"
-            }
-          },
-          {
-            "name": "timeout",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 60,
-              "minimum": 0,
-              "default": 30,
-              "title": "Timeout"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WfRunWaitResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/runs/{run_id}/events": {
       "get": {
         "tags": [
@@ -9958,65 +9871,6 @@
         }
       }
     },
-    "/v1/runs/{run_id}/cancel": {
-      "post": {
-        "tags": [
-          "runs"
-        ],
-        "summary": "Cancel Run",
-        "description": "Cancel a run (pending/running/suspended). Records a cancel marker + wakes the\nrun; it finalizes ``cancelled`` on its next wake (so the returned run may still\nshow its pre-cancel status \u2014 like ``resume``). Idempotent on an already-terminal\nrun; a cross-tenant run 404s.",
-        "operationId": "cancel_run",
-        "parameters": [
-          {
-            "name": "run_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Run Id"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WfRun"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/runs/{run_id}/stream": {
       "get": {
         "tags": [
@@ -10093,7 +9947,7 @@
           "invocations"
         ],
         "summary": "Invoke",
-        "description": "Write a trusted request edge + resolve-or-create a servicer, returning a handle.\n\n``target_kind=agent`` creates a **session** servicer (env-bound) and injects a\nchannel-less request; ``target_kind=workflow`` creates a **run** servicer;\n``target_kind=session`` invokes an existing same-account session by id. The\nreturned ``request_id`` correlates the matching awaiter\n(``GET /v1/sessions/{id}/await?request_id=`` for sessions, ``GET /v1/runs/{id}/wait``\nfor runs). A cross-tenant ``target`` 404s before any edge is written; a supplied\n``environment_id`` is ownership-checked against the caller's account.",
+        "description": "Write a trusted request edge + resolve-or-create a servicer, returning a handle.\n\n``target_kind=agent`` creates a **session** servicer (env-bound) and injects a\nchannel-less request; ``target_kind=workflow`` creates a **run** servicer;\n``target_kind=session`` invokes an existing same-account session by id. Await the\nhandle at ``GET /v1/invocations/{servicer_id}/await`` \u2014 for a session servicer pass\n``?request_id=`` to correlate the response; a run resolves off its terminal row. A\ncross-tenant ``target`` 404s before any edge is written; a supplied ``environment_id``\nis ownership-checked against the caller's account.",
         "operationId": "invoke",
         "parameters": [
           {
@@ -10143,6 +9997,164 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/invocations/{task_id}/await": {
+      "get": {
+        "tags": [
+          "invocations"
+        ],
+        "summary": "Await Invocation",
+        "description": "Block until the invocation reaches a terminal state, or ``timeout`` seconds.\n\nThe **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``\nfrom the POST handle and its kind is read off the id prefix. A ``session``\nservicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off\nits terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so\nthe caller re-polls \u2014 a plain request/response (MCP-usable) so an agent can await\na sub-invocation and join. A cross-tenant/missing servicer 404s.",
+        "operationId": "await_invocation",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 60,
+              "minimum": 0,
+              "default": 30,
+              "title": "Timeout"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AwaitResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/invocations/{task_id}/cancel": {
+      "post": {
+        "tags": [
+          "invocations"
+        ],
+        "summary": "Cancel Invocation",
+        "description": "Cancel the invocation identified by ``task_id`` (the servicer id) + ``request_id``.\n\nSeeds the cancel on the servicer (a run via its cancel signal, a session via its\ncancel-marker); the servicer harvests it under its own single-writer step lock and answers\nthe request ``cancelled``. **202 Accepted**: the cancel is *requested*, finalized on the\nservicer's next step. Account-scoped; idempotent (re-cancel is a no-op); a cross-tenant or\nmissing servicer 404s. ``task_id``'s kind is read off the id prefix (``wfr``/``sess``).",
+        "operationId": "cancel_invocation",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
           }
         }
       }
@@ -10907,6 +10919,47 @@
         ],
         "title": "AgentVersion",
         "description": "Read view of a specific agent version from the version history."
+      },
+      "AwaitResponse": {
+        "properties": {
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "errored",
+                  "cancelled"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome",
+            "description": "The invocation's terminal outcome, or null while it is still pending (the long-poll timed out \u2014 call again to keep blocking)."
+          },
+          "result": {
+            "title": "Result",
+            "description": "The servicer's return value when outcome=='ok'; null otherwise."
+          },
+          "error": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "On outcome 'errored'/'cancelled', the {kind, message, \u2026} detail; null otherwise."
+          }
+        },
+        "type": "object",
+        "title": "AwaitResponse",
+        "description": "The one completion envelope \u2014 ``GET /v1/invocations/{task_id}/await``.\n\nUnifies the session and run completion long-polls. ``outcome`` is the\nterminal state minus liveness (the trace's ``TerminalState`` with\n``suspended``/``running`` folded into pending): ``None`` means **still\npending** \u2014 the long-poll timed out before the invocation reached a terminal\nstate, so re-poll. ``result`` carries the servicer's return value on ``ok``;\n``error`` carries the ``{kind, message, \u2026}`` detail on ``errored`` /\n``cancelled``."
       },
       "AwaitingToolCall": {
         "properties": {
@@ -12205,7 +12258,7 @@
           "request_id"
         ],
         "title": "InvocationHandle",
-        "description": "Structured handle returned by ``POST /v1/invocations``.\n\nPlain JSON fields, no opaque encoding: the handle is **not** an auth boundary\n(``await`` re-authorizes by ``account_id``). The caller picks the matching\nawaiter off ``servicer_kind`` \u2014 ``session`` \u2192 ``GET /sessions/{servicer_id}/await``\nwith ``request_id``, ``run`` \u2192 ``GET /runs/{servicer_id}/wait``."
+        "description": "Structured handle returned by ``POST /v1/invocations``.\n\nPlain JSON fields, no opaque encoding: the handle is **not** an auth boundary\n(``await`` re-authorizes by ``account_id``). Await the invocation at the one\nunified awaiter ``GET /v1/invocations/{servicer_id}/await`` \u2014 the ``task_id``\npath segment is the ``servicer_id`` and its kind is read off the id prefix; a\n``session`` servicer additionally needs ``?request_id=`` to correlate the\nresponse, a ``run`` servicer resolves off its terminal row."
       },
       "InvocationRequest": {
         "properties": {
@@ -14564,7 +14617,7 @@
           "command"
         ],
         "title": "SandboxCommandAction",
-        "description": "Run a bash command in the session's sandbox WITHOUT waking the model.\n\nVerbatim today's scheduled-task behavior. Defaults for\n``timeout_seconds`` / ``max_output_bytes`` are materialized at write\ntime so the stored row is self-describing (the runner carries no\ndefaults knowledge)."
+        "description": "Run a bash command in the session's sandbox WITHOUT waking the model.\n\nDefaults for ``timeout_seconds`` / ``max_output_bytes`` are materialized\nat write time so the stored row is self-describing (the runner carries no\ndefaults knowledge)."
       },
       "SandboxCommandActionReplace": {
         "properties": {
@@ -14855,26 +14908,6 @@
           "last_reacted_seq": {
             "type": "integer",
             "title": "Last Reacted Seq"
-          },
-          "result": {
-            "title": "Result"
-          },
-          "is_error": {
-            "type": "boolean",
-            "title": "Is Error",
-            "default": false
-          },
-          "error": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
           }
         },
         "type": "object",
@@ -14883,7 +14916,7 @@
           "last_reacted_seq"
         ],
         "title": "SessionAwaitResponse",
-        "description": "Response for GET /v1/sessions/{id}/await \u2014 the await-a-completion primitive,\nsession backing. One envelope over two monotonic predicates (request_id\ncorrelation, or reacted>=watermark). Poll until `done`."
+        "description": "Response for GET /v1/sessions/{id}/await \u2014 the session **quiescence\ndrive-and-join** alias. Poll until `done` (`last_reacted_seq >= watermark`).\nRequest correlation is the unified awaiter's job (`AwaitResponse`)."
       },
       "SessionCloneRequest": {
         "properties": {
@@ -15949,8 +15982,6 @@
                   "update_workflow",
                   "archive_workflow",
                   "unarchive_workflow",
-                  "create_run",
-                  "await_run",
                   "cancel_run",
                   "resume_gate",
                   "get_workflow",
@@ -15958,11 +15989,11 @@
                   "get_run",
                   "list_runs",
                   "list_run_events",
+                  "call_session",
+                  "call_agent",
+                  "call_workflow",
                   "skill_upsert",
-                  "skill_archive",
-                  "invoke",
-                  "invoke_agent",
-                  "invoke_workflow"
+                  "skill_archive"
                 ]
               },
               {
@@ -18018,8 +18049,7 @@
               "call_result",
               "run_completed",
               "annotation",
-              "frontier_deferred",
-              "request_response"
+              "frontier_deferred"
             ],
             "title": "Type"
           },
@@ -18140,58 +18170,6 @@
         "type": "object",
         "title": "WfRunUsage",
         "description": "Per-run cost / token / iteration / wall-clock \u2014 the machine-observer's substrate.\n\nThe read-path projection of a run's actual spend (#1324). The numbers are summed\nover the run's direct child sessions via ``run_children_usage`` \u2014 the SAME source\n``step.py``'s ``budget()`` builtin consumes \u2014 so a run's ``budget_usd`` *ceiling*\n(on ``WfRun``) and its realized ``cost_microusd`` *spend* (here) are finally both\nlegible from the read path.\n\nEVERY field is ``int | None``, and absence is reported as **explicit null**, never\na silent ``0`` or an omitted key (cf. the ``vault_ids:null`` read-path disease this\nmust not inherit \u2014 see the substrate-different-verdict invariant). The observer\nreads null as *cannot-determine* and fails loud, NOT as \"zero spend\":\n\n* ``cost_microusd`` / ``*_tokens`` \u2014 summed over the run's child sessions. A run\n  with no children sums to ``0`` (a real, observed zero \u2014 distinct from null).\n* ``iteration_count`` \u2014 the run's wake/step count. The host keeps **no** per-run\n  iteration counter on any substrate today, so this is reported as ``None``\n  (cannot-determine) rather than fabricated from an unrelated proxy. Reserved for\n  when a real counter lands; surfaced now so the observer's contract is stable.\n* ``wall_clock_ms`` \u2014 wall-clock span ``updated_at - created_at`` in milliseconds,\n  reported ONLY for a TERMINAL run (``updated_at`` is its completion instant). A\n  still-running run's ``updated_at`` is a moving \"last touched\" stamp, not an end,\n  so it is reported as ``None`` rather than a misleading partial span."
-      },
-      "WfRunWaitResponse": {
-        "properties": {
-          "run_status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "running",
-              "suspended",
-              "completed",
-              "errored",
-              "cancelled"
-            ],
-            "title": "Run Status",
-            "description": "The run's terminal-or-current lifecycle status (the run row's `status` field). This is the field to poll \u2014 there is no `state` field. Terminal values: `completed`/`errored`/`cancelled`."
-          },
-          "done": {
-            "type": "boolean",
-            "title": "Done",
-            "description": "True once `run_status` is terminal (completed/errored/cancelled). Poll `done` (or `run_status`); there is no `state` field on this response (#1140)."
-          },
-          "output": {
-            "title": "Output",
-            "description": "The run's return value, set when `done` and not `is_error`; None otherwise."
-          },
-          "is_error": {
-            "type": "boolean",
-            "title": "Is Error",
-            "description": "True when run_status == errored.",
-            "default": false
-          },
-          "error": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error",
-            "description": "On is_error, the run_completed event's {kind,message,traceback}; None otherwise."
-          }
-        },
-        "type": "object",
-        "required": [
-          "run_status",
-          "done"
-        ],
-        "title": "WfRunWaitResponse",
-        "description": "Response for ``GET /v1/runs/{run_id}/wait`` \u2014 the run's completion record, or its\ncurrent (non-terminal) state if the wait timed out.\n\nDeliberately mirrors the ``{result, is_error, error}`` shape of a request response\n(``derive_response``) so the ``await`` primitive's two backings (run-terminal and, later,\nsession-request) share one envelope. Poll until ``done``: a still-running run returns\n``done=False`` with its live ``run_status`` (``running``/``suspended``/\u2026); call again to\nkeep blocking."
       },
       "WhatsappConfirmPairingRequest": {
         "properties": {
@@ -18504,7 +18482,7 @@
           "workflow_id"
         ],
         "title": "WorkflowAction",
-        "description": "Launch a run of ``workflow_id`` at fire time \u2014 deterministic, no model\nwake.\n\nThe run's input is ALWAYS the envelope ``{\"trigger\": <firing context>,\n\"input\": <input_template verbatim>}`` \u2014 no placeholder substitution. A\nworkflow built to be triggered reads ``input[\"trigger\"]`` for the firing\ncontext (for run_completion fires: the completing run's id, status,\noutput, and error kind) and ``input[\"input\"]`` for this template.\n\n``environment_id`` is deliberately NOT a field: the run always binds to\nthe owner session's environment, resolved at write time into the\nfirst-class ``triggers.environment_id`` column (sessions' environment is\nimmutable, so write-time freeze equals fire-time resolution). Anything on\nthis model is agent-reachable through the ``trigger_create`` tool \u2014 a\ncaller-chosen environment would bypass the same-stance refusal on the\n``create_run`` builtin.\n\n``workflow_version``: ``None`` = run the workflow's CURRENT version at\neach fire (float); an integer is a DRIFT ASSERTION \u2014 it must equal the\nworkflow's current version at write, and a fire whose workflow has since\nbeen edited records an error instead of running the unreviewed script\n(workflows have no version-history table: a pin cannot resolve an old\nscript, only refuse a new one).\n\nThis member is STRUCTURE-ONLY: the ``input_template`` size bound lives on\nthe write models \u2014 see :func:`_validate_input_template_bound` for why a\nread-side byte bound is unsafe."
+        "description": "Launch a run of ``workflow_id`` at fire time \u2014 deterministic, no model\nwake.\n\nThe run's input is ALWAYS the envelope ``{\"trigger\": <firing context>,\n\"input\": <input_template verbatim>}`` \u2014 no placeholder substitution. A\nworkflow built to be triggered reads ``input[\"trigger\"]`` for the firing\ncontext (for run_completion fires: the completing run's id, status,\noutput, and error kind) and ``input[\"input\"]`` for this template.\n\n``environment_id`` is deliberately NOT a field: the run always binds to\nthe owner session's environment, resolved at write time into the\nfirst-class ``triggers.environment_id`` column (sessions' environment is\nimmutable, so write-time freeze equals fire-time resolution). Anything on\nthis model is agent-reachable through the ``trigger_create`` tool \u2014 a\ncaller-chosen environment would bypass the same-stance refusal on the\n``call_workflow`` builtin.\n\n``workflow_version``: ``None`` = run the workflow's CURRENT version at\neach fire (float); an integer is a DRIFT ASSERTION \u2014 it must equal the\nworkflow's current version at write, and a fire whose workflow has since\nbeen edited records an error instead of running the unreviewed script\n(workflows have no version-history table: a pin cannot resolve an old\nscript, only refuse a new one).\n\nThis member is STRUCTURE-ONLY: the ``input_template`` size bound lives on\nthe write models \u2014 see :func:`_validate_input_template_bound` for why a\nread-side byte bound is unsafe."
       },
       "WorkflowActionReplace": {
         "properties": {
