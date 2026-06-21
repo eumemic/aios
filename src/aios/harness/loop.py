@@ -50,6 +50,10 @@ from aios.models.agents import (
     McpServerSpec,
     is_mcp_tool_name,
 )
+from aios.models.events import (
+    ERRORED_LIFECYCLE_STATUS,
+    ERRORED_LIFECYCLE_STOP_REASON,
+)
 from aios.services import accounts as accounts_service
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
@@ -1140,8 +1144,18 @@ async def _latch_errored_turn(
     await sessions_service.set_session_stop_reason(
         pool, session_id, stop_reason, account_id=account_id
     )
+    # The lifecycle ``status``/``stop_reason`` here are the SAME shared constants
+    # ``append_event`` reads to bump ``last_error_seq`` and park the errored
+    # session. Routing both write and read through ``aios.models.events`` is the
+    # binding that survives the JSONB ``Any`` boundary (#1084); the coupling is
+    # pinned by ``test_errored_lifecycle_coupling.py``.
     await _append_lifecycle(
-        pool, session_id, "turn_ended", "errored", "error", account_id=account_id
+        pool,
+        session_id,
+        "turn_ended",
+        ERRORED_LIFECYCLE_STATUS,
+        ERRORED_LIFECYCLE_STOP_REASON,
+        account_id=account_id,
     )
 
 

@@ -65,6 +65,39 @@ MODEL_VISIBLE_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
 )
 
 
+# ── Error-latch lifecycle vocabulary (#1084) ──────────────────────────────
+# The error latch (``harness/loop.py``) writes a ``turn_ended`` lifecycle event
+# with this exact ``stop_reason`` string; ``append_event``
+# (``db/queries/events.py``) reads the SAME constant to recognize the event and
+# bump ``last_error_seq`` (which drives ``_SESSION_ERRORED_EXPR`` and so the
+# sweep's errored-session park). The value round-trips writer → ``json.dumps``
+# → Postgres JSONB → asyncpg → ``dict[str, Any]``, so the read is type ``Any``
+# and the checker CANNOT bind the write literal to the read literal. Two free
+# strings on either side of that ``Any`` boundary type-check and pass CI even
+# when they DIVERGE — flip one (e.g. the tempting ``"errored"`` transposition
+# to match ``ERRORED_LIFECYCLE_STATUS``) and the park silently breaks: the
+# session busy-wakes forever with no progress (#155 class). Routing BOTH sides
+# through this single ``Literal`` constant is the binding; the coupling is
+# pinned by ``tests/unit/test_errored_lifecycle_coupling.py`` (the floor), which
+# the ``Any`` read can otherwise evaporate.
+ERRORED_LIFECYCLE_STOP_REASON: Literal["error"] = "error"
+ERRORED_LIFECYCLE_STATUS: Literal["errored"] = "errored"
+
+
+def is_errored_lifecycle_event(kind: str, data: dict[str, Any]) -> bool:
+    """The errored-park predicate: does this lifecycle event latch the session
+    into ``errored``?
+
+    ``data`` is the JSONB-round-tripped event payload (``dict[str, Any]``), so
+    the ``stop_reason`` it carries is type ``Any`` — the checker cannot bind it
+    to the writer's literal. This helper is the SINGLE read site
+    (``db/queries/events.py:append_event`` calls it to bump ``last_error_seq``)
+    and reads the SAME ``ERRORED_LIFECYCLE_STOP_REASON`` the latch writes, so the
+    write↔read coupling is one constant rather than two free strings (#1084).
+    """
+    return kind == "lifecycle" and data.get("stop_reason") == ERRORED_LIFECYCLE_STOP_REASON
+
+
 class Event(BaseModel):
     """Read view of a single event from the session log.
 

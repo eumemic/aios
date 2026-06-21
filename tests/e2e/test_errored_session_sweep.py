@@ -19,6 +19,7 @@ import pytest
 from aios.db.pool import create_pool
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_sessions_needing_inference
+from aios.models.events import ERRORED_LIFECYCLE_STATUS, ERRORED_LIFECYCLE_STOP_REASON
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
 
@@ -69,7 +70,11 @@ async def _seed_session_with_unreacted_message(
             pool,
             session.id,
             "lifecycle",
-            {"event": "turn_ended", "status": "errored", "stop_reason": "error"},
+            {
+                "event": "turn_ended",
+                "status": ERRORED_LIFECYCLE_STATUS,
+                "stop_reason": ERRORED_LIFECYCLE_STOP_REASON,
+            },
             account_id=account_id,
         )
     return session.id

@@ -29,7 +29,12 @@ from aios.ids import (
     EVENT,
     make_id,
 )
-from aios.models.events import MODEL_VISIBLE_LIFECYCLE_EVENTS, Event, EventKind
+from aios.models.events import (
+    MODEL_VISIBLE_LIFECYCLE_EVENTS,
+    Event,
+    EventKind,
+    is_errored_lifecycle_event,
+)
 
 # ─── events ───────────────────────────────────────────────────────────────────
 
@@ -791,7 +796,12 @@ async def append_event(
     # ``data.get`` is missing → falsy on every historical/unmarked result, so
     # those keep counting as stimulus exactly as before (backward-compat).
     is_stimulus = kind == "message" and role != "assistant" and not data.get("no_reaction")
-    is_error_lifecycle = kind == "lifecycle" and data.get("stop_reason") == "error"
+    # ``is_errored_lifecycle_event`` reads the SAME constant the error latch
+    # writes (``harness/loop.py:_latch_errored_turn``). The read is off the JSONB
+    # ``data`` (type ``Any``), which cannot bind to the write literal — see the
+    # constant's definition (#1084) — so the binding lives in the shared module
+    # and is pinned by ``test_errored_lifecycle_coupling.py``.
+    is_error_lifecycle = is_errored_lifecycle_event(kind, data)
     is_assistant_message = kind == "message" and role == "assistant"
     tool_call_count_delta = (
         len(data.get("tool_calls") or [])
