@@ -2743,6 +2743,7 @@ class TestSlice2WritePath:
                         "kind": "workflow",
                         "workflow_id": wf_id,
                         "workflow_version": None,
+                        "version": None,
                         "input_template": {"x": 1},
                         "vault_ids": [],
                     }
@@ -2763,6 +2764,7 @@ class TestSlice2WritePath:
                         "kind": "workflow",
                         "workflow_id": wf_id,
                         "workflow_version": None,
+                        "version": None,
                         "input_template": None,
                         "vault_ids": [],
                     }
