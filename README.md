@@ -1,16 +1,16 @@
 # aios
 
-**The only agent runtime where you can interrupt and redirect an agent in the middle of a running tool — because it has no agentic loop.**
+**Interrupt and redirect an agent in the middle of a running tool — because it has no agentic loop.**
 
 aios is an open-source, multi-tenant agent runtime for **assistants that live for months, not minutes**. A durable Postgres-backed job queue calls the model exactly once per step, fires every tool as a detached async task, and re-enters — so the model stays responsive to new messages even while tools run, and a user can redirect a busy agent mid-tool.
 
 Its entire memory is **one append-only event log**. Status, spend, and "what is it waiting on" are *derived* from that log — never stored, never able to lie. Context is a strictly monotonic pure function of it (prompt-cache stable, no LLM compaction), and the agent recalls old turns with SQL.
 
-**The model is just a [LiteLLM](https://github.com/BerriAI/litellm) URL** — `anthropic/claude-opus`, `ollama/llama3.3`, `openrouter/anything`. You self-host all of it; nothing load-bearing is hostage to a third party.
+**The model is just a [LiteLLM](https://github.com/BerriAI/litellm) model string** — `anthropic/claude-opus`, `ollama/llama3.3`, `openrouter/anything`. You self-host all of it; nothing load-bearing is hostage to a third party.
 
 > No loop. No compaction. No lock-in. An append-only event log *is* the assistant. A call is a durable edge, not a function call.
 
-**Project status:** alpha, actively developed, and deployed in production. ~160 unit-test files plus a Docker-backed e2e suite; `mypy --strict`, `ruff`, and OpenAPI/SDK/CLI drift-guards gate every commit.
+**Project status:** alpha, actively developed, and deployed in production. ~255 unit-test files plus a Docker-backed e2e suite; `mypy --strict`, `ruff`, and OpenAPI/SDK/CLI drift-guards gate every PR and master push in CI.
 
 ---
 
@@ -41,7 +41,7 @@ bot ▸ Got it, narrowing to bug-labeled issues and prioritizing the top 3.
        very next step, not after the tool returned)
 ```
 
-No other framework does this: LangChain/LangGraph/CrewAI/AutoGPT block the turn until each tool returns. aios calls the model **once** per step, launches each tool as a fire-and-forget asyncio task, sets `stop_reason=end_turn`, and returns — releasing its lock instantly. A durable [procrastinate](https://procrastinate.readthedocs.io/) job re-entering the step function is the only "loop."
+Controller-loop frameworks (LangChain, LangGraph, CrewAI, AutoGPT) block the turn until each tool returns. aios calls the model **once** per step, launches each tool as a fire-and-forget asyncio task, sets `stop_reason=end_turn`, and returns — releasing its lock instantly. A durable [procrastinate](https://procrastinate.readthedocs.io/) job re-entering the step function is the only "loop."
 
 ---
 
@@ -60,12 +60,12 @@ The rest of the system follows from the same primitives:
 | Pillar | What it buys you |
 |---|---|
 | **Unified invocation kernel** | Any caller (a model mid-conversation, an HTTP client, a workflow) invokes any servicer (a peer session, a fresh agent, a durable run) through **one** durable request edge. Recursive cancel, depth-budgeting, and a one-call causal trace fall out for free. |
-| **Capability attenuation** | A child's authority is the lattice *meet* of its declared surface with its launcher's already-frozen one — frozen at the spawn edge, non-widening by construction. Even *which inference endpoint its mind talks to* is attenuable. |
+| **Capability attenuation** | A child's authority is the lattice *meet* of its declared surface with its launcher's already-frozen one — frozen at the spawn edge, non-widening by construction. Even *which inference endpoint its mind talks to* is frozen at the spawn edge. |
 | **Durable sandboxes** | Each session's container persists its **entire** filesystem across months via stop → commit → resume. The agent runs as root inside, yet can never read the credentials it authenticates with. |
 | **One mind, every channel** | A single session reachable across Signal, Telegram, Slack, WhatsApp, and HTTP at once, with a `switch_channel` focal-attention primitive. |
 | **Self-scheduled triggers** | cron / one-shot deadline / workflow-completion / authenticated webhook × bash / workflow / wake — a 4×4 product space the agent provisions itself. |
 | **Hierarchical multi-tenancy** | Account tree with per-account HKDF crypto isolation. Spend limits inherit *down*; dollar spend rolls *up*; every step admits pre-flight against the summed subtree spend. |
-| **Provider-agnostic** | The model is any LiteLLM URL, with correct dual-channel prompt caching and thinking-block preservation driven by family/substring rules — no per-model shims. |
+| **Provider-agnostic** | The model is any LiteLLM model string, with correct dual-channel prompt caching and thinking-block preservation driven by family/substring rules — no per-model shims. |
 | **Self-improving agents** | An agent authors and version-bumps its own skills and durable workflows from inside the session — bounded by capability, never by trusting model input. |
 | **Security model** | Per-account HKDF crypto, a separately-keyed egress CA, two credential paths the model can never read, an attenuation lattice, and fail-closed sandbox sidecars. See [Security model](#security-model). |
 | **One API, three faces** | Operator REST, an auto-reflected MCP server, and a code-generated SDK from one source of truth, with CI drift-guards. |
@@ -76,7 +76,7 @@ The rest of the system follows from the same primitives:
 
 aios is for **sovereign, self-hosted, long-lived assistant entities** — agents meant to run for months across an owner's channels and credentials, with real multi-tenancy and durable execution.
 
-It's a good fit if you want Anthropic Managed Agents' architecture as open, auditable, self-hostable code; you're building a multi-tenant hosted agent product that needs cryptographic tenant isolation and subtree spend ceilings; you've outgrown in-process agent loops and need crash-recoverable, SQL-queryable execution; or you want the model to be just a LiteLLM URL.
+It's a good fit if you want Anthropic Managed Agents' architecture as open, auditable, self-hostable code; you're building a multi-tenant hosted agent product that needs cryptographic tenant isolation and subtree spend ceilings; you've outgrown in-process agent loops and need crash-recoverable, SQL-queryable execution; or you want the model to be just a LiteLLM model string.
 
 **When *not* to use it:** if you want a stateless task-runner for one-shot jobs, or a lightweight in-process library to embed in an existing app, aios is overkill — it's infrastructure for persistent entities, not a function call.
 
@@ -213,7 +213,7 @@ uv run aios dev status      # expect: mode: isolated
 ```bash
 uv run mypy src tests
 uv run ruff check src tests && uv run ruff format --check src tests
-uv run pytest tests/unit -q                                   # ~160 files, fast, no Docker
+uv run pytest tests/unit -q                                   # ~255 files, fast, no Docker
 DOCKER_HOST=unix://... uv run pytest tests/e2e -q             # needs Docker
 ```
 
@@ -330,7 +330,7 @@ aios agents list | get | create | update | archive | versions | version
 
 A workflow is the literal **dual of an agent**: deterministic Python where the model would be. A *run* is a durable execution instance whose entire state lives in an append-only journal. Each wake re-executes the author script from the top, replaying memoized capability results until it reaches the next unresolved one — **replay-from-memo**. No model is called inside a step; the actual LLM work happens only inside the `agent()` children the script spawns. **The orchestration logic itself spends zero model tokens.**
 
-- **Replay-from-memo durable step** — a single journal writer allocates a gapless seq under a row lock, idempotent on `(run_id, call_key, type)`, so a replayed append or procrastinate dual-execution collides and no-ops. A crash anywhere re-wakes to a valid state.
+- **Replay-from-memo durable step** — a single journal writer allocates a gapless seq serialized by the per-run procrastinate lock (`lock=run_id`), idempotent on `(run_id, call_key, type)` via a `UNIQUE NULLS NOT DISTINCT` constraint, so a replayed append or procrastinate dual-execution collides and no-ops. A crash anywhere re-wakes to a valid state.
 - **Credential-free out-of-process host** — the script runs in a fresh `python -m aios.workflows.wf_script_host` subprocess under a deny-by-default env allowlist that never inherits the master `CryptoBox`, the all-accounts pool, or any `*_API_KEY`. **The subprocess boundary — not a builtins allowlist — is the security perimeter:** even a full Python sandbox escape in author code (which may be agent-written) reaches zero tenant secrets. The parent enforces a wall-clock `SIGKILL` deadline plus memory/CPU rlimits.
 - **Content-addressed determinism** — canonical-JSON encoding rejects NaN/Inf/sets/bytes at the call site (loud author error, never silent hash desync); per-content-hash call keys make divergence content-local; `PYTHONHASHSEED=0` and a pinned host-semantics epoch make a months-suspended run safe to resume on any worker.
 - **Capability API** — a small orthogonal set composes the full space:
@@ -395,7 +395,7 @@ Any caller — a model inside a session, an external HTTP/operator client, or a 
 - **One `stimulate` spine** over a 4-arm frozen-dataclass union — `AskNewSession` / `TellNewSession` / `AskExistingSession` / `TellExistingSession` — so illegal combinations (e.g. `output_schema` on a Tell) are unrepresentable. `Ask ⇒ awaited`; `Tell ⇒ fire-and-forget`.
 - **Trusted request edge** — every invocation materializes a lifecycle event carrying `caller={kind,id}`, depth, the frozen capability surface, vault_ids, `awaited`, `output_schema`, and a summary. All enforcement reads come off this trusted frame, never a forgeable blob; the model cannot inject a `caller` (every arg model is `extra=forbid`).
 - **Caller invocations park as implicit-async tasks** — model-callable `call_session` / `call_agent` / `call_workflow`, the HTTP `POST /v1/invocations`, and the workflow run-caller all converge on the same edge; the caller stays responsive to its human while the servicer works.
-- **Functional recursive cancel** — cancel seeds only the root; each marked node cancels itself under its own single-writer lock, then re-seeds markers on its awaited children. No global supervisor, no lock-the-world; first-writer-wins makes a late `return` a harmless no-op.
+- **Functional recursive cancel** — cancel seeds only the root; each marked **session** node cancels itself under its own single-writer lock, then re-seeds markers on its awaited children (a run servicer finalizes as a single node — no down-cascade, by construction). No global supervisor, no lock-the-world; first-writer-wins makes a late `return` a harmless no-op.
 - **Down-counting depth budget** — every trusted edge carries `parent.depth - 1`; the spawn edge refuses *before* writing any child row when depth hits 0. The decrement IS the cycle bound.
 - **Background-priority demotion** — a session is demoted to background priority (`-10`) when its latest open request edge is background-rooted, so a workflow's fan-out can't starve a human's interactive message.
 - **`trace`** — a zero-instrumentation read-projection: one `REPEATABLE READ` snapshot, flat DFS pre-order, each node normalized to `ok/errored/cancelled/suspended/running`, journals interleaved, typed truncation at `AIOS_TRACE_MAX_NODES` (2000).
@@ -406,9 +406,9 @@ Any caller — a model inside a session, an external HTTP/operator client, or a 
 
 | Tool | Description |
 |---|---|
-| `call_session` | Call an existing same-account session; park for `{ok\|error}`. (legacy `invoke`) |
-| `call_agent` | Spawn a fresh session from one of your agents and call it. (legacy `invoke_agent`) |
-| `call_workflow` | Launch a run as an awaited single-shot servicer. (legacy `invoke_workflow`/`create_run`+`await_run`) |
+| `call_session` | Call an existing same-account session; park for `{ok\|error}`. (renamed from `invoke`) |
+| `call_agent` | Spawn a fresh session from one of your agents and call it. (renamed from `invoke_agent`) |
+| `call_workflow` | Launch a run as an awaited single-shot servicer. (renamed from `invoke_workflow`/`create_run`+`await_run`) |
 | `cancel` | Stop waiting on in-flight tool tasks (detaches the wait; does not kill a running sandbox command). |
 | `wake_session` | Wake another same-account session (depth cap 10, per-pair rate cap 10/hr). |
 | `wake_self` | Append a user-role message to your own session (model tool AND sandbox `tool wake_self`). |
@@ -482,11 +482,11 @@ aios sessions triggers list | add | update | remove | runs <session_id> ...
 
 > Your assistant lives on Signal, Telegram, Slack, and WhatsApp at the same time — one continuous mind, not a bot-per-app.
 
-**What it buys you:** a single agent identity omnipresent across every consumer messaging app at once, holding one channel in focus at a time — with connectors that can crash or be compromised without reaching a single secret.
+**What it buys you:** a single agent identity omnipresent across every consumer messaging app at once, holding one channel in focus at a time — with connectors that can crash or be compromised without reaching the master key, another tenant's secrets, or the worker's database pool.
 
 A connection binds one platform account to a routing target — a single long-lived session, or a `session_template` that spawns a fresh session per unseen chat partner — and one session can be bound across many channels at once.
 
-- **Connectors are out-of-process HTTP clients**, not in-tree plugins. Each is a standalone container that talks to aios purely over the management API (POST inbound, tail SSE for outbound calls, POST results). It never shares the worker's process, Postgres pool, or `CryptoBox` — a crashed or compromised connector can't reach a single secret.
+- **Connectors are out-of-process HTTP clients**, not in-tree plugins. Each is a standalone container that talks to aios purely over the management API (POST inbound, tail SSE for outbound calls, POST results). It never shares the worker's process, Postgres pool, or `CryptoBox` — so a crashed or compromised connector can't reach the master key, the database, or another tenant's secrets (only the platform credentials for the connection it serves).
 - **Multi-channel focal attention** — a session holds exactly one focal channel at a time (or none — "phone down"); non-focal channels render as truncated unread markers. `switch_channel` is the only way focal attention changes after spawn, returning a re-orient recap.
 - **Bare assistant text is internal monologue** — channels are reachable *only* via outbound tools, so "what the user saw" is exactly the set of outbound tool calls — a clean audit boundary.
 - **Three routing modes from one bindings table** — `detached` / `single_session` / `per_chat`, with a three-tier resolver (chat-sessions ledger → routing-rule prefix demux → bindings.mode fallback). At-most-one-active-binding is a schema invariant.
@@ -583,7 +583,7 @@ aios envs list | get | create | update | archive
 | `AIOS_DOCKER_IMAGE` | Default sandbox + lockdown-sidecar image (`ghcr.io/eumemic/aios-sandbox:latest`). |
 | `AIOS_EGRESS_CA_KEY` | **Required.** HKDF-derives the deterministic egress CA, separate from the vault key. |
 | `AIOS_SANDBOX_{CPU_QUOTA,MEMORY_BYTES,PIDS_LIMIT,SECCOMP_PROFILE}` | Per-sandbox resource + syscall caps. |
-| `AIOS_SANDBOX_SNAPSHOT_{BUDGET,POOL,TTL_SECONDS}` | Per-session byte budget / per-host pool / dormancy TTL (30 days). |
+| `AIOS_SANDBOX_SNAPSHOT_{BUDGET_BYTES,POOL_BYTES,TTL_SECONDS}` | Per-session byte budget / per-host pool / dormancy TTL (30 days). |
 | `AIOS_CONTAINER_IDLE_TIMEOUT_SECONDS` | Inactivity before a sandbox is released (default 1800s; release snapshots first). |
 
 </details>
@@ -723,7 +723,7 @@ aios's strongest differentiator is that security is **structural** — illegal s
 - **Cryptographic tenant isolation** — bearer tokens hash to a row (revocable, never an env compare); every account's secrets are encrypted under a per-account HKDF subkey, so a leaked subkey reads nothing across tenants.
 - **Two credential paths the model can never read** — vaulted header credentials are authored worker-side into outbound headers; env-var secrets surface only as opaque placeholders swapped by a per-session TLS-MITM egress proxy. The git PAT for repo mounts is held by an in-worker **GitProxy** the same way. In all three, the secret never enters the container, log, or spec.
 - **Separately-keyed egress CA** — `AIOS_EGRESS_CA_KEY` is distinct from `AIOS_VAULT_KEY` by design, so vault-key holders cannot mint sandbox-trusted certs. The fail-closed SNI gate re-resolves and pins the upstream IP (anti-SSRF, anti-DNS-rebinding).
-- **Capability-attenuation lattice + api_base freeze** — a child's authority is the lattice meet of its declared surface with its launcher's, frozen at the spawn edge and non-widening by construction; the inference endpoint is itself an attenuable, fail-closed capability.
+- **Capability-attenuation lattice + api_base freeze** — a child's authority is the lattice meet of its declared surface with its launcher's, frozen at the spawn edge and non-widening by construction; the inference endpoint is itself a separately-frozen, fail-closed identity check (equality-or-allowlist, not a lattice meet).
 - **Fail-closed sidecars** — network lockdown is applied and read-back-verified from an ephemeral operator-image sidecar in the sandbox's netns; the sandbox holds zero `NET_ADMIN`, so a poisoned persisted binary can't subvert its own firewall.
 - **Human-in-the-loop gating** — `always_ask` down to a single HTTP route or MCP tool.
 
@@ -783,7 +783,7 @@ The entire runtime is **one** versioned FastAPI app that is:
 - **introspected into a committed `openapi.json`**, and
 - **code-generated into a typed Python SDK** (`packages/aios-sdk`),
 
-all from one source of truth, with **CI drift-guards** (including a coverage test that fails if any OpenAPI operation lacks a covering CLI command). An `x-codegen.targets` contract per route controls which faces (`sdk`/`mcp`/`cli`) each operation appears on; an MCP polish pass derives `readOnlyHint`/`destructiveHint`/`idempotentHint` from the HTTP verb and roughly halves the schema size the model sees.
+all from one source of truth, with **CI drift-guards** (including a coverage test that fails if any OpenAPI operation lacks a covering CLI command unless explicitly allowlisted). An `x-codegen.targets` contract per route controls which faces (`sdk`/`mcp`/`cli`) each operation appears on; an MCP polish pass derives `readOnlyHint`/`destructiveHint`/`idempotentHint` from the HTTP verb and roughly halves the schema size the model sees.
 
 **Three ways to observe a session over one `LISTEN/NOTIFY` spine:**
 
@@ -835,7 +835,7 @@ aios shares the **core architecture** from Anthropic's Managed Agents work — s
 The AMA-specific deltas:
 
 - Sessions are **mutable and outlive the agent** that drives them — rebind model/config without losing history (Managed Agents sessions are immutable after creation).
-- The model is **any LiteLLM URL**, not a fixed provider.
+- The model is **any LiteLLM model string**, not a fixed provider.
 - One session is **omnipresent across Signal/Telegram/Slack/WhatsApp** via a focal-channel primitive Managed Agents has no analog for.
 - **Agent-scheduled triggers** (vs operator-only cron deployments), and per-route / per-MCP-tool permission gating (vs coarser per-agent tool toggles).
 - It's **open and self-hostable**: durable workflows, the invocation kernel, the multi-tenant account tree, the separately-keyed egress CA, and per-session leaf minting are all yours to run and audit.
