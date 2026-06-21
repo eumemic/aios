@@ -101,6 +101,7 @@ from aios.cli.commands import dev as _dev  # noqa: E402
 from aios.cli.commands import envs as _envs  # noqa: E402
 from aios.cli.commands import invocations as _invocations  # noqa: E402
 from aios.cli.commands import ops as _ops  # noqa: E402
+from aios.cli.commands import sandbox as _sandbox  # noqa: E402
 from aios.cli.commands import session_templates as _session_templates  # noqa: E402
 from aios.cli.commands import sessions as _sessions  # noqa: E402
 from aios.cli.commands import signal as _signal  # noqa: E402
@@ -128,6 +129,7 @@ app.add_typer(_workflows.runs_app, name="runs")
 app.add_typer(_invocations.app, name="invocations")
 
 _ops.register(app)
+_sandbox.register(app)
 _status.register(app)
 _chat.register(app)
 _tail.register(app)

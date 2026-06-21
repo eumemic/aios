@@ -499,6 +499,34 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    async def prewarm_run(self, image: str) -> str:
+        """``docker run --detach`` ``image`` as a transient prewarm container.
+
+        Operator prewarm bake (#1348). A PLAIN run — no managed/instance/
+        session labels, no spec — so the committed prewarm image never enters
+        the image GC's reapable set. Returns the new container's id. Raises
+        :class:`SandboxBackendError` on launch failure.
+        """
+        ...
+
+    async def prewarm_commit(self, sandbox_id: str, tag: str, *, labels: dict[str, str]) -> None:
+        """``docker commit`` ``sandbox_id`` to ``tag``, stamping ``labels``.
+
+        Operator prewarm bake (#1348). Stamps exactly the labels given
+        (``BASE_IMAGE_LABEL_KEY`` + ``PREWARM_LABEL_KEY``) and DELIBERATELY
+        none of ``MANAGED_LABEL_KEY``/``INSTANCE_LABEL_KEY``/
+        ``SESSION_LABEL_KEY`` — that is what keeps the prewarm image out of the
+        GC's reapable set. Raises :class:`SandboxBackendError` on failure.
+        """
+        ...
+
+    async def prewarm_remove(self, sandbox_id: str) -> None:
+        """``docker rm -f`` the transient prewarm container (#1348).
+
+        Idempotent / best-effort: a container already gone is a no-op.
+        """
+        ...
+
     async def is_alive(self, handle: SandboxHandle) -> bool:
         """Return True iff ``handle``'s sandbox is still running.
 
@@ -550,3 +578,20 @@ ENV_KEYS_LABEL_KEY = "aios.env_keys"
 BASE_IMAGE_LABEL_KEY = "aios.base_image"
 FLATTENED_LABEL_KEY = "aios.flattened"
 FLATTENED_LABEL_VALUE = "true"
+
+# ── Operator prewarm label (#1348) ──────────────────────────────────────────
+#
+# A prewarm image is an operator-baked image that has ``install_egress_ca`` /
+# ``install_packages`` already applied against the base, so the cold-start hot
+# path can skip those (idempotent) setup execs. It is distinguished from a
+# tenant snapshot PURELY by labels (variation-as-KIND-via-labels, consistent
+# with ``MANAGED_LABEL_KEY``/``SESSION_LABEL_KEY``/``FLATTENED_LABEL_KEY``) — no
+# new image-class flag. ``PREWARM_LABEL_KEY``'s VALUE is the base ref this image
+# was baked against; the cold-start skip gate only fires when that value equals
+# the CURRENT base ref (``spec.image``), so a base change disables the skip —
+# the same equality discipline as the #916 base-drift gate. A prewarm image
+# deliberately carries ``PREWARM_LABEL_KEY`` + ``BASE_IMAGE_LABEL_KEY`` but NOT
+# ``MANAGED_LABEL_KEY``/``INSTANCE_LABEL_KEY``/``SESSION_LABEL_KEY``, so it never
+# enters the image GC's reapable set (it is treated like the base image — an
+# external operator-managed dependency).
+PREWARM_LABEL_KEY = "aios.prewarmed"  # value = the base ref this image was baked against

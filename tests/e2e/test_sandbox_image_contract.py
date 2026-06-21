@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -370,3 +371,246 @@ class TestArchitecture:
         output = result.stdout + result.stderr
         assert "linux/amd64" in output, f"amd64 not found in manifest: {output[:500]}"
         assert "linux/arm64" in output, f"arm64 not found in manifest: {output[:500]}"
+
+
+# -- operator prewarm bake (#1348) ---------------------------------------------
+#
+# These shell out to the Docker CLI directly (no aios harness): bake a prewarm
+# image from the base by committing a CA-installed container with the two
+# prewarm labels, then assert (a) the labels are stamped exactly (and the
+# managed/instance/session labels are NOT — GC-invisibility by construction),
+# (b) the egress CA is already in the trust store in the baked image (so the
+# cold-start CA exec is genuinely redundant), and (c) the iptables lockdown
+# DROP policy can STILL be applied against a container started from the
+# prewarmed image — the lockdown is never baked (§5.8). Label key strings are
+# inlined to keep this module free of aios package imports (see module
+# docstring); they mirror ``PREWARM_LABEL_KEY``/``BASE_IMAGE_LABEL_KEY`` etc.
+# in ``src/aios/sandbox/backends/base.py``.
+
+_PREWARM_LABEL_KEY = "aios.prewarmed"
+_BASE_IMAGE_LABEL_KEY = "aios.base_image"
+_MANAGED_LABEL_KEY = "aios.managed"
+_INSTANCE_LABEL_KEY = "aios.instance_id"
+_SESSION_LABEL_KEY = "aios.session_id"
+
+# A self-signed CA cert generated once at import time so the bake test does not
+# depend on AIOS_EGRESS_CA_KEY (the real CA derivation is operator-side; the
+# trust-store mechanism under test is identical for any PEM).
+_TEST_CA_PEM = subprocess.run(
+    [
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "/dev/null",
+        "-subj",
+        "/CN=aios-prewarm-test-ca",
+        "-days",
+        "1",
+    ],
+    capture_output=True,
+    text=True,
+    check=False,
+    timeout=30,
+).stdout
+
+
+@pytest.fixture()
+def prewarm_image(pulled_image: str) -> Iterator[str]:
+    """Bake a prewarm image from the base: run → install CA → commit + labels.
+
+    Mirrors the operator ``bake_prewarm_image`` path with the Docker CLI. Yields
+    the prewarm tag and force-removes it (and any leftover container) on teardown.
+    """
+    tag = "aios-prewarm-e2e:test"
+    container = "aios-prewarm-e2e-bake"
+    subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30)
+    subprocess.run(["docker", "rmi", "-f", tag], capture_output=True, check=False, timeout=30)
+
+    # 1. Plain run of the base (keepalive CMD), no aios.* labels.
+    run = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--detach",
+            "--name",
+            container,
+            pulled_image,
+            "/usr/bin/tail",
+            "-f",
+            "/dev/null",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert run.returncode == 0, f"prewarm run failed: {run.stderr.strip()}"
+
+    # 2. Install the CA into the trust store (the amortized setup exec). Pass
+    #    the PEM via ``docker exec --env`` so it lands INSIDE the container
+    #    (host env is not forwarded into the container shell).
+    install = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "--env",
+            f"CA_PEM={_TEST_CA_PEM}",
+            container,
+            "bash",
+            "-c",
+            "printf '%s' \"$CA_PEM\" > /usr/local/share/ca-certificates/aios-egress.crt "
+            "&& update-ca-certificates",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert install.returncode == 0, f"prewarm CA install failed: {install.stderr.strip()}"
+
+    # 3. Commit + stamp BOTH prewarm labels (and NONE of managed/instance/session).
+    commit = subprocess.run(
+        [
+            "docker",
+            "commit",
+            "--change",
+            f"LABEL {_BASE_IMAGE_LABEL_KEY}={pulled_image}",
+            "--change",
+            f"LABEL {_PREWARM_LABEL_KEY}={pulled_image}",
+            container,
+            tag,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert commit.returncode == 0, f"prewarm commit failed: {commit.stderr.strip()}"
+    # 4. Remove the transient container.
+    subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30)
+
+    try:
+        yield tag
+    finally:
+        subprocess.run(
+            ["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30
+        )
+        subprocess.run(["docker", "rmi", "-f", tag], capture_output=True, check=False, timeout=30)
+
+
+class TestPrewarmBake:
+    def test_prewarm_labels_stamped_exactly(self, prewarm_image: str, pulled_image: str) -> None:
+        """The prewarm image carries BOTH prewarm labels = base ref and NONE of
+        the managed/instance/session labels (GC-invisibility by construction)."""
+        result = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", prewarm_image],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr.strip()
+        labels = json.loads(result.stdout.strip()) or {}
+        assert labels.get(_PREWARM_LABEL_KEY) == pulled_image
+        assert labels.get(_BASE_IMAGE_LABEL_KEY) == pulled_image
+        for forbidden in (_MANAGED_LABEL_KEY, _INSTANCE_LABEL_KEY, _SESSION_LABEL_KEY):
+            assert forbidden not in labels, f"prewarm image must not carry {forbidden}"
+
+    def test_egress_ca_already_in_trust_store(self, prewarm_image: str) -> None:
+        """The CA is baked into the trust store, so the cold-start CA exec is
+        genuinely redundant for a container started from the prewarm image.
+
+        ``update-ca-certificates`` concatenates the raw PEM (DER base64) into
+        the aggregate bundle WITHOUT a human-readable subject comment, so the
+        CA's CN never appears as plaintext there. Match instead on a unique
+        line of the cert's own base64 body, which IS appended verbatim to the
+        bundle — that is the real "the CA is in the trust store" signal.
+        """
+        # Pick a distinctive interior base64 line of the test CA (skip the
+        # PEM armor lines) and assert it is present in the aggregate bundle.
+        body_lines = [
+            ln.strip() for ln in _TEST_CA_PEM.splitlines() if ln.strip() and "-----" not in ln
+        ]
+        assert body_lines, f"test CA PEM has no body lines: {_TEST_CA_PEM!r}"
+        needle = body_lines[len(body_lines) // 2]
+        result = _docker_run(
+            prewarm_image,
+            "grep",
+            "-qF",
+            needle,
+            "/etc/ssl/certs/ca-certificates.crt",
+            timeout=30,
+        )
+        # grep -qF: fixed-string match of the cert body ⇒ rc 0 when baked.
+        assert result.returncode == 0, (
+            "egress CA not found in the prewarm image trust store: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+    def test_lockdown_still_appliable_against_prewarm_image(self, prewarm_image: str) -> None:
+        """The iptables DROP lockdown is NEVER baked (§5.8): a container started
+        from the prewarmed image starts with an open OUTPUT policy and the
+        lockdown can still be applied fresh (proving it is not persisted)."""
+        container = "aios-prewarm-e2e-lockdown"
+        subprocess.run(
+            ["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30
+        )
+        try:
+            run = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--detach",
+                    "--name",
+                    container,
+                    "--cap-add",
+                    "NET_ADMIN",
+                    prewarm_image,
+                    "/usr/bin/tail",
+                    "-f",
+                    "/dev/null",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            if run.returncode != 0:
+                pytest.skip(f"could not start NET_ADMIN container: {run.stderr.strip()}")
+            # Baked image must NOT carry a DROP policy (lockdown never baked).
+            before = subprocess.run(
+                ["docker", "exec", container, "iptables-legacy", "-S", "OUTPUT"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            assert before.returncode == 0, before.stderr.strip()
+            assert "-P OUTPUT DROP" not in before.stdout, (
+                "prewarm image must not ship a baked DROP policy"
+            )
+            # The lockdown can be applied fresh — proving it runs at provision time.
+            applied = subprocess.run(
+                ["docker", "exec", container, "iptables-legacy", "-P", "OUTPUT", "DROP"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            assert applied.returncode == 0, applied.stderr.strip()
+            after = subprocess.run(
+                ["docker", "exec", container, "iptables-legacy", "-S", "OUTPUT"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            assert "-P OUTPUT DROP" in after.stdout
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30
+            )
