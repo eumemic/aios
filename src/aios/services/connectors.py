@@ -16,6 +16,7 @@ import asyncpg
 
 from aios.db import queries
 from aios.errors import ForbiddenError
+from aios.models.connectors import ConnectorCapabilities
 
 
 async def update_tools_schema(
@@ -49,4 +50,36 @@ async def update_tools_schema(
             )
         await queries.update_connector_tools_schema(
             conn, connector, account_id=account_id, tools_schema=tools_schema
+        )
+
+
+async def update_capabilities(
+    pool: asyncpg.Pool[Any],
+    *,
+    connector: str,
+    account_id: str,
+    capabilities: ConnectorCapabilities,
+) -> None:
+    """Publish ``connector``'s typed capability descriptor.  Root-only.
+
+    The capability sibling to :func:`update_tools_schema`, carrying the
+    byte-identical root-gate.  ``capabilities`` is a property of the connector
+    *type* (one row per type, shared across every tenant), so a child tenant
+    publishing it would overwrite the global row and change how every other
+    tenant's session bound to a connection of that type is rendered.  The
+    cross-tenant rationale that motivates the ``tools_schema`` root-gate applies
+    identically — capabilities are render metadata at the same altitude.
+
+    Restricting publication to the root account preserves the "connectors
+    configured by root, connections added by tenants" architectural invariant.
+    """
+    async with pool.acquire() as conn:
+        account = await queries.get_account(conn, account_id)
+        if account is None or account.parent_account_id is not None:
+            raise ForbiddenError(
+                "publishing a connector's capabilities is reserved for the root account",
+                detail={"connector": connector},
+            )
+        await queries.update_connector_capabilities(
+            conn, connector, account_id=account_id, capabilities=capabilities.model_dump()
         )

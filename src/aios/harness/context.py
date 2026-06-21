@@ -1211,20 +1211,26 @@ def build_messages(
 
     _correct_image_data_url_mimes(messages)
 
-    # Defer the heavy ``litellm`` import: every consumer of this module
-    # pays ~1.18s of bootstrap otherwise, and most call sites either
+    # Resolve the thinking-capability sniff through the shared provider-quirk
+    # resolver in ``completion.py`` (consolidated from the prior inline
+    # expression). The import is **function-local on purpose**: ``completion.py``
+    # imports ``litellm`` at module top, so a module-top import here would
+    # silently re-introduce the ~1.18s litellm bootstrap for every consumer of
+    # this module — the very cost this lazy import defers. Most call sites either
     # exit before this point or run under tests that never reach it.
-    import litellm
-
+    #
     # Same stale-catalog short-circuit as ``supports_vision`` (see its docstring
     # for the full rationale): a Claude newer than this worker's catalog
     # snapshot — or a proxy-routed one litellm under-reports even when fresh —
     # must keep its ``thinking_blocks``, or stripping them across turns violates
     # Anthropic's preservation contract.  Extended thinking is Claude 4.x+;
     # over-broad for <= 3.5 (no thinking), which aios doesn't run.
-    target_supports_thinking = bool(
-        model and ("claude" in model.lower() or litellm.supports_reasoning(model))
-    )
+    #
+    # ``bool(model) and …`` preserves the empty-model short-circuit: the resolver
+    # is not called for an empty model string.
+    from aios.harness.completion import model_descriptor
+
+    target_supports_thinking = bool(model) and model_descriptor(model).supports_thinking
     stripped = [
         _strip_to_spec(m, target_supports_thinking=target_supports_thinking) for m in messages
     ]

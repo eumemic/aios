@@ -70,7 +70,9 @@ def supports_vision(model: str) -> bool:
        by name needs no edit when the next Claude lands.  The match is a
        substring rather than an ``anthropic/`` prefix because aios routes Claude
        through several providers whose strings all still contain ``claude`` (the
-       routes ``_supports_anthropic_cache_control`` enumerates in
+       routes that :func:`~aios.harness.completion.model_descriptor` maps to
+       :attr:`~aios.harness.completion.CacheChannel.ANTHROPIC` — via the
+       ``_ANTHROPIC_PROXY_PROVIDERS`` frozenset it reads — in
        :mod:`aios.harness.completion`).
     3. ``litellm.get_model_info`` for every other provider/model.
     """

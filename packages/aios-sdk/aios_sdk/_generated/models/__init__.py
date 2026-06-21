@@ -30,6 +30,7 @@ from .body_upload_session_file import BodyUploadSessionFile
 from .bootstrap_request import BootstrapRequest
 from .bootstrap_response import BootstrapResponse
 from .bound_chat import BoundChat
+from .capabilities_update import CapabilitiesUpdate
 from .connection import Connection
 from .connection_attach import ConnectionAttach
 from .connection_configure_per_chat import ConnectionConfigurePerChat
@@ -40,6 +41,7 @@ from .connection_metadata import ConnectionMetadata
 from .connection_reparent import ConnectionReparent
 from .connection_set_secrets import ConnectionSetSecrets
 from .connection_set_secrets_secrets import ConnectionSetSecretsSecrets
+from .connector_capabilities import ConnectorCapabilities
 from .connector_inbound_response import ConnectorInboundResponse
 from .connector_secrets import ConnectorSecrets
 from .connector_secrets_secrets import ConnectorSecretsSecrets
@@ -47,6 +49,7 @@ from .context_response import ContextResponse
 from .context_response_messages_item import ContextResponseMessagesItem
 from .context_response_tools_item import ContextResponseToolsItem
 from .cron_source import CronSource
+from .draft_streaming import DraftStreaming
 from .environment import Environment
 from .environment_config import EnvironmentConfig
 from .environment_config_env_type_0 import EnvironmentConfigEnvType0
@@ -139,6 +142,7 @@ from .mint_account_request import MintAccountRequest
 from .mint_account_response import MintAccountResponse
 from .mint_key_request import MintKeyRequest
 from .mint_key_response import MintKeyResponse
+from .native_buttons import NativeButtons
 from .o_auth_complete_request import OAuthCompleteRequest
 from .o_auth_start_request import OAuthStartRequest
 from .o_auth_start_request_token_endpoint_auth_method_type_0 import (
@@ -146,6 +150,7 @@ from .o_auth_start_request_token_endpoint_auth_method_type_0 import (
 )
 from .o_auth_start_response import OAuthStartResponse
 from .one_shot_source import OneShotSource
+from .owed_request import OwedRequest
 from .post_connector_runtime_chat_lifecycle_response_post_connector_runtime_chat_lifecycle import (
     PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle,
 )
@@ -343,6 +348,7 @@ __all__ = (
     "BootstrapRequest",
     "BootstrapResponse",
     "BoundChat",
+    "CapabilitiesUpdate",
     "Connection",
     "ConnectionAttach",
     "ConnectionConfigurePerChat",
@@ -353,6 +359,7 @@ __all__ = (
     "ConnectionReparent",
     "ConnectionSetSecrets",
     "ConnectionSetSecretsSecrets",
+    "ConnectorCapabilities",
     "ConnectorInboundResponse",
     "ConnectorSecrets",
     "ConnectorSecretsSecrets",
@@ -360,6 +367,7 @@ __all__ = (
     "ContextResponseMessagesItem",
     "ContextResponseToolsItem",
     "CronSource",
+    "DraftStreaming",
     "Environment",
     "EnvironmentConfig",
     "EnvironmentConfigEnvType0",
@@ -446,11 +454,13 @@ __all__ = (
     "MintAccountResponse",
     "MintKeyRequest",
     "MintKeyResponse",
+    "NativeButtons",
     "OAuthCompleteRequest",
     "OAuthStartRequest",
     "OAuthStartRequestTokenEndpointAuthMethodType0",
     "OAuthStartResponse",
     "OneShotSource",
+    "OwedRequest",
     "PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle",

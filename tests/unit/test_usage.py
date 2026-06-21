@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
+
+import pytest
 
 from aios.harness.completion import (
     _CACHE_CONTROL,
+    CacheChannel,
     _normalize_usage,
     inject_cache_breakpoints,
+    model_descriptor,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_model_descriptor_cache() -> None:
+    """Reset the ``@cache``'d resolver before each test.
+
+    ``model_descriptor`` is ``@cache``'d, so verdicts would otherwise stick
+    across tests (including any that monkeypatch ``litellm``), producing
+    order-dependent failures.
+    """
+    model_descriptor.cache_clear()
+
 
 # Model string that LiteLLM routes through the Anthropic provider — used to
 # exercise the branch of inject_cache_breakpoints that actually mutates
@@ -362,3 +378,71 @@ class TestInjectCacheBreakpointsProviderGuard:
         assert msgs[1]["content"] == [
             {"type": "text", "text": "hi", "cache_control": _CACHE_CONTROL}
         ]
+
+
+class TestModelDescriptor:
+    """The consolidated provider-quirk resolver.
+
+    ``model_descriptor`` collapses the three former sniffs
+    (``_supports_anthropic_cache_control``, ``_supports_openai_prompt_cache_key``,
+    and the inline thinking gate in ``context.py``) behind one ``@cache``'d
+    pure function of the model string.
+    """
+
+    @pytest.mark.parametrize(
+        ("model", "channel"),
+        [
+            ("anthropic/claude-opus-4-8", CacheChannel.ANTHROPIC),
+            ("openrouter/anthropic/claude-fable-5", CacheChannel.ANTHROPIC),
+            ("openrouter/openai/gpt-5", CacheChannel.OPENAI),
+            ("openai/gpt-5", CacheChannel.OPENAI),
+            ("openrouter/meta-llama/llama-4", CacheChannel.NONE),
+            ("bedrock/amazon.titan", CacheChannel.NONE),
+            ("completely-unknown-garbage-model-string", CacheChannel.NONE),
+        ],
+    )
+    def test_cache_channel_table(self, model: str, channel: CacheChannel) -> None:
+        assert model_descriptor(model).cache_channel is channel
+
+    def test_garbage_string_does_not_raise(self) -> None:
+        """An unroutable string collapses to a safe NONE / False, no raise."""
+        desc = model_descriptor("completely-unknown-garbage-model-string")
+        assert desc.cache_channel is CacheChannel.NONE
+        assert desc.supports_thinking is False
+
+    def test_thinking_true_for_claude(self) -> None:
+        assert model_descriptor("anthropic/claude-opus-4-8").supports_thinking is True
+
+    def test_thinking_true_for_bare_claude(self) -> None:
+        """``supports_thinking`` matches the full model string (incl. when the
+        provider probe can't resolve it), so a bare ``claude-*`` is True."""
+        assert model_descriptor("claude-fable-5").supports_thinking is True
+
+
+class TestModelDescriptorEquivalence:
+    """Pins the resolver to the pre-refactor truth table of the two deleted
+    predicates.
+
+    The literals below ARE the old ``_supports_anthropic_cache_control`` /
+    ``_supports_openai_prompt_cache_key`` verdicts for each model string,
+    inlined because the predicates no longer exist. The
+    ``cache_channel is ANTHROPIC`` arm must equal the old Anthropic predicate
+    and the ``is OPENAI`` arm the old OpenAI predicate, for every model.
+    """
+
+    # (model, old_supports_anthropic_cache_control, old_supports_openai_prompt_cache_key)
+    _TRUTH_TABLE: ClassVar[list[tuple[str, bool, bool]]] = [
+        ("anthropic/claude-opus-4-8", True, False),
+        ("openrouter/anthropic/claude-fable-5", True, False),
+        ("openrouter/openai/gpt-5", False, True),
+        ("openai/gpt-5", False, True),
+        ("openrouter/meta-llama/llama-4", False, False),
+        ("bedrock/amazon.titan", False, False),
+        ("completely-unknown-garbage-model-string", False, False),
+    ]
+
+    @pytest.mark.parametrize(("model", "old_anthropic", "old_openai"), _TRUTH_TABLE)
+    def test_equivalence(self, model: str, old_anthropic: bool, old_openai: bool) -> None:
+        desc = model_descriptor(model)
+        assert (desc.cache_channel is CacheChannel.ANTHROPIC) is old_anthropic
+        assert (desc.cache_channel is CacheChannel.OPENAI) is old_openai

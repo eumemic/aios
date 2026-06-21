@@ -34,7 +34,7 @@ from aios.ids import (
 )
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.attenuation import Surface
-from aios.models.sessions import Session, SessionStatus, SessionUsage
+from aios.models.sessions import Obligation, Session, SessionStatus, SessionUsage
 
 # ─── sessions ─────────────────────────────────────────────────────────────────
 
@@ -521,6 +521,60 @@ async def get_open_request_ids(
     return [r["rid"] for r in rows]
 
 
+async def get_open_obligations(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[Obligation]:
+    """The session's still-open **awaited** obligations, oldest first (#1413).
+
+    Modeled 1:1 on :func:`get_open_request_ids` — same
+    ``asked(request_opened) MINUS answered(request_response)`` anti-join, same
+    ``awaited=true`` COALESCE filter (so a fire-and-forget ``Tell`` edge is
+    excluded), same ``ORDER BY req.seq ASC`` (oldest-first, deterministic). But
+    instead of bare ``request_id``s it projects a full :class:`Obligation` per open
+    edge so the tail-injected obligations block (and the ``owed_requests`` read
+    model) can render it: ``caller_kind`` (``req.data->'caller'->>'kind'`` — the
+    **trusted** frame, not the forgeable ``metadata.request`` blob), ``opened_at``
+    (``req.created_at``, for age), and a short ``summary`` (``req.data->>'summary'``,
+    additive — absent on pre-#1413 frames -> ``None`` -> an id-only render line, no
+    migration).
+
+    This is the data source for the always-on obligations reminder that survives
+    context-windowing erasure of the original request user message (the defect
+    #1413 fixes): a full-log query, not a slate-derived render-time marker.
+    """
+    rows: list[asyncpg.Record] = await conn.fetch(
+        "SELECT req.data->>'request_id' AS rid, "
+        "req.data->'caller'->>'kind' AS caller_kind, "
+        "req.data->'caller'->>'id' AS caller_id, "
+        "req.created_at AS opened_at, "
+        "req.data->>'summary' AS summary "
+        "FROM events req "
+        "WHERE req.session_id = $1 AND req.account_id = $2 "
+        "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+        "AND req.data->>'request_id' IS NOT NULL "
+        # #1197 awaited-triad filter -- lockstep with get_open_request_ids: an
+        # unawaited Tell edge owes no response. Absent reads as awaited=true.
+        "AND COALESCE((req.data->>'awaited')::boolean, TRUE) "
+        "AND NOT EXISTS (SELECT 1 FROM events resp "
+        "    WHERE resp.session_id = $1 AND resp.account_id = $2 "
+        "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
+        "    AND resp.data->>'request_id' = req.data->>'request_id') "
+        "ORDER BY req.seq ASC",
+        session_id,
+        account_id,
+    )
+    return [
+        Obligation(
+            request_id=r["rid"],
+            caller_kind=r["caller_kind"] or "",
+            caller_id=r["caller_id"],
+            opened_at=r["opened_at"],
+            summary=r["summary"],
+        )
+        for r in rows
+    ]
+
+
 async def get_request_caller(
     conn: asyncpg.Connection[Any], session_id: str, *, request_id: str
 ) -> dict[str, Any] | None:
@@ -577,17 +631,45 @@ async def get_request_output_schema(
 async def count_request_nudges(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
 ) -> int:
-    """How many times this request has been nudged — the count of nudge user
-    messages whose ``metadata.nudged_request_ids`` include it.
+    """How many times this request has been nudged **since the most recent
+    activity turn** — the count of nudge user messages whose
+    ``metadata.nudged_request_ids`` include it and whose ``seq`` is greater than
+    the latest assistant tool-call turn in this session.
 
-    The per-request retry budget is *derived* from the log, not stored — so it is
-    crash-safe and needs no counter to keep in sync (the same stance as
-    ``_count_consecutive_rescheduling`` for model-error backoff).
+    This is a **consecutive-inaction** count, not a lifetime one (#1412): the
+    request-totality quiescence guard short-circuits on any assistant turn that
+    carries ``tool_calls`` (``services/sessions.py``), so that tool-call turn is
+    the natural reset anchor. Counting nudges only *after* it turns the retry
+    budget from a **loop-limiter** (bounds total idle work → fights always-on)
+    into a **stuck-detector** (bounds *consecutive* idle turns → enables
+    always-on): an agent that interleaves tool calls never trips the budget,
+    while one stuck doing nothing N turns running still gets ``no_return``'d.
+
+    The reset anchor is **session-wide** (the latest tool-call turn), but the
+    nudge count is **per-request** (filtered by ``nudged_request_ids``): a
+    session working one obligation does not reset a stuck sibling's count —
+    each open request keeps its own consecutive count, so a stuck sibling still
+    hits ``no_return`` (#1412, multi-request reset = per-request).
+
+    The budget stays *derived* from the log, not stored — so it is crash-safe
+    and needs no counter to keep in sync (the same stance as
+    ``_count_consecutive_rescheduling`` for model-error backoff). The
+    ``data ? 'tool_calls'`` / ``role = 'assistant'`` anchor subquery matches
+    ``events_assistant_tool_calls_idx`` (migration 0011/0023); the extra
+    ``jsonb_array_length > 0`` guard excludes a present-but-empty array so the
+    anchor agrees byte-for-byte with the guard's ``assistant_msg.get('tool_calls')``
+    truthiness short-circuit.
     """
     n: int | None = await conn.fetchval(
         "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
         "AND kind = 'message' AND role = 'user' "
-        "AND data->'metadata'->'nudged_request_ids' @> to_jsonb($3::text)",
+        "AND data->'metadata'->'nudged_request_ids' @> to_jsonb($3::text) "
+        "AND seq > COALESCE("
+        "    (SELECT max(seq) FROM events "
+        "     WHERE session_id = $1 AND account_id = $2 "
+        "     AND kind = 'message' AND role = 'assistant' "
+        "     AND data ? 'tool_calls' "
+        "     AND jsonb_array_length(data->'tool_calls') > 0), 0)",
         session_id,
         account_id,
         request_id,
@@ -764,6 +846,7 @@ async def append_request_opened(
     vault_ids: list[str],
     awaited: bool = True,
     output_schema: dict[str, Any] | None = None,
+    summary: str | None = None,
 ) -> None:
     """Append the trusted ``request_opened`` lifecycle event — the *ask* half of
     the request edge (#1123).
@@ -802,6 +885,14 @@ async def append_request_opened(
     path gates this behind its first-spawn ``ON CONFLICT`` check, so a replayed
     wake opens the edge exactly once (see :func:`get_open_request_ids` for the
     asked-minus-answered derivation this feeds).
+
+    ``summary`` (#1413) is a short (~60-char) truncated preview of the request
+    input, carried so the always-on tail-injected obligations block can render a
+    human-readable line for an obligation whose original request user message has
+    been windowed out of context. **Purely additive**: omitted (the legacy/None
+    case) it is simply not written to the frame, and the obligations reader treats
+    an absent field as ``None`` -> an id-only render line (no migration, #1131-proof
+    -- frame-extension rather than a LEFT-JOIN on the soon-retired ``metadata`` blob).
     """
     data: dict[str, Any] = {
         "event": "request_opened",
@@ -818,6 +909,8 @@ async def append_request_opened(
         # on the trusted edge so ``return`` enforcement no longer reads the forgeable
         # ``metadata.request`` user-message blob.
         data["output_schema"] = output_schema
+    if summary is not None:
+        data["summary"] = summary
     await queries.append_event(
         conn,
         account_id=account_id,

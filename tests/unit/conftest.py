@@ -53,6 +53,9 @@ def _unit_runtime_tool_provider() -> Iterator[None]:
         async def list_tools_for_session(self, pool: Any, session_id: str) -> list[Any]:
             return []
 
+        async def list_capabilities_for_session(self, pool: Any, session_id: str) -> dict[str, Any]:
+            return {}
+
     runtime.tool_provider = _NoopToolProvider()
     try:
         yield

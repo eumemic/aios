@@ -7459,6 +7459,73 @@
         }
       }
     },
+    "/v1/connectors/{connector}/capabilities": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Put Capabilities",
+        "description": "Publish the runtime container's typed capability descriptor for a\nconnector type.\n\nA sibling to :func:`put_tools_schema` (same root-only publication path),\nkept on its own route so capability churn is decoupled from a full\n``tools_schema`` republish.  The runtime container is the source of truth\nfor what richer renderings it supports; it publishes the descriptor at\nstartup, replacing whatever was on the ``connectors.capabilities`` row\nwholesale.\n\nAuthorization: the runtime bearer's ``connector`` must match the path's\n``connector``; publication itself is root-only (enforced in the service\nlayer \u2014 connectors are root-owned, the same cross-tenant rationale as\n``tools_schema``).  Capabilities declare NO authority: they constrain\nRENDERING, never what any principal may invoke.",
+        "operationId": "put_connector_capabilities",
+        "parameters": [
+          {
+            "name": "connector",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CapabilitiesUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/connections": {
       "get": {
         "tags": [
@@ -11112,6 +11179,20 @@
         "title": "BoundChat",
         "description": "Read view of one ``chat_sessions`` row.\n\nReturned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound\nrows and per-chat-spawned rows are returned together \u2014 the table\ndoesn't tag the writer."
       },
+      "CapabilitiesUpdate": {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/ConnectorCapabilities"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "capabilities"
+        ],
+        "title": "CapabilitiesUpdate",
+        "description": "Body for ``PUT /v1/connectors/{connector}/capabilities``.\n\nA sibling to :class:`ToolsSchemaUpdate` \u2014 kept separate so capability churn\nis decoupled from a full ``tools_schema`` republish and the shipped\n``tools_schema`` body contract stays untouched."
+      },
       "Connection": {
         "properties": {
           "id": {
@@ -11311,6 +11392,34 @@
         "title": "ConnectionSetSecrets",
         "description": "Request body for ``PUT /v1/connections/{id}/secrets``.\n\nReplaces the connection's secrets dict wholesale.  Encrypted at\nrest server-side via ``AIOS_VAULT_KEY``; the operator never reads\nthem back.\n\nPass an empty dict to clear secrets."
       },
+      "ConnectorCapabilities": {
+        "properties": {
+          "draft_streaming": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DraftStreaming"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "native_buttons": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeButtons"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ConnectorCapabilities",
+        "description": "Typed richness descriptor \u2014 a ``tools_schema`` sibling on the catalog\nrow.  Each field is a present/absent typed sub-object (a declared KIND),\nnever a bool flag.  An absent field == capability not declared == the\nconservative rendering floor."
+      },
       "ConnectorInboundResponse": {
         "properties": {
           "appended_event_id": {
@@ -11422,6 +11531,25 @@
         ],
         "title": "CronSource",
         "description": "Recurring source: a standard 5-field cron expression in UTC.\n\nStructure-only here \u2014 grammar/occurrence checks live on the write\nmodels (``TriggerCreate`` / ``TriggerUpdate``) so the read path accepts\nevery row the write path ever accepted (see module docstring + \u00a72.2 of\nthe design contract). A future additive ``timezone`` field (IANA name;\nabsent = UTC) lands without touching this model or the DB CHECK."
+      },
+      "DraftStreaming": {
+        "properties": {
+          "overflow_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overflow Limit"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DraftStreaming",
+        "description": "Present == connector can render in-progress assistant deltas as an\neditable draft.  Absent == connector waits for the committed message."
       },
       "Environment": {
         "properties": {
@@ -13758,6 +13886,21 @@
         ],
         "title": "MintKeyResponse"
       },
+      "NativeButtons": {
+        "properties": {
+          "max_buttons": {
+            "type": "integer",
+            "title": "Max Buttons"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "max_buttons"
+        ],
+        "title": "NativeButtons",
+        "description": "Present == connector renders externally-executed tool-confirmations as\ninbound platform buttons; a button-tap maps to the existing\n``POST /sessions/:id/tool-confirmations``.  Absent == text-prompt fallback."
+      },
       "OAuthCompleteRequest": {
         "properties": {
           "state": {
@@ -13910,6 +14053,53 @@
         ],
         "title": "OneShotSource",
         "description": "One-shot source: fires once at an absolute UTC time, then self-deletes."
+      },
+      "OwedRequest": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "caller_kind": {
+            "type": "string",
+            "title": "Caller Kind"
+          },
+          "caller_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caller Id"
+          },
+          "opened_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Opened At"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "caller_kind",
+          "opened_at"
+        ],
+        "title": "OwedRequest",
+        "description": "Read-model projection of an open obligation on the :class:`Session` view (#1413).\n\nParallel to ``Session.awaiting`` (tool-call-only), but for the request edges\nthe session owes a response to. Projected from the same ``get_open_obligations``\nrows. Load-bearing for the operator-cancel path (#1414) \u2014 it cannot enumerate\na session's open goal_ids otherwise."
       },
       "RecentChat": {
         "properties": {
@@ -14553,6 +14743,13 @@
             "type": "array",
             "title": "Awaiting"
           },
+          "owed_requests": {
+            "items": {
+              "$ref": "#/components/schemas/OwedRequest"
+            },
+            "type": "array",
+            "title": "Owed Requests"
+          },
           "vault_ids": {
             "items": {
               "type": "string"
@@ -14700,7 +14897,7 @@
           "updated_at"
         ],
         "title": "Session",
-        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``status`` ({active, idle}) is derived per read from the event log; see\n:data:`SessionStatus`. ``stop_reason`` records why the most recent step\nended. Possible ``type`` values: ``\"end_turn\"``, ``\"interrupt\"``,\n``\"rescheduling\"``, ``\"error\"`` (``idle`` + ``error`` = the errored\nlanding pad). ``awaiting`` lists tool calls the session is blocked on\n(derived per read from the event log + agent tool specs)."
+        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``status`` ({active, idle}) is derived per read from the event log; see\n:data:`SessionStatus`. ``stop_reason`` records why the most recent step\nended. Possible ``type`` values: ``\"end_turn\"``, ``\"interrupt\"``,\n``\"rescheduling\"``, ``\"error\"`` (``idle`` + ``error`` = the errored\nlanding pad). ``awaiting`` lists tool calls the session is blocked on\n(derived per read from the event log + agent tool specs). ``owed_requests``\nlists the still-open **awaited** request edges the session owes a response to\n(derived per read from the ``request_opened`` lifecycle frame \u2014 #1413)."
       },
       "SessionAwaitResponse": {
         "properties": {
@@ -15794,7 +15991,9 @@
                   "list_run_events",
                   "call_session",
                   "call_agent",
-                  "call_workflow"
+                  "call_workflow",
+                  "skill_upsert",
+                  "skill_archive"
                 ]
               },
               {

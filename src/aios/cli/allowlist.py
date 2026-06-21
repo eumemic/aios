@@ -63,6 +63,11 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
     "put_connector_tools_schema": (
         "Called by connector containers via runtime token; not for operators."
     ),
+    "put_connector_capabilities": (
+        "Called by connector containers via runtime token; not for operators. "
+        "Sibling to put_connector_tools_schema: the runtime container publishes "
+        "its typed capability descriptor at startup; operators don't hand-write it."
+    ),
     # ── Infra/orchestrator probe ─────────────────────────────────────
     "get_ready": (
         "Readiness probe (SELECT 1 under a short timeout) consumed by the "

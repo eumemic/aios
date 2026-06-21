@@ -51,6 +51,8 @@ BuiltinToolType = Literal[
     "call_session",
     "call_agent",
     "call_workflow",
+    "skill_upsert",
+    "skill_archive",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled

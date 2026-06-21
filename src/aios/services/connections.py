@@ -30,6 +30,7 @@ from aios.models.connections import (
     ConnectionMode,
     RecentChat,
 )
+from aios.models.connectors import ConnectorCapabilities
 from aios.services.sessions import _evict_sandbox_for_resource_change
 
 
@@ -131,6 +132,26 @@ async def list_tools_for_session(
     """
     async with pool.acquire() as conn:
         return await queries.list_connection_tools_for_session(
+            conn, session_id, account_id=account_id
+        )
+
+
+async def list_capabilities_for_session(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> dict[str, ConnectorCapabilities]:
+    """Typed capability descriptors for every connector type bound to
+    ``session_id``, keyed by connector type.
+
+    The capability sibling to :func:`list_tools_for_session`: reached from the
+    ``ToolProvider`` Protocol seam
+    (:class:`aios_connectors.providers.SubsystemToolProvider`).  Surfaces the
+    declared richness descriptor so shared rendering code can branch on a
+    declared KIND rather than a ``connector == '<type>'`` identity shim.  The
+    only consumer — the #1335 outbound delta renderer — is not yet in-tree;
+    this is the deliberate read seam it plugs into.
+    """
+    async with pool.acquire() as conn:
+        return await queries.list_connection_capabilities_for_session(
             conn, session_id, account_id=account_id
         )
 

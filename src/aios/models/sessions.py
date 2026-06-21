@@ -170,6 +170,46 @@ class AwaitingToolCall(BaseModel):
     pending_since: datetime
 
 
+class Obligation(BaseModel):
+    """One still-open **awaited** request the session owes a response to (#1413).
+
+    The dual of :class:`AwaitingToolCall`: that view lists tool calls the session
+    is *blocked on*; this one lists requests the session *owes an answer to*. An
+    obligation is an open ``request_opened`` edge (#1123) — ``awaited=true``, with
+    no paired ``request_response`` — and is the in-context surface the model reads
+    to know which ``request_id`` to echo back to ``return``/``error``.
+
+    Derived (oldest-first) from the trusted ``request_opened`` lifecycle frame via
+    :func:`aios.db.queries.sessions.get_open_obligations`, NEVER the forgeable
+    ``metadata.request`` user-message blob (#1131-proof). ``caller_kind`` is the
+    trusted ``caller.kind`` (``api``|``session``|``run``); ``opened_at`` is the
+    edge's ``created_at`` (for age); ``summary`` is a short truncated preview of
+    the request input (absent on pre-#1413 frames → ``None``, rendered id-only).
+    """
+
+    request_id: str
+    caller_kind: str
+    caller_id: str | None = None
+    opened_at: datetime
+    summary: str | None = None
+
+
+class OwedRequest(BaseModel):
+    """Read-model projection of an open obligation on the :class:`Session` view (#1413).
+
+    Parallel to ``Session.awaiting`` (tool-call-only), but for the request edges
+    the session owes a response to. Projected from the same ``get_open_obligations``
+    rows. Load-bearing for the operator-cancel path (#1414) — it cannot enumerate
+    a session's open goal_ids otherwise.
+    """
+
+    request_id: str
+    caller_kind: str
+    caller_id: str | None = None
+    opened_at: datetime
+    summary: str | None = None
+
+
 class SessionCreate(BaseModel):
     """Request body for `POST /v1/sessions`."""
 
@@ -338,7 +378,9 @@ class Session(BaseModel):
     ended. Possible ``type`` values: ``"end_turn"``, ``"interrupt"``,
     ``"rescheduling"``, ``"error"`` (``idle`` + ``error`` = the errored
     landing pad). ``awaiting`` lists tool calls the session is blocked on
-    (derived per read from the event log + agent tool specs).
+    (derived per read from the event log + agent tool specs). ``owed_requests``
+    lists the still-open **awaited** request edges the session owes a response to
+    (derived per read from the ``request_opened`` lifecycle frame — #1413).
     """
 
     id: str
@@ -351,6 +393,7 @@ class Session(BaseModel):
     status: SessionStatus
     stop_reason: dict[str, Any] | None
     awaiting: list[AwaitingToolCall] = Field(default_factory=list)
+    owed_requests: list[OwedRequest] = Field(default_factory=list)
     vault_ids: list[str] = Field(default_factory=list)
     last_event_seq: int
     usage: SessionUsage = Field(default_factory=SessionUsage)
