@@ -29,6 +29,7 @@ from aios.models.events import (
     ERRORED_LIFECYCLE_STOP_REASON,
     is_errored_lifecycle_event,
 )
+from aios.services import sessions as sessions_service
 
 
 async def _capture_latch_lifecycle_event() -> dict[str, Any]:
@@ -50,10 +51,8 @@ async def _capture_latch_lifecycle_event() -> dict[str, Any]:
 
     with (
         patch.object(loop, "fail_all_open_requests", new=AsyncMock(return_value=None)),
-        patch.object(
-            loop.sessions_service, "set_session_stop_reason", new=AsyncMock(return_value=None)
-        ),
-        patch.object(loop.sessions_service, "append_event", side_effect=_record_append),
+        patch.object(sessions_service, "set_session_stop_reason", new=AsyncMock(return_value=None)),
+        patch.object(sessions_service, "append_event", side_effect=_record_append),
     ):
         await loop._latch_errored_turn(
             pool=object(),
@@ -119,6 +118,9 @@ def test_status_and_stop_reason_constants_are_distinct() -> None:
     ``stop_reason='error'`` are DIFFERENT strings. Pinning them distinct keeps a
     careless "make them match" edit from collapsing the two fields.
     """
-    assert ERRORED_LIFECYCLE_STOP_REASON != ERRORED_LIFECYCLE_STATUS
+    # Compare via ``str`` so mypy does not narrow these distinct ``Literal``
+    # types to a statically-known (non-overlapping) result and reject the
+    # equality check — the assertion guards a runtime invariant, not a type one.
+    assert str(ERRORED_LIFECYCLE_STOP_REASON) != str(ERRORED_LIFECYCLE_STATUS)
     assert ERRORED_LIFECYCLE_STOP_REASON == "error"
     assert ERRORED_LIFECYCLE_STATUS == "errored"
