@@ -31,9 +31,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-async def wf_pool(
-    migrated_db_url: str, _reset_db_state: None
-) -> AsyncIterator[asyncpg.Pool[Any]]:
+async def wf_pool(migrated_db_url: str, _reset_db_state: None) -> AsyncIterator[asyncpg.Pool[Any]]:
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
     prev = runtime.pool
     runtime.pool = pool

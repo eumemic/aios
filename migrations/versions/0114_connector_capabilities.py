@@ -31,10 +31,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE connectors "
-        "ADD COLUMN capabilities jsonb NOT NULL DEFAULT '{}'::jsonb"
-    )
+    op.execute("ALTER TABLE connectors ADD COLUMN capabilities jsonb NOT NULL DEFAULT '{}'::jsonb")
 
 
 def downgrade() -> None:

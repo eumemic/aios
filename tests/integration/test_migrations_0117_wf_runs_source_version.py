@@ -92,9 +92,7 @@ def test_backfill_sets_unambiguous_and_leaves_ambiguous_null(postgres: object) -
     up = _run_alembic(["upgrade", "0117"], db_url)
     assert up.returncode == 0, f"upgrade to 0117 failed:\n{up.stderr}\n{up.stdout}"
 
-    rows = asyncio.run(
-        _fetch(db_url, "SELECT id, source_version FROM wf_runs ORDER BY id")
-    )
+    rows = asyncio.run(_fetch(db_url, "SELECT id, source_version FROM wf_runs ORDER BY id"))
     by_id = {r["id"]: r["source_version"] for r in rows}
     # Unambiguous sha → backfilled to the single matching version (v1 of wf_a).
     assert by_id["run_unambiguous"] == 1
@@ -136,9 +134,7 @@ def test_composite_fk_rejects_dangling_pointer(postgres: object) -> None:
             " NULL, 0, 'pending')",
         )
     )
-    rows = asyncio.run(
-        _fetch(db_url, "SELECT source_version FROM wf_runs WHERE id = 'run_null'")
-    )
+    rows = asyncio.run(_fetch(db_url, "SELECT source_version FROM wf_runs WHERE id = 'run_null'"))
     assert rows[0]["source_version"] is None
 
 
