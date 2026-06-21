@@ -41,7 +41,6 @@ BuiltinToolType = Literal[
     "update_workflow",
     "archive_workflow",
     "unarchive_workflow",
-    "cancel_run",
     "resume_gate",
     "get_workflow",
     "list_workflows",
@@ -51,6 +50,8 @@ BuiltinToolType = Literal[
     "call_session",
     "call_agent",
     "call_workflow",
+    "stop_task",
+    "list_tasks",
     "skill_upsert",
     "skill_archive",
 ]
@@ -76,20 +77,26 @@ HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
 
-# Read-tolerance for the #1419 invoke*→call_* rename. Agent/workflow/run/session rows
-# persisted before the rename carry these pre-rename builtin tool names in their `tools`
-# JSONB; without a map they'd fail `ToolSpec` validation on read (a deploy-breaker —
-# every agent that exposed workflow-launch/session-invoke to its model would 500). The
+# Read-tolerance for the builtin tool renames (#1419 invoke*→call_*, #1428 cancel_run→stop_task).
+# Agent/workflow/run/session rows persisted before a rename carry the pre-rename builtin tool
+# names in their `tools` JSONB; without a map they'd fail `ToolSpec` validation on read (a
+# deploy-breaker — every agent that exposed the renamed tool to its model would 500). The
 # `mode="before"` validator below maps them so old rows still load; the two-step
-# create_run/await_run launch tools fold into the unified `call_workflow`. The data
-# migration (0116) rewrites the persisted rows to canonical; once it has run everywhere
-# this map + the validator can be removed (teardown tracked: #1432).
+# create_run/await_run launch tools fold into the unified `call_workflow`. The data migrations
+# (0116 for #1419, 0117 for #1428) rewrite the persisted rows to canonical; once they have run
+# everywhere this map + the validator can be removed (teardown tracked: #1432).
 _LEGACY_BUILTIN_RENAMES: dict[str, str] = {
     "invoke": "call_session",
     "invoke_agent": "call_agent",
     "invoke_workflow": "call_workflow",
     "create_run": "call_workflow",
     "await_run": "call_workflow",
+    # #1428: the cancel_run MODEL tool is superseded by stop_task (which reaches a session
+    # servicer too, keyed on tool_call_id). The wf_service.cancel_run SERVICE is unaffected.
+    # Maps to a REGISTERED name (stop_task) — load-bearing: to_openai_tools' registry.get
+    # raises on an unregistered type, which would 500 every affected agent in the post-deploy
+    # window. The data migration (0117) rewrites persisted rows; this shim covers the window.
+    "cancel_run": "stop_task",
 }
 
 # Header names the MCP streamable-http transport authors on every request
@@ -456,14 +463,15 @@ class ToolSpec(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _map_legacy_builtin_names(cls, data: Any) -> Any:
-        """Map pre-#1419-rename builtin tool names to canonical ones (read-tolerance).
+        """Map pre-rename builtin tool names to canonical ones (read-tolerance).
 
-        Runs before field validation so a row persisted with a legacy ``type``
-        (``invoke``/``invoke_agent``/``invoke_workflow``/``create_run``/``await_run``)
-        still validates against the post-rename ``BuiltinToolType`` Literal. The
-        ``create_run``/``await_run`` collapse to ``call_workflow`` is deduped at the list
-        level (``to_openai_tools`` + migration 0116), not here. Temporary shim — remove
-        once 0116 has rewritten all persisted rows. See :data:`_LEGACY_BUILTIN_RENAMES`.
+        Runs before field validation so a row persisted with a legacy ``type`` — the #1419
+        ``invoke``/``invoke_agent``/``invoke_workflow``/``create_run``/``await_run`` set or the
+        #1428 ``cancel_run`` — still validates against the post-rename ``BuiltinToolType``
+        Literal. The ``create_run``/``await_run`` collapse to ``call_workflow`` is deduped at the
+        list level (``to_openai_tools`` + migrations 0116/0117), not here. Temporary shim —
+        remove once 0116/0117 have rewritten all persisted rows. See
+        :data:`_LEGACY_BUILTIN_RENAMES`.
         """
         if isinstance(data, dict):
             t = data.get("type")

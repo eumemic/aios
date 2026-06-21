@@ -1,11 +1,11 @@
-"""Read-tolerance for the #1419 invoke*→call_* builtin tool rename.
+"""Read-tolerance for the builtin tool renames (#1419 invoke*→call_*, #1428 cancel_run→stop_task).
 
-Agent/workflow/run/session rows persisted before the rename carry legacy builtin
-names (``invoke``/``invoke_agent``/``invoke_workflow``/``create_run``/``await_run``) in
-their ``tools`` JSONB. The ``ToolSpec`` ``mode="before"`` validator maps them so old rows
-still load; ``to_openai_tools`` dedupes the ``create_run``/``invoke_workflow`` collapse so
-the model never sees a duplicate ``call_workflow``. (The data migration 0116 rewrites the
-persisted rows; this shim covers the post-deploy/pre-migrate window.)
+Agent/workflow/run/session rows persisted before a rename carry legacy builtin names
+(``invoke``/``invoke_agent``/``invoke_workflow``/``create_run``/``await_run`` from #1419,
+``cancel_run`` from #1428) in their ``tools`` JSONB. The ``ToolSpec`` ``mode="before"`` validator
+maps them so old rows still load; ``to_openai_tools`` dedupes the ``create_run``/``invoke_workflow``
+collapse so the model never sees a duplicate ``call_workflow``. (The data migrations 0116 / 0117
+rewrite the persisted rows; the shim covers the post-deploy/pre-migrate window.)
 """
 
 from __future__ import annotations
@@ -24,6 +24,9 @@ from aios.tools.registry import to_openai_tools
         ("invoke_workflow", "call_workflow"),
         ("create_run", "call_workflow"),
         ("await_run", "call_workflow"),
+        # #1428: the cancel_run MODEL tool superseded by stop_task. Maps to a REGISTERED
+        # name so to_openai_tools' registry.get doesn't raise in the post-deploy window.
+        ("cancel_run", "stop_task"),
     ],
 )
 def test_legacy_builtin_name_maps_to_canonical(legacy: str, canonical: str) -> None:

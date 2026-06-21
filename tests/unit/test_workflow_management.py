@@ -136,11 +136,16 @@ class TestSchemaRejectsInjectedTrustedIds:
                 {"workflow_id": "wf_1", "version": 1, "actor_session_id": "ses_victim"},
             )
 
-    async def test_cancel_run_canceller_session_id_rejected(self) -> None:
+    async def test_stop_task_session_id_rejected(self) -> None:
+        # stop_task replaced cancel_run (#1428); the trusted caller is still never a field.
         with pytest.raises(ToolBail):
             await invoke_builtin(
-                "ses_1", "cancel_run", {"run_id": "wfr_1", "canceller_session_id": "ses_victim"}
+                "ses_1", "stop_task", {"tool_call_id": "tc_1", "session_id": "ses_victim"}
             )
+
+    async def test_list_tasks_rejects_smuggled_key(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin("ses_1", "list_tasks", {"account_id": "acc_victim"})
 
     async def test_archive_workflow_account_id_rejected(self) -> None:
         with pytest.raises(ToolBail):

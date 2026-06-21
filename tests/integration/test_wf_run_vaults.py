@@ -1016,9 +1016,15 @@ async def test_account_fanout_cap_binds_every_launch(
         await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
 
 
-async def test_cancel_run_builtin_only_own_runs(vault_pool: asyncpg.Pool[Any]) -> None:
-    """cancel_run cancels only runs the executing session launched — the self-service
-    escape for the launcher cap; operator-launched runs are out of its reach."""
+async def test_cancel_run_service_launcher_guard(vault_pool: asyncpg.Pool[Any]) -> None:
+    """``wf_service.cancel_run``'s launcher guard — the security-bearing mechanism the
+    model-facing ``stop_task`` (#1428) rides through ``cancel_invocation``. With a
+    ``canceller_session_id`` asserted (the model plane), only the launching session may
+    cancel: a foreign canceller or an operator-launched run is ``ForbiddenError``. The
+    retired ``cancel_run`` model tool's attenuation moved here. (``canceller_session_id=None``
+    — the operator HTTP plane — is unguarded, exercised by the cancel paths in
+    ``test_wf_step``.) ``stop_task`` itself can't even NAME a foreign run — its
+    ``find_parked_servicer`` pins ``caller.id`` — so this guard is its defense-in-depth backstop."""
     pool = vault_pool
     agent = await _make_agent(pool, "canceller-agent")
     sess = await _make_session(pool, agent)
@@ -1026,20 +1032,25 @@ async def test_cancel_run_builtin_only_own_runs(vault_pool: asyncpg.Pool[Any]) -
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-cxl", script=_SCRIPT)
 
     own = await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
-    out = await wm.cancel_run_handler(sess, {"run_id": own["id"]})
-    assert out["id"] == own["id"]  # accepted; the run finalizes on its next wake
+    run = await wf_service.cancel_run(
+        pool, run_id=own["id"], account_id=ACC, canceller_session_id=sess
+    )
+    assert run.id == own["id"]  # accepted; the run finalizes on its next wake
     async with pool.acquire() as conn:
         signal = await conn.fetchrow(
             "SELECT 1 FROM wf_run_signals WHERE run_id = $1 AND kind = 'cancel'", own["id"]
         )
     assert signal is not None
 
-    # Another session's run and an operator run are both forbidden.
+    # A foreign canceller and an operator-launched run are both forbidden when a
+    # canceller_session_id is asserted (the model plane).
     op = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
     with pytest.raises(ForbiddenError):
-        await wm.cancel_run_handler(other, {"run_id": own["id"]})
+        await wf_service.cancel_run(
+            pool, run_id=own["id"], account_id=ACC, canceller_session_id=other
+        )
     with pytest.raises(ForbiddenError):
-        await wm.cancel_run_handler(sess, {"run_id": op.id})
+        await wf_service.cancel_run(pool, run_id=op.id, account_id=ACC, canceller_session_id=sess)
 
 
 # ─── #794: the run→child materialize edge (frozen, run-attenuated surface) ────
