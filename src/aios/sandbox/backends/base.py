@@ -509,9 +509,7 @@ class SandboxBackend(Protocol):
         """
         ...
 
-    async def prewarm_commit(
-        self, sandbox_id: str, tag: str, *, labels: dict[str, str]
-    ) -> None:
+    async def prewarm_commit(self, sandbox_id: str, tag: str, *, labels: dict[str, str]) -> None:
         """``docker commit`` ``sandbox_id`` to ``tag``, stamping ``labels``.
 
         Operator prewarm bake (#1348). Stamps exactly the labels given

@@ -431,9 +431,21 @@ def prewarm_image(pulled_image: str) -> str:
 
     # 1. Plain run of the base (keepalive CMD), no aios.* labels.
     run = subprocess.run(
-        ["docker", "run", "--detach", "--name", container, pulled_image,
-         "/usr/bin/tail", "-f", "/dev/null"],
-        capture_output=True, text=True, check=False, timeout=60,
+        [
+            "docker",
+            "run",
+            "--detach",
+            "--name",
+            container,
+            pulled_image,
+            "/usr/bin/tail",
+            "-f",
+            "/dev/null",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
     )
     assert run.returncode == 0, f"prewarm run failed: {run.stderr.strip()}"
 
@@ -441,20 +453,40 @@ def prewarm_image(pulled_image: str) -> str:
     #    the PEM via ``docker exec --env`` so it lands INSIDE the container
     #    (host env is not forwarded into the container shell).
     install = subprocess.run(
-        ["docker", "exec", "--env", f"CA_PEM={_TEST_CA_PEM}", container, "bash", "-c",
-         "printf '%s' \"$CA_PEM\" > /usr/local/share/ca-certificates/aios-egress.crt "
-         "&& update-ca-certificates"],
-        capture_output=True, text=True, check=False, timeout=60,
+        [
+            "docker",
+            "exec",
+            "--env",
+            f"CA_PEM={_TEST_CA_PEM}",
+            container,
+            "bash",
+            "-c",
+            "printf '%s' \"$CA_PEM\" > /usr/local/share/ca-certificates/aios-egress.crt "
+            "&& update-ca-certificates",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
     )
     assert install.returncode == 0, f"prewarm CA install failed: {install.stderr.strip()}"
 
     # 3. Commit + stamp BOTH prewarm labels (and NONE of managed/instance/session).
     commit = subprocess.run(
-        ["docker", "commit",
-         "--change", f"LABEL {_BASE_IMAGE_LABEL_KEY}={pulled_image}",
-         "--change", f"LABEL {_PREWARM_LABEL_KEY}={pulled_image}",
-         container, tag],
-        capture_output=True, text=True, check=False, timeout=120,
+        [
+            "docker",
+            "commit",
+            "--change",
+            f"LABEL {_BASE_IMAGE_LABEL_KEY}={pulled_image}",
+            "--change",
+            f"LABEL {_PREWARM_LABEL_KEY}={pulled_image}",
+            container,
+            tag,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
     )
     assert commit.returncode == 0, f"prewarm commit failed: {commit.stderr.strip()}"
     # 4. Remove the transient container.
@@ -463,7 +495,9 @@ def prewarm_image(pulled_image: str) -> str:
     try:
         yield tag
     finally:
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30)
+        subprocess.run(
+            ["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30
+        )
         subprocess.run(["docker", "rmi", "-f", tag], capture_output=True, check=False, timeout=30)
 
 
@@ -473,7 +507,10 @@ class TestPrewarmBake:
         the managed/instance/session labels (GC-invisibility by construction)."""
         result = subprocess.run(
             ["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", prewarm_image],
-            capture_output=True, text=True, check=False, timeout=15,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
         )
         assert result.returncode == 0, result.stderr.strip()
         labels = json.loads(result.stdout.strip()) or {}
@@ -487,7 +524,10 @@ class TestPrewarmBake:
         genuinely redundant for a container started from the prewarm image."""
         result = _docker_run(
             prewarm_image,
-            "grep", "-l", "aios-prewarm-test-ca", "/etc/ssl/certs/ca-certificates.crt",
+            "grep",
+            "-l",
+            "aios-prewarm-test-ca",
+            "/etc/ssl/certs/ca-certificates.crt",
             timeout=30,
         )
         # grep -l prints the filename on a match; a baked CA ⇒ rc 0.
@@ -501,19 +541,38 @@ class TestPrewarmBake:
         from the prewarmed image starts with an open OUTPUT policy and the
         lockdown can still be applied fresh (proving it is not persisted)."""
         container = "aios-prewarm-e2e-lockdown"
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30)
+        subprocess.run(
+            ["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30
+        )
         try:
             run = subprocess.run(
-                ["docker", "run", "--detach", "--name", container, "--cap-add", "NET_ADMIN",
-                 prewarm_image, "/usr/bin/tail", "-f", "/dev/null"],
-                capture_output=True, text=True, check=False, timeout=60,
+                [
+                    "docker",
+                    "run",
+                    "--detach",
+                    "--name",
+                    container,
+                    "--cap-add",
+                    "NET_ADMIN",
+                    prewarm_image,
+                    "/usr/bin/tail",
+                    "-f",
+                    "/dev/null",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
             )
             if run.returncode != 0:
                 pytest.skip(f"could not start NET_ADMIN container: {run.stderr.strip()}")
             # Baked image must NOT carry a DROP policy (lockdown never baked).
             before = subprocess.run(
                 ["docker", "exec", container, "iptables-legacy", "-S", "OUTPUT"],
-                capture_output=True, text=True, check=False, timeout=30,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
             )
             assert before.returncode == 0, before.stderr.strip()
             assert "-P OUTPUT DROP" not in before.stdout, (
@@ -522,13 +581,21 @@ class TestPrewarmBake:
             # The lockdown can be applied fresh — proving it runs at provision time.
             applied = subprocess.run(
                 ["docker", "exec", container, "iptables-legacy", "-P", "OUTPUT", "DROP"],
-                capture_output=True, text=True, check=False, timeout=30,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
             )
             assert applied.returncode == 0, applied.stderr.strip()
             after = subprocess.run(
                 ["docker", "exec", container, "iptables-legacy", "-S", "OUTPUT"],
-                capture_output=True, text=True, check=False, timeout=30,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
             )
             assert "-P OUTPUT DROP" in after.stdout
         finally:
-            subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30)
+            subprocess.run(
+                ["docker", "rm", "-f", container], capture_output=True, check=False, timeout=30
+            )

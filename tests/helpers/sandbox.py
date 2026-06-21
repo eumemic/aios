@@ -214,9 +214,7 @@ class FakeBackend:
         self.calls.append(("prewarm_run", {"image": image}))
         return self.next_prewarm_id
 
-    async def prewarm_commit(
-        self, sandbox_id: str, tag: str, *, labels: dict[str, str]
-    ) -> None:
+    async def prewarm_commit(self, sandbox_id: str, tag: str, *, labels: dict[str, str]) -> None:
         self.calls.append(
             ("prewarm_commit", {"sandbox_id": sandbox_id, "tag": tag, "labels": dict(labels)})
         )

@@ -120,7 +120,13 @@ class TestColdStartSkipGate:
 
         ca = AsyncMock()
         pkgs = AsyncMock()
-        patches = (*_patch_provision_preamble(registry, plan), patch("aios.sandbox.registry.install_egress_ca", ca), patch("aios.sandbox.registry.install_packages", pkgs), patch.object(registry, "_apply_egress_rules", AsyncMock()), patch("aios.sandbox.registry.log", MagicMock()))
+        patches = (
+            *_patch_provision_preamble(registry, plan),
+            patch("aios.sandbox.registry.install_egress_ca", ca),
+            patch("aios.sandbox.registry.install_packages", pkgs),
+            patch.object(registry, "_apply_egress_rules", AsyncMock()),
+            patch("aios.sandbox.registry.log", MagicMock()),
+        )
         _enter(patches)
         try:
             await registry._provision("sess_01TEST")
@@ -151,7 +157,13 @@ class TestColdStartSkipGate:
 
         ca = AsyncMock()
         pkgs = AsyncMock()
-        patches = (*_patch_provision_preamble(registry, plan), patch("aios.sandbox.registry.install_egress_ca", ca), patch("aios.sandbox.registry.install_packages", pkgs), patch.object(registry, "_apply_egress_rules", AsyncMock()), patch("aios.sandbox.registry.log", MagicMock()))
+        patches = (
+            *_patch_provision_preamble(registry, plan),
+            patch("aios.sandbox.registry.install_egress_ca", ca),
+            patch("aios.sandbox.registry.install_packages", pkgs),
+            patch.object(registry, "_apply_egress_rules", AsyncMock()),
+            patch("aios.sandbox.registry.log", MagicMock()),
+        )
         _enter(patches)
         try:
             await registry._provision("sess_01TEST")
@@ -211,7 +223,14 @@ class TestColdStartSkipGate:
         runtime = MagicMock()
         runtime.require_tool_broker = MagicMock(return_value=tool_broker)
 
-        patches = (*_patch_provision_preamble(registry, plan), patch("aios.sandbox.registry.install_egress_ca", AsyncMock()), patch("aios.sandbox.registry.install_packages", AsyncMock()), patch("aios.sandbox.registry.apply_network_lockdown", lockdown), patch("aios.harness.runtime.require_tool_broker", runtime.require_tool_broker), patch("aios.sandbox.registry.log", MagicMock()))
+        patches = (
+            *_patch_provision_preamble(registry, plan),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", lockdown),
+            patch("aios.harness.runtime.require_tool_broker", runtime.require_tool_broker),
+            patch("aios.sandbox.registry.log", MagicMock()),
+        )
         _enter(patches)
         try:
             await registry._provision("sess_01TEST")

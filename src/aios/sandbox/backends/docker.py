@@ -475,9 +475,7 @@ class DockerBackend:
             )
         return stdout_bytes.decode("utf-8", errors="replace").strip()
 
-    async def prewarm_commit(
-        self, sandbox_id: str, tag: str, *, labels: dict[str, str]
-    ) -> None:
+    async def prewarm_commit(self, sandbox_id: str, tag: str, *, labels: dict[str, str]) -> None:
         """``docker commit`` ``sandbox_id`` to ``tag``, stamping exactly ``labels``.
 
         Stamps only the caller-supplied labels (``BASE_IMAGE_LABEL_KEY`` +
@@ -498,9 +496,7 @@ class DockerBackend:
 
     async def prewarm_remove(self, sandbox_id: str) -> None:
         """``docker rm -f`` the transient prewarm container (idempotent)."""
-        rc, _stdout, stderr_bytes = await run_docker_cli(
-            ["docker", "rm", "--force", sandbox_id]
-        )
+        rc, _stdout, stderr_bytes = await run_docker_cli(["docker", "rm", "--force", sandbox_id])
         if rc != 0:
             stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
             if _is_no_such_container(stderr):

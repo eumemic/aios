@@ -127,9 +127,7 @@ async def _load_environment_config(
     return env_config
 
 
-async def _run_prewarm_async(
-    tag: str, environment_id: str | None, account_id: str | None
-) -> int:
+async def _run_prewarm_async(tag: str, environment_id: str | None, account_id: str | None) -> int:
     from aios.config import get_settings
     from aios.sandbox.backends.docker import DockerBackend
 
