@@ -16,11 +16,13 @@ Two surfaces, no Docker:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from aios.cli.commands.sandbox import bake_prewarm_image
+from aios.models.environments import EnvironmentConfig
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
     INSTANCE_LABEL_KEY,
@@ -53,7 +55,9 @@ def _make_spec(*, snapshot_image: str | None = None, image: str = BASE) -> Sandb
     )
 
 
-def _make_plan(spec: SandboxSpec, *, env_config: object = None) -> ProvisioningPlan:
+def _make_plan(
+    spec: SandboxSpec, *, env_config: EnvironmentConfig | None = None
+) -> ProvisioningPlan:
     return ProvisioningPlan(
         spec=spec,
         env_config=env_config,
@@ -67,7 +71,7 @@ def _make_plan(spec: SandboxSpec, *, env_config: object = None) -> ProvisioningP
 # ── shared fixtures for driving _provision / _provision_run ──────────────────
 
 
-def _patch_provision_preamble(registry: SandboxRegistry, plan: ProvisioningPlan):
+def _patch_provision_preamble(registry: SandboxRegistry, plan: ProvisioningPlan) -> tuple[Any, ...]:
     """Patch the session ``_provision`` preamble so it reaches the setup execs.
 
     ``_resolve_snapshot`` is patched to return ``plan.spec`` unchanged — the
@@ -85,12 +89,12 @@ def _patch_provision_preamble(registry: SandboxRegistry, plan: ProvisioningPlan)
     )
 
 
-def _enter(patches):
+def _enter(patches: tuple[Any, ...]) -> list[Any]:
     ctxs = [p.__enter__() for p in patches]
     return ctxs
 
 
-def _exit(patches):
+def _exit(patches: tuple[Any, ...]) -> None:
     for p in reversed(patches):
         p.__exit__(None, None, None)
 
@@ -112,7 +116,7 @@ class TestColdStartSkipGate:
         ],
     )
     async def test_provision_skip_matrix(
-        self, labels_by_ref: dict[str, object], expect_skipped: bool
+        self, labels_by_ref: dict[str, dict[str, str] | None], expect_skipped: bool
     ) -> None:
         backend = FakeBackend(image_labels_by_ref=labels_by_ref)
         registry = SandboxRegistry(backend=backend)

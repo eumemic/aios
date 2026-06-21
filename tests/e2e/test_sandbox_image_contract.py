@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -418,7 +419,7 @@ _TEST_CA_PEM = subprocess.run(
 
 
 @pytest.fixture()
-def prewarm_image(pulled_image: str) -> str:
+def prewarm_image(pulled_image: str) -> Iterator[str]:
     """Bake a prewarm image from the base: run → install CA → commit + labels.
 
     Mirrors the operator ``bake_prewarm_image`` path with the Docker CLI. Yields
