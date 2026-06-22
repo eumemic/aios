@@ -45,13 +45,13 @@ class TestCancellation:
         reg = InflightToolRegistry()
         task = asyncio.create_task(_sleeper())
         reg.add("sess_1", "call_a", task)
-        assert reg.cancel_task("sess_1", "call_a") is True
+        assert reg.cancel_tool_task("sess_1", "call_a") is True
         await asyncio.sleep(0)  # let the task process CancelledError
         assert task.cancelled()
 
     async def test_cancel_unknown_returns_false(self) -> None:
         reg = InflightToolRegistry()
-        assert reg.cancel_task("sess_1", "call_nope") is False
+        assert reg.cancel_tool_task("sess_1", "call_nope") is False
 
     async def test_cancel_session(self) -> None:
         reg = InflightToolRegistry()

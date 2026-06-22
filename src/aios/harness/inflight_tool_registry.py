@@ -35,7 +35,7 @@ class InflightToolRegistry:
             if not session_tasks:
                 del self._tasks[session_id]
 
-    def cancel_task(self, session_id: str, tool_call_id: str) -> bool:
+    def cancel_tool_task(self, session_id: str, tool_call_id: str) -> bool:
         """Cancel one tool task. Returns True if the task was found and cancelled."""
         session_tasks = self._tasks.get(session_id)
         if session_tasks is None:

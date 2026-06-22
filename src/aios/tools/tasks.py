@@ -143,7 +143,7 @@ STOP_TASK_DESCRIPTION = (
     "before the stop landed, or an error if no open task matches that tool_call_id."
 )
 LIST_TASKS_DESCRIPTION = (
-    "List your open tasks — the call_session / call_agent / call_workflow tasks you have "
+    "List your open tasks — the call_session / call_agent / call_workflow calls you have "
     "launched that are still running and awaiting an answer. Each entry carries the "
     "tool_call_id (pass it to stop_task to cancel), the servicer kind (session or run), the "
     "target id, and when it was opened. A point-in-time snapshot; answered or cancelled calls "
