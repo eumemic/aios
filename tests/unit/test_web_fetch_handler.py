@@ -96,6 +96,21 @@ class TestWebFetchHandler:
         }
         result = await web_fetch_handler("sess_01TEST", {"url": "https://example.com"})
         assert len(result["content"]) == 100_000
+        # A cut page is flagged so the model never mistakes it for a complete one.
+        assert result["truncated"] is True
+
+    async def test_complete_content_has_no_truncated_flag(
+        self, mock_tavily: AsyncMock, mock_safe_url: Any
+    ) -> None:
+        """The flag is opt-in: present ONLY when cut. Exactly-at-cap content is
+        complete (``>`` is strict), so no ``truncated`` key appears."""
+        exact = "y" * 100_000
+        mock_tavily.return_value = {
+            "results": [{"url": "https://example.com", "raw_content": exact}]
+        }
+        result = await web_fetch_handler("sess_01TEST", {"url": "https://example.com"})
+        assert len(result["content"]) == 100_000
+        assert "truncated" not in result
 
     async def test_empty_raw_content_yields_empty_content(
         self, mock_tavily: AsyncMock, mock_safe_url: Any

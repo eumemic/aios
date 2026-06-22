@@ -7,6 +7,9 @@ Return shape: {"url": "...", "title": "...", "content": "markdown..."}
 The ``title`` is derived from the markdown's first heading: Tavily's /extract
 response carries only ``url`` + ``raw_content`` (no title field — that belongs
 to /search), so reading a ``title`` key returned ``""`` on every real call.
+When the content is cut at the char cap the result also carries ``"truncated":
+True`` (present only when truncated, mirroring ``http_request``) so the model
+never mistakes a cut page for a complete one.
 On error: {"error": "..."}
 """
 
@@ -46,7 +49,9 @@ def _title_from_markdown(content: str) -> str:
 WEB_FETCH_DESCRIPTION = (
     "Fetch a URL and return its content as markdown. Uses Tavily's "
     "extract endpoint for HTML-to-markdown conversion. Content is "
-    "truncated to 100k characters. Private/internal URLs are blocked."
+    "truncated to 100k characters; when content is cut the result carries "
+    '"truncated": true so you never mistake a truncated page for a complete '
+    "one. Private/internal URLs are blocked."
 )
 
 WEB_FETCH_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -74,8 +79,19 @@ async def web_fetch_handler(session_id: str, arguments: dict[str, Any]) -> dict[
         # /extract returns only ``raw_content`` (markdown); there is no ``title``
         # or ``content`` field to read (those are /search fields), so derive the
         # title from the markdown's first heading.
-        content = (result.get("raw_content") or "")[:_MAX_CONTENT_CHARS]
-        return {"url": url, "title": _title_from_markdown(content), "content": content}
+        raw = result.get("raw_content") or ""
+        content = raw[:_MAX_CONTENT_CHARS]
+        out: dict[str, Any] = {
+            "url": url,
+            "title": _title_from_markdown(content),
+            "content": content,
+        }
+        # Signal a cut page explicitly, opt-in like ``http_request`` (aios#1294):
+        # the flag is present ONLY when truncated, so the model can branch on its
+        # mere presence. ``>`` strictly — exactly-100k is complete, not cut.
+        if len(raw) > _MAX_CONTENT_CHARS:
+            out["truncated"] = True
+        return out
     except WebToolError:
         raise
     except httpx.HTTPStatusError as exc:

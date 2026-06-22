@@ -543,6 +543,42 @@ class TestHttpRequestHandler:
         # A complete body never carries the truncated flag.
         assert "truncated" not in result
 
+    async def test_duplicate_response_headers_preserved(self, _stub_runtime: Any) -> None:
+        """``headers`` is a list of ``[name, value]`` pairs so every occurrence
+        survives in wire order — the contract the module docstring promises. A dict
+        would collapse duplicate names, silently dropping all but the last; HTTP
+        *requires* some be multi-valued (the canonical ``Set-Cookie``, but also
+        ``Link`` etc.). We interleave distinct names with TWO duplicate names — one
+        cookie, one non-cookie — so the assertion pins both cross-name order and the
+        pair-list's generality (a fix that special-cased only ``Set-Cookie`` and
+        ``dict()``'d the rest would fail here)."""
+        sent = [
+            ["x-first", "1"],
+            ["set-cookie", "a=1"],
+            ["link", "</p1>; rel=next"],
+            ["set-cookie", "b=2"],
+            ["link", "</p2>; rel=prev"],
+            ["x-last", "9"],
+        ]
+        response = httpx.Response(200, headers=[(k, v) for k, v in sent], content=b"ok")
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        stub = _make_stub_client(response=response)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            _patch_safe_url(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        # Filter to just the names we set (httpx auto-injects content-length); the
+        # surviving sublist must equal our input verbatim — same order, both dups.
+        names = {k for k, _ in sent}
+        preserved = [[k.lower(), v] for k, v in result["headers"] if k.lower() in names]
+        assert preserved == sent
+
     async def test_over_cap_body_sets_truncated_flag(
         self, _stub_runtime: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -893,7 +929,7 @@ class TestOutboundSuppressionHttp:
                 },
             )
         # Synthesized success — looks like a real response, no upstream dispatch.
-        assert result == {"status": 200, "headers": {}, "body": ""}
+        assert result == {"status": 200, "headers": [], "body": ""}
         assert "url" not in captured
         # Audit event recorded with the un-suppressed intent.
         record.assert_awaited_once()
@@ -951,7 +987,7 @@ class TestOutboundSuppressionHttp:
                 "sess_x",
                 {"server_ref": "hue", "path": "/trigger/1", "method": "GET"},
             )
-        assert result == {"status": 200, "headers": {}, "body": ""}
+        assert result == {"status": 200, "headers": [], "body": ""}
         assert "url" not in captured
         record.assert_awaited_once()
 

@@ -59,12 +59,14 @@ def http_synthesized_response(status: int) -> dict[str, Any]:
     """The synthesized success an HTTP write observes under suppression.
 
     Mirrors the real ``http_request`` return shape (``status``/``headers``/
-    ``body``) so the agent can't tell it apart from a real success. The body is
+    ``body``) so the agent can't tell it apart from a real success — including
+    ``headers`` being a list of ``[name, value]`` pairs (empty here), not a dict,
+    so a suppressed write can't be fingerprinted by the headers' type. The body is
     empty (``""``) — enough for v1; a per-route synthetic-response template is
     explicitly deferred until a real test hits the limitation (e.g. a write that
     returns the created entity's id).
     """
-    return {"status": status, "headers": {}, "body": ""}
+    return {"status": status, "headers": [], "body": ""}
 
 
 def mcp_synthesized_result() -> dict[str, Any]:
