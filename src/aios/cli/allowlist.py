@@ -9,9 +9,10 @@ containers, not operators), multipart upload, long-poll, one-shot
 deployment bootstrap.
 
 ``NEEDS_CLI_TRACKED`` — operations that *should* get a CLI command but
-haven't yet. Each entry points at a tracking issue (or ``aios#TBD`` if
-filed at the same time as this allowlist). When the CLI command lands,
-remove the entry and decorate the new command with ``@covers(...)``.
+haven't yet. Each entry MUST cite a real filed tracking issue (e.g.
+``#1446``); ``test_cli_coverage`` fails CI on a leftover ``aios#TBD``
+placeholder, so a deferral can never ship untracked. When the CLI command
+lands, remove the entry and decorate the new command with ``@covers(...)``.
 
 The coverage test treats both categories identically for pass/fail —
 they're separated only so dead-entry detection (and future grepping)
@@ -114,40 +115,40 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
 
 NEEDS_CLI_TRACKED: dict[str, str] = {
     # ── Memory stores (followup) ─────────────────────────────────────
-    # Tracked: aios#TBD — single followup issue for `aios memory-stores ...`
+    # Tracked: #1446 — single followup issue for `aios memory-stores ...`
     # and `aios memory-stores memories ...` command groups.
-    "list_memory_stores": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "get_memory_store": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "create_memory_store": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "update_memory_store": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "delete_memory_store": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "archive_memory_store": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "list_memories": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "get_memory": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "create_memory": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "update_memory": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "delete_memory": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "list_memory_versions": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "get_memory_version": "needs CLI; tracked in aios#TBD (memory-stores group)",
-    "redact_memory_version": "needs CLI; tracked in aios#TBD (memory-stores group)",
+    "list_memory_stores": "needs CLI; tracked in #1446 (memory-stores group)",
+    "get_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
+    "create_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
+    "update_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
+    "delete_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
+    "archive_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
+    "list_memories": "needs CLI; tracked in #1446 (memory-stores group)",
+    "get_memory": "needs CLI; tracked in #1446 (memory-stores group)",
+    "create_memory": "needs CLI; tracked in #1446 (memory-stores group)",
+    "update_memory": "needs CLI; tracked in #1446 (memory-stores group)",
+    "delete_memory": "needs CLI; tracked in #1446 (memory-stores group)",
+    "list_memory_versions": "needs CLI; tracked in #1446 (memory-stores group)",
+    "get_memory_version": "needs CLI; tracked in #1446 (memory-stores group)",
+    "redact_memory_version": "needs CLI; tracked in #1446 (memory-stores group)",
     # ── Runtime tokens (followup) ────────────────────────────────────
-    # Tracked: aios#TBD — single followup issue for `aios runtime-tokens ...`.
-    "list_runtime_tokens": "needs CLI; tracked in aios#TBD (runtime-tokens group)",
-    "issue_runtime_token": "needs CLI; tracked in aios#TBD (runtime-tokens group)",
-    "revoke_runtime_token": "needs CLI; tracked in aios#TBD (runtime-tokens group)",
+    # Tracked: #1447 — single followup issue for `aios runtime-tokens ...`.
+    "list_runtime_tokens": "needs CLI; tracked in #1447 (runtime-tokens group)",
+    "issue_runtime_token": "needs CLI; tracked in #1447 (runtime-tokens group)",
+    "revoke_runtime_token": "needs CLI; tracked in #1447 (runtime-tokens group)",
     # ── Session resources / context (followup) ───────────────────────
-    # Tracked: aios#TBD — extend `aios sessions` with `context`.
+    # Tracked: #1448 — extend `aios sessions` with `context`.
     # list/add/remove/rotate resources now have `aios sessions resources …`
     # commands (#270); get_session_resource has no CLI yet.
-    "get_session_context": "needs CLI; tracked in aios#TBD (sessions context/resources)",
-    "get_session_resource": "needs CLI; tracked in aios#TBD (sessions context/resources)",
+    "get_session_context": "needs CLI; tracked in #1448 (sessions context/resources)",
+    "get_session_resource": "needs CLI; tracked in #1448 (sessions context/resources)",
     # ── Account usage (followup) ─────────────────────────────────────
-    # Tracked: aios#TBD — add `aios accounts usage <ID>`.
-    "get_account_usage": "needs CLI; tracked in aios#TBD (accounts usage)",
+    # Tracked: #1449 — add `aios accounts usage <ID>`.
+    "get_account_usage": "needs CLI; tracked in #1449 (accounts usage)",
     # ── Session events (followup) ────────────────────────────────────
     # Single-event lookup landed via #598 (events API gaps fix).
-    # Tracked: aios#TBD — extend `aios sessions events` with `get <event-id>`.
-    "get_session_event": "needs CLI; tracked in aios#TBD (sessions events get)",
+    # Tracked: #1450 — extend `aios sessions events` with `get <event-id>`.
+    "get_session_event": "needs CLI; tracked in #1450 (sessions events get)",
 }
 
 

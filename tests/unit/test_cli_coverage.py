@@ -100,3 +100,21 @@ def test_allowlist_categories_are_disjoint() -> None:
         "Allowlist categories overlap — an operation is either deliberately not for "
         "CLI or waiting on a CLI followup, not both:\n  " + "\n  ".join(overlap)
     )
+
+
+def test_needs_cli_tracked_cite_real_issues() -> None:
+    """Every deferred-CLI entry cites a real filed issue, never ``aios#TBD``.
+
+    ``aios#TBD`` meant "tracking issue filed alongside this allowlist" — but those
+    issues (the followups #370 promised) went unfiled, so the deferrals were
+    untracked in practice. Filing them and asserting the placeholder is gone makes
+    a deferred CLI command unable to ship untracked again (#1433 drift guard). We
+    check dict *values* rather than scanning the source so this guard doesn't match
+    its own needle (the docstring legitimately names ``aios#TBD``).
+    """
+    untracked = sorted(op for op, reason in NEEDS_CLI_TRACKED.items() if "aios#TBD" in reason)
+    assert not untracked, (
+        f"{len(untracked)} NEEDS_CLI_TRACKED entry(ies) cite the placeholder aios#TBD "
+        "instead of a real filed issue — file a tracking issue and cite its #number:\n  "
+        + "\n  ".join(untracked)
+    )
