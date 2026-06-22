@@ -32,11 +32,14 @@ CANCEL_DESCRIPTION = (
     "`tool_call_id` is provided, detaches from that specific tool call; "
     "if omitted, detaches from all currently running tool calls. The "
     "tool call reports a cancelled error result so you can move on. "
-    "Note: this stops you waiting on the call, but an already-running "
-    "bash command keeps executing inside the sandbox until it finishes "
-    "or hits its own timeout — it is not killed. Avoid re-running a "
-    "non-idempotent command (build, migration, network write) on the "
-    "assumption that cancel stopped it."
+    "Note: this stops you waiting on the call, but the underlying work is "
+    "NOT stopped. An already-running bash command keeps executing inside "
+    "the sandbox until it finishes or hits its own timeout — it is not "
+    "killed. For an in-flight call_session / call_agent / call_workflow, "
+    "this only detaches your await — the child keeps running (and spending "
+    "budget); use stop_task to durably stop the child itself. Avoid "
+    "re-running a non-idempotent command (build, migration, network write) "
+    "on the assumption that cancel stopped it."
 )
 
 CANCEL_PARAMETERS_SCHEMA: dict[str, Any] = {
