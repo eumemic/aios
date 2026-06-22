@@ -13,8 +13,9 @@ from aios.errors import MemoryPreconditionFailedError
 from aios.harness._text import join_blocks
 from aios.models.memory_stores import MAX_CONTENT_BYTES, MemoryStoreResourceEcho
 
-# When #332 lands (bash writes durably persisted to the memory version log),
-# drop the bash-bypass clause in the "Handling write failures" section below.
+# Bash writes to /mnt/memory bypass the version log by design (#332, closed as
+# "incomplete by design"), so the bash-bypass clause in the "Handling write
+# failures" section below is intentional and permanent.
 _PLAYBOOK = f"""\
 The store mounts above are network-backed: expect non-trivial per-operation
 latency, a hard {MAX_CONTENT_BYTES // 1024} KiB per-file limit, and occasional transient errors. Use

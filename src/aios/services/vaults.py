@@ -31,8 +31,8 @@ credentials DO feed the sandbox spec builder
 (:func:`resolve_session_env_var_credentials` below): vault BINDING
 changes now bump ``spec_version`` (migration 0082) so a live sandbox
 recycles, while credential-LEVEL drift in a still-bound vault (rotation,
-create/archive) stays invisible to a live sandbox until #877's drift
-key.
+create/archive) now recycles the sandbox too, via the ``updated_at`` drift
+key (#877).
 """
 
 from __future__ import annotations

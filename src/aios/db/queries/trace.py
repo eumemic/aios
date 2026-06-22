@@ -5,9 +5,9 @@ Two responsibilities, both pure reads:
 * **the reverse "children-of by caller" lookup** — for a node ``(kind, id)``,
   the set of child nodes it invoked. It is the **union of the trusted edge and
   the still-live structural FK columns** (``parent_run_id`` /
-  ``launcher_session_id``), because on master today (#1131 unmerged, dual-write
-  era) neither alone is complete. When #1131 retires the FK columns the FK half
-  simply drops out and the edge covers everything.
+  ``launcher_session_id``), because in the current dual-write/dual-read era
+  neither alone is complete. When a future contract migration retires the FK
+  columns the FK half simply drops out and the edge covers everything.
 * **batched journal reads** — once the node-id set is resolved, the per-node
   event streams are read with ``= ANY($1)`` set-membership (no N+1).
 
@@ -118,7 +118,7 @@ async def children_of(
             ),
         )
 
-    # ── live FK half (until #1131) ───────────────────────────────────────────
+    # ── live FK half (until the FK columns are retired) ──────────────────────
     # These cover pre-#1123/#1129 subtrees and the *detached* session→run launches
     # (the ``create_run`` tool, the trigger ``workflow`` action) that write no
     # caller edge — the awaited ``call_workflow``/``invoke_workflow`` path now does

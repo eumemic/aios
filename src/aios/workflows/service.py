@@ -24,7 +24,7 @@ from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
 # The single shared trusted invoke-depth budget (#1124): how many trusted
 # hops a chain of invoke-edges (run→run sub-launches, run→session ``agent()``
-# children, and — once #1127/#1128 land their call sites — session→session and
+# children, and — since #1127/#1128 landed their call sites — session→session and
 # api→session) may take before refusal. The DOWN-counter that replaces the
 # run-only ``parent_run_id`` ancestor walk (the deleted ``run_ancestor_depth``
 # CTE): every trusted edge carries ``parent.depth - 1`` and an edgeless root

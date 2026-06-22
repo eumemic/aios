@@ -494,8 +494,9 @@ async def get_open_request_ids(
 
     Reads the trusted ``request_opened`` frame rather than the forgeable
     ``metadata.request`` user-message blob (which #1123 still dual-writes for the
-    legacy run path until #1131 retires it). Both halves are partial-indexed
-    (``events_request_opened_idx`` / ``events_request_response_idx``) so this stays
+    legacy run path until a future contract migration retires it). Both halves
+    are partial-indexed (``events_request_opened_idx`` /
+    ``events_request_response_idx``) so this stays
     a point lookup rather than a per-wake history scan.
     """
     rows: list[asyncpg.Record] = await conn.fetch(

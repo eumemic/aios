@@ -198,8 +198,8 @@ def _evict_sandbox_for_resource_change(session_id: str) -> None:
     (url, vault_id). In-place vault credential rotation (refresh_credential
     / ciphertext overwrite) does NOT evict: the pool keys on (url, vault_id)
     and a rotation overwrites the row contents, so the stable key already
-    serves the new secret — and a live sandbox keeps its already-
-    materialized env-var set until #877's drift handling lands. Layer 2's
+    serves the new secret — and the live sandbox recycles to re-materialize its
+    env-var set on rotation, via the ``updated_at`` drift key (#877). Layer 2's
     triggers stay off the connection tables — that asymmetry is intentional.
     """
     from aios.harness import runtime

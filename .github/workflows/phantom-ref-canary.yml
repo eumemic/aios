@@ -1,0 +1,141 @@
+name: Phantom issue-reference canary
+
+# Scheduled guard against forward-looking issue references that have gone stale.
+#
+# A comment like "until #877 lands" or "TODO(#1131)" promises future work gated on
+# another issue. When that issue later closes or merges — often in a DIFFERENT PR
+# than the one that wrote the comment — no PR-time check ever sees the now-stale
+# reference. This weekly canary closes that gap: the offline scanner
+# (src/aios/_drift/forward_refs.py) finds the promissory phrases, this workflow
+# checks each referenced issue's live state, and files a drift issue listing the
+# ones that are closed or missing (the promise landed or was abandoned, yet the
+# prose still says "pending").
+#
+# Why a scheduled canary and not a unit test: an issue's open/closed state needs
+# the GitHub API (the unit suite is strictly offline), and "until #877 lands" rots
+# when #877 merges in some OTHER PR — invisible to any PR-time check. So the verdict
+# has to be re-evaluated on a clock, not at merge.
+#
+# Security: no untrusted ${{ }} expression is interpolated into run: commands. The
+# issue title and label are workflow-authored constants; the issue body is built
+# ONLY from the repo's own committed source text (via the scanner's JSON) and is
+# passed as a quoted shell value, never eval'd. Only trusted contexts
+# (secrets.GITHUB_TOKEN, github.repository) are referenced.
+
+on:
+  schedule:
+    # Weekly, Monday 06:17 UTC. Off-minute by design (not :00/:30) so this doesn't
+    # land in the top-of-hour scheduler stampede.
+    - cron: "17 6 * * 1"
+  workflow_dispatch: {}
+
+# Serialize, and never cancel an in-flight run mid-filing: this is the
+# authoritative "are there phantom refs" verdict, and a later run must not abort
+# one whose drift-issue write is still in progress.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Scan for phantom forward-refs and report drift
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # The scanner is dependency-free (stdlib only) and imports nothing from
+          # the aios package, so run the file directly — no `uv sync`, no package
+          # import, seconds not minutes.
+          python src/aios/_drift/forward_refs.py src > candidates.json
+          echo "candidates:"; cat candidates.json
+
+          # Resolve each referenced issue's live state. HARD-FAIL the run on any
+          # API error that is NOT a clean 404 — a rate-limit/5xx must never be
+          # misread as "issue still open", which would silently drop a real phantom.
+          # A 404 (issue genuinely gone) is itself a violation, recorded as "missing".
+          echo '{}' > states.json
+          for n in $(jq -r '.[].number' candidates.json); do
+            if out=$(gh api "repos/${REPO}/issues/${n}" \
+                       --jq '{state: .state, is_pr: (.pull_request != null)}' 2>api_err); then
+              jq --arg n "$n" --argjson v "$out" '. + {($n): $v}' states.json > states.tmp
+            elif grep -qi 'not found' api_err; then
+              jq --arg n "$n" '. + {($n): {state: "missing", is_pr: false}}' states.json > states.tmp
+            else
+              echo "::error::gh api failed for #${n} (not a 404): $(cat api_err)"
+              exit 1
+            fi
+            mv states.tmp states.json
+          done
+
+          # A violation = a candidate whose issue is closed or missing AND is not a
+          # pull request. A forward reference to a PR ("blocked on #1234" where 1234
+          # is a PR) is a different beast — a merged PR is the expected end state, so
+          # skip PR-typed refs rather than flag them.
+          jq -n \
+            --slurpfile c candidates.json \
+            --slurpfile s states.json '
+            $c[0] | map(
+              . as $item
+              | ($s[0][($item.number | tostring)]) as $st
+              | select(($st.is_pr | not) and ($st.state == "closed" or $st.state == "missing"))
+              | $item + {state: $st.state}
+            )' > violations.json
+
+          COUNT=$(jq 'length' violations.json)
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "No phantom forward-refs — every referenced issue is still open."
+            exit 0
+          fi
+
+          TITLE="Phantom issue references detected on master"
+          BODY=$(jq -r '
+            "Forward-looking issue references on `master` now point at **closed or missing** issues — the promised work has landed or been abandoned, but the prose still says it is pending. Fix forward by rewriting each phrase (a past-tense citation, or a numberless future for genuinely untracked work), or reopen the issue if the work truly remains.\n\n"
+            + (map(
+                "- **#\(.number)** (\(.state)):\n"
+                + (.occurrences | map("    - `\(.path):\(.line)` — \(.text)") | join("\n"))
+              ) | join("\n\n"))
+            + "\n\n---\nDetected by `.github/workflows/phantom-ref-canary.yml` via the offline scanner `src/aios/_drift/forward_refs.py`. This issue is NOT auto-closed — close it yourself once the references are fixed."
+          ' violations.json)
+
+          # A dedicated, non-incident label: a phantom ref is docs-hygiene drift,
+          # not a production outage, so it must not land in the incident queue.
+          # Created idempotently (it may not exist yet).
+          gh label create drift \
+            --color FBCA04 \
+            --description "Stale in-code signal surfaced by a drift canary" \
+            2>/dev/null || true
+
+          # One drift issue, its body REPLACED (not appended) each run, so a
+          # deliberately deferred phantom doesn't pile a fresh comment every week.
+          # List by label (the REST list is immediately consistent, unlike the
+          # search index) and exact-match the title in jq so reruns update the one
+          # issue instead of spawning duplicates.
+          EXISTING=$(gh issue list --label drift --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty" || echo "")
+
+          if [ -n "${EXISTING}" ]; then
+            echo "Updating existing drift issue #${EXISTING} (body replaced)."
+            gh issue edit "${EXISTING}" --body "${BODY}"
+          else
+            echo "Filing new drift issue."
+            gh issue create --title "${TITLE}" --label drift --body "${BODY}"
+          fi
+
+          echo "::error::${COUNT} phantom forward-ref(s) detected; drift issue filed/updated."
+          exit 1
