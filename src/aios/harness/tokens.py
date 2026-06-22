@@ -6,8 +6,8 @@
   windowing, and per-tool budgeting (e.g. the ``switch_channel``
   recap floor) all go through this.
 
-* :func:`tokens_to_drop` — snap boundary math shared by the DB-level
-  windowed reader and the pure-function ``select_window``.
+* :func:`tokens_to_drop` — snap boundary math for the DB-level windowed
+  reader (:func:`~aios.db.queries.events.read_windowed_events`).
 """
 
 from __future__ import annotations

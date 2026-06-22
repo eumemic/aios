@@ -1586,7 +1586,7 @@ async def read_windowed_events(
     """Read message events for the session's trailing context window.
 
     Uses the ``cumulative_tokens`` column to compute the chunked-window
-    snap boundary (same math as :func:`~aios.harness.window.select_window`)
+    snap boundary (the shared snap math, :func:`~aios.harness.tokens.tokens_to_drop`)
     and loads only the events past that boundary.
 
     ``cumulative_tokens`` is stored in model-agnostic units (see
@@ -1687,16 +1687,15 @@ async def read_windowed_events(
 
     drop = math.ceil(drop_effective / ratio)
 
-    # Never drop the entire window. ``select_window`` keeps a non-empty tail
-    # because it requires ``min_tokens >= 1``; here ``events_window_min`` can
-    # clamp to 0 when overhead exceeds ``window_min`` (above), and the
-    # asymmetric ceil back-conversion can then push ``drop`` up to ``total`` —
-    # the retained scan (``cumulative_tokens > drop``) would match zero rows
-    # while the omission complement still matches every row. That pairing
-    # (empty events + a non-None omission) crashes ``build_messages``, which
-    # reads ``events[0].created_at`` to anchor the omission marker and relies
-    # on the inverse invariant. Clamp so the most recent event always survives
-    # (its ``cumulative_tokens == total``), matching select_window's
+    # Never drop the entire window: the window must keep a non-empty tail.
+    # Here ``events_window_min`` can clamp to 0 when overhead exceeds
+    # ``window_min`` (above), and the asymmetric ceil back-conversion can then
+    # push ``drop`` up to ``total`` — the retained scan (``cumulative_tokens >
+    # drop``) would match zero rows while the omission complement still matches
+    # every row. That pairing (empty events + a non-None omission) crashes
+    # ``build_messages``, which reads ``events[0].created_at`` to anchor the
+    # omission marker and relies on the inverse invariant. Clamp so the most
+    # recent event always survives (its ``cumulative_tokens == total``) — the
     # retain-the-tail-even-when-oversized guarantee.
     drop = min(drop, total - 1)
 

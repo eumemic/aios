@@ -280,7 +280,7 @@ async def test_overhead_clamp_never_drops_entire_window(
 
     When per-step overhead exceeds ``window_min``, ``events_window_min``
     clamps to its 0 floor (events.py) — losing the floor that normally
-    guarantees a non-empty tail (cf. ``select_window``, which requires
+    guarantees a non-empty tail (the chunked policy requires
     ``min_tokens >= 1``). The chunked snap then drops in full-window chunks,
     and the asymmetric ``ceil(drop_effective / ratio)`` back-conversion can
     push ``drop`` up to ``total``. The retained scan (``cumulative_tokens >
