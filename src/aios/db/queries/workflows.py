@@ -653,11 +653,12 @@ class RunChildrenUsage(NamedTuple):
 async def run_children_usage(
     conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
 ) -> RunChildrenUsage:
-    # TODO(#1131): this point-reads ``sessions.parent_run_id`` directly. When #1131
-    # subsumes ``parent_run_id`` into the ``request_opened`` edge and retires the
-    # column, this filter becomes a join through the ``request_opened`` lifecycle
-    # events (``caller.kind='run' AND caller.id = $1``). #1123 leaves it untouched —
-    # the dual-write keeps ``parent_run_id`` live for the migration owner to flip.
+    # TODO: this point-reads ``sessions.parent_run_id`` directly. The edge now
+    # also carries it (``parent_run_id`` was subsumed into the ``request_opened``
+    # edge in #1131); once a future contract migration retires the column, this
+    # filter becomes a join through the ``request_opened`` lifecycle events
+    # (``caller.kind='run' AND caller.id = $1``). #1123 leaves it untouched — the
+    # dual-write keeps ``parent_run_id`` live for that future contract migration.
     row = await conn.fetchrow(
         """
         SELECT

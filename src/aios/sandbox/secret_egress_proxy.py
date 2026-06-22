@@ -37,8 +37,8 @@ Security posture:
 Named residuals (operator-facing):
 
 * IP-literal HTTPS destinations have no SNI and are therefore rejected by
-  construction — the proxy serves hostname-addressed egress only. Once #878
-  redirects allowed-host traffic here, a sandbox ``curl https://<ip>`` to an
+  construction — the proxy serves hostname-addressed egress only. Allowed-host
+  traffic is redirected here (#878), so a sandbox ``curl https://<ip>`` to an
   allowed host's IP gets its handshake reset rather than connecting.
 * The request body is buffered whole to swap across chunk boundaries (memory
   bound = request size); responses stay streamed. Very large request uploads
@@ -48,7 +48,7 @@ Named residuals (operator-facing):
 
 Lifecycle mirrors ``git_proxy``: started per session, stopped on release /
 recycle. Wiring into provisioning, the iptables chokepoint, and
-recycle-on-rotation are follow-ups (#877/#878).
+recycle-on-rotation landed in #877/#878.
 """
 
 from __future__ import annotations
