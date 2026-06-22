@@ -132,13 +132,6 @@ class HostOutcome:
     error_repr: str | None = None
     error_traceback: str | None = None
     error_kind: HostErrorKind | None = None
-    # The child's real stderr — crash diagnostics only (a host-crash traceback, an
-    # rlimit message). log()/phase() no longer route through here; they are journaled
-    # annotation frames on stdout. The step deliberately does NOT consume this field:
-    # capturing-at-the-boundary-then-dropping is the "explicitly dropped" disposition the
-    # design calls for — it is never plumbed into the run journal (author-visible output
-    # is the annotations now), and is here for a host-crash post-mortem path to read.
-    stderr: str = ""
 
 
 def _parse_frames(buf: bytes) -> list[dict[str, Any]]:
@@ -153,9 +146,7 @@ def _parse_frames(buf: bytes) -> list[dict[str, Any]]:
     return frames
 
 
-def _outcome_from_frames(
-    frames: list[dict[str, Any]], stderr: str, returncode: int | None
-) -> HostOutcome:
+def _outcome_from_frames(frames: list[dict[str, Any]], returncode: int | None) -> HostOutcome:
     emitted = [
         EmittedCapability(
             capability_id=f["capability_id"],
@@ -185,20 +176,16 @@ def _outcome_from_frames(
             annotations=annotations,
             error_kind="script_host_crash",
             error_repr=f"script host exited (rc={returncode}) without a terminal frame",
-            stderr=stderr,
         )
     kind = terminal["type"]
     if kind == SUSPENDED:
-        return HostOutcome(
-            kind="suspended", emitted=emitted, annotations=annotations, stderr=stderr
-        )
+        return HostOutcome(kind="suspended", emitted=emitted, annotations=annotations)
     if kind == RETURNED:
         return HostOutcome(
             kind="returned",
             emitted=emitted,
             annotations=annotations,
             value=terminal.get("value"),
-            stderr=stderr,
         )
     return HostOutcome(
         kind="raised",
@@ -209,7 +196,6 @@ def _outcome_from_frames(
         # The host stamps a specific kind on structural failures it detects itself
         # (e.g. the fan-out cap); an uncaught author exception carries none → generic.
         error_kind=terminal.get("kind") or "author_exception",
-        stderr=stderr,
     )
 
 
@@ -264,7 +250,11 @@ async def run_script_host(
         )
 
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+        # communicate() drains both child pipes; we keep only stdout (the framed
+        # protocol stream). The child's stderr is drained-and-dropped — PIPE keeps a
+        # host-crash traceback out of the worker's own stderr, and the run's terminal
+        # error_repr already carries the crash summary.
+        stdout_bytes, _ = await asyncio.wait_for(
             proc.communicate(input=init_bytes), timeout=deadline
         )
     except TimeoutError:
@@ -288,7 +278,6 @@ async def run_script_host(
             proc._transport.close()  # type: ignore[attr-defined]
         raise
 
-    stderr = stderr_bytes.decode("utf-8", "replace")
     # A corrupt / oversized stream (``decode_length`` ValueError, ``json.loads``
     # JSONDecodeError — the latter is a ValueError subclass) must error the run as
     # a host crash, never escape the step uncaught and wedge a non-terminal run
@@ -300,6 +289,5 @@ async def run_script_host(
             kind="raised",
             error_kind="script_host_crash",
             error_repr=f"unparseable script host output: {exc}",
-            stderr=stderr,
         )
-    return _outcome_from_frames(frames, stderr, proc.returncode)
+    return _outcome_from_frames(frames, proc.returncode)

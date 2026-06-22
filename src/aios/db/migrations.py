@@ -17,15 +17,15 @@ from unittest import mock
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def upgrade_to_head(db_url: str, target: str = "head") -> None:
-    """In-process equivalent of ``alembic upgrade <target>`` against ``db_url``."""
+def upgrade_to_head(db_url: str) -> None:
+    """In-process equivalent of ``alembic upgrade head`` against ``db_url``."""
     from alembic import command
     from alembic.config import Config
 
     cfg = Config(str(_REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_REPO_ROOT / "migrations"))
     with mock.patch.dict(os.environ, {"AIOS_DB_URL": db_url}):
-        command.upgrade(cfg, target)
+        command.upgrade(cfg, "head")
 
 
 async def apply_procrastinate_schema(db_url: str, *, verbose: bool = False) -> None:

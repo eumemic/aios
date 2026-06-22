@@ -2,10 +2,9 @@
 
 Each typer command annotates which OpenAPI ``operationId`` it implements
 by stacking ``@covers("<operation_id>")`` underneath ``@app.command(...)``.
-The drift test in :mod:`tests.unit.test_cli_coverage` compares the union of
-``REGISTRY`` keys against the operations published in ``openapi.json`` and
-the entries in :mod:`aios.cli.allowlist`, failing if any operation is
-missing from both.
+The drift test in :mod:`tests.unit.test_cli_coverage` compares ``REGISTRY``
+against the operations published in ``openapi.json`` and the entries in
+:mod:`aios.cli.allowlist`, failing if any operation is missing from both.
 
 Stacking multiple ``@covers(...)`` on one command is allowed for the
 genuinely-multi-operation case (e.g. ``aios status`` probes ``get_health``
@@ -19,14 +18,13 @@ from typing import TypeVar
 
 F = TypeVar("F", bound=Callable[..., object])
 
-REGISTRY: dict[str, list[str]] = {}
-"""Maps operationId → list of fully-qualified command function paths.
+REGISTRY: set[str] = set()
+"""The set of operationIds claimed by some ``@covers(...)`` CLI command.
 
-The value is a list (not a single string) so the same operation can
-legitimately be claimed by more than one command — e.g. a top-level
-alias plus the canonical subcommand. The test only cares that the key
-exists, but keeping the call sites lets future tooling render a
-"which command covers what" map.
+A set, not a map: the drift test only needs membership ("is this operation
+covered?"). Multiple commands may claim the same operation (a top-level alias
+plus the canonical subcommand); they collapse to one entry, which is exactly
+what the coverage check wants.
 """
 
 
@@ -40,12 +38,11 @@ def covers(operation_id: str) -> Callable[[F], F]:
         def list_(...) -> None: ...
 
     The decorator returns the function unchanged; it only records the
-    mapping at import time so the coverage test can read it.
+    operation_id at import time so the coverage test can read it.
     """
 
     def decorator(fn: F) -> F:
-        path = f"{fn.__module__}.{fn.__qualname__}"
-        REGISTRY.setdefault(operation_id, []).append(path)
+        REGISTRY.add(operation_id)
         return fn
 
     return decorator

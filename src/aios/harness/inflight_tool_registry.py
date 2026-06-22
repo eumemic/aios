@@ -73,12 +73,6 @@ class InflightToolRegistry:
             log.info("session.tasks_cancelled", session_id=session_id, count=count)
         return count
 
-    def in_flight_count(self, session_id: str) -> int:
-        session_tasks = self._tasks.get(session_id)
-        if not session_tasks:
-            return 0
-        return sum(1 for t in session_tasks.values() if not t.done())
-
     def in_flight_tool_call_ids(self, session_id: str) -> set[str]:
         """Return tool_call_ids with in-flight tasks for a session."""
         session_tasks = self._tasks.get(session_id)

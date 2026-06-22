@@ -6,8 +6,8 @@
   windowing, and per-tool budgeting (e.g. the ``switch_channel``
   recap floor) all go through this.
 
-* :func:`tokens_to_drop` — snap boundary math shared by the DB-level
-  windowed reader and the pure-function ``select_window``.
+* :func:`tokens_to_drop` — snap boundary math for the DB-level windowed
+  reader (:func:`~aios.db.queries.events.read_windowed_events`).
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def approx_tokens(
 def tokens_to_drop(total: int, *, window_min: int, window_max: int) -> int:
     """Compute how many tokens to drop from the front of a context window.
 
-    Uses the chunked snap policy from :mod:`aios.harness.window`:
+    Implements the chunked snap policy (described in :mod:`aios.harness.window`):
     drop in ``(max - min)``-sized chunks so the cutoff advances
     monotonically and prefix caching stays stable within a chunk.
 
