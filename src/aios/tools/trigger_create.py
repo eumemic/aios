@@ -247,6 +247,19 @@ _ACTION_SCHEMA: dict[str, Any] = {
                         "instead of running the unreviewed edit (re-pin after review)."
                     ),
                 },
+                "version": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "default": None,
+                    "description": (
+                        "null (default): each fire runs the workflow's CURRENT version. "
+                        "An integer is a SELECTOR — each fire re-runs that specific "
+                        "historical version (its script + clamped surface), so a "
+                        "'re-run v3 nightly' trigger stays reachable after the head moves "
+                        "past 3. Distinct from workflow_version (a drift ASSERTION); "
+                        "setting both is rejected."
+                    ),
+                },
                 "input_template": {
                     "default": None,
                     "description": (

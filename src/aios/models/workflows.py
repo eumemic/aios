@@ -172,6 +172,14 @@ class WfRun(BaseModel):
     request_output_schema: dict[str, Any] | None = None
     script: str
     script_sha: str
+    # The workflow version this run snapshotted its script + declared surface from
+    # (#1321). NULL on legacy rows that predate the column (and on rows the
+    # best-effort backfill left ambiguous). The run-side analog of
+    # ``Session.agent_version``; bound by a strict composite FK to
+    # ``workflow_versions`` so a non-NULL pointer always resolves. Purely
+    # audit/integrity today — the run still execs its inline ``script`` snapshot
+    # (reading the script *through* this FK is the deferred Phase 3).
+    source_version: int | None = None
     host_semantics_epoch: int
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
@@ -369,6 +377,18 @@ class WfRunCreate(BaseModel):
 
     workflow_id: str
     environment_id: str
+    version: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional historical workflow version to run. `None` (default) launches the "
+            "workflow's CURRENT version. An integer re-runs that specific version: the run "
+            "snapshots that version's script + declared surface (clamped against the current "
+            "launcher's authority) and binds `source_version` to it. Launching ANY version "
+            "of an archived workflow is refused (409). This is a SELECTOR — distinct from the "
+            "trigger's `workflow_version` drift assertion."
+        ),
+    )
     input: Any = None
     vault_ids: list[str] = Field(
         default_factory=list,

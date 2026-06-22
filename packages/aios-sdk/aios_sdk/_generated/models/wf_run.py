@@ -61,6 +61,7 @@ class WfRun:
             request_id (None | str | Unset):
             caller (None | Unset | WfRunCallerType0):
             request_output_schema (None | Unset | WfRunRequestOutputSchemaType0):
+            source_version (int | None | Unset):
             tools (list[ToolSpec] | Unset):
             mcp_servers (list[McpServerSpec] | Unset):
             http_servers (list[HttpServerSpec] | Unset):
@@ -89,6 +90,7 @@ class WfRun:
     request_id: None | str | Unset = UNSET
     caller: None | Unset | WfRunCallerType0 = UNSET
     request_output_schema: None | Unset | WfRunRequestOutputSchemaType0 = UNSET
+    source_version: int | None | Unset = UNSET
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
@@ -164,6 +166,12 @@ class WfRun:
             request_output_schema = self.request_output_schema.to_dict()
         else:
             request_output_schema = self.request_output_schema
+
+        source_version: int | None | Unset
+        if isinstance(self.source_version, Unset):
+            source_version = UNSET
+        else:
+            source_version = self.source_version
 
         tools: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.tools, Unset):
@@ -247,6 +255,8 @@ class WfRun:
             field_dict["caller"] = caller
         if request_output_schema is not UNSET:
             field_dict["request_output_schema"] = request_output_schema
+        if source_version is not UNSET:
+            field_dict["source_version"] = source_version
         if tools is not UNSET:
             field_dict["tools"] = tools
         if mcp_servers is not UNSET:
@@ -373,6 +383,15 @@ class WfRun:
             d.pop("request_output_schema", UNSET)
         )
 
+        def _parse_source_version(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        source_version = _parse_source_version(d.pop("source_version", UNSET))
+
         _tools = d.pop("tools", UNSET)
         tools: list[ToolSpec] | Unset = UNSET
         if _tools is not UNSET:
@@ -476,6 +495,7 @@ class WfRun:
             request_id=request_id,
             caller=caller,
             request_output_schema=request_output_schema,
+            source_version=source_version,
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_servers,

@@ -24,6 +24,7 @@ class WorkflowActionReplace:
         Attributes:
             workflow_id (str):
             workflow_version (int | None):
+            version (int | None):
             input_template (Any):
             vault_ids (list[str]):
             kind (Literal['workflow'] | Unset):  Default: 'workflow'.
@@ -31,6 +32,7 @@ class WorkflowActionReplace:
 
     workflow_id: str
     workflow_version: int | None
+    version: int | None
     input_template: Any
     vault_ids: list[str]
     kind: Literal["workflow"] | Unset = "workflow"
@@ -40,6 +42,9 @@ class WorkflowActionReplace:
 
         workflow_version: int | None
         workflow_version = self.workflow_version
+
+        version: int | None
+        version = self.version
 
         input_template = self.input_template
 
@@ -53,6 +58,7 @@ class WorkflowActionReplace:
             {
                 "workflow_id": workflow_id,
                 "workflow_version": workflow_version,
+                "version": version,
                 "input_template": input_template,
                 "vault_ids": vault_ids,
             }
@@ -74,6 +80,13 @@ class WorkflowActionReplace:
 
         workflow_version = _parse_workflow_version(d.pop("workflow_version"))
 
+        def _parse_version(data: object) -> int | None:
+            if data is None:
+                return data
+            return cast(int | None, data)
+
+        version = _parse_version(d.pop("version"))
+
         input_template = d.pop("input_template")
 
         vault_ids = cast(list[str], d.pop("vault_ids"))
@@ -85,6 +98,7 @@ class WorkflowActionReplace:
         workflow_action_replace = cls(
             workflow_id=workflow_id,
             workflow_version=workflow_version,
+            version=version,
             input_template=input_template,
             vault_ids=vault_ids,
             kind=kind,

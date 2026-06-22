@@ -99,6 +99,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         request_output_schema=parse_jsonb(row.get("request_output_schema")),
         script=row["script"],
         script_sha=row["script_sha"],
+        source_version=row.get("source_version"),
         host_semantics_epoch=row["host_semantics_epoch"],
         tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
         mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
@@ -556,6 +557,7 @@ async def insert_wf_run(
     environment_id: str,
     script: str,
     script_sha: str,
+    source_version: int | None = None,
     host_semantics_epoch: int,
     input: Any = None,
     run_id: str | None = None,
@@ -592,12 +594,12 @@ async def insert_wf_run(
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
                  launcher_session_id, request_id, caller, request_output_schema,
-                 script, script_sha, host_semantics_epoch, status, input,
+                 script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
                  depth)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12,
-                    'pending', $13::jsonb,
-                    $14::jsonb, $15::jsonb, $16::jsonb, $17, $18, $19)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13,
+                    'pending', $14::jsonb,
+                    $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, $20)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -612,6 +614,7 @@ async def insert_wf_run(
             json.dumps(request_output_schema) if request_output_schema is not None else None,
             script,
             script_sha,
+            source_version,
             host_semantics_epoch,
             json.dumps(input) if input is not None else None,
             json.dumps([t.model_dump() for t in (tools or [])]),

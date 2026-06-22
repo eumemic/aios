@@ -22,6 +22,11 @@ class WfRunCreate:
         Attributes:
             workflow_id (str):
             environment_id (str):
+            version (int | None | Unset): Optional historical workflow version to run. `None` (default) launches the
+                workflow's CURRENT version. An integer re-runs that specific version: the run snapshots that version's script +
+                declared surface (clamped against the current launcher's authority) and binds `source_version` to it. Launching
+                ANY version of an archived workflow is refused (409). This is a SELECTOR — distinct from the trigger's
+                `workflow_version` drift assertion.
             input_ (Any | Unset):
             vault_ids (list[str] | Unset): Vault ids to bind to the run for credential resolution. When an agent launches
                 the run, these must be a subset of the launcher's own vaults; the HTTP path is unattenuated operator authority.
@@ -31,6 +36,7 @@ class WfRunCreate:
 
     workflow_id: str
     environment_id: str
+    version: int | None | Unset = UNSET
     input_: Any | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
     budget_usd: float | None | Unset = UNSET
@@ -40,6 +46,12 @@ class WfRunCreate:
         workflow_id = self.workflow_id
 
         environment_id = self.environment_id
+
+        version: int | None | Unset
+        if isinstance(self.version, Unset):
+            version = UNSET
+        else:
+            version = self.version
 
         input_ = self.input_
 
@@ -67,6 +79,8 @@ class WfRunCreate:
                 "environment_id": environment_id,
             }
         )
+        if version is not UNSET:
+            field_dict["version"] = version
         if input_ is not UNSET:
             field_dict["input"] = input_
         if vault_ids is not UNSET:
@@ -84,6 +98,15 @@ class WfRunCreate:
         workflow_id = d.pop("workflow_id")
 
         environment_id = d.pop("environment_id")
+
+        def _parse_version(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        version = _parse_version(d.pop("version", UNSET))
 
         input_ = d.pop("input", UNSET)
 
@@ -112,6 +135,7 @@ class WfRunCreate:
         wf_run_create = cls(
             workflow_id=workflow_id,
             environment_id=environment_id,
+            version=version,
             input_=input_,
             vault_ids=vault_ids,
             budget_usd=budget_usd,

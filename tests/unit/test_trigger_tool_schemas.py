@@ -94,6 +94,7 @@ class TestUpdateSchemaReplaceSemantics:
             "kind",
             "workflow_id",
             "workflow_version",
+            "version",
             "input_template",
             "vault_ids",
         ]

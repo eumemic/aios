@@ -569,8 +569,14 @@ def _action_summary(row: dict[str, Any]) -> str:
     if kind == "wake_owner":
         return f"wake_owner: {_preview(action.get('content') or '')}"
     if kind == "workflow":
+        sel = action.get("version")
         pin = action.get("workflow_version")
-        suffix = f" @v{pin}" if pin is not None else ""
+        if sel is not None:
+            suffix = f" =v{sel}"  # selector: re-run a historical version
+        elif pin is not None:
+            suffix = f" @v{pin}"  # drift assertion
+        else:
+            suffix = ""
         return f"workflow: {action.get('workflow_id')}{suffix}"
     return str(kind or "")
 
