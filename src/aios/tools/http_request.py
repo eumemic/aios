@@ -6,7 +6,11 @@ matches the path against the ``HttpServerSpec``'s route allowlist and
 authors the ``Authorization`` header from the session's vault. Secret
 never enters the sandbox.
 
-Return shape: ``{"status": int, "headers": {...}, "body": "..."}``.
+Return shape: ``{"status": int, "headers": [[name, value], ...], "body": "..."}``.
+``headers`` is a list of ``[name, value]`` pairs, not a dict: a dict collapses
+duplicate header names, and HTTP *requires* some (notably ``Set-Cookie``) be
+multi-valued — so a response setting two cookies would silently lose one. The
+pair-list preserves every occurrence in wire order.
 On error: ``{"error": "..."}``.
 """
 
@@ -391,7 +395,10 @@ async def _do_http_request(
     body_text, truncated = _decode_body(response)
     result: dict[str, Any] = {
         "status": response.status_code,
-        "headers": dict(response.headers),
+        # A list of ``[name, value]`` pairs, NOT a dict: ``dict(headers)`` collapses
+        # duplicate names, silently dropping all but the last ``Set-Cookie`` (HTTP
+        # requires it be multi-valued). ``multi_items()`` preserves every occurrence.
+        "headers": [[k, v] for k, v in response.headers.multi_items()],
         "body": body_text,
     }
     # Signal a cut body explicitly (aios#1294). The flag is present ONLY when the
