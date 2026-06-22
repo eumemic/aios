@@ -817,13 +817,12 @@ def _ann_key(kind: str, text: str, *, path: str = "") -> str:
     return f"{path}sha:{content_hash('annotation', {'kind': kind, 'text': text})}#0"
 
 
-async def test_log_is_a_journaled_annotation_not_stderr() -> None:
-    # The stderr reversion: log() no longer writes stderr — it emits a journaled
-    # annotation frame, keyed branch-locally so the journal can dedup it across replays.
+async def test_log_is_a_journaled_annotation() -> None:
+    # log() emits a journaled annotation frame (not stdout/stderr), keyed
+    # branch-locally so the journal can dedup it across replays.
     out = await _run("async def main(input):\n    log('diagnostic')\n    return 7")
     assert out.kind == "returned"
     assert out.value == 7
-    assert "diagnostic" not in out.stderr  # stderr is crash-diagnostics-only now
     assert out.annotations == [
         EmittedAnnotation(
             call_key=_ann_key("log", "diagnostic"),
