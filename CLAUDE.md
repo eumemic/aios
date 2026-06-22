@@ -198,7 +198,7 @@ The durable workflow runtime runs deterministic, replayable scripts as an **appe
 
 ## Conventions
 
-- **Python 3.13+** with PEP 695 type parameter syntax: `class ListResponse[T](BaseModel)`, `def select_window[T](...)`. Do NOT use `TypeVar` + `Generic[T]`.
+- **Python 3.13+** with PEP 695 type parameter syntax: `class ListResponse[T](BaseModel)`, `def _list_scoped[T](...)`. Do NOT use `TypeVar` + `Generic[T]`.
 - **`from __future__ import annotations`** at the top of every source file.
 - **Raw SQL + asyncpg**, no ORM. Every query lives in the `db/queries` package — **one module per resource** (`db/queries/sessions.py`, `events.py`, `connections.py`, `vaults.py`, `triggers.py`, …). Shared tenant-scoping helpers (`_get_scoped`, `_list_scoped`, `_archive_scoped`, `_build_set_assignments`, `parse_jsonb`, `_escape_like`) live in `db/queries/__init__.py` and are imported by the per-resource modules. Every public query is re-exported from the package root, so `from aios.db import queries; queries.foo()` and `from aios.db.queries import foo` both work and stay patchable (`patch.object(queries, "foo", ...)`).
 - **`pg_notify($1, $2)` function form**, never literal `NOTIFY`. Postgres case-folds unquoted identifiers; our ULIDs have uppercase.
