@@ -19,10 +19,10 @@ What to poll:
 | Surface | Field to poll | Terminal when |
 | --- | --- | --- |
 | `GET /v1/runs/{id}` (`WfRun`) | `status` | `status ∈ {completed, errored, cancelled}` |
-| `GET /v1/invocations/{task_id}/await` (`AwaitResponse`) | `outcome` | `outcome` is non-null (`ok` / `errored` / `cancelled`) |
+| `GET /v1/tasks/{task_id}/await` (`AwaitResponse`) | `outcome` | `outcome` is non-null (`ok` / `errored` / `cancelled`) |
 
-`GET /v1/invocations/{task_id}/await` is the one await-a-completion primitive
-(over both a run and a session servicer): it blocks until the invocation is
+`GET /v1/tasks/{task_id}/await` is the one await-a-completion primitive
+(over both a run and a session servicer): it blocks until the task is
 terminal or `timeout` seconds elapse. On timeout it returns `outcome=null` (still
 pending); call again to keep blocking. The completion payload is `{outcome:"ok",
 result}` (success) or `{outcome:"errored"|"cancelled", error}` (failure). The
@@ -30,8 +30,8 @@ result}` (success) or `{outcome:"errored"|"cancelled", error}` (failure). The
 `run_status` field — `outcome` alone is the terminal discriminant.
 
 > Sessions, by contrast, expose `status` (`SessionStatus`) and are not
-> persisted the way runs are — but the same rule holds: poll `status` (or, for an
-> invocation, `outcome`), there is no `state`.
+> persisted the way runs are — but the same rule holds: poll `status` (or, for a
+> task, `outcome`), there is no `state`.
 
 ## (b) An empty event page is not a "session/run reset"
 

@@ -5,21 +5,19 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
-from ..models.invocation_request_target_kind import InvocationRequestTargetKind
+from ..models.task_request_target_kind import TaskRequestTargetKind
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
-    from ..models.invocation_request_output_schema_type_0 import (
-        InvocationRequestOutputSchemaType0,
-    )
+    from ..models.task_request_output_schema_type_0 import TaskRequestOutputSchemaType0
 
 
-T = TypeVar("T", bound="InvocationRequest")
+T = TypeVar("T", bound="TaskRequest")
 
 
 @_attrs_define
-class InvocationRequest:
-    """Request body for ``POST /v1/invocations`` — the API caller's request-writer.
+class TaskRequest:
+    """Request body for ``POST /v1/tasks`` — the API caller's request-writer.
 
     ``target`` is an ``agent_id | workflow_id | session_id`` and ``target_kind``
     discriminates it:
@@ -38,25 +36,25 @@ class InvocationRequest:
     (the per-field containment clamp is #1130's deliverable).
 
         Attributes:
-            target_kind (InvocationRequestTargetKind):
+            target_kind (TaskRequestTargetKind):
             target (str): An agent_id / workflow_id / session_id, discriminated by ``target_kind``.
             input_ (Any | Unset): The request payload delivered to the servicer (arbitrary JSON or a string).
-            output_schema (InvocationRequestOutputSchemaType0 | None | Unset): Optional JSON Schema the response ``value``
-                must satisfy. Rides the request edge, per-request — coexists with any definition-level schema.
+            output_schema (None | TaskRequestOutputSchemaType0 | Unset): Optional JSON Schema the response ``value`` must
+                satisfy. Rides the request edge, per-request — coexists with any definition-level schema.
             environment_id (None | str | Unset): Environment to bind a created servicer to (agent → session, workflow →
                 run). Ownership-checked against the caller's account. Inapplicable for ``target_kind=session`` (the session
                 already exists).
     """
 
-    target_kind: InvocationRequestTargetKind
+    target_kind: TaskRequestTargetKind
     target: str
     input_: Any | Unset = UNSET
-    output_schema: InvocationRequestOutputSchemaType0 | None | Unset = UNSET
+    output_schema: None | TaskRequestOutputSchemaType0 | Unset = UNSET
     environment_id: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.invocation_request_output_schema_type_0 import (
-            InvocationRequestOutputSchemaType0,
+        from ..models.task_request_output_schema_type_0 import (
+            TaskRequestOutputSchemaType0,
         )
 
         target_kind = self.target_kind.value
@@ -68,7 +66,7 @@ class InvocationRequest:
         output_schema: dict[str, Any] | None | Unset
         if isinstance(self.output_schema, Unset):
             output_schema = UNSET
-        elif isinstance(self.output_schema, InvocationRequestOutputSchemaType0):
+        elif isinstance(self.output_schema, TaskRequestOutputSchemaType0):
             output_schema = self.output_schema.to_dict()
         else:
             output_schema = self.output_schema
@@ -98,12 +96,12 @@ class InvocationRequest:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.invocation_request_output_schema_type_0 import (
-            InvocationRequestOutputSchemaType0,
+        from ..models.task_request_output_schema_type_0 import (
+            TaskRequestOutputSchemaType0,
         )
 
         d = dict(src_dict)
-        target_kind = InvocationRequestTargetKind(d.pop("target_kind"))
+        target_kind = TaskRequestTargetKind(d.pop("target_kind"))
 
         target = d.pop("target")
 
@@ -111,7 +109,7 @@ class InvocationRequest:
 
         def _parse_output_schema(
             data: object,
-        ) -> InvocationRequestOutputSchemaType0 | None | Unset:
+        ) -> None | TaskRequestOutputSchemaType0 | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -119,14 +117,12 @@ class InvocationRequest:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
-                output_schema_type_0 = InvocationRequestOutputSchemaType0.from_dict(
-                    data
-                )
+                output_schema_type_0 = TaskRequestOutputSchemaType0.from_dict(data)
 
                 return output_schema_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(InvocationRequestOutputSchemaType0 | None | Unset, data)
+            return cast(None | TaskRequestOutputSchemaType0 | Unset, data)
 
         output_schema = _parse_output_schema(d.pop("output_schema", UNSET))
 
@@ -139,7 +135,7 @@ class InvocationRequest:
 
         environment_id = _parse_environment_id(d.pop("environment_id", UNSET))
 
-        invocation_request = cls(
+        task_request = cls(
             target_kind=target_kind,
             target=target,
             input_=input_,
@@ -147,4 +143,4 @@ class InvocationRequest:
             environment_id=environment_id,
         )
 
-        return invocation_request
+        return task_request

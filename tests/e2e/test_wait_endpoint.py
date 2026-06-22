@@ -1,5 +1,5 @@
 """E2E tests for the session/run watch endpoints: the ``GET /v1/sessions/{id}/wait`` SSE
-long-poll (issue #40), the unified ``GET /v1/invocations/{task_id}/await`` awaiter, and the
+long-poll (issue #40), the unified ``GET /v1/tasks/{task_id}/await`` awaiter, and the
 ``GET /v1/sessions/{id}/await`` watermark quiescence alias."""
 
 from __future__ import annotations
@@ -216,8 +216,8 @@ async def run_id(pool: Any) -> str:
     return run.id
 
 
-class TestInvocationAwaitEndpoint:
-    """``GET /v1/invocations/{task_id}/await`` — the one awaiter over both servicer kinds.
+class TestTaskAwaitEndpoint:
+    """``GET /v1/tasks/{task_id}/await`` — the one awaiter over both servicer kinds.
 
     Exercises the HTTP wiring (route registration, the ``timeout`` query alias, the
     ``AwaitResponse`` serialization, kind-dispatch off the id prefix, account scoping) over a
@@ -230,7 +230,7 @@ class TestInvocationAwaitEndpoint:
     ) -> None:
         """A never-stepped run is non-terminal; ``timeout=0`` returns at once with
         ``outcome=null`` (the re-poll contract) — proving the run-arm dispatch + model wiring."""
-        r = await http_client.get(f"/v1/invocations/{run_id}/await", params={"timeout": 0})
+        r = await http_client.get(f"/v1/tasks/{run_id}/await", params={"timeout": 0})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["outcome"] is None
@@ -241,7 +241,7 @@ class TestInvocationAwaitEndpoint:
     ) -> None:
         """An unanswered ``request_id`` on a session servicer is non-terminal → ``outcome=null``."""
         r = await http_client.get(
-            f"/v1/invocations/{session_id}/await", params={"request_id": "nope", "timeout": 0}
+            f"/v1/tasks/{session_id}/await", params={"request_id": "nope", "timeout": 0}
         )
         assert r.status_code == 200, r.text
         body = r.json()
@@ -251,20 +251,20 @@ class TestInvocationAwaitEndpoint:
         self, http_client: httpx.AsyncClient, session_id: str
     ) -> None:
         """A session servicer needs ``request_id`` to correlate; omitting it is a 422."""
-        r = await http_client.get(f"/v1/invocations/{session_id}/await", params={"timeout": 0})
+        r = await http_client.get(f"/v1/tasks/{session_id}/await", params={"timeout": 0})
         assert r.status_code == 422, r.text
 
     async def test_rejects_timeout_above_cap(
         self, http_client: httpx.AsyncClient, run_id: str
     ) -> None:
         """The ``le=60`` bound on the ``timeout`` query param is enforced (422)."""
-        r = await http_client.get(f"/v1/invocations/{run_id}/await", params={"timeout": 3600})
+        r = await http_client.get(f"/v1/tasks/{run_id}/await", params={"timeout": 3600})
         assert r.status_code == 422, r.text
 
     async def test_non_servicer_task_id_422(self, http_client: httpx.AsyncClient) -> None:
         """A well-formed id of a non-awaitable kind (e.g. an agent) is a 422, not a 404."""
         r = await http_client.get(
-            "/v1/invocations/agent_0000000000000000000000abcd/await", params={"timeout": 0}
+            "/v1/tasks/agent_0000000000000000000000abcd/await", params={"timeout": 0}
         )
         assert r.status_code == 422, r.text
 
@@ -274,7 +274,7 @@ class TestInvocationAwaitEndpoint:
         """A run id the caller can't see 404s — and the scope check runs BEFORE any LISTEN is
         opened, so an unauthorized caller never opens a connection on the channel."""
         r = await http_client.get(
-            "/v1/invocations/wfr_00000000000000000000000000/await", params={"timeout": 0}
+            "/v1/tasks/wfr_00000000000000000000000000/await", params={"timeout": 0}
         )
         assert r.status_code == 404, r.text
 
@@ -284,7 +284,7 @@ class TestSessionAwaitEndpoint:
 
     Exercises the HTTP wiring (route registration, the ``timeout`` query alias, the ``watermark``
     param, the ``SessionAwaitResponse`` serialization, account scoping) over a real ASGI client.
-    Request correlation lives on the unified awaiter (``/v1/invocations/{id}/await``); here
+    Request correlation lives on the unified awaiter (``/v1/tasks/{id}/await``); here
     ``timeout=0`` keeps each case non-blocking."""
 
     async def test_default_watermark_unmet_done_false(

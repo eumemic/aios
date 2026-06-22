@@ -1,10 +1,10 @@
 """The API caller's request-*writer* + the one completion *awaiter* (#1128).
 
-``POST /v1/invocations`` is the one kind-agnostic request-writer for an
+``POST /v1/tasks`` is the one kind-agnostic request-writer for an
 external/operator caller: it materializes the trusted request edge (#1123) and
 constructs-or-resolves a servicer (a session or a run), returning a **structured
 handle**. The ephemeral caller then awaits that handle via the one unified
-awaiter ``GET /v1/invocations/{task_id}/await`` — both servicer kinds, one
+awaiter ``GET /v1/tasks/{task_id}/await`` — both servicer kinds, one
 :class:`AwaitResponse` envelope.
 
 The handle is explicitly **not an auth boundary** — ``await`` re-authorizes by
@@ -25,8 +25,8 @@ from pydantic import BaseModel, ConfigDict, Field
 API_CALLER_KIND = "api"
 
 
-class InvocationRequest(BaseModel):
-    """Request body for ``POST /v1/invocations`` — the API caller's request-writer.
+class TaskRequest(BaseModel):
+    """Request body for ``POST /v1/tasks`` — the API caller's request-writer.
 
     ``target`` is an ``agent_id | workflow_id | session_id`` and ``target_kind``
     discriminates it:
@@ -72,12 +72,12 @@ class InvocationRequest(BaseModel):
     )
 
 
-class InvocationHandle(BaseModel):
-    """Structured handle returned by ``POST /v1/invocations``.
+class TaskHandle(BaseModel):
+    """Structured handle returned by ``POST /v1/tasks``.
 
     Plain JSON fields, no opaque encoding: the handle is **not** an auth boundary
-    (``await`` re-authorizes by ``account_id``). Await the invocation at the one
-    unified awaiter ``GET /v1/invocations/{servicer_id}/await`` — the ``task_id``
+    (``await`` re-authorizes by ``account_id``). Await the task at the one
+    unified awaiter ``GET /v1/tasks/{servicer_id}/await`` — the ``task_id``
     path segment is the ``servicer_id`` and its kind is read off the id prefix; a
     ``session`` servicer additionally needs ``?request_id=`` to correlate the
     response, a ``run`` servicer resolves off its terminal row.
@@ -89,12 +89,12 @@ class InvocationHandle(BaseModel):
 
 
 class AwaitResponse(BaseModel):
-    """The one completion envelope — ``GET /v1/invocations/{task_id}/await``.
+    """The one completion envelope — ``GET /v1/tasks/{task_id}/await``.
 
     Unifies the session and run completion long-polls. ``outcome`` is the
     terminal state minus liveness (the trace's ``TerminalState`` with
     ``suspended``/``running`` folded into pending): ``None`` means **still
-    pending** — the long-poll timed out before the invocation reached a terminal
+    pending** — the long-poll timed out before the task reached a terminal
     state, so re-poll. ``result`` carries the servicer's return value on ``ok``;
     ``error`` carries the ``{kind, message, …}`` detail on ``errored`` /
     ``cancelled``.
@@ -103,7 +103,7 @@ class AwaitResponse(BaseModel):
     outcome: Literal["ok", "errored", "cancelled"] | None = Field(
         default=None,
         description=(
-            "The invocation's terminal outcome, or null while it is still pending "
+            "The task's terminal outcome, or null while it is still pending "
             "(the long-poll timed out — call again to keep blocking)."
         ),
     )
@@ -117,13 +117,13 @@ class AwaitResponse(BaseModel):
     )
 
 
-class OpenInvocation(BaseModel):
+class OpenTask(BaseModel):
     """One still-open outbound ``call_*`` a session is awaiting — a ``list_tasks`` row (#1428).
 
     The model-plane roster entry: a parked ``call_session``/``call_agent``/``call_workflow``
     keyed by the launching ``tool_call_id`` (the same handle ``stop_task`` takes). ``kind`` is
     the servicer kind (``session`` for ``call_session``/``call_agent``, ``run`` for
-    ``call_workflow``); ``target`` is the servicer id. Only **open** invocations are listed —
+    ``call_workflow``); ``target`` is the servicer id. Only **open** tasks are listed —
     an answered/cancelled edge is resolved out by the service under one snapshot.
     """
 

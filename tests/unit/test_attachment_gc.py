@@ -12,7 +12,7 @@ points at a deleted file — the renderer's later read raises
 ``FileNotFoundError`` and the attachment is silently lost.
 
 Same defect class as PR #517 (cleanup scope: don't unlink files this
-invocation doesn't own), one layer up: the sweep doesn't own ANY
+call doesn't own), one layer up: the sweep doesn't own ANY
 file it didn't write, so the conservative rule is to skip recently
 created files entirely.
 """

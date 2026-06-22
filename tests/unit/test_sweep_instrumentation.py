@@ -54,7 +54,8 @@ class TestTailSweepSpan:
         with (
             patch("aios.harness.tool_dispatch.sessions_service.append_event", append_event),
             patch(
-                "aios.harness.tool_dispatch.runtime.require_task_registry", return_value=MagicMock()
+                "aios.harness.tool_dispatch.runtime.require_inflight_tool_registry",
+                return_value=MagicMock(),
             ),
             patch("aios.harness.sweep.wake_sessions_needing_inference", wake_mock),
         ):
@@ -84,7 +85,8 @@ class TestTailSweepSpan:
         with (
             patch("aios.harness.tool_dispatch.sessions_service.append_event", append_event),
             patch(
-                "aios.harness.tool_dispatch.runtime.require_task_registry", return_value=MagicMock()
+                "aios.harness.tool_dispatch.runtime.require_inflight_tool_registry",
+                return_value=MagicMock(),
             ),
             patch("aios.harness.sweep.wake_sessions_needing_inference", wake_mock),
             pytest.raises(RuntimeError, match="db down"),
@@ -105,7 +107,7 @@ def mock_runtime() -> Iterator[None]:
     with (
         patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
         patch(
-            "aios.harness.loop.runtime.require_task_registry",
+            "aios.harness.loop.runtime.require_inflight_tool_registry",
             return_value=MagicMock(),
         ),
     ):
@@ -169,7 +171,7 @@ class TestEntrySweepSpan:
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
-                "aios.harness.loop.runtime.require_task_registry",
+                "aios.harness.loop.runtime.require_inflight_tool_registry",
                 return_value=MagicMock(),
             ),
             patch(

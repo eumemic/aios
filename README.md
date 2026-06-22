@@ -238,7 +238,7 @@ aios exposes its entire runtime through one versioned REST API (`/v1/...`, FastA
 | **session-templates** | Frozen recipe for per-chat session spawn. |
 | **triggers** | Per-session `source × action` scheduled/reactive edges. |
 | **runtime-tokens** | Per-connector-type bearers for connector containers (optionally allowlisted). |
-| **invocations** | The kind-agnostic request edge (caller → servicer). |
+| **tasks** | The kind-agnostic request edge (caller → servicer). |
 | **workflows / runs** | Durable, replayable deterministic-Python orchestration definitions + instances. |
 | **files / github-repos** | Session-scoped uploads and git-repo mounts (encrypted clone token). |
 
@@ -394,7 +394,7 @@ Any caller — a model inside a session, an external HTTP/operator client, or a 
 
 - **One `stimulate` spine** over a 4-arm frozen-dataclass union — `AskNewSession` / `TellNewSession` / `AskExistingSession` / `TellExistingSession` — so illegal combinations (e.g. `output_schema` on a Tell) are unrepresentable. `Ask ⇒ awaited`; `Tell ⇒ fire-and-forget`.
 - **Trusted request edge** — every invocation materializes a lifecycle event carrying `caller={kind,id}`, depth, the frozen capability surface, vault_ids, `awaited`, `output_schema`, and a summary. All enforcement reads come off this trusted frame, never a forgeable blob; the model cannot inject a `caller` (every arg model is `extra=forbid`).
-- **Caller invocations park as implicit-async tasks** — model-callable `call_session` / `call_agent` / `call_workflow`, the HTTP `POST /v1/invocations`, and the workflow run-caller all converge on the same edge; the caller stays responsive to its human while the servicer works.
+- **Caller invocations park as implicit-async tasks** — model-callable `call_session` / `call_agent` / `call_workflow`, the HTTP `POST /v1/tasks`, and the workflow run-caller all converge on the same edge; the caller stays responsive to its human while the servicer works.
 - **Functional recursive cancel** — cancel seeds only the root; each marked **session** node cancels itself under its own single-writer lock, then re-seeds markers on its awaited children (a run servicer finalizes as a single node — no down-cascade, by construction). No global supervisor, no lock-the-world; first-writer-wins makes a late `return` a harmless no-op.
 - **Down-counting depth budget** — every trusted edge carries `parent.depth - 1`; the spawn edge refuses *before* writing any child row when depth hits 0. The decrement IS the cycle bound.
 - **Background-priority demotion** — a session is demoted to background priority (`-10`) when its latest open request edge is background-rooted, so a workflow's fan-out can't starve a human's interactive message.
@@ -419,13 +419,13 @@ Any caller — a model inside a session, an external HTTP/operator client, or a 
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/v1/invocations` | Kind-agnostic request-writer; returns `InvocationHandle{servicer_kind, servicer_id, request_id}`. |
-| GET | `/v1/invocations/{task_id}/await` | The one awaiter over both servicer kinds (≤60s long-poll, MCP-usable). |
-| POST | `/v1/invocations/{task_id}/cancel` | Seed a recursive cancel (202 Accepted, idempotent). |
+| POST | `/v1/tasks` | Kind-agnostic request-writer; returns `TaskHandle{servicer_kind, servicer_id, request_id}`. |
+| GET | `/v1/tasks/{task_id}/await` | The one awaiter over both servicer kinds (≤60s long-poll, MCP-usable). |
+| POST | `/v1/tasks/{task_id}/cancel` | Seed a recursive cancel (202 Accepted, idempotent). |
 
 ```
 aios trace <id>                  # DFS pre-order tree of a run (wfr_…) or session (sess_…)
-aios invocations create --target-kind --target --input
+aios tasks create --target-kind --target --input
 ```
 
 </details>

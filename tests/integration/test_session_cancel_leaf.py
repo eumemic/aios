@@ -1,11 +1,11 @@
 """Integration tests for the session-side cancel leaf, the C2 sweep clause, and
-``cancel_invocation`` (6e/6f/6g).
+``cancel_task`` (6e/6f/6g).
 
 A cancel-marked session must (a) be selected by ``find_sessions_needing_inference`` even when
 idle (so the sweep wakes it), (b) when its step runs the leaf, answer each marked request
 ``cancelled`` and harvest the marker (no hot-loop), and (c) when it owes no remaining inbound,
 propagate a cancel-marker to each awaited child (the §2.3 recursive hop — owned-only, so a
-shared session never over-cancels a surviving request's work). ``cancel_invocation`` seeds it
+shared session never over-cancels a surviving request's work). ``cancel_task`` seeds it
 for both servicer kinds. Owned-session teardown (interrupt + archive, §4/C1) + §7 attributed_to
 + the §9 counter are the deferred residuals.
 """
@@ -22,10 +22,10 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import NotFoundError
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_sessions_needing_inference
-from aios.harness.task_registry import TaskRegistry
-from aios.services import invocations as invocations_service
 from aios.services import sessions as service
+from aios.services import tasks as tasks_service
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
@@ -35,7 +35,7 @@ _ACCOUNT = "acc_cancel_leaf"
 
 @pytest.fixture(autouse=True)
 def _mock_prompt_wakes() -> Iterator[None]:
-    """The cancel leaf + ``cancel_invocation``'s session arm fire prompt procrastinate wakes
+    """The cancel leaf + ``cancel_task``'s session arm fire prompt procrastinate wakes
     (no open App here), all via late imports of ``aios.services.wake`` — so patching the source
     catches them. The durable seed (marker / signal + tombstone) and the C2 sweep, not these
     best-effort prompts, are what drive the cancel. (``create_run`` / ``cancel_run`` bind
@@ -98,7 +98,9 @@ async def test_cancel_marked_session_is_swept_then_leaf_answers_cancelled(
         )
 
     # C2: the marked session is selected even though it is otherwise idle (no unreacted msgs).
-    needs = await find_sessions_needing_inference(pool, TaskRegistry(), session_id=session_id)
+    needs = await find_sessions_needing_inference(
+        pool, InflightToolRegistry(), session_id=session_id
+    )
     assert session_id in needs
 
     # The leaf answers the request cancelled + harvests the marker.
@@ -118,7 +120,9 @@ async def test_cancel_marked_session_is_swept_then_leaf_answers_cancelled(
 
     # Idempotent: with the marker harvested, a second leaf run is a no-op (no hot-loop).
     assert not await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT)
-    needs_again = await find_sessions_needing_inference(pool, TaskRegistry(), session_id=session_id)
+    needs_again = await find_sessions_needing_inference(
+        pool, InflightToolRegistry(), session_id=session_id
+    )
     assert session_id not in needs_again
 
 
@@ -135,15 +139,15 @@ async def test_unmarked_session_runs_no_leaf(
         ]
 
 
-async def test_cancel_invocation_session_seeds_tombstone_and_marker_end_to_end(
+async def test_cancel_task_session_seeds_tombstone_and_marker_end_to_end(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
-    """``cancel_invocation`` on a session servicer writes the tombstone + the exit-marker; the
+    """``cancel_task`` on a session servicer writes the tombstone + the exit-marker; the
     session's own leaf then answers the request ``cancelled`` — the full operator cancel path."""
     pool, session_id, env_id = pool_and_session
     await _open_request(pool, session_id, env_id, request_id="req_x")
 
-    await invocations_service.cancel_invocation(
+    await tasks_service.cancel_task(
         pool,
         servicer_kind="session",
         servicer_id=session_id,
@@ -165,7 +169,7 @@ async def test_cancel_invocation_session_seeds_tombstone_and_marker_end_to_end(
         assert resolved == {"result": None, "is_error": True, "error": {"kind": "cancelled"}}
 
     # Idempotent: re-cancelling the same edge is a no-op (ON CONFLICT).
-    await invocations_service.cancel_invocation(
+    await tasks_service.cancel_task(
         pool,
         servicer_kind="session",
         servicer_id=session_id,
@@ -174,13 +178,13 @@ async def test_cancel_invocation_session_seeds_tombstone_and_marker_end_to_end(
     )
 
 
-async def test_cancel_invocation_cross_tenant_404(
+async def test_cancel_task_cross_tenant_404(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
-    """A foreign account cannot cancel another tenant's session invocation."""
+    """A foreign account cannot cancel another tenant's session task."""
     pool, session_id, _env = pool_and_session
     with pytest.raises(NotFoundError):
-        await invocations_service.cancel_invocation(
+        await tasks_service.cancel_task(
             pool,
             servicer_kind="session",
             servicer_id=session_id,
@@ -189,10 +193,10 @@ async def test_cancel_invocation_cross_tenant_404(
         )
 
 
-async def test_cancel_invocation_run_seeds_signal_and_tombstone(
+async def test_cancel_task_run_seeds_signal_and_tombstone(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
-    """``cancel_invocation`` on a RUN servicer reuses ``cancel_run`` (seeds the cancel signal +
+    """``cancel_task`` on a RUN servicer reuses ``cancel_run`` (seeds the cancel signal +
     wakes) and writes the tombstone; the run's own harvest finalizes ``cancelled``."""
     from aios.db.queries import workflows as wf_queries
     from aios.services import workflows as wf_service
@@ -215,7 +219,7 @@ async def test_cancel_invocation_run_seeds_signal_and_tombstone(
         run = await wf_service.create_run(
             pool, account_id=_ACCOUNT, workflow_id=wf.id, environment_id=env_id, input=None
         )
-        await invocations_service.cancel_invocation(
+        await tasks_service.cancel_task(
             pool,
             servicer_kind="run",
             servicer_id=run.id,

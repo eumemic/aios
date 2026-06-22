@@ -143,7 +143,7 @@ def mock_step_dependencies() -> Any:
             return_value=MagicMock(),
         ),
         patch(
-            "aios.harness.loop.runtime.require_task_registry",
+            "aios.harness.loop.runtime.require_inflight_tool_registry",
             return_value=MagicMock(),
         ),
         patch(

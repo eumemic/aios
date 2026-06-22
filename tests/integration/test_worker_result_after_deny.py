@@ -41,7 +41,7 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import runtime
-from aios.harness.task_registry import TaskRegistry
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.tool_dispatch import _execute_tool_async
 from aios.models.agents import ToolSpec
 from aios.services import sessions as sessions_service
@@ -54,18 +54,18 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 async def runtime_for_dispatch() -> AsyncIterator[None]:
     """Install minimum worker globals on ``aios.harness.runtime`` so
-    ``_execute_tool_async``'s ``runtime.require_task_registry()`` works.
+    ``_execute_tool_async``'s ``runtime.require_inflight_tool_registry()`` works.
 
     Restores the previous globals on teardown.
     """
-    prev_task_reg = runtime.task_registry
+    prev_inflight_reg = runtime.inflight_tool_registry
     prev_worker_id = runtime.worker_id
-    runtime.task_registry = TaskRegistry()
+    runtime.inflight_tool_registry = InflightToolRegistry()
     runtime.worker_id = "worker_test_deny_race"
     try:
         yield
     finally:
-        runtime.task_registry = prev_task_reg
+        runtime.inflight_tool_registry = prev_inflight_reg
         runtime.worker_id = prev_worker_id
 
 

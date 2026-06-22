@@ -38,7 +38,6 @@ from aios.models.agents import (
 )
 from aios.models.attenuation import Surface, surface_of
 from aios.models.events import Event, EventKind
-from aios.models.invocations import InvocationHandle
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -51,6 +50,7 @@ from aios.models.sessions import (
     SessionStatus,
     split_resources_by_type,
 )
+from aios.models.tasks import TaskHandle
 from aios.models.triggers import (
     ExternalEventSource,
     TriggerCreate,
@@ -840,12 +840,12 @@ async def invoke(
     environment_id: str | None = None,
     crypto_box: CryptoBox | None = None,
     caller: dict[str, Any] | None = None,
-) -> InvocationHandle:
+) -> TaskHandle:
     """The API caller's request-*writer* (#1128).
 
     Materializes the trusted request edge (#1123) and constructs-or-resolves a
     servicer for an external/operator caller, returning a structured
-    :class:`InvocationHandle` the ephemeral caller awaits via the shipped
+    :class:`TaskHandle` the ephemeral caller awaits via the shipped
     completion endpoints. Kind-agnostic — ``target_kind`` discriminates ``target``:
 
     * ``agent``    — create a **session** servicer (env-bound) and inject a
@@ -892,9 +892,7 @@ async def invoke(
             input=input,
             output_schema=output_schema,
         )
-        return InvocationHandle(
-            servicer_kind="session", servicer_id=session.id, request_id=request_id
-        )
+        return TaskHandle(servicer_kind="session", servicer_id=session.id, request_id=request_id)
 
     if target_kind == "session":
         # Resolve an existing same-account session (404s cross-tenant/missing
@@ -913,9 +911,7 @@ async def invoke(
             input=input,
             output_schema=output_schema,
         )
-        return InvocationHandle(
-            servicer_kind="session", servicer_id=session.id, request_id=request_id
-        )
+        return TaskHandle(servicer_kind="session", servicer_id=session.id, request_id=request_id)
 
     if target_kind == "workflow":
         if environment_id is None:
@@ -943,7 +939,7 @@ async def invoke(
             caller=caller,
             output_schema=output_schema,
         )
-        return InvocationHandle(servicer_kind="run", servicer_id=run.id, request_id=request_id)
+        return TaskHandle(servicer_kind="run", servicer_id=run.id, request_id=request_id)
 
     raise ValidationError(
         f"unknown target_kind {target_kind!r}",
@@ -1145,7 +1141,7 @@ async def await_session(
     """Block until the session has fully reacted to a fixed stimulus, or timeout.
 
     The session **quiescence drive-and-join** — an orthogonal, session-only alias kept
-    distinct from the unified request/run awaiter (``await_invocation``): it resolves on
+    distinct from the unified request/run awaiter (``await_task``): it resolves on
     ``last_reacted_seq >= watermark`` (defaulting to ``last_stimulus_seq`` captured at call
     time), which has no run analog. Correlating a *request* response is the unified awaiter's
     job, not this one.

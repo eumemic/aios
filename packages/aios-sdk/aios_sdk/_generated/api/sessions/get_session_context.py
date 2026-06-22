@@ -78,7 +78,7 @@ def sync_detailed(
 
     One known divergence from the worker's output: unresolved tool_calls
     that the worker is currently executing render as ``_PENDING_EXTERNAL``
-    here (the API process has no view into the worker's task_registry).
+    here (the API process has no view into the worker's inflight_tool_registry).
     The worker would render them as ``_PENDING_BACKGROUND``. Custom and
     awaiting-confirm calls render identically on both sides.
 
@@ -128,7 +128,7 @@ def sync(
 
     One known divergence from the worker's output: unresolved tool_calls
     that the worker is currently executing render as ``_PENDING_EXTERNAL``
-    here (the API process has no view into the worker's task_registry).
+    here (the API process has no view into the worker's inflight_tool_registry).
     The worker would render them as ``_PENDING_BACKGROUND``. Custom and
     awaiting-confirm calls render identically on both sides.
 
@@ -173,7 +173,7 @@ async def asyncio_detailed(
 
     One known divergence from the worker's output: unresolved tool_calls
     that the worker is currently executing render as ``_PENDING_EXTERNAL``
-    here (the API process has no view into the worker's task_registry).
+    here (the API process has no view into the worker's inflight_tool_registry).
     The worker would render them as ``_PENDING_BACKGROUND``. Custom and
     awaiting-confirm calls render identically on both sides.
 
@@ -221,7 +221,7 @@ async def asyncio(
 
     One known divergence from the worker's output: unresolved tool_calls
     that the worker is currently executing render as ``_PENDING_EXTERNAL``
-    here (the API process has no view into the worker's task_registry).
+    here (the API process has no view into the worker's inflight_tool_registry).
     The worker would render them as ``_PENDING_BACKGROUND``. Custom and
     awaiting-confirm calls render identically on both sides.
 

@@ -332,7 +332,7 @@ class TestProvisionSkillFiles:
         raised on disk-full or EACCES, subsequent steps short-circuited
         with the partial state intact rather than retrying.
 
-        Reachability: HIGH — any bash invocation that creates
+        Reachability: HIGH — any bash call that creates
         ``/workspace/skills`` (model exploration, package install
         scripts, build tooling) triggers the skip. Pre-fix the only
         recovery is restarting the container.

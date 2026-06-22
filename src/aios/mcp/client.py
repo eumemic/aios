@@ -1,4 +1,4 @@
-"""MCP client — tool discovery, invocation, and credential resolution.
+"""MCP client — tool discovery, execution, and credential resolution.
 
 In worker context the module uses the worker-scoped
 :class:`~aios.mcp.pool.McpSessionPool` (stashed on
@@ -333,7 +333,7 @@ async def _list_tools_timed(session: ClientSession) -> Any:
     The discovery RPC previously had no finite ceiling other than the httpx read
     timeout and the outer 960s step budget, so a hung server starved the entire
     turn prelude. Wrapping it in ``asyncio.timeout`` mirrors the proven
-    ``_call_tool_fast`` bound on invocation and converts a stall into a prompt
+    ``_call_tool_fast`` bound at call time and converts a stall into a prompt
     ``TimeoutError`` the caller can mark unhealthy + skip.
     """
     async with asyncio.timeout(_DISCOVERY_TIMEOUT_S):

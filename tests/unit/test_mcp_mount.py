@@ -146,9 +146,9 @@ def test_apply_mcp_polish_populates_annotations_and_instructions(polished_mcp: A
     assert by_name["list_agents"].annotations is not None
     assert by_name["list_agents"].annotations.readOnlyHint is True
     assert by_name["get_health"].annotations.readOnlyHint is True
-    # await_invocation is MCP-included (no x-codegen opt-out) — an agent awaits a
-    # sub-invocation as a read-only tool. Its whole reason to exist is reachability over MCP.
-    assert by_name["await_invocation"].annotations.readOnlyHint is True
+    # await_task is MCP-included (no x-codegen opt-out) — an agent awaits a
+    # sub-task as a read-only tool. Its whole reason to exist is reachability over MCP.
+    assert by_name["await_task"].annotations.readOnlyHint is True
     assert by_name["await_session"].annotations.readOnlyHint is True
 
     # DELETE → destructiveHint

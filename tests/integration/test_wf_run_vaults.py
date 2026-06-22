@@ -1018,7 +1018,7 @@ async def test_account_fanout_cap_binds_every_launch(
 
 async def test_cancel_run_service_launcher_guard(vault_pool: asyncpg.Pool[Any]) -> None:
     """``wf_service.cancel_run``'s launcher guard — the security-bearing mechanism the
-    model-facing ``stop_task`` (#1428) rides through ``cancel_invocation``. With a
+    model-facing ``stop_task`` (#1428) rides through ``cancel_task``. With a
     ``canceller_session_id`` asserted (the model plane), only the launching session may
     cancel: a foreign canceller or an operator-launched run is ``ForbiddenError``. The
     retired ``cancel_run`` model tool's attenuation moved here. (``canceller_session_id=None``

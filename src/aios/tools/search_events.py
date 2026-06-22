@@ -190,7 +190,7 @@ SEARCH_EVENTS_DESCRIPTION = (
     "tool_calls array on assistant events, span events (cost/timing/tokens),\n"
     "and the rendered channel header. If you need any of those, ask — there\n"
     "isn't currently a way to get them from SQL.\n\n"
-    "Role semantics: role='tool' rows are tool RESULTS. Tool INVOCATIONS\n"
+    "Role semantics: role='tool' rows are tool RESULTS. Tool CALLS\n"
     "live on assistant rows and are discoverable via tool_name.\n\n"
     "Dialect: PostgreSQL 16. ILIKE, CTEs, window functions, JSON operators\n"
     "(->, ->>, @>) all work. Results capped at 200 rows. SELECT only.\n\n"

@@ -2,7 +2,7 @@
 
 These assert the documented contract for three #1068 dogfood papercuts:
 
-(a) The unified ``GET /v1/invocations/{task_id}/await`` terminal state is carried
+(a) The unified ``GET /v1/tasks/{task_id}/await`` terminal state is carried
     by ``outcome`` (null while pending) — there is NO ``state``/``done``/
     ``run_status`` field, and the model/schema must say so explicitly so a watcher
     does not key on a nonexistent field and wait forever.
@@ -31,7 +31,7 @@ def _openapi() -> dict[str, Any]:
 
 class TestWaitTerminalStateField:
     def test_await_response_has_no_state_or_legacy_fields(self) -> None:
-        from aios.models.invocations import AwaitResponse
+        from aios.models.tasks import AwaitResponse
 
         # The watcher in #1068 keyed on ``.state`` and waited forever. The unified
         # awaiter carries the terminal state on ``outcome`` (null while pending);
@@ -43,7 +43,7 @@ class TestWaitTerminalStateField:
             assert absent not in fields
 
     def test_await_outcome_field_describes_terminal_and_pending(self) -> None:
-        from aios.models.invocations import AwaitResponse
+        from aios.models.tasks import AwaitResponse
 
         outcome_desc = (AwaitResponse.model_fields["outcome"].description or "").lower()
         # The terminal-state field must be self-describing in the schema: it names

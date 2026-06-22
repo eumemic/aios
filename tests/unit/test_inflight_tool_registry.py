@@ -1,10 +1,10 @@
-"""Unit tests for the TaskRegistry."""
+"""Unit tests for the InflightToolRegistry."""
 
 from __future__ import annotations
 
 import asyncio
 
-from aios.harness.task_registry import TaskRegistry
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 
 
 def _future() -> asyncio.Future[None]:
@@ -19,30 +19,30 @@ async def _sleeper() -> None:
 
 class TestBasicLifecycle:
     def test_add_and_count(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         task = _future()
         reg.add("sess_1", "call_a", task)  # type: ignore[arg-type]
         assert reg.in_flight_count("sess_1") == 1
 
     def test_remove(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         task = _future()
         reg.add("sess_1", "call_a", task)  # type: ignore[arg-type]
         reg.remove("sess_1", "call_a")
         assert reg.in_flight_count("sess_1") == 0
 
     def test_remove_nonexistent_is_noop(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         reg.remove("sess_1", "call_nope")  # no error
 
     def test_count_unknown_session_is_zero(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         assert reg.in_flight_count("sess_nope") == 0
 
 
 class TestCancellation:
     async def test_cancel_task(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         task = asyncio.create_task(_sleeper())
         reg.add("sess_1", "call_a", task)
         assert reg.cancel_task("sess_1", "call_a") is True
@@ -50,11 +50,11 @@ class TestCancellation:
         assert task.cancelled()
 
     async def test_cancel_unknown_returns_false(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         assert reg.cancel_task("sess_1", "call_nope") is False
 
     async def test_cancel_session(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         t1 = asyncio.create_task(_sleeper())
         t2 = asyncio.create_task(_sleeper())
         reg.add("sess_1", "call_a", t1)
@@ -66,17 +66,17 @@ class TestCancellation:
         assert t2.cancelled()
 
     async def test_cancel_empty_session_returns_zero(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         assert reg.cancel_session("sess_nope") == 0
 
 
 class TestInFlightQueries:
     def test_in_flight_tool_call_ids_empty(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         assert reg.in_flight_tool_call_ids("sess_nope") == set()
 
     def test_in_flight_tool_call_ids(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         f1 = _future()
         f2 = _future()
         reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
@@ -84,7 +84,7 @@ class TestInFlightQueries:
         assert reg.in_flight_tool_call_ids("sess_1") == {"call_a", "call_b"}
 
     def test_in_flight_tool_call_ids_excludes_done(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         f1 = _future()
         f2 = _future()
         f2.set_result(None)  # mark as done
@@ -93,7 +93,7 @@ class TestInFlightQueries:
         assert reg.in_flight_tool_call_ids("sess_1") == {"call_a"}
 
     def test_all_in_flight_tool_call_ids(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         f1 = _future()
         f2 = _future()
         f3 = _future()
@@ -105,7 +105,7 @@ class TestInFlightQueries:
         assert result == {"sess_1": {"call_a"}, "sess_2": {"call_b"}}
 
     def test_all_in_flight_excludes_sessions_with_no_active(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         f1 = _future()
         f1.set_result(None)  # done
         reg.add("sess_1", "call_a", f1)  # type: ignore[arg-type]
@@ -114,7 +114,7 @@ class TestInFlightQueries:
 
 class TestShutdown:
     async def test_shutdown_cancels_all(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         t1 = asyncio.create_task(_sleeper())
         t2 = asyncio.create_task(_sleeper())
         reg.add("sess_1", "call_a", t1)
@@ -131,7 +131,7 @@ class TestShutdown:
 
 class TestStepTracking:
     async def test_register_and_cancel_step(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         task = asyncio.create_task(_sleeper())
         reg.register_step("sess_1", task)
         assert reg.cancel_step("sess_1") is True
@@ -139,11 +139,11 @@ class TestStepTracking:
         assert task.cancelled()
 
     async def test_cancel_step_unknown_session_returns_false(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         assert reg.cancel_step("sess_nope") is False
 
     async def test_unregister_step_clears(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         task = asyncio.create_task(_sleeper())
         reg.register_step("sess_1", task)
         reg.unregister_step("sess_1")
@@ -152,7 +152,7 @@ class TestStepTracking:
         await asyncio.sleep(0)
 
     async def test_register_step_replaces_prior(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         old = asyncio.create_task(_sleeper())
         new = asyncio.create_task(_sleeper())
         reg.register_step("sess_1", old)
@@ -165,7 +165,7 @@ class TestStepTracking:
         await asyncio.sleep(0)
 
     async def test_step_tracking_is_independent_of_tool_tasks(self) -> None:
-        reg = TaskRegistry()
+        reg = InflightToolRegistry()
         step = asyncio.create_task(_sleeper())
         tool = asyncio.create_task(_sleeper())
         reg.register_step("sess_1", step)

@@ -23,7 +23,7 @@ def install_docker_responder(
 ) -> list[list[str]]:
     """Patch the docker subprocess runner and return a log of argv lists.
 
-    Each docker invocation is recorded in the returned list (callers can
+    Each docker call is recorded in the returned list (callers can
     introspect order/contents) and routed through ``responder`` for the
     return triple.
     """

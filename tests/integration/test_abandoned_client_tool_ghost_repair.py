@@ -61,8 +61,8 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import sweep
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_and_repair_ghosts, find_sessions_needing_inference
-from aios.harness.task_registry import TaskRegistry
 from aios.models.agents import ToolSpec
 from tests.integration.conftest import seed_agent_env_session
 
@@ -302,7 +302,7 @@ class TestAbandonedClientCallRepaired:
         session_with_abandoned_client_call: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
         pool, account_id, session_id = session_with_abandoned_client_call
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
 
         # Precondition: the call holds open_tool_call_count > 0, so the session
         # is a wake candidate. Pre-fix it has NO unreacted stimulus and nothing
@@ -377,7 +377,7 @@ class TestRecentClientCallNotRepaired:
         session_with_recent_client_call: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
         pool, _account_id, session_id = session_with_recent_client_call
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
 
         repaired = await find_and_repair_ghosts(pool, registry, session_id=session_id)
         assert repaired == [], (
@@ -397,7 +397,7 @@ class TestConfirmationPendingExcluded:
         session_with_old_unconfirmed_always_ask: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
         pool, _account_id, session_id = session_with_old_unconfirmed_always_ask
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
 
         repaired = await find_and_repair_ghosts(pool, registry, session_id=session_id)
         assert repaired == [], (

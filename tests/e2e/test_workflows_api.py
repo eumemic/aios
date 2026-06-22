@@ -197,8 +197,8 @@ async def test_workflow_description_round_trips(http_client: httpx.AsyncClient) 
     assert r2.status_code == 201 and r2.json()["description"] is None
 
 
-async def test_cancel_run_via_invocation_endpoint(http_client: httpx.AsyncClient) -> None:
-    """A run is cancelled through the unified ``POST /v1/invocations/{task_id}/cancel``
+async def test_cancel_run_via_task_endpoint(http_client: httpx.AsyncClient) -> None:
+    """A run is cancelled through the unified ``POST /v1/tasks/{task_id}/cancel``
     (the run-side ``POST /runs/{id}/cancel`` was merged into it). Wired + account-scoped
     + idempotent + **202 Accepted** (the terminal flip to ``cancelled`` lands on a worker
     wake — mocked out here, as for create/resume). ``request_id`` is a free operator
@@ -211,7 +211,7 @@ async def test_cancel_run_via_invocation_endpoint(http_client: httpx.AsyncClient
         await http_client.post("/v1/runs", json={"workflow_id": wf["id"], "environment_id": env_id})
     ).json()
 
-    cancel_url = f"/v1/invocations/{run['id']}/cancel"
+    cancel_url = f"/v1/tasks/{run['id']}/cancel"
     r = await http_client.post(cancel_url, params={"request_id": "operator"})
     assert r.status_code == 202, r.text
     # Idempotent: a second cancel is still 202.
@@ -222,9 +222,7 @@ async def test_cancel_run_via_invocation_endpoint(http_client: httpx.AsyncClient
     # id would 422 on the unified endpoint's servicer-kind parse before the not-found check.)
     unknown_run = "wfr_00000000000000000000000000"
     assert (
-        await http_client.post(
-            f"/v1/invocations/{unknown_run}/cancel", params={"request_id": "operator"}
-        )
+        await http_client.post(f"/v1/tasks/{unknown_run}/cancel", params={"request_id": "operator"})
     ).status_code == 404
     key_b = await _mint_tenant(http_client, f"tenant-b-{_uniq()}")
     cross = await http_client.post(

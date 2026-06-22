@@ -81,7 +81,7 @@ def sync_detailed(
      One-call linear trace rooted at a session + all nested sub-runs/sessions (#1149).
 
     The session-root counterpart of ``GET /v1/runs/{id}/trace``: walks the
-    parent→child invocation-edge tree from this session (its ``agent()`` peer
+    parent→child invoke-edge tree from this session (its ``agent()`` peer
     sessions and any runs it launched via the still-live ``launcher_session_id``
     FK), normalizes each node to ``terminal_state`` + raw ``error_kind``, and
     interleaves journals into a flat DFS-pre-order list. See the run-trace
@@ -126,7 +126,7 @@ def sync(
      One-call linear trace rooted at a session + all nested sub-runs/sessions (#1149).
 
     The session-root counterpart of ``GET /v1/runs/{id}/trace``: walks the
-    parent→child invocation-edge tree from this session (its ``agent()`` peer
+    parent→child invoke-edge tree from this session (its ``agent()`` peer
     sessions and any runs it launched via the still-live ``launcher_session_id``
     FK), normalizes each node to ``terminal_state`` + raw ``error_kind``, and
     interleaves journals into a flat DFS-pre-order list. See the run-trace
@@ -166,7 +166,7 @@ async def asyncio_detailed(
      One-call linear trace rooted at a session + all nested sub-runs/sessions (#1149).
 
     The session-root counterpart of ``GET /v1/runs/{id}/trace``: walks the
-    parent→child invocation-edge tree from this session (its ``agent()`` peer
+    parent→child invoke-edge tree from this session (its ``agent()`` peer
     sessions and any runs it launched via the still-live ``launcher_session_id``
     FK), normalizes each node to ``terminal_state`` + raw ``error_kind``, and
     interleaves journals into a flat DFS-pre-order list. See the run-trace
@@ -209,7 +209,7 @@ async def asyncio(
      One-call linear trace rooted at a session + all nested sub-runs/sessions (#1149).
 
     The session-root counterpart of ``GET /v1/runs/{id}/trace``: walks the
-    parent→child invocation-edge tree from this session (its ``agent()`` peer
+    parent→child invoke-edge tree from this session (its ``agent()`` peer
     sessions and any runs it launched via the still-live ``launcher_session_id``
     FK), normalizes each node to ``terminal_state`` + raw ``error_kind``, and
     interleaves journals into a flat DFS-pre-order list. See the run-trace

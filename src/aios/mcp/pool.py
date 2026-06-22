@@ -3,7 +3,7 @@
 Holds initialized ``ClientSession`` instances per ``(url, vault_id, headers_key)``
 key (``headers_key`` hashes only the static spec headers, so the key is stable
 across OAuth token rotation — see :meth:`acquire` and #459) so tool
-discovery and invocation can reuse an already-initialized MCP connection
+discovery and execution can reuse an already-initialized MCP connection
 instead of opening a fresh one on every call.
 
 Checkout model: each tool call :meth:`acquire`\\ s an entry for **exclusive**

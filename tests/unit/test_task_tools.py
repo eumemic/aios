@@ -64,7 +64,7 @@ def _wire_common(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 async def test_stop_task_threads_canceller_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An open run task → cancel_invocation is seeded with canceller_session_id = the executing
+    """An open run task → cancel_task is seeded with canceller_session_id = the executing
     session (the launcher guard, construction-held) and the full edge handle."""
     fake_pool = _wire_common(monkeypatch)
     monkeypatch.setattr(
@@ -72,7 +72,7 @@ async def test_stop_task_threads_canceller_session_id(monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr("aios.db.queries.workflows.derive_run_response", _async_ret(None))
     cancel_spy = mock.AsyncMock()
-    monkeypatch.setattr("aios.services.invocations.cancel_invocation", cancel_spy)
+    monkeypatch.setattr("aios.services.tasks.cancel_task", cancel_spy)
 
     out = await task_tools.stop_task_handler("ses_caller", {"tool_call_id": "tc_1"})
 
@@ -93,7 +93,7 @@ async def test_stop_task_none_handle_errors(monkeypatch: pytest.MonkeyPatch) -> 
     _wire_common(monkeypatch)
     monkeypatch.setattr("aios.db.queries.find_parked_servicer", _async_ret(None))
     cancel_spy = mock.AsyncMock()
-    monkeypatch.setattr("aios.services.invocations.cancel_invocation", cancel_spy)
+    monkeypatch.setattr("aios.services.tasks.cancel_task", cancel_spy)
 
     out = await task_tools.stop_task_handler("ses_caller", {"tool_call_id": "tc_missing"})
 
@@ -116,7 +116,7 @@ async def test_stop_task_already_resolved(monkeypatch: pytest.MonkeyPatch) -> No
         _async_ret({"result": {"v": 1}, "is_error": False, "error": None}),
     )
     cancel_spy = mock.AsyncMock()
-    monkeypatch.setattr("aios.services.invocations.cancel_invocation", cancel_spy)
+    monkeypatch.setattr("aios.services.tasks.cancel_task", cancel_spy)
 
     out = await task_tools.stop_task_handler("ses_caller", {"tool_call_id": "tc_1"})
 

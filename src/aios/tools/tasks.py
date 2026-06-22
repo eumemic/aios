@@ -1,22 +1,20 @@
 """Model-facing task verbs — ``stop_task`` + ``list_tasks`` (#1428).
 
-The in-band counterpart of the operator cancel plane (``POST /v1/invocations/{task_id}/cancel``):
-a session's own model can see and command the durable ``call_*`` invocations it is awaiting,
+The in-band counterpart of the operator cancel plane (``POST /v1/tasks/{task_id}/cancel``):
+a session's own model can see and command the durable ``call_*`` tasks it is awaiting,
 keyed on the launching ``tool_call_id`` — the handle the model already holds, stamped on the
 servicer edge by ``invoke_session._caller`` and re-derivable via ``find_parked_servicer`` (#1431).
 The operator plane keys on ``task_id`` (the servicer id); the model plane keys on ``tool_call_id``.
 Isolation rides on the edge's ``caller.id`` (pinned to THIS session by ``find_parked_servicer``),
 never on ``tool_call_id`` uniqueness — a forged/guessed id can't reach another session's task.
 
-**Naming anticipates the invocation→task rename (#1154).** The tool NAMES are task-ward
-(``stop_task``/``list_tasks``) NOW because tool names persist in agent ``ToolSpec`` rows — naming
-them ``*_invocation`` today would force a *second* ToolSpec migration when #1154 renames the
-abstraction. The internal services they call stay invocation-era
-(``invocations_service.cancel_invocation`` / ``list_open_invocations``) — code-only, renamed
-without a migration in #1154.
+The tool NAMES persist in agent ``ToolSpec`` rows, so they were minted task-ward
+(``stop_task``/``list_tasks``) ahead of the #1154 abstraction rename to avoid a second ToolSpec
+migration; that rename has since landed, so the services they call are task-named too
+(``tasks_service.cancel_task`` / ``list_open_tasks``).
 
 ``stop_task`` supersedes the retired ``cancel_run`` model tool: ``cancel_run`` reached only runs,
-whereas ``stop_task`` reaches a session servicer too — and via ``cancel_invocation``'s session
+whereas ``stop_task`` reaches a session servicer too — and via ``cancel_task``'s session
 cascade, the servicer's whole awaited subtree. It also disambiguates from the existing local
 ``cancel`` tool (durable-task stop vs. local in-flight tool-task detach).
 
@@ -37,8 +35,8 @@ from pydantic import ValidationError as PydanticValidationError
 from aios.db import queries
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
-from aios.services import invocations as invocations_service
 from aios.services import sessions as sessions_service
+from aios.services import tasks as tasks_service
 from aios.tools.invoke import ToolBail
 from aios.tools.registry import ToolResult, registry
 
@@ -87,7 +85,7 @@ async def stop_task_handler(
     # Resolve the servicer this tool_call_id is awaiting. find_parked_servicer pins
     # caller.id=session_id, so a forged/foreign tool_call_id resolves to None here — a clean
     # model-visible error, never another session's task. (For a run servicer, caller.id IS the
-    # launcher, so cancel_invocation's launcher guard is satisfied by construction.)
+    # launcher, so cancel_task's launcher guard is satisfied by construction.)
     async with pool.acquire() as conn:
         handle = await queries.find_parked_servicer(
             conn,
@@ -111,11 +109,11 @@ async def stop_task_handler(
             resp = await wf_queries.derive_run_response(conn, servicer_id, account_id=account_id)
         if resp is not None:
             return {"ok": "already resolved"}
-    # The conn is released; seed the cancel on the servicer (cancel_invocation acquires its own).
+    # The conn is released; seed the cancel on the servicer (cancel_task acquires its own).
     # It harvests under its own step lock and answers the parked call ``cancelled`` (an
     # independent tool_result — by design). canceller_session_id gates the run arm's launcher
     # guard (no-op for the session arm).
-    await invocations_service.cancel_invocation(
+    await tasks_service.cancel_task(
         pool,
         servicer_kind=servicer_kind,
         servicer_id=servicer_id,
@@ -130,9 +128,7 @@ async def list_tasks_handler(session_id: str, arguments: dict[str, Any]) -> dict
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     _parse(_ListTasksArgs, arguments)  # no fields; enforces extra="forbid" (reject smuggled keys)
-    tasks = await invocations_service.list_open_invocations(
-        pool, session_id=session_id, account_id=account_id
-    )
+    tasks = await tasks_service.list_open_tasks(pool, session_id=session_id, account_id=account_id)
     return {"tasks": [t.model_dump(mode="json") for t in tasks]}
 
 
@@ -147,7 +143,7 @@ STOP_TASK_DESCRIPTION = (
     "before the stop landed, or an error if no open task matches that tool_call_id."
 )
 LIST_TASKS_DESCRIPTION = (
-    "List your open tasks — the call_session / call_agent / call_workflow invocations you have "
+    "List your open tasks — the call_session / call_agent / call_workflow tasks you have "
     "launched that are still running and awaiting an answer. Each entry carries the "
     "tool_call_id (pass it to stop_task to cancel), the servicer kind (session or run), the "
     "target id, and when it was opened. A point-in-time snapshot; answered or cancelled calls "

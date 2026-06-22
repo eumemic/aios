@@ -18,7 +18,7 @@ from tests.conftest import needs_docker
 pytestmark = [pytest.mark.integration, needs_docker]
 
 
-class _FakeTaskRegistry:
+class _FakeInflightToolRegistry:
     def __init__(self) -> None:
         self.cancelled: asyncio.Queue[str] = asyncio.Queue()
 
@@ -67,7 +67,7 @@ async def test_interrupt_listener_reconnects_after_backend_termination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("aios.harness.worker._LISTEN_RECONNECT_BACKOFF_SECONDS", 0.1)
-    fake_registry = _FakeTaskRegistry()
+    fake_registry = _FakeInflightToolRegistry()
     registry = MagicMock()
     registry.cancel_step.side_effect = fake_registry.cancel_step
     registry.cancel_session.side_effect = fake_registry.cancel_session

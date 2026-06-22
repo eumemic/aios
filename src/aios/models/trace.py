@@ -2,7 +2,7 @@
 (#1149).
 
 A *trace* is **not** a new subsystem — it is a read-projection over the
-invocation-edge tree the invoke-edge epic (#1122) already records. Three moves:
+invoke-edge tree the kernel epic (#1122) already records. Three moves:
 **walk** the parent→child edge tree from the root, **normalize** each node's
 outcome into a small terminal-state enum (+ a raw ``error_kind`` passthrough),
 and **interleave** the nodes' existing journals (``events`` for sessions,
@@ -16,7 +16,7 @@ per-entry column for chronology; a ``--chronological`` client re-sort by
 ``timestamp`` is best-effort to transaction granularity (the two journals share
 no global sequence — only the causal parent→child edge is exact).
 
-Scope = the invocation-edge tree (``agent()`` / ``invoke_workflow`` /
+Scope = the invoke-edge tree (``agent()`` / ``invoke_workflow`` /
 api-invoke). ``wake_session`` peer-pokes are **out of scope** (a peer stimulus
 carrying ``wake_depth``, not a spawn — it opens no ``request_opened`` edge).
 """

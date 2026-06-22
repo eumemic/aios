@@ -91,7 +91,7 @@ async def test_host_backstop_exceeds_container_deadline(monkeypatch: pytest.Monk
 
 async def test_rc_137_maps_to_timed_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """TC3: the SIGKILL-path timeout exit (137) — the ONLY code our
-    ``timeout -s KILL`` invocation produces on a timeout — is reported as
+    ``timeout -s KILL`` call produces on a timeout — is reported as
     ``timed_out`` even though the host backstop did not fire, and the exit code
     passes through unchanged."""
     _install_exec_capture(monkeypatch, rc=137, timed_out=False)
@@ -104,7 +104,7 @@ async def test_rc_137_maps_to_timed_out(monkeypatch: pytest.MonkeyPatch) -> None
 
 async def test_rc_124_not_flagged_as_timed_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """TC4: 124 is the GNU ``timeout`` TERM-path code, which our ``-s KILL``
-    invocation never yields on a timeout. A command that exits 124 on its own is
+    call never yields on a timeout. A command that exits 124 on its own is
     therefore NOT a timeout — it is not flagged, and the exit code passes
     through unchanged."""
     _install_exec_capture(monkeypatch, rc=124, timed_out=False)

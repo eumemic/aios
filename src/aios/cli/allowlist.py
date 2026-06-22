@@ -81,7 +81,7 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
     ),
     "await_session": (
         "Session quiescence drive-and-join long-poll (watermark only; request "
-        "correlation lives on `await_invocation`). MCP-surfaced for agents, but "
+        "correlation lives on `await_task`). MCP-surfaced for agents, but "
         "operators watch a session via `aios sessions stream` / `aios tail` rather "
         "than a blocking poll."
     ),

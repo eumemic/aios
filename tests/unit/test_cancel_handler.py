@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from aios.harness import runtime
-from aios.harness.task_registry import TaskRegistry
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.tools.cancel import CancelArgumentError, cancel_handler
 
 
@@ -18,52 +18,54 @@ async def _sleeper() -> None:
 
 
 @pytest.fixture
-def task_reg() -> Any:
-    """Install a TaskRegistry on the runtime module, restore after."""
-    previous = runtime.task_registry
-    reg = TaskRegistry()
-    runtime.task_registry = reg
+def inflight_reg() -> Any:
+    """Install a InflightToolRegistry on the runtime module, restore after."""
+    previous = runtime.inflight_tool_registry
+    reg = InflightToolRegistry()
+    runtime.inflight_tool_registry = reg
     try:
         yield reg
     finally:
-        runtime.task_registry = previous
+        runtime.inflight_tool_registry = previous
 
 
 class TestCancelSpecificTask:
-    async def test_cancel_existing_task(self, task_reg: TaskRegistry) -> None:
+    async def test_cancel_existing_task(self, inflight_reg: InflightToolRegistry) -> None:
         task = asyncio.create_task(_sleeper())
-        task_reg.add("sess_01TEST", "call_abc", task)
+        inflight_reg.add("sess_01TEST", "call_abc", task)
         result = await cancel_handler("sess_01TEST", {"tool_call_id": "call_abc"})
         assert result["cancelled"] is True
         assert result["tool_call_id"] == "call_abc"
         await asyncio.sleep(0)  # let the task process CancelledError
         assert task.cancelled()
 
-    async def test_cancel_missing_task(self, task_reg: TaskRegistry) -> None:
+    async def test_cancel_missing_task(self, inflight_reg: InflightToolRegistry) -> None:
         result = await cancel_handler("sess_01TEST", {"tool_call_id": "call_nope"})
         assert result["cancelled"] is False
 
-    async def test_non_string_tool_call_id_raises(self, task_reg: TaskRegistry) -> None:
+    async def test_non_string_tool_call_id_raises(self, inflight_reg: InflightToolRegistry) -> None:
         with pytest.raises(CancelArgumentError):
             await cancel_handler("sess_01TEST", {"tool_call_id": 42})
 
 
 class TestCancelAllTasks:
-    async def test_cancel_all(self, task_reg: TaskRegistry) -> None:
+    async def test_cancel_all(self, inflight_reg: InflightToolRegistry) -> None:
         t1 = asyncio.create_task(_sleeper())
         t2 = asyncio.create_task(_sleeper())
-        task_reg.add("sess_01TEST", "call_a", t1)
-        task_reg.add("sess_01TEST", "call_b", t2)
+        inflight_reg.add("sess_01TEST", "call_a", t1)
+        inflight_reg.add("sess_01TEST", "call_b", t2)
         result = await cancel_handler("sess_01TEST", {})
         assert result["cancelled"] is True
         assert result["count"] == 2
 
-    async def test_cancel_all_empty(self, task_reg: TaskRegistry) -> None:
+    async def test_cancel_all_empty(self, inflight_reg: InflightToolRegistry) -> None:
         result = await cancel_handler("sess_01TEST", {})
         assert result["cancelled"] is True
         assert result["count"] == 0
 
-    async def test_cancel_excludes_own_running_task(self, task_reg: TaskRegistry) -> None:
+    async def test_cancel_excludes_own_running_task(
+        self, inflight_reg: InflightToolRegistry
+    ) -> None:
         """The in-band cancel tool runs as a registered task in its own
         session set, so cancel-all must skip it. If it cancels itself the
         count is inflated by one and a CancelledError fired at the
@@ -72,7 +74,7 @@ class TestCancelAllTasks:
         caller runs from a non-registered task, so it is unaffected."""
         sid = "sess_01TEST"
         sibling = asyncio.create_task(_sleeper())
-        task_reg.add(sid, "call_bash", sibling)
+        inflight_reg.add(sid, "call_bash", sibling)
 
         captured: dict[str, Any] = {}
 
@@ -86,7 +88,7 @@ class TestCancelAllTasks:
             captured["reached"] = True
 
         own = asyncio.create_task(run_cancel())
-        task_reg.add(sid, "call_cancel", own)
+        inflight_reg.add(sid, "call_cancel", own)
 
         with contextlib.suppress(asyncio.CancelledError):
             await own

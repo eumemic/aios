@@ -76,15 +76,15 @@ class TestHarnessErrorSpan:
 
         mock_append = AsyncMock(return_value=SimpleNamespace(id="ev_start"))
         mock_retry = AsyncMock(return_value=2.0)
-        mock_task_registry = MagicMock()
-        mock_task_registry.register_step = MagicMock()
-        mock_task_registry.unregister_step = MagicMock()
+        mock_inflight_tool_registry = MagicMock()
+        mock_inflight_tool_registry.register_step = MagicMock()
+        mock_inflight_tool_registry.unregister_step = MagicMock()
 
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
-                "aios.harness.loop.runtime.require_task_registry",
-                return_value=mock_task_registry,
+                "aios.harness.loop.runtime.require_inflight_tool_registry",
+                return_value=mock_inflight_tool_registry,
             ),
             patch(
                 "aios.harness.loop.sessions_service.append_event",
@@ -120,15 +120,15 @@ class TestHarnessErrorSpan:
 
         mock_append = AsyncMock(return_value=SimpleNamespace(id="ev_start"))
         mock_retry = AsyncMock(return_value=None)  # budget exhausted
-        mock_task_registry = MagicMock()
-        mock_task_registry.register_step = MagicMock()
-        mock_task_registry.unregister_step = MagicMock()
+        mock_inflight_tool_registry = MagicMock()
+        mock_inflight_tool_registry.register_step = MagicMock()
+        mock_inflight_tool_registry.unregister_step = MagicMock()
 
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
-                "aios.harness.loop.runtime.require_task_registry",
-                return_value=mock_task_registry,
+                "aios.harness.loop.runtime.require_inflight_tool_registry",
+                return_value=mock_inflight_tool_registry,
             ),
             patch(
                 "aios.harness.loop.sessions_service.append_event",

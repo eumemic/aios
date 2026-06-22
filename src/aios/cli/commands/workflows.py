@@ -21,7 +21,6 @@ from aios.cli.files import PayloadError, load_payload
 from aios.cli.output import print_success
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk import stream_run
-from aios_sdk._generated.api.invocations import await_invocation, cancel_invocation
 from aios_sdk._generated.api.runs import (
     create_run,
     get_run,
@@ -29,6 +28,7 @@ from aios_sdk._generated.api.runs import (
     list_runs,
     resume_gate,
 )
+from aios_sdk._generated.api.tasks import await_task, cancel_task
 from aios_sdk._generated.api.workflows import (
     archive_workflow,
     create_workflow,
@@ -229,7 +229,7 @@ def get_run_(ctx: typer.Context, run_id: str) -> None:
 
 
 @runs_app.command("wait", help="Block until a run completes, then print its result.")
-@covers("await_invocation")
+@covers("await_task")
 def wait_run_(
     ctx: typer.Context,
     run_id: str,
@@ -250,7 +250,7 @@ def wait_run_(
         with get_state(ctx).sdk_client() as client:
             while True:
                 resp = unwrap(
-                    await_invocation.sync_detailed(task_id=run_id, client=client, timeout=timeout)
+                    await_task.sync_detailed(task_id=run_id, client=client, timeout=timeout)
                 )
                 if resp.outcome:
                     break
@@ -309,7 +309,7 @@ def run_events_(
 @runs_app.command(
     "cancel", help="Request cancellation of a run (it finalizes 'cancelled' on its next wake)."
 )
-@covers("cancel_invocation")
+@covers("cancel_task")
 def cancel_run_(ctx: typer.Context, run_id: str) -> None:
     def _run() -> None:
         # The unified cancel is edge-keyed (task_id + request_id). An operator cancelling a
@@ -317,11 +317,7 @@ def cancel_run_(ctx: typer.Context, run_id: str) -> None:
         # cancels the run regardless and uses request_id only as the cancel-intent key. 202,
         # no body — the terminal flip to 'cancelled' lands on the run's next wake.
         with get_state(ctx).sdk_client() as client:
-            unwrap(
-                cancel_invocation.sync_detailed(
-                    task_id=run_id, request_id="operator", client=client
-                )
-            )
+            unwrap(cancel_task.sync_detailed(task_id=run_id, request_id="operator", client=client))
         print_success("cancel requested", run_id)
 
     run_or_die(_run)

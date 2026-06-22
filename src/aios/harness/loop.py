@@ -59,7 +59,7 @@ from aios.tools.workflow_completion import fail_all_open_requests
 if TYPE_CHECKING:
     import asyncpg
 
-    from aios.harness.task_registry import TaskRegistry
+    from aios.harness.inflight_tool_registry import InflightToolRegistry
     from aios.models.memory_stores import MemoryStoreResourceEcho
 
 log = get_logger("aios.harness.loop")
@@ -67,7 +67,7 @@ log = get_logger("aios.harness.loop")
 
 _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
 
-# Wall-clock cap on a single ``run_session_step`` invocation. The harness's
+# Wall-clock cap on a single ``run_session_step`` call. The harness's
 # zero-hang guarantee: per-call timeouts (LiteLLM, MCP, tool dispatch, etc.)
 # are the precise instruments, but if any future code path bypasses them
 # this cap fires and forces a clean rescheduling. Sized as the default 900s
@@ -227,7 +227,7 @@ async def run_session_step(
     # append, ``register_step``) can't escape with the contextvars still bound — e.g.
     # a DB drop or a session archived in the race window past the account_id guard.
     try:
-        task_registry = runtime.require_task_registry()
+        inflight_tool_registry = runtime.require_inflight_tool_registry()
 
         # Outermost span pair: brackets the entire step (issue #131).  Emitted
         # before the sweep guard so early-outs are also measured — a "wasted
@@ -243,14 +243,14 @@ async def run_session_step(
         )
         current_task = asyncio.current_task()
         assert current_task is not None
-        task_registry.register_step(session_id, current_task)
+        inflight_tool_registry.register_step(session_id, current_task)
         result = _StepResult()
         try:
             try:
                 result = await asyncio.wait_for(
                     _run_session_step_body(
                         pool,
-                        task_registry,
+                        inflight_tool_registry,
                         session_id,
                         cause=cause,
                         account_id=account_id,
@@ -283,7 +283,7 @@ async def run_session_step(
                 if delay is None:
                     raise
         finally:
-            task_registry.unregister_step(session_id)
+            inflight_tool_registry.unregister_step(session_id)
             await sessions_service.append_event(
                 pool,
                 session_id,
@@ -336,7 +336,7 @@ async def run_session_step(
 
 async def _run_session_step_body(
     pool: asyncpg.Pool[Any],
-    task_registry: TaskRegistry,
+    inflight_tool_registry: InflightToolRegistry,
     session_id: str,
     *,
     cause: str,
@@ -363,7 +363,9 @@ async def _run_session_step_body(
     )
     needs: set[str] = set()
     try:
-        needs = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
+        needs = await find_sessions_needing_inference(
+            pool, inflight_tool_registry, session_id=session_id
+        )
     finally:
         await sessions_service.append_event(
             pool,
@@ -435,7 +437,7 @@ async def _run_session_step_body(
         pool,
         session_id,
         account_id=account_id,
-        task_registry=task_registry,
+        inflight_tool_registry=inflight_tool_registry,
     )
     if pending:
         pending_builtin = [tc for tc in pending if not is_mcp_tool_name(_tc_name(tc))]
@@ -510,7 +512,9 @@ async def _run_session_step_body(
             channels=channels,
             prelude=prelude,
             events=events,
-            in_flight_tool_call_ids=frozenset(task_registry.in_flight_tool_call_ids(session_id)),
+            in_flight_tool_call_ids=frozenset(
+                inflight_tool_registry.in_flight_tool_call_ids(session_id)
+            ),
             omission=windowed.omission,
         )
     except Exception:
@@ -1040,7 +1044,7 @@ async def _dispatch_confirmed_tools(
     session_id: str,
     *,
     account_id: str,
-    task_registry: TaskRegistry,
+    inflight_tool_registry: InflightToolRegistry,
 ) -> list[dict[str, Any]]:
     """Find tool calls that have been confirmed (allow) but not yet dispatched.
 
@@ -1057,7 +1061,7 @@ async def _dispatch_confirmed_tools(
     now resolve the identical predicate, so they can't disagree at any edge.
 
     Skips ``tool_call_id``s whose asyncio task is still in flight per
-    *task_registry*: procrastinate releases the per-session lock when step N's
+    *inflight_tool_registry*: procrastinate releases the per-session lock when step N's
     job body returns, but the fire-and-forget tool task outlives the body —
     any wake firing step N+1 before the task appends its result would otherwise
     re-launch the same tool and write a second ``tool_result`` event (violates
@@ -1069,7 +1073,7 @@ async def _dispatch_confirmed_tools(
     )
     if not dispatchable:
         return []
-    in_flight = task_registry.in_flight_tool_call_ids(session_id)
+    in_flight = inflight_tool_registry.in_flight_tool_call_ids(session_id)
     return [tc for tc in dispatchable if tc.get("id") not in in_flight]
 
 

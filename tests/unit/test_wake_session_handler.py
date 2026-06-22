@@ -49,7 +49,7 @@ def _make_pool(*, target_row: dict[str, Any] | None, depth: int, recent_wakes: i
       3. fetchval → recent-wake count (SELECT count(*) FROM events ...)
       4. append_event is patched separately via ``queries.append_event``.
 
-    Each ``pool.acquire()`` invocation re-enters the same conn, so the
+    Each ``pool.acquire()`` call re-enters the same conn, so the
     side_effect queue is shared across the acquire blocks.
     """
     pool = MagicMock()

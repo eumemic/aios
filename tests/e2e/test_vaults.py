@@ -476,7 +476,7 @@ class TestVaultCredentialCRUD:
         opens a connection without a transaction or row lock; the
         ``decrypt → merge → re-encrypt → UPDATE`` sequence is read-modify-
         write across an unbounded gap, so the second commit clobbers the
-        first invocation's blob field. PR #496 fixed the merge-logic
+        first call's blob field. PR #496 fixed the merge-logic
         for ``None``-unset within ONE call; this PR fixes the cross-call
         race that ``#496`` left uncovered.
 
@@ -505,12 +505,12 @@ class TestVaultCredentialCRUD:
             account_id=account_id,
         )
 
-        # Force the race window deterministically: both invocations must
+        # Force the race window deterministically: both calls must
         # complete the SELECT before either reaches the UPDATE. With
         # plain ``asyncio.gather`` the asyncpg pool would generally let
-        # the first invocation run get → update before the second's
+        # the first call run get → update before the second's
         # get starts, masking the bug. Patch the UPDATE query to wait
-        # until BOTH invocations have arrived — this reconstructs the
+        # until BOTH calls have arrived — this reconstructs the
         # exact race that webhook-retry / dual-CLI / parallel-agent
         # production traffic creates intermittently. The release event
         # is set from a separate coroutine so neither update releases
@@ -534,12 +534,12 @@ class TestVaultCredentialCRUD:
             return await original_update(*args, **kwargs)
 
         async def release_barrier() -> None:
-            # Pre-fix: both invocations reach ``gated_update`` (no row
+            # Pre-fix: both calls reach ``gated_update`` (no row
             # lock from get) and ``both_arrived`` fires fast.
-            # Post-fix: the second invocation blocks on ``FOR UPDATE``
+            # Post-fix: the second call blocks on ``FOR UPDATE``
             # before ever reaching ``gated_update`` — ``both_arrived``
             # times out. Either way, release ``release_updates`` so
-            # the first invocation commits; the second then proceeds
+            # the first call commits; the second then proceeds
             # naturally (immediately pre-fix, after row-lock release
             # post-fix).
             import contextlib as _contextlib
@@ -573,7 +573,7 @@ class TestVaultCredentialCRUD:
 
         # Read back via the get-with-blob query and decrypt to verify the
         # actual stored secrets — the public ``VaultCredential`` strips
-        # them. Both invocations should have committed their field.
+        # them. Both calls should have committed their field.
         async with pool.acquire() as conn:
             from aios.db import queries
 
@@ -850,7 +850,7 @@ class TestOAuthRefreshE2E:
     def _patched_async_client(post_calls: list[Any], body: dict[str, Any]) -> Any:
         """Build a ``patch`` context for ``services.vaults.httpx.AsyncClient``.
 
-        Each ``client.post`` invocation is recorded into ``post_calls`` and
+        Each ``client.post`` call is recorded into ``post_calls`` and
         returns a mocked 200 response with ``body``.
         """
         from unittest.mock import AsyncMock, MagicMock, patch

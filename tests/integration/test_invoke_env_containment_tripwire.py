@@ -1,7 +1,7 @@
 """Tripwire test pinning the deferral precondition for #1130.
 
 #1130 ships an **ownership-only** gate on the caller-supplied ``environment_id``
-at ``POST /v1/invocations`` (#1128): the supplied env must be owned by the
+at ``POST /v1/tasks`` (#1128): the supplied env must be owned by the
 authenticated account (``get_environment(conn, env_id, account_id=<caller>)``),
 exactly as ``create_session`` / ``create_run`` already enforce (#755). The
 *per-field containment clamp* (``networking`` / ``image`` / ``env``-keys subset-of a
@@ -85,7 +85,7 @@ async def test_account_keys_has_no_attenuation_surface_column(
 
     The bearer/account-key path (``require_bearer_auth`` ->
     ``lookup_account_by_key_hash``) is the principal that authorizes
-    ``POST /v1/invocations``. Today every account key is full-account-TOP: the
+    ``POST /v1/tasks``. Today every account key is full-account-TOP: the
     ``account_keys`` row binds a key to an ``account_id`` and nothing finer.
     There is no column describing an attenuated *subset* of that account's
     surface, so the supplied ``environment_id`` has nothing below top to be

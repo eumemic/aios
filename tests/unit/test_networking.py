@@ -184,9 +184,9 @@ class TestBuildIptablesScript:
         assert '"$IPT" -F OUTPUT' in script
         assert '"$IPT" -A OUTPUT -o lo -j ACCEPT' in script
 
-    def test_no_bare_iptables_invocations(self) -> None:
+    def test_no_bare_iptables_calls(self) -> None:
         """Every netfilter command goes through the ``$IPT`` selector so apply
-        and verify agree on the backend; a bare ``iptables ...`` invocation
+        and verify agree on the backend; a bare ``iptables ...`` call
         (line start or after a guard) would silently use the nft default."""
         script = build_iptables_script(
             allowed_hosts={"api.example.com"},
@@ -199,7 +199,7 @@ class TestBuildIptablesScript:
             if "command -v iptables-legacy" in stripped:
                 continue
             assert not stripped.startswith("iptables "), (
-                f"bare iptables invocation would use the nft default: {line!r}"
+                f"bare iptables call would use the nft default: {line!r}"
             )
 
     # ── nat-table DNAT to the secret-egress proxy (#878) ──────────────────────
@@ -326,7 +326,7 @@ class TestIPv6EgressLockdown:
         script = build_iptables_script(allowed_hosts={"api.example.com"})
         assert "command -v ip6tables-legacy" in script
 
-    def test_no_bare_ip6tables_invocations(self) -> None:
+    def test_no_bare_ip6tables_calls(self) -> None:
         """Every v6 netfilter command goes through the ``$IP6T`` selector so it
         never silently uses the nft default (which fails on runsc)."""
         script = build_iptables_script(
@@ -340,7 +340,7 @@ class TestIPv6EgressLockdown:
             if "command -v ip6tables-legacy" in stripped:
                 continue
             assert not stripped.startswith("ip6tables "), (
-                f"bare ip6tables invocation would use the nft default: {line!r}"
+                f"bare ip6tables call would use the nft default: {line!r}"
             )
 
     def test_v6_drop_present_with_dnat(self) -> None:
@@ -517,7 +517,7 @@ class TestBuildSecretEgressDnatScript:
             if "command -v iptables-legacy" in stripped:
                 continue
             assert not stripped.startswith("iptables "), (
-                f"bare iptables invocation would use the nft default: {line!r}"
+                f"bare iptables call would use the nft default: {line!r}"
             )
 
     def test_dnat_rule_shape_matches_lockdown_script(self) -> None:
@@ -649,7 +649,7 @@ class TestBuildLockdownVerifyScript:
 
     def _run_verify(self, *, v4_policy: str, v6_mode: str, dnat_hosts: Sequence[str] = ()) -> int:
         """Run the generated verify script under ``bash -c`` (exactly as the
-        sidecar does — no ``-e`` on the invocation) against fake legacy
+        sidecar does — no ``-e`` on the call) against fake legacy
         binaries, returning its exit code.
 
         ``v4_policy``/``v6_mode`` are the ``-S OUTPUT`` policies the fakes report
@@ -885,7 +885,7 @@ class TestApplyNetworkLockdown:
         await apply_network_lockdown(backend, handle, networking)
 
         scripts = self._sidecar_scripts(backend)
-        # Two sidecar invocations: apply, then read-back verify.
+        # Two sidecar calls: apply, then read-back verify.
         assert len(scripts) == 2
         apply_script, verify_script = scripts
         assert '"$IPT" -P OUTPUT DROP' in apply_script
@@ -1022,7 +1022,7 @@ class TestApplyNetworkLockdown:
     @pytest.mark.asyncio
     async def test_runtime_threaded_to_both_sidecar_calls(self) -> None:
         """The sandbox's container runtime (#1014) reaches BOTH sidecar
-        invocations (apply and read-back verify) so the lockdown runs under
+        calls (apply and read-back verify) so the lockdown runs under
         the same runtime as the sandbox it locks down."""
         backend = FakeBackend()
         handle = make_handle()

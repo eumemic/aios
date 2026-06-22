@@ -93,7 +93,7 @@ def sync_detailed(
 
     The session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent
     can drive a session and join when it has fully reacted. Correlating a *request* response is
-    the unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A
+    the unified awaiter's job (``GET /v1/tasks/{task_id}/await?request_id=``). A
     cross-tenant session 404s before any subscription opens.
 
     Args:
@@ -140,7 +140,7 @@ def sync(
 
     The session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent
     can drive a session and join when it has fully reacted. Correlating a *request* response is
-    the unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A
+    the unified awaiter's job (``GET /v1/tasks/{task_id}/await?request_id=``). A
     cross-tenant session 404s before any subscription opens.
 
     Args:
@@ -182,7 +182,7 @@ async def asyncio_detailed(
 
     The session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent
     can drive a session and join when it has fully reacted. Correlating a *request* response is
-    the unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A
+    the unified awaiter's job (``GET /v1/tasks/{task_id}/await?request_id=``). A
     cross-tenant session 404s before any subscription opens.
 
     Args:
@@ -227,7 +227,7 @@ async def asyncio(
 
     The session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent
     can drive a session and join when it has fully reacted. Correlating a *request* response is
-    the unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A
+    the unified awaiter's job (``GET /v1/tasks/{task_id}/await?request_id=``). A
     cross-tenant session 404s before any subscription opens.
 
     Args:

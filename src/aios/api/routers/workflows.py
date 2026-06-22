@@ -292,7 +292,7 @@ async def get_run_trace(
 ) -> TraceResponse:
     """One-call linear trace of a run + all nested sessions and sub-runs (#1149).
 
-    A read-projection over the invocation-edge tree: walks the parent→child edge
+    A read-projection over the invoke-edge tree: walks the parent→child edge
     tree from this run, normalizes each node's outcome to
     ``terminal_state ∈ {ok,errored,cancelled,suspended,running}`` (+ raw
     ``error_kind``), and interleaves the nodes' journals into a flat

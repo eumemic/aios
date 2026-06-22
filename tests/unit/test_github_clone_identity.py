@@ -3,14 +3,14 @@
 When a ``github_repository`` attachment carries ``git_user_name`` /
 ``git_user_email``, the per-session working tree's ``.git/config`` is
 stamped via ``git config user.name`` / ``git config user.email`` after
-the clone completes.  Subsequent ``git commit`` invocations from inside
+the clone completes.  Subsequent ``git commit`` calls from inside
 the sandbox attribute commits to that identity without the agent
 seeing or self-correcting from git's "Please tell me who you are"
 error.
 
 These tests pin the sandbox-side wiring (``ensure_session_working_tree``)
 without spinning up a real container — ``_run_git`` is patched so each
-``git`` invocation appears as a captured argv.
+``git`` call appears as a captured argv.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ async def _run_with_captured_git(
     repos_root: Path,
 ) -> list[list[str]]:
     """Invoke ``ensure_session_working_tree`` with patched ``_run_git``;
-    return the captured argv list (one entry per ``git`` invocation).
+    return the captured argv list (one entry per ``git`` call).
     """
     captured: list[list[str]] = []
 

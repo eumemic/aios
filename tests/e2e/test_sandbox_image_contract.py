@@ -42,7 +42,7 @@ def pulled_image() -> str:
     fresh local build with the older registry tag, masking the very
     change the build was meant to validate.
 
-    Module-scoped so this check runs at most once per pytest invocation.
+    Module-scoped so this check runs at most once per pytest run.
     """
     check = subprocess.run(
         ["docker", "image", "inspect", IMAGE],

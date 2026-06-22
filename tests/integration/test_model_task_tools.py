@@ -4,7 +4,7 @@ DB-backed (testcontainer Postgres). The model plane keys on ``tool_call_id`` (th
 caller already holds, stamped on the servicer edge by ``invoke_session._caller``); these tests
 exercise:
 
-* ``list_open_invocations`` (backs ``list_tasks``) — only OPEN edges keyed by ``tool_call_id``
+* ``list_open_tasks`` (backs ``list_tasks``) — only OPEN edges keyed by ``tool_call_id``
   appear; an answered one drops off, and another session's edge is never visible. Both servicer
   kinds (a session servicer + a run servicer).
 * ``stop_task`` — seeds the cancel on the servicer (session arm → cancel-marker; run arm →
@@ -27,9 +27,9 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
-from aios.harness.task_registry import TaskRegistry
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.models.agents import ToolSpec
-from aios.services import invocations as invocations_service
+from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools import tasks as task_tools
 from aios.tools import workflow_completion
@@ -49,9 +49,9 @@ async def env(
     """Yield ``(pool, account_id)`` with the worker runtime wired so the task handlers run
     without a live worker (the wake/cancel-wake deferrals are patched out)."""
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
-    prev_pool, prev_reg = runtime.pool, runtime.task_registry
+    prev_pool, prev_reg = runtime.pool, runtime.inflight_tool_registry
     runtime.pool = pool
-    runtime.task_registry = TaskRegistry()
+    runtime.inflight_tool_registry = InflightToolRegistry()
     try:
         async with pool.acquire() as conn:
             await conn.execute(
@@ -65,7 +65,7 @@ async def env(
         ):
             yield pool, _ACCOUNT
     finally:
-        runtime.pool, runtime.task_registry = prev_pool, prev_reg
+        runtime.pool, runtime.inflight_tool_registry = prev_pool, prev_reg
         await pool.close()
 
 
@@ -150,10 +150,10 @@ async def _seed_run(
     return run.id
 
 
-# ─── list_open_invocations (backs list_tasks) ────────────────────────────────
+# ─── list_open_tasks (backs list_tasks) ────────────────────────────────
 
 
-async def test_list_open_invocations_only_open_and_own(
+async def test_list_open_tasks_only_open_and_own(
     env: tuple[asyncpg.Pool[Any], str],
 ) -> None:
     """Only this session's OPEN edges appear, keyed by tool_call_id — an answered edge and a
@@ -197,10 +197,8 @@ async def test_list_open_invocations_only_open_and_own(
         request_id="req_foreign",
     )
 
-    open_invocations = await invocations_service.list_open_invocations(
-        pool, session_id=caller, account_id=account_id
-    )
-    by_tcid = {i.tool_call_id: i for i in open_invocations}
+    open_tasks = await tasks_service.list_open_tasks(pool, session_id=caller, account_id=account_id)
+    by_tcid = {i.tool_call_id: i for i in open_tasks}
     assert set(by_tcid) == {"tc_open", "tc_run"}  # answered + foreign excluded
     assert (by_tcid["tc_open"].kind, by_tcid["tc_open"].target) == ("session", servicer_open)
     assert (by_tcid["tc_run"].kind, by_tcid["tc_run"].target) == ("run", run_id)

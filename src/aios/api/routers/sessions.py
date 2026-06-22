@@ -728,7 +728,7 @@ async def get_session_trace(
     """One-call linear trace rooted at a session + all nested sub-runs/sessions (#1149).
 
     The session-root counterpart of ``GET /v1/runs/{id}/trace``: walks the
-    parent→child invocation-edge tree from this session (its ``agent()`` peer
+    parent→child invoke-edge tree from this session (its ``agent()`` peer
     sessions and any runs it launched via the still-live ``launcher_session_id``
     FK), normalizes each node to ``terminal_state`` + raw ``error_kind``, and
     interleaves journals into a flat DFS-pre-order list. See the run-trace
@@ -771,7 +771,7 @@ async def get_context(
 
     One known divergence from the worker's output: unresolved tool_calls
     that the worker is currently executing render as ``_PENDING_EXTERNAL``
-    here (the API process has no view into the worker's task_registry).
+    here (the API process has no view into the worker's inflight_tool_registry).
     The worker would render them as ``_PENDING_BACKGROUND``. Custom and
     awaiting-confirm calls render identically on both sides.
 
@@ -818,7 +818,7 @@ async def get_context(
         account_id=account_id,
     )
 
-    # The API process has no task_registry — it lives only in the worker
+    # The API process has no inflight_tool_registry — it lives only in the worker
     # — so we can't tell which unresolved tool_calls are mid-execution
     # versus awaiting external action. All unresolved calls render as
     # ``_PENDING_EXTERNAL`` for this preview; see docstring.
@@ -947,7 +947,7 @@ async def await_session(
 
     The session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent
     can drive a session and join when it has fully reacted. Correlating a *request* response is
-    the unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A
+    the unified awaiter's job (``GET /v1/tasks/{task_id}/await?request_id=``). A
     cross-tenant session 404s before any subscription opens.
     """
     return await service.await_session(

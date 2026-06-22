@@ -27,8 +27,8 @@ from typing import Any
 
 import asyncpg
 
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.loop import run_session_step
-from aios.harness.task_registry import TaskRegistry
 from aios.models.events import Event
 from aios.models.sessions import Session
 from aios.services import agents as agents_service
@@ -325,10 +325,10 @@ class Harness:
     def __init__(
         self,
         pool: asyncpg.Pool[Any],
-        task_registry: TaskRegistry,
+        inflight_tool_registry: InflightToolRegistry,
     ) -> None:
         self._pool = pool
-        self._task_registry = task_registry
+        self._inflight_tool_registry = inflight_tool_registry
         self._responses: list[dict[str, Any]] = []
         self._response_idx = 0
         self._env_id: str | None = None
@@ -471,7 +471,7 @@ class Harness:
     async def wait_for_tools(self, session_id: str) -> None:
         """Wait for all in-flight tool tasks to complete."""
         for _ in range(100):  # safety cap
-            tasks = self._task_registry._tasks.get(session_id, {})
+            tasks = self._inflight_tool_registry._tasks.get(session_id, {})
             pending = [t for t in tasks.values() if not t.done()]
             if not pending:
                 return
@@ -503,10 +503,10 @@ class Harness:
         """
         from unittest import mock
 
-        session_tasks = self._task_registry._tasks.get(session_id, {})
+        session_tasks = self._inflight_tool_registry._tasks.get(session_id, {})
         raw_tasks = list(session_tasks.values())
         # Remove from registry first so shutdown won't find them.
-        self._task_registry._tasks.pop(session_id, None)
+        self._inflight_tool_registry._tasks.pop(session_id, None)
         if raw_tasks:
             # Suppress DB writes during cancellation cleanup. Patch at the
             # queries layer rather than the service layer so both
@@ -527,14 +527,16 @@ class Harness:
         """
         from aios.harness.sweep import find_and_repair_ghosts
 
-        return await find_and_repair_ghosts(self._pool, self._task_registry, session_id=session_id)
+        return await find_and_repair_ghosts(
+            self._pool, self._inflight_tool_registry, session_id=session_id
+        )
 
     async def sessions_needing_inference(self, session_id: str | None = None) -> set[str]:
         """Return session IDs that the sweep considers ready for inference."""
         from aios.harness.sweep import find_sessions_needing_inference
 
         return await find_sessions_needing_inference(
-            self._pool, self._task_registry, session_id=session_id
+            self._pool, self._inflight_tool_registry, session_id=session_id
         )
 
     # ── inspection ───────────────────────────────────────────────────────

@@ -79,7 +79,7 @@ async def test_session_step_binds_then_clears() -> None:
                 "aios.services.sessions.append_event",
                 new=AsyncMock(return_value=MagicMock(id="evt_1")),
             ),
-            mock.patch.object(runtime, "require_task_registry", return_value=MagicMock()),
+            mock.patch.object(runtime, "require_inflight_tool_registry", return_value=MagicMock()),
         ):
             await run_session_step("ses_live", cause="message")
     finally:

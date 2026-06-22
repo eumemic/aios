@@ -12,7 +12,7 @@ Two host directories per attached repo:
    Stored at ``<session_workspace>/_repos/<repo_id>/`` and bind-mounted
    into the container at the user-supplied ``mount_path``.
 
-The auth token is used only on the host-side ``git clone`` invocation;
+The auth token is used only on the host-side ``git clone`` call;
 we then ``git remote set-url origin`` the working tree to a per-session
 :class:`aios.sandbox.git_proxy.GitProxy` URL so the bind-mounted
 ``.git/config`` inside the sandbox carries no credential. The proxy

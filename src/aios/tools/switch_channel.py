@@ -442,7 +442,7 @@ def _render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
     Arguments are emitted verbatim from the OpenAI chat-completions
     tool_call shape (``function.arguments`` — a JSON string).  No
     per-tool classification or argument extraction: the recap shows
-    every invocation's raw shape and lets the agent pick out what
+    every call's raw shape and lets the agent pick out what
     matters (the ``text`` arg of a ``signal_send`` call, the
     ``command`` arg of a ``bash`` call, etc.).
     """

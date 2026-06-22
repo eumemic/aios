@@ -140,7 +140,7 @@ def mock_runtime() -> Iterator[None]:
     with (
         patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
         patch(
-            "aios.harness.loop.runtime.require_task_registry",
+            "aios.harness.loop.runtime.require_inflight_tool_registry",
             return_value=MagicMock(),
         ),
     ):
@@ -221,7 +221,7 @@ class TestStepStartEndSpans:
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
-                "aios.harness.loop.runtime.require_task_registry",
+                "aios.harness.loop.runtime.require_inflight_tool_registry",
                 return_value=MagicMock(),
             ),
             patch(
@@ -324,7 +324,7 @@ class TestStepStartEndSpans:
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
-                "aios.harness.loop.runtime.require_task_registry",
+                "aios.harness.loop.runtime.require_inflight_tool_registry",
                 return_value=MagicMock(),
             ),
             patch(
@@ -439,7 +439,9 @@ class TestStepStartEndSpans:
 
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
-            patch("aios.harness.loop.runtime.require_task_registry", return_value=MagicMock()),
+            patch(
+                "aios.harness.loop.runtime.require_inflight_tool_registry", return_value=MagicMock()
+            ),
             patch(
                 "aios.harness.loop.find_sessions_needing_inference",
                 AsyncMock(return_value={"sess_x"}),
@@ -537,7 +539,9 @@ class TestStepStartEndSpans:
 
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
-            patch("aios.harness.loop.runtime.require_task_registry", return_value=MagicMock()),
+            patch(
+                "aios.harness.loop.runtime.require_inflight_tool_registry", return_value=MagicMock()
+            ),
             patch(
                 "aios.harness.loop.find_sessions_needing_inference",
                 AsyncMock(return_value={"sess_x"}),
@@ -630,7 +634,7 @@ class TestStepStartEndSpans:
         with (
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
-                "aios.harness.loop.runtime.require_task_registry",
+                "aios.harness.loop.runtime.require_inflight_tool_registry",
                 return_value=MagicMock(),
             ),
             patch(
@@ -730,7 +734,7 @@ async def _harness_with_guard(
     manager.attach_mock(defer_wake, "defer_wake")
     with (
         patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
-        patch("aios.harness.loop.runtime.require_task_registry", return_value=MagicMock()),
+        patch("aios.harness.loop.runtime.require_inflight_tool_registry", return_value=MagicMock()),
         patch(
             "aios.harness.loop.find_sessions_needing_inference", AsyncMock(return_value={"sess_x"})
         ),

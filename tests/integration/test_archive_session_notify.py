@@ -29,8 +29,8 @@ import pytest
 from aios.db.listen import EVENTS_ARCHIVED_NOTIFY, open_listen_for_events
 from aios.db.pool import create_pool
 from aios.errors import NotFoundError
-from aios.services import invocations as invocations_service
 from aios.services import sessions as service
+from aios.services import tasks as tasks_service
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
@@ -90,7 +90,7 @@ async def test_mode1_await_wakes_promptly_on_mid_flight_archive(
     loop = asyncio.get_running_loop()
     start = loop.time()
     resp, _ = await asyncio.gather(
-        invocations_service.await_invocation(
+        tasks_service.await_task(
             pool,
             migrated_db_url,
             servicer_kind="session",

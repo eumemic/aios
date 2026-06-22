@@ -36,7 +36,7 @@ tool-role message's ``content`` by :mod:`aios.harness.tool_dispatch`):
 
 A nonzero exit code is NOT an error at the handler level — it's normal
 output; the model will see it and react. An ``is_error`` tool message is
-only produced when the docker invocation itself fails (container dead,
+only produced when the docker call itself fails (container dead,
 daemon unreachable, host error). That path is handled by
 :mod:`aios.harness.tool_dispatch`, not here.
 

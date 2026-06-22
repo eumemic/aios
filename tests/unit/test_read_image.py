@@ -303,7 +303,7 @@ class TestImageBranch:
         stub_get_session_model: Any,
     ) -> None:
         """Reading ``/etc/foo.png`` (not a bind mount) hits docker-exec
-        with one combined stat+base64 invocation."""
+        with one combined stat+base64 call."""
         stub_get_session_model.value = "model/vision"
         b64_payload = base64.b64encode(b"otherbytes").decode()
         stub_runtime.exec = AsyncMock(

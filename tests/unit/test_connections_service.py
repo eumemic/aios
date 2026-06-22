@@ -37,7 +37,7 @@ def _mk_connection(cid: str, external: str = "ext") -> Connection:
 def _mk_pool() -> MagicMock:
     """Mock pool whose ``async with pool.acquire()`` yields a fresh MagicMock conn.
 
-    Records every ``acquire()`` invocation so tests can assert one acquire
+    Records every ``acquire()`` call so tests can assert one acquire
     per page (per-page release contract).
     """
     conn = MagicMock()

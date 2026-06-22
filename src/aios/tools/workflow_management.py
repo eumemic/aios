@@ -15,7 +15,7 @@ already enforce, keyed on the **executing session id** the harness supplies
 Cancelling a run is **not** here: it is the model-facing ``stop_task`` builtin (``tools/tasks.py``),
 which cancels any awaited ``call_*`` task by its ``tool_call_id`` — a session servicer or a run —
 and threads the launcher guard (``wf_service.cancel_run``'s "only runs you launched") through
-``cancel_invocation``. The retired ``cancel_run`` model tool is fully covered by it.
+``cancel_task``. The retired ``cancel_run`` model tool is fully covered by it.
 
 Launching-and-awaiting a run is **not** here: it is the unified ``call_workflow``
 builtin (the ``call_*`` family in ``tools/invoke_session.py``) — a single-shot

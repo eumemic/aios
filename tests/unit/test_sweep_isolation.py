@@ -10,8 +10,8 @@ import datetime as dt
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_and_repair_ghosts, wake_sessions_needing_inference
-from aios.harness.task_registry import TaskRegistry
 from tests.unit.conftest import fake_pool_yielding_conn
 
 # Assistant-turn emit time carried on each GHOST_ASST_SQL row (the column added
@@ -35,7 +35,7 @@ async def test_defer_wake_failure_does_not_abort_sweep_batch() -> None:
         patch("aios.harness.sweep.sessions_service.load_session_account_id", load_account_mock),
         patch("aios.harness.sweep.defer_wake", defer_wake_mock),
     ):
-        result = await wake_sessions_needing_inference(MagicMock(), TaskRegistry())
+        result = await wake_sessions_needing_inference(MagicMock(), InflightToolRegistry())
 
     called_sids = {call.args[1] for call in defer_wake_mock.await_args_list}
     assert called_sids == set(woken_sids), (
@@ -93,7 +93,7 @@ async def test_ghost_repair_failure_does_not_abort_batch(monkeypatch: Any) -> No
     )
     monkeypatch.setattr("aios.harness.sweep.sessions_service.append_tool_result", append_mock)
 
-    repaired = await find_and_repair_ghosts(pool, TaskRegistry())
+    repaired = await find_and_repair_ghosts(pool, InflightToolRegistry())
 
     assert append_mock.await_count == 2, (
         f"sweep aborted mid-batch: append_tool_result was called {append_mock.await_count} "
@@ -156,7 +156,7 @@ async def test_ghost_repair_branch_may_have_completed(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr("aios.harness.sweep.sessions_service.append_tool_result", append_mock)
 
-    repaired = await find_and_repair_ghosts(pool, TaskRegistry())
+    repaired = await find_and_repair_ghosts(pool, InflightToolRegistry())
 
     assert repaired == [("sess_a", "tc_a")]
     assert append_mock.await_count == 1
@@ -203,7 +203,7 @@ async def test_ghost_repair_branch_did_not_run(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr("aios.harness.sweep.sessions_service.append_tool_result", append_mock)
 
-    repaired = await find_and_repair_ghosts(pool, TaskRegistry())
+    repaired = await find_and_repair_ghosts(pool, InflightToolRegistry())
 
     assert repaired == [("sess_a", "tc_a")]
     assert append_mock.await_count == 1

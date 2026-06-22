@@ -15,7 +15,7 @@ the registry needs to track separately:
   started here so the spec builder can rewrite working-tree origins
   through the proxy URL, stopped by the registry on session release.
 
-Pure orchestration: no Docker calls, no subprocess invocations beyond
+Pure orchestration: no Docker calls, no subprocess calls beyond
 the cache-clone helpers in :mod:`aios.sandbox.github_clone`. Whether the
 returned spec is realized by a Docker backend, a host-subprocess
 backend, or anything else is decided by the worker's selected backend.

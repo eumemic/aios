@@ -985,8 +985,8 @@ async def _open_agent_capability(
         from aios.workflows.service import INVOKE_MAX_DEPTH
 
         return await _reject(
-            "invocation_depth_exceeded",
-            f"agent() would exceed the trusted invocation depth budget ({INVOKE_MAX_DEPTH})",
+            "invoke_depth_exceeded",
+            f"agent() would exceed the trusted invoke-depth budget ({INVOKE_MAX_DEPTH})",
         )
     run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=account_id)
 
