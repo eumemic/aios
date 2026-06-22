@@ -390,7 +390,7 @@ async def worker_main() -> None:
 
         worker_task = asyncio.create_task(
             procrastinate_app.run_worker_async(
-                queues=["sessions", "connectors", "workflows"],
+                queues=["sessions", "workflows"],
                 concurrency=settings.worker_concurrency,
                 wait=True,
                 install_signal_handlers=True,
