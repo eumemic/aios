@@ -18,26 +18,16 @@ async def _sleeper() -> None:
 
 
 class TestBasicLifecycle:
-    def test_add_and_count(self) -> None:
-        reg = InflightToolRegistry()
-        task = _future()
-        reg.add("sess_1", "call_a", task)  # type: ignore[arg-type]
-        assert reg.in_flight_count("sess_1") == 1
-
     def test_remove(self) -> None:
         reg = InflightToolRegistry()
         task = _future()
         reg.add("sess_1", "call_a", task)  # type: ignore[arg-type]
         reg.remove("sess_1", "call_a")
-        assert reg.in_flight_count("sess_1") == 0
+        assert reg.in_flight_tool_call_ids("sess_1") == set()
 
     def test_remove_nonexistent_is_noop(self) -> None:
         reg = InflightToolRegistry()
         reg.remove("sess_1", "call_nope")  # no error
-
-    def test_count_unknown_session_is_zero(self) -> None:
-        reg = InflightToolRegistry()
-        assert reg.in_flight_count("sess_nope") == 0
 
 
 class TestCancellation:
@@ -122,8 +112,8 @@ class TestShutdown:
         await reg.shutdown()
         assert t1.cancelled()
         assert t2.cancelled()
-        assert reg.in_flight_count("sess_1") == 0
-        assert reg.in_flight_count("sess_2") == 0
+        assert reg.in_flight_tool_call_ids("sess_1") == set()
+        assert reg.in_flight_tool_call_ids("sess_2") == set()
 
 
 # ── step-task tracking ───────────────────────────────────────────────
@@ -174,6 +164,6 @@ class TestStepTracking:
         await asyncio.sleep(0)
         assert step.cancelled()
         assert not tool.cancelled()
-        assert reg.in_flight_count("sess_1") == 1
+        assert reg.in_flight_tool_call_ids("sess_1") == {"call_a"}
         tool.cancel()
         await asyncio.sleep(0)
