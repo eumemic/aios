@@ -12,6 +12,13 @@ from __future__ import annotations
 
 from aios_sdk._generated import AuthenticatedClient as Client
 from aios_sdk._generated.errors import UnexpectedStatus
+from aios_sdk.authoring import (
+    AgentBuilder,
+    define_agent,
+    define_tool_builtin,
+    define_tool_custom,
+    define_tool_mcp,
+)
 from aios_sdk.factory import client_from_env
 from aios_sdk.streaming import (
     SseMessage,
@@ -24,10 +31,15 @@ from aios_sdk.streaming import (
 )
 
 __all__ = [
+    "AgentBuilder",
     "Client",
     "SseMessage",
     "UnexpectedStatus",
     "client_from_env",
+    "define_agent",
+    "define_tool_builtin",
+    "define_tool_custom",
+    "define_tool_mcp",
     "parse_sse_lines",
     "stream_connection_discovery",
     "stream_connector_calls",
