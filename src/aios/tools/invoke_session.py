@@ -17,7 +17,7 @@ top — *create the servicer, then call it*:
 All three return a **single-shot handle** (one ``request_id``, one resolution;
 re-asking = a fresh invoke) and **park as an implicit-async tool task** — the
 caller session stays responsive to user messages while parked (never #772's
-blocking long-poll). The park rides the one awaiter (``await_invocation``,
+blocking long-poll). The park rides the one awaiter (``await_task``,
 dispatching session vs run) re-polled in a loop; the response-write NOTIFYs the
 servicer's channel the park subscribes to.
 
@@ -57,9 +57,9 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.harness import runtime
-from aios.models.invocations import AwaitResponse
-from aios.services import invocations as invocations_service
+from aios.models.tasks import AwaitResponse
 from aios.services import sessions as sessions_service
+from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail, current_tool_call_id
 from aios.tools.registry import ToolResult, registry
@@ -170,24 +170,24 @@ def _error_result(error: dict[str, Any] | None) -> ToolResult:
 # ─── park loops ──────────────────────────────────────────────────────────────
 
 
-async def _park_on_invocation(
+async def _park_on_task(
     pool: Any,
     *,
-    servicer_kind: invocations_service.ServicerKind,
+    servicer_kind: tasks_service.ServicerKind,
     servicer_id: str,
     request_id: str | None,
     account_id: str,
 ) -> AwaitResponse:
     """Park (implicit-async) until the servicer answers, via the one awaiter.
 
-    Re-polls :func:`await_invocation` (session → ``derive_response`` on
+    Re-polls :func:`await_task` (session → ``derive_response`` on
     ``request_id``; run → terminal row) so a single LISTEN drop can't strand us. As
     a fire-and-forget tool task the caller stays responsive to user messages while
-    parked. ``outcome`` is non-None exactly when the invocation is terminal.
+    parked. ``outcome`` is non-None exactly when the task is terminal.
     """
     db_url = get_settings().db_url
     while True:
-        resp = await invocations_service.await_invocation(
+        resp = await tasks_service.await_task(
             pool,
             db_url,
             servicer_kind=servicer_kind,
@@ -203,7 +203,7 @@ async def _park_on_invocation(
 async def _park_and_resolve(
     pool: Any,
     *,
-    servicer_kind: invocations_service.ServicerKind,
+    servicer_kind: tasks_service.ServicerKind,
     servicer_id: str,
     request_id: str | None,
     account_id: str,
@@ -212,13 +212,13 @@ async def _park_and_resolve(
     """Park on the servicer, then resolve to a model-visible ``{ok | error}``.
 
     The shared tail of every ``call_*`` handler AND the crash-resume path
-    (:func:`aios.harness.tool_dispatch.relaunch_parked_invocation`). It is a **pure read**
+    (:func:`aios.harness.tool_dispatch.relaunch_parked_task`). It is a **pure read**
     of durable state — re-entrant, so re-parking after a worker restart re-reads the same
     servicer edge with zero side effects; the resolved tool result is the only write it
     drives. ``output_schema`` is validated caller-side (a run/peer answer can bypass the
     servicer's own ``return`` gate).
     """
-    resp = await _park_on_invocation(
+    resp = await _park_on_task(
         pool,
         servicer_kind=servicer_kind,
         servicer_id=servicer_id,
@@ -232,10 +232,10 @@ async def _park_and_resolve(
 
 
 def _caller(session_id: str) -> dict[str, Any]:
-    """Trusted caller provenance for a model-launched invocation: THIS session's id plus
+    """Trusted caller provenance for a model-launched task: THIS session's id plus
     the launching ``tool_call_id`` (#1431).
 
-    The ``tool_call_id`` rides onto the servicer's edge ``caller`` so a parked invocation
+    The ``tool_call_id`` rides onto the servicer's edge ``caller`` so a parked task
     can be re-derived from durable state and re-parked after a worker restart
     (``queries.find_parked_servicer``). Omitted (not written as ``null``) when no tool
     context is set — e.g. a non-dispatch caller — keeping the edge clean.

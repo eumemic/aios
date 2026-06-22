@@ -37,7 +37,7 @@ from aios.db.queries import (
     session_active_predicate,
     session_errored_predicate,
 )
-from aios.harness.task_registry import TaskRegistry
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
 from aios.services.wake import defer_wake
@@ -292,16 +292,16 @@ ERRORED_SESSIONS_SQL = f"""
 
 async def find_and_repair_ghosts(
     pool: asyncpg.Pool[Any],
-    task_registry: TaskRegistry,
+    inflight_tool_registry: InflightToolRegistry,
     *,
     session_id: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Recover ghost tool calls: re-park resumable invocations, error-repair the rest.
+    """Recover ghost tool calls: re-park resumable tasks, error-repair the rest.
 
     A ghost is a tool_call_id from an assistant message where:
 
     - No tool-role result event exists in the log.
-    - No asyncio task is in-flight (TaskRegistry).
+    - No asyncio task is in-flight (InflightToolRegistry).
     - The harness would have dispatched the tool (i.e. it's not a
       custom tool or an unconfirmed ``always_ask`` tool still waiting
       for client action).
@@ -335,7 +335,7 @@ async def find_and_repair_ghosts(
     Returns a list of ``(session_id, tool_call_id)`` pairs that were
     repaired (both categories count as repairs).
     """
-    in_flight = task_registry.all_in_flight_tool_call_ids()
+    in_flight = inflight_tool_registry.all_in_flight_tool_call_ids()
 
     scope_clause = "AND e.session_id = $1" if session_id else ""
     scope_params: list[Any] = [session_id] if session_id else []
@@ -471,7 +471,7 @@ async def find_and_repair_ghosts(
     # Lazy imports: ``sweep`` ↔ ``tool_dispatch`` is a mutual-lazy-import pair (the
     # symmetric counterpart of ``_trigger_sweep``'s lazy ``sweep`` import); ``invoke_session``
     # registers tools at import and isn't needed at ``sweep`` module load.
-    from aios.harness.tool_dispatch import relaunch_parked_invocation
+    from aios.harness.tool_dispatch import relaunch_parked_task
     from aios.tools.invoke_session import PARKING_TOOL_NAMES
 
     resumable = [c for c in ghosts if c.tool_name in PARKING_TOOL_NAMES]
@@ -495,7 +495,7 @@ async def find_and_repair_ghosts(
                 launch_lost.append(c)
                 continue
             servicer_kind, servicer_id, request_id, output_schema = handle
-            relaunch_parked_invocation(
+            relaunch_parked_task(
                 pool,
                 c.session_id,
                 call={
@@ -514,7 +514,7 @@ async def find_and_repair_ghosts(
             )
             continue
         log.info(
-            "sweep.invocation_reparked",
+            "sweep.task_reparked",
             session_id=c.session_id,
             tool_call_id=c.tool_call_id,
             servicer_kind=servicer_kind,
@@ -595,7 +595,7 @@ async def find_and_repair_ghosts(
             (
                 c,
                 "launch_lost",
-                "The invocation did not start before the worker restarted; "
+                "The task did not start before the worker restarted; "
                 "nothing was launched. You may retry.",
             )
         )
@@ -617,7 +617,7 @@ async def find_and_repair_ghosts(
         # repairs.  Bare-append had a TOCTOU window between the
         # result-rows read above and the write here that admitted two
         # duplicate synthetic results for the same ``tool_call_id``
-        # under concurrent sweep invocation, violating invariant #4
+        # under a concurrent sweep run, violating invariant #4
         # (tool-always-appends-EXACTLY-one result).
         try:
             sid_account_id = await sessions_service.load_session_account_id(pool, sid)
@@ -739,7 +739,7 @@ async def _errored_session_ids(
 
 async def find_sessions_needing_inference(
     pool: asyncpg.Pool[Any],
-    task_registry: TaskRegistry,
+    inflight_tool_registry: InflightToolRegistry,
     *,
     session_id: str | None = None,
 ) -> set[str]:
@@ -802,14 +802,16 @@ async def find_sessions_needing_inference(
     confirmed_sessions -= errored
     to_filter = candidates - confirmed_sessions
     filtered = (
-        await _filter_incomplete_batches(pool, task_registry, to_filter) if to_filter else set()
+        await _filter_incomplete_batches(pool, inflight_tool_registry, to_filter)
+        if to_filter
+        else set()
     )
     return filtered | confirmed_sessions | cancel_marked
 
 
 async def _filter_incomplete_batches(
     pool: asyncpg.Pool[Any],
-    task_registry: TaskRegistry,
+    inflight_tool_registry: InflightToolRegistry,
     candidates: set[str],
 ) -> set[str]:
     """Remove sessions whose only unreacted events are tool results from
@@ -830,7 +832,7 @@ async def _filter_incomplete_batches(
 
     result: set[str] = set()
     for sid in candidates:
-        in_flight = task_registry.in_flight_tool_call_ids(sid)
+        in_flight = inflight_tool_registry.in_flight_tool_call_ids(sid)
         unreacted = unreacted_by_sid.get(sid, [])
 
         if not unreacted:
@@ -925,7 +927,7 @@ async def reap_stalled_jobs(job_manager: Any) -> int:
 
 async def wake_sessions_needing_inference(
     pool: asyncpg.Pool[Any],
-    task_registry: TaskRegistry,
+    inflight_tool_registry: InflightToolRegistry,
     *,
     session_id: str | None = None,
 ) -> SweepResult:
@@ -939,8 +941,10 @@ async def wake_sessions_needing_inference(
     the number of procrastinate wakes deferred, so the tail-site
     ``sweep_end`` span can stamp both without unrolling the composition.
     """
-    repaired = await find_and_repair_ghosts(pool, task_registry, session_id=session_id)
-    woken = await find_sessions_needing_inference(pool, task_registry, session_id=session_id)
+    repaired = await find_and_repair_ghosts(pool, inflight_tool_registry, session_id=session_id)
+    woken = await find_sessions_needing_inference(
+        pool, inflight_tool_registry, session_id=session_id
+    )
     # Per-session try/except: a transient failure on one session must
     # not strand the rest of the cross-session batch.  account_id is
     # loaded individually because the cross-session sweeper has none

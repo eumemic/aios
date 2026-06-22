@@ -57,8 +57,8 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import sweep
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.loop import _dispatch_confirmed_tools
-from aios.harness.task_registry import TaskRegistry
 from aios.models.agents import ToolSpec
 from aios.models.events import EventKind
 from tests.integration.conftest import seed_agent_env_session
@@ -300,7 +300,7 @@ class TestStaleConfirmedDispatchExcluded:
             pool,
             session_id,
             account_id=account_id,
-            task_registry=TaskRegistry(),
+            inflight_tool_registry=InflightToolRegistry(),
         )
         pending_ids = [tc["id"] for tc in pending]
 
@@ -333,7 +333,7 @@ class TestFreshConfirmOnOldProposalStillDispatches:
             pool,
             session_id,
             account_id=account_id,
-            task_registry=TaskRegistry(),
+            inflight_tool_registry=InflightToolRegistry(),
         )
         pending_ids = [tc["id"] for tc in pending]
 

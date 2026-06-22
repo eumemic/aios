@@ -1,7 +1,7 @@
 """Integration tests for the **session caller surface** (#1127).
 
 DB-backed (testcontainer Postgres). Covers the session-caller half that the API
-caller (#1128, ``test_invocations.py``) does not:
+caller (#1128, ``test_tasks.py``) does not:
 
 * ``service.invoke(target_kind=session, caller={kind:"session", ...})`` writes the
   trusted ``request_opened`` edge into an EXISTING same-account session with a

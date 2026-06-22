@@ -1,4 +1,4 @@
-"""Integration tests for durable await-resume of parked ``call_*`` invocations (#1431).
+"""Integration tests for durable await-resume of parked ``call_*`` tasks (#1431).
 
 DB-backed (testcontainer Postgres). On a worker crash a parked ``call_*`` tool task is
 lost; recovery must re-derive its servicer from the durable edge (the ``tool_call_id`` the
@@ -34,8 +34,8 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_and_repair_ghosts
-from aios.harness.task_registry import TaskRegistry
 from aios.models.agents import ToolSpec
 from aios.services import workflows as wf_service
 from aios.tools import workflow_completion
@@ -54,9 +54,9 @@ async def env(
     """Yield ``(pool, account_id, migrated_db_url)`` with the worker runtime wired so
     recovery + resume can run without a live worker (wakes are patched out)."""
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
-    prev_pool, prev_reg = runtime.pool, runtime.task_registry
+    prev_pool, prev_reg = runtime.pool, runtime.inflight_tool_registry
     runtime.pool = pool
-    runtime.task_registry = TaskRegistry()
+    runtime.inflight_tool_registry = InflightToolRegistry()
     try:
         async with pool.acquire() as conn:
             await conn.execute(
@@ -70,7 +70,7 @@ async def env(
         ):
             yield pool, _ACCOUNT, migrated_db_url
     finally:
-        runtime.pool, runtime.task_registry = prev_pool, prev_reg
+        runtime.pool, runtime.inflight_tool_registry = prev_pool, prev_reg
         await pool.close()
 
 
@@ -261,10 +261,10 @@ async def test_sweep_reparks_resumable_ghost_routing(
     )
 
     relaunch = mock.Mock()
-    monkeypatch.setattr("aios.harness.tool_dispatch.relaunch_parked_invocation", relaunch)
+    monkeypatch.setattr("aios.harness.tool_dispatch.relaunch_parked_task", relaunch)
 
     repaired = await find_and_repair_ghosts(
-        pool, runtime.require_task_registry(), session_id=caller
+        pool, runtime.require_inflight_tool_registry(), session_id=caller
     )
 
     # tc_live: re-parked — relaunch called with the session servicer handle, NOT error-repaired.
@@ -313,7 +313,7 @@ async def test_resume_parked_lands_answer_without_start_span(
     await workflow_completion.respond_to_request(
         pool, servicer, request_id="req_done", is_error=False, result={"v": 42}, error=None
     )
-    # _park_on_invocation reads the LISTEN db_url off settings; point it at the test DB.
+    # _park_on_task reads the LISTEN db_url off settings; point it at the test DB.
     monkeypatch.setattr(
         "aios.tools.invoke_session.get_settings", lambda: SimpleNamespace(db_url=db_url)
     )
@@ -351,7 +351,7 @@ async def test_recovery_isolates_per_ghost_failure(
 ) -> None:
     """A transient failure resolving one resumable ghost must NOT abort recovery of the
     others — the cross-session sweep needs the same per-item isolation the error-repair
-    loop has, or one gone caller strands every other tenant's parked invocation."""
+    loop has, or one gone caller strands every other tenant's parked task."""
     pool, account_id, _ = env
     caller = await _seed_session(pool, "iso-caller", tools=[ToolSpec(type="call_session")])
     async with pool.acquire() as conn:
@@ -374,7 +374,7 @@ async def test_recovery_isolates_per_ghost_failure(
 
     # Must return normally despite tc_boom raising mid-loop.
     repaired = await find_and_repair_ghosts(
-        pool, runtime.require_task_registry(), session_id=caller
+        pool, runtime.require_inflight_tool_registry(), session_id=caller
     )
     repaired_ids = {tcid for _sid, tcid in repaired}
 

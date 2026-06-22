@@ -47,8 +47,8 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_sessions_needing_inference
-from aios.harness.task_registry import TaskRegistry
 from aios.models.agents import ToolSpec
 from aios.services import sessions as sessions_service
 from tests.integration.conftest import seed_agent_env_session
@@ -191,7 +191,7 @@ class TestFireAndForgetSettles:
         assert scalars["last_stimulus_seq"] <= scalars["last_reacted_seq"]
         assert await _status(pool, session_id, account_id) == "idle"
 
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id not in needs, (
             "a successful fire-and-forget delivery confirmation must NOT wake the "
@@ -218,7 +218,7 @@ class TestFireAndForgetSettles:
         assert await _result_marker(pool, session_id, "tc_fail") is None
         assert await _status(pool, session_id, account_id) == "active"
 
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id in needs, "a FAILED send must wake so the model can recover"
 
@@ -235,7 +235,7 @@ class TestFireAndForgetSettles:
         assert await _result_marker(pool, session_id, "tc_list") is None
         assert await _status(pool, session_id, account_id) == "active"
 
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id in needs
 
@@ -280,7 +280,7 @@ class TestFireAndForgetSettles:
         assert await _result_marker(pool, session_id, "tc_old") is None
         assert await _status(pool, session_id, account_id) == "active"
 
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id in needs
 
@@ -306,6 +306,6 @@ class TestFireAndForgetSettles:
             )
 
         assert await _status(pool, session_id, account_id) == "active"
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id in needs, "a co-pending real user message must still wake"

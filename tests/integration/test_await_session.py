@@ -3,7 +3,7 @@
 Two monotonic awaits over a session, now split across two services:
 
 * **request correlation** is the session arm of the unified awaiter
-  ``await_invocation`` — correlate a posted request to its response via
+  ``await_task`` — correlate a posted request to its response via
   ``derive_response``, resolving once a response (or a ``child_gone`` outcome) lands.
 * **watermark quiescence** is ``await_session`` (the orthogonal session-only alias):
   block until ``last_reacted_seq >= watermark`` (defaulting to ``last_stimulus_seq``
@@ -27,9 +27,9 @@ from aios.db.listen import open_listen_for_events
 from aios.db.pool import create_pool
 from aios.db.sse_lock import has_subscriber
 from aios.errors import NotFoundError
-from aios.models.invocations import AwaitResponse
-from aios.services import invocations as invocations_service
+from aios.models.tasks import AwaitResponse
 from aios.services import sessions as service
+from aios.services import tasks as tasks_service
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
@@ -67,7 +67,7 @@ async def _await_request(
     timeout_seconds: float,
 ) -> AwaitResponse:
     """Drive the unified awaiter's session arm (request correlation)."""
-    return await invocations_service.await_invocation(
+    return await tasks_service.await_task(
         pool,
         db_url,
         servicer_kind="session",
@@ -78,7 +78,7 @@ async def _await_request(
     )
 
 
-# ─── request correlation (await_invocation, session arm) ─────────────────────
+# ─── request correlation (await_task, session arm) ─────────────────────
 
 
 async def test_request_already_responded_ok_with_result(

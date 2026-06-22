@@ -27,7 +27,7 @@ bridge over the async confirmation machinery. That bridge is deferred;
 the seam where it slots in is the ``return _err(403, ...)`` branches
 in :meth:`ToolBroker._resolve_builtin` and :meth:`ToolBroker._resolve_mcp`.
 
-**Invocation.** Built-ins run through :func:`aios.tools.invoke.invoke_builtin`
+**Execution.** Built-ins run through :func:`aios.tools.invoke.invoke_builtin`
 — the same pure core the model path drives (the event-append and sweep
 are model-path-only and stay in ``harness/tool_dispatch.py``). MCP
 calls hit :func:`aios.mcp.client.call_mcp_tool` unchanged. Credentials

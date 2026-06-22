@@ -176,7 +176,7 @@ class TestErrorPath:
         sha line is then cached into the read-sha map (poisoning the next
         write's precondition).
 
-        The fix prepends ``set -o pipefail`` to the bash invocation so any
+        The fix prepends ``set -o pipefail`` to the bash call so any
         non-zero exit anywhere in the pipe (or in either side of the ``&&``)
         is surfaced as the overall exit code, which the existing
         ``result.exit_code != 0`` branch then turns into the error dict the

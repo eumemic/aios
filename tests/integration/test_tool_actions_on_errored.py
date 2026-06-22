@@ -14,8 +14,8 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import ConflictError
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import GHOST_ASST_SQL, find_and_repair_ghosts
-from aios.harness.task_registry import TaskRegistry
 from aios.services import sessions as sessions_service
 from tests.integration.conftest import seed_agent_env_session
 
@@ -156,7 +156,7 @@ async def test_ghost_repair_skips_errored_session(
     the sweep loop."""
     pool, _account_id, session_id = errored_session_with_tool_call
 
-    repaired = await find_and_repair_ghosts(pool, TaskRegistry(), session_id=session_id)
+    repaired = await find_and_repair_ghosts(pool, InflightToolRegistry(), session_id=session_id)
     assert repaired == [], (
         f"ghost-repair attempted on an errored session (got {repaired}); "
         f"find_and_repair_ghosts is missing the derived-errored exclusion "
@@ -256,7 +256,7 @@ async def test_ghost_repair_handles_healthy_session_with_open_call(
         f"tool_call (got {len(rows)} rows); the #897 predicate over-excludes."
     )
 
-    repaired = await find_and_repair_ghosts(pool, TaskRegistry(), session_id=session_id)
+    repaired = await find_and_repair_ghosts(pool, InflightToolRegistry(), session_id=session_id)
     assert (session_id, "tc_live") in repaired, (
         f"ghost-repair missed the open dispatched tool_call on a healthy "
         f"session (got {repaired}); the #897 errored exclusion must not "

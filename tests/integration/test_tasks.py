@@ -30,16 +30,16 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import NotFoundError, ValidationError
 from aios.harness import runtime
-from aios.services import invocations as invocations_service
 from aios.services import sessions as service
+from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
-_ROOT = "acc_invocations_root"
-_ACCOUNT = "acc_invocations"
-_OTHER = "acc_invocations_other"
+_ROOT = "acc_tasks_root"
+_ACCOUNT = "acc_tasks"
+_OTHER = "acc_tasks_other"
 
 
 @pytest.fixture
@@ -60,7 +60,7 @@ async def pool_env(
             # test tenants are sibling children of that root.
             await conn.execute(
                 "INSERT INTO accounts (id, parent_account_id, can_mint_children, "
-                "display_name) VALUES ($1, NULL, TRUE, 'invocations-root')",
+                "display_name) VALUES ($1, NULL, TRUE, 'tasks-root')",
                 _ROOT,
             )
             for acc in (_ACCOUNT, _OTHER):
@@ -72,7 +72,7 @@ async def pool_env(
                     acc,
                 )
         agent, env, session = await seed_agent_env_session(
-            pool, account_id=_ACCOUNT, prefix="invocations"
+            pool, account_id=_ACCOUNT, prefix="tasks"
         )
         with (
             mock.patch("aios.services.wake.defer_wake", new=AsyncMock()),
@@ -89,7 +89,7 @@ async def _seed_workflow(pool: asyncpg.Pool[Any], *, account_id: str) -> str:
     wf = await wf_service.create_workflow(
         pool,
         account_id=account_id,
-        name="invocations-wf",
+        name="tasks-wf",
         script="async def main(input):\n    return None\n",
         description=None,
         tools=[],
@@ -156,7 +156,7 @@ async def test_agent_request_correlates_await_to_response(
             error=None,
         )
 
-    resp = await invocations_service.await_invocation(
+    resp = await tasks_service.await_task(
         pool,
         migrated_db_url,
         servicer_kind="session",
@@ -306,7 +306,7 @@ async def test_unowned_environment_refused(
     from aios.services import environments as env_service
 
     other_env = await env_service.create_environment(
-        pool, account_id=_OTHER, name="invocations-other-env"
+        pool, account_id=_OTHER, name="tasks-other-env"
     )
     with pytest.raises(NotFoundError):
         await service.invoke(

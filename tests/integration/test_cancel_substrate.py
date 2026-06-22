@@ -1,6 +1,6 @@
 """Integration tests for the cancel-supervision side-table (cancel-design §2).
 
-DB-backed round-trips over the durable primitive the recursive ``cancel_invocation``
+DB-backed round-trips over the durable primitive the recursive ``cancel_task``
 cascade is built on: the session-side ``session_cancel_markers`` exit-marker. The cascade
 logic that drives it (propagation, the leaf, the seed) is covered by test_session_cancel_leaf;
 here we pin the marker's idempotency + harvest semantics in isolation.

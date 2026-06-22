@@ -488,7 +488,7 @@ async def get_wf_run(conn: asyncpg.Connection[Any], run_id: str, *, account_id: 
 
 
 async def get_run_depth(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> int:
-    """Read a run's DOWN-counting trusted invocation depth (#1124), account-scoped.
+    """Read a run's DOWN-counting trusted invoke-depth (#1124), account-scoped.
 
     The remaining trusted-edge budget on ``run_id`` — what a sub-launch off this run
     may carry as ``depth - 1``. ACCOUNT-SCOPED: a foreign or missing parent raises
@@ -575,7 +575,7 @@ async def insert_wf_run(
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
     ``launcher_session_id`` records the agent session that launched it (NULL = operator).
 
-    ``depth`` is the DOWN-counting trusted invocation budget (#1124) carried on the run:
+    ``depth`` is the DOWN-counting trusted invoke-depth budget (#1124) carried on the run:
     the remaining hops this run may spend on its OUTGOING trusted edges. The caller
     (``create_run``) computes it — full budget for an edgeless root, ``parent.depth - 1``
     for a nested launch — and refuses BEFORE calling here when the parent has none left,

@@ -675,7 +675,7 @@ class TestCallMcpToolWithPool:
         session.initialize.assert_awaited_once()
 
     async def test_spec_headers_segment_pool_via_call(self, restore_runtime_pool: None) -> None:
-        """Two ``call_mcp_tool`` invocations with DIFFERENT ``spec_headers``
+        """Two ``call_mcp_tool`` calls with DIFFERENT ``spec_headers``
         open two distinct pooled sessions (the headers_key is part of the pool
         key); the SAME spec_headers reuses one. This proves spec_headers
         threads end-to-end through ``call_mcp_tool`` into the pool key."""

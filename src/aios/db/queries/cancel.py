@@ -1,7 +1,7 @@
 """Cancel-supervision side-table queries (cancel-design §2).
 
 A subsystem module of the ``aios.db.queries`` package — see ``__init__`` for the
-shared contract. The durable primitive the recursive ``cancel_invocation`` cascade is
+shared contract. The durable primitive the recursive ``cancel_task`` cascade is
 built on: the session-side ``session_cancel_markers`` exit-marker (the run side reuses
 ``wf_run_signals kind='cancel'`` verbatim). Every write is to a **side-table**, never to
 a node's event log/journal — the single-writer invariant: a node's own step under its
@@ -14,7 +14,7 @@ from typing import Any
 
 import asyncpg
 
-from aios.models.invocations import SessionCancelMarker
+from aios.models.tasks import SessionCancelMarker
 
 
 def _row_to_session_cancel_marker(row: asyncpg.Record) -> SessionCancelMarker:

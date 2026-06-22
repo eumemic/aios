@@ -87,7 +87,7 @@ async def launch_awaited_run(
     """Launch a run as an **awaited** servicer — the one place the run-as-Ask contract lives.
 
     Both Ask-shaped callers (the model ``call_workflow`` builtin and the API
-    ``POST /v1/invocations`` workflow arm) go through here, so the contract — mint a fresh
+    ``POST /v1/tasks`` workflow arm) go through here, so the contract — mint a fresh
     ``request_id`` and stamp ``caller.awaited=True`` so the run carries a response obligation —
     is correct-by-construction at one site rather than re-typed (and forgettable) at each.
     Returns ``(run, request_id)``; the caller awaits the run via the unified awaiter. The

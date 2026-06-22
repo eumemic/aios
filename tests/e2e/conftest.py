@@ -334,20 +334,20 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     from aios.crypto.vault import CryptoBox
     from aios.db.pool import create_pool
     from aios.harness import runtime
-    from aios.harness.task_registry import TaskRegistry
+    from aios.harness.inflight_tool_registry import InflightToolRegistry
     from aios.tools.registry import registry
     from aios_connectors.providers import SubsystemToolProvider
 
     settings = get_settings()
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
     crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    task_reg = TaskRegistry()
+    inflight_reg = InflightToolRegistry()
 
     # Save runtime globals
     prev = (
         runtime.pool,
         runtime.crypto_box,
-        runtime.task_registry,
+        runtime.inflight_tool_registry,
         runtime.sandbox_registry,
         runtime.worker_id,
         runtime.tool_provider,
@@ -356,7 +356,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     # Install
     runtime.pool = pool
     runtime.crypto_box = crypto_box
-    runtime.task_registry = task_reg
+    runtime.inflight_tool_registry = inflight_reg
     runtime.sandbox_registry = None  # no Docker in fast tier
     runtime.worker_id = "worker_test"
     runtime.tool_provider = SubsystemToolProvider()
@@ -364,7 +364,7 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     # Snapshot tool registry
     tool_snapshot = dict(registry._tools)
 
-    h = Harness(pool, task_reg)
+    h = Harness(pool, inflight_reg)
 
     # Install mocks at fixture scope so they cover fire-and-forget tool tasks
     async def _fake_acompletion(**kwargs: Any) -> Any:
@@ -387,12 +387,12 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
     (
         runtime.pool,
         runtime.crypto_box,
-        runtime.task_registry,
+        runtime.inflight_tool_registry,
         runtime.sandbox_registry,
         runtime.worker_id,
         runtime.tool_provider,
     ) = prev
-    await task_reg.shutdown()
+    await inflight_reg.shutdown()
     await pool.close()
 
 
@@ -425,7 +425,7 @@ async def docker_harness(
     from aios.crypto.vault import CryptoBox
     from aios.db.pool import create_pool
     from aios.harness import runtime
-    from aios.harness.task_registry import TaskRegistry
+    from aios.harness.inflight_tool_registry import InflightToolRegistry
     from aios.sandbox.backends.docker import DockerBackend
     from aios.sandbox.network import ensure_sandbox_network
     from aios.sandbox.registry import SandboxRegistry
@@ -436,7 +436,7 @@ async def docker_harness(
     settings = get_settings()
     pool = await create_pool(settings.db_url, min_size=1, max_size=4)
     crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-    task_reg = TaskRegistry()
+    inflight_reg = InflightToolRegistry()
     sandbox_reg = SandboxRegistry(backend=DockerBackend())
     # Mirror worker startup: create+attach the sandbox network before
     # bringing the broker up. Otherwise the very first sandbox a test
@@ -449,7 +449,7 @@ async def docker_harness(
     prev = (
         runtime.pool,
         runtime.crypto_box,
-        runtime.task_registry,
+        runtime.inflight_tool_registry,
         runtime.sandbox_registry,
         runtime.tool_broker,
         runtime.worker_id,
@@ -457,14 +457,14 @@ async def docker_harness(
     )
     runtime.pool = pool
     runtime.crypto_box = crypto_box
-    runtime.task_registry = task_reg
+    runtime.inflight_tool_registry = inflight_reg
     runtime.sandbox_registry = sandbox_reg
     runtime.tool_broker = tool_broker
     runtime.worker_id = "worker_test"
     runtime.tool_provider = SubsystemToolProvider()
 
     tool_snapshot = dict(registry._tools)
-    h = Harness(pool, task_reg)
+    h = Harness(pool, inflight_reg)
 
     async def _fake_acompletion(**kwargs: Any) -> Any:
         if kwargs.get("stream"):
@@ -485,13 +485,13 @@ async def docker_harness(
     (
         runtime.pool,
         runtime.crypto_box,
-        runtime.task_registry,
+        runtime.inflight_tool_registry,
         runtime.sandbox_registry,
         runtime.tool_broker,
         runtime.worker_id,
         runtime.tool_provider,
     ) = prev
-    await task_reg.shutdown()
+    await inflight_reg.shutdown()
     from tests.helpers.sandbox import purge_all_sandboxes
 
     await purge_all_sandboxes(sandbox_reg)

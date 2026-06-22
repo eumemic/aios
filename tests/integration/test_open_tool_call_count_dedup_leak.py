@@ -48,8 +48,8 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import ConflictError
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_sessions_needing_inference
-from aios.harness.task_registry import TaskRegistry
 from aios.harness.tool_dispatch import _append_tool_result_event
 from aios.models.agents import ToolSpec
 from aios.services import sessions as sessions_service
@@ -179,7 +179,7 @@ class TestWorkerDedupSkipCompensates:
         )
 
         assert await _status(pool, session_id, account_id) == "idle"
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
         candidates = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id not in candidates, (
             "with open_tool_call_count compensated to 0 and the stimulus reacted-to, "
@@ -245,7 +245,7 @@ class TestApiDedupSkipCompensates:
         )
 
         assert await _status(pool, session_id, account_id) == "idle"
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
         candidates = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id not in candidates, (
             "with open_tool_call_count compensated to 0 and the stimulus reacted-to, "
@@ -264,7 +264,7 @@ class TestApiDedupSkipCompensates:
         re-activates the session when the sibling's real result lands.
         """
         pool, account_id, session_id = pool_account_session
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
 
         # 1. Assistant turn A1 issues tc_X and tc_Y → id-blind +2 → count 2.
         async with pool.acquire() as conn:

@@ -3,7 +3,7 @@
 The one mechanism behind "await-a-completion": block on a target's notify queue, re-reading
 state on each notify until ``is_done`` holds (or the deadline passes). The predicate must be
 *monotonic* — a terminal record never un-completes — so the loop safely stops the first time it
-holds. The unified awaiter :func:`aios.services.invocations.await_invocation` drives it for both
+holds. The unified awaiter :func:`aios.services.tasks.await_task` drives it for both
 a run (``status in {completed, errored, cancelled}``) and a session (``request_response``
 correlation); :func:`aios.services.sessions.await_session` drives it for watermarked quiescence.
 None is the non-monotonic "wait for idle", which would be the reverted Stop hook.

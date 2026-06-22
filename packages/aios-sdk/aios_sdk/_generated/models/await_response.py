@@ -18,18 +18,18 @@ T = TypeVar("T", bound="AwaitResponse")
 
 @_attrs_define
 class AwaitResponse:
-    """The one completion envelope — ``GET /v1/invocations/{task_id}/await``.
+    """The one completion envelope — ``GET /v1/tasks/{task_id}/await``.
 
     Unifies the session and run completion long-polls. ``outcome`` is the
     terminal state minus liveness (the trace's ``TerminalState`` with
     ``suspended``/``running`` folded into pending): ``None`` means **still
-    pending** — the long-poll timed out before the invocation reached a terminal
+    pending** — the long-poll timed out before the task reached a terminal
     state, so re-poll. ``result`` carries the servicer's return value on ``ok``;
     ``error`` carries the ``{kind, message, …}`` detail on ``errored`` /
     ``cancelled``.
 
         Attributes:
-            outcome (AwaitResponseOutcomeType0 | None | Unset): The invocation's terminal outcome, or null while it is still
+            outcome (AwaitResponseOutcomeType0 | None | Unset): The task's terminal outcome, or null while it is still
                 pending (the long-poll timed out — call again to keep blocking).
             result (Any | Unset): The servicer's return value when outcome=='ok'; null otherwise.
             error (AwaitResponseErrorType0 | None | Unset): On outcome 'errored'/'cancelled', the {kind, message, …} detail;

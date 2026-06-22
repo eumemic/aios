@@ -6,29 +6,29 @@ from typing import Any, TypeVar
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
-from ..models.invocation_handle_servicer_kind import InvocationHandleServicerKind
+from ..models.task_handle_servicer_kind import TaskHandleServicerKind
 
-T = TypeVar("T", bound="InvocationHandle")
+T = TypeVar("T", bound="TaskHandle")
 
 
 @_attrs_define
-class InvocationHandle:
-    """Structured handle returned by ``POST /v1/invocations``.
+class TaskHandle:
+    """Structured handle returned by ``POST /v1/tasks``.
 
     Plain JSON fields, no opaque encoding: the handle is **not** an auth boundary
-    (``await`` re-authorizes by ``account_id``). Await the invocation at the one
-    unified awaiter ``GET /v1/invocations/{servicer_id}/await`` — the ``task_id``
+    (``await`` re-authorizes by ``account_id``). Await the task at the one
+    unified awaiter ``GET /v1/tasks/{servicer_id}/await`` — the ``task_id``
     path segment is the ``servicer_id`` and its kind is read off the id prefix; a
     ``session`` servicer additionally needs ``?request_id=`` to correlate the
     response, a ``run`` servicer resolves off its terminal row.
 
         Attributes:
-            servicer_kind (InvocationHandleServicerKind):
+            servicer_kind (TaskHandleServicerKind):
             servicer_id (str):
             request_id (str):
     """
 
-    servicer_kind: InvocationHandleServicerKind
+    servicer_kind: TaskHandleServicerKind
     servicer_id: str
     request_id: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -55,20 +55,20 @@ class InvocationHandle:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        servicer_kind = InvocationHandleServicerKind(d.pop("servicer_kind"))
+        servicer_kind = TaskHandleServicerKind(d.pop("servicer_kind"))
 
         servicer_id = d.pop("servicer_id")
 
         request_id = d.pop("request_id")
 
-        invocation_handle = cls(
+        task_handle = cls(
             servicer_kind=servicer_kind,
             servicer_id=servicer_id,
             request_id=request_id,
         )
 
-        invocation_handle.additional_properties = d
-        return invocation_handle
+        task_handle.additional_properties = d
+        return task_handle
 
     @property
     def additional_keys(self) -> list[str]:

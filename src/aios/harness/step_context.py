@@ -71,8 +71,8 @@ _MCP_CLI_HINT = (
     "    tool <server>                     list methods on a server\n"
     "    tool <server> <method> --help     show description + JSON schema\n"
     "    tool <server> <method> '{...}'    invoke with JSON arguments\n\n"
-    "Use the CLI when you want scriptable invocation (composition with `jq`, "
-    "`xargs`, redirection, scheduled wakes). The model-tool invocation path "
+    "Use the CLI when you want scriptable use (composition with `jq`, "
+    "`xargs`, redirection, scheduled wakes). The model-tool call path "
     "remains available for the same tools."
 )
 

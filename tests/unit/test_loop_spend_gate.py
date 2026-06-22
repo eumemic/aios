@@ -31,8 +31,8 @@ def test_spend_warning_crossing_fires_once() -> None:
 
 async def test_spend_gate_trips_before_context_build() -> None:
     pool = MagicMock()
-    task_registry = MagicMock()
-    task_registry.in_flight_tool_call_ids.return_value = set()
+    inflight_tool_registry = MagicMock()
+    inflight_tool_registry.in_flight_tool_call_ids.return_value = set()
     session = SimpleNamespace(
         id="sess_x",
         agent_id="agt_x",
@@ -82,7 +82,7 @@ async def test_spend_gate_trips_before_context_build() -> None:
         patch("aios.harness.loop.compose_step_context", AsyncMock()) as compose,
     ):
         result = await _run_session_step_body(
-            pool, task_registry, "sess_x", cause="message", account_id="acc_x"
+            pool, inflight_tool_registry, "sess_x", cause="message", account_id="acc_x"
         )
 
     assert result == _StepResult()
@@ -108,8 +108,8 @@ async def test_preflight_gate_trips_on_subtree_rollup() -> None:
     must be ignored: only the rollup (1_500_000 µ$ ≥ a 1.0 USD limit) trips it.
     """
     pool = MagicMock()
-    task_registry = MagicMock()
-    task_registry.in_flight_tool_call_ids.return_value = set()
+    inflight_tool_registry = MagicMock()
+    inflight_tool_registry.in_flight_tool_call_ids.return_value = set()
     session = SimpleNamespace(
         id="sess_x",
         agent_id="agt_x",
@@ -160,7 +160,7 @@ async def test_preflight_gate_trips_on_subtree_rollup() -> None:
         patch("aios.harness.loop.compose_step_context", AsyncMock()) as compose,
     ):
         result = await _run_session_step_body(
-            pool, task_registry, "sess_x", cause="message", account_id="acc_x"
+            pool, inflight_tool_registry, "sess_x", cause="message", account_id="acc_x"
         )
 
     assert result == _StepResult()
@@ -187,8 +187,8 @@ async def test_preflight_gate_admits_when_subtree_under_limit() -> None:
     matter — the rollup is the envelope — but here both are under the cap.
     """
     pool = MagicMock()
-    task_registry = MagicMock()
-    task_registry.in_flight_tool_call_ids.return_value = set()
+    inflight_tool_registry = MagicMock()
+    inflight_tool_registry.in_flight_tool_call_ids.return_value = set()
     session = SimpleNamespace(
         id="sess_x",
         agent_id="agt_x",
@@ -238,7 +238,7 @@ async def test_preflight_gate_admits_when_subtree_under_limit() -> None:
         pytest.raises(RuntimeError, match="stop after admission"),
     ):
         await _run_session_step_body(
-            pool, task_registry, "sess_x", cause="message", account_id="acc_x"
+            pool, inflight_tool_registry, "sess_x", cause="message", account_id="acc_x"
         )
 
     # The gate ADMITTED the step — execution reached context build / dispatch.
@@ -254,8 +254,8 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
     With the charge after the persist, a failed persist bills nothing and the
     retry charges exactly once (fail-safe: under-, never over-charge)."""
     pool = MagicMock()
-    task_registry = MagicMock()
-    task_registry.in_flight_tool_call_ids.return_value = set()
+    inflight_tool_registry = MagicMock()
+    inflight_tool_registry.in_flight_tool_call_ids.return_value = set()
     session = SimpleNamespace(
         id="sess_x",
         agent_id="agt_x",
@@ -327,7 +327,7 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
         pytest.raises(RuntimeError, match="persist failed"),
     ):
         await _run_session_step_body(
-            pool, task_registry, "sess_x", cause="message", account_id="acc_x"
+            pool, inflight_tool_registry, "sess_x", cause="message", account_id="acc_x"
         )
 
     append_assistant.assert_awaited_once()

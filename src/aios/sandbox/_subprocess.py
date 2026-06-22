@@ -87,7 +87,7 @@ async def run_subprocess_with_timeout(
 async def run_docker_cli(
     argv: list[str], *, timeout_s: float = DOCKER_CLI_TIMEOUT_S
 ) -> tuple[int, bytes, bytes]:
-    """Run a ``docker`` CLI invocation. Returns ``(exit_code, stdout, stderr)``.
+    """Run a ``docker`` CLI call. Returns ``(exit_code, stdout, stderr)``.
 
     Raises :class:`SandboxBackendError` on launch failure or timeout. A
     nonzero ``docker`` exit is returned as a regular tuple — callers

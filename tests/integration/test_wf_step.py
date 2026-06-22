@@ -35,8 +35,8 @@ from aios.models.sessions import Session
 from aios.models.vaults import VaultCredentialCreate
 from aios.models.workflows import WfRunStatus
 from aios.services import agents as agents_service
-from aios.services import invocations as invocations_service
 from aios.services import sessions as sessions_service
+from aios.services import tasks as tasks_service
 from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
 from aios.workflows import run_tools, service
@@ -1413,7 +1413,7 @@ async def test_return_real_dispatch_appends_result_and_does_not_archive(
     import json as _json
 
     from aios.harness import tool_dispatch
-    from aios.harness.task_registry import TaskRegistry
+    from aios.harness.inflight_tool_registry import InflightToolRegistry
 
     pool = wf_runtime
     run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:rd#0")
@@ -1425,8 +1425,8 @@ async def test_return_real_dispatch_appends_result_and_does_not_archive(
         },
     }
 
-    prev_reg = runtime.task_registry
-    runtime.task_registry = TaskRegistry()
+    prev_reg = runtime.inflight_tool_registry
+    runtime.inflight_tool_registry = InflightToolRegistry()
     try:
         with (
             mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake,
@@ -1434,7 +1434,7 @@ async def test_return_real_dispatch_appends_result_and_does_not_archive(
         ):
             await tool_dispatch._execute_tool_async(pool, cid, call, account_id="acc_wf")
     finally:
-        runtime.task_registry = prev_reg
+        runtime.inflight_tool_registry = prev_reg
 
     wake.assert_awaited_once_with(run_id, batch=True)
     async with pool.acquire() as conn:
@@ -2206,12 +2206,14 @@ async def test_archived_session_wake_is_a_noop(
         await db_queries.archive_session(conn, sess.id, account_id="acc_wf")
         before = await conn.fetchval("SELECT last_event_seq FROM sessions WHERE id = $1", sess.id)
 
-    prev_reg = runtime.task_registry
-    runtime.task_registry = None  # the guard must return before require_task_registry
+    prev_reg = runtime.inflight_tool_registry
+    runtime.inflight_tool_registry = (
+        None  # the guard must return before require_inflight_tool_registry
+    )
     try:
         await run_session_step(sess.id)  # must NOT raise
     finally:
-        runtime.task_registry = prev_reg
+        runtime.inflight_tool_registry = prev_reg
 
     async with pool.acquire() as conn:
         after = await conn.fetchval("SELECT last_event_seq FROM sessions WHERE id = $1", sess.id)
@@ -4080,14 +4082,14 @@ async def test_defer_wake_priority_reflects_real_origin(
     assert priorities[cid] == _BACKGROUND_PRIORITY  # real background child → demoted
 
 
-# ─── await_invocation (run arm) — the one awaiter, runs backing ──────────────
+# ─── await_task (run arm) — the one awaiter, runs backing ──────────────
 
 
 async def _await_run(
     pool: asyncpg.Pool[Any], db_url: str, run_id: str, *, account_id: str, timeout_seconds: float
 ) -> Any:
     """Drive the unified awaiter on a run servicer (request_id is run-irrelevant)."""
-    return await invocations_service.await_invocation(
+    return await tasks_service.await_task(
         pool,
         db_url,
         servicer_kind="run",

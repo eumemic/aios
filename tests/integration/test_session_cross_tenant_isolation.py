@@ -154,7 +154,7 @@ class TestSessionCrossTenantIsolation:
 
 
 # ─── api->session invoke edge: caller-supplied environment_id ownership gate ───
-# (#1130, ships with #1128's POST /v1/invocations.)
+# (#1130, ships with #1128's POST /v1/tasks.)
 #
 # Unlike session-> / run-> callers (which inherit the launcher's env), the API
 # caller has no launcher to inherit from, so it supplies ``environment_id``
@@ -212,7 +212,7 @@ class TestInvokeEnvironmentOwnershipGate:
         self,
         pool_invoke_gate: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
-        """``invoke`` (POST /v1/invocations) must refuse a foreign ``environment_id``.
+        """``invoke`` (POST /v1/tasks) must refuse a foreign ``environment_id``.
 
         The caller authenticates as ``_CALLER`` but supplies an env owned by
         ``_OTHER``. The ownership gate (``get_environment(..., account_id=_CALLER)``

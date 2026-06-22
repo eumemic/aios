@@ -82,12 +82,12 @@ if ! should_skip tests; then
     echo "── pytest (unit) ──"
     uv run pytest tests/unit -q || fail
 
-    # Each connector suite runs as its own invocation: every connector
+    # Each connector suite runs as its own run: every connector
     # ``tests/`` dir has an ``__init__.py`` and no parent package, so pytest
     # resolves each conftest to the module name ``tests.conftest`` —
     # collecting two in one process is an ``ImportPathMismatchError``.  The
     # connectors are independent uv workspace members with their own pytest
-    # config, so per-invocation is correct-by-construction.  All mocked; no
+    # config, so per-run is correct-by-construction.  All mocked; no
     # Postgres/Docker/network.
     echo "── pytest (connectors) ──"
     uv run pytest connectors/signal/tests -q || fail

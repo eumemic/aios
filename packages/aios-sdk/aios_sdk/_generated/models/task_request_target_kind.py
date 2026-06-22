@@ -1,7 +1,7 @@
 from enum import Enum
 
 
-class InvocationRequestTargetKind(str, Enum):
+class TaskRequestTargetKind(str, Enum):
     AGENT = "agent"
     SESSION = "session"
     WORKFLOW = "workflow"

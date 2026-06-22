@@ -599,7 +599,7 @@ def bootstrap() -> None:
     # Hermetic subprocess env: explicit overrides beat any stale shell exports.
     # Parsed secrets are passed through so the child doesn't need to re-read
     # ~/.aios/secrets.env (which pydantic-settings resolves at class-definition
-    # time, not per-invocation).
+    # time, not per-call).
     migrate_env = os.environ | {
         "AIOS_INSTANCE_ID": instance_id,
         "AIOS_DB_URL": runtime_db_url,

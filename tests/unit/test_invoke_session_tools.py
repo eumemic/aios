@@ -7,7 +7,7 @@ These stub the worker pool + services so they need no live Postgres. They cover:
   the handler runs.
 * **park + resolve** — the handler writes the edge via ``service.invoke`` with
   ``caller={kind:session, id:<this session>}``, parks via the one awaiter
-  ``await_invocation``, and shapes ``{ok | error}`` off its ``outcome``.
+  ``await_task``, and shapes ``{ok | error}`` off its ``outcome``.
 * **output_schema** — a non-conforming answer is reported fail-loud as an error.
 * **porcelain wiring** — ``call_agent`` (create+invoke) and ``call_workflow``
   (create_run+await) call the right services with the caller's env / lineage.
@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import aios.tools  # noqa: F401 — registers the builtins
-from aios.models.invocations import AwaitResponse, InvocationHandle
+from aios.models.tasks import AwaitResponse, TaskHandle
 from aios.tools.invoke import ToolBail, invoke_builtin
 from aios.tools.registry import ToolResult
 
@@ -47,8 +47,8 @@ def _stub_runtime(monkeypatch: Any) -> None:
     )
 
 
-def _handle(servicer_id: str = "ses_target", request_id: str = "req_1") -> InvocationHandle:
-    return InvocationHandle(servicer_kind="session", servicer_id=servicer_id, request_id=request_id)
+def _handle(servicer_id: str = "ses_target", request_id: str = "req_1") -> TaskHandle:
+    return TaskHandle(servicer_kind="session", servicer_id=servicer_id, request_id=request_id)
 
 
 async def test_invoke_arg_schema_forbids_caller(monkeypatch: Any) -> None:
@@ -65,7 +65,7 @@ async def test_invoke_parks_and_returns_ok(monkeypatch: Any) -> None:
     inv_mock = AsyncMock(return_value=_handle())
     monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
     await_mock = AsyncMock(return_value=AwaitResponse(outcome="ok", result={"v": 1}))
-    monkeypatch.setattr("aios.services.invocations.await_invocation", await_mock)
+    monkeypatch.setattr("aios.services.tasks.await_task", await_mock)
     out = await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target", "input": "hi"})
     assert out == {"ok": {"v": 1}}
     # caller names THIS session, target_kind=session, target is the model-supplied id.
@@ -83,7 +83,7 @@ async def test_invoke_parks_and_returns_ok(monkeypatch: Any) -> None:
 async def test_invoke_returns_error_outcome(monkeypatch: Any) -> None:
     monkeypatch.setattr("aios.services.sessions.invoke", AsyncMock(return_value=_handle()))
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="errored", error={"kind": "boom"})),
     )
     out = await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target"})
@@ -96,7 +96,7 @@ async def test_invoke_output_schema_violation(monkeypatch: Any) -> None:
     """A non-conforming answer is reported fail-loud (output_schema_violation)."""
     monkeypatch.setattr("aios.services.sessions.invoke", AsyncMock(return_value=_handle()))
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="ok", result="not-an-object")),
     )
     out = await invoke_builtin(
@@ -112,7 +112,7 @@ async def test_invoke_output_schema_violation(monkeypatch: Any) -> None:
 async def test_invoke_output_schema_conforms(monkeypatch: Any) -> None:
     monkeypatch.setattr("aios.services.sessions.invoke", AsyncMock(return_value=_handle()))
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="ok", result={"a": 1})),
     )
     out = await invoke_builtin(
@@ -132,7 +132,7 @@ async def test_invoke_repolls_until_done(monkeypatch: Any) -> None:
             AwaitResponse(outcome="ok", result="ok"),
         ]
     )
-    monkeypatch.setattr("aios.services.invocations.await_invocation", await_mock)
+    monkeypatch.setattr("aios.services.tasks.await_task", await_mock)
     out = await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target"})
     assert out == {"ok": "ok"}
     assert await_mock.await_count == 2
@@ -142,7 +142,7 @@ async def test_invoke_agent_create_then_invoke(monkeypatch: Any) -> None:
     inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
     monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
     )
     out = await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", "input": "go"})
@@ -159,7 +159,7 @@ async def test_invoke_workflow_create_run_then_await(monkeypatch: Any) -> None:
     run_mock = AsyncMock(return_value=SimpleNamespace(id="run_1"))
     monkeypatch.setattr("aios.services.workflows.create_run", run_mock)
     await_mock = AsyncMock(return_value=AwaitResponse(outcome="ok", result={"k": "v"}))
-    monkeypatch.setattr("aios.services.invocations.await_invocation", await_mock)
+    monkeypatch.setattr("aios.services.tasks.await_task", await_mock)
     out = await invoke_builtin(
         _CALLER,
         "call_workflow",
@@ -198,7 +198,7 @@ async def test_invoke_workflow_error_outcome(monkeypatch: Any) -> None:
         "aios.services.workflows.create_run", AsyncMock(return_value=SimpleNamespace(id="run_1"))
     )
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="errored", error={"kind": "x"})),
     )
     out = await invoke_builtin(_CALLER, "call_workflow", {"workflow_id": "wf_1"})
@@ -212,7 +212,7 @@ async def test_invoke_workflow_output_schema_violation(monkeypatch: Any) -> None
         "aios.services.workflows.create_run", AsyncMock(return_value=SimpleNamespace(id="run_1"))
     )
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="ok", result="bad")),
     )
     out = await invoke_builtin(
@@ -228,11 +228,11 @@ async def test_invoke_workflow_output_schema_violation(monkeypatch: Any) -> None
 
 async def test_caller_carries_tool_call_id(monkeypatch: Any) -> None:
     """The launching ``tool_call_id`` rides onto the servicer edge via ``caller`` so a
-    parked invocation can be re-derived and re-parked after a worker crash (#1431)."""
+    parked task can be re-derived and re-parked after a worker crash (#1431)."""
     inv_mock = AsyncMock(return_value=_handle())
     monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
     )
     await invoke_builtin(
@@ -252,7 +252,7 @@ async def test_caller_omits_tool_call_id_when_unset(monkeypatch: Any) -> None:
     inv_mock = AsyncMock(return_value=_handle())
     monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
     )
     await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target"})
@@ -266,7 +266,7 @@ async def test_workflow_caller_carries_tool_call_id(monkeypatch: Any) -> None:
     run_mock = AsyncMock(return_value=SimpleNamespace(id="run_1"))
     monkeypatch.setattr("aios.services.workflows.create_run", run_mock)
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
     )
     await invoke_builtin(_CALLER, "call_workflow", {"workflow_id": "wf_1"}, tool_call_id="tc_7")
@@ -283,7 +283,7 @@ async def test_current_tool_call_id_scoped_to_call(monkeypatch: Any) -> None:
 
     monkeypatch.setattr("aios.services.sessions.invoke", AsyncMock(return_value=_handle()))
     monkeypatch.setattr(
-        "aios.services.invocations.await_invocation",
+        "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
     )
     assert current_tool_call_id() is None

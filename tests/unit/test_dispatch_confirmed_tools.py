@@ -14,8 +14,8 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.loop import _dispatch_confirmed_tools
-from aios.harness.task_registry import TaskRegistry
 
 
 def _tool_call(tool_call_id: str, name: str = "bash") -> dict[str, Any]:
@@ -34,7 +34,10 @@ class TestDispatchConfirmedTools:
             AsyncMock(return_value=[]),
         ):
             pending = await _dispatch_confirmed_tools(
-                pool, "sess_x", account_id="acc_test_stub", task_registry=TaskRegistry()
+                pool,
+                "sess_x",
+                account_id="acc_test_stub",
+                inflight_tool_registry=InflightToolRegistry(),
             )
         assert pending == []
 
@@ -48,7 +51,10 @@ class TestDispatchConfirmedTools:
             AsyncMock(return_value=[_tool_call("tc_X"), _tool_call("tc_Y")]),
         ):
             pending = await _dispatch_confirmed_tools(
-                pool, "sess_x", account_id="acc_test_stub", task_registry=TaskRegistry()
+                pool,
+                "sess_x",
+                account_id="acc_test_stub",
+                inflight_tool_registry=InflightToolRegistry(),
             )
         assert [tc["id"] for tc in pending] == ["tc_X", "tc_Y"]
 
@@ -57,7 +63,7 @@ class TestDispatchConfirmedTools:
         second asyncio task, no duplicate ``tool_result`` (CLAUDE.md
         invariant #4)."""
         pool = MagicMock()
-        registry = TaskRegistry()
+        registry = InflightToolRegistry()
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         registry.add("sess_x", "tc_X", fut)  # type: ignore[arg-type]
         with patch(
@@ -65,6 +71,6 @@ class TestDispatchConfirmedTools:
             AsyncMock(return_value=[_tool_call("tc_X"), _tool_call("tc_Y")]),
         ):
             pending = await _dispatch_confirmed_tools(
-                pool, "sess_x", account_id="acc_test_stub", task_registry=registry
+                pool, "sess_x", account_id="acc_test_stub", inflight_tool_registry=registry
             )
         assert [tc["id"] for tc in pending] == ["tc_Y"]

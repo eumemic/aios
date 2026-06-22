@@ -1,4 +1,4 @@
-"""Pure built-in tool invocation: parse → lookup → validate → call.
+"""Pure built-in tool execution: parse → lookup → validate → call.
 
 Both the model dispatch path (``harness/tool_dispatch.py``) and the
 sandbox CLI broker (``sandbox/tool_broker.py``) drive built-in tools
@@ -7,7 +7,7 @@ event-append + sweep + ``_tool_lifecycle`` context manager; the broker
 wraps it with HTTP response serialisation. The pure core never appends
 events, never triggers the sweep, never touches sandbox state.
 
-:class:`ToolBail` is the typed exception for *expected* invocation
+:class:`ToolBail` is the typed exception for *expected* tool-call
 failures — bad JSON arguments, unknown tool, schema mismatch. Handler
 exceptions propagate unchanged; the caller's transport-specific wrapper
 decides what to do with them (log + sandbox eviction on the model path;
@@ -28,7 +28,7 @@ from aios.tools.registry import ToolNotFoundError, ToolResult, registry
 # Set by :func:`invoke_builtin` around the handler call on the model dispatch path
 # (the sandbox CLI broker and any caller that omits ``tool_call_id`` leave it ``None``).
 # The parking ``call_*`` handlers read it via :func:`current_tool_call_id` to stamp their
-# own ``tool_call_id`` onto the servicer edge, so a parked invocation can be re-derived and
+# own ``tool_call_id`` onto the servicer edge, so a parked task can be re-derived and
 # re-parked after a worker restart (#1431) — a builtin's only honest channel to its call id,
 # which the ``(session_id, arguments)`` handler signature deliberately doesn't carry.
 _CURRENT_TOOL_CALL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -42,7 +42,7 @@ def current_tool_call_id() -> str | None:
 
 
 class ToolBail(Exception):
-    """Clean model-visible bail from a tool invocation.
+    """Clean model-visible bail from a tool call.
 
     Raised for failures the model can read and self-correct from: bad
     JSON arguments, unknown tool name, schema validation mismatch.

@@ -1,4 +1,4 @@
-"""Per-invocation CLI state + the error-handling shim used by every command.
+"""Per-command CLI state + the error-handling shim used by every command.
 
 Split out of :mod:`aios.cli.app` so command modules can import it without
 introducing a circular dependency (the root app imports every command
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class CliState:
-    """Per-invocation CLI state set from the root callback."""
+    """Per-command CLI state set from the root callback."""
 
     base_url: str
     api_key: str | None

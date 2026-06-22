@@ -18,7 +18,7 @@ sweep recovers from that.
 
 Tool tasks run on the worker's event loop and outlive the procrastinate
 job handler that spawned them. They're tracked in the per-worker
-:class:`~aios.harness.task_registry.TaskRegistry` for cancellation
+:class:`~aios.harness.inflight_tool_registry.InflightToolRegistry` for cancellation
 and shutdown support.
 """
 
@@ -43,7 +43,7 @@ from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments
 from aios.tools.registry import ToolResult
 
 if TYPE_CHECKING:
-    from aios.services.invocations import ServicerKind
+    from aios.services.tasks import ServicerKind
 
 log = get_logger("aios.harness.tool_dispatch")
 
@@ -56,17 +56,17 @@ def _launch_tasks(
     prefix: str,
 ) -> None:
     """Shared launcher: spawn one asyncio task per tool call, register in task registry."""
-    task_reg = runtime.require_task_registry()
+    inflight_reg = runtime.require_inflight_tool_registry()
     for call in tool_calls:
         call_id = call.get("id") or "unknown"
         task = asyncio.create_task(
             coro_factory(call),
             name=f"{prefix}:{session_id}:{call_id}",
         )
-        task_reg.add(session_id, call_id, task)
+        inflight_reg.add(session_id, call_id, task)
 
         def _on_done(t: asyncio.Task[None], s: str = session_id, c: str = call_id) -> None:
-            task_reg.remove(s, c)
+            inflight_reg.remove(s, c)
 
         task.add_done_callback(_on_done)
 
@@ -293,7 +293,7 @@ def _shape_tool_result(tc: _ToolCall, result: ToolResult | dict[str, Any]) -> di
     return event_data
 
 
-def relaunch_parked_invocation(
+def relaunch_parked_task(
     pool: asyncpg.Pool[Any],
     session_id: str,
     *,
@@ -304,10 +304,10 @@ def relaunch_parked_invocation(
     output_schema: dict[str, Any] | None,
     account_id: str,
 ) -> None:
-    """Re-park a ``call_*`` invocation whose in-memory park task was lost to a worker
+    """Re-park a ``call_*`` task whose in-memory park task was lost to a worker
     crash (#1431). Returns immediately; the resume runs as a fire-and-forget tool task.
 
-    Routed through :func:`_launch_tasks` so the resume registers in the ``TaskRegistry``
+    Routed through :func:`_launch_tasks` so the resume registers in the ``InflightToolRegistry``
     synchronously — a concurrent sweep then sees it in-flight (``CANDIDATE`` filter) and
     won't double-launch. The handle ``(servicer_kind, servicer_id, request_id)`` is
     re-derived from the durable servicer edge (``queries.find_parked_servicer``); ``call``
@@ -588,7 +588,7 @@ async def _trigger_sweep(
     result = SweepResult(repaired_ghosts=0, woken_sessions=0)
     try:
         result = await wake_sessions_needing_inference(
-            pool, runtime.require_task_registry(), session_id=session_id
+            pool, runtime.require_inflight_tool_registry(), session_id=session_id
         )
     finally:
         await sessions_service.append_event(

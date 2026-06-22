@@ -258,19 +258,19 @@ class TestStaging:
         rename raises ``FileNotFoundError``. The loser's
         ``except BaseException`` then unconditionally ran
         ``target.unlink(missing_ok=True)`` — DELETING the winner's
-        freshly-renamed file. The winner's invocation returned a
+        freshly-renamed file. The winner's call returned a
         ``staged_records`` entry pointing at the now-missing path; the
         renderer would later fail to open it (or worse, the GC sweep
         would race with the actual write).
 
         To reproduce the race in a single asyncio event loop the stream
         ``read`` is wrapped with an ``asyncio.sleep(0)`` yield so the
-        scheduler can interleave the two invocations between
+        scheduler can interleave the two calls between
         ``target.exists()`` and ``os.rename`` — the same shape real
         ``UploadFile`` streams produce when reading from a real socket.
 
         Fix: don't unlink ``target`` in the loser's cleanup path —
-        nothing this invocation owns lives at ``target``.
+        nothing this call owns lives at ``target``.
         """
         import asyncio
 
@@ -321,7 +321,7 @@ class TestStaging:
             return_exceptions=True,
         )
 
-        # At least one invocation should have succeeded (the rename winner).
+        # At least one call should have succeeded (the rename winner).
         successes = [r for r in results if not isinstance(r, BaseException)]
         assert len(successes) >= 1, f"at least one stage must succeed; got {results!r}"
 

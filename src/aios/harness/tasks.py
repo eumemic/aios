@@ -1,4 +1,4 @@
-"""Procrastinate task definitions.
+"""Procrastinate job definitions.
 
 ``wake_session``
     The API process defers a wake job when a user posts a message; the
@@ -80,7 +80,7 @@ async def run_trigger(trigger_id: str, trigger_run_id: str | None = None) -> Non
 
     Renamed from ``harness.run_scheduled_task`` (#818, delete-don't-deprecate).
     Deploy-window caveat: a job enqueued pre-restart under the old name
-    fails task-lookup; the claimed row recovers via stale-recovery (~2h
+    fails job-lookup; the claimed row recovers via stale-recovery (~2h
     worst case, sub-second on a lockstep drain-and-restart).
     """
     from aios.harness.trigger_runner import run_trigger_step

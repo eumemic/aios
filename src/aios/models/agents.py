@@ -256,7 +256,7 @@ class HttpRouteSpec(BaseModel):
     segment, ``**`` matches any number of segments).  ``description`` is
     operator-authored prose rendered into the system prompt so the agent
     knows what the route does and how to call it.  ``permission_policy``
-    gates *invocation*: ``always_ask`` leaves the call unresolved in the
+    gates *execution*: ``always_ask`` leaves the call unresolved in the
     event log until the client confirms via
     ``POST /sessions/:id/tool-confirmations``.
 

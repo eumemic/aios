@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aios.harness.task_registry import TaskRegistry
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.worker import _run_interrupt_listener
 
 
@@ -34,7 +34,7 @@ async def test_listener_survives_dispatch_exception(
     """One exception in dispatch must not disable the listener.
 
     Drive a real ``asyncio.Queue`` through the listener, with a
-    ``TaskRegistry`` whose ``cancel_step`` raises on the first call.
+    ``InflightToolRegistry`` whose ``cancel_step`` raises on the first call.
     The listener must log the failure and continue processing
     subsequent interrupts — today the first exception escapes the
     outer try/except wrapping ``while True`` and kills the task.
@@ -50,7 +50,7 @@ async def test_listener_survives_dispatch_exception(
         fake_listen,
     )
 
-    registry = MagicMock(spec=TaskRegistry)
+    registry = MagicMock(spec=InflightToolRegistry)
 
     first_dispatched = asyncio.Event()
     second_dispatched = asyncio.Event()
@@ -121,7 +121,7 @@ async def test_listener_reconnects_after_context_acquisition_failure(
     )
     monkeypatch.setattr("aios.harness.worker._LISTEN_RECONNECT_BACKOFF_SECONDS", 0)
 
-    registry = MagicMock(spec=TaskRegistry)
+    registry = MagicMock(spec=InflightToolRegistry)
     listener_task = asyncio.create_task(_run_interrupt_listener("postgresql://stub", registry))
     try:
         await asyncio.wait_for(first_enter_attempted.wait(), timeout=1.0)
@@ -152,6 +152,6 @@ async def test_listener_cancelled_error_passthrough(
     )
     monkeypatch.setattr("aios.harness.worker._LISTEN_RECONNECT_BACKOFF_SECONDS", 0)
 
-    registry = MagicMock(spec=TaskRegistry)
+    registry = MagicMock(spec=InflightToolRegistry)
     with pytest.raises(asyncio.CancelledError):
         await _run_interrupt_listener("postgresql://stub", registry)

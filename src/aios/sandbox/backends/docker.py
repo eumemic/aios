@@ -58,7 +58,7 @@ _CONTAINER_TIMEOUT_KILL_AFTER_S = 5
 _HOST_BACKSTOP_MARGIN_S = 5
 # GNU ``timeout -s KILL`` exits 137 (128+9) when it force-kills the workload
 # on timeout — verified in the sandbox image and locally. We map exactly this
-# code to ``timed_out``: our invocation never yields the 124 (TERM-path) code
+# code to ``timed_out``: our call never yields the 124 (TERM-path) code
 # from a timeout, and a command that exits 124 on its own is not a timeout.
 _CONTAINER_TIMEOUT_EXIT_CODE = 137
 
@@ -264,7 +264,7 @@ class DockerBackend:
         # deadline lands on the workload itself, not just the host ``docker exec``
         # client (#844 / moby#9098). The primary signal is already SIGKILL (-s KILL),
         # which is unblockable; ``-k 5`` is a redundant kill-after backstop kept to
-        # match the agreed invocation and only matters if the primary signal is ever
+        # match the agreed call and only matters if the primary signal is ever
         # softened.
         argv = [
             "docker",

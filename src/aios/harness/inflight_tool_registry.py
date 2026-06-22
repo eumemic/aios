@@ -14,10 +14,10 @@ import asyncio
 
 from aios.logging import get_logger
 
-log = get_logger("aios.harness.task_registry")
+log = get_logger("aios.harness.inflight_tool_registry")
 
 
-class TaskRegistry:
+class InflightToolRegistry:
     """Maps ``session_id`` → ``{tool_call_id → asyncio.Task}``."""
 
     def __init__(self) -> None:
@@ -118,6 +118,6 @@ class TaskRegistry:
                     task.cancel()
                     all_tasks.append(task)
         if all_tasks:
-            log.info("task_registry.shutdown", count=len(all_tasks))
+            log.info("inflight_tool_registry.shutdown", count=len(all_tasks))
             await asyncio.gather(*all_tasks, return_exceptions=True)
         self._tasks.clear()

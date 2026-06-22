@@ -142,7 +142,7 @@ def test_runs_only_the_chain_test_not_the_suite() -> None:
 
     This exact-token-set check fails for end-of-line ``tests/unit`` (no trailing
     whitespace), for the whole suite, and for any extra test file added to the
-    invocation.
+    run.
     """
     pytest_steps = [r for r in _run_steps(_doc()) if "pytest" in r]
     assert len(pytest_steps) == 1, f"expected exactly one pytest step, found {len(pytest_steps)}"

@@ -178,7 +178,7 @@ async def find_parked_servicer(
     tool_call_id: str,
     account_id: str,
 ) -> tuple[NodeKind, str, str | None, dict[str, Any] | None] | None:
-    """Resolve the servicer a session's parked ``call_*`` invocation was awaiting (#1431).
+    """Resolve the servicer a session's parked ``call_*`` task was awaiting (#1431).
 
     The durable counterpart of the in-memory park handle: a ``call_*`` handler stamps its
     own ``tool_call_id`` onto the servicer's edge ``caller`` (``request_opened.data.caller``
@@ -230,8 +230,8 @@ async def find_parked_servicer(
 
 
 @dataclass(frozen=True)
-class CallerInvocation:
-    """One ``call_*`` invocation a session launched, located by its caller edge (#1428).
+class CallerTask:
+    """One ``call_*`` task a session launched, located by its caller edge (#1428).
 
     The set-returning sibling of :func:`find_parked_servicer`: a servicer edge whose ``caller``
     names this session and carries a ``tool_call_id`` (so it was a model-launched ``call_*``
@@ -248,13 +248,13 @@ class CallerInvocation:
     opened_at: Any
 
 
-async def list_caller_invocations(
+async def list_caller_tasks(
     conn: asyncpg.Connection[Any],
     *,
     caller_session_id: str,
     account_id: str,
-) -> list[CallerInvocation]:
-    """Every ``call_*`` invocation a session launched — its outbound task roster (#1428).
+) -> list[CallerTask]:
+    """Every ``call_*`` task a session launched — its outbound task roster (#1428).
 
     The set-returning sibling of :func:`find_parked_servicer`, on the same 0103 reverse-caller
     indexes (``events_request_opened_caller_idx`` / ``wf_runs_caller_idx``: ``(account_id,
@@ -270,7 +270,7 @@ async def list_caller_invocations(
     detached launches that carry no park to list or stop.
 
     This is the pure locator: it returns BOTH open and already-answered edges (events are
-    append-only). The caller (``services.invocations.list_open_invocations``) resolves liveness
+    append-only). The caller (``services.tasks.list_open_tasks``) resolves liveness
     under one snapshot and keeps only the open ones. Ordered oldest-first (``opened_at`` then
     ``tool_call_id`` as a stable tiebreak when two share a transaction timestamp).
     """
@@ -285,8 +285,8 @@ async def list_caller_invocations(
         account_id,
         caller_session_id,
     )
-    out: list[CallerInvocation] = [
-        CallerInvocation(
+    out: list[CallerTask] = [
+        CallerTask(
             tool_call_id=r["tool_call_id"],
             servicer_kind="session",
             servicer_id=r["servicer_id"],
@@ -306,7 +306,7 @@ async def list_caller_invocations(
         caller_session_id,
     )
     out.extend(
-        CallerInvocation(
+        CallerTask(
             tool_call_id=r["tool_call_id"],
             servicer_kind="run",
             servicer_id=r["servicer_id"],

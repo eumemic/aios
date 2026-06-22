@@ -1,6 +1,6 @@
 """The trace service (#1149): walk → normalize → interleave.
 
-A *trace* is a read-projection over the invocation-edge tree the invoke-edge
+A *trace* is a read-projection over the invoke-edge tree the invoke-edge
 epic already records — no new subsystem, no trace table, no spans. This module:
 
 1. **Walks** the parent→child edge tree from the root (``db.queries.trace`` does

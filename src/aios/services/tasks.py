@@ -1,8 +1,8 @@
-"""``await_invocation`` — the one awaiter over the invocation tree (§3.2).
+"""``await_task`` — the one awaiter over the task tree (§3.2).
 
 Merges the session and run completion long-polls into a single dispatch over the
 edge handle ``(servicer_kind, servicer_id, request_id)``. One
-:class:`~aios.models.invocations.AwaitResponse` ``{outcome, result, error}`` out;
+:class:`~aios.models.tasks.AwaitResponse` ``{outcome, result, error}`` out;
 ``outcome=None`` means still pending (the caller re-polls).
 
 The **awaiter's** terminal rule lives here:
@@ -39,14 +39,14 @@ from aios.db.listen import open_listen_for_events, open_listen_for_run_events
 from aios.db.queries import trace as trace_q
 from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError, ValidationError
-from aios.models.invocations import AwaitResponse, OpenInvocation
+from aios.models.tasks import AwaitResponse, OpenTask
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun
 from aios.services.await_completion import await_completion
 
 ServicerKind = Literal["session", "run"]
 
 
-async def await_invocation(
+async def await_task(
     pool: asyncpg.Pool[Any],
     db_url: str,
     *,
@@ -179,7 +179,7 @@ def _response_to_await(resolved: dict[str, Any] | None) -> AwaitResponse:
     return AwaitResponse(outcome="ok", result=resolved.get("result"))
 
 
-async def cancel_invocation(
+async def cancel_task(
     pool: asyncpg.Pool[Any],
     *,
     servicer_kind: ServicerKind,
@@ -188,7 +188,7 @@ async def cancel_invocation(
     account_id: str,
     canceller_session_id: str | None = None,
 ) -> None:
-    """Cancel an invocation by its edge handle (cancel-design §2) — the supervisor seed.
+    """Cancel a task by its edge handle (cancel-design §2) — the supervisor seed.
 
     Seeds the exit on the servicer so it harvests the cancel under its OWN single-writer
     step lock: a **run** via the existing ``wf_run_signals kind='cancel'`` + harvest
@@ -203,7 +203,7 @@ async def cancel_invocation(
     single node (#788/#1152), and the §9 quiescence accounting rides with it.
 
     ``request_id`` is ``None`` for a **run** servicer (it cancels off its terminal row, not a
-    request edge — same dispatch asymmetry as :func:`await_invocation`); a **session** servicer
+    request edge — same dispatch asymmetry as :func:`await_task`); a **session** servicer
     still requires it (the cancel-marker keys on the request edge). ``canceller_session_id``
     scopes a **model**-initiated cancel (the ``stop_task`` tool): the run arm threads it into
     ``cancel_run``'s launcher guard so a session may cancel only runs it launched. The operator
@@ -238,20 +238,20 @@ async def cancel_invocation(
     await defer_wake(pool, servicer_id, cause="cancel", account_id=account_id)
 
 
-async def list_open_invocations(
+async def list_open_tasks(
     pool: asyncpg.Pool[Any],
     *,
     session_id: str,
     account_id: str,
-) -> list[OpenInvocation]:
-    """A session's still-open outbound ``call_*`` invocations — backs the ``list_tasks`` tool (#1428).
+) -> list[OpenTask]:
+    """A session's still-open outbound ``call_*`` tasks — backs the ``list_tasks`` tool (#1428).
 
-    Reads the caller's whole edge roster (:func:`aios.db.queries.trace.list_caller_invocations`)
+    Reads the caller's whole edge roster (:func:`aios.db.queries.trace.list_caller_tasks`)
     under one ``REPEATABLE READ`` readonly snapshot, then resolves each edge's liveness with the
     same #1126 resolvers the trace/await paths use — ``derive_response`` for a session servicer,
     ``derive_run_response`` for a run — and keeps only the **open** ones (``resp is None``, i.e.
     still pending). One snapshot so the roster and the per-edge liveness can't tear (the
-    ``services.trace.get_trace`` pattern). Returns the open invocations keyed by ``tool_call_id``
+    ``services.trace.get_trace`` pattern). Returns the open tasks keyed by ``tool_call_id``
     (the handle ``stop_task`` takes), oldest-first. A point-in-time snapshot, independent of the
     in-context ``_PENDING`` placeholders ``build_messages`` synthesizes — both converge next step.
     """
@@ -259,10 +259,10 @@ async def list_open_invocations(
         pool.acquire() as conn,
         conn.transaction(isolation="repeatable_read", readonly=True),
     ):
-        edges = await trace_q.list_caller_invocations(
+        edges = await trace_q.list_caller_tasks(
             conn, caller_session_id=session_id, account_id=account_id
         )
-        open_invocations: list[OpenInvocation] = []
+        open_tasks: list[OpenTask] = []
         for edge in edges:
             if edge.servicer_kind == "session":
                 # A session servicer always carries a request_id (the request edge it answers).
@@ -275,12 +275,12 @@ async def list_open_invocations(
                     conn, edge.servicer_id, account_id=account_id
                 )
             if resp is None:  # alive and unanswered → an open task
-                open_invocations.append(
-                    OpenInvocation(
+                open_tasks.append(
+                    OpenTask(
                         tool_call_id=edge.tool_call_id,
                         kind=edge.servicer_kind,
                         target=edge.servicer_id,
                         opened_at=edge.opened_at,
                     )
                 )
-    return open_invocations
+    return open_tasks

@@ -1,7 +1,7 @@
 from enum import Enum
 
 
-class InvocationHandleServicerKind(str, Enum):
+class TaskHandleServicerKind(str, Enum):
     RUN = "run"
     SESSION = "session"
 

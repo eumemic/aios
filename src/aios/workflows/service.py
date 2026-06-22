@@ -22,8 +22,8 @@ from aios.services import attenuation as attenuation_service
 from aios.services.wake import defer_run_wake
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
-# The single shared trusted-invocation depth budget (#1124): how many trusted
-# hops a chain of invocations (run→run sub-launches, run→session ``agent()``
+# The single shared trusted invoke-depth budget (#1124): how many trusted
+# hops a chain of invoke-edges (run→run sub-launches, run→session ``agent()``
 # children, and — once #1127/#1128 land their call sites — session→session and
 # api→session) may take before refusal. The DOWN-counter that replaces the
 # run-only ``parent_run_id`` ancestor walk (the deleted ``run_ancestor_depth``
@@ -36,10 +36,10 @@ INVOKE_MAX_DEPTH = 10
 
 
 class WorkflowRunDepthExceededError(AiosError):
-    """A trusted invocation would nest past the shared depth budget (#1124).
+    """A trusted invoke-edge would nest past the shared depth budget (#1124).
 
     Raised before the over-budget child run/edge is written — the model-visible
-    ``409`` refusal at every trusted-invocation hop (the ``error_type`` is kept
+    ``409`` refusal at every trusted invoke-edge hop (the ``error_type`` is kept
     stable for clients across the run-only → edge-carried generalization).
     """
 
@@ -186,7 +186,7 @@ async def create_run(
             # bound; this is the only refusal, no wait-for-graph.
             if parent_depth <= 1:
                 raise WorkflowRunDepthExceededError(
-                    f"trusted invocation would exceed depth budget {INVOKE_MAX_DEPTH}",
+                    f"trusted invoke-edge would exceed depth budget {INVOKE_MAX_DEPTH}",
                     detail={"max_depth": INVOKE_MAX_DEPTH, "parent_run_id": parent_run_id},
                 )
             child_depth = parent_depth - 1

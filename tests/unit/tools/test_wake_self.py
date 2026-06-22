@@ -120,7 +120,7 @@ class TestWakeSelfToolSpec:
 
     Without ``"wake_self"`` in ``BuiltinToolType``, Pydantic rejects
     ``ToolSpec(type="wake_self")``, agents cannot list the tool, and
-    the broker's ``_find_builtin_spec`` 404s every CLI invocation —
+    the broker's ``_find_builtin_spec`` 404s every CLI call —
     defeating the entire purpose of the tool.
     """
 

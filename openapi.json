@@ -3326,7 +3326,7 @@
           "sessions"
         ],
         "summary": "Get Session Trace",
-        "description": "One-call linear trace rooted at a session + all nested sub-runs/sessions (#1149).\n\nThe session-root counterpart of ``GET /v1/runs/{id}/trace``: walks the\nparent\u2192child invocation-edge tree from this session (its ``agent()`` peer\nsessions and any runs it launched via the still-live ``launcher_session_id``\nFK), normalizes each node to ``terminal_state`` + raw ``error_kind``, and\ninterleaves journals into a flat DFS-pre-order list. See the run-trace\nendpoint for the verbosity / ordering / scope caveats. A cross-tenant session\n404s.",
+        "description": "One-call linear trace rooted at a session + all nested sub-runs/sessions (#1149).\n\nThe session-root counterpart of ``GET /v1/runs/{id}/trace``: walks the\nparent\u2192child invoke-edge tree from this session (its ``agent()`` peer\nsessions and any runs it launched via the still-live ``launcher_session_id``\nFK), normalizes each node to ``terminal_state`` + raw ``error_kind``, and\ninterleaves journals into a flat DFS-pre-order list. See the run-trace\nendpoint for the verbosity / ordering / scope caveats. A cross-tenant session\n404s.",
         "operationId": "get_session_trace",
         "parameters": [
           {
@@ -3463,7 +3463,7 @@
           "sessions"
         ],
         "summary": "Get Context",
-        "description": "Return the chat-completions payload the worker would send next.\n\nDry-run preview for debugging prompt construction. Reuses the exact\ncomposer the worker's step function uses (:func:`compose_step_context`).\nSide effects (skill provisioning, session-status bumps, event\nappends) are omitted; the endpoint is read-only.\n\nOne known divergence from the worker's output: unresolved tool_calls\nthat the worker is currently executing render as ``_PENDING_EXTERNAL``\nhere (the API process has no view into the worker's task_registry).\nThe worker would render them as ``_PENDING_BACKGROUND``. Custom and\nawaiting-confirm calls render identically on both sides.\n\nImage attachments \u2014 including those under ``/workspace/...`` \u2014 render\nidentically to the worker: ``compose_step_context`` resolves the\nbind-mount source from the session row, not a worker-only sandbox\nhandle.",
+        "description": "Return the chat-completions payload the worker would send next.\n\nDry-run preview for debugging prompt construction. Reuses the exact\ncomposer the worker's step function uses (:func:`compose_step_context`).\nSide effects (skill provisioning, session-status bumps, event\nappends) are omitted; the endpoint is read-only.\n\nOne known divergence from the worker's output: unresolved tool_calls\nthat the worker is currently executing render as ``_PENDING_EXTERNAL``\nhere (the API process has no view into the worker's inflight_tool_registry).\nThe worker would render them as ``_PENDING_BACKGROUND``. Custom and\nawaiting-confirm calls render identically on both sides.\n\nImage attachments \u2014 including those under ``/workspace/...`` \u2014 render\nidentically to the worker: ``compose_step_context`` resolves the\nbind-mount source from the session row, not a worker-only sandbox\nhandle.",
         "operationId": "get_session_context",
         "parameters": [
           {
@@ -3676,7 +3676,7 @@
           "sessions"
         ],
         "summary": "Await Session",
-        "description": "Block until the session has fully reacted to a stimulus (``watermark``; defaults to the\nsession's ``last_stimulus_seq`` at call time), or ``timeout`` seconds elapse \u2014 then\n``done=false`` so the caller re-polls.\n\nThe session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent\ncan drive a session and join when it has fully reacted. Correlating a *request* response is\nthe unified awaiter's job (``GET /v1/invocations/{task_id}/await?request_id=``). A\ncross-tenant session 404s before any subscription opens.",
+        "description": "Block until the session has fully reacted to a stimulus (``watermark``; defaults to the\nsession's ``last_stimulus_seq`` at call time), or ``timeout`` seconds elapse \u2014 then\n``done=false`` so the caller re-polls.\n\nThe session **quiescence drive-and-join** alias: one JSON round-trip, MCP-usable so an agent\ncan drive a session and join when it has fully reacted. Correlating a *request* response is\nthe unified awaiter's job (``GET /v1/tasks/{task_id}/await?request_id=``). A\ncross-tenant session 404s before any subscription opens.",
         "operationId": "await_session",
         "parameters": [
           {
@@ -9739,7 +9739,7 @@
           "runs"
         ],
         "summary": "Get Run Trace",
-        "description": "One-call linear trace of a run + all nested sessions and sub-runs (#1149).\n\nA read-projection over the invocation-edge tree: walks the parent\u2192child edge\ntree from this run, normalizes each node's outcome to\n``terminal_state \u2208 {ok,errored,cancelled,suspended,running}`` (+ raw\n``error_kind``), and interleaves the nodes' journals into a flat\n**DFS-pre-order** list (a CLI renders ``depth`` as indentation). A\ndeliberately-failed nested session's death cause is visible at a glance \u2014 the\nnode carries ``terminal_state`` + ``error_kind`` (e.g. ``no_return``) and the\nabbreviated default co-locates the proximate ``is_error`` frame.\n\n``verbose=false`` (default) keeps only the load-bearing frames per node\n(request/response/turn lifecycle, gates, errors); ``verbose=true`` lifts the\nfilter to the full per-node firehose. The walk runs in one ``REPEATABLE\nREAD`` snapshot with a node-count ceiling; a tree past the ceiling returns a\ntyped ``truncated: {at_nodes}`` marker.\n\nOrdering caveat: cross-subtree time-ordering is best-effort to transaction\ngranularity; only the causal parent\u2192child edge is exact. ``wake_session``\npeer-pokes are out of scope (a peer stimulus, not a spawn). A cross-tenant\nrun 404s.",
+        "description": "One-call linear trace of a run + all nested sessions and sub-runs (#1149).\n\nA read-projection over the invoke-edge tree: walks the parent\u2192child edge\ntree from this run, normalizes each node's outcome to\n``terminal_state \u2208 {ok,errored,cancelled,suspended,running}`` (+ raw\n``error_kind``), and interleaves the nodes' journals into a flat\n**DFS-pre-order** list (a CLI renders ``depth`` as indentation). A\ndeliberately-failed nested session's death cause is visible at a glance \u2014 the\nnode carries ``terminal_state`` + ``error_kind`` (e.g. ``no_return``) and the\nabbreviated default co-locates the proximate ``is_error`` frame.\n\n``verbose=false`` (default) keeps only the load-bearing frames per node\n(request/response/turn lifecycle, gates, errors); ``verbose=true`` lifts the\nfilter to the full per-node firehose. The walk runs in one ``REPEATABLE\nREAD`` snapshot with a node-count ceiling; a tree past the ceiling returns a\ntyped ``truncated: {at_nodes}`` marker.\n\nOrdering caveat: cross-subtree time-ordering is best-effort to transaction\ngranularity; only the causal parent\u2192child edge is exact. ``wake_session``\npeer-pokes are out of scope (a peer stimulus, not a spawn). A cross-tenant\nrun 404s.",
         "operationId": "get_run_trace",
         "parameters": [
           {
@@ -9941,14 +9941,14 @@
         }
       }
     },
-    "/v1/invocations": {
+    "/v1/tasks": {
       "post": {
         "tags": [
-          "invocations"
+          "tasks"
         ],
-        "summary": "Invoke",
-        "description": "Write a trusted request edge + resolve-or-create a servicer, returning a handle.\n\n``target_kind=agent`` creates a **session** servicer (env-bound) and injects a\nchannel-less request; ``target_kind=workflow`` creates a **run** servicer;\n``target_kind=session`` invokes an existing same-account session by id. Await the\nhandle at ``GET /v1/invocations/{servicer_id}/await`` \u2014 for a session servicer pass\n``?request_id=`` to correlate the response; a run resolves off its terminal row. A\ncross-tenant ``target`` 404s before any edge is written; a supplied ``environment_id``\nis ownership-checked against the caller's account.",
-        "operationId": "invoke",
+        "summary": "Create Task",
+        "description": "Write a trusted request edge + resolve-or-create a servicer, returning a handle.\n\n``target_kind=agent`` creates a **session** servicer (env-bound) and injects a\nchannel-less request; ``target_kind=workflow`` creates a **run** servicer;\n``target_kind=session`` invokes an existing same-account session by id. Await the\nhandle at ``GET /v1/tasks/{servicer_id}/await`` \u2014 for a session servicer pass\n``?request_id=`` to correlate the response; a run resolves off its terminal row. A\ncross-tenant ``target`` 404s before any edge is written; a supplied ``environment_id``\nis ownership-checked against the caller's account.",
+        "operationId": "create_task",
         "parameters": [
           {
             "name": "Authorization",
@@ -9972,7 +9972,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/InvocationRequest"
+                "$ref": "#/components/schemas/TaskRequest"
               }
             }
           }
@@ -9983,7 +9983,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/InvocationHandle"
+                  "$ref": "#/components/schemas/TaskHandle"
                 }
               }
             }
@@ -10001,14 +10001,14 @@
         }
       }
     },
-    "/v1/invocations/{task_id}/await": {
+    "/v1/tasks/{task_id}/await": {
       "get": {
         "tags": [
-          "invocations"
+          "tasks"
         ],
-        "summary": "Await Invocation",
-        "description": "Block until the invocation reaches a terminal state, or ``timeout`` seconds.\n\nThe **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``\nfrom the POST handle and its kind is read off the id prefix. A ``session``\nservicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off\nits terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so\nthe caller re-polls \u2014 a plain request/response (MCP-usable) so an agent can await\na sub-invocation and join. A cross-tenant/missing servicer 404s.",
-        "operationId": "await_invocation",
+        "summary": "Await Task",
+        "description": "Block until the task reaches a terminal state, or ``timeout`` seconds.\n\nThe **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``\nfrom the POST handle and its kind is read off the id prefix. A ``session``\nservicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off\nits terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so\nthe caller re-polls \u2014 a plain request/response (MCP-usable) so an agent can await\na sub-task and join. A cross-tenant/missing servicer 404s.",
+        "operationId": "await_task",
         "parameters": [
           {
             "name": "task_id",
@@ -10088,14 +10088,14 @@
         }
       }
     },
-    "/v1/invocations/{task_id}/cancel": {
+    "/v1/tasks/{task_id}/cancel": {
       "post": {
         "tags": [
-          "invocations"
+          "tasks"
         ],
-        "summary": "Cancel Invocation",
-        "description": "Cancel the invocation identified by ``task_id`` (the servicer id) + ``request_id``.\n\nSeeds the cancel on the servicer (a run via its cancel signal, a session via its\ncancel-marker); the servicer harvests it under its own single-writer step lock and answers\nthe request ``cancelled``. **202 Accepted**: the cancel is *requested*, finalized on the\nservicer's next step. Account-scoped; idempotent (re-cancel is a no-op); a cross-tenant or\nmissing servicer 404s. ``task_id``'s kind is read off the id prefix (``wfr``/``sess``).",
-        "operationId": "cancel_invocation",
+        "summary": "Cancel Task",
+        "description": "Cancel the task identified by ``task_id`` (the servicer id) + ``request_id``.\n\nSeeds the cancel on the servicer (a run via its cancel signal, a session via its\ncancel-marker); the servicer harvests it under its own single-writer step lock and answers\nthe request ``cancelled``. **202 Accepted**: the cancel is *requested*, finalized on the\nservicer's next step. Account-scoped; idempotent (re-cancel is a no-op); a cross-tenant or\nmissing servicer 404s. ``task_id``'s kind is read off the id prefix (``wfr``/``sess``).",
+        "operationId": "cancel_task",
         "parameters": [
           {
             "name": "task_id",
@@ -10937,7 +10937,7 @@
               }
             ],
             "title": "Outcome",
-            "description": "The invocation's terminal outcome, or null while it is still pending (the long-poll timed out \u2014 call again to keep blocking)."
+            "description": "The task's terminal outcome, or null while it is still pending (the long-poll timed out \u2014 call again to keep blocking)."
           },
           "result": {
             "title": "Result",
@@ -10959,7 +10959,7 @@
         },
         "type": "object",
         "title": "AwaitResponse",
-        "description": "The one completion envelope \u2014 ``GET /v1/invocations/{task_id}/await``.\n\nUnifies the session and run completion long-polls. ``outcome`` is the\nterminal state minus liveness (the trace's ``TerminalState`` with\n``suspended``/``running`` folded into pending): ``None`` means **still\npending** \u2014 the long-poll timed out before the invocation reached a terminal\nstate, so re-poll. ``result`` carries the servicer's return value on ``ok``;\n``error`` carries the ``{kind, message, \u2026}`` detail on ``errored`` /\n``cancelled``."
+        "description": "The one completion envelope \u2014 ``GET /v1/tasks/{task_id}/await``.\n\nUnifies the session and run completion long-polls. ``outcome`` is the\nterminal state minus liveness (the trace's ``TerminalState`` with\n``suspended``/``running`` folded into pending): ``None`` means **still\npending** \u2014 the long-poll timed out before the task reached a terminal\nstate, so re-poll. ``result`` carries the servicer's return value on ``ok``;\n``error`` carries the ``{kind, message, \u2026}`` detail on ``errored`` /\n``cancelled``."
       },
       "AwaitingToolCall": {
         "properties": {
@@ -12182,7 +12182,7 @@
           "path_pattern"
         ],
         "title": "HttpRouteSpec",
-        "description": "One entry in an ``HttpServerSpec.routes`` allowlist.\n\n``path_pattern`` is a glob against the request path (``*`` matches one\nsegment, ``**`` matches any number of segments).  ``description`` is\noperator-authored prose rendered into the system prompt so the agent\nknows what the route does and how to call it.  ``permission_policy``\ngates *invocation*: ``always_ask`` leaves the call unresolved in the\nevent log until the client confirms via\n``POST /sessions/:id/tool-confirmations``.\n\n``methods`` scopes the route to a set of HTTP verbs so a surface can\nexpress read/write attenuation structurally \u2014 e.g. ``GET`` everywhere\nbut ``POST`` only on a sandbox path (#828).  ``None`` (the default)\nmeans *all* methods are allowed (the method-dimension lattice top;\nbackward-compatible with routes authored before method scoping).  A\nnon-empty list restricts the route to exactly those verbs.  An empty\nlist (``[]``) is *deny-all* \u2014 the method-dimension lattice bottom, and\nthe natural result of intersecting two disjoint method sets during\nattenuation; it matches nothing.  The capability meet\n(:mod:`aios.models.attenuation`) intersects ``methods`` per route, so a\nchild surface can narrow a parent route's verbs but never widen them.\n\nGraphQL caveat \u2014 **REST-only discipline for attenuated surfaces.**\nMethod scoping confines REST read/write because the verb encodes the\nsemantics.  A GraphQL endpoint serves both queries (reads) and\nmutations (writes) over a single ``POST`` path, so method scoping\n*cannot* separate read from write there, and the broker does not\ninspect request bodies.  An operator who needs to confine writes on a\nGraphQL surface must place reads and writes behind distinct\n``base_url`` servers (each with its own credential/route allowlist) or\naccept that granting ``POST`` grants both.\n\n``allow_query`` opts the route into permitting a query string on the\nrequest ``path``.  The default is ``False``: a ``?...`` is rejected at\nthe route gate (#485) because ``httpx`` parses the query off the URL\nand an unanticipating allowlist \u2014 e.g. a read-only ``/lights/*`` \u2014 is\nbypassed when the upstream interprets ``?action=delete`` as a write.\nAn operator sets ``allow_query=True`` only on routes where the query\nstring cannot escalate beyond what the route already grants and where\nit is functionally required \u2014 e.g. a GitHub ``/repos/**`` route that\nalready permits every verb and must follow cursor/``page`` pagination\nto read a full comment thread (#1156).  The path portion is still\nglob-matched against ``path_pattern`` (the query is stripped before\nthe match), and ``.``/``..`` dot-segment rejection still applies, so a\nquery allowance never widens the path-dimension grant.  It is\nlauncher-verbatim under attenuation: a child surface cannot turn it on\nwhere the parent left it off."
+        "description": "One entry in an ``HttpServerSpec.routes`` allowlist.\n\n``path_pattern`` is a glob against the request path (``*`` matches one\nsegment, ``**`` matches any number of segments).  ``description`` is\noperator-authored prose rendered into the system prompt so the agent\nknows what the route does and how to call it.  ``permission_policy``\ngates *execution*: ``always_ask`` leaves the call unresolved in the\nevent log until the client confirms via\n``POST /sessions/:id/tool-confirmations``.\n\n``methods`` scopes the route to a set of HTTP verbs so a surface can\nexpress read/write attenuation structurally \u2014 e.g. ``GET`` everywhere\nbut ``POST`` only on a sandbox path (#828).  ``None`` (the default)\nmeans *all* methods are allowed (the method-dimension lattice top;\nbackward-compatible with routes authored before method scoping).  A\nnon-empty list restricts the route to exactly those verbs.  An empty\nlist (``[]``) is *deny-all* \u2014 the method-dimension lattice bottom, and\nthe natural result of intersecting two disjoint method sets during\nattenuation; it matches nothing.  The capability meet\n(:mod:`aios.models.attenuation`) intersects ``methods`` per route, so a\nchild surface can narrow a parent route's verbs but never widen them.\n\nGraphQL caveat \u2014 **REST-only discipline for attenuated surfaces.**\nMethod scoping confines REST read/write because the verb encodes the\nsemantics.  A GraphQL endpoint serves both queries (reads) and\nmutations (writes) over a single ``POST`` path, so method scoping\n*cannot* separate read from write there, and the broker does not\ninspect request bodies.  An operator who needs to confine writes on a\nGraphQL surface must place reads and writes behind distinct\n``base_url`` servers (each with its own credential/route allowlist) or\naccept that granting ``POST`` grants both.\n\n``allow_query`` opts the route into permitting a query string on the\nrequest ``path``.  The default is ``False``: a ``?...`` is rejected at\nthe route gate (#485) because ``httpx`` parses the query off the URL\nand an unanticipating allowlist \u2014 e.g. a read-only ``/lights/*`` \u2014 is\nbypassed when the upstream interprets ``?action=delete`` as a write.\nAn operator sets ``allow_query=True`` only on routes where the query\nstring cannot escalate beyond what the route already grants and where\nit is functionally required \u2014 e.g. a GitHub ``/repos/**`` route that\nalready permits every verb and must follow cursor/``page`` pagination\nto read a full comment thread (#1156).  The path portion is still\nglob-matched against ``path_pattern`` (the query is stripped before\nthe match), and ``.``/``..`` dot-segment rejection still applies, so a\nquery allowance never widens the path-dimension grant.  It is\nlauncher-verbatim under attenuation: a child surface cannot turn it on\nwhere the parent left it off."
       },
       "HttpServerSpec": {
         "properties": {
@@ -12231,89 +12231,6 @@
         ],
         "title": "HttpServerSpec",
         "description": "One entry in an agent's ``http_servers`` list.\n\nDeclares an authenticated HTTP endpoint the agent can reach via the\n``http_request`` built-in tool.  ``base_url`` is the common URL\nprefix the agent's ``path`` argument is appended to; ``routes`` is\nthe allowlist of path patterns the broker permits.  Credentials are\nresolved at request time from the session's bound vaults, keyed on\n``base_url``.  Secret never enters the sandbox \u2014 the worker authors\nthe ``Authorization`` header from the vault credential."
-      },
-      "InvocationHandle": {
-        "properties": {
-          "servicer_kind": {
-            "type": "string",
-            "enum": [
-              "session",
-              "run"
-            ],
-            "title": "Servicer Kind"
-          },
-          "servicer_id": {
-            "type": "string",
-            "title": "Servicer Id"
-          },
-          "request_id": {
-            "type": "string",
-            "title": "Request Id"
-          }
-        },
-        "type": "object",
-        "required": [
-          "servicer_kind",
-          "servicer_id",
-          "request_id"
-        ],
-        "title": "InvocationHandle",
-        "description": "Structured handle returned by ``POST /v1/invocations``.\n\nPlain JSON fields, no opaque encoding: the handle is **not** an auth boundary\n(``await`` re-authorizes by ``account_id``). Await the invocation at the one\nunified awaiter ``GET /v1/invocations/{servicer_id}/await`` \u2014 the ``task_id``\npath segment is the ``servicer_id`` and its kind is read off the id prefix; a\n``session`` servicer additionally needs ``?request_id=`` to correlate the\nresponse, a ``run`` servicer resolves off its terminal row."
-      },
-      "InvocationRequest": {
-        "properties": {
-          "target_kind": {
-            "type": "string",
-            "enum": [
-              "agent",
-              "workflow",
-              "session"
-            ],
-            "title": "Target Kind"
-          },
-          "target": {
-            "type": "string",
-            "title": "Target",
-            "description": "An agent_id / workflow_id / session_id, discriminated by ``target_kind``."
-          },
-          "input": {
-            "title": "Input",
-            "description": "The request payload delivered to the servicer (arbitrary JSON or a string)."
-          },
-          "output_schema": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Output Schema",
-            "description": "Optional JSON Schema the response ``value`` must satisfy. Rides the request edge, per-request \u2014 coexists with any definition-level schema."
-          },
-          "environment_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Environment Id",
-            "description": "Environment to bind a created servicer to (agent \u2192 session, workflow \u2192 run). Ownership-checked against the caller's account. Inapplicable for ``target_kind=session`` (the session already exists)."
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "target_kind",
-          "target"
-        ],
-        "title": "InvocationRequest",
-        "description": "Request body for ``POST /v1/invocations`` \u2014 the API caller's request-writer.\n\n``target`` is an ``agent_id | workflow_id | session_id`` and ``target_kind``\ndiscriminates it:\n\n* ``agent``     \u2014 create a **session** servicer and inject a channel-less\n  request into it (the API analog of ``invoke_agent``).\n* ``workflow``  \u2014 create a **run** servicer of the workflow.\n* ``session``   \u2014 invoke an **existing** same-account session by id (the API\n  analog of #1127's ``invoke(session_id)``). No ``environment_id`` applies \u2014\n  the session already exists.\n\n``output_schema`` is the per-request JSON Schema the response ``value`` must\nsatisfy; it rides the edge (``metadata.request.output_schema``), coexisting\nwith any definition-level schema. ``environment_id`` is ownership-checked\nagainst the caller's account on the ``agent`` / ``workflow`` create-paths\n(the per-field containment clamp is #1130's deliverable)."
       },
       "LimitedNetworking": {
         "properties": {
@@ -15813,6 +15730,89 @@
         ],
         "title": "SkillVersionCreate",
         "description": "Request body for ``POST /v1/skills/{skill_id}/versions``.\n\nSame file format as :class:`SkillCreate`. The directory, name, and\ndescription are re-extracted from the new SKILL.md."
+      },
+      "TaskHandle": {
+        "properties": {
+          "servicer_kind": {
+            "type": "string",
+            "enum": [
+              "session",
+              "run"
+            ],
+            "title": "Servicer Kind"
+          },
+          "servicer_id": {
+            "type": "string",
+            "title": "Servicer Id"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "servicer_kind",
+          "servicer_id",
+          "request_id"
+        ],
+        "title": "TaskHandle",
+        "description": "Structured handle returned by ``POST /v1/tasks``.\n\nPlain JSON fields, no opaque encoding: the handle is **not** an auth boundary\n(``await`` re-authorizes by ``account_id``). Await the task at the one\nunified awaiter ``GET /v1/tasks/{servicer_id}/await`` \u2014 the ``task_id``\npath segment is the ``servicer_id`` and its kind is read off the id prefix; a\n``session`` servicer additionally needs ``?request_id=`` to correlate the\nresponse, a ``run`` servicer resolves off its terminal row."
+      },
+      "TaskRequest": {
+        "properties": {
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "workflow",
+              "session"
+            ],
+            "title": "Target Kind"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target",
+            "description": "An agent_id / workflow_id / session_id, discriminated by ``target_kind``."
+          },
+          "input": {
+            "title": "Input",
+            "description": "The request payload delivered to the servicer (arbitrary JSON or a string)."
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Schema",
+            "description": "Optional JSON Schema the response ``value`` must satisfy. Rides the request edge, per-request \u2014 coexists with any definition-level schema."
+          },
+          "environment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Id",
+            "description": "Environment to bind a created servicer to (agent \u2192 session, workflow \u2192 run). Ownership-checked against the caller's account. Inapplicable for ``target_kind=session`` (the session already exists)."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_kind",
+          "target"
+        ],
+        "title": "TaskRequest",
+        "description": "Request body for ``POST /v1/tasks`` \u2014 the API caller's request-writer.\n\n``target`` is an ``agent_id | workflow_id | session_id`` and ``target_kind``\ndiscriminates it:\n\n* ``agent``     \u2014 create a **session** servicer and inject a channel-less\n  request into it (the API analog of ``invoke_agent``).\n* ``workflow``  \u2014 create a **run** servicer of the workflow.\n* ``session``   \u2014 invoke an **existing** same-account session by id (the API\n  analog of #1127's ``invoke(session_id)``). No ``environment_id`` applies \u2014\n  the session already exists.\n\n``output_schema`` is the per-request JSON Schema the response ``value`` must\nsatisfy; it rides the edge (``metadata.request.output_schema``), coexisting\nwith any definition-level schema. ``environment_id`` is ownership-checked\nagainst the caller's account on the ``agent`` / ``workflow`` create-paths\n(the per-field containment clamp is #1130's deliverable)."
       },
       "TokenEndpointAuthBasic": {
         "properties": {

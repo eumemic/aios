@@ -23,13 +23,13 @@ import datetime as dt
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import (
     _Candidate,
     _SweepAgentSurface,
     _was_dispatched,
     find_and_repair_ghosts,
 )
-from aios.harness.task_registry import TaskRegistry
 from aios.models.agents import HttpPermissionPolicy, HttpRouteSpec, HttpServerSpec, ToolSpec
 from tests.unit.conftest import fake_pool_yielding_conn
 
@@ -147,7 +147,7 @@ async def test_route_gated_always_ask_not_ghost_repaired(monkeypatch: Any) -> No
         patch("aios.harness.sweep.sessions_service.append_tool_result", append_mock),
         patch("aios.harness.sweep.sessions_service.load_session_account_id", load_account_mock),
     ):
-        repaired = await find_and_repair_ghosts(pool, TaskRegistry())
+        repaired = await find_and_repair_ghosts(pool, InflightToolRegistry())
 
     assert repaired == [], "a parked route-gated always_ask call must NOT be ghost-repaired"
     append_mock.assert_not_called()
@@ -202,7 +202,7 @@ async def test_route_gated_always_ask_confirmed_is_ghost_repaired(monkeypatch: A
         patch("aios.harness.sweep.sessions_service.append_tool_result", append_mock),
         patch("aios.harness.sweep.sessions_service.load_session_account_id", load_account_mock),
     ):
-        repaired = await find_and_repair_ghosts(pool, TaskRegistry())
+        repaired = await find_and_repair_ghosts(pool, InflightToolRegistry())
 
     assert repaired == [("sess_a", "tc_a")], "a confirmed-then-lost always_ask call is a ghost"
     append_mock.assert_awaited_once()

@@ -181,7 +181,7 @@ async def install_packages(
 # Pick the legacy netfilter backend when it's available (#1022). gVisor's
 # netstack (``runsc``) implements the *legacy* netfilter ABI, NOT nftables,
 # but debian/ubuntu images default the ``iptables`` command to the nft
-# backend via update-alternatives — so a bare ``iptables`` invocation inside a
+# backend via update-alternatives — so a bare ``iptables`` call inside a
 # runsc netns fails with ``Failed to initialize nft: Protocol not supported``
 # and the fail-closed gate refuses to provision the sandbox. The legacy binary
 # ships in debian's ``iptables`` package as the ``iptables-legacy`` alternative,

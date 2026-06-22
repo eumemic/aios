@@ -95,7 +95,7 @@ def _settings_stub(*, session: float, cache: float) -> SimpleNamespace:
 async def test_session_clone_passes_configured_session_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``ensure_session_working_tree``'s ``clone --reference`` invocation
+    """``ensure_session_working_tree``'s ``clone --reference`` call
     must use ``Settings.github_clone_session_timeout_seconds`` — not the
     300s harness step budget that issue #697 closes."""
     from aios.config import get_settings
@@ -131,7 +131,7 @@ async def test_session_clone_passes_configured_session_timeout(
 async def test_session_clone_timeout_raises_github_clone_error_with_configured_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the ``clone --reference`` invocation times out, the
+    """When the ``clone --reference`` call times out, the
     ``GithubCloneError`` message must reflect the configured budget — not
     the old 300s constant."""
     from aios.config import get_settings
@@ -169,7 +169,7 @@ async def test_cache_clone_uses_cache_timeout_not_session_timeout(
     """``ensure_cache_clone`` cold-path runs ``git clone --bare`` against
     the upstream — that's the cache budget, not the per-session one.
 
-    Asserts EVERY ``_run_git`` invocation inside ``ensure_cache_clone``
+    Asserts EVERY ``_run_git`` call inside ``ensure_cache_clone``
     uses the cache budget. A regression that swaps either call's
     constant (e.g. the post-clone ``config gc.auto`` admin op) would
     otherwise pass undetected — and silently leave the cache with
@@ -192,7 +192,7 @@ async def test_cache_clone_uses_cache_timeout_not_session_timeout(
 
     await github_clone.ensure_cache_clone("https://github.com/acme/foo", "ghp_TOKEN")
 
-    # Cold-path issues two git invocations: ``clone --bare`` then
+    # Cold-path issues two git calls: ``clone --bare`` then
     # ``config gc.auto 0``. Both are cache initialization; both must
     # use the cache budget.
     assert fake_run.await_count == 2

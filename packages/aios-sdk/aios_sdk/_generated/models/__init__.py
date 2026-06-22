@@ -75,11 +75,6 @@ from .http_validation_error import HTTPValidationError
 from .ingest_external_event_response_ingest_external_event import (
     IngestExternalEventResponseIngestExternalEvent,
 )
-from .invocation_handle import InvocationHandle
-from .invocation_handle_servicer_kind import InvocationHandleServicerKind
-from .invocation_request import InvocationRequest
-from .invocation_request_output_schema_type_0 import InvocationRequestOutputSchemaType0
-from .invocation_request_target_kind import InvocationRequestTargetKind
 from .limited_networking import LimitedNetworking
 from .list_connections_mode_type_0 import ListConnectionsModeType0
 from .list_response_agent import ListResponseAgent
@@ -227,6 +222,11 @@ from .skill_version import SkillVersion
 from .skill_version_create import SkillVersionCreate
 from .skill_version_create_files import SkillVersionCreateFiles
 from .skill_version_files import SkillVersionFiles
+from .task_handle import TaskHandle
+from .task_handle_servicer_kind import TaskHandleServicerKind
+from .task_request import TaskRequest
+from .task_request_output_schema_type_0 import TaskRequestOutputSchemaType0
+from .task_request_target_kind import TaskRequestTargetKind
 from .token_endpoint_auth_basic import TokenEndpointAuthBasic
 from .token_endpoint_auth_none import TokenEndpointAuthNone
 from .token_endpoint_auth_post import TokenEndpointAuthPost
@@ -391,11 +391,6 @@ __all__ = (
     "HttpServerSpec",
     "HTTPValidationError",
     "IngestExternalEventResponseIngestExternalEvent",
-    "InvocationHandle",
-    "InvocationHandleServicerKind",
-    "InvocationRequest",
-    "InvocationRequestOutputSchemaType0",
-    "InvocationRequestTargetKind",
     "LimitedNetworking",
     "ListConnectionsModeType0",
     "ListResponseAgent",
@@ -521,6 +516,11 @@ __all__ = (
     "SkillVersionCreate",
     "SkillVersionCreateFiles",
     "SkillVersionFiles",
+    "TaskHandle",
+    "TaskHandleServicerKind",
+    "TaskRequest",
+    "TaskRequestOutputSchemaType0",
+    "TaskRequestTargetKind",
     "TokenEndpointAuthBasic",
     "TokenEndpointAuthNone",
     "TokenEndpointAuthPost",

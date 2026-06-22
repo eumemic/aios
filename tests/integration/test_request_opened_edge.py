@@ -525,7 +525,7 @@ async def test_session_to_session_cycle_bounded_by_construction(
         pool, account_id=account_id, prefix="cycle-b"
     )
 
-    # Replay the A↔B invocation cycle the decrement rule produces: an edgeless
+    # Replay the A↔B invoke-edge cycle the decrement rule produces: an edgeless
     # root seeds at the full budget, and each trusted hop stamps parent_depth - 1.
     # The loop stops emitting the moment a hop has no budget left to spend.
     targets = [sess_b.id, sess_a.id]  # A invokes B, B invokes A, A invokes B, ...

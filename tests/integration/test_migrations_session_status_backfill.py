@@ -357,7 +357,7 @@ def test_backfill_bounded_on_a_large_session(postgres: object) -> None:
     set-based, whereas the correlated form's cost is visibly super-linear.
 
     The budget (60s) is deliberately generous: it brackets the WHOLE
-    ``uv run alembic upgrade`` invocation — process spawn, env bootstrap, and
+    ``uv run alembic upgrade`` run — process spawn, env bootstrap, and
     the full migration ladder from 0065 — not just the 0066 statement, so it
     stays robust on cold CI while still failing a true minutes-long hang.
     """
@@ -438,7 +438,7 @@ def test_backfill_bounded_on_a_large_session(postgres: object) -> None:
     elapsed = time.monotonic() - start
     assert result.returncode == 0, f"upgrade head failed:\n{result.stderr}\n{result.stdout}"
 
-    # The whole alembic invocation (process spawn + 0066) finishes well under
+    # The whole alembic run (process spawn + 0066) finishes well under
     # this; a correlated re-scan of a large session is what blows it.
     assert elapsed < 60.0, f"0066 backfill took {elapsed:.1f}s — suspect a re-scan"
 

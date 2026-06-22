@@ -188,7 +188,7 @@ async def test_missing_session_is_none(
 # A session that has served more than one request carries several
 # ``request_opened`` edges. The priority must reflect the **most-recently-opened
 # still-open** edge (the current stimulus), not the oldest-ever one. These cases
-# are the reachable inversions once ``POST /v1/invocations target_kind=session``
+# are the reachable inversions once ``POST /v1/tasks target_kind=session``
 # (#1128) appends a second edge to a live session; the single-edge cases above
 # cannot distinguish oldest from latest.
 

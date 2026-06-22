@@ -3,7 +3,7 @@
 Procrastinate registers task functions at import time, which means task bodies
 can't be closures over locally-bound state from ``worker_main``. The standard
 workaround is a small module that holds module-level globals — set once at
-worker startup, read by every task invocation.
+worker startup, read on every job run.
 
 The values are ``None`` between import and ``worker_main`` initialization, so
 task bodies use the ``require_*`` family to fail loudly if a task fires
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from aios.crypto.vault import CryptoBox
-    from aios.harness.task_registry import TaskRegistry
+    from aios.harness.inflight_tool_registry import InflightToolRegistry
     from aios.mcp.pool import McpSessionPool
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.sandbox.registry import SandboxRegistry
@@ -35,7 +35,7 @@ pool: asyncpg.Pool[Any] | None = None
 crypto_box: CryptoBox | None = None
 worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
-task_registry: TaskRegistry | None = None
+inflight_tool_registry: InflightToolRegistry | None = None
 mcp_session_pool: McpSessionPool | None = None
 tool_broker: ToolBroker | None = None
 tool_provider: ToolProvider | None = None
@@ -115,8 +115,8 @@ def require_sandbox_registry() -> SandboxRegistry:
     return _require("sandbox_registry", sandbox_registry)
 
 
-def require_task_registry() -> TaskRegistry:
-    return _require("task_registry", task_registry)
+def require_inflight_tool_registry() -> InflightToolRegistry:
+    return _require("inflight_tool_registry", inflight_tool_registry)
 
 
 def require_tool_broker() -> ToolBroker:

@@ -6,7 +6,7 @@
 2. Acquires a Postgres advisory lock to refuse a duplicate worker
 3. Opens the asyncpg pool
 4. Constructs the libsodium CryptoBox
-5. Creates the SandboxRegistry, TaskRegistry, and McpSessionPool
+5. Creates the SandboxRegistry, InflightToolRegistry, and McpSessionPool
 6. Stashes globals on :mod:`aios.harness.runtime`
 7. Opens the procrastinate connector
 8. Sweeps orphan attachments, reaps stalled jobs, wakes sessions needing inference
@@ -41,13 +41,13 @@ from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
 from aios.harness.sweep import (
     reap_stalled_jobs,
     wake_sessions_needing_inference,
 )
-from aios.harness.task_registry import TaskRegistry
 from aios.harness.trigger_runner import sweep_trigger_fires
 from aios.harness.workspace_reaper import sweep_archived_workspaces
 from aios.logging import configure_logging, get_logger
@@ -207,7 +207,7 @@ async def worker_main() -> None:
     # still releases the advisory lock and any already-built resource.
     pool: asyncpg.Pool[Any] | None = None
     sandbox_registry: SandboxRegistry | None = None
-    task_registry: TaskRegistry | None = None
+    inflight_tool_registry: InflightToolRegistry | None = None
     mcp_session_pool: McpSessionPool | None = None
     tool_broker: ToolBroker | None = None
     procrastinate_opened = False
@@ -229,7 +229,7 @@ async def worker_main() -> None:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
         sandbox_registry = SandboxRegistry(backend=select_sandbox_backend(settings))
-        task_registry = TaskRegistry()
+        inflight_tool_registry = InflightToolRegistry()
         mcp_session_pool = McpSessionPool()
         await ensure_sandbox_network()
         tool_broker = ToolBroker(socket_path=settings.tool_broker_socket_path)
@@ -249,7 +249,7 @@ async def worker_main() -> None:
         runtime.crypto_box = crypto_box
         runtime.worker_id = _make_worker_id()
         runtime.sandbox_registry = sandbox_registry
-        runtime.task_registry = task_registry
+        runtime.inflight_tool_registry = inflight_tool_registry
         runtime.mcp_session_pool = mcp_session_pool
         runtime.tool_broker = tool_broker
         runtime.tool_provider = SubsystemToolProvider()
@@ -287,7 +287,7 @@ async def worker_main() -> None:
         #      re-enqueued in the same pass.
         #   2. Repair tool-call ghosts and wake sessions needing inference.
         await reap_stalled_jobs(procrastinate_app.job_manager)
-        sweep = await wake_sessions_needing_inference(pool, task_registry)
+        sweep = await wake_sessions_needing_inference(pool, inflight_tool_registry)
         if sweep.woken_sessions or sweep.repaired_ghosts:
             log.info(
                 "worker.startup_sweep",
@@ -344,13 +344,13 @@ async def worker_main() -> None:
 
         # Start periodic sweep (every 30s).
         sweep_task = asyncio.create_task(
-            _periodic_sweep(pool, task_registry, interval=30),
+            _periodic_sweep(pool, inflight_tool_registry, interval=30),
             name="periodic_sweep",
         )
         _supervise(sweep_task, latch=supervised_latch, fatal=supervised_failure)
 
         interrupt_task = asyncio.create_task(
-            _run_interrupt_listener(settings.db_url, task_registry),
+            _run_interrupt_listener(settings.db_url, inflight_tool_registry),
             name="interrupt_listener",
         )
         _supervise(interrupt_task, latch=supervised_latch, fatal=supervised_failure)
@@ -442,8 +442,8 @@ async def worker_main() -> None:
         if sandbox_registry is not None:
             sandbox_registry.stop_reaper()
             sandbox_registry.stop_gc()
-        if task_registry is not None:
-            await task_registry.shutdown()
+        if inflight_tool_registry is not None:
+            await inflight_tool_registry.shutdown()
         if sandbox_registry is not None:
             # Durable session sandboxes: STOP (don't destroy) every container
             # so their filesystems survive; the next worker's boot GC tick
@@ -552,7 +552,7 @@ async def _periodic_heartbeat(*, interval: int = _HEARTBEAT_INTERVAL_SECONDS) ->
 
 async def _periodic_sweep(
     pool: asyncpg.Pool[Any],
-    task_registry: TaskRegistry,
+    inflight_tool_registry: InflightToolRegistry,
     *,
     interval: int = 30,
 ) -> None:
@@ -561,7 +561,7 @@ async def _periodic_sweep(
     while True:
         await asyncio.sleep(interval)
         try:
-            sweep = await wake_sessions_needing_inference(pool, task_registry)
+            sweep = await wake_sessions_needing_inference(pool, inflight_tool_registry)
             if sweep.woken_sessions or sweep.repaired_ghosts:
                 log.info(
                     "periodic_sweep.woken",
@@ -633,7 +633,7 @@ async def _workspace_reaper_loop(pool: asyncpg.Pool[Any]) -> None:
 
 async def _run_interrupt_listener(
     db_url: str,
-    task_registry: TaskRegistry,
+    inflight_tool_registry: InflightToolRegistry,
 ) -> None:
     """Drain pg_notify on the session-interrupt channel and cancel matching steps.
 
@@ -651,8 +651,8 @@ async def _run_interrupt_listener(
                         session_id = await queue.get()
                         if session_id == "":
                             raise ConnectionError("session interrupt LISTEN connection terminated")
-                        step_cancelled = task_registry.cancel_step(session_id)
-                        tools_cancelled = task_registry.cancel_session(session_id)
+                        step_cancelled = inflight_tool_registry.cancel_step(session_id)
+                        tools_cancelled = inflight_tool_registry.cancel_session(session_id)
                         log.info(
                             "interrupt_listener.dispatch",
                             session_id=session_id,

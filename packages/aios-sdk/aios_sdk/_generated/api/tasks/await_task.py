@@ -6,6 +6,7 @@ import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
+from ...models.await_response import AwaitResponse
 from ...models.http_validation_error import HTTPValidationError
 from ...types import UNSET, Response, Unset
 
@@ -13,7 +14,8 @@ from ...types import UNSET, Response, Unset
 def _get_kwargs(
     task_id: str,
     *,
-    request_id: str,
+    request_id: None | str | Unset = UNSET,
+    timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -22,13 +24,20 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["request_id"] = request_id
+    json_request_id: None | str | Unset
+    if isinstance(request_id, Unset):
+        json_request_id = UNSET
+    else:
+        json_request_id = request_id
+    params["request_id"] = json_request_id
+
+    params["timeout"] = timeout
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
-        "method": "post",
-        "url": "/v1/invocations/{task_id}/cancel".format(
+        "method": "get",
+        "url": "/v1/tasks/{task_id}/await".format(
             task_id=quote(str(task_id), safe=""),
         ),
         "params": params,
@@ -40,10 +49,11 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Any | HTTPValidationError | None:
-    if response.status_code == 202:
-        response_202 = response.json()
-        return response_202
+) -> AwaitResponse | HTTPValidationError | None:
+    if response.status_code == 200:
+        response_200 = AwaitResponse.from_dict(response.json())
+
+        return response_200
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -58,7 +68,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Any | HTTPValidationError]:
+) -> Response[AwaitResponse | HTTPValidationError]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -71,22 +81,25 @@ def sync_detailed(
     task_id: str,
     *,
     client: AuthenticatedClient | Client,
-    request_id: str,
+    request_id: None | str | Unset = UNSET,
+    timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
-    """Cancel Invocation
+) -> Response[AwaitResponse | HTTPValidationError]:
+    """Await Task
 
-     Cancel the invocation identified by ``task_id`` (the servicer id) + ``request_id``.
+     Block until the task reaches a terminal state, or ``timeout`` seconds.
 
-    Seeds the cancel on the servicer (a run via its cancel signal, a session via its
-    cancel-marker); the servicer harvests it under its own single-writer step lock and answers
-    the request ``cancelled``. **202 Accepted**: the cancel is *requested*, finalized on the
-    servicer's next step. Account-scoped; idempotent (re-cancel is a no-op); a cross-tenant or
-    missing servicer 404s. ``task_id``'s kind is read off the id prefix (``wfr``/``sess``).
+    The **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``
+    from the POST handle and its kind is read off the id prefix. A ``session``
+    servicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off
+    its terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so
+    the caller re-polls — a plain request/response (MCP-usable) so an agent can await
+    a sub-task and join. A cross-tenant/missing servicer 404s.
 
     Args:
         task_id (str):
-        request_id (str):
+        request_id (None | str | Unset):
+        timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
     Raises:
@@ -94,12 +107,13 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[AwaitResponse | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
         task_id=task_id,
         request_id=request_id,
+        timeout=timeout,
         authorization=authorization,
     )
 
@@ -114,22 +128,25 @@ def sync(
     task_id: str,
     *,
     client: AuthenticatedClient | Client,
-    request_id: str,
+    request_id: None | str | Unset = UNSET,
+    timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
-    """Cancel Invocation
+) -> AwaitResponse | HTTPValidationError | None:
+    """Await Task
 
-     Cancel the invocation identified by ``task_id`` (the servicer id) + ``request_id``.
+     Block until the task reaches a terminal state, or ``timeout`` seconds.
 
-    Seeds the cancel on the servicer (a run via its cancel signal, a session via its
-    cancel-marker); the servicer harvests it under its own single-writer step lock and answers
-    the request ``cancelled``. **202 Accepted**: the cancel is *requested*, finalized on the
-    servicer's next step. Account-scoped; idempotent (re-cancel is a no-op); a cross-tenant or
-    missing servicer 404s. ``task_id``'s kind is read off the id prefix (``wfr``/``sess``).
+    The **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``
+    from the POST handle and its kind is read off the id prefix. A ``session``
+    servicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off
+    its terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so
+    the caller re-polls — a plain request/response (MCP-usable) so an agent can await
+    a sub-task and join. A cross-tenant/missing servicer 404s.
 
     Args:
         task_id (str):
-        request_id (str):
+        request_id (None | str | Unset):
+        timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
     Raises:
@@ -137,13 +154,14 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        AwaitResponse | HTTPValidationError
     """
 
     return sync_detailed(
         task_id=task_id,
         client=client,
         request_id=request_id,
+        timeout=timeout,
         authorization=authorization,
     ).parsed
 
@@ -152,22 +170,25 @@ async def asyncio_detailed(
     task_id: str,
     *,
     client: AuthenticatedClient | Client,
-    request_id: str,
+    request_id: None | str | Unset = UNSET,
+    timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
-    """Cancel Invocation
+) -> Response[AwaitResponse | HTTPValidationError]:
+    """Await Task
 
-     Cancel the invocation identified by ``task_id`` (the servicer id) + ``request_id``.
+     Block until the task reaches a terminal state, or ``timeout`` seconds.
 
-    Seeds the cancel on the servicer (a run via its cancel signal, a session via its
-    cancel-marker); the servicer harvests it under its own single-writer step lock and answers
-    the request ``cancelled``. **202 Accepted**: the cancel is *requested*, finalized on the
-    servicer's next step. Account-scoped; idempotent (re-cancel is a no-op); a cross-tenant or
-    missing servicer 404s. ``task_id``'s kind is read off the id prefix (``wfr``/``sess``).
+    The **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``
+    from the POST handle and its kind is read off the id prefix. A ``session``
+    servicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off
+    its terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so
+    the caller re-polls — a plain request/response (MCP-usable) so an agent can await
+    a sub-task and join. A cross-tenant/missing servicer 404s.
 
     Args:
         task_id (str):
-        request_id (str):
+        request_id (None | str | Unset):
+        timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
     Raises:
@@ -175,12 +196,13 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[AwaitResponse | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
         task_id=task_id,
         request_id=request_id,
+        timeout=timeout,
         authorization=authorization,
     )
 
@@ -193,22 +215,25 @@ async def asyncio(
     task_id: str,
     *,
     client: AuthenticatedClient | Client,
-    request_id: str,
+    request_id: None | str | Unset = UNSET,
+    timeout: int | Unset = 30,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
-    """Cancel Invocation
+) -> AwaitResponse | HTTPValidationError | None:
+    """Await Task
 
-     Cancel the invocation identified by ``task_id`` (the servicer id) + ``request_id``.
+     Block until the task reaches a terminal state, or ``timeout`` seconds.
 
-    Seeds the cancel on the servicer (a run via its cancel signal, a session via its
-    cancel-marker); the servicer harvests it under its own single-writer step lock and answers
-    the request ``cancelled``. **202 Accepted**: the cancel is *requested*, finalized on the
-    servicer's next step. Account-scoped; idempotent (re-cancel is a no-op); a cross-tenant or
-    missing servicer 404s. ``task_id``'s kind is read off the id prefix (``wfr``/``sess``).
+    The **one awaiter** over both servicer kinds: ``task_id`` is the ``servicer_id``
+    from the POST handle and its kind is read off the id prefix. A ``session``
+    servicer needs ``?request_id=`` to correlate its response; a ``run`` resolves off
+    its terminal row (``request_id`` ignored). On timeout returns ``outcome=null`` so
+    the caller re-polls — a plain request/response (MCP-usable) so an agent can await
+    a sub-task and join. A cross-tenant/missing servicer 404s.
 
     Args:
         task_id (str):
-        request_id (str):
+        request_id (None | str | Unset):
+        timeout (int | Unset):  Default: 30.
         authorization (None | str | Unset):
 
     Raises:
@@ -216,7 +241,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        AwaitResponse | HTTPValidationError
     """
 
     return (
@@ -224,6 +249,7 @@ async def asyncio(
             task_id=task_id,
             client=client,
             request_id=request_id,
+            timeout=timeout,
             authorization=authorization,
         )
     ).parsed
