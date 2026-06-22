@@ -254,7 +254,7 @@ async def list_caller_tasks(
     caller_session_id: str,
     account_id: str,
 ) -> list[CallerTask]:
-    """Every ``call_*`` task a session launched — its outbound task roster (#1428).
+    """Every ``call_*`` task a session launched — its outbound roster (#1428).
 
     The set-returning sibling of :func:`find_parked_servicer`, on the same 0103 reverse-caller
     indexes (``events_request_opened_caller_idx`` / ``wf_runs_caller_idx``: ``(account_id,

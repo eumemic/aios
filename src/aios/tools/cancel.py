@@ -62,7 +62,7 @@ async def cancel_handler(session_id: str, arguments: dict[str, Any]) -> dict[str
     if tool_call_id is not None:
         if not isinstance(tool_call_id, str):
             raise CancelArgumentError("tool_call_id must be a string")
-        cancelled = inflight_reg.cancel_task(session_id, tool_call_id)
+        cancelled = inflight_reg.cancel_tool_task(session_id, tool_call_id)
         return {"cancelled": cancelled, "tool_call_id": tool_call_id}
 
     count = inflight_reg.cancel_session(session_id)

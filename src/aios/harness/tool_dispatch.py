@@ -55,7 +55,7 @@ def _launch_tasks(
     *,
     prefix: str,
 ) -> None:
-    """Shared launcher: spawn one asyncio task per tool call, register in task registry."""
+    """Shared launcher: spawn one asyncio task per tool call, register in the InflightToolRegistry."""
     inflight_reg = runtime.require_inflight_tool_registry()
     for call in tool_calls:
         call_id = call.get("id") or "unknown"
@@ -304,7 +304,7 @@ def relaunch_parked_task(
     output_schema: dict[str, Any] | None,
     account_id: str,
 ) -> None:
-    """Re-park a ``call_*`` task whose in-memory park task was lost to a worker
+    """Re-park a ``call_*`` task whose in-memory asyncio park task was lost to a worker
     crash (#1431). Returns immediately; the resume runs as a fire-and-forget tool task.
 
     Routed through :func:`_launch_tasks` so the resume registers in the ``InflightToolRegistry``
