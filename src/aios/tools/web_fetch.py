@@ -15,6 +15,7 @@ On error: {"error": "..."}
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -70,7 +71,9 @@ async def web_fetch_handler(session_id: str, arguments: dict[str, Any]) -> dict[
     if not isinstance(url, str) or not url.strip():
         raise WebFetchArgumentError("web_fetch tool requires a non-empty 'url' string")
 
-    if not is_safe_url(url):
+    # is_safe_url does a blocking getaddrinfo; offload it so the SSRF pre-flight
+    # never stalls the event loop (matches services/vault_oauth._guard_url).
+    if not await asyncio.to_thread(is_safe_url, url):
         return {"error": "Blocked: URL targets a private/internal address"}
 
     try:

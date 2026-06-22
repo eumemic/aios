@@ -16,6 +16,7 @@ On error: ``{"error": "..."}``.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -365,7 +366,9 @@ async def _do_http_request(
             return synthesized
 
     full_url = server.base_url.rstrip("/") + "/" + path.lstrip("/")
-    if not is_safe_url(full_url):
+    # is_safe_url does a blocking getaddrinfo; offload it so the SSRF pre-flight
+    # never stalls the event loop (matches services/vault_oauth._guard_url).
+    if not await asyncio.to_thread(is_safe_url, full_url):
         return {"error": f"Blocked: URL targets a private/internal address: {full_url}"}
 
     _vault_id, auth_headers = await resolve_auth(server.base_url)

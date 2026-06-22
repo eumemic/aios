@@ -353,6 +353,26 @@ class TestHttpRequestHandler:
         assert "error" in result
         assert "does not match any enabled route" in result["error"]
 
+    async def test_ssrf_blocked_url_returns_error(self, _stub_runtime: Any) -> None:
+        """The SSRF pre-flight blocks a private/internal target after the route
+        matches but before any upstream dispatch — coverage parity with
+        web_fetch's guard test (the offload to a worker thread doesn't change
+        this functional contract)."""
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_safe_url(False),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert "private/internal" in result["error"]
+        assert "url" not in captured  # blocked before any upstream dispatch
+
     async def test_method_not_allowed_returns_error(self, _stub_runtime: Any) -> None:
         # A route scoped to GET refuses a POST at the gate (no upstream dispatch).
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*", methods=["GET"])])])
