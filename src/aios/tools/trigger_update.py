@@ -28,6 +28,7 @@ from aios.models.triggers import (
 )
 from aios.services import sessions as sessions_service
 from aios.services import triggers as triggers_service
+from aios.tools.input import tool_input
 from aios.tools.registry import registry
 
 TRIGGER_UPDATE_DESCRIPTION = (
@@ -262,11 +263,14 @@ TRIGGER_UPDATE_PARAMETERS_SCHEMA: dict[str, Any] = {
 async def trigger_update_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    name = arguments.get("name")
-    if not isinstance(name, str):
-        raise ValueError("name must be a string")
+    # ``name`` is a required, string-typed schema field, so the dispatch-layer
+    # ``validate_arguments`` (jsonschema) already rejects a missing/non-string
+    # ``name`` for the model + CLI-broker paths before this handler runs — no
+    # in-handler isinstance guard needed (that bare ``ValueError`` would have
+    # evicted the sandbox via ``_classify_tool_error``'s final arm).
+    name = arguments["name"]
     patch_data = {k: v for k, v in arguments.items() if k != "name"}
-    update = TriggerUpdate.model_validate(patch_data)
+    update = tool_input(TriggerUpdate, patch_data)
     echo = await triggers_service.update_trigger(
         pool, session_id, name, update, account_id=account_id
     )
