@@ -33,6 +33,7 @@ from aios.models.triggers import (
 )
 from aios.services import sessions as sessions_service
 from aios.services import triggers as triggers_service
+from aios.tools.input import tool_input
 from aios.tools.registry import registry
 
 TRIGGER_CREATE_DESCRIPTION = (
@@ -318,7 +319,7 @@ TRIGGER_CREATE_PARAMETERS_SCHEMA: dict[str, Any] = {
 async def trigger_create_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    spec = TriggerCreate.model_validate(arguments)
+    spec = tool_input(TriggerCreate, arguments)
     created = await triggers_service.add_trigger(pool, session_id, spec, account_id=account_id)
     # The dump carries ``ingest_token`` (the once-only ingest secret) for an
     # external_event source, ``None`` otherwise — the agent must see the minted

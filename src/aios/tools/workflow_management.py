@@ -44,7 +44,6 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic import ValidationError as PydanticValidationError
 
 from aios.harness import runtime
 from aios.models.workflows import (
@@ -55,7 +54,7 @@ from aios.models.workflows import (
 )
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
-from aios.tools.invoke import ToolBail
+from aios.tools.input import tool_input
 from aios.tools.registry import registry
 
 # Heavy snapshot fields the model already sent (or doesn't need echoed back); trimmed
@@ -154,22 +153,13 @@ class _ResumeGateArgs(BaseModel):
 # propagate: the dispatch layer (``tool_dispatch._classify_tool_error``) turns a
 # client-class (4xx) ``AiosError`` — a denied attenuation, a stale-version conflict, a
 # depth-cap hit — into a clean, model-visible result without evicting the sandbox, and
-# a 5xx into a genuine failure. Only argument parsing bails locally (``_parse``).
-
-
-def _parse[M: BaseModel](model: type[M], arguments: dict[str, Any]) -> M:
-    """Parse + validate via the pydantic arg model (semantic checks the JSON schema
-    can't encode, e.g. ``McpServerSpec`` name rules) → ``ToolBail`` on failure."""
-    try:
-        return model.model_validate(arguments)
-    except PydanticValidationError as exc:
-        raise ToolBail(f"invalid arguments: {exc}") from exc
+# a 5xx into a genuine failure. Only argument parsing bails locally (``tool_input``).
 
 
 async def create_workflow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    body = _parse(WorkflowCreate, arguments)
+    body = tool_input(WorkflowCreate, arguments)
     wf = await wf_service.create_workflow(
         pool,
         account_id=account_id,
@@ -189,7 +179,7 @@ async def create_workflow_handler(session_id: str, arguments: dict[str, Any]) ->
 async def update_workflow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_UpdateWorkflowArgs, arguments)
+    args = tool_input(_UpdateWorkflowArgs, arguments)
     wf = await wf_service.update_workflow(
         pool,
         args.workflow_id,
@@ -211,7 +201,7 @@ async def update_workflow_handler(session_id: str, arguments: dict[str, Any]) ->
 async def archive_workflow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_WorkflowIdArgs, arguments)
+    args = tool_input(_WorkflowIdArgs, arguments)
     wf = await wf_service.archive_workflow(pool, args.workflow_id, account_id=account_id)
     return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
 
@@ -219,7 +209,7 @@ async def archive_workflow_handler(session_id: str, arguments: dict[str, Any]) -
 async def unarchive_workflow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_WorkflowIdArgs, arguments)
+    args = tool_input(_WorkflowIdArgs, arguments)
     wf = await wf_service.unarchive_workflow(pool, args.workflow_id, account_id=account_id)
     return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
 
@@ -227,7 +217,7 @@ async def unarchive_workflow_handler(session_id: str, arguments: dict[str, Any])
 async def get_workflow_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_GetWorkflowArgs, arguments)
+    args = tool_input(_GetWorkflowArgs, arguments)
     wf = await wf_service.get_workflow(pool, args.workflow_id, account_id=account_id)
     return wf.model_dump(mode="json")  # FULL — includes script + version (the re-read loop)
 
@@ -235,7 +225,7 @@ async def get_workflow_handler(session_id: str, arguments: dict[str, Any]) -> di
 async def list_workflows_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_ListWorkflowsArgs, arguments)
+    args = tool_input(_ListWorkflowsArgs, arguments)
     workflows = await wf_service.list_workflows(
         pool, account_id=account_id, limit=args.limit, after=args.after, name=args.name
     )
@@ -247,7 +237,7 @@ async def list_workflows_handler(session_id: str, arguments: dict[str, Any]) -> 
 async def get_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_GetRunArgs, arguments)
+    args = tool_input(_GetRunArgs, arguments)
     run = await wf_service.get_run(pool, args.run_id, account_id=account_id)
     return run.model_dump(mode="json")  # FULL WfRun incl. pinned script
 
@@ -255,7 +245,7 @@ async def get_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[st
 async def list_runs_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_ListRunsArgs, arguments)
+    args = tool_input(_ListRunsArgs, arguments)
     runs = await wf_service.list_runs(
         pool,
         account_id=account_id,
@@ -273,7 +263,7 @@ async def list_runs_handler(session_id: str, arguments: dict[str, Any]) -> dict[
 async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_ListRunEventsArgs, arguments)
+    args = tool_input(_ListRunEventsArgs, arguments)
     # Scope check (mirrors the HTTP /runs/{id}/events route): raise NotFoundError on a
     # missing/cross-account run, so the model sees a real error instead of an empty page
     # indistinguishable from "no events past after_seq".
@@ -288,7 +278,7 @@ async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) ->
 async def resume_gate_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    args = _parse(_ResumeGateArgs, arguments)
+    args = tool_input(_ResumeGateArgs, arguments)
     run = await wf_service.resume_gate_by_nonce(
         pool,
         run_id=args.run_id,
