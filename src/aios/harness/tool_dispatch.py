@@ -13,8 +13,13 @@ per tool call. Each task:
 The contract: **every task MUST append exactly one tool-role event and
 trigger the sweep before returning.** This is enforced by the
 :func:`_tool_lifecycle` async context manager, which both dispatch
-paths drive. Only a worker SIGKILL can break it — and the periodic
-sweep recovers from that.
+paths drive — including a cancel that lands on the start-span append
+(the model's ``cancel`` tool, the interrupt listener, and a graceful
+drain all deliver one). Three things can still leave a task without an
+*in-task* result: worker death (SIGKILL/OOM), a DB failure writing the
+start span, or a *second* cancel interrupting the first cancel's cleanup
+awaits (the same exposure the in-body cancel handler has). The
+ghost-repair sweep recovers all three (≤30s).
 
 Tool tasks run on the worker's event loop and outlive the procrastinate
 job handler that spawned them. They're tracked in the per-worker
@@ -138,28 +143,41 @@ async def _tool_lifecycle(
     # first action in this lifecycle — only pure-Python preamble (arg
     # extraction, no I/O) is permitted above.
     #
-    # The span is intentionally OUTSIDE the try/except below: an
-    # ``asyncio.CancelledError`` arriving mid-await leaves the span possibly
-    # committed and the body never entered, surfacing as "may have completed"
-    # — an over-pessimistic outcome that the recovery message acknowledges
-    # (see the branch comment in ``sweep.find_and_repair_ghosts``).  This is
-    # the conservatively-safe direction; the alternative (suppress the span
-    # on cancellation) would risk under-pessimism on real side effects.
-    span_start = (
-        await sessions_service.append_event(
-            pool,
-            session_id,
-            "span",
-            {
-                "event": "tool_execute_start",
-                "tool_call_id": call_id,
-                "tool_name": name,
-            },
-            account_id=account_id,
+    # The span append has its OWN try/except below: a ``CancelledError`` landing on this
+    # await (the model's ``cancel`` tool, the interrupt listener, or a graceful worker
+    # drain) strikes inside ``__aenter__`` — before the main try/finally — so without
+    # handling it the task would escape with no result and no tail sweep, leaving the call
+    # unresolved until the next sweep (≤30s) and then ghost-classified as the pessimistic
+    # "may have completed". But the body provably never ran (the cancel struck while writing
+    # the start marker), so we resolve it in-task as a clean ``cancelled`` and re-raise. (A
+    # *second* cancel can still interrupt the cleanup awaits below — same exposure as the
+    # in-body cancel handler; the ghost sweep is the backstop for that, for worker death, and
+    # for a DB failure writing this span.)
+    try:
+        span_start = (
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {
+                    "event": "tool_execute_start",
+                    "tool_call_id": call_id,
+                    "tool_name": name,
+                },
+                account_id=account_id,
+            )
+            if write_start_span
+            else None
         )
-        if write_start_span
-        else None
-    )
+    except asyncio.CancelledError:
+        log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name).info(
+            f"{log_prefix}.cancelled_before_start"
+        )
+        await _append_tool_result(
+            pool, session_id, call_id, name, account_id=account_id, error="cancelled"
+        )
+        await _trigger_sweep(pool, session_id, account_id=account_id)
+        raise
     bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
     tc = _ToolCall(call_id=call_id, name=name, raw_args=raw_args, bound_log=bound_log)
     try:

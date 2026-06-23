@@ -9,6 +9,7 @@ or a genuine failure (also evicts the sandbox).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -182,6 +183,59 @@ class TestToolLifecycleEviction:
         evicted, append_result = await self._drive(monkeypatch, ValueError("oops"))
         assert evicted == ["ses_1"]
         assert append_result.await_args.kwargs["error"] == "ValueError: oops"
+
+
+class TestCancelDuringStartSpan:
+    """A (single) cancel landing on the ``tool_execute_start`` append — which happens inside
+    ``__aenter__``, before the main try/finally (the model's ``cancel`` tool, the interrupt
+    listener, and a graceful drain all deliver one) — must still resolve the call in-task:
+    a clean ``cancelled`` result + a tail sweep, with the body never running. Without the
+    targeted handler the task would escape with no result and no sweep, stranding the call
+    until the ≤30s ghost sweep and then misclassifying it as 'may have completed'. (A *second*
+    cancel interrupting the cleanup awaits falls back to that ghost sweep — same exposure as
+    the in-body cancel handler — so it is the documented backstop, not pinned here.)"""
+
+    async def test_cancel_during_start_span_appends_cancelled_and_sweeps(
+        self, monkeypatch: Any
+    ) -> None:
+        span_committed = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_append_event(
+            _pool: Any, _session_id: str, _kind: str, data: dict[str, Any], **_kw: Any
+        ) -> Any:
+            # Model the start-span write: signal it committed server-side, then hold the
+            # client await open (suspended, cancellable) so the cancel lands right here.
+            if data.get("event") == "tool_execute_start":
+                span_committed.set()
+                await release.wait()
+            return MagicMock(id="span_1")
+
+        monkeypatch.setattr(sessions_service, "append_event", fake_append_event)
+        append_result: Any = AsyncMock()
+        trigger_sweep = AsyncMock()
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result", append_result)
+        monkeypatch.setattr(tool_dispatch, "_trigger_sweep", trigger_sweep)
+
+        body_ran = asyncio.Event()
+        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+
+        async def driver() -> None:
+            async with _tool_lifecycle(
+                MagicMock(), "ses_1", call, account_id="acc_1", log_prefix="tool"
+            ):
+                body_ran.set()  # must NOT happen — the cancel struck during the start span
+
+        task = asyncio.create_task(driver())
+        await span_committed.wait()  # span "committed"; the lifecycle is suspended on it
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert not body_ran.is_set()  # the body provably never ran
+        assert append_result.await_count == 1  # resolved in-task, not left to the sweep
+        assert append_result.await_args.kwargs["error"] == "cancelled"
+        assert trigger_sweep.await_count == 1  # tail sweep fired so the step wakes now
 
 
 class TestParentChannelThreading:
