@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+import litellm.exceptions as litellm_exceptions
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
 from aios.config import get_settings
@@ -101,6 +102,45 @@ _REFUSAL_STOP_REASON_MESSAGE = (
 _SPEND_CAP_STOP_REASON_MESSAGE = (
     "This account has reached its spend limit, so no model calls can be made. "
     "The account operator can raise the limit (account config spend_limit_usd) to resume."
+)
+
+# litellm's already-typed terminal model-call errors: requests that will NEVER
+# succeed on retry of the SAME prompt. Routing these straight to the errored
+# latch skips the [2,8,30,120]s backoff ladder, which on a terminal error only
+# burns ~160s + up to 4 doomed prompt-token round-trips. Kept as a small FAMILY
+# rule over litellm's exception hierarchy (generalize-over-enumerate) — NOT a
+# per-provider-string enum. ContextWindowExceededError and
+# ContentPolicyViolationError both subclass BadRequestError, so they are already
+# covered by isinstance against BadRequestError alone; they are listed only to
+# DOCUMENT the covered 400-subclasses (redundant for matching, not required).
+_TERMINAL_MODEL_ERRORS: tuple[type[Exception], ...] = (
+    litellm_exceptions.BadRequestError,             # 400: malformed/invalid prompt
+    litellm_exceptions.ContextWindowExceededError,  # 400 subclass: prompt too long
+    litellm_exceptions.ContentPolicyViolationError, # 400 subclass: policy block
+    litellm_exceptions.AuthenticationError,         # 401: bad/expired key
+    litellm_exceptions.PermissionDeniedError,       # 403: key lacks model access
+    litellm_exceptions.NotFoundError,               # 404: unknown model id
+    litellm_exceptions.UnprocessableEntityError,    # 422: schema-invalid request
+)
+
+
+def _is_terminal_model_error(exc: BaseException) -> bool:
+    """True iff ``exc`` is a litellm error that retrying the SAME prompt cannot fix.
+
+    Fail-SAFE: anything NOT matched here (RateLimitError / APIConnectionError /
+    InternalServerError / Timeout / ServiceUnavailableError, or any non-litellm
+    Exception) falls through to the existing backoff ladder — current behavior.
+    A misclassified *transient* therefore degrades to burning the ladder, never
+    the reverse.
+    """
+    return isinstance(exc, _TERMINAL_MODEL_ERRORS)
+
+
+_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE = (
+    "The model call failed with a terminal error that retrying cannot fix "
+    "(e.g. invalid request, context-window exceeded, content policy, or auth). "
+    "To recover, post a message to the session, optionally after switching the "
+    "agent's model or trimming the conversation."
 )
 
 
@@ -617,7 +657,24 @@ async def _run_session_step_body(
         return _StepResult(
             retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
         )
-    except Exception:
+    except Exception as exc:
+        if _is_terminal_model_error(exc):
+            log.warning(
+                "step.model_terminal_error",
+                session_id=session_id,
+                error_class=type(exc).__name__,
+            )
+            await _append_model_request_error_span(
+                pool, session_id, start_event_id=start_event.id, account_id=account_id
+            )
+            await _latch_errored_turn(
+                pool,
+                session_id,
+                error_kind="model_terminal_error",
+                stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                account_id=account_id,
+            )
+            return _StepResult()  # no retry_delay → no defer_wake → session parks errored
         log.exception("step.litellm_failed", session_id=session_id)
         await _append_model_request_error_span(
             pool, session_id, start_event_id=start_event.id, account_id=account_id
