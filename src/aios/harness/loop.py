@@ -114,13 +114,13 @@ _SPEND_CAP_STOP_REASON_MESSAGE = (
 # covered by isinstance against BadRequestError alone; they are listed only to
 # DOCUMENT the covered 400-subclasses (redundant for matching, not required).
 _TERMINAL_MODEL_ERRORS: tuple[type[Exception], ...] = (
-    litellm_exceptions.BadRequestError,             # 400: malformed/invalid prompt
+    litellm_exceptions.BadRequestError,  # 400: malformed/invalid prompt
     litellm_exceptions.ContextWindowExceededError,  # 400 subclass: prompt too long
-    litellm_exceptions.ContentPolicyViolationError, # 400 subclass: policy block
-    litellm_exceptions.AuthenticationError,         # 401: bad/expired key
-    litellm_exceptions.PermissionDeniedError,       # 403: key lacks model access
-    litellm_exceptions.NotFoundError,               # 404: unknown model id
-    litellm_exceptions.UnprocessableEntityError,    # 422: schema-invalid request
+    litellm_exceptions.ContentPolicyViolationError,  # 400 subclass: policy block
+    litellm_exceptions.AuthenticationError,  # 401: bad/expired key
+    litellm_exceptions.PermissionDeniedError,  # 403: key lacks model access
+    litellm_exceptions.NotFoundError,  # 404: unknown model id
+    litellm_exceptions.UnprocessableEntityError,  # 422: schema-invalid request
 )
 
 

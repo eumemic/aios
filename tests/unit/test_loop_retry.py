@@ -473,9 +473,7 @@ class TestRunSessionStepOnTerminalModelError:
         ]
         # Subset check: the terminal latch passes ``stop_message``, so the
         # recorded reason is ``{"type": "error", "message": ...}``.
-        assert any(
-            {"type": "error"}.items() <= recorded.items() for recorded in recorded_reasons
-        )
+        assert any({"type": "error"}.items() <= recorded.items() for recorded in recorded_reasons)
 
         mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
             ANY, "sess_x", account_id=ANY, error={"kind": "model_terminal_error"}
