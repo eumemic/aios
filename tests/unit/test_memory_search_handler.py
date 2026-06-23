@@ -18,7 +18,7 @@ from aios.tools.memory_search import (
 )
 
 
-class _FakeRecord(dict):
+class _FakeRecord(dict[str, object]):
     """asyncpg.Record-like: indexable by column name, the only access
     ``_format_results`` uses."""
 
