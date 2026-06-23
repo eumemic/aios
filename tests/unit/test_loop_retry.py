@@ -15,15 +15,57 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+import httpx
+import litellm.exceptions as litellm_exceptions
 import pytest
 
 from aios.harness.completion import ModelCallDeadlineError
 from aios.harness.loop import (
     _count_consecutive_rescheduling,
+    _is_terminal_model_error,
     _retry_delay_for_attempt,
     run_session_step,
 )
 from aios.harness.window import WindowedEvents
+
+
+def _make_litellm_error(cls: type[Exception]) -> Exception:
+    """Construct a litellm exception instance, supplying per-class required args.
+
+    Some 4xx/5xx classes (PermissionDeniedError, UnprocessableEntityError,
+    ServiceUnavailableError) require an httpx ``response``; others don't. This
+    builds a valid instance of each so the tests exercise real litellm types
+    through the predicate / handler rather than stand-ins.
+    """
+    request = httpx.Request("POST", "https://example.test/v1")
+    response = httpx.Response(400, request=request)
+    kwargs: dict[str, Any] = {"message": "boom", "model": "x", "llm_provider": "y"}
+    if cls in (
+        litellm_exceptions.PermissionDeniedError,
+        litellm_exceptions.UnprocessableEntityError,
+        litellm_exceptions.ServiceUnavailableError,
+    ):
+        kwargs["response"] = response
+    return cls(**kwargs)
+
+
+_TERMINAL_ERROR_CLASSES = [
+    litellm_exceptions.BadRequestError,
+    litellm_exceptions.AuthenticationError,
+    litellm_exceptions.ContextWindowExceededError,
+    litellm_exceptions.ContentPolicyViolationError,
+    litellm_exceptions.PermissionDeniedError,
+    litellm_exceptions.NotFoundError,
+    litellm_exceptions.UnprocessableEntityError,
+]
+
+_TRANSIENT_ERROR_CLASSES = [
+    litellm_exceptions.RateLimitError,
+    litellm_exceptions.APIConnectionError,
+    litellm_exceptions.InternalServerError,
+    litellm_exceptions.ServiceUnavailableError,
+    litellm_exceptions.Timeout,
+]
 
 
 class TestRetryDelayForAttempt:
@@ -392,3 +434,64 @@ class TestRunSessionStepOnModelError:
             "model_usage": {},
             "cost_usd": None,
         } in span_payloads
+
+
+class TestIsTerminalModelError:
+    """Pure-predicate table test for ``_is_terminal_model_error``."""
+
+    @pytest.mark.parametrize("cls", _TERMINAL_ERROR_CLASSES)
+    def test_terminal_classes_are_terminal(self, cls: type[Exception]) -> None:
+        assert _is_terminal_model_error(_make_litellm_error(cls)) is True
+
+    @pytest.mark.parametrize("cls", _TRANSIENT_ERROR_CLASSES)
+    def test_transient_classes_are_not_terminal(self, cls: type[Exception]) -> None:
+        assert _is_terminal_model_error(_make_litellm_error(cls)) is False
+
+    def test_bare_runtime_error_is_not_terminal(self) -> None:
+        # Pins the fixture's default ``RuntimeError("provider boom")`` path as
+        # still-transient (falls through to the backoff ladder).
+        assert _is_terminal_model_error(RuntimeError("provider boom")) is False
+
+
+class TestRunSessionStepOnTerminalModelError:
+    """The terminal-first branch inside the generic model-call ``except``."""
+
+    @pytest.mark.parametrize("cls", _TERMINAL_ERROR_CLASSES)
+    async def test_terminal_class_latches_errored_without_retry(
+        self, mock_step_dependencies: Any, cls: type[Exception]
+    ) -> None:
+        mock_step_dependencies.stream_litellm.side_effect = _make_litellm_error(cls)
+
+        # Crucially WITHOUT patching ``_count_consecutive_rescheduling`` high:
+        # the ladder must be bypassed regardless of attempt count.
+        await run_session_step("sess_x")  # must NOT raise
+
+        mock_step_dependencies.defer_wake.assert_not_awaited()
+
+        recorded_reasons = [
+            call.args[2] for call in mock_step_dependencies.set_stop_reason.call_args_list
+        ]
+        # Subset check: the terminal latch passes ``stop_message``, so the
+        # recorded reason is ``{"type": "error", "message": ...}``.
+        assert any({"type": "error"}.items() <= recorded.items() for recorded in recorded_reasons)
+
+        mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
+            ANY, "sess_x", account_id=ANY, error={"kind": "model_terminal_error"}
+        )
+
+    @pytest.mark.parametrize("cls", _TRANSIENT_ERROR_CLASSES)
+    async def test_transient_class_keeps_backoff_ladder(
+        self, mock_step_dependencies: Any, cls: type[Exception]
+    ) -> None:
+        mock_step_dependencies.stream_litellm.side_effect = _make_litellm_error(cls)
+
+        with patch(
+            "aios.harness.loop._count_consecutive_rescheduling",
+            AsyncMock(return_value=0),
+        ):
+            await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_awaited_once_with(
+            ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
+        )
+        mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
