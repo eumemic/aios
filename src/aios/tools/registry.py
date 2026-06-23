@@ -108,6 +108,14 @@ class ToolDefinition:
     The workflow-run step reads it to route a ``tool('bash')`` call to the
     run-sandbox executor; the session path doesn't consult it (every built-in
     already runs against the session's own sandbox there).
+
+    ``resumable`` marks a **pure-await** tool: its handler parks on a durable
+    servicer edge (a pure read of the log), so the ghost-repair sweep RE-PARKS it
+    on crash recovery instead of synthesizing an error result — re-reading the
+    durable answer is side-effect-free, unlike bash/http (#1431). The sweep derives
+    its resumable set from this flag (:meth:`ToolRegistry.resumable_tool_names`), so
+    a new parking tool just sets ``resumable=True`` here at registration — there is
+    no separate hand-maintained name list to keep in lockstep.
     """
 
     name: str
@@ -117,6 +125,7 @@ class ToolDefinition:
     transport: ToolTransport = "both"
     executes: Literal["worker", "sandbox"] = "worker"
     classify_permission: ClassifyPermission | None = None
+    resumable: bool = False
 
 
 @dataclass(slots=True)
@@ -135,11 +144,12 @@ class ToolRegistry:
         transport: ToolTransport = "both",
         executes: Literal["worker", "sandbox"] = "worker",
         classify_permission: ClassifyPermission | None = None,
+        resumable: bool = False,
     ) -> None:
         """Register a tool. Raises :class:`DuplicateToolError` on name clash.
 
         Intended to be called at module import time from tool modules
-        (e.g. :mod:`aios.tools.bash`).
+        (e.g. :mod:`aios.tools.bash`). See :class:`ToolDefinition` for ``resumable``.
         """
         if name in self._tools:
             raise DuplicateToolError(
@@ -154,7 +164,14 @@ class ToolRegistry:
             transport=transport,
             executes=executes,
             classify_permission=classify_permission,
+            resumable=resumable,
         )
+
+    def resumable_tool_names(self) -> frozenset[str]:
+        """Names of the registered pure-await tools (``resumable=True``) — the
+        ghost-repair sweep's re-park discriminant. Single source of truth: derived
+        from the registrations, never a hand-maintained list (#1431)."""
+        return frozenset(name for name, tool in self._tools.items() if tool.resumable)
 
     def get(self, name: str) -> ToolDefinition:
         """Return the registered tool. Raises :class:`ToolNotFoundError` if absent."""
