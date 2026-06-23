@@ -20,6 +20,7 @@ class ToolSpecTypeType0(str, Enum):
     LIST_RUN_EVENTS = "list_run_events"
     LIST_TASKS = "list_tasks"
     LIST_WORKFLOWS = "list_workflows"
+    MEMORY_SEARCH = "memory_search"
     READ = "read"
     RESUME_GATE = "resume_gate"
     SCHEDULE_WAKE = "schedule_wake"
