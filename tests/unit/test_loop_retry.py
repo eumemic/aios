@@ -39,14 +39,14 @@ def _make_litellm_error(cls: type[Exception]) -> Exception:
     """
     request = httpx.Request("POST", "https://example.test/v1")
     response = httpx.Response(400, request=request)
-    common = {"message": "boom", "model": "x", "llm_provider": "y"}
+    kwargs: dict[str, Any] = {"message": "boom", "model": "x", "llm_provider": "y"}
     if cls in (
         litellm_exceptions.PermissionDeniedError,
         litellm_exceptions.UnprocessableEntityError,
         litellm_exceptions.ServiceUnavailableError,
     ):
-        return cls(response=response, **common)
-    return cls(**common)
+        kwargs["response"] = response
+    return cls(**kwargs)
 
 
 _TERMINAL_ERROR_CLASSES = [
