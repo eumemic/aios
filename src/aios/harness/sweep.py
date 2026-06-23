@@ -306,8 +306,9 @@ async def find_and_repair_ghosts(
       custom tool or an unconfirmed ``always_ask`` tool still waiting
       for client action).
 
-    A ghost whose tool is a parking ``call_*`` builtin (``PARKING_TOOL_NAMES``) is a
-    **pure-await** that crash-recovery RE-PARKS rather than error-repairs (#1431): its
+    A ghost whose tool is a registered ``resumable`` builtin
+    (:meth:`registry.resumable_tool_names`) is a **pure-await** that crash-recovery
+    RE-PARKS rather than error-repairs (#1431): its
     servicer is re-derived from the durable edge (:func:`queries.find_parked_servicer`) and
     a fresh resume task is launched (a pure read of durable state) so the servicer's
     exactly-once answer lands in the original tool result. Only a resumable ghost whose edge
@@ -468,14 +469,16 @@ async def find_and_repair_ghosts(
     # RE-PARK it (a pure read), so the answer lands in the original tool result instead of
     # being orphaned by a synthetic error. Only when no edge exists (the launch crashed
     # before it was durable) does the call fall through to a retryable ``launch_lost`` error.
-    # Lazy imports: ``sweep`` ↔ ``tool_dispatch`` is a mutual-lazy-import pair (the
-    # symmetric counterpart of ``_trigger_sweep``'s lazy ``sweep`` import); ``invoke_session``
-    # registers tools at import and isn't needed at ``sweep`` module load.
+    # Lazy import: ``sweep`` ↔ ``tool_dispatch`` is a mutual-lazy-import pair (the
+    # symmetric counterpart of ``_trigger_sweep``'s lazy ``sweep`` import). The tool
+    # registry is the single source of truth for which builtins are pure-await
+    # resumables (``resumable=True`` at registration); no separate name list.
     from aios.harness.tool_dispatch import relaunch_parked_task
-    from aios.tools.invoke_session import PARKING_TOOL_NAMES
+    from aios.tools.registry import registry
 
-    resumable = [c for c in ghosts if c.tool_name in PARKING_TOOL_NAMES]
-    ghosts = [c for c in ghosts if c.tool_name not in PARKING_TOOL_NAMES]
+    resumable_names = registry.resumable_tool_names()
+    resumable = [c for c in ghosts if c.tool_name in resumable_names]
+    ghosts = [c for c in ghosts if c.tool_name not in resumable_names]
     launch_lost: list[_Candidate] = []
     for c in resumable:
         # Per-ghost isolation, matching the error-repair + wake-defer loops below: this

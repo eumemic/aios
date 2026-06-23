@@ -342,13 +342,6 @@ async def call_workflow_handler(
 
 # ─── descriptions + registration ─────────────────────────────────────────────
 
-# The model-facing parking builtins: a ``call_*`` tool whose handler parks
-# (:func:`_park_and_resolve`) on a servicer and is therefore a **pure-await** —
-# safe to re-park on crash-recovery rather than error-repair (#1431). The
-# ghost-repair sweep uses this set as the resumability discriminant; it MUST stay
-# in lockstep with the names registered in :func:`_register` below.
-PARKING_TOOL_NAMES = frozenset({"call_session", "call_agent", "call_workflow"})
-
 CALL_SESSION_DESCRIPTION = (
     "Call an existing same-account session: deliver `input` to it as a trusted "
     "request and wait for its single answer ({ok: value} on success, an error "
@@ -372,12 +365,17 @@ CALL_WORKFLOW_DESCRIPTION = (
 
 
 def _register() -> None:
+    # ``resumable=True``: each handler parks (:func:`_park_and_resolve`) on a durable
+    # servicer edge — a pure-await, safe for the ghost-repair sweep to re-park rather
+    # than error-repair on crash recovery (#1431). The sweep derives its discriminant
+    # from this flag; no separate name list to keep in lockstep.
     registry.register(
         name="call_session",
         description=CALL_SESSION_DESCRIPTION,
         parameters_schema=_CallSessionArgs.model_json_schema(),
         handler=call_session_handler,
         transport="agent_tool",
+        resumable=True,
     )
     registry.register(
         name="call_agent",
@@ -385,6 +383,7 @@ def _register() -> None:
         parameters_schema=_CallAgentArgs.model_json_schema(),
         handler=call_agent_handler,
         transport="agent_tool",
+        resumable=True,
     )
     registry.register(
         name="call_workflow",
@@ -392,6 +391,7 @@ def _register() -> None:
         parameters_schema=_CallWorkflowArgs.model_json_schema(),
         handler=call_workflow_handler,
         transport="agent_tool",
+        resumable=True,
     )
 
 

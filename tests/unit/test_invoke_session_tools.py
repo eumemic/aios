@@ -291,12 +291,20 @@ async def test_current_tool_call_id_scoped_to_call(monkeypatch: Any) -> None:
     assert current_tool_call_id() is None
 
 
-def test_parking_tool_names_match_registered() -> None:
-    """``PARKING_TOOL_NAMES`` (the sweep's resumability discriminant) must stay in lockstep
-    with the registered ``call_*`` builtins."""
-    from aios.tools.invoke_session import PARKING_TOOL_NAMES
-    from aios.tools.registry import registry
+def test_resumable_tools_are_exactly_the_parking_call_builtins() -> None:
+    """The ghost-repair sweep re-parks exactly the registered ``resumable`` builtins
+    (:meth:`ToolRegistry.resumable_tool_names` — its single source of truth). The one place
+    a tool declares itself pure-await is ``resumable=True`` at registration; this assertion
+    is a tripwire that fails if the derived set changes, forcing a deliberate confirmation
+    the change was intended (#1431). A parking tool left ``resumable=False`` would be
+    silently error-repaired = re-orphaned on restart; a side-effectful tool wrongly marked
+    ``resumable`` would be re-parked-and-re-read as if pure — a double-execution risk."""
+    from aios.tools.registry import registry  # ``aios.tools`` imported at module top
 
-    assert set(PARKING_TOOL_NAMES) == {"call_session", "call_agent", "call_workflow"}
-    for name in PARKING_TOOL_NAMES:
+    assert registry.resumable_tool_names() == frozenset(
+        {"call_session", "call_agent", "call_workflow"}
+    )
+    for name in registry.resumable_tool_names():
         assert registry.get(name).transport == "agent_tool"
+    # The default is non-resumable: a side-effectful tool must never be re-parked.
+    assert registry.get("bash").resumable is False
