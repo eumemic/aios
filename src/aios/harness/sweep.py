@@ -548,14 +548,17 @@ async def find_and_repair_ghosts(
         # connector send) on the model's retry — see #685.
         #
         # The "may have completed" branch is conservatively over-pessimistic:
-        # it also fires for crashes/cancels in the window between the span
-        # commit and the actual side-effectful invoke (MCP auth resolve,
-        # parameter validation, ``asyncio.CancelledError`` arriving inside
-        # the span ``await``).  Those produce false "verify the outcome"
-        # advice but never the dangerous false "safe to retry" that this
-        # design eliminates.  Tighter classification would require a second
-        # marker written immediately before each tool's side-effectful call
-        # — deferred until the over-pessimism is shown to matter.
+        # it also fires for a crash in the window between the span commit and
+        # the actual side-effectful invoke (an MCP auth resolve / parameter
+        # validation dying mid-flight, or worker death). A cancel landing on the
+        # span ``await`` is normally NOT among these — ``_tool_lifecycle`` resolves
+        # it eagerly as ``cancelled`` (the body provably never ran). It only reaches
+        # this branch if a *second* cancel interrupts that eager cleanup, where this
+        # is the backstop. The remaining crash cases produce false "verify the
+        # outcome" advice but never the dangerous false "safe to retry" that this
+        # design eliminates. Tighter classification would need a second marker
+        # before each tool's side-effectful call — deferred until the residual
+        # over-pessimism is shown to matter.
         if (c.session_id, c.tool_call_id) in started:
             repair_items.append(
                 (
