@@ -46,9 +46,10 @@ INSERT INTO environments (id, name, config, account_id)
 VALUES ('env_a', 'env-a', '{}'::jsonb, 'acc_a'),
        ('env_b', 'env-b', '{}'::jsonb, 'acc_b');
 
-INSERT INTO sessions (id, account_id, agent_id, environment_id, agent_version, status)
-VALUES ('sess_x', 'acc_a', 'agent_a', 'env_a', 1, 'active'),
-       ('sess_y', 'acc_b', 'agent_b', 'env_b', 1, 'active');
+INSERT INTO sessions
+    (id, account_id, agent_id, environment_id, agent_version, workspace_volume_path)
+VALUES ('sess_x', 'acc_a', 'agent_a', 'env_a', 1, '/tmp/sess_x'),
+       ('sess_y', 'acc_b', 'agent_b', 'env_b', 1, '/tmp/sess_y');
 
 INSERT INTO memory_stores (id, name, account_id)
 VALUES ('store_s1', 'store-s1', 'acc_a'),
