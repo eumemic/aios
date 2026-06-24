@@ -18,7 +18,14 @@ class RecentChat:
 
     Returned by ``GET /v1/connections/{id}/recent-chats`` so operators
     can find the chat_id for a specific peer without digging through
-    event logs before calling ``bind-chat``.
+    event logs before calling ``bind-chat`` or opening an ``AllowList``.
+
+    ``chat_id`` is the **authoritative, gate-relevant identifier** — it is
+    exactly what the inbound-admission gate (``AllowList.chat_ids``) matches
+    on, so it is the value an operator copies into an allowlist. This view
+    deliberately does not present a connector-supplied ``display_name`` /
+    ``sender_name`` alongside it: that name is self-reported by the
+    connector and forgeable, never a verified identity.
 
         Attributes:
             chat_id (str):

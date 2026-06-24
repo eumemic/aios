@@ -26,6 +26,22 @@ from aios.models.connections import Connection
 from aios.models.inbound_policy import DenyAll, InboundPolicy
 
 
+def effective_inbound_policy(stored: InboundPolicy | None) -> InboundPolicy:
+    """Apply the NULL → server-default ``DenyAll`` (fail-closed) rule.
+
+    The single home of the "what does a connection with no stored policy
+    admit" decision. A stored union member passes through unchanged; an
+    absent (NULL column) policy resolves to ``DenyAll`` so a connection
+    that has never been opened admits nobody. Both the async
+    :func:`resolve_effective_inbound_policy` (the gate's read path) and the
+    read-model echo (``inbound_policy_effective`` on ``Connection``) route
+    through here so the default lives in exactly one place.
+    """
+    if stored is None:
+        return DenyAll()
+    return stored
+
+
 async def resolve_effective_inbound_policy(
     pool: asyncpg.Pool[Any],
     *,
@@ -39,6 +55,4 @@ async def resolve_effective_inbound_policy(
     the loaded ``connection`` row. No extra round-trips; ``pool`` and
     ``account_id`` are accepted for signature symmetry (see module docstring).
     """
-    if connection.inbound_policy is None:
-        return DenyAll()
-    return connection.inbound_policy
+    return effective_inbound_policy(connection.inbound_policy)

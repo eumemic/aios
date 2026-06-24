@@ -31,6 +31,7 @@ from aios.models.connections import (
     RecentChat,
 )
 from aios.models.connectors import ConnectorCapabilities
+from aios.models.inbound_policy import InboundPolicy
 from aios.services.sessions import _evict_sandbox_for_resource_change
 
 
@@ -93,6 +94,28 @@ async def set_connection_secrets(
             connection_id,
             secrets_blob=_encrypt_secrets(secrets, crypto_box, account_id=account_id),
             account_id=account_id,
+        )
+
+
+async def set_inbound_policy(
+    pool: asyncpg.Pool[Any],
+    connection_id: str,
+    *,
+    account_id: str,
+    policy: InboundPolicy,
+) -> Connection:
+    """Replace a connection's inbound-admission policy, wholesale (Replace).
+
+    Thin wrapper mirroring ``set_connection_secrets``: the validated
+    :class:`InboundPolicy` union member arrives from the operator endpoint
+    (empty ``AllowList`` and partial ``allow_list`` already 422'd at the
+    wire edge), and this writes the ``connections.inbound_policy`` jsonb
+    column and returns the re-read :class:`Connection`. Refuses archived
+    rows in the query layer.
+    """
+    async with pool.acquire() as conn:
+        return await queries.set_connection_inbound_policy(
+            conn, connection_id, policy=policy, account_id=account_id
         )
 
 
@@ -312,6 +335,13 @@ async def attach_connection(
                 session_id=session_id,
                 account_id=account_id,
             )
+            # Fail-closed at bind: a newly-bound connection with no policy
+            # admits nobody until explicitly opened. Only defaults when the
+            # column is NULL — never clobbers an operator-set policy. Runs
+            # before the read below so the returned Connection reflects it.
+            await queries.default_inbound_policy_if_unset(
+                conn, connection_id, account_id=account_id
+            )
             connection = await queries.get_connection(conn, connection_id, account_id=account_id)
         await queries.notify_connection_change(
             conn,
@@ -393,6 +423,11 @@ async def configure_per_chat(
             session_template_id=session_template_id,
             account_id=account_id,
         )
+        # Fail-closed at bind (see ``attach_connection``): default to
+        # ``DenyAll`` only when the policy column is NULL so a freshly-bound
+        # per_chat connection admits nobody until opened, without clobbering
+        # an operator-set policy.
+        await queries.default_inbound_policy_if_unset(conn, connection_id, account_id=account_id)
         return await queries.get_connection(conn, connection_id, account_id=account_id)
 
 

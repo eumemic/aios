@@ -35,10 +35,13 @@ from aios_sdk._generated.api.connections import (
     list_connections,
     list_recent_chats,
     reparent_connection,
+    set_connection_inbound_policy,
     set_connection_secrets,
     unbind_chat,
     unconfigure_connection,
 )
+from aios_sdk._generated.models.allow_all import AllowAll
+from aios_sdk._generated.models.allow_list import AllowList
 from aios_sdk._generated.models.bind_chat_request import BindChatRequest
 from aios_sdk._generated.models.connection_attach import ConnectionAttach
 from aios_sdk._generated.models.connection_configure_per_chat import ConnectionConfigurePerChat
@@ -46,6 +49,7 @@ from aios_sdk._generated.models.connection_create import ConnectionCreate
 from aios_sdk._generated.models.connection_reparent import ConnectionReparent
 from aios_sdk._generated.models.connection_set_secrets import ConnectionSetSecrets
 from aios_sdk._generated.models.connection_set_secrets_secrets import ConnectionSetSecretsSecrets
+from aios_sdk._generated.models.deny_all import DenyAll
 from aios_sdk._generated.models.list_connections_mode_type_0 import ListConnectionsModeType0
 
 app = typer.Typer(name="connections", help="Manage connector connections.", no_args_is_help=True)
@@ -201,6 +205,60 @@ def set_secrets(
             ctx, set_connection_secrets.sync_detailed, connection_id=connection_id, body=body
         )
         print_success("secrets updated on", connection_id)
+        return None
+
+    run_or_die(_run)
+
+
+@app.command(
+    "set-inbound-policy",
+    help="Set the connection's inbound-admission policy (wholesale Replace).",
+)
+@covers("set_connection_inbound_policy")
+def set_inbound_policy(
+    ctx: typer.Context,
+    connection_id: str,
+    kind: Annotated[
+        str,
+        typer.Option(
+            "--kind",
+            help="Policy kind: allow_all | allow_list | deny_all.",
+        ),
+    ],
+    chat_id: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--chat-id",
+            help=(
+                "Authoritative chat_id to admit. Repeatable. Required (and "
+                "non-empty) for --kind allow_list; ignored for allow_all / "
+                "deny_all. Use the chat_id from `connections recent-chats` — "
+                "never a connector-supplied display name (it is self-reported)."
+            ),
+        ),
+    ] = None,
+) -> None:
+    def _run() -> int | None:
+        # Build the bare union body the SDK operation expects. Do NOT
+        # pre-validate the empty-allow-list case client-side: send what the
+        # operator asked for and let the server's 422 surface through
+        # call_single (the CLI is a thin wire; the server owns the rule).
+        body: AllowAll | AllowList | DenyAll
+        if kind == "allow_all":
+            body = AllowAll()
+        elif kind == "deny_all":
+            body = DenyAll()
+        elif kind == "allow_list":
+            body = AllowList(chat_ids=chat_id or [])
+        else:
+            print_error(f"unknown --kind {kind!r}: expected allow_all | allow_list | deny_all")
+            return 64
+        call_single(
+            ctx,
+            set_connection_inbound_policy.sync_detailed,
+            connection_id=connection_id,
+            body=body,
+        )
         return None
 
     run_or_die(_run)

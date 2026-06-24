@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 
 class AllowAll(BaseModel):
@@ -67,12 +67,24 @@ InboundPolicy = Annotated[
 ]
 """Discriminated union over ``kind`` — the stored / read-model shape."""
 
-InboundPolicyReplace = Annotated[
-    AllowAll | AllowList | DenyAll,
-    Field(discriminator="kind"),
-]
-"""Required-on-update variant. Structurally identical to ``InboundPolicy``
-today (``AllowList.chat_ids`` is already required, so a partial update that
-omits it 422s), named separately so the operator-surface PR can pin update
-semantics without re-deriving it. Defined here but not yet wired to any
-endpoint — see the issue's Out-of-scope note."""
+
+class InboundPolicyReplace(RootModel[InboundPolicy]):
+    """Wire wrapper for ``PUT /v1/connections/{id}/inbound-policy``.
+
+    A ``RootModel`` over the :data:`InboundPolicy` discriminated union so the
+    request body is the bare ``{"kind": ..., "chat_ids"?: [...]}`` shape (no
+    envelope key) and the validated member is reachable as ``body.root``.
+
+    **Replace, not Patch.** This is the *required-on-update* variant:
+    ``AllowList.chat_ids`` is required with ``min_length=1``, so a partial
+    body ``{"kind": "allow_list"}`` (no ``chat_ids``) 422s rather than
+    silently widening to an unbounded allow-everyone or re-defaulting, and an
+    empty ``{"kind": "allow_list", "chat_ids": []}`` 422s at the write edge.
+    ``DenyAll`` / ``AllowAll`` bodies carry no ``chat_ids`` and are accepted.
+    An unknown or missing ``kind`` 422s via the discriminated-union
+    validation plus each member's ``extra="forbid"``. (Mirrors
+    ``TriggerSourceReplace`` in :mod:`aios.models.triggers`.)
+
+    Revocation (§9) is expressed as a Replace with the smaller list — there
+    is no separate patch shape.
+    """

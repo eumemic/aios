@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from aios.models.inbound_policy import InboundPolicy
+from aios.models.inbound_policy import DenyAll, InboundPolicy
 
 ConnectionMode = Literal["detached", "single_session", "per_chat"]
 
@@ -143,6 +143,19 @@ class Connection(BaseModel):
     updated_at: datetime
     archived_at: datetime | None = None
     inbound_policy: InboundPolicy | None = None
+    inbound_policy_effective: InboundPolicy = Field(
+        default_factory=DenyAll,
+        description=(
+            "Server-derived, read-only echo of the *effective* inbound-admission "
+            "policy: the stored ``inbound_policy`` union member, or the server "
+            "default ``DenyAll`` (fail-closed) when the column is NULL. Lets an "
+            "operator see both the fail-open (``allow_all``) and fail-closed "
+            "(``deny_all`` / ``allow_list``) posture on create / get / list "
+            "without a second round-trip. **Never an input** — it is rejected on "
+            "the ``ConnectionCreate`` write model; set the policy via "
+            "``PUT /v1/connections/{id}/inbound-policy``."
+        ),
+    )
 
 
 class ConnectionSetSecrets(BaseModel):
@@ -193,6 +206,13 @@ class BoundChat(BaseModel):
     Returned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound
     rows and per-chat-spawned rows are returned together — the table
     doesn't tag the writer.
+
+    ``chat_id`` is the **authoritative, gate-relevant identifier** — it is
+    what the inbound-admission gate (``AllowList.chat_ids``) matches on.
+    This view deliberately does not surface a connector-supplied
+    ``display_name`` / ``sender_name``: that value is self-reported by the
+    connector and forgeable, so an operator copying an allowlist entry from
+    this view trusts the ``chat_id``, never a display name.
     """
 
     chat_id: str
@@ -206,7 +226,14 @@ class RecentChat(BaseModel):
 
     Returned by ``GET /v1/connections/{id}/recent-chats`` so operators
     can find the chat_id for a specific peer without digging through
-    event logs before calling ``bind-chat``.
+    event logs before calling ``bind-chat`` or opening an ``AllowList``.
+
+    ``chat_id`` is the **authoritative, gate-relevant identifier** — it is
+    exactly what the inbound-admission gate (``AllowList.chat_ids``) matches
+    on, so it is the value an operator copies into an allowlist. This view
+    deliberately does not present a connector-supplied ``display_name`` /
+    ``sender_name`` alongside it: that name is self-reported by the
+    connector and forgeable, never a verified identity.
     """
 
     chat_id: str
