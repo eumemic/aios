@@ -22,6 +22,7 @@ import asyncpg
 from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
+from aios.models.inbound_policy import AllowAll, AllowList, DenyAll, InboundPolicy
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services.attachment_staging import (
     AttachmentStagingError,
@@ -52,15 +53,22 @@ class InboundDrop(StrEnum):
     """Why an inbound was not delivered to a session.
 
     Each maps to an HTTP response in the router: PAYLOAD_TOO_LARGE → 413;
-    DETACHED and ARCHIVED_TEMPLATE → 422 (operator config issue);
-    ATTACHMENT_STAGING_FAILED and SESSION_MISSING → 500.  Replays of an
-    already-processed ``event_id`` are NOT a drop — they return 200
-    with ``deduped=True``.
+    DETACHED, ARCHIVED_TEMPLATE and DENIED_BY_POLICY → 422 (operator config
+    / admission issue); ATTACHMENT_STAGING_FAILED and SESSION_MISSING → 500.
+    Replays of an already-processed ``event_id`` are NOT a drop — they return
+    200 with ``deduped=True``.
+
+    DENIED_BY_POLICY MUST map to 422 (a routine per-envelope drop), never 403
+    or 5xx: ``_is_fatal_inbound_status`` in the connector-http runner treats
+    401/403/5xx as fatal (crash-restarts the connector container, killing
+    every connection it serves), so a denied stranger must not be able to take
+    the container down.
     """
 
     PAYLOAD_TOO_LARGE = "payload_too_large"
     DETACHED = "detached"
     ARCHIVED_TEMPLATE = "archived_template"
+    DENIED_BY_POLICY = "denied_by_policy"
     ATTACHMENT_STAGING_FAILED = "attachment_staging_failed"
     SESSION_MISSING = "session_missing"
 
@@ -70,6 +78,21 @@ class InboundResult(NamedTuple):
     session_id: str | None
     drop_reason: InboundDrop | None
     deduped: bool
+
+
+def _admits(policy: InboundPolicy, chat_id: str) -> bool:
+    """Pure admission predicate — no I/O.
+
+    ``AllowAll`` → always; ``AllowList`` → membership in its set; ``DenyAll``
+    → never. The ``match`` is exhaustive over the discriminated union.
+    """
+    match policy:
+        case AllowAll():
+            return True
+        case AllowList():
+            return chat_id in set(policy.chat_ids)
+        case DenyAll():
+            return False
 
 
 async def handle_inbound(
@@ -114,6 +137,19 @@ async def handle_inbound(
     # rather than exceptional.
     if connection.archived_at is not None:
         return InboundResult(None, None, InboundDrop.DETACHED, False)
+
+    # Inbound-admission gate (#1500). Resolve the connection's effective
+    # inbound policy and drop an unadmitted sender *before any side effect* —
+    # no attachment staging, no session spawn, no ``append_event``, no
+    # ``defer_wake``. The server default (NULL policy) is ``DenyAll``
+    # (fail-closed). The denial maps to HTTP 422 in the router so a denied
+    # stranger drops one envelope rather than crash-restarting the connector
+    # (which 403/5xx would trigger via ``_is_fatal_inbound_status``).
+    policy = await queries.resolve_effective_inbound_policy(
+        pool, connection=connection, account_id=account_id
+    )
+    if not _admits(policy, chat_id):
+        return InboundResult(None, None, InboundDrop.DENIED_BY_POLICY, False)
 
     # Session resolution: three-tier resolver in the connector subsystem
     # (chat_sessions → routing_rules → bindings.mode). Imported inside the

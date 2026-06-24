@@ -29,6 +29,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from aios.models.inbound_policy import InboundPolicy
+
 ConnectionMode = Literal["detached", "single_session", "per_chat"]
 
 # A connection's *binding* exists only when curated — ``detached`` is "no
@@ -140,6 +142,7 @@ class Connection(BaseModel):
     attached_at: datetime | None = None
     updated_at: datetime
     archived_at: datetime | None = None
+    inbound_policy: InboundPolicy | None = None
 
 
 class ConnectionSetSecrets(BaseModel):
