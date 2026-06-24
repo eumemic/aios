@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -7,13 +7,11 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
-from ...models.vault_credential import VaultCredential
 from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     vault_id: str,
-    credential_id: str,
     *,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
@@ -23,9 +21,8 @@ def _get_kwargs(
 
     _kwargs: dict[str, Any] = {
         "method": "post",
-        "url": "/v1/vaults/{vault_id}/credentials/{credential_id}/archive".format(
+        "url": "/v1/vaults/{vault_id}/purge".format(
             vault_id=quote(str(vault_id), safe=""),
-            credential_id=quote(str(credential_id), safe=""),
         ),
     }
 
@@ -35,11 +32,10 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> HTTPValidationError | VaultCredential | None:
-    if response.status_code == 200:
-        response_200 = VaultCredential.from_dict(response.json())
-
-        return response_200
+) -> Any | HTTPValidationError | None:
+    if response.status_code == 204:
+        response_204 = cast(Any, None)
+        return response_204
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -54,7 +50,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[HTTPValidationError | VaultCredential]:
+) -> Response[Any | HTTPValidationError]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -65,23 +61,21 @@ def _build_response(
 
 def sync_detailed(
     vault_id: str,
-    credential_id: str,
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | VaultCredential]:
-    """Archive Credential
+) -> Response[Any | HTTPValidationError]:
+    """Purge
 
-     Archive a credential and **zero its encrypted secret payload**.
+     Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).
 
-    Sets ``archived_at`` and hides the credential from default lists. The
-    encrypted blob is scrubbed at archive time so a future DB dump cannot
-    leak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE
-    soft-archives). Use ``purge_vault_credential`` for full removal.
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), this removes the
+    rows entirely and leaves no audit trail. The explicit ``/purge`` verb is
+    the only way to reach the destructive path. Prefer archive unless you
+    specifically need the rows gone.
 
     Args:
         vault_id (str):
-        credential_id (str):
         authorization (None | str | Unset):
 
     Raises:
@@ -89,12 +83,11 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | VaultCredential]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
         vault_id=vault_id,
-        credential_id=credential_id,
         authorization=authorization,
     )
 
@@ -107,23 +100,21 @@ def sync_detailed(
 
 def sync(
     vault_id: str,
-    credential_id: str,
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | VaultCredential | None:
-    """Archive Credential
+) -> Any | HTTPValidationError | None:
+    """Purge
 
-     Archive a credential and **zero its encrypted secret payload**.
+     Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).
 
-    Sets ``archived_at`` and hides the credential from default lists. The
-    encrypted blob is scrubbed at archive time so a future DB dump cannot
-    leak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE
-    soft-archives). Use ``purge_vault_credential`` for full removal.
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), this removes the
+    rows entirely and leaves no audit trail. The explicit ``/purge`` verb is
+    the only way to reach the destructive path. Prefer archive unless you
+    specifically need the rows gone.
 
     Args:
         vault_id (str):
-        credential_id (str):
         authorization (None | str | Unset):
 
     Raises:
@@ -131,12 +122,11 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | VaultCredential
+        Any | HTTPValidationError
     """
 
     return sync_detailed(
         vault_id=vault_id,
-        credential_id=credential_id,
         client=client,
         authorization=authorization,
     ).parsed
@@ -144,23 +134,21 @@ def sync(
 
 async def asyncio_detailed(
     vault_id: str,
-    credential_id: str,
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | VaultCredential]:
-    """Archive Credential
+) -> Response[Any | HTTPValidationError]:
+    """Purge
 
-     Archive a credential and **zero its encrypted secret payload**.
+     Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).
 
-    Sets ``archived_at`` and hides the credential from default lists. The
-    encrypted blob is scrubbed at archive time so a future DB dump cannot
-    leak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE
-    soft-archives). Use ``purge_vault_credential`` for full removal.
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), this removes the
+    rows entirely and leaves no audit trail. The explicit ``/purge`` verb is
+    the only way to reach the destructive path. Prefer archive unless you
+    specifically need the rows gone.
 
     Args:
         vault_id (str):
-        credential_id (str):
         authorization (None | str | Unset):
 
     Raises:
@@ -168,12 +156,11 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | VaultCredential]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
         vault_id=vault_id,
-        credential_id=credential_id,
         authorization=authorization,
     )
 
@@ -184,23 +171,21 @@ async def asyncio_detailed(
 
 async def asyncio(
     vault_id: str,
-    credential_id: str,
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | VaultCredential | None:
-    """Archive Credential
+) -> Any | HTTPValidationError | None:
+    """Purge
 
-     Archive a credential and **zero its encrypted secret payload**.
+     Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).
 
-    Sets ``archived_at`` and hides the credential from default lists. The
-    encrypted blob is scrubbed at archive time so a future DB dump cannot
-    leak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE
-    soft-archives). Use ``purge_vault_credential`` for full removal.
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), this removes the
+    rows entirely and leaves no audit trail. The explicit ``/purge`` verb is
+    the only way to reach the destructive path. Prefer archive unless you
+    specifically need the rows gone.
 
     Args:
         vault_id (str):
-        credential_id (str):
         authorization (None | str | Unset):
 
     Raises:
@@ -208,13 +193,12 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | VaultCredential
+        Any | HTTPValidationError
     """
 
     return (
         await asyncio_detailed(
             vault_id=vault_id,
-            credential_id=credential_id,
             client=client,
             authorization=authorization,
         )

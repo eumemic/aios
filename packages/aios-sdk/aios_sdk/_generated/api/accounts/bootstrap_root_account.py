@@ -73,6 +73,12 @@ def sync_detailed(
 
      Mint the root account and its first API key.
 
+    T2 decision (#1463): ``bootstrap`` is deliberately retained over
+    ``create_root_account`` — the one-time, token-gated, self-closing
+    operator ceremony semantic is load-bearing (the endpoint behaves like it
+    doesn't exist once a root is in place), and a generic ``create`` would
+    obscure that. Documented exception; not part of the agent-facing plane.
+
     Gated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset
     or empty, the endpoint is 401 regardless of header value.
 
@@ -118,6 +124,12 @@ def sync(
 
      Mint the root account and its first API key.
 
+    T2 decision (#1463): ``bootstrap`` is deliberately retained over
+    ``create_root_account`` — the one-time, token-gated, self-closing
+    operator ceremony semantic is load-bearing (the endpoint behaves like it
+    doesn't exist once a root is in place), and a generic ``create`` would
+    obscure that. Documented exception; not part of the agent-facing plane.
+
     Gated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset
     or empty, the endpoint is 401 regardless of header value.
 
@@ -157,6 +169,12 @@ async def asyncio_detailed(
     r"""Bootstrap
 
      Mint the root account and its first API key.
+
+    T2 decision (#1463): ``bootstrap`` is deliberately retained over
+    ``create_root_account`` — the one-time, token-gated, self-closing
+    operator ceremony semantic is load-bearing (the endpoint behaves like it
+    doesn't exist once a root is in place), and a generic ``create`` would
+    obscure that. Documented exception; not part of the agent-facing plane.
 
     Gated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset
     or empty, the endpoint is 401 regardless of header value.
@@ -200,6 +218,12 @@ async def asyncio(
     r"""Bootstrap
 
      Mint the root account and its first API key.
+
+    T2 decision (#1463): ``bootstrap`` is deliberately retained over
+    ``create_root_account`` — the one-time, token-gated, self-closing
+    operator ceremony semantic is load-bearing (the endpoint behaves like it
+    doesn't exist once a root is in place), and a generic ``create`` would
+    obscure that. Documented exception; not part of the agent-facing plane.
 
     Gated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset
     or empty, the endpoint is 401 regardless of header value.

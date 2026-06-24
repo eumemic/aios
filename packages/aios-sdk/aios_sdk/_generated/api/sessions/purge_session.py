@@ -1,19 +1,18 @@
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
+from urllib.parse import quote
 
 import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
-from ...models.mint_account_request import MintAccountRequest
-from ...models.mint_account_response import MintAccountResponse
 from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
+    session_id: str,
     *,
-    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -22,12 +21,10 @@ def _get_kwargs(
 
     _kwargs: dict[str, Any] = {
         "method": "post",
-        "url": "/v1/accounts/children",
+        "url": "/v1/sessions/{session_id}/purge".format(
+            session_id=quote(str(session_id), safe=""),
+        ),
     }
-
-    _kwargs["json"] = body.to_dict()
-
-    headers["Content-Type"] = "application/json"
 
     _kwargs["headers"] = headers
     return _kwargs
@@ -35,11 +32,10 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> HTTPValidationError | MintAccountResponse | None:
-    if response.status_code == 201:
-        response_201 = MintAccountResponse.from_dict(response.json())
-
-        return response_201
+) -> Any | HTTPValidationError | None:
+    if response.status_code == 204:
+        response_204 = cast(Any, None)
+        return response_204
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -54,7 +50,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[HTTPValidationError | MintAccountResponse]:
+) -> Response[Any | HTTPValidationError]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -64,33 +60,32 @@ def _build_response(
 
 
 def sync_detailed(
+    session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | MintAccountResponse]:
-    """Mint Child
+) -> Response[Any | HTTPValidationError]:
+    """Purge
 
-     Mint a direct child account under the caller and its first API key.
+     Hard-delete a session and cascade its events, vaults, and bindings.
 
-    Requires the caller's ``can_mint_children`` to be true. Returns the
-    new account id, the first key's id, and the plaintext bearer (the
-    only time that plaintext is recoverable).
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), the explicit
+    ``/purge`` verb is the only way to reach this destructive path.
 
     Args:
+        session_id (str):
         authorization (None | str | Unset):
-        body (MintAccountRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | MintAccountResponse]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
-        body=body,
+        session_id=session_id,
         authorization=authorization,
     )
 
@@ -102,66 +97,64 @@ def sync_detailed(
 
 
 def sync(
+    session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | MintAccountResponse | None:
-    """Mint Child
+) -> Any | HTTPValidationError | None:
+    """Purge
 
-     Mint a direct child account under the caller and its first API key.
+     Hard-delete a session and cascade its events, vaults, and bindings.
 
-    Requires the caller's ``can_mint_children`` to be true. Returns the
-    new account id, the first key's id, and the plaintext bearer (the
-    only time that plaintext is recoverable).
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), the explicit
+    ``/purge`` verb is the only way to reach this destructive path.
 
     Args:
+        session_id (str):
         authorization (None | str | Unset):
-        body (MintAccountRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | MintAccountResponse
+        Any | HTTPValidationError
     """
 
     return sync_detailed(
+        session_id=session_id,
         client=client,
-        body=body,
         authorization=authorization,
     ).parsed
 
 
 async def asyncio_detailed(
+    session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | MintAccountResponse]:
-    """Mint Child
+) -> Response[Any | HTTPValidationError]:
+    """Purge
 
-     Mint a direct child account under the caller and its first API key.
+     Hard-delete a session and cascade its events, vaults, and bindings.
 
-    Requires the caller's ``can_mint_children`` to be true. Returns the
-    new account id, the first key's id, and the plaintext bearer (the
-    only time that plaintext is recoverable).
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), the explicit
+    ``/purge`` verb is the only way to reach this destructive path.
 
     Args:
+        session_id (str):
         authorization (None | str | Unset):
-        body (MintAccountRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | MintAccountResponse]
+        Response[Any | HTTPValidationError]
     """
 
     kwargs = _get_kwargs(
-        body=body,
+        session_id=session_id,
         authorization=authorization,
     )
 
@@ -171,35 +164,34 @@ async def asyncio_detailed(
 
 
 async def asyncio(
+    session_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | MintAccountResponse | None:
-    """Mint Child
+) -> Any | HTTPValidationError | None:
+    """Purge
 
-     Mint a direct child account under the caller and its first API key.
+     Hard-delete a session and cascade its events, vaults, and bindings.
 
-    Requires the caller's ``can_mint_children`` to be true. Returns the
-    new account id, the first key's id, and the plaintext bearer (the
-    only time that plaintext is recoverable).
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), the explicit
+    ``/purge`` verb is the only way to reach this destructive path.
 
     Args:
+        session_id (str):
         authorization (None | str | Unset):
-        body (MintAccountRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | MintAccountResponse
+        Any | HTTPValidationError
     """
 
     return (
         await asyncio_detailed(
+            session_id=session_id,
             client=client,
-            body=body,
             authorization=authorization,
         )
     ).parsed

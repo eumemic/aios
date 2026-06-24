@@ -122,6 +122,7 @@ NEEDS_CLI_TRACKED: dict[str, str] = {
     "create_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
     "update_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
     "delete_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
+    "purge_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
     "archive_memory_store": "needs CLI; tracked in #1446 (memory-stores group)",
     "list_memories": "needs CLI; tracked in #1446 (memory-stores group)",
     "get_memory": "needs CLI; tracked in #1446 (memory-stores group)",

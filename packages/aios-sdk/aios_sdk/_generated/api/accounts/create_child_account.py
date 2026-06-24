@@ -1,20 +1,19 @@
 from http import HTTPStatus
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
-from ...models.vault_credential import VaultCredential
+from ...models.mint_account_request import MintAccountRequest
+from ...models.mint_account_response import MintAccountResponse
 from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
-    vault_id: str,
-    credential_id: str,
     *,
+    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -23,11 +22,12 @@ def _get_kwargs(
 
     _kwargs: dict[str, Any] = {
         "method": "post",
-        "url": "/v1/vaults/{vault_id}/credentials/{credential_id}/archive".format(
-            vault_id=quote(str(vault_id), safe=""),
-            credential_id=quote(str(credential_id), safe=""),
-        ),
+        "url": "/v1/accounts/children",
     }
+
+    _kwargs["json"] = body.to_dict()
+
+    headers["Content-Type"] = "application/json"
 
     _kwargs["headers"] = headers
     return _kwargs
@@ -35,11 +35,11 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> HTTPValidationError | VaultCredential | None:
-    if response.status_code == 200:
-        response_200 = VaultCredential.from_dict(response.json())
+) -> HTTPValidationError | MintAccountResponse | None:
+    if response.status_code == 201:
+        response_201 = MintAccountResponse.from_dict(response.json())
 
-        return response_200
+        return response_201
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -54,7 +54,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[HTTPValidationError | VaultCredential]:
+) -> Response[HTTPValidationError | MintAccountResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -64,37 +64,33 @@ def _build_response(
 
 
 def sync_detailed(
-    vault_id: str,
-    credential_id: str,
     *,
     client: AuthenticatedClient | Client,
+    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | VaultCredential]:
-    """Archive Credential
+) -> Response[HTTPValidationError | MintAccountResponse]:
+    """Create Child
 
-     Archive a credential and **zero its encrypted secret payload**.
+     Create a direct child account under the caller and its first API key.
 
-    Sets ``archived_at`` and hides the credential from default lists. The
-    encrypted blob is scrubbed at archive time so a future DB dump cannot
-    leak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE
-    soft-archives). Use ``purge_vault_credential`` for full removal.
+    Requires the caller's ``can_mint_children`` to be true. Returns the
+    new account id, the first key's id, and the plaintext bearer (the
+    only time that plaintext is recoverable).
 
     Args:
-        vault_id (str):
-        credential_id (str):
         authorization (None | str | Unset):
+        body (MintAccountRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | VaultCredential]
+        Response[HTTPValidationError | MintAccountResponse]
     """
 
     kwargs = _get_kwargs(
-        vault_id=vault_id,
-        credential_id=credential_id,
+        body=body,
         authorization=authorization,
     )
 
@@ -106,74 +102,66 @@ def sync_detailed(
 
 
 def sync(
-    vault_id: str,
-    credential_id: str,
     *,
     client: AuthenticatedClient | Client,
+    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | VaultCredential | None:
-    """Archive Credential
+) -> HTTPValidationError | MintAccountResponse | None:
+    """Create Child
 
-     Archive a credential and **zero its encrypted secret payload**.
+     Create a direct child account under the caller and its first API key.
 
-    Sets ``archived_at`` and hides the credential from default lists. The
-    encrypted blob is scrubbed at archive time so a future DB dump cannot
-    leak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE
-    soft-archives). Use ``purge_vault_credential`` for full removal.
+    Requires the caller's ``can_mint_children`` to be true. Returns the
+    new account id, the first key's id, and the plaintext bearer (the
+    only time that plaintext is recoverable).
 
     Args:
-        vault_id (str):
-        credential_id (str):
         authorization (None | str | Unset):
+        body (MintAccountRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | VaultCredential
+        HTTPValidationError | MintAccountResponse
     """
 
     return sync_detailed(
-        vault_id=vault_id,
-        credential_id=credential_id,
         client=client,
+        body=body,
         authorization=authorization,
     ).parsed
 
 
 async def asyncio_detailed(
-    vault_id: str,
-    credential_id: str,
     *,
     client: AuthenticatedClient | Client,
+    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
-) -> Response[HTTPValidationError | VaultCredential]:
-    """Archive Credential
+) -> Response[HTTPValidationError | MintAccountResponse]:
+    """Create Child
 
-     Archive a credential and **zero its encrypted secret payload**.
+     Create a direct child account under the caller and its first API key.
 
-    Sets ``archived_at`` and hides the credential from default lists. The
-    encrypted blob is scrubbed at archive time so a future DB dump cannot
-    leak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE
-    soft-archives). Use ``purge_vault_credential`` for full removal.
+    Requires the caller's ``can_mint_children`` to be true. Returns the
+    new account id, the first key's id, and the plaintext bearer (the
+    only time that plaintext is recoverable).
 
     Args:
-        vault_id (str):
-        credential_id (str):
         authorization (None | str | Unset):
+        body (MintAccountRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[HTTPValidationError | VaultCredential]
+        Response[HTTPValidationError | MintAccountResponse]
     """
 
     kwargs = _get_kwargs(
-        vault_id=vault_id,
-        credential_id=credential_id,
+        body=body,
         authorization=authorization,
     )
 
@@ -183,39 +171,35 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    vault_id: str,
-    credential_id: str,
     *,
     client: AuthenticatedClient | Client,
+    body: MintAccountRequest,
     authorization: None | str | Unset = UNSET,
-) -> HTTPValidationError | VaultCredential | None:
-    """Archive Credential
+) -> HTTPValidationError | MintAccountResponse | None:
+    """Create Child
 
-     Archive a credential and **zero its encrypted secret payload**.
+     Create a direct child account under the caller and its first API key.
 
-    Sets ``archived_at`` and hides the credential from default lists. The
-    encrypted blob is scrubbed at archive time so a future DB dump cannot
-    leak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE
-    soft-archives). Use ``purge_vault_credential`` for full removal.
+    Requires the caller's ``can_mint_children`` to be true. Returns the
+    new account id, the first key's id, and the plaintext bearer (the
+    only time that plaintext is recoverable).
 
     Args:
-        vault_id (str):
-        credential_id (str):
         authorization (None | str | Unset):
+        body (MintAccountRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        HTTPValidationError | VaultCredential
+        HTTPValidationError | MintAccountResponse
     """
 
     return (
         await asyncio_detailed(
-            vault_id=vault_id,
-            credential_id=credential_id,
             client=client,
+            body=body,
             authorization=authorization,
         )
     ).parsed

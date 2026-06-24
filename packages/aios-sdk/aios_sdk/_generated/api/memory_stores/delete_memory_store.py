@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -7,6 +7,7 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
+from ...models.memory_store import MemoryStore
 from ...types import UNSET, Response, Unset
 
 
@@ -32,10 +33,11 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Any | HTTPValidationError | None:
-    if response.status_code == 204:
-        response_204 = cast(Any, None)
-        return response_204
+) -> HTTPValidationError | MemoryStore | None:
+    if response.status_code == 200:
+        response_200 = MemoryStore.from_dict(response.json())
+
+        return response_200
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -50,7 +52,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | MemoryStore]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -64,15 +66,16 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | MemoryStore]:
     """Delete Store
 
-     Hard-delete a memory store, all its memories, and its host mirror.
+     Soft-archive a memory store (bare DELETE = soft-archive; T2 convention).
 
-    Cascade-deletes memories and versions in the database. After the DB
-    transaction commits, the per-store host mirror directory is removed
-    (best-effort — a missing dir is fine, indicates no session ever
-    provisioned for this store). Returns 204.
+    Sets ``archived_at``, hides the store from default lists, and makes it
+    read-only (same behavior as ``archive_memory_store``). The store, its
+    memories, and the host mirror all persist. Bare DELETE is never silently
+    destructive; for the irreversible hard-delete (cascade + host-mirror rm)
+    use ``POST /v1/memory-stores/{store_id}/purge``.
 
     Args:
         store_id (str):
@@ -83,7 +86,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[HTTPValidationError | MemoryStore]
     """
 
     kwargs = _get_kwargs(
@@ -103,15 +106,16 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
+) -> HTTPValidationError | MemoryStore | None:
     """Delete Store
 
-     Hard-delete a memory store, all its memories, and its host mirror.
+     Soft-archive a memory store (bare DELETE = soft-archive; T2 convention).
 
-    Cascade-deletes memories and versions in the database. After the DB
-    transaction commits, the per-store host mirror directory is removed
-    (best-effort — a missing dir is fine, indicates no session ever
-    provisioned for this store). Returns 204.
+    Sets ``archived_at``, hides the store from default lists, and makes it
+    read-only (same behavior as ``archive_memory_store``). The store, its
+    memories, and the host mirror all persist. Bare DELETE is never silently
+    destructive; for the irreversible hard-delete (cascade + host-mirror rm)
+    use ``POST /v1/memory-stores/{store_id}/purge``.
 
     Args:
         store_id (str):
@@ -122,7 +126,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        HTTPValidationError | MemoryStore
     """
 
     return sync_detailed(
@@ -137,15 +141,16 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | MemoryStore]:
     """Delete Store
 
-     Hard-delete a memory store, all its memories, and its host mirror.
+     Soft-archive a memory store (bare DELETE = soft-archive; T2 convention).
 
-    Cascade-deletes memories and versions in the database. After the DB
-    transaction commits, the per-store host mirror directory is removed
-    (best-effort — a missing dir is fine, indicates no session ever
-    provisioned for this store). Returns 204.
+    Sets ``archived_at``, hides the store from default lists, and makes it
+    read-only (same behavior as ``archive_memory_store``). The store, its
+    memories, and the host mirror all persist. Bare DELETE is never silently
+    destructive; for the irreversible hard-delete (cascade + host-mirror rm)
+    use ``POST /v1/memory-stores/{store_id}/purge``.
 
     Args:
         store_id (str):
@@ -156,7 +161,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[HTTPValidationError | MemoryStore]
     """
 
     kwargs = _get_kwargs(
@@ -174,15 +179,16 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
+) -> HTTPValidationError | MemoryStore | None:
     """Delete Store
 
-     Hard-delete a memory store, all its memories, and its host mirror.
+     Soft-archive a memory store (bare DELETE = soft-archive; T2 convention).
 
-    Cascade-deletes memories and versions in the database. After the DB
-    transaction commits, the per-store host mirror directory is removed
-    (best-effort — a missing dir is fine, indicates no session ever
-    provisioned for this store). Returns 204.
+    Sets ``archived_at``, hides the store from default lists, and makes it
+    read-only (same behavior as ``archive_memory_store``). The store, its
+    memories, and the host mirror all persist. Bare DELETE is never silently
+    destructive; for the irreversible hard-delete (cascade + host-mirror rm)
+    use ``POST /v1/memory-stores/{store_id}/purge``.
 
     Args:
         store_id (str):
@@ -193,7 +199,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        HTTPValidationError | MemoryStore
     """
 
     return (

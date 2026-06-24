@@ -23,7 +23,7 @@ def _get_kwargs(
         headers["Authorization"] = authorization
 
     _kwargs: dict[str, Any] = {
-        "method": "post",
+        "method": "put",
         "url": "/v1/memory-stores/{store_id}".format(
             store_id=quote(str(store_id), safe=""),
         ),

@@ -75,7 +75,7 @@ class TestStoreCrud:
         assert r.status_code == 200, r.text
         assert r.json()["description"] == "initial"
 
-        r = await http_client.post(
+        r = await http_client.put(
             f"/v1/memory-stores/{store_id}",
             json={"description": "updated"},
         )
@@ -86,7 +86,16 @@ class TestStoreCrud:
         assert r.status_code == 200, r.text
         assert r.json()["archived_at"] is not None
 
+        # Bare DELETE soft-archives (T2): the row persists, still fetchable.
         r = await http_client.delete(f"/v1/memory-stores/{store_id}")
+        assert r.status_code == 200, r.text
+        assert r.json()["archived_at"] is not None
+
+        r = await http_client.get(f"/v1/memory-stores/{store_id}")
+        assert r.status_code == 200, r.text
+
+        # Explicit /purge hard-deletes the row.
+        r = await http_client.post(f"/v1/memory-stores/{store_id}/purge")
         assert r.status_code == 204, r.text
 
         r = await http_client.get(f"/v1/memory-stores/{store_id}")
@@ -191,14 +200,14 @@ class TestMemoryCrud:
         mem = await _create_memory(http_client, store["id"], "/x.md", "v1")
 
         # Bump content via update so the head sha changes.
-        r = await http_client.post(
+        r = await http_client.put(
             f"/v1/memory-stores/{store['id']}/memories/{mem['id']}",
             json={"content": "v2"},
         )
         assert r.status_code == 200, r.text
 
         # Now try to update again with the original sha — should 409.
-        r = await http_client.post(
+        r = await http_client.put(
             f"/v1/memory-stores/{store['id']}/memories/{mem['id']}",
             json={
                 "content": "v3",
@@ -214,7 +223,7 @@ class TestMemoryCrud:
     async def test_rename_via_update(self, http_client: httpx.AsyncClient) -> None:
         store = await _create_store(http_client)
         mem = await _create_memory(http_client, store["id"], "/x.md", "x")
-        r = await http_client.post(
+        r = await http_client.put(
             f"/v1/memory-stores/{store['id']}/memories/{mem['id']}",
             json={"path": "/y.md"},
         )
@@ -301,7 +310,7 @@ class TestVersionsAndRedact:
         head_v1 = mem["memory_version_id"]
 
         # Modify so v1 is no longer the head.
-        r = await http_client.post(
+        r = await http_client.put(
             f"/v1/memory-stores/{store['id']}/memories/{mem['id']}",
             json={"content": "v2"},
         )
@@ -490,7 +499,7 @@ class TestSessionResourcesUpdate:
         s1 = await _create_store(http_client, name=clash_name)
         s2 = await _create_store(http_client, name=clash_name + "-x")
         # Rename s2 to clash with s1 so two distinct ids share the same name.
-        r = await http_client.post(f"/v1/memory-stores/{s2['id']}", json={"name": clash_name})
+        r = await http_client.put(f"/v1/memory-stores/{s2['id']}", json={"name": clash_name})
         assert r.status_code == 200, r.text
 
         session = await _create_session_for_resources_test(

@@ -23,6 +23,8 @@ from aios_sdk._generated.api.vaults import (
     get_vault_credential,
     list_vault_credentials,
     list_vaults,
+    purge_vault,
+    purge_vault_credential,
     update_vault,
     update_vault_credential,
 )
@@ -144,10 +146,23 @@ def archive(ctx: typer.Context, vault_id: str) -> None:
 
 @app.command(
     "delete",
-    help="Hard-delete a vault (irreversible; prefer `archive` instead).",
+    help="Soft-archive a vault (bare DELETE = soft-archive; reversible). "
+    "Use `purge` for the irreversible hard-delete.",
 )
 @covers("delete_vault")
-def delete(
+def delete(ctx: typer.Context, vault_id: str) -> None:
+    def _run() -> None:
+        call_single(ctx, delete_vault.sync_detailed, vault_id=vault_id)
+
+    run_or_die(_run)
+
+
+@app.command(
+    "purge",
+    help="Hard-delete a vault and its credentials (irreversible; prefer `archive`/`delete`).",
+)
+@covers("purge_vault")
+def purge(
     ctx: typer.Context,
     vault_id: str,
     yes: Annotated[
@@ -159,12 +174,12 @@ def delete(
         if not yes:
             print_error(
                 "hard-delete is irreversible; pass --yes to confirm "
-                "(or use `aios vaults archive` for a reversible soft-delete)"
+                "(or use `aios vaults delete` for a reversible soft-archive)"
             )
             return 2
         with get_state(ctx).sdk_client() as client:
-            unwrap(delete_vault.sync_detailed(client=client, vault_id=vault_id))
-        print_success("deleted", vault_id)
+            unwrap(purge_vault.sync_detailed(client=client, vault_id=vault_id))
+        print_success("purged", vault_id)
         return None
 
     run_or_die(_run)
@@ -276,10 +291,28 @@ def cred_archive(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
 
 @credentials.command(
     "delete",
-    help="Hard-delete a credential (irreversible; prefer `archive` instead).",
+    help="Soft-archive a credential (bare DELETE = soft-archive; reversible). "
+    "Use `purge` for the irreversible hard-delete.",
 )
 @covers("delete_vault_credential")
-def cred_delete(
+def cred_delete(ctx: typer.Context, vault_id: str, credential_id: str) -> None:
+    def _run() -> None:
+        call_single(
+            ctx,
+            delete_vault_credential.sync_detailed,
+            vault_id=vault_id,
+            credential_id=credential_id,
+        )
+
+    run_or_die(_run)
+
+
+@credentials.command(
+    "purge",
+    help="Hard-delete a credential (irreversible; prefer `archive`/`delete`).",
+)
+@covers("purge_vault_credential")
+def cred_purge(
     ctx: typer.Context,
     vault_id: str,
     credential_id: str,
@@ -292,16 +325,16 @@ def cred_delete(
         if not yes:
             print_error(
                 "hard-delete is irreversible; pass --yes to confirm "
-                "(or use `aios vaults credentials archive` for a reversible soft-delete)"
+                "(or use `aios vaults credentials delete` for a reversible soft-archive)"
             )
             return 2
         with get_state(ctx).sdk_client() as client:
             unwrap(
-                delete_vault_credential.sync_detailed(
+                purge_vault_credential.sync_detailed(
                     client=client, vault_id=vault_id, credential_id=credential_id
                 )
             )
-        print_success("deleted", credential_id)
+        print_success("purged", credential_id)
         return None
 
     run_or_die(_run)

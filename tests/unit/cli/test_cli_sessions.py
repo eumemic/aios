@@ -88,23 +88,37 @@ class TestActionSummary:
         assert _action_summary(row).endswith("…")
 
 
-def test_delete_refuses_without_yes_and_makes_no_request(mocked_cli):
+def test_delete_is_soft_archive(mocked_cli):
+    """Bare DELETE is now a soft-archive (T2 #1463): no --yes guard, body returned."""
+    mocked_cli.queue_response(
+        httpx.Response(
+            200,
+            json={"id": "sess_1", "archived_at": "2024-01-02T00:00:00+00:00"},
+        )
+    )
     result = runner.invoke(app, ["sessions", "delete", "sess_1"])
-    assert result.exit_code == 2
-    assert "--yes" in result.output
-    assert "archive" in result.output  # remind about the soft alternative
-    assert mocked_cli.captured.method == ""  # no HTTP call was made
-
-
-def test_delete_is_hard_delete_with_yes(mocked_cli):
-    mocked_cli.queue_response(httpx.Response(204))
-    result = runner.invoke(app, ["sessions", "delete", "sess_1", "--yes"])
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.method == "DELETE"
     assert mocked_cli.captured.path == "/v1/sessions/sess_1"
-    # Confirmation line on stdout — "deleted <id>" gives scripts something to
+
+
+def test_purge_refuses_without_yes_and_makes_no_request(mocked_cli):
+    result = runner.invoke(app, ["sessions", "purge", "sess_1"])
+    assert result.exit_code == 2
+    assert "--yes" in result.output
+    assert "delete" in result.output  # remind about the soft alternative
+    assert mocked_cli.captured.method == ""  # no HTTP call was made
+
+
+def test_purge_is_hard_delete_with_yes(mocked_cli):
+    mocked_cli.queue_response(httpx.Response(204))
+    result = runner.invoke(app, ["sessions", "purge", "sess_1", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert mocked_cli.captured.method == "POST"
+    assert mocked_cli.captured.path == "/v1/sessions/sess_1/purge"
+    # Confirmation line on stdout — "purged <id>" gives scripts something to
     # grep and humans a visible ack (the server returns 204 with no body).
-    assert "deleted" in result.output
+    assert "purged" in result.output
     assert "sess_1" in result.output
 
 

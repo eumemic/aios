@@ -191,10 +191,27 @@ def clone(
 
 @app.command(
     "delete",
-    help="Hard-delete a session (irreversible; prefer `archive` instead).",
+    help="Soft-archive a session (bare DELETE = soft-archive; reversible). "
+    "Use `purge` for the irreversible hard-delete.",
 )
 @covers("delete_session")
-def delete(
+def delete(ctx: typer.Context, session_id: str) -> None:
+    def _run() -> None:
+        client = just_client(ctx)
+        with client:
+            obj = client.request("DELETE", f"/v1/sessions/{session_id}")
+        render_single(obj)
+
+    run_or_die(_run)
+
+
+@app.command(
+    "purge",
+    help="Hard-delete a session and cascade its events/vaults/bindings "
+    "(irreversible; prefer `archive`/`delete`).",
+)
+@covers("purge_session")
+def purge(
     ctx: typer.Context,
     session_id: str,
     yes: Annotated[
@@ -206,13 +223,13 @@ def delete(
         if not yes:
             print_error(
                 "hard-delete is irreversible; pass --yes to confirm "
-                "(or use `aios sessions archive` for a reversible soft-delete)"
+                "(or use `aios sessions delete` for a reversible soft-archive)"
             )
             return 2
         client = just_client(ctx)
         with client:
-            client.request("DELETE", f"/v1/sessions/{session_id}")
-        print_success("deleted", session_id)
+            client.request("POST", f"/v1/sessions/{session_id}/purge")
+        print_success("purged", session_id)
         return None
 
     run_or_die(_run)

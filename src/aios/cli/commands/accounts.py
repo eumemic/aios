@@ -33,12 +33,12 @@ from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.accounts import (
     archive_account,
     bootstrap_root_account,
+    create_child_account,
     get_account,
     get_my_account,
     list_account_keys,
     list_my_children,
     mint_account_key,
-    mint_child_account,
     purge_account,
     resolve_account_by_path,
     revoke_account_key,
@@ -160,7 +160,7 @@ def get(ctx: typer.Context, target_id: str) -> None:
 
 
 @app.command("mint", help="Mint a direct child account and its first API key.")
-@covers("mint_child_account")
+@covers("create_child_account")
 def mint(
     ctx: typer.Context,
     display_name: Annotated[
@@ -178,7 +178,7 @@ def mint(
     def _run() -> None:
         body = MintAccountRequest(display_name=display_name, can_mint_children=can_mint_children)
         with get_state(ctx).sdk_client() as client:
-            obj = unwrap(mint_child_account.sync_detailed(client=client, body=body))
+            obj = unwrap(create_child_account.sync_detailed(client=client, body=body))
         data = obj.to_dict()
         if get_state(ctx).output_format == "json":
             print_json(data)

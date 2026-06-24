@@ -90,7 +90,7 @@ async def get_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) -> M
     return await service.get_store(pool, store_id, account_id=account_id)
 
 
-@router.post("/{store_id}", operation_id="update_memory_store")
+@router.put("/{store_id}", operation_id="update_memory_store")
 async def update_store(
     store_id: str, body: MemoryStoreUpdate, pool: PoolDep, account_id: AccountIdDep
 ) -> MemoryStore:
@@ -120,8 +120,9 @@ async def archive_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) 
 
     The store and its memories persist; sessions can still resolve memory
     content. Subsequent ``update_memory_store`` calls fail until
-    un-archived (no API surface for that currently). Use
-    ``delete_memory_store`` for full removal.
+    un-archived (no API surface for that currently). Equivalent to ``DELETE``
+    on the store (bare DELETE soft-archives). Use ``purge_memory_store`` for
+    full removal.
     """
     return await service.archive_store(pool, store_id, account_id=account_id)
 
@@ -129,15 +130,35 @@ async def archive_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) 
 @router.delete(
     "/{store_id}",
     operation_id="delete_memory_store",
-    status_code=status.HTTP_204_NO_CONTENT,
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
-async def delete_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) -> None:
+async def delete_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) -> MemoryStore:
+    """Soft-archive a memory store (bare DELETE = soft-archive; T2 convention).
+
+    Sets ``archived_at``, hides the store from default lists, and makes it
+    read-only (same behavior as ``archive_memory_store``). The store, its
+    memories, and the host mirror all persist. Bare DELETE is never silently
+    destructive; for the irreversible hard-delete (cascade + host-mirror rm)
+    use ``POST /v1/memory-stores/{store_id}/purge``.
+    """
+    return await service.archive_store(pool, store_id, account_id=account_id)
+
+
+@router.post(
+    "/{store_id}/purge",
+    operation_id="purge_memory_store",
+    status_code=status.HTTP_204_NO_CONTENT,
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
+async def purge_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) -> None:
     """Hard-delete a memory store, all its memories, and its host mirror.
 
     Cascade-deletes memories and versions in the database. After the DB
     transaction commits, the per-store host mirror directory is removed
     (best-effort — a missing dir is fine, indicates no session ever
-    provisioned for this store). Returns 204.
+    provisioned for this store). Returns 204. Unlike the bare ``DELETE``
+    (soft-archive), the explicit ``/purge`` verb is the only way to reach
+    this destructive path.
     """
     await service.delete_store(pool, store_id, account_id=account_id)
 
@@ -217,7 +238,7 @@ async def get_memory(
     )
 
 
-@router.post("/{store_id}/memories/{memory_id}", operation_id="update_memory")
+@router.put("/{store_id}/memories/{memory_id}", operation_id="update_memory")
 async def update_memory(
     store_id: str,
     memory_id: str,
