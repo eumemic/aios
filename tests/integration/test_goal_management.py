@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest import mock
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
@@ -58,7 +59,16 @@ async def pool_session(
         _agent, _env, session = await seed_agent_env_session(
             pool, account_id=_ACCOUNT, prefix="goal_seed"
         )
-        yield pool, _ACCOUNT, session.id
+        # The goal handlers drive the real service path (create_goal →
+        # sessions_service.invoke → defer_wake; complete_goal/fail_goal →
+        # respond_to_request → defer_wake/defer_run_wake). With no live worker
+        # the procrastinate app pool is never opened, so the deferrals are
+        # patched out — matching the model-task-tools integration fixture.
+        with (
+            mock.patch("aios.services.wake.defer_wake", new=AsyncMock()),
+            mock.patch("aios.services.workflows.defer_run_wake", new=AsyncMock()),
+        ):
+            yield pool, _ACCOUNT, session.id
     finally:
         runtime.pool = prev_pool
         runtime.crypto_box = prev_box
