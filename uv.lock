@@ -14,6 +14,7 @@ members = [
     "aios-sdk",
     "aios-signal",
     "aios-slack",
+    "aios-sms",
     "aios-telegram",
     "aios-whatsapp",
 ]
@@ -370,6 +371,47 @@ requires-dist = [
     { name = "slack-sdk", specifier = ">=3.31,<4" },
     { name = "structlog", specifier = ">=24.4" },
     { name = "websockets", specifier = ">=9.1,<16" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pytest-mock", specifier = ">=3.14" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
+name = "aios-sms"
+version = "0.1.0"
+source = { editable = "connectors/sms" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "aios-connector-http" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "structlog" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-mock" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.10" },
+    { name = "aios-connector-http", editable = "packages/aios-connector-http" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "structlog", specifier = ">=24.4" },
 ]
 
 [package.metadata.requires-dev]

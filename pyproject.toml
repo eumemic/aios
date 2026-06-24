@@ -101,6 +101,7 @@ members = [
     "connectors/echo-http",
     "connectors/signal",
     "connectors/slack",
+    "connectors/sms",
     "connectors/telegram",
     "connectors/whatsapp",
     "packages/aios-connector-http",
@@ -116,6 +117,7 @@ aios-echo-http = { workspace = true }
 aios-sdk = { workspace = true }
 aios-signal = { workspace = true }
 aios-slack = { workspace = true }
+aios-sms = { workspace = true }
 aios-telegram = { workspace = true }
 aios-whatsapp = { workspace = true }
 
