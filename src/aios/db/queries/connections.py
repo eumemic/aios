@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, NamedTuple, NoReturn
 
 import asyncpg
+from pydantic import TypeAdapter
 
 from aios.crypto.vault import EncryptedBlob
 from aios.db.queries import (
@@ -29,6 +30,14 @@ from aios.ids import (
 )
 from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.connectors import ConnectorCapabilities
+from aios.models.inbound_policy import InboundPolicy
+
+# Discriminated-union adapter for the ``connections.inbound_policy`` jsonb
+# column. Parses NULL→None (handled by the caller) or a validated union member
+# (``allow_all`` / ``allow_list`` / ``deny_all``). A malformed stored shape
+# raises at read time — same write-path-validated posture as the triggers
+# ``source`` / ``action`` jsonb.
+_INBOUND_POLICY_ADAPTER: TypeAdapter[InboundPolicy] = TypeAdapter(InboundPolicy)
 
 # ─── bindings (#328 PR 7 — unit of curation, succeeded the in-place
 #                          ``connections.session_id`` / ``session_template_id``
@@ -288,6 +297,10 @@ _CONNECTION_UPDATE_CTE_TAIL = """
 
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
+    raw_policy = parse_jsonb(row["inbound_policy"])
+    inbound_policy = (
+        _INBOUND_POLICY_ADAPTER.validate_python(raw_policy) if raw_policy is not None else None
+    )
     return Connection(
         id=row["id"],
         connector=row["connector"],
@@ -300,6 +313,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         attached_at=row["binding_created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
+        inbound_policy=inbound_policy,
     )
 
 

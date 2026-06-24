@@ -11,7 +11,10 @@ from dateutil.parser import isoparse
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.allow_all import AllowAll
+    from ..models.allow_list import AllowList
     from ..models.connection_metadata import ConnectionMetadata
+    from ..models.deny_all import DenyAll
 
 
 T = TypeVar("T", bound="Connection")
@@ -52,6 +55,7 @@ class Connection:
             secrets_set (bool | Unset):  Default: False.
             attached_at (datetime.datetime | None | Unset):
             archived_at (datetime.datetime | None | Unset):
+            inbound_policy (AllowAll | AllowList | DenyAll | None | Unset):
     """
 
     id: str
@@ -65,9 +69,14 @@ class Connection:
     secrets_set: bool | Unset = False
     attached_at: datetime.datetime | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
+    inbound_policy: AllowAll | AllowList | DenyAll | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.allow_all import AllowAll
+        from ..models.allow_list import AllowList
+        from ..models.deny_all import DenyAll
+
         id = self.id
 
         connector = self.connector
@@ -110,6 +119,18 @@ class Connection:
         else:
             archived_at = self.archived_at
 
+        inbound_policy: dict[str, Any] | None | Unset
+        if isinstance(self.inbound_policy, Unset):
+            inbound_policy = UNSET
+        elif isinstance(self.inbound_policy, AllowAll):
+            inbound_policy = self.inbound_policy.to_dict()
+        elif isinstance(self.inbound_policy, AllowList):
+            inbound_policy = self.inbound_policy.to_dict()
+        elif isinstance(self.inbound_policy, DenyAll):
+            inbound_policy = self.inbound_policy.to_dict()
+        else:
+            inbound_policy = self.inbound_policy
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -132,12 +153,17 @@ class Connection:
             field_dict["attached_at"] = attached_at
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
+        if inbound_policy is not UNSET:
+            field_dict["inbound_policy"] = inbound_policy
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.allow_all import AllowAll
+        from ..models.allow_list import AllowList
         from ..models.connection_metadata import ConnectionMetadata
+        from ..models.deny_all import DenyAll
 
         d = dict(src_dict)
         id = d.pop("id")
@@ -208,6 +234,41 @@ class Connection:
 
         archived_at = _parse_archived_at(d.pop("archived_at", UNSET))
 
+        def _parse_inbound_policy(
+            data: object,
+        ) -> AllowAll | AllowList | DenyAll | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                inbound_policy_type_0_type_0 = AllowAll.from_dict(data)
+
+                return inbound_policy_type_0_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                inbound_policy_type_0_type_1 = AllowList.from_dict(data)
+
+                return inbound_policy_type_0_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                inbound_policy_type_0_type_2 = DenyAll.from_dict(data)
+
+                return inbound_policy_type_0_type_2
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(AllowAll | AllowList | DenyAll | None | Unset, data)
+
+        inbound_policy = _parse_inbound_policy(d.pop("inbound_policy", UNSET))
+
         connection = cls(
             id=id,
             connector=connector,
@@ -220,6 +281,7 @@ class Connection:
             secrets_set=secrets_set,
             attached_at=attached_at,
             archived_at=archived_at,
+            inbound_policy=inbound_policy,
         )
 
         connection.additional_properties = d

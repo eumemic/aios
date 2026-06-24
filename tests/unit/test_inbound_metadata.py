@@ -351,6 +351,7 @@ async def _drive_inbound_to_wake(
     from types import SimpleNamespace
 
     from aios.models.connections import Connection
+    from aios.models.inbound_policy import AllowAll
     from aios.services.inbound import handle_inbound
     from aios_connectors.resolver import ResolveResult
 
@@ -366,6 +367,10 @@ async def _drive_inbound_to_wake(
         attached_at=None,
         updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         archived_at=None,  # ← live
+        # Admit the sender so the inbound-admission gate (#1500) lets this
+        # debounce-path inbound through to ``defer_wake``; this test exercises
+        # the wake-debounce branch, not the admission gate.
+        inbound_policy=AllowAll(),
     )
 
     async def fake_get_connection(*_args: Any, **_kwargs: Any) -> Connection:

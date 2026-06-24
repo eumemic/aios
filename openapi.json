@@ -11265,6 +11265,45 @@
         "title": "AgentVersion",
         "description": "Read view of a specific agent version from the version history."
       },
+      "AllowAll": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "allow_all",
+            "title": "Kind",
+            "default": "allow_all"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AllowAll",
+        "description": "Explicit \"anyone may talk to this agent\" acknowledgement."
+      },
+      "AllowList": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "allow_list",
+            "title": "Kind",
+            "default": "allow_list"
+          },
+          "chat_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Chat Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "chat_ids"
+        ],
+        "title": "AllowList",
+        "description": "Admit only the enumerated ``chat_ids``.\n\n``chat_ids`` is required and ``min_length=1`` \u2014 an empty list is a\nvalidation error (422), never a silent deny-all. (Use ``DenyAll`` to\ndeny everyone explicitly.)"
+      },
       "AwaitResponse": {
         "properties": {
           "outcome": {
@@ -11617,6 +11656,35 @@
               }
             ],
             "title": "Archived At"
+          },
+          "inbound_policy": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/AllowAll"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AllowList"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DenyAll"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "kind",
+                  "mapping": {
+                    "allow_all": "#/components/schemas/AllowAll",
+                    "allow_list": "#/components/schemas/AllowList",
+                    "deny_all": "#/components/schemas/DenyAll"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inbound Policy"
           }
         },
         "type": "object",
@@ -11876,6 +11944,20 @@
         ],
         "title": "CronSource",
         "description": "Recurring source: a standard 5-field cron expression in UTC.\n\nStructure-only here \u2014 grammar/occurrence checks live on the write\nmodels (``TriggerCreate`` / ``TriggerUpdate``) so the read path accepts\nevery row the write path ever accepted (see module docstring + \u00a72.2 of\nthe design contract). A future additive ``timezone`` field (IANA name;\nabsent = UTC) lands without touching this model or the DB CHECK."
+      },
+      "DenyAll": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "deny_all",
+            "title": "Kind",
+            "default": "deny_all"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DenyAll",
+        "description": "Explicit fail-closed \u2014 admit no one. The server default."
       },
       "DraftStreaming": {
         "properties": {

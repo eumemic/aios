@@ -324,6 +324,9 @@ class TestReparentConnection:
                 "created_at": _NOW,
                 "updated_at": _NOW,
                 "archived_at": None,
+                # Rides ``c.*`` on every real read (migration 0121); NULL → the
+                # connection has no explicit policy (resolves to DenyAll).
+                "inbound_policy": None,
             }
 
         conn = MagicMock()

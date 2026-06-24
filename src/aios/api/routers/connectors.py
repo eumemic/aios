@@ -96,7 +96,7 @@ def _inbound_drop_error(drop_reason: str) -> AiosError:
     msg = f"inbound dropped ({drop_reason})"
     if drop_reason == "payload_too_large":
         return PayloadTooLargeError(msg, detail=detail)
-    if drop_reason in ("detached", "archived_template"):
+    if drop_reason in ("detached", "archived_template", "denied_by_policy"):
         return ValidationError(msg, detail=detail)
     if drop_reason == "session_missing":
         return NotFoundError(msg, detail=detail)
