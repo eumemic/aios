@@ -45,6 +45,12 @@ async def bootstrap(
 ) -> BootstrapResponse:
     """Mint the root account and its first API key.
 
+    T2 decision (#1463): ``bootstrap`` is deliberately retained over
+    ``create_root_account`` — the one-time, token-gated, self-closing
+    operator ceremony semantic is load-bearing (the endpoint behaves like it
+    doesn't exist once a root is in place), and a generic ``create`` would
+    obscure that. Documented exception; not part of the agent-facing plane.
+
     Gated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset
     or empty, the endpoint is 401 regardless of header value.
 
@@ -102,11 +108,13 @@ async def list_my_children(pool: PoolDep, auth: AuthDep) -> list[Account]:
 
 @router.post(
     "/children",
-    operation_id="mint_child_account",
+    operation_id="create_child_account",
     status_code=status.HTTP_201_CREATED,
 )
-async def mint_child(body: MintAccountRequest, pool: PoolDep, auth: AuthDep) -> MintAccountResponse:
-    """Mint a direct child account under the caller and its first API key.
+async def create_child(
+    body: MintAccountRequest, pool: PoolDep, auth: AuthDep
+) -> MintAccountResponse:
+    """Create a direct child account under the caller and its first API key.
 
     Requires the caller's ``can_mint_children`` to be true. Returns the
     new account id, the first key's id, and the plaintext bearer (the
@@ -155,6 +163,14 @@ async def get_account(target_id: str, pool: PoolDep, auth: AuthDep) -> Account:
     return await service.get_account_in_scope(pool, target_id, caller_account_id=account_id)
 
 
+# T2 verb-normalization decision (#1463): accounts deliberately keep PATCH
+# here rather than moving to the project-wide PUT-for-update convention.
+# ``update_account`` is a genuine *partial* update — omitted fields are
+# preserved and "all fields null" is a valid no-op — which is exactly
+# PATCH's RFC 5789 semantics. PUT would imply whole-resource replacement,
+# which is wrong for the account row (it carries operator-managed columns
+# the management plane must never clobber). This is the one documented
+# account-only exception to the UPDATE=PUT rule.
 @router.patch("/{target_id}", operation_id="update_account")
 async def update_account(
     target_id: str, body: UpdateAccountRequest, pool: PoolDep, auth: AuthDep
@@ -164,6 +180,11 @@ async def update_account(
 
     Omitted fields are preserved. Both fields null is a valid no-op
     that returns the current row.
+
+    Uses PATCH (not the project-wide PUT-for-update convention) as a
+    deliberate, account-only choice: this is a true partial update, so
+    PATCH's partial-replace semantics are correct and PUT's
+    whole-resource-replace semantics would be wrong. See #1463.
     """
     account_id, key_id, can_mint = auth
     updated = await service.update_account(
@@ -219,6 +240,13 @@ async def archive_account(target_id: str, pool: PoolDep, auth: AuthDep) -> Accou
 )
 async def purge_account(target_id: str, pool: PoolDep, auth: AuthDep) -> None:
     """Hard-delete a direct child that has already been soft-archived.
+
+    T2 decision (#1463): ``purge`` is deliberately retained as the
+    explicitly-named two-step hard-delete ceremony (it refuses unless the
+    account is already archived, childless, and resourceless). It is *not*
+    renamed to ``delete_account`` — under the T2 convention the bare DELETE
+    verb is the soft-archive, and ``/purge`` is the consistent name for the
+    irreversible hard-delete across families. accounts is the baseline here.
 
     Two-step ceremony: \
     1. ``DELETE /v1/accounts/{id}`` soft-archives (sets ``archived_at``).\
@@ -294,7 +322,13 @@ async def list_account_keys(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def revoke_account_key(target_id: str, key_id: str, pool: PoolDep, auth: AuthDep) -> None:
-    """Revoke an API key on a caller-or-child account. Idempotent."""
+    """Revoke an API key on a caller-or-child account. Idempotent.
+
+    T2 decision (#1463): ``revoke`` is deliberately retained over
+    ``delete_account_key`` — "revoke a key" is the load-bearing security-
+    domain idiom and conveys the irreversible credential-invalidation
+    semantic more precisely than a generic delete. Documented exception.
+    """
     account_id, actor_key_id, _can_mint = auth
     await service.revoke_key(
         pool,

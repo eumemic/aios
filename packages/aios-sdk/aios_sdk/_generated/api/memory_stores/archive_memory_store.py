@@ -73,8 +73,9 @@ def sync_detailed(
 
     The store and its memories persist; sessions can still resolve memory
     content. Subsequent ``update_memory_store`` calls fail until
-    un-archived (no API surface for that currently). Use
-    ``delete_memory_store`` for full removal.
+    un-archived (no API surface for that currently). Equivalent to ``DELETE``
+    on the store (bare DELETE soft-archives). Use ``purge_memory_store`` for
+    full removal.
 
     Args:
         store_id (str):
@@ -112,8 +113,9 @@ def sync(
 
     The store and its memories persist; sessions can still resolve memory
     content. Subsequent ``update_memory_store`` calls fail until
-    un-archived (no API surface for that currently). Use
-    ``delete_memory_store`` for full removal.
+    un-archived (no API surface for that currently). Equivalent to ``DELETE``
+    on the store (bare DELETE soft-archives). Use ``purge_memory_store`` for
+    full removal.
 
     Args:
         store_id (str):
@@ -146,8 +148,9 @@ async def asyncio_detailed(
 
     The store and its memories persist; sessions can still resolve memory
     content. Subsequent ``update_memory_store`` calls fail until
-    un-archived (no API surface for that currently). Use
-    ``delete_memory_store`` for full removal.
+    un-archived (no API surface for that currently). Equivalent to ``DELETE``
+    on the store (bare DELETE soft-archives). Use ``purge_memory_store`` for
+    full removal.
 
     Args:
         store_id (str):
@@ -183,8 +186,9 @@ async def asyncio(
 
     The store and its memories persist; sessions can still resolve memory
     content. Subsequent ``update_memory_store`` calls fail until
-    un-archived (no API surface for that currently). Use
-    ``delete_memory_store`` for full removal.
+    un-archived (no API surface for that currently). Equivalent to ``DELETE``
+    on the store (bare DELETE soft-archives). Use ``purge_memory_store`` for
+    full removal.
 
     Args:
         store_id (str):

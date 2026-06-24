@@ -148,9 +148,13 @@ async def update_store(
         )
 
 
-async def archive_store(pool: asyncpg.Pool[Any], store_id: str, *, account_id: str) -> MemoryStore:
+async def archive_store(
+    pool: asyncpg.Pool[Any], store_id: str, *, account_id: str, idempotent: bool = False
+) -> MemoryStore:
     async with pool.acquire() as conn:
-        return await queries.archive_memory_store(conn, store_id, account_id=account_id)
+        return await queries.archive_memory_store(
+            conn, store_id, account_id=account_id, idempotent=idempotent
+        )
 
 
 async def delete_store(pool: asyncpg.Pool[Any], store_id: str, *, account_id: str) -> None:

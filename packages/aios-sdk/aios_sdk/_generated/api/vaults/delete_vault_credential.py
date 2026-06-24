@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -7,6 +7,7 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
+from ...models.vault_credential import VaultCredential
 from ...types import UNSET, Response, Unset
 
 
@@ -34,10 +35,11 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Any | HTTPValidationError | None:
-    if response.status_code == 204:
-        response_204 = cast(Any, None)
-        return response_204
+) -> HTTPValidationError | VaultCredential | None:
+    if response.status_code == 200:
+        response_200 = VaultCredential.from_dict(response.json())
+
+        return response_200
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -52,7 +54,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | VaultCredential]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -67,14 +69,16 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | VaultCredential]:
     """Delete Credential
 
-     Hard-delete a credential row. Returns 204.
+     Soft-archive a credential (bare DELETE = soft-archive; T2 convention).
 
-    Unlike ``archive_vault_credential``, removes the row entirely and
-    leaves no audit trail. Prefer archive unless you specifically need the
-    row gone.
+    Sets ``archived_at``, hides the credential from default lists, and zeroes
+    its encrypted secret payload (same behavior as
+    ``archive_vault_credential``). The row persists for audit. Bare DELETE is
+    never silently destructive; for the irreversible hard-delete use
+    ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
 
     Args:
         vault_id (str):
@@ -86,7 +90,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[HTTPValidationError | VaultCredential]
     """
 
     kwargs = _get_kwargs(
@@ -108,14 +112,16 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
+) -> HTTPValidationError | VaultCredential | None:
     """Delete Credential
 
-     Hard-delete a credential row. Returns 204.
+     Soft-archive a credential (bare DELETE = soft-archive; T2 convention).
 
-    Unlike ``archive_vault_credential``, removes the row entirely and
-    leaves no audit trail. Prefer archive unless you specifically need the
-    row gone.
+    Sets ``archived_at``, hides the credential from default lists, and zeroes
+    its encrypted secret payload (same behavior as
+    ``archive_vault_credential``). The row persists for audit. Bare DELETE is
+    never silently destructive; for the irreversible hard-delete use
+    ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
 
     Args:
         vault_id (str):
@@ -127,7 +133,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        HTTPValidationError | VaultCredential
     """
 
     return sync_detailed(
@@ -144,14 +150,16 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | VaultCredential]:
     """Delete Credential
 
-     Hard-delete a credential row. Returns 204.
+     Soft-archive a credential (bare DELETE = soft-archive; T2 convention).
 
-    Unlike ``archive_vault_credential``, removes the row entirely and
-    leaves no audit trail. Prefer archive unless you specifically need the
-    row gone.
+    Sets ``archived_at``, hides the credential from default lists, and zeroes
+    its encrypted secret payload (same behavior as
+    ``archive_vault_credential``). The row persists for audit. Bare DELETE is
+    never silently destructive; for the irreversible hard-delete use
+    ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
 
     Args:
         vault_id (str):
@@ -163,7 +171,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[HTTPValidationError | VaultCredential]
     """
 
     kwargs = _get_kwargs(
@@ -183,14 +191,16 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
+) -> HTTPValidationError | VaultCredential | None:
     """Delete Credential
 
-     Hard-delete a credential row. Returns 204.
+     Soft-archive a credential (bare DELETE = soft-archive; T2 convention).
 
-    Unlike ``archive_vault_credential``, removes the row entirely and
-    leaves no audit trail. Prefer archive unless you specifically need the
-    row gone.
+    Sets ``archived_at``, hides the credential from default lists, and zeroes
+    its encrypted secret payload (same behavior as
+    ``archive_vault_credential``). The row persists for audit. Bare DELETE is
+    never silently destructive; for the irreversible hard-delete use
+    ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
 
     Args:
         vault_id (str):
@@ -202,7 +212,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        HTTPValidationError | VaultCredential
     """
 
     return (

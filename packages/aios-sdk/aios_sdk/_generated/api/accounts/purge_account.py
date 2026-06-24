@@ -69,6 +69,13 @@ def sync_detailed(
 
      Hard-delete a direct child that has already been soft-archived.
 
+    T2 decision (#1463): ``purge`` is deliberately retained as the
+    explicitly-named two-step hard-delete ceremony (it refuses unless the
+    account is already archived, childless, and resourceless). It is *not*
+    renamed to ``delete_account`` — under the T2 convention the bare DELETE
+    verb is the soft-archive, and ``/purge`` is the consistent name for the
+    irreversible hard-delete across families. accounts is the baseline here.
+
     Two-step ceremony:     1. ``DELETE /v1/accounts/{id}`` soft-archives (sets ``archived_at``).    2.
     ``POST /v1/accounts/{id}/purge`` hard-deletes the row.
 
@@ -111,6 +118,13 @@ def sync(
 
      Hard-delete a direct child that has already been soft-archived.
 
+    T2 decision (#1463): ``purge`` is deliberately retained as the
+    explicitly-named two-step hard-delete ceremony (it refuses unless the
+    account is already archived, childless, and resourceless). It is *not*
+    renamed to ``delete_account`` — under the T2 convention the bare DELETE
+    verb is the soft-archive, and ``/purge`` is the consistent name for the
+    irreversible hard-delete across families. accounts is the baseline here.
+
     Two-step ceremony:     1. ``DELETE /v1/accounts/{id}`` soft-archives (sets ``archived_at``).    2.
     ``POST /v1/accounts/{id}/purge`` hard-deletes the row.
 
@@ -147,6 +161,13 @@ async def asyncio_detailed(
     """Purge Account
 
      Hard-delete a direct child that has already been soft-archived.
+
+    T2 decision (#1463): ``purge`` is deliberately retained as the
+    explicitly-named two-step hard-delete ceremony (it refuses unless the
+    account is already archived, childless, and resourceless). It is *not*
+    renamed to ``delete_account`` — under the T2 convention the bare DELETE
+    verb is the soft-archive, and ``/purge`` is the consistent name for the
+    irreversible hard-delete across families. accounts is the baseline here.
 
     Two-step ceremony:     1. ``DELETE /v1/accounts/{id}`` soft-archives (sets ``archived_at``).    2.
     ``POST /v1/accounts/{id}/purge`` hard-deletes the row.
@@ -187,6 +208,13 @@ async def asyncio(
     """Purge Account
 
      Hard-delete a direct child that has already been soft-archived.
+
+    T2 decision (#1463): ``purge`` is deliberately retained as the
+    explicitly-named two-step hard-delete ceremony (it refuses unless the
+    account is already archived, childless, and resourceless). It is *not*
+    renamed to ``delete_account`` — under the T2 convention the bare DELETE
+    verb is the soft-archive, and ``/purge`` is the consistent name for the
+    irreversible hard-delete across families. accounts is the baseline here.
 
     Two-step ceremony:     1. ``DELETE /v1/accounts/{id}`` soft-archives (sets ``archived_at``).    2.
     ``POST /v1/accounts/{id}/purge`` hard-deletes the row.

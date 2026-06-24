@@ -77,7 +77,9 @@ def sync_detailed(
     are unrecoverable. Defense in depth: a future DB dump cannot leak
     secrets that were already retired.
 
-    Use ``delete_vault`` instead if you want to remove the rows entirely.
+    Equivalent to ``DELETE /v1/vaults/{vault_id}`` (the bare DELETE verb
+    soft-archives). Use ``purge_vault`` if you want to remove the rows
+    entirely.
 
     Args:
         vault_id (str):
@@ -119,7 +121,9 @@ def sync(
     are unrecoverable. Defense in depth: a future DB dump cannot leak
     secrets that were already retired.
 
-    Use ``delete_vault`` instead if you want to remove the rows entirely.
+    Equivalent to ``DELETE /v1/vaults/{vault_id}`` (the bare DELETE verb
+    soft-archives). Use ``purge_vault`` if you want to remove the rows
+    entirely.
 
     Args:
         vault_id (str):
@@ -156,7 +160,9 @@ async def asyncio_detailed(
     are unrecoverable. Defense in depth: a future DB dump cannot leak
     secrets that were already retired.
 
-    Use ``delete_vault`` instead if you want to remove the rows entirely.
+    Equivalent to ``DELETE /v1/vaults/{vault_id}`` (the bare DELETE verb
+    soft-archives). Use ``purge_vault`` if you want to remove the rows
+    entirely.
 
     Args:
         vault_id (str):
@@ -196,7 +202,9 @@ async def asyncio(
     are unrecoverable. Defense in depth: a future DB dump cannot leak
     secrets that were already retired.
 
-    Use ``delete_vault`` instead if you want to remove the rows entirely.
+    Equivalent to ``DELETE /v1/vaults/{vault_id}`` (the bare DELETE verb
+    soft-archives). Use ``purge_vault`` if you want to remove the rows
+    entirely.
 
     Args:
         vault_id (str):

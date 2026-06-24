@@ -95,18 +95,43 @@ async def archive(vault_id: str, pool: PoolDep, account_id: AccountIdDep) -> Vau
     are unrecoverable. Defense in depth: a future DB dump cannot leak
     secrets that were already retired.
 
-    Use ``delete_vault`` instead if you want to remove the rows entirely.
+    Equivalent to ``DELETE /v1/vaults/{vault_id}`` (the bare DELETE verb
+    soft-archives). Use ``purge_vault`` if you want to remove the rows
+    entirely.
     """
     return await service.archive_vault(pool, vault_id, account_id=account_id)
 
 
-@router.delete("/{vault_id}", operation_id="delete_vault", status_code=status.HTTP_204_NO_CONTENT)
-async def delete(vault_id: str, pool: PoolDep, account_id: AccountIdDep) -> None:
+@router.delete(
+    "/{vault_id}",
+    operation_id="delete_vault",
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
+async def delete(vault_id: str, pool: PoolDep, account_id: AccountIdDep) -> Vault:
+    """Soft-archive a vault (bare DELETE = soft-archive; T2 convention).
+
+    Sets ``archived_at`` and hides the vault from default lists, zeroing the
+    encrypted secret material of its credentials (same behavior as
+    ``archive_vault``). The rows persist for audit and history is retained.
+    Bare DELETE is never silently destructive; for the irreversible
+    hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
+    """
+    return await service.archive_vault(pool, vault_id, account_id=account_id)
+
+
+@router.post(
+    "/{vault_id}/purge",
+    operation_id="purge_vault",
+    status_code=status.HTTP_204_NO_CONTENT,
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
+async def purge(vault_id: str, pool: PoolDep, account_id: AccountIdDep) -> None:
     """Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).
 
-    Returns 204. Unlike ``archive_vault``, this removes the rows entirely
-    and leaves no audit trail. Prefer archive unless you specifically need
-    the rows gone.
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), this removes the
+    rows entirely and leaves no audit trail. The explicit ``/purge`` verb is
+    the only way to reach the destructive path. Prefer archive unless you
+    specifically need the rows gone.
     """
     await service.delete_vault(pool, vault_id, account_id=account_id)
 
@@ -268,7 +293,8 @@ async def archive_credential(
 
     Sets ``archived_at`` and hides the credential from default lists. The
     encrypted blob is scrubbed at archive time so a future DB dump cannot
-    leak the secret. Use ``delete_vault_credential`` for full removal.
+    leak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE
+    soft-archives). Use ``purge_vault_credential`` for full removal.
     """
     return await service.archive_vault_credential(
         pool, vault_id, credential_id, account_id=account_id
@@ -278,15 +304,38 @@ async def archive_credential(
 @router.delete(
     "/{vault_id}/credentials/{credential_id}",
     operation_id="delete_vault_credential",
-    status_code=status.HTTP_204_NO_CONTENT,
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
 async def delete_credential(
+    vault_id: str, credential_id: str, pool: PoolDep, account_id: AccountIdDep
+) -> VaultCredential:
+    """Soft-archive a credential (bare DELETE = soft-archive; T2 convention).
+
+    Sets ``archived_at``, hides the credential from default lists, and zeroes
+    its encrypted secret payload (same behavior as
+    ``archive_vault_credential``). The row persists for audit. Bare DELETE is
+    never silently destructive; for the irreversible hard-delete use
+    ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
+    """
+    return await service.archive_vault_credential(
+        pool, vault_id, credential_id, account_id=account_id
+    )
+
+
+@router.post(
+    "/{vault_id}/credentials/{credential_id}/purge",
+    operation_id="purge_vault_credential",
+    status_code=status.HTTP_204_NO_CONTENT,
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
+async def purge_credential(
     vault_id: str, credential_id: str, pool: PoolDep, account_id: AccountIdDep
 ) -> None:
     """Hard-delete a credential row. Returns 204.
 
-    Unlike ``archive_vault_credential``, removes the row entirely and
-    leaves no audit trail. Prefer archive unless you specifically need the
-    row gone.
+    Unlike the bare ``DELETE`` (soft-archive), removes the row entirely and
+    leaves no audit trail. The explicit ``/purge`` verb is the only way to
+    reach the destructive path. Prefer archive unless you specifically need
+    the row gone.
     """
     await service.delete_vault_credential(pool, vault_id, credential_id, account_id=account_id)

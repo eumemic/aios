@@ -201,13 +201,20 @@ async def _archive_scoped(
     account_id: str,
     noun: str,
     bump_updated_at: bool = True,
+    idempotent: bool = False,
 ) -> asyncpg.Record:
     """Soft-archive: ``SET archived_at = now()`` (and ``updated_at = now()``
     unless ``bump_updated_at=False`` — the ``environments`` table has no
     ``updated_at`` column, so its archive must skip the bump) scoped by
     id + account_id + ``archived_at IS NULL``.  Raises NotFound on miss or
     already-archived row.  Callers that need the model map the returned
-    Record themselves; callers that return ``None`` simply discard it."""
+    Record themselves; callers that return ``None`` simply discard it.
+
+    When ``idempotent`` is set, an already-archived (but still present) row is
+    not an error: the existing row is returned unchanged.  This backs the
+    bare ``DELETE`` verb (T2 soft-archive), which must be idempotent — a
+    second DELETE, or a DELETE after an explicit ``/archive``, still reports
+    the archived row with 200 rather than 404."""
     extra = ", updated_at = now()" if bump_updated_at else ""
     rec = await conn.fetchrow(
         f"UPDATE {table} SET archived_at = now(){extra} "
@@ -216,6 +223,14 @@ async def _archive_scoped(
         account_id,
     )
     if rec is None:
+        if idempotent:
+            existing = await conn.fetchrow(
+                f"SELECT * FROM {table} WHERE id = $1 AND account_id = $2",
+                id_,
+                account_id,
+            )
+            if existing is not None:
+                return existing
         raise NotFoundError(
             f"{noun} {id_} not found or already archived",
             detail={"id": id_},

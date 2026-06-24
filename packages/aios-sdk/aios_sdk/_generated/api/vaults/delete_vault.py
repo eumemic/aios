@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -7,6 +7,7 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
+from ...models.vault import Vault
 from ...types import UNSET, Response, Unset
 
 
@@ -32,10 +33,11 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Any | HTTPValidationError | None:
-    if response.status_code == 204:
-        response_204 = cast(Any, None)
-        return response_204
+) -> HTTPValidationError | Vault | None:
+    if response.status_code == 200:
+        response_200 = Vault.from_dict(response.json())
+
+        return response_200
 
     if response.status_code == 422:
         response_422 = HTTPValidationError.from_dict(response.json())
@@ -50,7 +52,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | Vault]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -64,14 +66,16 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | Vault]:
     """Delete
 
-     Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).
+     Soft-archive a vault (bare DELETE = soft-archive; T2 convention).
 
-    Returns 204. Unlike ``archive_vault``, this removes the rows entirely
-    and leaves no audit trail. Prefer archive unless you specifically need
-    the rows gone.
+    Sets ``archived_at`` and hides the vault from default lists, zeroing the
+    encrypted secret material of its credentials (same behavior as
+    ``archive_vault``). The rows persist for audit and history is retained.
+    Bare DELETE is never silently destructive; for the irreversible
+    hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
 
     Args:
         vault_id (str):
@@ -82,7 +86,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[HTTPValidationError | Vault]
     """
 
     kwargs = _get_kwargs(
@@ -102,14 +106,16 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
+) -> HTTPValidationError | Vault | None:
     """Delete
 
-     Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).
+     Soft-archive a vault (bare DELETE = soft-archive; T2 convention).
 
-    Returns 204. Unlike ``archive_vault``, this removes the rows entirely
-    and leaves no audit trail. Prefer archive unless you specifically need
-    the rows gone.
+    Sets ``archived_at`` and hides the vault from default lists, zeroing the
+    encrypted secret material of its credentials (same behavior as
+    ``archive_vault``). The rows persist for audit and history is retained.
+    Bare DELETE is never silently destructive; for the irreversible
+    hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
 
     Args:
         vault_id (str):
@@ -120,7 +126,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        HTTPValidationError | Vault
     """
 
     return sync_detailed(
@@ -135,14 +141,16 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Response[Any | HTTPValidationError]:
+) -> Response[HTTPValidationError | Vault]:
     """Delete
 
-     Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).
+     Soft-archive a vault (bare DELETE = soft-archive; T2 convention).
 
-    Returns 204. Unlike ``archive_vault``, this removes the rows entirely
-    and leaves no audit trail. Prefer archive unless you specifically need
-    the rows gone.
+    Sets ``archived_at`` and hides the vault from default lists, zeroing the
+    encrypted secret material of its credentials (same behavior as
+    ``archive_vault``). The rows persist for audit and history is retained.
+    Bare DELETE is never silently destructive; for the irreversible
+    hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
 
     Args:
         vault_id (str):
@@ -153,7 +161,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | HTTPValidationError]
+        Response[HTTPValidationError | Vault]
     """
 
     kwargs = _get_kwargs(
@@ -171,14 +179,16 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
-) -> Any | HTTPValidationError | None:
+) -> HTTPValidationError | Vault | None:
     """Delete
 
-     Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).
+     Soft-archive a vault (bare DELETE = soft-archive; T2 convention).
 
-    Returns 204. Unlike ``archive_vault``, this removes the rows entirely
-    and leaves no audit trail. Prefer archive unless you specifically need
-    the rows gone.
+    Sets ``archived_at`` and hides the vault from default lists, zeroing the
+    encrypted secret material of its credentials (same behavior as
+    ``archive_vault``). The rows persist for audit and history is retained.
+    Bare DELETE is never silently destructive; for the irreversible
+    hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
 
     Args:
         vault_id (str):
@@ -189,7 +199,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | HTTPValidationError
+        HTTPValidationError | Vault
     """
 
     return (

@@ -68,9 +68,14 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Any | HTTPValidationError]:
-    """Revoke Account Key
+    r"""Revoke Account Key
 
      Revoke an API key on a caller-or-child account. Idempotent.
+
+    T2 decision (#1463): ``revoke`` is deliberately retained over
+    ``delete_account_key`` — \"revoke a key\" is the load-bearing security-
+    domain idiom and conveys the irreversible credential-invalidation
+    semantic more precisely than a generic delete. Documented exception.
 
     Args:
         target_id (str):
@@ -105,9 +110,14 @@ def sync(
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
 ) -> Any | HTTPValidationError | None:
-    """Revoke Account Key
+    r"""Revoke Account Key
 
      Revoke an API key on a caller-or-child account. Idempotent.
+
+    T2 decision (#1463): ``revoke`` is deliberately retained over
+    ``delete_account_key`` — \"revoke a key\" is the load-bearing security-
+    domain idiom and conveys the irreversible credential-invalidation
+    semantic more precisely than a generic delete. Documented exception.
 
     Args:
         target_id (str):
@@ -137,9 +147,14 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Any | HTTPValidationError]:
-    """Revoke Account Key
+    r"""Revoke Account Key
 
      Revoke an API key on a caller-or-child account. Idempotent.
+
+    T2 decision (#1463): ``revoke`` is deliberately retained over
+    ``delete_account_key`` — \"revoke a key\" is the load-bearing security-
+    domain idiom and conveys the irreversible credential-invalidation
+    semantic more precisely than a generic delete. Documented exception.
 
     Args:
         target_id (str):
@@ -172,9 +187,14 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     authorization: None | str | Unset = UNSET,
 ) -> Any | HTTPValidationError | None:
-    """Revoke Account Key
+    r"""Revoke Account Key
 
      Revoke an API key on a caller-or-child account. Idempotent.
+
+    T2 decision (#1463): ``revoke`` is deliberately retained over
+    ``delete_account_key`` — \"revoke a key\" is the load-bearing security-
+    domain idiom and conveys the irreversible credential-invalidation
+    semantic more precisely than a generic delete. Documented exception.
 
     Args:
         target_id (str):

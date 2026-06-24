@@ -52,7 +52,7 @@
           "accounts"
         ],
         "summary": "Bootstrap",
-        "description": "Mint the root account and its first API key.\n\nGated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset\nor empty, the endpoint is 401 regardless of header value.\n\nRoot-exists check fires before the token check so a probe with no/\nwrong token can't distinguish \"no bootstrap\" (404) from \"wrong token\nbut bootstrap is still open\" (401). Once a root is in place the\nendpoint behaves like it doesn't exist at all.\n\n``plaintext_key`` in the response is the only time the operator key\nis returned in plaintext.",
+        "description": "Mint the root account and its first API key.\n\nT2 decision (#1463): ``bootstrap`` is deliberately retained over\n``create_root_account`` \u2014 the one-time, token-gated, self-closing\noperator ceremony semantic is load-bearing (the endpoint behaves like it\ndoesn't exist once a root is in place), and a generic ``create`` would\nobscure that. Documented exception; not part of the agent-facing plane.\n\nGated by ``AIOS_BOOTSTRAP_TOKEN`` (env var). When that env is unset\nor empty, the endpoint is 401 regardless of header value.\n\nRoot-exists check fires before the token check so a probe with no/\nwrong token can't distinguish \"no bootstrap\" (404) from \"wrong token\nbut bootstrap is still open\" (401). Once a root is in place the\nendpoint behaves like it doesn't exist at all.\n\n``plaintext_key`` in the response is the only time the operator key\nis returned in plaintext.",
         "operationId": "bootstrap_root_account",
         "parameters": [
           {
@@ -218,9 +218,9 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Mint Child",
-        "description": "Mint a direct child account under the caller and its first API key.\n\nRequires the caller's ``can_mint_children`` to be true. Returns the\nnew account id, the first key's id, and the plaintext bearer (the\nonly time that plaintext is recoverable).",
-        "operationId": "mint_child_account",
+        "summary": "Create Child",
+        "description": "Create a direct child account under the caller and its first API key.\n\nRequires the caller's ``can_mint_children`` to be true. Returns the\nnew account id, the first key's id, and the plaintext bearer (the\nonly time that plaintext is recoverable).",
+        "operationId": "create_child_account",
         "parameters": [
           {
             "name": "Authorization",
@@ -395,7 +395,7 @@
           "accounts"
         ],
         "summary": "Update Account",
-        "description": "Partial-update ``display_name`` / ``can_mint_children`` on a\ncaller-or-direct-child account.\n\nOmitted fields are preserved. Both fields null is a valid no-op\nthat returns the current row.",
+        "description": "Partial-update ``display_name`` / ``can_mint_children`` on a\ncaller-or-direct-child account.\n\nOmitted fields are preserved. Both fields null is a valid no-op\nthat returns the current row.\n\nUses PATCH (not the project-wide PUT-for-update convention) as a\ndeliberate, account-only choice: this is a true partial update, so\nPATCH's partial-replace semantics are correct and PUT's\nwhole-resource-replace semantics would be wrong. See #1463.",
         "operationId": "update_account",
         "parameters": [
           {
@@ -521,7 +521,7 @@
           "accounts"
         ],
         "summary": "Purge Account",
-        "description": "Hard-delete a direct child that has already been soft-archived.\n\nTwo-step ceremony:     1. ``DELETE /v1/accounts/{id}`` soft-archives (sets ``archived_at``).    2. ``POST /v1/accounts/{id}/purge`` hard-deletes the row.\n\nRefuses with 409 if the account is not yet archived, has non-archived\nchildren, has any resources (FK RESTRICT will refuse the DELETE), or\nis the caller's own account. Compliance / GDPR path; the normal\nlifecycle stops at archive.",
+        "description": "Hard-delete a direct child that has already been soft-archived.\n\nT2 decision (#1463): ``purge`` is deliberately retained as the\nexplicitly-named two-step hard-delete ceremony (it refuses unless the\naccount is already archived, childless, and resourceless). It is *not*\nrenamed to ``delete_account`` \u2014 under the T2 convention the bare DELETE\nverb is the soft-archive, and ``/purge`` is the consistent name for the\nirreversible hard-delete across families. accounts is the baseline here.\n\nTwo-step ceremony:     1. ``DELETE /v1/accounts/{id}`` soft-archives (sets ``archived_at``).    2. ``POST /v1/accounts/{id}/purge`` hard-deletes the row.\n\nRefuses with 409 if the account is not yet archived, has non-archived\nchildren, has any resources (FK RESTRICT will refuse the DELETE), or\nis the caller's own account. Compliance / GDPR path; the normal\nlifecycle stops at archive.",
         "operationId": "purge_account",
         "parameters": [
           {
@@ -762,7 +762,7 @@
           "accounts"
         ],
         "summary": "Revoke Account Key",
-        "description": "Revoke an API key on a caller-or-child account. Idempotent.",
+        "description": "Revoke an API key on a caller-or-child account. Idempotent.\n\nT2 decision (#1463): ``revoke`` is deliberately retained over\n``delete_account_key`` \u2014 \"revoke a key\" is the load-bearing security-\ndomain idiom and conveys the irreversible credential-invalidation\nsemantic more precisely than a generic delete. Documented exception.",
         "operationId": "revoke_account_key",
         "parameters": [
           {
@@ -1952,6 +1952,7 @@
           "sessions"
         ],
         "summary": "Delete",
+        "description": "Soft-archive a session (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at`` and hides the session from default lists (same\nbehavior as ``archive_session``); events, vaults, and bindings are\nretained. Bare DELETE is never silently destructive; for the\nirreversible hard-delete (cascade of events / vaults / bindings) use\n``POST /v1/sessions/{session_id}/purge``.",
         "operationId": "delete_session",
         "parameters": [
           {
@@ -1981,8 +1982,15 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -1993,6 +2001,11 @@
                 }
               }
             }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
           }
         }
       }
@@ -2827,6 +2840,63 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}/purge": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Purge",
+        "description": "Hard-delete a session and cascade its events, vaults, and bindings.\n\nReturns 204. Unlike the bare ``DELETE`` (soft-archive), the explicit\n``/purge`` verb is the only way to reach this destructive path.",
+        "operationId": "purge_session",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
           }
         }
       }
@@ -4508,7 +4578,7 @@
           "vaults"
         ],
         "summary": "Delete",
-        "description": "Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).\n\nReturns 204. Unlike ``archive_vault``, this removes the rows entirely\nand leaves no audit trail. Prefer archive unless you specifically need\nthe rows gone.",
+        "description": "Soft-archive a vault (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at`` and hides the vault from default lists, zeroing the\nencrypted secret material of its credentials (same behavior as\n``archive_vault``). The rows persist for audit and history is retained.\nBare DELETE is never silently destructive; for the irreversible\nhard-delete use ``POST /v1/vaults/{vault_id}/purge``.",
         "operationId": "delete_vault",
         "parameters": [
           {
@@ -4538,8 +4608,15 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vault"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -4551,6 +4628,11 @@
               }
             }
           }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
         }
       }
     },
@@ -4560,7 +4642,7 @@
           "vaults"
         ],
         "summary": "Archive",
-        "description": "Archive a vault and **purge the encrypted secret material** of its credentials.\n\nSets ``archived_at`` and hides the vault from default lists. In the same\ntransaction, every active credential is archived and its encrypted blob\nis zeroed \u2014 the credential rows persist for audit but the stored secrets\nare unrecoverable. Defense in depth: a future DB dump cannot leak\nsecrets that were already retired.\n\nUse ``delete_vault`` instead if you want to remove the rows entirely.",
+        "description": "Archive a vault and **purge the encrypted secret material** of its credentials.\n\nSets ``archived_at`` and hides the vault from default lists. In the same\ntransaction, every active credential is archived and its encrypted blob\nis zeroed \u2014 the credential rows persist for audit but the stored secrets\nare unrecoverable. Defense in depth: a future DB dump cannot leak\nsecrets that were already retired.\n\nEquivalent to ``DELETE /v1/vaults/{vault_id}`` (the bare DELETE verb\nsoft-archives). Use ``purge_vault`` if you want to remove the rows\nentirely.",
         "operationId": "archive_vault",
         "parameters": [
           {
@@ -4599,6 +4681,63 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
+        }
+      }
+    },
+    "/v1/vaults/{vault_id}/purge": {
+      "post": {
+        "tags": [
+          "vaults"
+        ],
+        "summary": "Purge",
+        "description": "Hard-delete a vault and all its credentials (``ON DELETE CASCADE``).\n\nReturns 204. Unlike the bare ``DELETE`` (soft-archive), this removes the\nrows entirely and leaves no audit trail. The explicit ``/purge`` verb is\nthe only way to reach the destructive path. Prefer archive unless you\nspecifically need the rows gone.",
+        "operationId": "purge_vault",
+        "parameters": [
+          {
+            "name": "vault_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Vault Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -5064,7 +5203,7 @@
           "vaults"
         ],
         "summary": "Delete Credential",
-        "description": "Hard-delete a credential row. Returns 204.\n\nUnlike ``archive_vault_credential``, removes the row entirely and\nleaves no audit trail. Prefer archive unless you specifically need the\nrow gone.",
+        "description": "Soft-archive a credential (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at``, hides the credential from default lists, and zeroes\nits encrypted secret payload (same behavior as\n``archive_vault_credential``). The row persists for audit. Bare DELETE is\nnever silently destructive; for the irreversible hard-delete use\n``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.",
         "operationId": "delete_vault_credential",
         "parameters": [
           {
@@ -5103,8 +5242,15 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultCredential"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -5116,6 +5262,11 @@
               }
             }
           }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
         }
       }
     },
@@ -5125,7 +5276,7 @@
           "vaults"
         ],
         "summary": "Archive Credential",
-        "description": "Archive a credential and **zero its encrypted secret payload**.\n\nSets ``archived_at`` and hides the credential from default lists. The\nencrypted blob is scrubbed at archive time so a future DB dump cannot\nleak the secret. Use ``delete_vault_credential`` for full removal.",
+        "description": "Archive a credential and **zero its encrypted secret payload**.\n\nSets ``archived_at`` and hides the credential from default lists. The\nencrypted blob is scrubbed at archive time so a future DB dump cannot\nleak the secret. Equivalent to ``DELETE`` on the credential (bare DELETE\nsoft-archives). Use ``purge_vault_credential`` for full removal.",
         "operationId": "archive_vault_credential",
         "parameters": [
           {
@@ -5173,6 +5324,72 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
+        }
+      }
+    },
+    "/v1/vaults/{vault_id}/credentials/{credential_id}/purge": {
+      "post": {
+        "tags": [
+          "vaults"
+        ],
+        "summary": "Purge Credential",
+        "description": "Hard-delete a credential row. Returns 204.\n\nUnlike the bare ``DELETE`` (soft-archive), removes the row entirely and\nleaves no audit trail. The explicit ``/purge`` verb is the only way to\nreach the destructive path. Prefer archive unless you specifically need\nthe row gone.",
+        "operationId": "purge_vault_credential",
+        "parameters": [
+          {
+            "name": "vault_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Vault Id"
+            }
+          },
+          {
+            "name": "credential_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Credential Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -5408,7 +5625,7 @@
           }
         }
       },
-      "post": {
+      "put": {
         "tags": [
           "memory-stores"
         ],
@@ -5480,7 +5697,7 @@
           "memory-stores"
         ],
         "summary": "Delete Store",
-        "description": "Hard-delete a memory store, all its memories, and its host mirror.\n\nCascade-deletes memories and versions in the database. After the DB\ntransaction commits, the per-store host mirror directory is removed\n(best-effort \u2014 a missing dir is fine, indicates no session ever\nprovisioned for this store). Returns 204.",
+        "description": "Soft-archive a memory store (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at``, hides the store from default lists, and makes it\nread-only (same behavior as ``archive_memory_store``). The store, its\nmemories, and the host mirror all persist. Bare DELETE is never silently\ndestructive; for the irreversible hard-delete (cascade + host-mirror rm)\nuse ``POST /v1/memory-stores/{store_id}/purge``.",
         "operationId": "delete_memory_store",
         "parameters": [
           {
@@ -5510,8 +5727,15 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryStore"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -5523,6 +5747,11 @@
               }
             }
           }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
         }
       }
     },
@@ -5532,7 +5761,7 @@
           "memory-stores"
         ],
         "summary": "Archive Store",
-        "description": "Archive a memory store: hides from default lists, makes it read-only.\n\nThe store and its memories persist; sessions can still resolve memory\ncontent. Subsequent ``update_memory_store`` calls fail until\nun-archived (no API surface for that currently). Use\n``delete_memory_store`` for full removal.",
+        "description": "Archive a memory store: hides from default lists, makes it read-only.\n\nThe store and its memories persist; sessions can still resolve memory\ncontent. Subsequent ``update_memory_store`` calls fail until\nun-archived (no API surface for that currently). Equivalent to ``DELETE``\non the store (bare DELETE soft-archives). Use ``purge_memory_store`` for\nfull removal.",
         "operationId": "archive_memory_store",
         "parameters": [
           {
@@ -5571,6 +5800,63 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
+        }
+      }
+    },
+    "/v1/memory-stores/{store_id}/purge": {
+      "post": {
+        "tags": [
+          "memory-stores"
+        ],
+        "summary": "Purge Store",
+        "description": "Hard-delete a memory store, all its memories, and its host mirror.\n\nCascade-deletes memories and versions in the database. After the DB\ntransaction commits, the per-store host mirror directory is removed\n(best-effort \u2014 a missing dir is fine, indicates no session ever\nprovisioned for this store). Returns 204. Unlike the bare ``DELETE``\n(soft-archive), the explicit ``/purge`` verb is the only way to reach\nthis destructive path.",
+        "operationId": "purge_memory_store",
+        "parameters": [
+          {
+            "name": "store_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Store Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -5837,7 +6123,7 @@
           }
         }
       },
-      "post": {
+      "put": {
         "tags": [
           "memory-stores"
         ],

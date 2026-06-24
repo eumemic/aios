@@ -82,6 +82,11 @@ def sync_detailed(
     Omitted fields are preserved. Both fields null is a valid no-op
     that returns the current row.
 
+    Uses PATCH (not the project-wide PUT-for-update convention) as a
+    deliberate, account-only choice: this is a true partial update, so
+    PATCH's partial-replace semantics are correct and PUT's
+    whole-resource-replace semantics would be wrong. See #1463.
+
     Args:
         target_id (str):
         authorization (None | str | Unset):
@@ -129,6 +134,11 @@ def sync(
     Omitted fields are preserved. Both fields null is a valid no-op
     that returns the current row.
 
+    Uses PATCH (not the project-wide PUT-for-update convention) as a
+    deliberate, account-only choice: this is a true partial update, so
+    PATCH's partial-replace semantics are correct and PUT's
+    whole-resource-replace semantics would be wrong. See #1463.
+
     Args:
         target_id (str):
         authorization (None | str | Unset):
@@ -170,6 +180,11 @@ async def asyncio_detailed(
 
     Omitted fields are preserved. Both fields null is a valid no-op
     that returns the current row.
+
+    Uses PATCH (not the project-wide PUT-for-update convention) as a
+    deliberate, account-only choice: this is a true partial update, so
+    PATCH's partial-replace semantics are correct and PUT's
+    whole-resource-replace semantics would be wrong. See #1463.
 
     Args:
         target_id (str):
@@ -215,6 +230,11 @@ async def asyncio(
 
     Omitted fields are preserved. Both fields null is a valid no-op
     that returns the current row.
+
+    Uses PATCH (not the project-wide PUT-for-update convention) as a
+    deliberate, account-only choice: this is a true partial update, so
+    PATCH's partial-replace semantics are correct and PUT's
+    whole-resource-replace semantics would be wrong. See #1463.
 
     Args:
         target_id (str):

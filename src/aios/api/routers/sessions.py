@@ -479,9 +479,32 @@ async def clone(
 @router.delete(
     "/{session_id}",
     operation_id="delete_session",
-    status_code=status.HTTP_204_NO_CONTENT,
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
-async def delete(session_id: str, pool: PoolDep, account_id: AccountIdDep) -> None:
+async def delete(session_id: str, pool: PoolDep, account_id: AccountIdDep) -> Session:
+    """Soft-archive a session (bare DELETE = soft-archive; T2 convention).
+
+    Sets ``archived_at`` and hides the session from default lists (same
+    behavior as ``archive_session``); events, vaults, and bindings are
+    retained. Bare DELETE is never silently destructive; for the
+    irreversible hard-delete (cascade of events / vaults / bindings) use
+    ``POST /v1/sessions/{session_id}/purge``.
+    """
+    return await service.archive_session(pool, session_id, account_id=account_id)
+
+
+@router.post(
+    "/{session_id}/purge",
+    operation_id="purge_session",
+    status_code=status.HTTP_204_NO_CONTENT,
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
+async def purge(session_id: str, pool: PoolDep, account_id: AccountIdDep) -> None:
+    """Hard-delete a session and cascade its events, vaults, and bindings.
+
+    Returns 204. Unlike the bare ``DELETE`` (soft-archive), the explicit
+    ``/purge`` verb is the only way to reach this destructive path.
+    """
     await service.delete_session(pool, session_id, account_id=account_id)
 
 
