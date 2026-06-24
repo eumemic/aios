@@ -41,10 +41,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
 
+from aios.api.routers import connectors as connectors_router
+from aios.api.routers.connectors import RuntimeToolResultRequest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness.inflight_tool_registry import InflightToolRegistry
@@ -309,3 +312,121 @@ class TestFireAndForgetSettles:
         registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id in needs, "a co-pending real user message must still wake"
+
+
+_CONNECTOR = "signal"
+
+
+async def _bind_connection(pool: asyncpg.Pool[Any], account_id: str, session_id: str) -> str:
+    """Create a ``signal`` connection and bind ``session_id`` to it; return its id —
+    the runtime intake requires the session to be bound to ``body.connection_id``."""
+    async with pool.acquire() as conn:
+        connection = await queries.insert_connection(
+            conn,
+            account_id=account_id,
+            connector=_CONNECTOR,
+            external_account_id="+15550000000",
+            metadata={},
+        )
+        await queries.insert_binding(
+            conn,
+            account_id=account_id,
+            connection_id=connection.id,
+            mode="single_session",
+            session_id=session_id,
+        )
+    return connection.id
+
+
+class TestMixedBatchWake:
+    async def test_no_reaction_completing_mixed_batch_still_wakes(
+        self,
+        pool_account_session: tuple[asyncpg.Pool[Any], str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A turn emits BOTH a real builtin (``bash``) AND a fire-and-forget connector
+        send. The real result lands first (unreacted; batch still incomplete), then the
+        ``no_reaction`` send result lands LAST via the connector-runtime intake, COMPLETING
+        the batch. The session now has an unreacted real result and must be woken — but the
+        intake's ``no_reaction`` wake-skip drops the wake, stranding the real result until
+        the 30s periodic sweep (~30s of dead air). The wake decision belongs to the gate
+        (which excludes the ``no_reaction`` row), not this intake site, which cannot see the
+        in-flight real sibling."""
+        pool, account_id, session_id = pool_account_session
+        connection_id = await _bind_connection(pool, account_id, session_id)
+
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={"role": "user", "content": "run ls and tell alice"},
+            )
+            # Assistant reacts to user@1 and emits a MIXED batch: a real builtin + a send.
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                kind="message",
+                data={
+                    "role": "assistant",
+                    "content": "",
+                    "reacting_to": 1,
+                    "tool_calls": [
+                        {
+                            "id": "tc_real",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        },
+                        {
+                            "id": "tc_send",
+                            "type": "function",
+                            "function": {"name": "signal_send", "arguments": "{}"},
+                        },
+                    ],
+                },
+            )
+            # The REAL tool result lands first: unreacted, and the batch is still
+            # incomplete (tc_send pending), so nothing wakes yet — correct.
+            await sessions_service.append_tool_result(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                tool_call_id="tc_real",
+                content="file1\nfile2",
+                is_error=False,
+                no_reaction=False,
+            )
+
+        # The fire-and-forget send result lands LAST, through the connector-runtime
+        # intake — the site whose wake decision is under test.
+        defer_wake_mock = AsyncMock()
+        monkeypatch.setattr(connectors_router, "defer_wake", defer_wake_mock)
+        auth = ("runtime-token", _CONNECTOR, account_id, None)
+        await connectors_router.post_runtime_tool_result(
+            RuntimeToolResultRequest(
+                connection_id=connection_id,
+                session_id=session_id,
+                tool_call_id="tc_send",
+                content='{"sent_at_ms": 1}',
+                is_error=False,
+                no_reaction=True,
+            ),
+            pool,
+            auth,
+        )
+
+        # The gate agrees there is work: the real bash result is unreacted and the
+        # batch is now complete (this assertion holds on buggy code too — the gate is
+        # correct; the bug is the missing wake to act on it).
+        registry = InflightToolRegistry()
+        needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
+        assert session_id in needs
+
+        # The intake MUST enqueue a wake. Skipping it on no_reaction stranded the real
+        # sibling until the periodic sweep — the bug.
+        assert defer_wake_mock.called, (
+            "a no_reaction result completing a mixed batch with an unreacted real "
+            "sibling must wake the session, not strand it until the 30s periodic sweep"
+        )
