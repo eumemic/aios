@@ -146,6 +146,25 @@ async def create_connection(api_key: str, base_url: str, account: str) -> str:
         return str(r.json()["id"])
 
 
+async def admit_inbound_all(pool: Any, connection_id: str) -> None:
+    """Set a connection's ``inbound_policy`` to ``AllowAll`` directly in the DB.
+
+    The inbound-admission gate (#1500) flipped the connector inbound path
+    fail-closed: a connection with ``inbound_policy IS NULL`` resolves to the
+    server default ``DenyAll`` and every inbound is dropped with
+    ``DENIED_BY_POLICY`` (HTTP 422) *before* any side effect. There is no
+    operator endpoint to set the policy yet (deliberately deferred to the
+    operator-surface PR), so e2e tests that create a fresh connection and then
+    POST to ``/v1/connectors/runtime/inbound`` must seed an admitting policy
+    out-of-band. This writes ``{"kind":"allow_all"}`` so the gate admits every
+    ``chat_id`` for the connection.
+    """
+    await pool.execute(
+        'UPDATE connections SET inbound_policy = \'{"kind":"allow_all"}\'::jsonb WHERE id = $1',
+        connection_id,
+    )
+
+
 @contextlib.asynccontextmanager
 async def asgi_client(pool: Any) -> AsyncIterator[httpx.AsyncClient]:
     """In-process ``httpx.AsyncClient`` wired to the shared FastAPI app.

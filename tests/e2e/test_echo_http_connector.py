@@ -28,7 +28,11 @@ from aios_echo_http import EchoConnector
 from tests.conftest import needs_docker
 from tests.e2e.conftest import live_aios_server
 from tests.e2e.harness import Harness, assistant, last_assistant_content, tool_call
-from tests.helpers.connections import create_connection, issue_runtime_token
+from tests.helpers.connections import (
+    admit_inbound_all,
+    create_connection,
+    issue_runtime_token,
+)
 
 pytestmark = pytest.mark.docker
 
@@ -327,6 +331,11 @@ class TestEchoHttpConnectorEndToEnd:
         await connections_service.attach_connection(
             harness._pool, connection_id, session_id=session.id, account_id=account_id
         )
+        # Inbound-admission gate (#1500): a fresh connection defaults to
+        # DenyAll, so the connector's trigger_inbound POST would be dropped
+        # with DENIED_BY_POLICY (422). Admit every chat_id so the synthesized
+        # user-message event lands.
+        await admit_inbound_all(harness._pool, connection_id)
         await _publish_echo_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "echo")
 

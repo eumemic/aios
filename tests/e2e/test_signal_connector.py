@@ -28,7 +28,7 @@ import pytest
 from tests.conftest import needs_docker
 from tests.e2e.conftest import live_aios_server
 from tests.e2e.harness import Harness, assistant, tool_call
-from tests.helpers.connections import authed_client, issue_runtime_token
+from tests.helpers.connections import admit_inbound_all, authed_client, issue_runtime_token
 
 pytestmark = pytest.mark.docker
 
@@ -228,6 +228,11 @@ class TestSignalMultiConnection:
         await connections_service.attach_connection(
             harness._pool, conn_b, session_id=session_b.id, account_id=account_id
         )
+        # Inbound-admission gate (#1500): fresh connections default to DenyAll,
+        # which would drop the fed envelopes before they reach a session. Admit
+        # every chat_id on both so the cross-routing assertions below hold.
+        await admit_inbound_all(harness._pool, conn_a)
+        await admit_inbound_all(harness._pool, conn_b)
         await _publish_signal_tools_schema(harness)
         token = await issue_runtime_token(api_key, live_server, "signal")
 

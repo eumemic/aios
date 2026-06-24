@@ -25,7 +25,7 @@ import pytest
 from aios.ids import EVENT, make_id, split_id
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
-from tests.helpers.connections import bearer
+from tests.helpers.connections import admit_inbound_all, bearer
 
 pytestmark = pytest.mark.docker
 
@@ -50,6 +50,10 @@ async def _attach(harness: Harness, connection_id: str, session_id: str) -> None
     await connections_service.attach_connection(
         harness._pool, connection_id, session_id=session_id, account_id=account_id
     )
+    # The inbound-admission gate (#1500) defaults a fresh connection to
+    # DenyAll; admit every chat_id so the runtime inbound POSTs below are
+    # delivered (201) instead of dropped with DENIED_BY_POLICY (422).
+    await admit_inbound_all(harness._pool, connection_id)
 
 
 @needs_docker
