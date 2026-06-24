@@ -624,7 +624,7 @@ class Settings(BaseSettings):
         "inbound rate/cost budget (#1504) enforced at the connector-write "
         "boundary. The budget is a per-``(connection_id, chat_id)`` rolling "
         "COUNT of admitted inbound messages over this window, keyed on the "
-        "``orig_channel`` (``f\"{connector}/{external_account_id}/{chat_id}\"``) "
+        '``orig_channel`` (``f"{connector}/{external_account_id}/{chat_id}"``) '
         "stamped on each ``role=user`` event — the same ``events``-log window "
         "shape as ``count_recent_wakes_from``, ``account_id``-scoped (so two "
         "tenants holding the same external ``chat_id`` get independent "

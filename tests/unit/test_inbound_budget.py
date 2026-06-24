@@ -72,7 +72,9 @@ async def test_disabled_by_default_admits_without_query() -> None:
     """Default (threshold 0) ⇒ admit with no DB read — byte-identical path."""
     pool = MagicMock()
     pool.acquire = MagicMock(side_effect=AssertionError("must not query when disabled"))
-    with patch.object(inbound_budget, "get_settings", return_value=_settings(window=0, threshold=0)):
+    with patch.object(
+        inbound_budget, "get_settings", return_value=_settings(window=0, threshold=0)
+    ):
         assert (
             await check_inbound_budget(
                 pool,
@@ -89,10 +91,11 @@ async def test_disabled_by_default_admits_without_query() -> None:
 async def test_threshold_zero_disables_even_with_window_set() -> None:
     pool = MagicMock()
     pool.acquire = MagicMock(side_effect=AssertionError("must not query"))
-    with patch.object(inbound_budget, "get_settings", return_value=_settings(window=60, threshold=0)):
+    with patch.object(
+        inbound_budget, "get_settings", return_value=_settings(window=60, threshold=0)
+    ):
         assert (
-            await check_inbound_budget_session(pool, account_id="acc_1", session_id="ses_1")
-            is True
+            await check_inbound_budget_session(pool, account_id="acc_1", session_id="ses_1") is True
         )
 
 
@@ -148,9 +151,7 @@ async def test_session_budget_decision(recent: int, threshold: int, expected: bo
     with patch.object(
         inbound_budget, "get_settings", return_value=_settings(window=3600, threshold=threshold)
     ):
-        got = await check_inbound_budget_session(
-            pool, account_id="acc_1", session_id="ses_1"
-        )
+        got = await check_inbound_budget_session(pool, account_id="acc_1", session_id="ses_1")
     assert got is expected
 
 
