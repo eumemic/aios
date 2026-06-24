@@ -51,7 +51,14 @@ MAX_INPUT_TEMPLATE_BYTES = 16_384  # compact-JSON serialized; enforced WRITE-PAT
 # or oversized probe must never reach the resolver or the carrier INSERT).
 MAX_INGEST_EVENT_BYTES = 65536
 
-CRON_OCCURRENCE_HORIZON_YEARS = 1
+# 8 = the maximum gap between consecutive fires of any valid 5-field cron. A
+# leap-day schedule (`0 0 29 2 *`) skips the non-leap century year — 2096 fires,
+# 2100 does not (not divisible by 400), 2104 fires — an 8-year gap. The horizon
+# must cover that worst case so a genuinely-recurring schedule is accepted; a
+# smaller value (the original 1) false-rejected leap-day crons as "no occurrence"
+# in ~3 of every 4 years. Truly-impossible crons (`0 0 30 2 *`) never match at
+# any horizon, so raising it does not let them slip through.
+CRON_OCCURRENCE_HORIZON_YEARS = 8
 
 TriggerFireStatus = Literal["ok", "error", "timeout", "skipped"]  # was ScheduledTaskStatus
 

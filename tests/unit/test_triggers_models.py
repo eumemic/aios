@@ -95,7 +95,29 @@ class TestCronSource:
 
     def test_rejects_no_occurrence_within_horizon(self) -> None:
         # Grammar-valid but never fires (Feb 30 doesn't exist) — rejected at
-        # write time by the 1-year occurrence horizon (#818 §7).
+        # write time by the occurrence horizon (#818 §7).
+        with pytest.raises(ValidationError, match="no occurrence"):
+            _spec(source={"kind": "cron", "schedule": "0 0 30 2 *"})
+
+    def test_accepts_leap_day_schedule(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A quadrennial leap-day cron (Feb 29) is a VALID recurring schedule: it
+        # fires up to 8 years apart across the 2096→2104 century skip (2100 is
+        # not a leap year). The write-path occurrence horizon must accept it —
+        # only truly-impossible crons (Feb 30) may be rejected. The read path
+        # already tolerates this exact cron (TestReadPathAcceptsRareCron), so the
+        # write path must not 422 a value the read path admits.
+        import aios.models.triggers as trig
+
+        class _PinnedNow(datetime):
+            @classmethod
+            def now(cls, tz: object = None) -> datetime:  # type: ignore[override]
+                # Worst-case anchor: just after a leap day, so the next Feb-29
+                # fire is the full century-skip gap away (2096-03-01 → 2104).
+                return datetime(2096, 3, 1, tzinfo=UTC)
+
+        monkeypatch.setattr(trig, "datetime", _PinnedNow)
+        _spec(source={"kind": "cron", "schedule": "0 0 29 2 *"})  # must NOT raise
+        # ...a genuinely-impossible cron is still rejected (the horizon's real job).
         with pytest.raises(ValidationError, match="no occurrence"):
             _spec(source={"kind": "cron", "schedule": "0 0 30 2 *"})
 
