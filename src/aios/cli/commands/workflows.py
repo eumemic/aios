@@ -22,6 +22,7 @@ from aios.cli.output import print_success
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk import stream_run
 from aios_sdk._generated.api.runs import (
+    archive_run,
     create_run,
     get_run,
     list_run_events,
@@ -224,6 +225,18 @@ def list_runs_(
 def get_run_(ctx: typer.Context, run_id: str) -> None:
     def _run() -> None:
         call_single(ctx, get_run.sync_detailed, run_id=run_id)
+
+    run_or_die(_run)
+
+
+@runs_app.command(
+    "archive",
+    help="Archive a terminal run (drops it from the default run list; refuses non-terminal).",
+)
+@covers("archive_run")
+def archive_run_(ctx: typer.Context, run_id: str) -> None:
+    def _run() -> None:
+        call_single(ctx, archive_run.sync_detailed, run_id=run_id)
 
     run_or_die(_run)
 

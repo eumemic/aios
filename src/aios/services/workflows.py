@@ -48,6 +48,7 @@ from aios.workflows.script_validation import (
 from aios.workflows.service import create_run, resume_gate
 
 __all__ = [
+    "archive_run",
     "archive_workflow",
     "cancel_run",
     "create_run",
@@ -519,6 +520,20 @@ def _run_usage(run: WfRun, children: wf_queries.RunChildrenUsage) -> WfRunUsage:
 async def get_run(pool: asyncpg.Pool[Any], run_id: str, *, account_id: str) -> WfRun:
     async with pool.acquire() as conn:
         run = await wf_queries.get_wf_run(conn, run_id, account_id=account_id)
+        children = await wf_queries.run_children_usage(conn, run.id, account_id=account_id)
+        return run.model_copy(update={"usage": _run_usage(run, children)})
+
+
+async def archive_run(pool: asyncpg.Pool[Any], run_id: str, *, account_id: str) -> WfRun:
+    """Archive a terminal run (the run-side analog of ``archive_workflow``).
+
+    Refuses non-terminal runs (``ConflictError``), sets ``archived_at`` on terminal
+    ones, and drops them from the default ``list_runs`` while keeping them fetchable
+    by id (and keeping their journal). Returns the archived run with its usage
+    roll-up populated, matching ``get_run``'s public read shape.
+    """
+    async with pool.acquire() as conn:
+        run = await wf_queries.archive_run(conn, run_id, account_id=account_id)
         children = await wf_queries.run_children_usage(conn, run.id, account_id=account_id)
         return run.model_copy(update={"usage": _run_usage(run, children)})
 

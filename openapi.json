@@ -9640,6 +9640,65 @@
         }
       }
     },
+    "/v1/runs/{run_id}/archive": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Archive Run",
+        "description": "Archive a TERMINAL run. Archived runs disappear from the default list_runs\nbut remain fetchable by id and keep their journal \u2014 the run-side analog of\narchive_workflow. A non-terminal run (pending/running/suspended) is refused with\n409 Conflict; an already-archived run is an idempotent 409. There is no\nunarchive \u2014 terminal+archived is a final state.",
+        "operationId": "archive_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WfRun"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/runs/{run_id}/events": {
       "get": {
         "tags": [
@@ -15988,6 +16047,7 @@
                   "list_workflows",
                   "get_run",
                   "list_runs",
+                  "archive_run",
                   "list_run_events",
                   "call_session",
                   "call_agent",

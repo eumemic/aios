@@ -102,7 +102,15 @@ async def _list_scoped[T](
     ``include_archived`` drops the default ``archived_at IS NULL`` clause so
     soft-archived rows are visible — e.g. enumerating a workflow run's spent
     ``agent()`` children (#831). The default keeps every other resource listing
-    archive-blind, as before."""
+    archive-blind, as before.
+
+    Readability note: the ``archived_at`` this toggles on a run's ``agent()``
+    CHILD SESSIONS is a different concept from ``wf_runs.archived_at`` (set by
+    ``archive_run``). Same column name, two unrelated lifecycles: a child session
+    is archived when it finalizes (and ``include_archived`` re-includes it for a
+    post-mortem usage roll-up); a RUN is archived as its own terminal disposition
+    (feeding #10's prune). Don't conflate "this run's children are archived" with
+    "this run is archived"."""
     args: list[Any] = [account_id]
     where = ["account_id = $1"] if include_archived else ["archived_at IS NULL", "account_id = $1"]
     for column, value in filters or []:

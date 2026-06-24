@@ -718,3 +718,63 @@ async def test_runs_children_usage_empty_input_is_empty(
     wf_conn: asyncpg.Connection[Any],
 ) -> None:
     assert await wf_queries.runs_children_usage(wf_conn, [], account_id="acc_root") == {}
+
+
+# ─── archive_run — terminal-only run archival (T6, #1469) ────────────────────
+
+
+async def test_archive_run_refuses_non_terminal(wf_conn: asyncpg.Connection[Any]) -> None:
+    """A pending/running/suspended run cannot be archived — the directive in
+    count_active_runs ("archival is terminal-only"). The refusal is a ConflictError
+    and leaves archived_at NULL, so the run stays visible and counted."""
+    run_id = await _seed_run(wf_conn)  # fresh runs are 'pending' (non-terminal)
+    with pytest.raises(ConflictError):
+        await wf_queries.archive_run(wf_conn, run_id, account_id="acc_root")
+    # Untouched: still NULL archived_at, still in the default list, still active-counted.
+    still = await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_root")
+    assert still.archived_at is None
+    assert [r.id for r in await wf_queries.list_wf_runs(wf_conn, account_id="acc_root")] == [run_id]
+    assert await wf_queries.count_active_runs(wf_conn, account_id="acc_root") == 1
+
+
+async def test_archive_run_terminal_archives_and_hides(wf_conn: asyncpg.Connection[Any]) -> None:
+    """A terminal run archives: archived_at is set, the run drops out of the default
+    list_wf_runs, but it stays fetchable by id (and keeps its journal)."""
+    run_id = await _seed_run(wf_conn)
+    await wf_queries.append_run_event(
+        wf_conn, account_id="acc_root", run_id=run_id, type="run_started", payload={"input": None}
+    )
+    await wf_queries.set_run_status(wf_conn, run_id, "completed", account_id="acc_root")
+
+    archived = await wf_queries.archive_run(wf_conn, run_id, account_id="acc_root")
+    assert archived.archived_at is not None
+    assert archived.status == "completed"
+
+    # Dropped from the default (archived-blind) list…
+    assert await wf_queries.list_wf_runs(wf_conn, account_id="acc_root") == []
+    # …but still fetchable by id, and its journal survives.
+    fetched = await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_root")
+    assert fetched.id == run_id
+    assert fetched.archived_at is not None
+    assert len(await wf_queries.list_run_events_scoped(wf_conn, run_id, account_id="acc_root")) == 1
+
+
+async def test_archive_run_already_archived_conflicts(wf_conn: asyncpg.Connection[Any]) -> None:
+    """A second archive of an already-archived run is an idempotent ConflictError."""
+    run_id = await _seed_run(wf_conn)
+    await wf_queries.set_run_status(wf_conn, run_id, "errored", account_id="acc_root")
+    await wf_queries.archive_run(wf_conn, run_id, account_id="acc_root")
+    with pytest.raises(ConflictError):
+        await wf_queries.archive_run(wf_conn, run_id, account_id="acc_root")
+
+
+async def test_archive_run_cross_tenant_not_found(wf_conn: asyncpg.Connection[Any]) -> None:
+    """A foreign account cannot archive another tenant's run — it 404s, never leaks."""
+    await wf_conn.execute(
+        "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+        "VALUES ('acc_other', 'acc_root', FALSE, 'tenant-other')"
+    )
+    run_id = await _seed_run(wf_conn)
+    await wf_queries.set_run_status(wf_conn, run_id, "completed", account_id="acc_root")
+    with pytest.raises(NotFoundError):
+        await wf_queries.archive_run(wf_conn, run_id, account_id="acc_other")

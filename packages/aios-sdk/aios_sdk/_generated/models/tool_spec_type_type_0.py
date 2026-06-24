@@ -2,6 +2,7 @@ from enum import Enum
 
 
 class ToolSpecTypeType0(str, Enum):
+    ARCHIVE_RUN = "archive_run"
     ARCHIVE_WORKFLOW = "archive_workflow"
     BASH = "bash"
     CALL_AGENT = "call_agent"

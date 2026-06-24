@@ -47,6 +47,7 @@ BuiltinToolType = Literal[
     "list_workflows",
     "get_run",
     "list_runs",
+    "archive_run",
     "list_run_events",
     "call_session",
     "call_agent",
