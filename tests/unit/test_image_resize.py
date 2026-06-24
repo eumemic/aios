@@ -53,6 +53,19 @@ def _noisy_rgb(width: int, height: int) -> Image.Image:
     return Image.frombytes("RGB", (width, height), data)
 
 
+@functools.cache
+def _noisy_la(width: int, height: int) -> Image.Image:
+    """Return a grayscale+alpha (mode ``LA``) noise image.
+
+    A grayscale logo/screenshot with a transparent background decodes to mode
+    ``LA`` via ``Image.open`` (PNG color type 4).  Noise keeps the encoded PNG
+    above the byte cap so the transparency encoder must reach its palette
+    fallback — the site that historically rejected ``LA``.
+    """
+    data = random.Random(f"LA{width}x{height}").randbytes(width * height * 2)
+    return Image.frombytes("LA", (width, height), data)
+
+
 class TestNoOp:
     async def test_returns_none_when_image_fits_both_caps(self) -> None:
         small = _encode(_noisy_rgb(50, 50), "JPEG", quality=90)
@@ -110,6 +123,22 @@ class TestPngTransparency:
         result = await maybe_downsample(data, "image/png")
         assert result is not None
         assert result.content_type == "image/jpeg"
+
+    async def test_grayscale_alpha_la_downsamples_without_crashing(self) -> None:
+        # A grayscale+alpha PNG decodes to mode LA. Oversized + noisy, so the
+        # first transparency PNG overshoots the cap and the encoder reaches its
+        # palette fallback — convert("P", ADAPTIVE) rejects LA, which previously
+        # raised a bare ValueError that escaped ImageDownsampleError, 500'd the
+        # connector inbound, and poisoned its retry loop. The encoder must
+        # normalize LA to RGBA and produce a valid downsampled PNG.
+        la = _noisy_la(INLINE_MAX_DIMENSION + 400, INLINE_MAX_DIMENSION + 400)
+        data = _encode(la, "PNG")
+        result = await maybe_downsample(data, "image/png")
+        assert result is not None
+        assert result.content_type == "image/png"
+        assert len(result.data) <= INLINE_SIZE_CAP_BYTES
+        assert result.width <= INLINE_MAX_DIMENSION
+        assert result.height <= INLINE_MAX_DIMENSION
 
 
 class TestCeiling:
