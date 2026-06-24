@@ -124,6 +124,46 @@ _TERMINAL_MODEL_ERRORS: tuple[type[Exception], ...] = (
 )
 
 
+# Cap the persisted provider-error message so a pathological multi-KB provider
+# body can't bloat the span JSONB. The class + status are the high-signal fields;
+# the message is a truncated human hint, not a full transcript.
+_PROVIDER_ERROR_MESSAGE_MAX_CHARS = 2000
+
+
+def _provider_error_detail(exc: BaseException) -> dict[str, Any]:
+    """Distil a model-call exception into the durable diagnostic triple.
+
+    Persists ``exception_class`` + ``http_status`` + ``message`` on the
+    ``child_errored``/errored-turn span so a latched failure is diagnosable
+    straight from Postgres/console — no more reconstructing 429/529/overload/
+    timeout causes from span *timings* (#1442).
+
+    ``http_status`` is litellm's ``status_code`` when present (RateLimitError →
+    429, InternalServerError → 500/529, etc.); ``None`` for non-HTTP failures
+    (connection drops, our own ``ModelCallDeadlineError``). The message is
+    truncated to keep the span JSONB bounded.
+    """
+    message = str(exc)
+    if len(message) > _PROVIDER_ERROR_MESSAGE_MAX_CHARS:
+        message = message[:_PROVIDER_ERROR_MESSAGE_MAX_CHARS] + "…"
+    status = getattr(exc, "status_code", None)
+    http_status: int | None
+    if isinstance(status, bool):  # bool is an int subclass — never a status code
+        http_status = None
+    elif isinstance(status, int):
+        http_status = status
+    else:
+        try:
+            http_status = int(status) if status is not None else None
+        except (TypeError, ValueError):
+            http_status = None
+    return {
+        "exception_class": type(exc).__name__,
+        "http_status": http_status,
+        "message": message,
+    }
+
+
 def _is_terminal_model_error(exc: BaseException) -> bool:
     """True iff ``exc`` is a litellm error that retrying the SAME prompt cannot fix.
 
@@ -649,10 +689,15 @@ async def _run_session_step_body(
                 cost_usd=exc.cost_usd,
                 model=agent.model,
                 account_id=account_id,
+                provider_error=_provider_error_detail(exc),
             )
             return _StepResult()
         await _append_model_request_error_span(
-            pool, session_id, start_event_id=start_event.id, account_id=account_id
+            pool,
+            session_id,
+            start_event_id=start_event.id,
+            account_id=account_id,
+            provider_error=_provider_error_detail(exc),
         )
         return _StepResult(
             retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
@@ -665,7 +710,11 @@ async def _run_session_step_body(
                 error_class=type(exc).__name__,
             )
             await _append_model_request_error_span(
-                pool, session_id, start_event_id=start_event.id, account_id=account_id
+                pool,
+                session_id,
+                start_event_id=start_event.id,
+                account_id=account_id,
+                provider_error=_provider_error_detail(exc),
             )
             await _latch_errored_turn(
                 pool,
@@ -677,7 +726,11 @@ async def _run_session_step_body(
             return _StepResult()  # no retry_delay → no defer_wake → session parks errored
         log.exception("step.litellm_failed", session_id=session_id)
         await _append_model_request_error_span(
-            pool, session_id, start_event_id=start_event.id, account_id=account_id
+            pool,
+            session_id,
+            start_event_id=start_event.id,
+            account_id=account_id,
+            provider_error=_provider_error_detail(exc),
         )
         return _StepResult(
             retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
@@ -1144,18 +1197,25 @@ async def _append_model_request_error_span(
     *,
     start_event_id: str,
     account_id: str,
+    provider_error: dict[str, Any] | None = None,
 ) -> None:
+    payload: dict[str, Any] = {
+        "event": "model_request_end",
+        "model_request_start_id": start_event_id,
+        "is_error": True,
+        "model_usage": {},
+        "cost_usd": None,
+    }
+    # Persist the provider failure detail (exception class + HTTP status +
+    # message) so a child_errored / errored-turn span is diagnosable straight
+    # from the DB — not by reconstructing the cause from span timings (#1442).
+    if provider_error is not None:
+        payload["provider_error"] = provider_error
     await sessions_service.append_event(
         pool,
         session_id,
         "span",
-        {
-            "event": "model_request_end",
-            "model_request_start_id": start_event_id,
-            "is_error": True,
-            "model_usage": {},
-            "cost_usd": None,
-        },
+        payload,
         account_id=account_id,
     )
 
@@ -1225,18 +1285,24 @@ async def _handle_streaming_model_deadline(
     cost_usd: float | None,
     model: str,
     account_id: str,
+    provider_error: dict[str, Any] | None = None,
 ) -> None:
+    span_payload: dict[str, Any] = {
+        "event": "model_request_end",
+        "model_request_start_id": start_event_id,
+        "is_error": True,
+        "model_usage": usage,
+        "cost_usd": cost_usd,
+    }
+    # This errored-turn span also carries the provider failure detail so the
+    # streaming-deadline cause is diagnosable from the DB directly (#1442).
+    if provider_error is not None:
+        span_payload["provider_error"] = provider_error
     await sessions_service.append_event(
         pool,
         session_id,
         "span",
-        {
-            "event": "model_request_end",
-            "model_request_start_id": start_event_id,
-            "is_error": True,
-            "model_usage": usage,
-            "cost_usd": cost_usd,
-        },
+        span_payload,
         account_id=account_id,
     )
     cost_microusd = _resolve_cost_microusd(model, usage, cost_usd, session_id=session_id)

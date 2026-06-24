@@ -23,6 +23,7 @@ from aios.harness.completion import ModelCallDeadlineError
 from aios.harness.loop import (
     _count_consecutive_rescheduling,
     _is_terminal_model_error,
+    _provider_error_detail,
     _retry_delay_for_attempt,
     run_session_step,
 )
@@ -392,6 +393,11 @@ class TestRunSessionStepOnModelError:
             "is_error": True,
             "model_usage": usage,
             "cost_usd": 1.25,
+            "provider_error": {
+                "exception_class": "ModelCallDeadlineError",
+                "http_status": None,
+                "message": "deadline",
+            },
         } in span_payloads
         lifecycle_payloads = [
             call.args[3]
@@ -433,6 +439,11 @@ class TestRunSessionStepOnModelError:
             "is_error": True,
             "model_usage": {},
             "cost_usd": None,
+            "provider_error": {
+                "exception_class": "ModelCallDeadlineError",
+                "http_status": None,
+                "message": "deadline",
+            },
         } in span_payloads
 
 
@@ -495,3 +506,139 @@ class TestRunSessionStepOnTerminalModelError:
             ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
         )
         mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
+
+
+class TestProviderErrorDetail:
+    """Pure extraction of the durable diagnostic triple (#1442).
+
+    The errored-turn span must carry the provider failure detail (exception
+    class + HTTP status + message) so a ``child_errored`` latch is diagnosable
+    straight from Postgres — not by reconstructing the cause from span timings.
+    """
+
+    def test_litellm_rate_limit_carries_429_status_and_message(self) -> None:
+        request = httpx.Request("POST", "https://example.test/v1")
+        response = httpx.Response(429, request=request)
+        exc = litellm_exceptions.RateLimitError(
+            message="provider is rate limiting", model="x", llm_provider="y", response=response
+        )
+
+        detail = _provider_error_detail(exc)
+
+        assert detail["exception_class"] == "RateLimitError"
+        assert detail["http_status"] == 429
+        assert "rate limiting" in detail["message"]
+
+    def test_internal_server_error_carries_5xx_status(self) -> None:
+        exc = litellm_exceptions.InternalServerError(
+            message="overloaded_error 529", model="x", llm_provider="y"
+        )
+
+        detail = _provider_error_detail(exc)
+
+        assert detail["exception_class"] == "InternalServerError"
+        # litellm maps InternalServerError to a 5xx status code.
+        assert detail["http_status"] == 500
+        assert "529" in detail["message"]
+
+    def test_non_http_exception_has_null_status(self) -> None:
+        detail = _provider_error_detail(RuntimeError("provider boom"))
+
+        assert detail["exception_class"] == "RuntimeError"
+        assert detail["http_status"] is None
+        assert detail["message"] == "provider boom"
+
+    def test_deadline_error_has_null_status_and_keeps_message(self) -> None:
+        exc = ModelCallDeadlineError("deadline exceeded", usage={}, cost_usd=None, chunks_seen=0)
+
+        detail = _provider_error_detail(exc)
+
+        assert detail["exception_class"] == "ModelCallDeadlineError"
+        assert detail["http_status"] is None
+        assert detail["message"] == "deadline exceeded"
+
+    def test_oversized_message_is_truncated(self) -> None:
+        detail = _provider_error_detail(RuntimeError("x" * 5000))
+
+        # Bounded so a pathological multi-KB provider body can't bloat the span.
+        assert len(detail["message"]) <= 2001
+        assert detail["message"].endswith("…")
+
+    def test_non_int_status_code_is_dropped(self) -> None:
+        class WeirdError(Exception):
+            status_code = "not-a-number"
+
+        detail = _provider_error_detail(WeirdError("boom"))
+
+        assert detail["http_status"] is None
+
+
+def _error_span_provider_errors(mock_deps: Any) -> list[dict[str, Any]]:
+    """All ``provider_error`` payloads stamped on errored model-request spans."""
+    return [
+        call.args[3]["provider_error"]
+        for call in mock_deps.append_event.call_args_list
+        if call.args[2] == "span"
+        and call.args[3].get("event") == "model_request_end"
+        and call.args[3].get("is_error") is True
+        and "provider_error" in call.args[3]
+    ]
+
+
+class TestErroredSpanCarriesProviderError:
+    """End-to-end: the persisted errored span carries the provider detail (#1442)."""
+
+    async def test_budget_exhausted_child_errored_span_has_provider_error(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        request = httpx.Request("POST", "https://example.test/v1")
+        response = httpx.Response(429, request=request)
+        mock_step_dependencies.stream_litellm.side_effect = litellm_exceptions.RateLimitError(
+            message="rate limited", model="x", llm_provider="y", response=response
+        )
+
+        with patch(
+            "aios.harness.loop._count_consecutive_rescheduling",
+            AsyncMock(return_value=4),  # budget spent → child_errored latch
+        ):
+            await run_session_step("sess_x")
+
+        provider_errors = _error_span_provider_errors(mock_step_dependencies)
+        assert provider_errors, "errored span must persist provider_error"
+        detail = provider_errors[-1]
+        assert detail["exception_class"] == "RateLimitError"
+        assert detail["http_status"] == 429
+        assert "rate limited" in detail["message"]
+
+    async def test_retry_span_also_carries_provider_error(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        mock_step_dependencies.stream_litellm.side_effect = RuntimeError("provider boom")
+
+        with patch(
+            "aios.harness.loop._count_consecutive_rescheduling",
+            AsyncMock(return_value=0),  # still retrying
+        ):
+            await run_session_step("sess_x")
+
+        provider_errors = _error_span_provider_errors(mock_step_dependencies)
+        assert provider_errors
+        assert provider_errors[-1] == {
+            "exception_class": "RuntimeError",
+            "http_status": None,
+            "message": "provider boom",
+        }
+
+    async def test_terminal_error_span_carries_provider_error(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        mock_step_dependencies.stream_litellm.side_effect = _make_litellm_error(
+            litellm_exceptions.AuthenticationError
+        )
+
+        await run_session_step("sess_x")
+
+        provider_errors = _error_span_provider_errors(mock_step_dependencies)
+        assert provider_errors
+        assert provider_errors[-1]["exception_class"] == "AuthenticationError"
+        assert provider_errors[-1]["http_status"] == 401
