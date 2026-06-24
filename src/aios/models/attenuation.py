@@ -340,6 +340,20 @@ def _meet_methods(
     return sorted(set(declared) & set(launcher))
 
 
+def _join_methods(
+    declared: list[HttpMethod] | None, other: list[HttpMethod] | None
+) -> list[HttpMethod] | None:
+    """Set-union JOIN of two method sets — the dual of :func:`_meet_methods`. ``None``
+    is the top (all verbs), so ``join(None, X) == None`` and ``join(X, None) == None``;
+    two concrete sets join to their (sorted) union. Used to aggregate a child's grant
+    for a ``path_pattern`` it declares on more than one route: request-time admission
+    (``http_request._match_route``) is first-match-wins, so a pattern's effective verb
+    grant is the union across its same-pattern routes, not the first one."""
+    if declared is None or other is None:
+        return None
+    return sorted(set(declared) | set(other))
+
+
 def _canon_http_server(s: HttpServerSpec) -> HttpServerSpec:
     """Resolve an http server to its normal form: identity/headers/route order kept
     verbatim, each route's ``methods`` normalized (sorted/deduped, ``None`` preserved)."""
@@ -353,20 +367,30 @@ def _meet_http_server(declared: HttpServerSpec, launcher: HttpServerSpec) -> Htt
     Path patterns, ordering, ``description``, ``enabled`` and ``permission_policy`` are
     **launcher-verbatim** (parent-wins-frozen: a child cannot re-order, re-gate, or add
     routes — preserving first-match-wins permission gates). The single dimension a child
-    may narrow is ``methods``: for each launcher route, if the child declares a route with
-    the same ``path_pattern``, the output route's methods are ``meet(launcher, child)``
-    (set intersection; ``None`` = all). A child that does not declare a matching path leaves
-    that launcher route's methods unchanged. The result is emitted in launcher route order.
+    may narrow is ``methods``: for each launcher route, the output methods are
+    ``meet(child_grant, launcher)`` (set intersection; ``None`` = all), where ``child_grant``
+    is the **union** of the methods of every child route sharing that ``path_pattern``. A
+    pattern may legitimately appear on multiple routes with disjoint verbs and
+    ``http_request._match_route`` admits a verb if any same-pattern route matches, so the
+    child's grant for the pattern is their join — collapsing to the first declaration would
+    silently demote later same-pattern routes to deny-all and break ``attenuate(x, x) ==
+    canonicalize(x)``. A child that declares no route for a launcher pattern leaves that
+    route's methods unchanged. The result is emitted in launcher route order.
     """
-    declared_by_pattern: dict[str, HttpRouteSpec] = {}
+    declared_methods: dict[str, list[HttpMethod] | None] = {}
     for r in declared.routes:
-        declared_by_pattern.setdefault(r.path_pattern, r)  # first child declaration wins
+        if r.path_pattern in declared_methods:
+            declared_methods[r.path_pattern] = _join_methods(
+                declared_methods[r.path_pattern], r.methods
+            )
+        else:
+            declared_methods[r.path_pattern] = _norm_methods(r.methods)
     out_routes: list[HttpRouteSpec] = []
     for lr in launcher.routes:
-        child = declared_by_pattern.get(lr.path_pattern)
-        methods = (
-            _norm_methods(lr.methods) if child is None else _meet_methods(child.methods, lr.methods)
-        )
+        # An undeclared pattern yields ``None`` (the method-lattice top), and
+        # ``meet(None, x) == _norm_methods(x)`` — so a route the child did not
+        # narrow is emitted launcher-verbatim without a separate branch.
+        methods = _meet_methods(declared_methods.get(lr.path_pattern), lr.methods)
         out_routes.append(lr.model_copy(update={"methods": methods}))
     return launcher.model_copy(update={"routes": out_routes})
 

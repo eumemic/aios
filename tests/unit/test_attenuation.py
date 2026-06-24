@@ -288,6 +288,49 @@ class TestServerSurvival:
         once = att(dec, lau)
         assert att(once, lau) == once
 
+    def test_http_route_meet_duplicate_path_pattern_preserves_each_verb(self) -> None:
+        # A server may legitimately carry two routes sharing a path_pattern but with
+        # disjoint methods (e.g. GET with allow_query for pagination + POST gated
+        # always_ask) — validate_http_servers dedups only base_url, and _match_route
+        # is first-match-wins on method precisely so [/x GET, /x POST] grants both.
+        # The meet must narrow each launcher route against the UNION of the child's
+        # same-pattern grants, not collapse them to the first declaration. Otherwise
+        # the second route is demoted to deny-all and the stated fixpoint law breaks.
+        srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[
+                HttpRouteSpec(path_pattern="/x", methods=["GET"]),
+                HttpRouteSpec(path_pattern="/x", methods=["POST"]),
+            ],
+        )
+        x = Surface([], [], [srv])
+        out = att(x, x)
+        # Each route keeps its own verb — the POST route is NOT silently denied.
+        assert [r.methods for r in out.http_servers[0].routes] == [["GET"], ["POST"]]
+        assert out == canon(x)  # attenuate(x, x) == canonicalize(x) holds for dup patterns
+
+    def test_http_route_meet_unions_child_same_pattern_grants(self) -> None:
+        # The child declares one pattern twice with disjoint verbs; its grant for the
+        # pattern is the UNION of both routes. The buggy first-declaration-wins meet
+        # silently drops the second route's verb, narrowing an all-verbs launcher route
+        # to GET-only instead of GET+POST.
+        l_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[HttpRouteSpec(path_pattern="/x")],  # methods=None → all verbs (top)
+        )
+        d_srv = HttpServerSpec(
+            name="api",
+            base_url="https://api",
+            routes=[
+                HttpRouteSpec(path_pattern="/x", methods=["GET"]),
+                HttpRouteSpec(path_pattern="/x", methods=["POST"]),
+            ],
+        )
+        out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+        assert out.http_servers[0].routes[0].methods == ["GET", "POST"]
+
     def test_http_server_absent_is_dropped(self) -> None:
         d_srv = HttpServerSpec(name="api", base_url="https://api")
         out = att(Surface([], [], [d_srv]), Surface([], [], []))
@@ -465,8 +508,20 @@ def _gnarly_surfaces() -> list[Surface]:
             )
         ],
     )
+    # A server with one path_pattern declared on two routes with disjoint verbs — a
+    # valid construction the meet must not collapse (its own base_url so it only ever
+    # meets against itself, exercising the fixpoint law for duplicate patterns).
+    http_dup = HttpServerSpec(
+        name="api2",
+        base_url="https://api2",
+        routes=[
+            HttpRouteSpec(path_pattern="/x", methods=["GET"]),
+            HttpRouteSpec(path_pattern="/x", methods=["POST"]),
+        ],
+    )
     return [
         Surface([], [], []),
+        Surface([], [], [http_dup]),
         Surface([ToolSpec(type="bash"), ToolSpec(type="read", permission="always_ask")], [], []),
         Surface(
             [
