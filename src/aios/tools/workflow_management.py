@@ -128,6 +128,12 @@ class _ListRunsArgs(BaseModel):
     after: str | None = None
 
 
+class _ArchiveRunArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+
+
 class _ListRunEventsArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -260,6 +266,14 @@ async def list_runs_handler(session_id: str, arguments: dict[str, Any]) -> dict[
     return {"runs": [r.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE) for r in runs]}
 
 
+async def archive_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = tool_input(_ArchiveRunArgs, arguments)
+    run = await wf_service.archive_run(pool, args.run_id, account_id=account_id)
+    return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
+
+
 async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
@@ -345,6 +359,13 @@ LIST_RUNS_DESCRIPTION = (
     "a full page means there may be more — call again. Rows are lean (no "
     "script or tool surface) — fetch a single run with get_run for its full body."
 )
+ARCHIVE_RUN_DESCRIPTION = (
+    "Archive a TERMINAL run (completed, errored, or cancelled). Archived runs "
+    "disappear from the default list_runs but stay fetchable by id and keep their "
+    "full journal — the run-side analog of archive_workflow. A run that is still "
+    "pending/running/suspended is refused (archive it after it finishes). There is "
+    "no unarchive: terminal+archived is a final, settled state."
+)
 LIST_RUN_EVENTS_DESCRIPTION = (
     "Page a run's journal in sequence order (oldest first): every event — run_started, "
     "call_started, call_result, run_completed, and the annotation log/phase progress "
@@ -414,6 +435,13 @@ def _register() -> None:
         description=LIST_RUNS_DESCRIPTION,
         parameters_schema=_ListRunsArgs.model_json_schema(),
         handler=list_runs_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="archive_run",
+        description=ARCHIVE_RUN_DESCRIPTION,
+        parameters_schema=_ArchiveRunArgs.model_json_schema(),
+        handler=archive_run_handler,
         transport="agent_tool",
     )
     registry.register(

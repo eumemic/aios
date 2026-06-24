@@ -33,6 +33,7 @@ from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.workflows import (
+    TERMINAL_RUN_STATUSES,
     WfRun,
     WfRunEvent,
     WfRunEventType,
@@ -549,6 +550,55 @@ async def list_wf_runs(
     )
 
 
+async def archive_run(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
+) -> WfRun:
+    """Soft-archive a TERMINAL run: ``SET archived_at = now()`` scoped by
+    id + account_id, dropping it from the default (``archived_at IS NULL``)
+    ``list_wf_runs`` while keeping it fetchable by id and keeping its journal.
+
+    Archival is **terminal-only** — the directive in :func:`count_active_runs`
+    ("if one lands, it must refuse non-terminal runs, else an archived-but-running
+    run would escape the count while still consuming real capacity"). A run whose
+    status is not in ``TERMINAL_RUN_STATUSES`` raises ``ConflictError``; an already
+    archived run is an idempotent ``ConflictError``; a missing/cross-tenant run is
+    ``NotFoundError``. Terminal+archived is a FINAL state (no ``unarchive_run`` in
+    this design) — it is the prune candidate #10 feeds on.
+
+    Note this ``wf_runs.archived_at`` is distinct from the same-named column on
+    child ``sessions``: a *run* is archived here as a terminal lifecycle state; a
+    run's ``agent()`` *child sessions* carry their own ``archived_at``, surfaced via
+    the ``include_archived`` list path (``db/queries/__init__.py``). Same column
+    name, two unrelated concepts.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE wf_runs
+           SET archived_at = now(), updated_at = now()
+         WHERE id = $1 AND account_id = $2 AND archived_at IS NULL
+           AND status = ANY($3::text[])
+        RETURNING *
+        """,
+        run_id,
+        account_id,
+        list(TERMINAL_RUN_STATUSES),
+    )
+    if row is not None:
+        return _row_to_wf_run(row)
+    # The UPDATE matched no row — disambiguate WHY for a precise error. Re-read the
+    # run account-scoped (raises NotFoundError on a missing/cross-tenant id).
+    run = await get_wf_run(conn, run_id, account_id=account_id)
+    if run.archived_at is not None:
+        raise ConflictError(
+            f"workflow run {run_id} is already archived", detail={"id": run_id}
+        )
+    raise ConflictError(
+        f"workflow run {run_id} is not terminal (status {run.status!r}); "
+        "only completed/errored/cancelled runs can be archived",
+        detail={"id": run_id, "status": run.status},
+    )
+
+
 async def insert_wf_run(
     conn: asyncpg.Connection[Any],
     *,
@@ -778,10 +828,12 @@ async def count_active_runs(
     predicate (migration 0078) — keep them in sync so the planner uses the partial
     index — and is the exact complement of ``TERMINAL_RUN_STATUSES``.
 
-    Cap invariant: ``archived_at IS NULL`` assumes archival is terminal-only. No run
-    archival exists today; if one lands, it must refuse non-terminal runs (or take
-    ``acquire_account_wf_runs_lock``), else an archived-but-running run would escape
-    the count while still consuming real capacity.
+    Cap invariant: ``archived_at IS NULL`` assumes archival is terminal-only.
+    :func:`archive_run` enforces exactly that — it refuses non-terminal runs
+    (``status = ANY(TERMINAL_RUN_STATUSES)`` in its UPDATE) — so an archived run is
+    always already terminal and thus already absent from the ``status IN
+    ('pending','running','suspended')`` count below. No archived-but-running run can
+    escape the count while still consuming real capacity.
     """
     if launcher_session_id is None:
         count: int = await conn.fetchval(

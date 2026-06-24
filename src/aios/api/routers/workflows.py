@@ -250,6 +250,16 @@ async def get_run(run_id: str, pool: PoolDep, account_id: AccountIdDep) -> WfRun
     return await service.get_run(pool, run_id, account_id=account_id)
 
 
+@runs_router.post("/{run_id}/archive", operation_id="archive_run")
+async def archive_run(run_id: str, pool: PoolDep, account_id: AccountIdDep) -> WfRun:
+    """Archive a TERMINAL run. Archived runs disappear from the default list_runs
+    but remain fetchable by id and keep their journal — the run-side analog of
+    archive_workflow. A non-terminal run (pending/running/suspended) is refused with
+    409 Conflict; an already-archived run is an idempotent 409. There is no
+    unarchive — terminal+archived is a final state."""
+    return await service.archive_run(pool, run_id, account_id=account_id)
+
+
 @runs_router.get("/{run_id}/events", operation_id="list_run_events")
 async def list_run_events(
     run_id: str,

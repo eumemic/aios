@@ -167,6 +167,12 @@ class TestSchemaRejectsInjectedTrustedIds:
                 "ses_1", "get_run", {"run_id": "wfr_1", "account_id": "acc_victim"}
             )
 
+    async def test_archive_run_account_id_rejected(self) -> None:
+        with pytest.raises(ToolBail):
+            await invoke_builtin(
+                "ses_1", "archive_run", {"run_id": "wfr_1", "account_id": "acc_victim"}
+            )
+
     async def test_list_runs_launcher_session_id_rejected(self) -> None:
         with pytest.raises(ToolBail):
             await invoke_builtin("ses_1", "list_runs", {"launcher_session_id": "ses_victim"})
@@ -284,6 +290,19 @@ class TestReturnShape:
         assert out["archived_at"] is None
         assert mock_unarchive.call_args.args[1] == "wf_1"
         assert mock_unarchive.call_args.kwargs["account_id"] == "acc_x"
+
+    async def test_archive_run_calls_service_and_trims_run(self, monkeypatch: Any) -> None:
+        archived = datetime(2026, 1, 2, tzinfo=UTC)
+        mock_archive = AsyncMock(
+            return_value=_run(status="completed", archived_at=archived, script="SECRET")
+        )
+        monkeypatch.setattr("aios.services.workflows.archive_run", mock_archive)
+        out = await wm.archive_run_handler("ses_1", {"run_id": "wfr_1"})
+        assert out["id"] == "wfr_1" and out["status"] == "completed"
+        assert out["archived_at"] == archived.isoformat().replace("+00:00", "Z")
+        assert "script" not in out  # heavy snapshot field trimmed
+        assert mock_archive.call_args.args[1] == "wfr_1"
+        assert mock_archive.call_args.kwargs["account_id"] == "acc_x"
 
     async def test_resume_gate_passes_launcher_session_id_and_trims_run(
         self, monkeypatch: Any
