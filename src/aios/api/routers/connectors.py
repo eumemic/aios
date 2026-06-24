@@ -874,9 +874,9 @@ async def post_runtime_tool_result(
                     "connection_id": body.connection_id,
                 },
             )
-        # A failure ALWAYS wakes: AND-gate the connector's ``no_reaction`` flag
-        # with ``not is_error`` so only a successful fire-and-forget result is
-        # excluded from the wake decision.
+        # ``no_reaction`` stamps the row so the wake GATE excludes it: a successful
+        # fire-and-forget result is not itself a stimulus to react to. A failure must
+        # react (so the model can recover), hence AND-gate with ``not is_error``.
         no_reaction = body.no_reaction and not body.is_error
         event = await sessions_service.append_tool_result(
             conn,
@@ -887,15 +887,13 @@ async def post_runtime_tool_result(
             no_reaction=no_reaction,
             account_id=account_id,
         )
-    # The result is ALWAYS appended (tool-always-appends-result invariant). Only
-    # the wake is conditional: a successful fire-and-forget result stamps
-    # ``data['no_reaction']=true`` and skips ``defer_wake`` — its row is excluded
-    # from the wake gate so the session settles instead of re-inferring to react
-    # to its own delivery confirmation.
-    if not no_reaction:
-        await defer_wake(
-            pool, body.session_id, cause="connector_tool_result", account_id=account_id
-        )
+    # Always append (tool-always-appends-result) and always wake: the wake GATE — not
+    # this intake — decides whether to infer. The gate excludes the ``no_reaction`` row,
+    # so a LONE delivery confirmation makes the woken step re-gate and no-op (settles, no
+    # re-inference on its own ack); but a ``no_reaction`` result COMPLETING a mixed batch
+    # still surfaces the unreacted real sibling, which must run. This intake can't see the
+    # worker's in-flight sibling tasks, so it cannot make that call itself.
+    await defer_wake(pool, body.session_id, cause="connector_tool_result", account_id=account_id)
     return event
 
 
