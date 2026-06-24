@@ -220,7 +220,7 @@ async def update_memory_store(
 
 
 async def archive_memory_store(
-    conn: asyncpg.Connection[Any], store_id: str, *, account_id: str
+    conn: asyncpg.Connection[Any], store_id: str, *, account_id: str, idempotent: bool = False
 ) -> MemoryStore:
     row = await _archive_scoped(
         conn,
@@ -228,6 +228,7 @@ async def archive_memory_store(
         id_=store_id,
         account_id=account_id,
         noun="memory store",
+        idempotent=idempotent,
     )
     return _row_to_memory_store(row)
 

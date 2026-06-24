@@ -141,7 +141,7 @@ async def delete_store(store_id: str, pool: PoolDep, account_id: AccountIdDep) -
     destructive; for the irreversible hard-delete (cascade + host-mirror rm)
     use ``POST /v1/memory-stores/{store_id}/purge``.
     """
-    return await service.archive_store(pool, store_id, account_id=account_id)
+    return await service.archive_store(pool, store_id, account_id=account_id, idempotent=True)
 
 
 @router.post(
