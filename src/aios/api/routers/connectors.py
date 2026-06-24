@@ -55,6 +55,7 @@ from aios.errors import (
     ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
+    RateLimitedError,
     ValidationError,
 )
 from aios.logging import get_logger
@@ -66,6 +67,7 @@ from aios.services import inbound as inbound_service
 from aios.services import management_calls
 from aios.services import sessions as sessions_service
 from aios.services.attachment_staging import InboundAttachment
+from aios.services.inbound_budget import check_inbound_budget, check_inbound_budget_session
 from aios.services.wake import defer_wake
 
 log = get_logger("aios.api.routers.connectors")
@@ -96,6 +98,13 @@ def _inbound_drop_error(drop_reason: str) -> AiosError:
     msg = f"inbound dropped ({drop_reason})"
     if drop_reason == "payload_too_large":
         return PayloadTooLargeError(msg, detail=detail)
+    if drop_reason == "rate_limited":
+        # Per-counterparty inbound budget exceeded (#1504). 429 is a routine,
+        # NON-FATAL drop for the connector-http runner: ``_is_fatal_inbound_status``
+        # treats only 401/403/5xx as fatal (crash-restarts the container,
+        # killing every sibling connection), so a single over-budget stranger
+        # cannot take the container down — it just drops one envelope.
+        return RateLimitedError(msg, detail=detail)
     if drop_reason in ("detached", "archived_template", "denied_by_policy"):
         return ValidationError(msg, detail=detail)
     if drop_reason == "session_missing":
@@ -598,6 +607,14 @@ async def post_runtime_lifecycle(
     bound at the time of the call (e.g. the operator detached every
     session before the connector finished tearing down); not an error.
     """
+    # Per-counterparty inbound budget (#1504): the broadcast lifecycle route is
+    # deliberately LEFT UNCAPPED. It is connection-grain operator-control-plane
+    # fan-out (it fans a notice across *every* bound session and carries no
+    # ``chat_id``), NOT a per-counterparty inbound surface — there is no
+    # ``(connection_id, chat_id)`` counterparty to bound. The per-counterparty
+    # budget is applied on the two single-target wake routes
+    # (``post_runtime_session_lifecycle`` / ``post_runtime_chat_lifecycle``) and
+    # on ``handle_inbound`` instead.
     _, auth_connector, account_id, auth_connection_ids = auth
     async with pool.acquire() as conn:
         connection = await queries.get_connection(conn, body.connection_id, account_id=account_id)
@@ -717,6 +734,24 @@ async def post_runtime_session_lifecycle(
         payload["reason"] = body.reason
     if body.data is not None:
         payload["data"] = body.data
+    # Per-counterparty inbound rate/cost budget (#1504), gated on the
+    # wake-bearing path only. The cost the budget bounds is the inference, and
+    # a ``wake=False`` append (visible-on-next-turn, no ``defer_wake``) triggers
+    # none — so a no-wake lifecycle is NOT throttled. The check runs AFTER the
+    # auth/scope checks above (an out-of-scope token still 403s first) and
+    # BEFORE the append, so an over-budget wake writes no event row. The
+    # session-lifecycle route carries ``session_id`` but no ``chat_id``; a
+    # wake-bearing session-lifecycle maps to exactly one session, so the budget
+    # is keyed on ``(account_id, session_id)``. The rejection is a non-fatal 429
+    # (``_is_fatal_inbound_status(429) is False``) so a throttle never
+    # crash-restarts the connector container. Disabled by default (no query).
+    if body.wake and not await check_inbound_budget_session(
+        pool, account_id=account_id, session_id=body.session_id
+    ):
+        raise RateLimitedError(
+            "inbound rate budget exceeded for this session",
+            detail={"drop_reason": "rate_limited", "session_id": body.session_id},
+        )
     event = await sessions_service.append_event(
         pool,
         body.session_id,
@@ -814,6 +849,29 @@ async def post_runtime_chat_lifecycle(
         payload["reason"] = body.reason
     if body.data is not None:
         payload["data"] = body.data
+    # Per-counterparty inbound rate/cost budget (#1504), wake-bearing path only.
+    # The chat-lifecycle route carries ``body.chat_id`` and the loaded
+    # ``connection`` (hence ``connector`` + ``external_account_id``), so the
+    # budget keys on the same ``orig_channel`` window as the inbound path — a
+    # per-``(connection_id, chat_id)`` counterparty. ``wake=False`` (no
+    # inference) is NOT throttled. Runs after auth/scope and before the append,
+    # so an over-budget wake writes no event row; the rejection is a non-fatal
+    # 429 (a throttle never crash-restarts the connector). Disabled by default.
+    if body.wake and not await check_inbound_budget(
+        pool,
+        account_id=account_id,
+        connector=connection.connector,
+        external_account_id=connection.external_account_id,
+        chat_id=body.chat_id,
+    ):
+        raise RateLimitedError(
+            "inbound rate budget exceeded for this chat",
+            detail={
+                "drop_reason": "rate_limited",
+                "connection_id": body.connection_id,
+                "chat_id": body.chat_id,
+            },
+        )
     event = await sessions_service.append_event(
         pool,
         session_id,

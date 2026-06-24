@@ -617,6 +617,43 @@ class Settings(BaseSettings):
         "tool-completion path (cause='connector_tool_result') are "
         "untouched.",
     )
+    inbound_rate_window_seconds: int = Field(
+        default=0,
+        ge=0,
+        description="Rolling-window length (seconds) for the per-counterparty "
+        "inbound rate/cost budget (#1504) enforced at the connector-write "
+        "boundary. The budget is a per-``(connection_id, chat_id)`` rolling "
+        "COUNT of admitted inbound messages over this window, keyed on the "
+        "``orig_channel`` (``f\"{connector}/{external_account_id}/{chat_id}\"``) "
+        "stamped on each ``role=user`` event — the same ``events``-log window "
+        "shape as ``count_recent_wakes_from``, ``account_id``-scoped (so two "
+        "tenants holding the same external ``chat_id`` get independent "
+        "budgets). When an admitted counterparty exceeds "
+        "``inbound_rate_max_per_window`` messages inside this window the "
+        "inbound (or wake-bearing lifecycle) call is dropped BEFORE any append "
+        "+ ``defer_wake`` — zero session spawn, zero event row, zero wake — as "
+        "a routine non-fatal 4xx (429) that never crash-restarts the "
+        "connector container. 0 (the default) DISABLES the budget: the helper "
+        "short-circuits to admit with no query, a path byte-identical to "
+        "pre-feature behavior (mirrors ``inbound_debounce_seconds``). v1 "
+        "enforces message-rate only; the token/cost variant is a "
+        "strictly-additive extension of the same window query (see #1504 "
+        "Out of scope).",
+    )
+    inbound_rate_max_per_window: int = Field(
+        default=0,
+        ge=0,
+        description="Per-window admitted-inbound message threshold for the "
+        "per-``(connection_id, chat_id)`` inbound rate/cost budget (#1504), "
+        "counted over ``inbound_rate_window_seconds``. A counterparty whose "
+        "rolling count reaches this threshold is throttled (the next inbound / "
+        "wake-bearing lifecycle wake is dropped before any append + wake). "
+        "0 (the default) DISABLES the budget — byte-identical to pre-feature "
+        "behavior, no extra query (mirrors ``inbound_debounce_seconds``'s "
+        "disabled-by-default convention). Both knobs must be > 0 for the "
+        "budget to engage. v1 is message-rate; the token/cost variant reuses "
+        "the same window with a different aggregate (see #1504 Out of scope).",
+    )
     connector_backfill_max_age_seconds: int = Field(
         default=60 * 60,  # 1 hour
         ge=60,
