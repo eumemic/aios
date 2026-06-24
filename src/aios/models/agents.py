@@ -28,7 +28,6 @@ BuiltinToolType = Literal[
     "web_search",
     "search_events",
     "memory_search",
-    "cancel",
     "schedule_wake",
     "wake_session",
     "wake_self",

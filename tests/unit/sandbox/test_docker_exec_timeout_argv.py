@@ -139,13 +139,3 @@ async def test_host_backstop_path_preserved(monkeypatch: pytest.MonkeyPatch) -> 
         _handle(), "sleep 999", timeout_seconds=30, max_output_bytes=1000
     )
     assert result.timed_out is True
-
-
-def test_cancel_description_corrected() -> None:
-    """TC7 (AC#2): the cancel description no longer promises stopping a
-    long-running operation, and tells the model the bash command keeps
-    executing inside the sandbox."""
-    from aios.tools.cancel import CANCEL_DESCRIPTION
-
-    assert "stop a long-running operation" not in CANCEL_DESCRIPTION
-    assert "keeps executing inside the sandbox" in CANCEL_DESCRIPTION

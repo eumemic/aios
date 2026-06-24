@@ -20,7 +20,6 @@ from __future__ import annotations
 # tool to the registry singleton. Order doesn't matter semantically but
 # matches the agent-tools declaration order for readability.
 from aios.tools import bash as _bash  # noqa: F401
-from aios.tools import cancel as _cancel  # noqa: F401
 from aios.tools import edit as _edit  # noqa: F401
 from aios.tools import glob as _glob  # noqa: F401
 from aios.tools import grep as _grep  # noqa: F401

@@ -187,8 +187,8 @@ class TestToolLifecycleEviction:
 
 class TestCancelDuringStartSpan:
     """A (single) cancel landing on the ``tool_execute_start`` append — which happens inside
-    ``__aenter__``, before the main try/finally (the model's ``cancel`` tool, the interrupt
-    listener, and a graceful drain all deliver one) — must still resolve the call in-task:
+    ``__aenter__``, before the main try/finally (the pg-notify interrupt listener and a
+    graceful drain both deliver one) — must still resolve the call in-task:
     a clean ``cancelled`` result + a tail sweep, with the body never running. Without the
     targeted handler the task would escape with no result and no sweep, stranding the call
     until the ≤30s ghost sweep and then misclassifying it as 'may have completed'. (A *second*

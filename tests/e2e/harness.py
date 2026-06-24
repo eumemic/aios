@@ -89,12 +89,6 @@ def bash(command: str, *, call_id: str | None = None) -> dict[str, Any]:
     return tool_call("bash", {"command": command}, call_id=call_id)
 
 
-def cancel(tool_call_id: str | None = None, *, call_id: str | None = None) -> dict[str, Any]:
-    """Shorthand for tool_call("cancel", ...)."""
-    args = {"tool_call_id": tool_call_id} if tool_call_id else {}
-    return tool_call("cancel", args, call_id=call_id)
-
-
 # ─── fake litellm response ──────────────────────────────────────────────────
 
 

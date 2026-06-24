@@ -18,7 +18,6 @@ from tests.e2e.harness import (
     Harness,
     assistant,
     bash,
-    cancel,
     first_tool_result,
     last_assistant_content,
     msg_text,
@@ -199,59 +198,6 @@ class TestErrorHandling:
         assert tr.get("is_error") is True
         assert "something broke" in tr["content"]
         assert last_assistant_content(events) == "I see the tool failed."
-
-
-@needs_docker
-class TestCancelFlow:
-    async def test_cancel_in_flight_tool(self, harness: Harness) -> None:
-        """Model cancels a running tool via the cancel tool."""
-        tool_started = asyncio.Event()
-
-        async def blocking_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-            tool_started.set()
-            await asyncio.sleep(3600)  # will be cancelled
-            return {"output": "should not reach"}  # pragma: no cover
-
-        harness.register_tool("blocking", blocking_handler)
-
-        tc_slow = tool_call("blocking", {}, call_id="call_slow")
-        tc_cancel = cancel("call_slow", call_id="call_cancel")
-
-        harness.script_model(
-            [
-                # Step 1: model calls blocking tool
-                assistant(tool_calls=[tc_slow]),
-                # Step 2 (after user injection): model calls cancel
-                assistant(tool_calls=[tc_cancel]),
-                # Step 3: model sees cancel result + blocking error, responds
-                assistant("Cancelled and moving on."),
-            ]
-        )
-
-        session = await harness.start("do blocking thing", tools=["cancel"])
-
-        # Step 1: model calls blocking tool
-        await harness.run_step(session.id)
-        await asyncio.wait_for(tool_started.wait(), timeout=5.0)
-
-        # User injects "cancel it" to trigger step 2
-        await harness.inject_message(session.id, "cancel it")
-
-        # Step 2: model calls cancel tool
-        await harness.run_step(session.id)
-        # Cancel tool executes synchronously (it's fast).
-        # The blocking tool gets CancelledError, appends error result.
-        await harness.wait_for_tools(session.id)
-
-        # Step 3: model sees everything, responds
-        await harness.run_step(session.id)
-
-        events = await harness.events(session.id)
-        trs = tool_results(events)
-        # Should have: blocking tool error (cancelled) + cancel tool result
-        cancelled_results = [t for t in trs if "cancelled" in t.get("content", "")]
-        assert len(cancelled_results) >= 1
-        assert last_assistant_content(events) == "Cancelled and moving on."
 
 
 # ─── invariant tests ─────────────────────────────────────────────────────────
@@ -473,47 +419,6 @@ class TestSessionStatus:
         await harness.run_until_idle(session.id)
         s = await harness.session(session.id)
         assert s.stop_reason == {"type": "end_turn"}
-
-
-@needs_docker
-class TestCancelContract:
-    async def test_cancelled_tool_result_has_is_error(self, harness: Harness) -> None:
-        """A cancelled tool's result should have is_error=True and contain 'cancelled'."""
-        tool_started = asyncio.Event()
-
-        async def blocking_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-            tool_started.set()
-            await asyncio.sleep(3600)
-            return {}  # pragma: no cover
-
-        harness.register_tool("blocker", blocking_handler)
-        tc_block = tool_call("blocker", {}, call_id="call_block")
-        tc_cancel_it = cancel("call_block", call_id="call_do_cancel")
-
-        harness.script_model(
-            [
-                assistant(tool_calls=[tc_block]),
-                assistant(tool_calls=[tc_cancel_it]),
-                assistant("Cancelled."),
-            ]
-        )
-        session = await harness.start("block", tools=["cancel"])
-        await harness.run_step(session.id)
-        await asyncio.wait_for(tool_started.wait(), timeout=5.0)
-
-        await harness.inject_message(session.id, "cancel it")
-        await harness.run_step(session.id)
-        await harness.wait_for_tools(session.id)
-        await harness.run_step(session.id)
-
-        events = await harness.events(session.id)
-        blocked_result = next(
-            e.data
-            for e in events
-            if e.data.get("role") == "tool" and e.data.get("tool_call_id") == "call_block"
-        )
-        assert blocked_result.get("is_error") is True
-        assert "cancelled" in blocked_result["content"].lower()
 
 
 # ─── reacting_to / stale-pending detection ───────────────────────────────────
