@@ -22,6 +22,7 @@ from __future__ import annotations
 from aios.tools import bash as _bash  # noqa: F401
 from aios.tools import edit as _edit  # noqa: F401
 from aios.tools import glob as _glob  # noqa: F401
+from aios.tools import goal_management as _goal_management  # noqa: F401
 from aios.tools import grep as _grep  # noqa: F401
 from aios.tools import http_request as _http_request  # noqa: F401
 from aios.tools import invoke_session as _invoke_session  # noqa: F401

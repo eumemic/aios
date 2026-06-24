@@ -572,6 +572,20 @@ class Settings(BaseSettings):
         "design. Enforced with the per-account cap under one advisory lock; "
         "on exceed, the launch raises ``RateLimitedError``.",
     )
+    session_open_goals_max: int = Field(
+        default=10,
+        ge=1,
+        description="Per-session ceiling on OUTSTANDING self-goals — the open "
+        "self-referential awaited obligations opened by the ``create_goal`` builtin "
+        "(#1508). A self-goal pins a definition-of-done the session is held to (it "
+        "cannot quiesce while one is open), so an unbounded count would let a "
+        "session paint itself into a corner it can never satisfy AND inflate the "
+        "reserved obligations-tail budget. A concurrency cap, not a lifetime budget: "
+        "``complete_goal``/``fail_goal`` free slots, so a sequential goal loop is "
+        "unbounded by design. On exceed, ``create_goal`` returns a clear tool error "
+        "(no obligation opened). Matched to ``MAX_RENDERED_OBLIGATIONS`` so the open "
+        "self-goals always render as full lines in the tail block.",
+    )
     workflow_runs_per_account_max: int = Field(
         default=100,
         ge=1,
