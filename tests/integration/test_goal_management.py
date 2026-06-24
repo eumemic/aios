@@ -148,9 +148,7 @@ async def test_open_goal_cap_enforced(
 ) -> None:
     pool, _account, session_id = pool_session
     cap = get_settings().session_open_goals_max
-    with mock.patch(
-        "aios.tools.goal_management.get_settings"
-    ) as gs:
+    with mock.patch("aios.tools.goal_management.get_settings") as gs:
         gs.return_value = mock.Mock(session_open_goals_max=2)
         a = await invoke_builtin(session_id, "create_goal", {"goal": "g1"})
         b = await invoke_builtin(session_id, "create_goal", {"goal": "g2"})

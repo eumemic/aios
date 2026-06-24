@@ -42,7 +42,8 @@ def _stub_runtime(monkeypatch: Any) -> None:
         "aios.services.sessions.load_session_account_id", AsyncMock(return_value=_ACCOUNT)
     )
     monkeypatch.setattr(
-        "aios.tools.goal_management.get_settings", lambda: SimpleNamespace(session_open_goals_max=10)
+        "aios.tools.goal_management.get_settings",
+        lambda: SimpleNamespace(session_open_goals_max=10),
     )
 
 
@@ -68,9 +69,7 @@ def _foreign(rid: str, *, kind: str = "api") -> Obligation:
 
 def _stub_open_obligations(monkeypatch: Any, obligations: list[Obligation]) -> None:
     """Stub ``queries.get_open_obligations`` (called under an acquired conn)."""
-    monkeypatch.setattr(
-        "aios.db.queries.get_open_obligations", AsyncMock(return_value=obligations)
-    )
+    monkeypatch.setattr("aios.db.queries.get_open_obligations", AsyncMock(return_value=obligations))
 
     class _Conn:
         async def __aenter__(self) -> Any:
@@ -160,7 +159,11 @@ async def test_create_goal_cap_ignores_foreign_obligations(monkeypatch: Any) -> 
 async def test_list_goals_filters_to_self_goals(monkeypatch: Any) -> None:
     _stub_open_obligations(
         monkeypatch,
-        [_self_goal("g1", summary="goal one"), _foreign("a1"), _self_goal("g2", summary="goal two")],
+        [
+            _self_goal("g1", summary="goal one"),
+            _foreign("a1"),
+            _self_goal("g2", summary="goal two"),
+        ],
     )
     out = await invoke_builtin(_SELF, "list_goals", {})
     ids = [g["goal_id"] for g in out["goals"]]
@@ -183,9 +186,7 @@ async def test_complete_goal_closes_via_respond(monkeypatch: Any) -> None:
     respond = AsyncMock(return_value="responded")
     monkeypatch.setattr("aios.tools.goal_management.respond_to_request", respond)
 
-    out = await invoke_builtin(
-        _SELF, "complete_goal", {"goal_id": "g1", "evidence": "all green"}
-    )
+    out = await invoke_builtin(_SELF, "complete_goal", {"goal_id": "g1", "evidence": "all green"})
 
     assert out == {"goal_id": "g1", "status": "completed"}
     kwargs = respond.await_args.kwargs

@@ -90,8 +90,9 @@ class _ListGoalsArgs(BaseModel):
 class _CompleteGoalArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    goal_id: str = Field(description="The id of the open goal to close as done (from create_goal "
-        "or list_goals).")
+    goal_id: str = Field(
+        description="The id of the open goal to close as done (from create_goal or list_goals)."
+    )
     evidence: str | None = Field(
         default=None,
         description="Optional evidence that the goal's acceptance criteria are met "
@@ -102,8 +103,9 @@ class _CompleteGoalArgs(BaseModel):
 class _FailGoalArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    goal_id: str = Field(description="The id of the open goal to abandon (from create_goal or "
-        "list_goals).")
+    goal_id: str = Field(
+        description="The id of the open goal to abandon (from create_goal or list_goals)."
+    )
     reason: str = Field(
         min_length=1,
         description="Why the goal is being abandoned rather than completed.",
