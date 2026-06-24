@@ -41,8 +41,10 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
+from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError
 from aios.services import connections as connections_service
+from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
@@ -80,9 +82,27 @@ async def child_session_scaffold(
                 metadata={},
                 account_id="acc_child_guard",
             )
-            # Seed a parent run row so the child's parent_run_id FK (if any)
-            # and the marker semantics are realistic. The guard only reads
-            # the parent_run_id column, so the value just needs to be non-NULL.
+            # Seed a real parent run row: ``sessions.parent_run_id`` carries a
+            # ``REFERENCES wf_runs(id)`` FK, so a non-existent id would trip the
+            # FK at ``insert_child_session`` (NotFoundError) before the guard is
+            # ever exercised. The guard only reads the column, but the row must
+            # exist, so mint a genuine workflow + run and use its id.
+            workflow = await wf_queries.insert_workflow(
+                conn,
+                account_id="acc_child_guard",
+                name="child-guard-wf",
+                script="async def main(input):\n    return input\n",
+            )
+            parent_run = await wf_queries.insert_wf_run(
+                conn,
+                account_id="acc_child_guard",
+                workflow_id=workflow.id,
+                environment_id=env.id,
+                script=workflow.script,
+                script_sha="deadbeef",
+                host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+                depth=10,
+            )
             child = await queries.insert_child_session(
                 conn,
                 session_id="sess_workflow_child",
@@ -91,13 +111,13 @@ async def child_session_scaffold(
                 environment_id=env.id,
                 agent_version=agent.version,
                 model="openrouter/test",
-                parent_run_id="run_parent_xyz",
+                parent_run_id=parent_run.id,
                 tools=[],
                 mcp_servers=[],
                 http_servers=[],
             )
         assert child is not None
-        assert child.parent_run_id == "run_parent_xyz"
+        assert child.parent_run_id == parent_run.id
         yield pool, "acc_child_guard", connection.id, child.id, session.id
     finally:
         await pool.close()
@@ -127,9 +147,7 @@ async def test_attach_connection_refuses_workflow_child(
 
     # No binding row may exist — the refusal is atomic.
     async with pool.acquire() as conn:
-        active = await queries.get_active_binding(
-            conn, connection_id, account_id=account_id
-        )
+        active = await queries.get_active_binding(conn, connection_id, account_id=account_id)
     assert active is None, (
         f"bindings must not be stamped when the attach is refused; found {active!r}."
     )
@@ -185,9 +203,7 @@ async def test_attach_connection_allows_normal_session(
     )
 
     async with pool.acquire() as conn:
-        active = await queries.get_active_binding(
-            conn, connection_id, account_id=account_id
-        )
+        active = await queries.get_active_binding(conn, connection_id, account_id=account_id)
     assert active is not None
     assert active.session_id == normal_session_id
 
