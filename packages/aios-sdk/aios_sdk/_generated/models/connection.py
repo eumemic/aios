@@ -56,6 +56,12 @@ class Connection:
             attached_at (datetime.datetime | None | Unset):
             archived_at (datetime.datetime | None | Unset):
             inbound_policy (AllowAll | AllowList | DenyAll | None | Unset):
+            inbound_policy_effective (AllowAll | AllowList | DenyAll | Unset): Server-derived, read-only echo of the
+                *effective* inbound-admission policy: the stored ``inbound_policy`` union member, or the server default
+                ``DenyAll`` (fail-closed) when the column is NULL. Lets an operator see both the fail-open (``allow_all``) and
+                fail-closed (``deny_all`` / ``allow_list``) posture on create / get / list without a second round-trip. **Never
+                an input** — it is rejected on the ``ConnectionCreate`` write model; set the policy via ``PUT
+                /v1/connections/{id}/inbound-policy``.
     """
 
     id: str
@@ -70,6 +76,7 @@ class Connection:
     attached_at: datetime.datetime | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     inbound_policy: AllowAll | AllowList | DenyAll | None | Unset = UNSET
+    inbound_policy_effective: AllowAll | AllowList | DenyAll | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -131,6 +138,16 @@ class Connection:
         else:
             inbound_policy = self.inbound_policy
 
+        inbound_policy_effective: dict[str, Any] | Unset
+        if isinstance(self.inbound_policy_effective, Unset):
+            inbound_policy_effective = UNSET
+        elif isinstance(self.inbound_policy_effective, AllowAll):
+            inbound_policy_effective = self.inbound_policy_effective.to_dict()
+        elif isinstance(self.inbound_policy_effective, AllowList):
+            inbound_policy_effective = self.inbound_policy_effective.to_dict()
+        else:
+            inbound_policy_effective = self.inbound_policy_effective.to_dict()
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -155,6 +172,8 @@ class Connection:
             field_dict["archived_at"] = archived_at
         if inbound_policy is not UNSET:
             field_dict["inbound_policy"] = inbound_policy
+        if inbound_policy_effective is not UNSET:
+            field_dict["inbound_policy_effective"] = inbound_policy_effective
 
         return field_dict
 
@@ -269,6 +288,37 @@ class Connection:
 
         inbound_policy = _parse_inbound_policy(d.pop("inbound_policy", UNSET))
 
+        def _parse_inbound_policy_effective(
+            data: object,
+        ) -> AllowAll | AllowList | DenyAll | Unset:
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                inbound_policy_effective_type_0 = AllowAll.from_dict(data)
+
+                return inbound_policy_effective_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                inbound_policy_effective_type_1 = AllowList.from_dict(data)
+
+                return inbound_policy_effective_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            if not isinstance(data, dict):
+                raise TypeError()
+            inbound_policy_effective_type_2 = DenyAll.from_dict(data)
+
+            return inbound_policy_effective_type_2
+
+        inbound_policy_effective = _parse_inbound_policy_effective(
+            d.pop("inbound_policy_effective", UNSET)
+        )
+
         connection = cls(
             id=id,
             connector=connector,
@@ -282,6 +332,7 @@ class Connection:
             attached_at=attached_at,
             archived_at=archived_at,
             inbound_policy=inbound_policy,
+            inbound_policy_effective=inbound_policy_effective,
         )
 
         connection.additional_properties = d

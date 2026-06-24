@@ -19,6 +19,7 @@ from aios.db.queries import (
     _escape_like,
     parse_jsonb,
 )
+from aios.db.queries.inbound_policy import effective_inbound_policy
 from aios.errors import (
     ConflictError,
     NotFoundError,
@@ -314,6 +315,10 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
         inbound_policy=inbound_policy,
+        # Server-derived echo: NULL column → the fail-closed ``DenyAll``
+        # default (same rule the gate's ``resolve_effective_inbound_policy``
+        # applies), defined once in ``effective_inbound_policy``.
+        inbound_policy_effective=effective_inbound_policy(inbound_policy),
     )
 
 
@@ -462,6 +467,80 @@ async def set_connection_secrets(
             detail={"id": connection_id},
         )
     return _row_to_connection(row)
+
+
+async def set_connection_inbound_policy(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    account_id: str,
+    policy: InboundPolicy,
+) -> Connection:
+    """Replace a connection's ``inbound_policy`` jsonb column, wholesale.
+
+    The ``policy`` is an already-validated :class:`InboundPolicy` union
+    member (the endpoint's Replace contract guarantees a non-empty
+    ``AllowList``, a discriminated ``kind``, and no partial widening — the
+    write edge never sees a malformed shape). Bumps ``updated_at`` and
+    re-reads through ``_CONNECTION_UPDATE_CTE_TAIL`` so the returned row
+    carries its projected binding columns (and the echoed
+    ``inbound_policy_effective``).
+
+    Refuses on archived rows — same ``WHERE archived_at IS NULL`` as
+    ``set_connection_secrets``; you cannot open or close a tombstone.
+    """
+    row = await conn.fetchrow(
+        f"""
+        WITH updated AS (
+            UPDATE connections
+               SET inbound_policy = $2::jsonb,
+                   updated_at     = now()
+             WHERE id = $1 AND archived_at IS NULL AND account_id = $3
+            RETURNING *
+        )
+        {_CONNECTION_UPDATE_CTE_TAIL}
+        """,
+        connection_id,
+        _INBOUND_POLICY_ADAPTER.dump_json(policy).decode(),
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found or archived",
+            detail={"id": connection_id},
+        )
+    return _row_to_connection(row)
+
+
+async def default_inbound_policy_if_unset(
+    conn: asyncpg.Connection[Any],
+    connection_id: str,
+    *,
+    account_id: str,
+) -> None:
+    """Default the connection's inbound policy to ``DenyAll`` only when NULL.
+
+    Called at bind time (``attach`` / ``configure-per-chat``) so a
+    newly-bound connection admits nobody until an operator explicitly opens
+    it (fail-closed by default). The ``inbound_policy IS NULL`` guard means
+    this **never clobbers** an operator-set policy — an operator who set
+    ``AllowList`` then attaches keeps the ``AllowList``. Idempotent and
+    no-op on an already-set column.
+
+    Must run inside the caller's ``conn.transaction()`` (the bind sites
+    already hold a ``SELECT ... FOR UPDATE`` on the connections row), before
+    the closing ``get_connection`` read, so the returned ``Connection``
+    reflects the defaulted policy.
+    """
+    await conn.execute(
+        """
+        UPDATE connections
+           SET inbound_policy = '{"kind":"deny_all"}'::jsonb
+         WHERE id = $1 AND account_id = $2 AND inbound_policy IS NULL
+        """,
+        connection_id,
+        account_id,
+    )
 
 
 async def get_connection_secret_blob(

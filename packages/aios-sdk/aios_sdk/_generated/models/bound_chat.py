@@ -19,6 +19,13 @@ class BoundChat:
     rows and per-chat-spawned rows are returned together — the table
     doesn't tag the writer.
 
+    ``chat_id`` is the **authoritative, gate-relevant identifier** — it is
+    what the inbound-admission gate (``AllowList.chat_ids``) matches on.
+    This view deliberately does not surface a connector-supplied
+    ``display_name`` / ``sender_name``: that value is self-reported by the
+    connector and forgeable, so an operator copying an allowlist entry from
+    this view trusts the ``chat_id``, never a display name.
+
         Attributes:
             chat_id (str):
             session_id (str):

@@ -6751,6 +6751,75 @@
         }
       }
     },
+    "/v1/connections/{connection_id}/inbound-policy": {
+      "put": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Set Inbound Policy",
+        "description": "Set the connection's inbound-admission policy, wholesale (Replace).\n\nOperator-authed (``AccountIdDep`` \u2014 **not** the runtime token; this\nroute lives on the operator connections router, not the runtime-scoped\nconnectors router). The body is the bare ``InboundPolicy`` union shape\n``{\"kind\": ..., \"chat_ids\"?: [...]}`` with **Replace** semantics:\n\n* ``{\"kind\": \"allow_list\", \"chat_ids\": []}`` \u2192 **422** (empty list is\n  never a silent deny-all; use ``deny_all``), never persisted.\n* ``{\"kind\": \"allow_list\"}`` (no ``chat_ids``) \u2192 **422** \u2014 ``chat_ids``\n  is required-on-update, so a partial body can neither widen to\n  allow-everyone nor silently re-default.\n* a body with no ``kind``, or a deferred/unknown ``kind`` (e.g.\n  ``deny_list``) \u2192 **422** (discriminated-union + ``extra=\"forbid\"``).\n* ``{\"kind\": \"deny_all\"}`` / ``{\"kind\": \"allow_all\"}`` are accepted.\n\nRevocation is a Replace with the smaller ``AllowList``. Returns the\nupdated ``Connection`` (its ``inbound_policy_effective`` reflects the\nnew posture).",
+        "operationId": "set_connection_inbound_policy",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboundPolicyReplace"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connections/{connection_id}": {
       "get": {
         "tags": [
@@ -11561,7 +11630,7 @@
           "created_at"
         ],
         "title": "BoundChat",
-        "description": "Read view of one ``chat_sessions`` row.\n\nReturned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound\nrows and per-chat-spawned rows are returned together \u2014 the table\ndoesn't tag the writer."
+        "description": "Read view of one ``chat_sessions`` row.\n\nReturned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound\nrows and per-chat-spawned rows are returned together \u2014 the table\ndoesn't tag the writer.\n\n``chat_id`` is the **authoritative, gate-relevant identifier** \u2014 it is\nwhat the inbound-admission gate (``AllowList.chat_ids``) matches on.\nThis view deliberately does not surface a connector-supplied\n``display_name`` / ``sender_name``: that value is self-reported by the\nconnector and forgeable, so an operator copying an allowlist entry from\nthis view trusts the ``chat_id``, never a display name."
       },
       "CapabilitiesUpdate": {
         "properties": {
@@ -11685,6 +11754,29 @@
               }
             ],
             "title": "Inbound Policy"
+          },
+          "inbound_policy_effective": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AllowAll"
+              },
+              {
+                "$ref": "#/components/schemas/AllowList"
+              },
+              {
+                "$ref": "#/components/schemas/DenyAll"
+              }
+            ],
+            "title": "Inbound Policy Effective",
+            "description": "Server-derived, read-only echo of the *effective* inbound-admission policy: the stored ``inbound_policy`` union member, or the server default ``DenyAll`` (fail-closed) when the column is NULL. Lets an operator see both the fail-open (``allow_all``) and fail-closed (``deny_all`` / ``allow_list``) posture on create / get / list without a second round-trip. **Never an input** \u2014 it is rejected on the ``ConnectionCreate`` write model; set the policy via ``PUT /v1/connections/{id}/inbound-policy``.",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "allow_all": "#/components/schemas/AllowAll",
+                "allow_list": "#/components/schemas/AllowList",
+                "deny_all": "#/components/schemas/DenyAll"
+              }
+            }
           }
         },
         "type": "object",
@@ -12658,6 +12750,29 @@
         ],
         "title": "HttpServerSpec",
         "description": "One entry in an agent's ``http_servers`` list.\n\nDeclares an authenticated HTTP endpoint the agent can reach via the\n``http_request`` built-in tool.  ``base_url`` is the common URL\nprefix the agent's ``path`` argument is appended to; ``routes`` is\nthe allowlist of path patterns the broker permits.  Credentials are\nresolved at request time from the session's bound vaults, keyed on\n``base_url``.  Secret never enters the sandbox \u2014 the worker authors\nthe ``Authorization`` header from the vault credential."
+      },
+      "InboundPolicyReplace": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/AllowAll"
+          },
+          {
+            "$ref": "#/components/schemas/AllowList"
+          },
+          {
+            "$ref": "#/components/schemas/DenyAll"
+          }
+        ],
+        "title": "InboundPolicyReplace",
+        "description": "Wire wrapper for ``PUT /v1/connections/{id}/inbound-policy``.\n\nA ``RootModel`` over the :data:`InboundPolicy` discriminated union so the\nrequest body is the bare ``{\"kind\": ..., \"chat_ids\"?: [...]}`` shape (no\nenvelope key) and the validated member is reachable as ``body.root``.\n\n**Replace, not Patch.** This is the *required-on-update* variant:\n``AllowList.chat_ids`` is required with ``min_length=1``, so a partial\nbody ``{\"kind\": \"allow_list\"}`` (no ``chat_ids``) 422s rather than\nsilently widening to an unbounded allow-everyone or re-defaulting, and an\nempty ``{\"kind\": \"allow_list\", \"chat_ids\": []}`` 422s at the write edge.\n``DenyAll`` / ``AllowAll`` bodies carry no ``chat_ids`` and are accepted.\nAn unknown or missing ``kind`` 422s via the discriminated-union\nvalidation plus each member's ``extra=\"forbid\"``. (Mirrors\n``TriggerSourceReplace`` in :mod:`aios.models.triggers`.)\n\nRevocation (\u00a79) is expressed as a Replace with the smaller list \u2014 there\nis no separate patch shape.",
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "allow_all": "#/components/schemas/AllowAll",
+            "allow_list": "#/components/schemas/AllowList",
+            "deny_all": "#/components/schemas/DenyAll"
+          }
+        }
       },
       "LimitedNetworking": {
         "properties": {
@@ -14463,7 +14578,7 @@
           "last_seen_at"
         ],
         "title": "RecentChat",
-        "description": "Distinct chat_id observed on a connection's account, with the\nmost-recent inbound timestamp.\n\nReturned by ``GET /v1/connections/{id}/recent-chats`` so operators\ncan find the chat_id for a specific peer without digging through\nevent logs before calling ``bind-chat``."
+        "description": "Distinct chat_id observed on a connection's account, with the\nmost-recent inbound timestamp.\n\nReturned by ``GET /v1/connections/{id}/recent-chats`` so operators\ncan find the chat_id for a specific peer without digging through\nevent logs before calling ``bind-chat`` or opening an ``AllowList``.\n\n``chat_id`` is the **authoritative, gate-relevant identifier** \u2014 it is\nexactly what the inbound-admission gate (``AllowList.chat_ids``) matches\non, so it is the value an operator copies into an allowlist. This view\ndeliberately does not present a connector-supplied ``display_name`` /\n``sender_name`` alongside it: that name is self-reported by the\nconnector and forgeable, never a verified identity."
       },
       "RunCompletionSource": {
         "properties": {

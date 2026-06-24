@@ -31,6 +31,7 @@ from aios.models.connections import (
     ConnectionSetSecrets,
     RecentChat,
 )
+from aios.models.inbound_policy import InboundPolicyReplace
 from aios.models.pagination import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -99,6 +100,38 @@ async def set_secrets(
     """
     return await service.set_connection_secrets(
         pool, connection_id, secrets=body.secrets, crypto_box=crypto_box, account_id=account_id
+    )
+
+
+@router.put("/{connection_id}/inbound-policy", operation_id="set_connection_inbound_policy")
+async def set_inbound_policy(
+    connection_id: str,
+    body: InboundPolicyReplace,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> Connection:
+    """Set the connection's inbound-admission policy, wholesale (Replace).
+
+    Operator-authed (``AccountIdDep`` — **not** the runtime token; this
+    route lives on the operator connections router, not the runtime-scoped
+    connectors router). The body is the bare ``InboundPolicy`` union shape
+    ``{"kind": ..., "chat_ids"?: [...]}`` with **Replace** semantics:
+
+    * ``{"kind": "allow_list", "chat_ids": []}`` → **422** (empty list is
+      never a silent deny-all; use ``deny_all``), never persisted.
+    * ``{"kind": "allow_list"}`` (no ``chat_ids``) → **422** — ``chat_ids``
+      is required-on-update, so a partial body can neither widen to
+      allow-everyone nor silently re-default.
+    * a body with no ``kind``, or a deferred/unknown ``kind`` (e.g.
+      ``deny_list``) → **422** (discriminated-union + ``extra="forbid"``).
+    * ``{"kind": "deny_all"}`` / ``{"kind": "allow_all"}`` are accepted.
+
+    Revocation is a Replace with the smaller ``AllowList``. Returns the
+    updated ``Connection`` (its ``inbound_policy_effective`` reflects the
+    new posture).
+    """
+    return await service.set_inbound_policy(
+        pool, connection_id, policy=body.root, account_id=account_id
     )
 
 

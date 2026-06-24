@@ -172,3 +172,71 @@ def test_unconfigure_posts_no_body(mocked_cli):
     runner.invoke(app, ["connections", "unconfigure", "conn_01"])
     assert mocked_cli.captured.method == "POST"
     assert mocked_cli.captured.path == "/v1/connections/conn_01/unconfigure"
+
+
+def test_set_inbound_policy_allow_list_repeatable_chat_ids(mocked_cli):
+    mocked_cli.queue_response(httpx.Response(200, json=resource_response("connection")))
+    result = runner.invoke(
+        app,
+        [
+            "connections",
+            "set-inbound-policy",
+            "conn_01",
+            "--kind",
+            "allow_list",
+            "--chat-id",
+            "A",
+            "--chat-id",
+            "B",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert mocked_cli.captured.method == "PUT"
+    assert mocked_cli.captured.path == "/v1/connections/conn_01/inbound-policy"
+    assert mocked_cli.captured.body == {"kind": "allow_list", "chat_ids": ["A", "B"]}
+
+
+def test_set_inbound_policy_allow_all(mocked_cli):
+    mocked_cli.queue_response(httpx.Response(200, json=resource_response("connection")))
+    result = runner.invoke(
+        app,
+        ["connections", "set-inbound-policy", "conn_01", "--kind", "allow_all"],
+    )
+    assert result.exit_code == 0, result.output
+    assert mocked_cli.captured.method == "PUT"
+    assert mocked_cli.captured.body == {"kind": "allow_all"}
+
+
+def test_set_inbound_policy_deny_all(mocked_cli):
+    mocked_cli.queue_response(httpx.Response(200, json=resource_response("connection")))
+    result = runner.invoke(
+        app,
+        ["connections", "set-inbound-policy", "conn_01", "--kind", "deny_all"],
+    )
+    assert result.exit_code == 0, result.output
+    assert mocked_cli.captured.body == {"kind": "deny_all"}
+
+
+def test_set_inbound_policy_allow_list_no_chat_ids_surfaces_server_422(mocked_cli):
+    # The CLI does NOT pre-validate the empty list; it sends {"chat_ids": []}
+    # and lets the server's 422 surface as a clean CLI error.
+    mocked_cli.queue_response(
+        httpx.Response(422, json={"detail": [{"msg": "List should have at least 1 item"}]})
+    )
+    result = runner.invoke(
+        app,
+        ["connections", "set-inbound-policy", "conn_01", "--kind", "allow_list"],
+    )
+    assert result.exit_code != 0
+    assert mocked_cli.captured.method == "PUT"
+    assert mocked_cli.captured.body == {"kind": "allow_list", "chat_ids": []}
+
+
+def test_set_inbound_policy_unknown_kind_is_client_error(mocked_cli):
+    result = runner.invoke(
+        app,
+        ["connections", "set-inbound-policy", "conn_01", "--kind", "deny_list"],
+    )
+    assert result.exit_code != 0
+    # Never hits the wire — a bad --kind is rejected before the request.
+    assert mocked_cli.captured.method == ""
