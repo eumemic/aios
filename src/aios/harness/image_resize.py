@@ -172,6 +172,14 @@ def _encode_with_transparency(img: PILImage.Image, cap_bytes: int) -> ImageDowns
     """Encode a transparency-bearing image, preferring PNG fidelity but
     falling back to palette PNG when the cap is tight."""
     pil = _pillow()
+    # Both encode steps below only accept some modes: PNG cannot write ``PA``/``La``,
+    # and ``convert("P", ADAPTIVE)`` rejects ``LA`` (a grayscale+alpha PNG — the common
+    # transparent-logo case — decodes to ``LA``). Normalize any non-canonical mode to
+    # ``RGBA`` (the full-alpha mode both steps accept) so the encode is total; ``P`` is
+    # already PNG-saveable and the palette target, so it is left as-is. Without this the
+    # raw ValueError/OSError escaped ImageDownsampleError → 500'd the connector inbound.
+    if img.mode not in ("RGBA", "P"):
+        img = img.convert("RGBA")
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     if buf.tell() <= cap_bytes:
