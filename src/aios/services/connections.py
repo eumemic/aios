@@ -294,6 +294,17 @@ async def attach_connection(
                     f"session {session_id} is archived; cannot attach a connection to it",
                     detail={"id": connection_id, "session_id": session_id},
                 )
+            # Refuse workflow-child sessions at attach time — a child
+            # (parent_run_id IS NOT NULL) is the run-attenuated, surface-frozen
+            # execution context of a workflow, not a human-facing session, and
+            # the connector inbound plane must never route messages into it.
+            # A single_session binding would make the child the tier-3 target
+            # for every chat_id on the connection, so foreclose it here.
+            if session.parent_run_id is not None:
+                raise ConflictError(
+                    f"session {session_id} is a workflow child; cannot attach a connection to it",
+                    detail={"id": connection_id, "session_id": session_id},
+                )
             await queries.insert_binding(
                 conn,
                 connection_id=connection_id,
@@ -496,6 +507,17 @@ async def bind_chat_to_session(
         if session.archived_at is not None:
             raise ConflictError(
                 f"session {session_id} is archived; cannot bind a chat to it",
+                detail={"connection_id": connection_id, "session_id": session_id},
+            )
+        # Refuse workflow-child sessions at bind time — a child
+        # (parent_run_id IS NOT NULL) is the run-attenuated, surface-frozen
+        # execution context of a workflow, not a human-facing session. A
+        # chat_sessions ledger row would make the child the resolver's tier-1
+        # target for this chat, so foreclose it here (sibling refusal to the
+        # attach_connection guard for tier-3).
+        if session.parent_run_id is not None:
+            raise ConflictError(
+                f"session {session_id} is a workflow child; cannot bind a chat to it",
                 detail={"connection_id": connection_id, "session_id": session_id},
             )
         await queries.insert_chat_session(
