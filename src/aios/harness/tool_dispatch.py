@@ -14,8 +14,8 @@ The contract: **every task MUST append exactly one tool-role event and
 trigger the sweep before returning.** This is enforced by the
 :func:`_tool_lifecycle` async context manager, which both dispatch
 paths drive — including a cancel that lands on the start-span append
-(the model's ``cancel`` tool, the interrupt listener, and a graceful
-drain all deliver one). Three things can still leave a task without an
+(the pg-notify interrupt listener and a graceful drain both deliver one).
+Three things can still leave a task without an
 *in-task* result: worker death (SIGKILL/OOM), a DB failure writing the
 start span, or a *second* cancel interrupting the first cancel's cleanup
 awaits (the same exposure the in-body cancel handler has). The
@@ -144,8 +144,8 @@ async def _tool_lifecycle(
     # extraction, no I/O) is permitted above.
     #
     # The span append has its OWN try/except below: a ``CancelledError`` landing on this
-    # await (the model's ``cancel`` tool, the interrupt listener, or a graceful worker
-    # drain) strikes inside ``__aenter__`` — before the main try/finally — so without
+    # await (the pg-notify interrupt listener or a graceful worker drain) strikes inside
+    # ``__aenter__`` — before the main try/finally — so without
     # handling it the task would escape with no result and no tail sweep, leaving the call
     # unresolved until the next sweep (≤30s) and then ghost-classified as the pessimistic
     # "may have completed". But the body provably never ran (the cancel struck while writing

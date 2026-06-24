@@ -1,9 +1,8 @@
 """Registry of in-flight asyncio tool tasks per session.
 
-Tracks ``asyncio.Task`` objects spawned by the async tool dispatcher so
-they can be cancelled (by the model via the ``cancel`` tool, or at
-worker shutdown) and so the worker knows which sessions have background
-work in progress.
+Tracks ``asyncio.Task`` objects spawned by the async tool dispatcher so they
+can be cancelled (by the pg-notify interrupt listener, or at worker shutdown)
+and so the worker knows which sessions have background work in progress.
 
 One instance per worker process, stashed on :mod:`aios.harness.runtime`.
 """
@@ -35,37 +34,18 @@ class InflightToolRegistry:
             if not session_tasks:
                 del self._tasks[session_id]
 
-    def cancel_tool_task(self, session_id: str, tool_call_id: str) -> bool:
-        """Cancel one tool task. Returns True if the task was found and cancelled."""
-        session_tasks = self._tasks.get(session_id)
-        if session_tasks is None:
-            return False
-        task = session_tasks.get(tool_call_id)
-        if task is None or task.done():
-            return False
-        task.cancel()
-        log.info("task.cancelled", session_id=session_id, tool_call_id=tool_call_id)
-        return True
-
     def cancel_session(self, session_id: str) -> int:
         """Cancel all in-flight tool tasks for a session. Returns count cancelled.
 
-        Skips the caller's own task. The in-band ``cancel`` tool runs as a
-        registered task in this session's set, so cancelling indiscriminately
-        would cancel itself — inflating the count and letting a
-        ``CancelledError`` raised at its post-handler await overwrite the
-        tool's real result with a generic ``"cancelled"`` error. The
-        interrupt-listener caller (``worker.py``) runs from a non-registered
-        listener task, so the skip is a no-op there.
+        Sole caller: the pg-notify interrupt listener (``worker.py``), which runs from a
+        non-registered listener task — so there is no in-set task to skip (the prior
+        self-skip existed only for the now-deleted in-band ``cancel`` tool, #1458).
         """
         session_tasks = self._tasks.get(session_id)
         if not session_tasks:
             return 0
-        current = asyncio.current_task()
         count = 0
         for _tool_call_id, task in list(session_tasks.items()):
-            if task is current:
-                continue
             if not task.done():
                 task.cancel()
                 count += 1

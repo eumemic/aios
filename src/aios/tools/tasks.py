@@ -15,8 +15,8 @@ migration; that rename has since landed, so the services they call are task-name
 
 ``stop_task`` supersedes the retired ``cancel_run`` model tool: ``cancel_run`` reached only runs,
 whereas ``stop_task`` reaches a session servicer too — and via ``cancel_task``'s session
-cascade, the servicer's whole awaited subtree. It also disambiguates from the existing local
-``cancel`` tool (durable-task stop vs. local in-flight tool-task detach).
+cascade, the servicer's whole awaited subtree. It is the sole model cancel verb (the local
+``cancel`` tool-task-detach was deleted in #1458).
 
 **Identity is load-bearing** (the F1 invariant, mirrored from ``invoke_session`` /
 ``workflow_management``): the trusted *caller* is the harness-supplied executing ``session_id``
@@ -137,12 +137,10 @@ async def list_tasks_handler(session_id: str, arguments: dict[str, Any]) -> dict
 STOP_TASK_DESCRIPTION = (
     "Stop (cancel) one of your in-flight tasks — a call_session / call_agent / call_workflow "
     "you launched and are still awaiting — by its tool_call_id (the id of that pending tool "
-    "call, as listed by list_tasks). This DURABLY stops the child itself: the task and "
-    "everything it is itself awaiting are cancelled, and the original call then resolves as "
-    "cancelled. (Contrast `cancel`, which only stops YOUR waiting and leaves the child "
-    "running.) Use this to abandon a call you no longer need or one that is stuck. Reports "
-    "'already resolved' if the task finished before the stop landed, or an error if no open "
-    "task matches that tool_call_id."
+    "call, as listed by list_tasks). The task and everything it is itself awaiting are "
+    "cancelled, and the original call then resolves as cancelled. Use this to abandon a call "
+    "you no longer need or one that is stuck. Reports 'already resolved' if the task finished "
+    "before the stop landed, or an error if no open task matches that tool_call_id."
 )
 LIST_TASKS_DESCRIPTION = (
     "List your open tasks — the call_session / call_agent / call_workflow calls you have "

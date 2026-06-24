@@ -73,7 +73,6 @@ BuiltinToolName = Literal[
     "web_fetch",
     "web_search",
     "search_events",
-    "cancel",
     "schedule_wake",
     "wake_session",
     "wake_self",

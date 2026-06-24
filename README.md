@@ -409,7 +409,7 @@ Any caller — a model inside a session, an external HTTP/operator client, or a 
 | `call_session` | Call an existing same-account session; park for `{ok\|error}`. (renamed from `invoke`) |
 | `call_agent` | Spawn a fresh session from one of your agents and call it. (renamed from `invoke_agent`) |
 | `call_workflow` | Launch a run as an awaited single-shot servicer. (renamed from `invoke_workflow`/`create_run`+`await_run`) |
-| `cancel` | Stop waiting on in-flight tool tasks (detaches the wait; does not kill a running sandbox command). |
+| `stop_task` | Durably cancel one of your awaited `call_*` tasks (and its subtree) by `tool_call_id`. |
 | `wake_session` | Wake another same-account session (depth cap 10, per-pair rate cap 10/hr). |
 | `wake_self` | Append a user-role message to your own session (model tool AND sandbox `tool wake_self`). |
 | `return` / `error` | Answer an open awaited obligation exactly-once. |
@@ -615,7 +615,7 @@ Every tool is registered once against a module-level `ToolRegistry`; the same pu
 | `search_events` | Read-only SELECT against your own session's `events_search` view. |
 | `http_request` | Authenticated call to a declared `http_server`; secret never in sandbox; route/method/query allowlisted. |
 | `call_session` / `call_agent` / `call_workflow` | The invocation kernel (park for `{ok\|error}`). |
-| `cancel` / `wake_self` / `wake_session` / `switch_channel` / `list_related_sessions` | Self-state & coordination. |
+| `stop_task` / `list_tasks` / `wake_self` / `wake_session` / `switch_channel` / `list_related_sessions` | Self-state & coordination. |
 | `schedule_wake` / `trigger_create` / `trigger_list` / `trigger_update` / `trigger_remove` | Self-scheduling. |
 | `create_workflow` / `update_workflow` / `archive_workflow` / `cancel_run` / `resume_gate` / `get_run` / `list_runs` / … | Strange-loop workflow authoring (surface must be ⊆ the agent's own). |
 | `skill_upsert` / `skill_archive` | Author/version-bump the agent's own skills (account/session ids loaded server-side, `extra=forbid`). |

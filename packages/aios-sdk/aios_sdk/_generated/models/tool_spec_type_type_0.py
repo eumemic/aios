@@ -8,7 +8,6 @@ class ToolSpecTypeType0(str, Enum):
     CALL_AGENT = "call_agent"
     CALL_SESSION = "call_session"
     CALL_WORKFLOW = "call_workflow"
-    CANCEL = "cancel"
     CREATE_WORKFLOW = "create_workflow"
     EDIT = "edit"
     GET_RUN = "get_run"
