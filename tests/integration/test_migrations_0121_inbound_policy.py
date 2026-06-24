@@ -59,8 +59,8 @@ VALUES
 
 # Ledger row for conn_signal: a direct-message chat_id.
 _CHAT_SESSIONS_SQL = """
-INSERT INTO chat_sessions (connection_id, chat_id, session_id)
-VALUES ('conn_signal', 'dm_alice', 'ses_mig');
+INSERT INTO chat_sessions (connection_id, chat_id, session_id, account_id)
+VALUES ('conn_signal', 'dm_alice', 'ses_mig', 'acc_mig');
 """
 
 
