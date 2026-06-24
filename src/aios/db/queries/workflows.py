@@ -550,9 +550,7 @@ async def list_wf_runs(
     )
 
 
-async def archive_run(
-    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
-) -> WfRun:
+async def archive_run(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> WfRun:
     """Soft-archive a TERMINAL run: ``SET archived_at = now()`` scoped by
     id + account_id, dropping it from the default (``archived_at IS NULL``)
     ``list_wf_runs`` while keeping it fetchable by id and keeping its journal.
@@ -589,9 +587,7 @@ async def archive_run(
     # run account-scoped (raises NotFoundError on a missing/cross-tenant id).
     run = await get_wf_run(conn, run_id, account_id=account_id)
     if run.archived_at is not None:
-        raise ConflictError(
-            f"workflow run {run_id} is already archived", detail={"id": run_id}
-        )
+        raise ConflictError(f"workflow run {run_id} is already archived", detail={"id": run_id})
     raise ConflictError(
         f"workflow run {run_id} is not terminal (status {run.status!r}); "
         "only completed/errored/cancelled runs can be archived",
