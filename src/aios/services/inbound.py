@@ -29,6 +29,7 @@ from aios.services.attachment_staging import (
     InboundAttachment,
     stage_inbound_attachments,
 )
+from aios.services.inbound_budget import check_inbound_budget
 from aios.services.wake import defer_wake
 
 # Metadata keys the trusted server-side path writes from request / state.
@@ -54,21 +55,24 @@ class InboundDrop(StrEnum):
 
     Each maps to an HTTP response in the router: PAYLOAD_TOO_LARGE → 413;
     DETACHED, ARCHIVED_TEMPLATE and DENIED_BY_POLICY → 422 (operator config
-    / admission issue); ATTACHMENT_STAGING_FAILED and SESSION_MISSING → 500.
+    / admission issue); RATE_LIMITED → 429 (per-counterparty budget exceeded);
+    ATTACHMENT_STAGING_FAILED and SESSION_MISSING → 500.
     Replays of an already-processed ``event_id`` are NOT a drop — they return
     200 with ``deduped=True``.
 
-    DENIED_BY_POLICY MUST map to 422 (a routine per-envelope drop), never 403
-    or 5xx: ``_is_fatal_inbound_status`` in the connector-http runner treats
-    401/403/5xx as fatal (crash-restarts the connector container, killing
-    every connection it serves), so a denied stranger must not be able to take
-    the container down.
+    DENIED_BY_POLICY and RATE_LIMITED MUST map to a non-fatal status (422 or
+    429), never 401/403/5xx: ``_is_fatal_inbound_status`` in the connector-http
+    runner treats 401/403/5xx as fatal (crash-restarts the connector container,
+    killing every connection it serves), so a denied stranger — or one
+    over-budget counterparty — must not be able to take the container down.
+    ``_is_fatal_inbound_status(429) is False`` (see #1504).
     """
 
     PAYLOAD_TOO_LARGE = "payload_too_large"
     DETACHED = "detached"
     ARCHIVED_TEMPLATE = "archived_template"
     DENIED_BY_POLICY = "denied_by_policy"
+    RATE_LIMITED = "rate_limited"
     ATTACHMENT_STAGING_FAILED = "attachment_staging_failed"
     SESSION_MISSING = "session_missing"
 
@@ -150,6 +154,28 @@ async def handle_inbound(
     )
     if not _admits(policy, chat_id):
         return InboundResult(None, None, InboundDrop.DENIED_BY_POLICY, False)
+
+    # Per-counterparty inbound rate/cost budget (#1504). Admission decides
+    # *whether* this sender may talk; the budget bounds *how much*. Enforce it
+    # here — after the admission gate, before ``resolve_target_session`` and
+    # before any append+wake — where ``chat_id`` and the loaded ``connection``
+    # (hence ``connector`` + ``external_account_id``) are both in scope. An
+    # over-budget counterparty drops with RATE_LIMITED *before any side effect*:
+    # zero session spawn, zero event row, zero ``defer_wake``. The cheap-drop
+    # path is one already-cheap aggregate read over the rolling window. The
+    # budget is disabled by default (threshold 0 ⇒ short-circuit admit, no
+    # query — byte-identical to pre-feature behavior). The drop maps to a
+    # non-fatal 429 in the router so a throttle never crash-restarts the
+    # connector (which 401/403/5xx would, via ``_is_fatal_inbound_status``).
+    within_budget = await check_inbound_budget(
+        pool,
+        account_id=account_id,
+        connector=connection.connector,
+        external_account_id=connection.external_account_id,
+        chat_id=chat_id,
+    )
+    if not within_budget:
+        return InboundResult(None, None, InboundDrop.RATE_LIMITED, False)
 
     # Session resolution: three-tier resolver in the connector subsystem
     # (chat_sessions → routing_rules → bindings.mode). Imported inside the
