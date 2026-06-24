@@ -131,6 +131,7 @@ async def test_create_goal_cap_enforced(monkeypatch: Any) -> None:
 
     assert isinstance(out, ToolResult)
     assert out.is_error
+    assert isinstance(out.content, str)
     assert "cap" in out.content.lower()
     # No edge opened on a cap rejection.
     inv.assert_not_awaited()
@@ -149,6 +150,7 @@ async def test_create_goal_cap_ignores_foreign_obligations(monkeypatch: Any) -> 
 
     out = await invoke_builtin(_SELF, "create_goal", {"goal": "still allowed"})
 
+    assert isinstance(out, dict)
     assert out["goal_id"] == "req_g"
     inv.assert_awaited_once()
 
@@ -166,6 +168,7 @@ async def test_list_goals_filters_to_self_goals(monkeypatch: Any) -> None:
         ],
     )
     out = await invoke_builtin(_SELF, "list_goals", {})
+    assert isinstance(out, dict)
     ids = [g["goal_id"] for g in out["goals"]]
     assert ids == ["g1", "g2"]
     assert out["goals"][0]["goal"] == "goal one"
@@ -189,6 +192,7 @@ async def test_complete_goal_closes_via_respond(monkeypatch: Any) -> None:
     out = await invoke_builtin(_SELF, "complete_goal", {"goal_id": "g1", "evidence": "all green"})
 
     assert out == {"goal_id": "g1", "status": "completed"}
+    assert respond.await_args is not None
     kwargs = respond.await_args.kwargs
     assert kwargs["request_id"] == "g1"
     assert kwargs["is_error"] is False
@@ -203,6 +207,7 @@ async def test_fail_goal_closes_with_error(monkeypatch: Any) -> None:
     out = await invoke_builtin(_SELF, "fail_goal", {"goal_id": "g1", "reason": "infeasible"})
 
     assert out == {"goal_id": "g1", "status": "failed"}
+    assert respond.await_args is not None
     kwargs = respond.await_args.kwargs
     assert kwargs["is_error"] is True
     assert kwargs["error"] == {"message": "infeasible"}
