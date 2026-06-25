@@ -212,9 +212,7 @@ class TestErrorPropagation:
         # model-visible result.
         monkeypatch.setattr(
             "aios.services.agents.create_agent",
-            AsyncMock(
-                side_effect=ForbiddenError("nope", detail={"exceeds": {"tools": ["bash"]}})
-            ),
+            AsyncMock(side_effect=ForbiddenError("nope", detail={"exceeds": {"tools": ["bash"]}})),
         )
         with pytest.raises(ForbiddenError, match="nope"):
             await am.create_agent_handler("ses_1", {"name": "a", "model": "test/dummy"})
@@ -249,9 +247,7 @@ class TestReturnShape:
         assert out["system"] == "SECRET-SYSTEM"
 
     async def test_list_agents_trims_heavy_fields(self, monkeypatch: Any) -> None:
-        monkeypatch.setattr(
-            "aios.services.agents.list_agents", AsyncMock(return_value=[_agent()])
-        )
+        monkeypatch.setattr("aios.services.agents.list_agents", AsyncMock(return_value=[_agent()]))
         out = await am.list_agents_handler("ses_1", {})
         assert len(out["agents"]) == 1
         summary = out["agents"][0]

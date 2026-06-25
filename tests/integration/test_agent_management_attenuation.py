@@ -123,7 +123,9 @@ async def test_create_rejects_surface_exceeding_creator(pool: asyncpg.Pool[Any])
 
 
 async def test_create_accepts_surface_subset_of_creator(pool: asyncpg.Pool[Any]) -> None:
-    creator = await _make_agent(pool, "creator2", tools=[ToolSpec(type="read"), ToolSpec(type="write")])
+    creator = await _make_agent(
+        pool, "creator2", tools=[ToolSpec(type="read"), ToolSpec(type="write")]
+    )
     session_id = await _make_session(pool, creator)
     child = await agents_service.create_agent(
         pool,
@@ -168,7 +170,9 @@ async def test_create_equal_surface_persists(pool: asyncpg.Pool[Any]) -> None:
 
 async def test_operator_path_skips_clamp(pool: asyncpg.Pool[Any]) -> None:
     # No creator_session_id (the HTTP/operator path): any surface may be declared.
-    agent = await _make_agent(pool, "operator-made", tools=[ToolSpec(type="read"), ToolSpec(type="write")])
+    agent = await _make_agent(
+        pool, "operator-made", tools=[ToolSpec(type="read"), ToolSpec(type="write")]
+    )
     assert {t.type for t in agent.tools} == {"read", "write"}
 
 
@@ -211,7 +215,9 @@ async def test_update_rejects_widening_past_editor(pool: asyncpg.Pool[Any]) -> N
 
 
 async def test_update_within_editor_surface_persists(pool: asyncpg.Pool[Any]) -> None:
-    editor = await _make_agent(pool, "editor2", tools=[ToolSpec(type="read"), ToolSpec(type="write")])
+    editor = await _make_agent(
+        pool, "editor2", tools=[ToolSpec(type="read"), ToolSpec(type="write")]
+    )
     session_id = await _make_session(pool, editor)
     target = await agents_service.create_agent(
         pool,
@@ -247,7 +253,9 @@ async def test_spawn_edge_reclamp_is_independent_and_unchanged(pool: asyncpg.Poo
     # An agent authored with surface ⊆ creator can still hold a tool a *narrower* run
     # lacks; the spawn-edge clamp (agent ∩ run, #794) — the same pure operator the
     # spawn path calls — strips it at spawn, independent of the create-time clamp.
-    creator = await _make_agent(pool, "spawn-creator", tools=[ToolSpec(type="read"), ToolSpec(type="write")])
+    creator = await _make_agent(
+        pool, "spawn-creator", tools=[ToolSpec(type="read"), ToolSpec(type="write")]
+    )
     session_id = await _make_session(pool, creator)
     child = await agents_service.create_agent(
         pool,
