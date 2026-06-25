@@ -14,17 +14,24 @@ cryptic ``call_session(session_id=<its own id>, input=…)`` awaited self-call
 These four tools are the **explicit, first-class surface** over that EXISTING
 mechanism (they do NOT reinvent the gate):
 
-* ``create_goal(goal, acceptance_criteria?)`` — open a self-goal: write the same
+* ``create_goal(goal, output_schema)`` — open a self-goal: write the same
   self-referential awaited edge a ``call_session(self)`` opens (reusing the #1414
   self-goal path via ``sessions_service.invoke``), so the quiescence guard holds
-  the session to it automatically. Returns a ``goal_id`` (the ``request_id`` of
-  the opened edge). Enforces the per-session open-goal admission cap
-  (``Settings.session_open_goals_max``) with a clear error on exceed.
+  the session to it automatically. ``output_schema`` is **REQUIRED** (#1512): a JSON
+  Schema expressing the checkable acceptance criteria as the shape the completion
+  ``result`` must satisfy, persisted on the ``request_opened`` frame the same way
+  ``call_*`` carry ``output_schema``. There is no schemaless goal. Returns a
+  ``goal_id`` (the ``request_id`` of the opened edge). Enforces the per-session
+  open-goal admission cap (``Settings.session_open_goals_max``) with a clear error
+  on exceed.
 * ``list_goals()`` — enumerate the session's OPEN self-goals (the open-obligation
   set filtered to self-caller edges), each with ``goal_id``, ``goal`` text, and
   ``age``.
-* ``complete_goal(goal_id, evidence?)`` — close a goal as DONE (the ``return``
-  arm via ``respond_to_request``); ``evidence`` is recorded on the response value.
+* ``complete_goal(goal_id, result)`` — close a goal as DONE (the ``return``
+  arm via ``respond_to_request``). ``result`` is **always validated against the
+  goal's ``output_schema``** (reusing ``invoke_session._validate_output`` /
+  the ``output_schema_violation`` path, #1512); a non-conforming result is rejected
+  exactly like ``call_*`` and the goal stays open.
 * ``fail_goal(goal_id, reason)`` — close a goal as abandoned (the ``error`` arm),
   with a reason.
 
@@ -57,6 +64,7 @@ from aios.harness.obligations import _format_age
 from aios.models.sessions import Obligation
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail
+from aios.tools.invoke_session import _validate_output
 from aios.tools.registry import ToolResult, registry
 from aios.tools.workflow_completion import respond_to_request
 
@@ -76,10 +84,13 @@ class _CreateGoalArgs(BaseModel):
         "this goal. You will be held to it (you cannot go idle until you "
         "complete_goal or fail_goal it).",
     )
-    acceptance_criteria: str | None = Field(
-        default=None,
-        description="Optional explicit acceptance criteria — the concrete, checkable "
-        "conditions that must hold for the goal to count as met.",
+    output_schema: dict[str, Any] = Field(
+        description="REQUIRED JSON Schema expressing the concrete, checkable "
+        "acceptance criteria as the shape the completion `result` must satisfy. "
+        "complete_goal validates its `result` against this schema (a non-conforming "
+        "result is rejected), so 'done' is a contract fixed up front, not prose. "
+        "There is no schemaless goal — every goal declares a checkable completion "
+        "contract.",
     )
 
 
@@ -93,10 +104,11 @@ class _CompleteGoalArgs(BaseModel):
     goal_id: str = Field(
         description="The id of the open goal to close as done (from create_goal or list_goals)."
     )
-    evidence: str | None = Field(
-        default=None,
-        description="Optional evidence that the goal's acceptance criteria are met "
-        "(recorded on the closing response).",
+    result: Any = Field(
+        description="The completion result — validated against the goal's output_schema "
+        "(the contract pinned by create_goal). A result that does not conform is "
+        "rejected with output_schema_violation and the goal stays open, exactly like "
+        "the call_* output_schema path.",
     )
 
 
@@ -174,11 +186,11 @@ async def create_goal_handler(
             is_error=True,
         )
 
-    # The goal text + optional acceptance criteria become the request input (the
-    # definition-of-done the obligation carries; the tail block renders a preview).
+    # The goal text becomes the request input (the definition-of-done preview the
+    # tail block renders); the REQUIRED output_schema becomes the completion contract,
+    # persisted on the same request_opened frame the way call_* carry output_schema
+    # (#1512) — complete_goal validates its result against it via _validate_output.
     goal_input: dict[str, Any] = {"goal": args.goal}
-    if args.acceptance_criteria is not None:
-        goal_input["acceptance_criteria"] = args.acceptance_criteria
 
     handle = await sessions_service.invoke(
         pool,
@@ -186,6 +198,7 @@ async def create_goal_handler(
         target_kind="session",
         target=session_id,  # the target IS this session — a self-goal (#1414).
         input=goal_input,
+        output_schema=args.output_schema,
         caller={"kind": "session", "id": session_id},
     )
     return {
@@ -223,6 +236,7 @@ async def _close_goal(
     is_error: bool,
     result: Any,
     error: dict[str, Any] | None,
+    validate_result: bool = False,
 ) -> dict[str, Any] | ToolResult:
     """Close a self-goal by writing the ``request_response`` half via the shared
     :func:`respond_to_request` core (the same exactly-once writer ``return``/
@@ -230,6 +244,12 @@ async def _close_goal(
     self-goals — so the goal surface can't be used to answer a caller-assigned
     (``api``/``run``/peer-``session``) obligation, which must go through
     ``return``/``error``.
+
+    When ``validate_result`` is set (the ``complete_goal`` path), the ``result`` is
+    validated against the goal's persisted ``output_schema`` AFTER the membership
+    check — reusing :func:`_validate_output` / the ``output_schema_violation`` path
+    (#1512). A non-conforming result is rejected before any response is written, so
+    the goal stays open.
     """
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
@@ -242,6 +262,18 @@ async def _close_goal(
             ),
             is_error=True,
         )
+    if validate_result:
+        # The goal's output_schema is the completion contract create_goal pinned up
+        # front (#1512) — read off the trusted request_opened edge and enforced with
+        # the SAME _validate_output the call_* output_schema path uses. create_goal
+        # makes a schema mandatory, so a confirmed-open goal always has one.
+        async with pool.acquire() as conn:
+            schema = await queries.get_request_output_schema(
+                conn, session_id, request_id=goal_id
+            )
+        violation = _validate_output(result, schema)
+        if violation is not None:
+            return violation
     status = await respond_to_request(
         pool,
         session_id,
@@ -264,14 +296,24 @@ async def _close_goal(
 async def complete_goal_handler(
     session_id: str, arguments: dict[str, Any]
 ) -> dict[str, Any] | ToolResult:
-    """Close a goal as DONE (the ``return`` arm). ``evidence`` is recorded on the
-    closing response value."""
+    """Close a goal as DONE (the ``return`` arm).
+
+    The ``result`` is **always validated against the goal's ``output_schema``** —
+    the completion contract ``create_goal`` pinned up front (#1512). The schema is
+    read off the trusted ``request_opened`` edge (``get_request_output_schema``) and
+    enforced via :func:`_validate_output`, reusing the exact ``output_schema_violation``
+    path the ``call_*`` tools use: a non-conforming ``result`` is rejected and no
+    response is written (the goal stays open), so a goal can only be closed by a
+    conforming proof.
+    """
     args = _parse(_CompleteGoalArgs, arguments)
-    result: dict[str, Any] = {"completed": True}
-    if args.evidence is not None:
-        result["evidence"] = args.evidence
     return await _close_goal(
-        session_id, goal_id=args.goal_id, is_error=False, result=result, error=None
+        session_id,
+        goal_id=args.goal_id,
+        is_error=False,
+        result=args.result,
+        error=None,
+        validate_result=True,
     )
 
 
@@ -295,9 +337,11 @@ CREATE_GOAL_DESCRIPTION = (
     "Self-assign a goal: pin a definition-of-done up front that you are then held "
     "to. Opens a self-goal that the quiescence guard refuses to let you go idle "
     "past — you stay re-prompted until you complete_goal or fail_goal it. `goal` is "
-    "what 'done' means; optionally add explicit `acceptance_criteria`. Returns a "
-    "`goal_id`. This is the highest-leverage way to actually close a task: declare "
-    "done up front, then you can't quiesce until it's met."
+    "what 'done' means in words; `output_schema` (REQUIRED, a JSON Schema) is the "
+    "checkable completion contract — the shape complete_goal's `result` must satisfy. "
+    "Returns a `goal_id`. This is the highest-leverage way to actually close a task: "
+    "declare a checkable 'done' up front, then you can't quiesce until a conforming "
+    "result proves it."
 )
 LIST_GOALS_DESCRIPTION = (
     "List your open self-goals (the goals you've pinned with create_goal that you "
@@ -305,8 +349,10 @@ LIST_GOALS_DESCRIPTION = (
 )
 COMPLETE_GOAL_DESCRIPTION = (
     "Close one of your open goals as DONE — its definition-of-done is met. `goal_id` "
-    "is the id from create_goal or list_goals; optionally record `evidence` that the "
-    "acceptance criteria are satisfied. Closing the last open goal lets you quiesce."
+    "is the id from create_goal or list_goals; `result` is the completion value, which "
+    "is validated against the goal's output_schema (the contract you pinned up front). "
+    "A non-conforming result is rejected (output_schema_violation) and the goal stays "
+    "open. Closing the last open goal lets you quiesce."
 )
 FAIL_GOAL_DESCRIPTION = (
     "Abandon one of your open goals — you will not meet its definition-of-done. "
