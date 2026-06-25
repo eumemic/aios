@@ -460,6 +460,17 @@ def shape_call_result(result: Any) -> dict[str, Any]:
         else:
             parts.append(f"[{item.type} content]")
     content = "\n".join(parts) if parts else ""
+    # MCP 2025-06-18 makes the backward-compat serialized-JSON text block a
+    # SHOULD, not a MUST: a spec-compliant server that declares an
+    # ``outputSchema`` may return its payload **only** in ``structuredContent``
+    # with an empty ``content`` list. Without this fallback such a result
+    # collapses to an empty success and the entire payload is silently dropped
+    # (the model can't detect the loss or retry). Serialize the structured
+    # payload when ``content`` produced nothing usable. (#1493)
+    if not content:
+        structured = getattr(result, "structuredContent", None)
+        if structured is not None:
+            content = json.dumps(structured)
     if result.isError:
         return {"error": content, "code": "tool_error"}
     return {"content": content}

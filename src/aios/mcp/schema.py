@@ -32,12 +32,22 @@ def sanitize_mcp_schema(node: Any) -> Any:
 
 
 def make_function_tool(qualified_name: str, tool: Tool) -> dict[str, Any]:
-    """Build the envelope, applying :func:`sanitize_mcp_schema` to ``tool.inputSchema``."""
+    """Build the envelope, applying :func:`sanitize_mcp_schema` to ``tool.inputSchema``.
+
+    When the tool declares an ``outputSchema`` (MCP 2025-06-18 structured
+    output), propagate it so the model is told the tool produces structured
+    output. Without this the model only ever sees ``inputSchema`` and is blind
+    to the structured payload it will receive (#1493).
+    """
+    function: dict[str, Any] = {
+        "name": qualified_name,
+        "description": tool.description or "",
+        "parameters": sanitize_mcp_schema(tool.inputSchema),
+    }
+    output_schema = getattr(tool, "outputSchema", None)
+    if output_schema is not None:
+        function["outputSchema"] = sanitize_mcp_schema(output_schema)
     return {
         "type": "function",
-        "function": {
-            "name": qualified_name,
-            "description": tool.description or "",
-            "parameters": sanitize_mcp_schema(tool.inputSchema),
-        },
+        "function": function,
     }
