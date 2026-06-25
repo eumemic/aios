@@ -12,6 +12,7 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
+from aios.errors import ForbiddenError
 from aios.models.agents import (
     Agent,
     AgentVersion,
@@ -21,9 +22,69 @@ from aios.models.agents import (
     ToolSpec,
     resolve_mcp_permission,
 )
+from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
 from aios.workflows.generic_child import GENERIC_CHILD_SYSTEM
+
+
+async def _enforce_surface_attenuation(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    actor_session_id: str,
+    tools: list[ToolSpec],
+    mcp_servers: list[McpServerSpec],
+    http_servers: list[HttpServerSpec],
+) -> None:
+    """Raise ``ForbiddenError`` unless the declared agent surface is admissible against
+    the acting (creator/editor) session's agent surface.
+
+    The create-time clamp the issue (T1) calls for: ``create_agent`` authored from
+    inside a session may only declare a surface ⊆ the creating agent's own — an agent
+    cannot grant a child agent a tool, MCP server, or HTTP server it does not itself
+    hold. ``update_agent`` runs the same check on the merged final surface against the
+    editing agent. This is the model-tool plane's analog of the ``create_workflow``
+    surface clamp (``services.workflows._enforce_surface_attenuation``); the HTTP/operator
+    path passes no actor and skips this entirely (declares verbatim, account-scoped).
+
+    The predicate is the lattice fixpoint: ``clamp(declared, actor) == normalize(declared)``
+    iff the meet narrowed nothing, i.e. ``declared ≤ actor`` on tool membership +
+    per-tool permission/transport, MCP server identity, and HTTP server identity
+    (name + base_url). A breach raises ``ForbiddenError`` with ``detail=surface_diff``.
+
+    Unlike the workflow author edge, agent ``http_servers`` are full ``HttpServerSpec``
+    objects (no names-only sugar), and an agent stores its declared surface verbatim, so
+    this is a pure predicate — it raises on a breach and returns ``None``; the caller
+    stores the originally-declared surface unchanged.
+    """
+    # Imported lazily to break the import cycle: ``services.sessions`` imports this
+    # module at top level, and ``services.attenuation`` pulls in ``tools.registry``
+    # (hence the whole tools package). ``services.agents`` loads very early in the
+    # sandbox/session chains, so a top-level import of either here would partially
+    # initialize the tools package mid-cycle. Deferring keeps this module's import
+    # graph at the bottom (it only needs them at call time).
+    from aios.services import attenuation as attenuation_service
+    from aios.services import sessions as sessions_service
+
+    session = await sessions_service.get_session_basic(
+        pool, actor_session_id, account_id=account_id
+    )
+    agent = await load_for_session(pool, session, account_id=account_id)
+    declared = Surface(tools, mcp_servers, http_servers)
+    expected = attenuation_service.normalize(declared)
+    effective = attenuation_service.clamp(declared, surface_of(agent))
+    surviving_http = {(s.name, s.base_url) for s in effective.http_servers}
+    exceeds = (
+        effective.tools != expected.tools
+        or effective.mcp_servers != expected.mcp_servers
+        or any((s.name, s.base_url) not in surviving_http for s in expected.http_servers)
+    )
+    if exceeds:
+        raise ForbiddenError(
+            "agent surface exceeds the acting agent's permissions",
+            detail={"exceeds": surface_diff(expected, effective)},
+        )
 
 
 async def create_agent(
@@ -42,7 +103,29 @@ async def create_agent(
     litellm_extra: dict[str, Any] | None = None,
     window_min: int,
     window_max: int,
+    creator_session_id: str | None = None,
 ) -> Agent:
+    """Create a new agent at version 1.
+
+    **Create-time attenuation (T1):** when ``creator_session_id`` is set (an agent
+    authoring another agent from inside a session, via the ``create_agent`` model
+    tool), the declared surface (``tools``/``mcp_servers``/``http_servers``) must be a
+    subset of the creating agent's own — an agent cannot grant a child agent a tool,
+    MCP server, or HTTP server it does not itself hold; a breach raises
+    :class:`ForbiddenError`. With no creator (the HTTP/operator path) any surface may be
+    declared verbatim, account-scoped. This is the authoring bound; the #794/#823
+    spawn-edge reclamp (``workflows/step.py``) independently re-clamps the agent's
+    surface ⊆ the run at spawn time and is unchanged by this path.
+    """
+    if creator_session_id is not None:
+        await _enforce_surface_attenuation(
+            pool,
+            account_id=account_id,
+            actor_session_id=creator_session_id,
+            tools=tools,
+            mcp_servers=mcp_servers or [],
+            http_servers=http_servers or [],
+        )
     skill_refs = skills or []
     resolved = await skills_service.resolve_skill_refs(pool, skill_refs, account_id=account_id)
     snapshot_json = skills_service.serialize_skills_for_snapshot(skill_refs, resolved)
@@ -107,7 +190,29 @@ async def update_agent(
     litellm_extra: dict[str, Any] | None = None,
     window_min: int | None = None,
     window_max: int | None = None,
+    editor_session_id: str | None = None,
 ) -> Agent:
+    """Update an agent in place, creating a new immutable version (optimistic
+    concurrency on ``expected_version``).
+
+    **Update-time attenuation (T1):** when ``editor_session_id`` is set (an agent
+    editing another agent via the ``update_agent`` model tool), the **merged final
+    surface** must be a subset of the editing agent's own — an agent may only update an
+    agent to a surface it could have declared itself; a breach raises
+    :class:`ForbiddenError`. Omitted surface fields are merged from the current stored
+    version before the check. With no editor (the HTTP/operator path) anything may be
+    updated.
+    """
+    if editor_session_id is not None:
+        current = await get_agent(pool, agent_id, account_id=account_id)
+        await _enforce_surface_attenuation(
+            pool,
+            account_id=account_id,
+            actor_session_id=editor_session_id,
+            tools=tools if tools is not None else current.tools,
+            mcp_servers=mcp_servers if mcp_servers is not None else current.mcp_servers,
+            http_servers=http_servers if http_servers is not None else current.http_servers,
+        )
     skills_json_str: str | None = None
     if skills is not None:
         resolved = await skills_service.resolve_skill_refs(pool, skills, account_id=account_id)
