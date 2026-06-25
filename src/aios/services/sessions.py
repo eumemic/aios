@@ -1103,6 +1103,7 @@ async def compute_owed_requests(
                         caller_id=o.caller_id,
                         opened_at=o.opened_at,
                         summary=o.summary,
+                        output_schema=o.output_schema,
                     )
                     for o in obligations
                 ]
@@ -1328,6 +1329,15 @@ async def append_event(
 REQUEST_NUDGE_BUDGET = 3
 
 
+_QUIESCENCE_OWED_HEADER = (
+    "You're trying to stop, but you still owe a response to these request(s). "
+    "Answer each one with return(request_id, value) if you have a result, or "
+    "error(request_id, message) if you can't complete it — you must answer "
+    "before you can finish. Where an expected output_schema is shown, your "
+    "return value must conform to it."
+)
+
+
 def _nudge_content(request_ids: list[str]) -> str:
     ids = ", ".join(request_ids)
     return (
@@ -1335,6 +1345,40 @@ def _nudge_content(request_ids: list[str]) -> str:
         "return(request_id, value) if you have a result, or error(request_id, message) "
         "if you can't complete it — you must answer before you can finish."
     )
+
+
+async def _quiescence_owed_surfacing(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    nudged_ids: list[str],
+) -> str:
+    """The quiescence-attempt surfacing content (#1522, folding #1514).
+
+    When a session attempts to quiesce while owing obligations, surface the owed
+    set **with their acceptance contracts** — "here is what you owe and in what
+    format" — drawn from the SHARED owed-read-model renderer
+    (:func:`harness.obligations.render_owed_listing`), NOT a separate render. The
+    cheap guard decision still rode on ``get_open_request_ids`` (bare ids); only
+    this rendered *content* pays for the widened, schema-bearing
+    ``get_open_obligations`` projection — and only on the (rare) nudge path, never
+    on the hot guard yes/no.
+
+    Filters the widened obligations to exactly the ``nudged_ids`` (the under-budget
+    open requests being re-prompted this turn), preserving the oldest-first order.
+    Falls back to the plain id-only :func:`_nudge_content` if the widened fetch
+    somehow returns nothing for the nudged set (it should not — the ids came from
+    the same open-edge set), so the session is never left without a nudge.
+    """
+    from aios.harness.obligations import render_owed_listing
+
+    obligations = await queries.get_open_obligations(conn, session_id, account_id=account_id)
+    nudged_set = set(nudged_ids)
+    owed = [o for o in obligations if o.request_id in nudged_set]
+    if not owed:
+        return _nudge_content(nudged_ids)
+    return render_owed_listing(owed, session_id=session_id, header=_QUIESCENCE_OWED_HEADER)
 
 
 async def write_gate_opened(
@@ -1756,7 +1800,9 @@ async def append_assistant_and_guard_quiescence(
                 kind="message",
                 data={
                     "role": "user",
-                    "content": _nudge_content(to_nudge),
+                    "content": await _quiescence_owed_surfacing(
+                        conn, session_id, account_id=account_id, nudged_ids=to_nudge
+                    ),
                     "metadata": {"nudged_request_ids": to_nudge},
                 },
                 account_id=account_id,

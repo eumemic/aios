@@ -1792,6 +1792,38 @@ async def test_idle_with_open_request_is_nudged(
     assert status == "active"  # the nudge user message keeps it alive, no idle window
 
 
+async def test_nudge_surfaces_owed_obligation_with_contract(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1522 / folds #1514: the quiescence-attempt surfacing (the nudge written when
+    a session tries to stop while owing) draws from the SHARED owed-read-model
+    renderer and shows the owed obligation WITH its output_schema contract — "here
+    is what you owe and in what format". The cheap guard yes/no still rides on
+    ``get_open_request_ids``; only this rendered content carries the schema."""
+    pool = wf_runtime
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:contract#0", output_schema=schema)
+
+    assistant = await _idle_assistant_turn(pool, cid)
+    result = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, cid, assistant, account_id="acc_wf"
+    )
+    assert result.nudged
+
+    # Read back the nudge user message and assert it surfaces the contract.
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT data FROM events WHERE session_id = $1 AND kind = 'message' "
+            "AND data->'metadata' ? 'nudged_request_ids' ORDER BY seq DESC LIMIT 1",
+            cid,
+        )
+    assert row is not None
+    content = db_queries.parse_jsonb(row["data"])["content"]
+    assert "sha:contract#0" in content  # the owed request_id
+    assert "output_schema" in content  # the #1514 contract-bearing surfacing
+    assert '"ok"' in content  # the actual schema body, rendered (bounded)
+
+
 async def test_tell_spawned_child_reaches_idle_with_zero_nudges(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:

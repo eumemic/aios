@@ -53,6 +53,7 @@ BuiltinToolType = Literal[
     "call_workflow",
     "create_goal",
     "list_goals",
+    "list_obligations",
     "stop_task",
     "list_tasks",
     "skill_upsert",

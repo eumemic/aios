@@ -539,16 +539,32 @@ async def get_open_obligations(
     additive — absent on pre-#1413 frames -> ``None`` -> an id-only render line, no
     migration).
 
+    #1522 widens the projection to also carry ``output_schema``
+    (``req.data->'output_schema'``) — the JSON Schema the request demands of its
+    response ``value`` (the **acceptance contract**), the SAME datum
+    :func:`get_request_output_schema` reads off the trusted ``request_opened``
+    frame. It is already persisted on the frame, so this is a SELECT widening, not
+    new persistence: additive, ``None`` when the request demands no schema or on a
+    pre-#1522 frame — no migration. This makes one shared owed-read-model carry
+    "outstanding obligations + each one's contract" so every consumer (the
+    obligations tail, the quiescence-attempt surfacing, the ``list_obligations``
+    tool) can render "what you owe **and the format**" from one source.
+
     This is the data source for the always-on obligations reminder that survives
     context-windowing erasure of the original request user message (the defect
     #1413 fixes): a full-log query, not a slate-derived render-time marker.
+
+    NOTE: the cheap quiescence GUARD decision ("do I owe anything at all?") stays
+    on :func:`get_open_request_ids` (bare ids) — it must NOT pay for the schema
+    projection. Only the **content render** uses this widened model.
     """
     rows: list[asyncpg.Record] = await conn.fetch(
         "SELECT req.data->>'request_id' AS rid, "
         "req.data->'caller'->>'kind' AS caller_kind, "
         "req.data->'caller'->>'id' AS caller_id, "
         "req.created_at AS opened_at, "
-        "req.data->>'summary' AS summary "
+        "req.data->>'summary' AS summary, "
+        "req.data->'output_schema' AS output_schema "
         "FROM events req "
         "WHERE req.session_id = $1 AND req.account_id = $2 "
         "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
@@ -571,6 +587,12 @@ async def get_open_obligations(
             caller_id=r["caller_id"],
             opened_at=r["opened_at"],
             summary=r["summary"],
+            # ``output_schema`` is a JSONB column (``data->'output_schema'``) —
+            # parse_jsonb decodes it the same way get_request_output_schema does;
+            # absent on a no-schema/pre-#1522 frame -> None (additive, no migration).
+            output_schema=parse_jsonb(r["output_schema"])
+            if r["output_schema"] is not None
+            else None,
         )
         for r in rows
     ]
