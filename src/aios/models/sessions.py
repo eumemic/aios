@@ -203,27 +203,6 @@ class Obligation(BaseModel):
     output_schema: dict[str, Any] | None = None
 
 
-class OwedRequest(BaseModel):
-    """Read-model projection of an open obligation on the :class:`Session` view (#1413).
-
-    Parallel to ``Session.awaiting`` (tool-call-only), but for the request edges
-    the session owes a response to. Projected from the same ``get_open_obligations``
-    rows. Load-bearing for the operator-cancel path (#1414) — it cannot enumerate
-    a session's open goal_ids otherwise.
-
-    ``output_schema`` (#1522) carries the request's acceptance contract — the same
-    additive projection added to :class:`Obligation`, from which this view is
-    derived.
-    """
-
-    request_id: str
-    caller_kind: str
-    caller_id: str | None = None
-    opened_at: datetime
-    summary: str | None = None
-    output_schema: dict[str, Any] | None = None
-
-
 class SessionCreate(BaseModel):
     """Request body for `POST /v1/sessions`."""
 
@@ -392,7 +371,7 @@ class Session(BaseModel):
     ended. Possible ``type`` values: ``"end_turn"``, ``"interrupt"``,
     ``"rescheduling"``, ``"error"`` (``idle`` + ``error`` = the errored
     landing pad). ``awaiting`` lists tool calls the session is blocked on
-    (derived per read from the event log + agent tool specs). ``owed_requests``
+    (derived per read from the event log + agent tool specs). ``obligations``
     lists the still-open **awaited** request edges the session owes a response to
     (derived per read from the ``request_opened`` lifecycle frame — #1413).
     """
@@ -407,7 +386,7 @@ class Session(BaseModel):
     status: SessionStatus
     stop_reason: dict[str, Any] | None
     awaiting: list[AwaitingToolCall] = Field(default_factory=list)
-    owed_requests: list[OwedRequest] = Field(default_factory=list)
+    obligations: list[Obligation] = Field(default_factory=list)
     vault_ids: list[str] = Field(default_factory=list)
     last_event_seq: int
     usage: SessionUsage = Field(default_factory=SessionUsage)

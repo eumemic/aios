@@ -42,7 +42,7 @@ from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
     AwaitingToolCall,
-    OwedRequest,
+    Obligation,
     Session,
     SessionAwaitResponse,
     SessionResource,
@@ -1075,10 +1075,10 @@ async def compute_awaiting(
     return out
 
 
-async def compute_owed_requests(
+async def compute_obligations(
     pool: asyncpg.Pool[Any], sessions: list[Session], *, account_id: str
-) -> dict[str, list[OwedRequest]]:
-    """Compute the ``owed_requests`` read-model view for a batch of sessions (#1413).
+) -> dict[str, list[Obligation]]:
+    """Compute the ``obligations`` read-model view for a batch of sessions (#1413).
 
     The dual of :func:`compute_awaiting`: that view lists tool calls a session is
     blocked on; this lists the still-open **awaited** request edges the session
@@ -1089,7 +1089,7 @@ async def compute_owed_requests(
     """
     if not sessions:
         return {}
-    out: dict[str, list[OwedRequest]] = {}
+    out: dict[str, list[Obligation]] = {}
     async with pool.acquire() as conn:
         for session in sessions:
             obligations = await queries.get_open_obligations(
@@ -1097,7 +1097,7 @@ async def compute_owed_requests(
             )
             if obligations:
                 out[session.id] = [
-                    OwedRequest(
+                    Obligation(
                         request_id=o.request_id,
                         caller_kind=o.caller_kind,
                         caller_id=o.caller_id,
@@ -1121,11 +1121,11 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: s
         session = await queries.get_session(conn, session_id, account_id=account_id)
         session = await _enrich_session(conn, session, account_id=account_id)
     awaiting_by_sid = await compute_awaiting(pool, [session], account_id=account_id)
-    owed_by_sid = await compute_owed_requests(pool, [session], account_id=account_id)
+    obligations_by_sid = await compute_obligations(pool, [session], account_id=account_id)
     return session.model_copy(
         update={
             "awaiting": awaiting_by_sid.get(session_id, []),
-            "owed_requests": owed_by_sid.get(session_id, []),
+            "obligations": obligations_by_sid.get(session_id, []),
         }
     )
 
@@ -1248,7 +1248,7 @@ async def list_sessions(
             conn, sid_list, account_id=account_id
         )
     awaiting_by_sid = await compute_awaiting(pool, sessions, account_id=account_id)
-    owed_by_sid = await compute_owed_requests(pool, sessions, account_id=account_id)
+    obligations_by_sid = await compute_obligations(pool, sessions, account_id=account_id)
     enriched: list[Session] = [
         s.model_copy(
             update={
@@ -1256,7 +1256,7 @@ async def list_sessions(
                 "resources": echoes_map[s.id],
                 "triggers": trigger_map[s.id],
                 "awaiting": awaiting_by_sid.get(s.id, []),
-                "owed_requests": owed_by_sid.get(s.id, []),
+                "obligations": obligations_by_sid.get(s.id, []),
             }
         )
         for s in sessions
