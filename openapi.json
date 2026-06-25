@@ -14549,6 +14549,18 @@
               }
             ],
             "title": "Summary"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Schema"
           }
         },
         "type": "object",
@@ -14558,7 +14570,7 @@
           "opened_at"
         ],
         "title": "OwedRequest",
-        "description": "Read-model projection of an open obligation on the :class:`Session` view (#1413).\n\nParallel to ``Session.awaiting`` (tool-call-only), but for the request edges\nthe session owes a response to. Projected from the same ``get_open_obligations``\nrows. Load-bearing for the operator-cancel path (#1414) \u2014 it cannot enumerate\na session's open goal_ids otherwise."
+        "description": "Read-model projection of an open obligation on the :class:`Session` view (#1413).\n\nParallel to ``Session.awaiting`` (tool-call-only), but for the request edges\nthe session owes a response to. Projected from the same ``get_open_obligations``\nrows. Load-bearing for the operator-cancel path (#1414) \u2014 it cannot enumerate\na session's open goal_ids otherwise.\n\n``output_schema`` (#1522) carries the request's acceptance contract \u2014 the same\nadditive projection added to :class:`Obligation`, from which this view is\nderived."
       },
       "RecentChat": {
         "properties": {
@@ -16536,6 +16548,7 @@
                   "call_workflow",
                   "create_goal",
                   "list_goals",
+                  "list_obligations",
                   "stop_task",
                   "list_tasks",
                   "skill_upsert",

@@ -23,6 +23,7 @@ a slate-derived marker), so it survives windowing erasure of the original ask.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,16 @@ MAX_RENDERED_OBLIGATIONS = 10
 # Summary truncation length; matches the 60-char preview the channels tail uses
 # and the store-side ``_obligation_summary`` budget.
 _SUMMARY_MAX = 60
+
+# Max chars of a rendered ``output_schema`` contract (#1522). Analogous to the
+# 60-char summary cap, but wider because a schema is a structural contract (it
+# legitimately needs a few keys/types to be useful) — still a HARD cap so a large
+# persisted schema can't blow the reserved tail budget. A schema longer than this
+# is JSON-serialised then elided to this width + an ellipsis. The bound is what
+# keeps ``max_obligations_block_local`` a correct upper bound for the
+# schema-bearing render: per-entry schema cost is capped REGARDLESS of the real
+# schema size, so the reserved budget never overflows ``read_windowed_events``.
+_SCHEMA_MAX = 240
 
 _HEADER = "━━━ Open obligations (answer with return/error) ━━━"
 
@@ -83,6 +94,27 @@ def _truncate_summary(summary: str | None) -> str:
     if len(s) > _SUMMARY_MAX:
         s = s[:_SUMMARY_MAX] + "…"
     return s
+
+
+def _render_schema(output_schema: dict[str, Any] | None) -> str | None:
+    """A bounded, single-line preview of an obligation's ``output_schema`` contract
+    (#1522), or ``None`` when the request demands no schema.
+
+    JSON-serialises the schema (compact separators, sorted keys for stability) and
+    **elides** it to :data:`_SCHEMA_MAX` chars + an ellipsis — the schema-side
+    analogue of the 60-char summary cap. A large persisted schema can therefore
+    NEVER inflate the rendered tail past a fixed per-entry bound, which is what
+    keeps :func:`max_obligations_block_local` a correct upper bound (no
+    ``read_windowed_events`` budget overflow). Newlines are flattened so the
+    contract stays a single render line.
+    """
+    if not output_schema:
+        return None
+    text = json.dumps(output_schema, separators=(",", ":"), sort_keys=True, default=str)
+    text = text.replace("\n", " ")
+    if len(text) > _SCHEMA_MAX:
+        text = text[:_SCHEMA_MAX] + "…"
+    return text
 
 
 def _obligation_line(obligation: Obligation, *, session_id: str, now: datetime) -> str:
@@ -133,6 +165,79 @@ def build_obligations_tail_block(
     if remaining > 0:
         lines.append(f"…(+{remaining} more)")
     return {"role": "user", "content": "\n".join(lines)}
+
+
+def render_owed_entry(obligation: Obligation, *, session_id: str, now: datetime) -> dict[str, Any]:
+    """The shared per-obligation owed-read-model entry (#1522) — the ONE place the
+    "outstanding obligation + its contract" projection is formatted.
+
+    Both contract-bearing consumers feed from this:
+
+    * the **quiescence-attempt surfacing** (#1514, folded here) — "you're trying to
+      stop, here is what you owe and in what format" — joins these entries into the
+      nudge content via :func:`render_owed_listing`; and
+    * the **``list_obligations`` PULL tool** — returns these entries directly as its
+      JSON result rows.
+
+    Each entry carries ``request_id``, ``caller_kind`` (the trusted frame kind),
+    ``origin`` (``api``/``session``/``run`` plus ``self`` for a #1414 self-goal),
+    a ``<=60``-char ``summary``, a terse ``age``, and the **bounded**
+    ``output_schema`` contract (elided to :data:`_SCHEMA_MAX`; ``None`` when the
+    request demands no schema). The schema bound is what lets the surfacing render
+    stay within :func:`max_obligations_block_local`'s upper bound.
+    """
+    return {
+        "request_id": obligation.request_id,
+        "caller_kind": obligation.caller_kind or "",
+        "origin": _origin_label(obligation, session_id=session_id),
+        "summary": _truncate_summary(obligation.summary),
+        "age": _format_age(obligation.opened_at, now),
+        "output_schema": _render_schema(obligation.output_schema),
+    }
+
+
+def _owed_listing_line(entry: dict[str, Any]) -> str:
+    """One human-readable line for the quiescence-attempt surfacing, built from a
+    :func:`render_owed_entry` row — ``request_id``, ``[origin]``, optional quoted
+    summary, age, and (when present) the bounded ``output_schema`` contract."""
+    summary = entry["summary"]
+    summary_clause = f' "{summary}"' if summary else ""
+    line = f"• {entry['request_id']} [{entry['origin']}]{summary_clause} (open {entry['age']})"
+    schema = entry["output_schema"]
+    if schema:
+        line += f"\n    expected output_schema: {schema}"
+    return line
+
+
+def render_owed_listing(
+    obligations: list[Obligation],
+    *,
+    session_id: str,
+    header: str,
+    now: datetime | None = None,
+) -> str:
+    """The shared **contract-bearing** owed render (#1522) used by the
+    quiescence-attempt surfacing (consumer (a), folding #1514).
+
+    A header line, then one entry per open obligation **oldest-first** (the caller
+    fetches them ``ORDER BY req.seq ASC``) drawn from :func:`render_owed_entry`:
+    each line shows ``request_id``, ``[origin]`` (incl. ``self``), quoted summary,
+    age, **and the bounded ``output_schema`` contract** — the format the session
+    must produce to answer. Capped at :data:`MAX_RENDERED_OBLIGATIONS` entries +
+    a ``+K more`` marker so the rendered size stays bounded regardless of count;
+    each schema is :data:`_SCHEMA_MAX`-elided so a large contract can't blow the
+    budget either.
+    """
+    if now is None:
+        now = datetime.now(UTC)
+    lines = [header]
+    rendered = obligations[:MAX_RENDERED_OBLIGATIONS]
+    for ob in rendered:
+        lines.append(_owed_listing_line(render_owed_entry(ob, session_id=session_id, now=now)))
+    remaining = len(obligations) - len(rendered)
+    if remaining > 0:
+        lines.append(f"…(+{remaining} more)")
+    return "\n".join(lines)
 
 
 def max_obligations_block_local(obligations: list[Obligation]) -> int:

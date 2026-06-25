@@ -605,6 +605,50 @@ async def test_get_open_obligations_projects_caller_kind_opened_at_summary(
     assert o.caller_id == "run_xyz"
     assert o.summary == "research the topic"
     assert o.opened_at is not None
+    # No output_schema persisted on this edge → None (additive, no migration).
+    assert o.output_schema is None
+
+
+async def test_get_open_obligations_projects_output_schema(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """#1522: the widened owed-read-model SELECTs the persisted ``output_schema``
+    off the ``request_opened`` frame (the same datum ``get_request_output_schema``
+    reads) — additive, ``None`` when absent. The cheap guard path
+    (``get_open_request_ids``) is unaffected; only this content model carries it."""
+    pool, account_id, _agent_id, env_id = pool_env
+    _agent, _env, session = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="obl_schema"
+    )
+    schema = {
+        "type": "object",
+        "properties": {"shipped": {"type": "boolean"}},
+        "required": ["shipped"],
+    }
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.append_request_opened(
+            conn,
+            session_id=session.id,
+            account_id=account_id,
+            request_id="req-schema",
+            caller={"kind": "session", "id": session.id},  # a self-goal edge
+            depth=0,
+            environment_id=env_id,
+            frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+            vault_ids=[],
+            summary="ship the thing",
+            output_schema=schema,
+        )
+    async with pool.acquire() as conn:
+        obs = await queries.get_open_obligations(conn, session.id, account_id=account_id)
+        # The widened model carries the contract...
+        assert len(obs) == 1
+        assert obs[0].output_schema == schema
+        # ...and reads the SAME datum get_request_output_schema reads off the frame.
+        via_schema_reader = await queries.get_request_output_schema(
+            conn, session.id, request_id="req-schema"
+        )
+    assert via_schema_reader == schema
 
 
 async def test_get_open_obligations_oldest_first_and_excludes_answered(

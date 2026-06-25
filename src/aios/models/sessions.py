@@ -185,6 +185,14 @@ class Obligation(BaseModel):
     trusted ``caller.kind`` (``api``|``session``|``run``); ``opened_at`` is the
     edge's ``created_at`` (for age); ``summary`` is a short truncated preview of
     the request input (absent on pre-#1413 frames → ``None``, rendered id-only).
+
+    ``output_schema`` (#1522) is the JSON Schema the request demands of its
+    response ``value`` — the **acceptance contract** the session must produce to
+    answer. It is the same datum :func:`aios.db.queries.sessions.get_request_output_schema`
+    reads off the ``request_opened`` frame, now projected directly onto the owed
+    read-model so a single renderer can show "here is what you owe **and the
+    format**". Additive: ``None`` when the request demands no schema (the common
+    case) or on a pre-#1522 frame — no migration.
     """
 
     request_id: str
@@ -192,6 +200,7 @@ class Obligation(BaseModel):
     caller_id: str | None = None
     opened_at: datetime
     summary: str | None = None
+    output_schema: dict[str, Any] | None = None
 
 
 class OwedRequest(BaseModel):
@@ -201,6 +210,10 @@ class OwedRequest(BaseModel):
     the session owes a response to. Projected from the same ``get_open_obligations``
     rows. Load-bearing for the operator-cancel path (#1414) — it cannot enumerate
     a session's open goal_ids otherwise.
+
+    ``output_schema`` (#1522) carries the request's acceptance contract — the same
+    additive projection added to :class:`Obligation`, from which this view is
+    derived.
     """
 
     request_id: str
@@ -208,6 +221,7 @@ class OwedRequest(BaseModel):
     caller_id: str | None = None
     opened_at: datetime
     summary: str | None = None
+    output_schema: dict[str, Any] | None = None
 
 
 class SessionCreate(BaseModel):

@@ -17,6 +17,7 @@ class ToolSpecTypeType0(str, Enum):
     GREP = "grep"
     HTTP_REQUEST = "http_request"
     LIST_GOALS = "list_goals"
+    LIST_OBLIGATIONS = "list_obligations"
     LIST_RELATED_SESSIONS = "list_related_sessions"
     LIST_RUNS = "list_runs"
     LIST_RUN_EVENTS = "list_run_events"
