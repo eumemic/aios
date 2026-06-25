@@ -1813,7 +1813,11 @@ async def test_quiescence_nudge_surfaces_acceptance_contract(
     source-agnostic. The contract detail appears ONLY in the quiescence nudge, not
     per-step (AC4 -- the per-step block is gone, asserted in the unit/per-step tests)."""
     pool = wf_runtime
-    schema = {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "string"}}}
+    schema = {
+        "type": "object",
+        "required": ["answer"],
+        "properties": {"answer": {"type": "string"}},
+    }
     _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:contract#0", output_schema=schema)
 
     assistant = await _idle_assistant_turn(pool, cid)
