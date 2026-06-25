@@ -1802,7 +1802,8 @@ async def _last_nudge_text(pool: asyncpg.Pool[Any], session_id: str) -> str:
             "acc_wf",
         )
     assert row is not None, "expected a nudge message"
-    return row["content"]
+    content: str = row["content"]
+    return content
 
 
 async def test_quiescence_nudge_surfaces_acceptance_contract(
