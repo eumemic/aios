@@ -194,7 +194,6 @@ async def update(
     crypto_box: CryptoBoxDep,
     account_id: AccountIdDep,
 ) -> Session:
-
     # Use model_fields_set to distinguish "not provided" from "explicitly null".
     # agent_version=null means "latest" (auto-updating); omitted means "keep current".
     return await service.update_session(

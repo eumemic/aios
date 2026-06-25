@@ -434,7 +434,6 @@ class TestMergeAuthPayload:
 
 
 def _existing_credential() -> VaultCredential:
-
     return VaultCredential(
         id="vc_1",
         vault_id="vlt_1",
@@ -572,7 +571,6 @@ def _async_client_returning(resp: Any) -> MagicMock:
 
 
 def _expiring_oauth_payload(**overrides: Any) -> dict[str, Any]:
-
     base = {
         "access_token": "old-at",
         "refresh_token": "rt-1",
@@ -587,18 +585,15 @@ def _expiring_oauth_payload(**overrides: Any) -> dict[str, Any]:
 
 class TestIsExpiring:
     def test_far_future_is_not_expiring(self) -> None:
-
         payload = {"expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}
         assert is_expiring(payload) is False
 
     def test_within_skew_is_expiring(self) -> None:
-
         # Inside the skew window (5 s < 30 s default).
         payload = {"expires_at": (datetime.now(UTC) + timedelta(seconds=5)).isoformat()}
         assert is_expiring(payload) is True
 
     def test_already_expired_is_expiring(self) -> None:
-
         payload = {"expires_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat()}
         assert is_expiring(payload) is True
 
@@ -607,7 +602,6 @@ class TestIsExpiring:
         assert is_expiring({}) is False
 
     def test_naive_datetime_assumed_utc(self) -> None:
-
         # Some providers return naive ISO strings; treat as UTC.
         future_naive = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=5)
         assert is_expiring({"expires_at": future_naive.isoformat()}) is True
