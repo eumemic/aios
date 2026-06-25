@@ -176,6 +176,7 @@ class TestTrustedIdsDerivedServerSide:
         mock_create = AsyncMock(return_value=_agent())
         monkeypatch.setattr("aios.services.agents.create_agent", mock_create)
         await am.create_agent_handler("ses_exec", {"name": "a", "model": "test/dummy"})
+        assert mock_create.await_args is not None
         kwargs = mock_create.await_args.kwargs
         assert kwargs["creator_session_id"] == "ses_exec"
         assert kwargs["account_id"] == "acc_x"
@@ -184,6 +185,7 @@ class TestTrustedIdsDerivedServerSide:
         mock_update = AsyncMock(return_value=_agent(version=2))
         monkeypatch.setattr("aios.services.agents.update_agent", mock_update)
         await am.update_agent_handler("ses_exec", {"agent_id": "agt_1", "version": 1})
+        assert mock_update.await_args is not None
         kwargs = mock_update.await_args.kwargs
         assert kwargs["editor_session_id"] == "ses_exec"
         assert kwargs["expected_version"] == 1
@@ -260,4 +262,5 @@ class TestReturnShape:
         monkeypatch.setattr("aios.services.agents.archive_agent", mock_archive)
         out = await am.archive_agent_handler("ses_1", {"agent_id": "agt_1"})
         assert out == {"agent_id": "agt_1", "archived": True}
+        assert mock_archive.await_args is not None
         assert mock_archive.await_args.kwargs["account_id"] == "acc_x"
