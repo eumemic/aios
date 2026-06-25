@@ -222,3 +222,57 @@ def test_complete_fail_goal_no_longer_registered(name: str) -> None:
     from aios.tools.registry import registry
 
     assert not registry.has(name), f"{name} should be retired (#1518), closed via return/error"
+
+
+# ─── terminology of record: create_goal is the sole goal-named verb (#1523) ───
+
+
+def test_create_goal_is_registered_with_required_output_schema() -> None:
+    """#1523: ``create_goal`` stays the canonical reflexive-OPEN verb under that exact
+    name, with its current signature — a REQUIRED ``output_schema`` (no schemaless
+    goal). The chairman-ratified decision keeps this name; it is NOT renamed to
+    ``set_goal``."""
+    from aios.tools.registry import registry
+
+    assert registry.has("create_goal")
+    schema = registry.get("create_goal").parameters_schema
+    props = schema.get("properties", {})
+    assert "goal" in props and "output_schema" in props
+    assert "output_schema" in schema.get("required", [])
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["set_goal", "cancel_goal", "update_goal", "complete_goal", "fail_goal"],
+)
+def test_no_goal_named_verb_other_than_create_and_list(name: str) -> None:
+    """#1523 terminology of record: the ONLY goal-named verbs are ``create_goal``
+    (the reflexive-OPEN verb) and — until child #3 retires it — ``list_goals``.
+    #1414's proposed ``set_goal``/``cancel_goal`` naming is explicitly DECLINED:
+    a goal close is ``return``/``error``, a goal list is ``list_obligations`` /
+    ``list_calls`` (origin=self), a goal drop is ``cancel_call`` (#5). No
+    ``set_goal``/``cancel_goal``/``update_goal`` is ever registered."""
+    from aios.tools.registry import registry
+
+    assert not registry.has(name)
+
+
+def test_terminology_of_record_documented() -> None:
+    """#1523: the module docstring + ``create_goal`` description record the
+    terminology of record (goal = reflexive call; close = return/error; list =
+    list_obligations/list_calls; drop = cancel_call) and cite the declined #1414
+    naming, so the decision is not re-litigated."""
+    from aios.tools import goal_management
+
+    doc = goal_management.__doc__ or ""
+    assert "reflexive" in doc.lower()
+    assert "#1414" in doc
+    # the canonical close/list/drop verbs of record are named in the module doc.
+    assert "return" in doc and "error" in doc
+    assert "list_obligations" in doc
+    assert "cancel_call" in doc
+    # and the declined rename is recorded.
+    assert "set_goal" in doc
+
+    desc = goal_management.CREATE_GOAL_DESCRIPTION
+    assert "return" in desc and "error" in desc
