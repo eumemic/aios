@@ -131,9 +131,7 @@ async def test_create_goal_opens_holding_self_obligation(
     # The completion contract is persisted on the trusted request_opened edge, the
     # same way call_* carry output_schema (#1512) — complete_goal reads it from here.
     async with pool.acquire() as conn:
-        persisted = await queries.get_request_output_schema(
-            conn, session_id, request_id=goal_id
-        )
+        persisted = await queries.get_request_output_schema(conn, session_id, request_id=goal_id)
     assert persisted == _SCHEMA
 
 
@@ -166,9 +164,7 @@ async def test_complete_goal_drains_open_set(
     the request_response half so the session may quiesce (#1512)."""
     pool, _account, session_id = pool_session
     goal_id = _gid(
-        await invoke_builtin(
-            session_id, "create_goal", {"goal": "do it", "output_schema": _SCHEMA}
-        )
+        await invoke_builtin(session_id, "create_goal", {"goal": "do it", "output_schema": _SCHEMA})
     )
     assert await _open_ids(pool, session_id) == [goal_id]
 
@@ -196,9 +192,7 @@ async def test_fail_goal_drains_open_set(
 ) -> None:
     pool, _account, session_id = pool_session
     goal_id = _gid(
-        await invoke_builtin(
-            session_id, "create_goal", {"goal": "do it", "output_schema": _SCHEMA}
-        )
+        await invoke_builtin(session_id, "create_goal", {"goal": "do it", "output_schema": _SCHEMA})
     )
     assert await _open_ids(pool, session_id) == [goal_id]
 

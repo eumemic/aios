@@ -268,9 +268,7 @@ async def _close_goal(
         # the SAME _validate_output the call_* output_schema path uses. create_goal
         # makes a schema mandatory, so a confirmed-open goal always has one.
         async with pool.acquire() as conn:
-            schema = await queries.get_request_output_schema(
-                conn, session_id, request_id=goal_id
-            )
+            schema = await queries.get_request_output_schema(conn, session_id, request_id=goal_id)
         violation = _validate_output(result, schema)
         if violation is not None:
             return violation

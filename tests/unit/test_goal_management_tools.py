@@ -100,9 +100,7 @@ def _stub_open_obligations(monkeypatch: Any, obligations: list[Obligation]) -> N
 def _stub_goal_schema(monkeypatch: Any, schema: dict[str, Any] | None) -> None:
     """Stub the goal's persisted ``output_schema`` read (``get_request_output_schema``)
     that ``complete_goal`` resolves to validate the result against."""
-    monkeypatch.setattr(
-        "aios.db.queries.get_request_output_schema", AsyncMock(return_value=schema)
-    )
+    monkeypatch.setattr("aios.db.queries.get_request_output_schema", AsyncMock(return_value=schema))
 
 
 # ─── create_goal ─────────────────────────────────────────────────────────────
@@ -135,9 +133,7 @@ async def test_create_goal_opens_self_goal_edge(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr("aios.services.sessions.invoke", inv)
 
-    out = await invoke_builtin(
-        _SELF, "create_goal", {"goal": "ship it", "output_schema": _SCHEMA}
-    )
+    out = await invoke_builtin(_SELF, "create_goal", {"goal": "ship it", "output_schema": _SCHEMA})
 
     assert out == {"goal_id": "req_goal", "goal": "ship it", "status": "open"}
     assert inv.await_args is not None
