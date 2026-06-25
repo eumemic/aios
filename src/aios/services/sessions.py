@@ -2131,7 +2131,9 @@ async def increment_usage(
         )
 
 
-async def archive_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:
+async def archive_session(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str, idempotent: bool = False
+) -> Session:
     # Archiving a workflow child that still owes its agent() response is a
     # COMPLETION: fail its open requests through write_child_response (error
     # child_gone) FIRST — before the archived_at flip, because append_event is
@@ -2145,7 +2147,9 @@ async def archive_session(pool: asyncpg.Pool[Any], session_id: str, *, account_i
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )
-        session = await queries.archive_session(conn, session_id, account_id=account_id)
+        session = await queries.archive_session(
+            conn, session_id, account_id=account_id, idempotent=idempotent
+        )
         session = await _enrich_session(conn, session, account_id=account_id)
     # Wake any consumer LISTENing on this session's events channel (#906): the
     # await primitive, the long-poll /wait endpoint, the SSE /stream. Archival
