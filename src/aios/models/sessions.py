@@ -192,6 +192,13 @@ class Obligation(BaseModel):
     caller_id: str | None = None
     opened_at: datetime
     summary: str | None = None
+    # The acceptance contract (#1512/#1514): the JSON Schema the answer's ``value``
+    # must satisfy for the obligation to close — the definition-of-done. Read off
+    # the trusted ``request_opened`` edge (``data->'output_schema'``), source-agnostic
+    # (caller-task via ``call_*`` or self-goal alike). ``None`` when the request
+    # demands no schema (the common case). Surfaced ONLY at the quiescence attempt
+    # (the nudge), never per-step — see ``services.sessions._nudge_content``.
+    output_schema: dict[str, Any] | None = None
 
 
 class OwedRequest(BaseModel):

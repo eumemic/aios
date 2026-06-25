@@ -42,6 +42,7 @@ from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
     AwaitingToolCall,
+    Obligation,
     OwedRequest,
     Session,
     SessionAwaitResponse,
@@ -1328,12 +1329,57 @@ async def append_event(
 REQUEST_NUDGE_BUDGET = 3
 
 
-def _nudge_content(request_ids: list[str]) -> str:
-    ids = ", ".join(request_ids)
+# Acceptance-contract rendering at the quiescence attempt (#1514). The contract is
+# the request's ``output_schema`` — the definition-of-done a conforming ``return``
+# value must satisfy. It is surfaced ONLY here (the stop-refusal), never per-step:
+# it is decision-relevant exactly when the agent tries to stop, and pinning it to
+# every step was a continuous context-token tax (the #1413 per-step block, removed).
+# Source-agnostic: the same ``output_schema`` off the same open awaited-obligation
+# set, whether the obligation is a caller-imposed task (``call_*``) or a self-goal.
+_CONTRACT_SCHEMA_MAX = 800
+
+
+def _render_acceptance_contract(output_schema: dict[str, Any] | None) -> str:
+    """The per-obligation '— here is what "done" requires' clause for the nudge.
+
+    Renders the request's ``output_schema`` (the acceptance contract / definition-of-done)
+    as compact JSON, truncated to a bound so an unusually large schema cannot blow up
+    the nudge. ``None`` (the request demands no schema — the common case, and every
+    pre-#1512 self-goal) renders a plain 'any conforming result' note: a task is binary
+    open/closed and closes when the agent returns *a* result; there is no independent
+    criteria-met check, so absence of a schema means any returned value closes it.
+    """
+    if not output_schema:
+        return "acceptance contract: any returned result closes it (no output_schema)."
+    rendered = json.dumps(output_schema, separators=(",", ":"), sort_keys=True)
+    if len(rendered) > _CONTRACT_SCHEMA_MAX:
+        rendered = rendered[:_CONTRACT_SCHEMA_MAX] + "…"
+    return f"acceptance contract (output_schema the returned value must satisfy): {rendered}"
+
+
+def _nudge_content(obligations: list[Obligation]) -> str:
+    """The quiescence-guard nudge body (#1514).
+
+    Lists each outstanding task AND, for each, its **acceptance contract** — the
+    ``output_schema`` definition-of-done — so the stop-refusal reads "you're trying
+    to stop, but you still owe these — here is what 'done' requires for each." The
+    contract is evaluated only at close-time against the submitted result (binary
+    open/closed; no progress fraction, no met-tracking — #1514 out-of-scope).
+
+    Source-agnostic: ``obligations`` is the same open awaited set whatever the caller
+    (self-goal or caller-imposed task), each carrying its own ``output_schema``.
+    """
+    lines = [
+        f"• {ob.request_id} — {_render_acceptance_contract(ob.output_schema)}" for ob in obligations
+    ]
+    tasks_block = "\n".join(lines)
     return (
-        f"You still owe a response to these request(s): {ids}. Answer each one with "
-        "return(request_id, value) if you have a result, or error(request_id, message) "
-        "if you can't complete it — you must answer before you can finish."
+        "You're trying to stop, but you still owe a response to these task(s) — "
+        "here is what 'done' requires for each:\n"
+        f"{tasks_block}\n"
+        "Answer each one with return(request_id, value) if you have a result that "
+        "satisfies its acceptance contract, or error(request_id, message) if you "
+        "can't complete it — you must answer before you can finish."
     )
 
 
@@ -1721,13 +1767,20 @@ async def append_assistant_and_guard_quiescence(
         #      active via a user message that arrived during inference.
         if assistant_msg.get("tool_calls"):
             return AssistantAppendResult(False, None, focal)
-        open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
-        if not open_ids:
+        # #1514: read the full obligations (the source-agnostic open awaited set) so
+        # the nudge can surface each owed task's acceptance contract (output_schema),
+        # not just its id. Same asked-minus-answered/awaited filter as
+        # ``get_open_request_ids`` — an empty list still short-circuits the guard.
+        open_obligations = await queries.get_open_obligations(
+            conn, session_id, account_id=account_id
+        )
+        if not open_obligations:
             return AssistantAppendResult(False, None, focal)  # nothing owed (or all answered)
         if await queries.derive_session_status(conn, session_id, account_id=account_id) != "idle":
             return AssistantAppendResult(False, None, focal)
-        to_nudge: list[str] = []
-        for request_id in open_ids:
+        to_nudge: list[Obligation] = []
+        for obligation in open_obligations:
+            request_id = obligation.request_id
             nudges = await queries.count_request_nudges(
                 conn, session_id, account_id=account_id, request_id=request_id
             )
@@ -1748,8 +1801,9 @@ async def append_assistant_and_guard_quiescence(
                 elif write.wake_session_id is not None:
                     autoerror_caller_session_ids.append(write.wake_session_id)
             else:
-                to_nudge.append(request_id)
+                to_nudge.append(obligation)
         if to_nudge:
+            nudged_request_ids = [ob.request_id for ob in to_nudge]
             await queries.append_event(
                 conn,
                 session_id=session_id,
@@ -1757,7 +1811,7 @@ async def append_assistant_and_guard_quiescence(
                 data={
                     "role": "user",
                     "content": _nudge_content(to_nudge),
-                    "metadata": {"nudged_request_ids": to_nudge},
+                    "metadata": {"nudged_request_ids": nudged_request_ids},
                 },
                 account_id=account_id,
             )

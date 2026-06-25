@@ -123,13 +123,14 @@ class StepPrelude:
     payload under ``window_max`` even when the tail renders at its
     fattest (every channel at 9999 unread with a maxed-out preview).
 
-    ``obligations`` is the session's open **awaited** obligations (#1413),
-    fetched once here (the unconditional ``get_open_obligations`` that also
-    decides the ``return``/``error`` tool gate) and reused by the composer to
-    render the obligations tail block — no second query.
-    ``obligations_block_upper_bound_local`` is the worst-case size of that
-    block, bounded from the actual fetched obligations (real count + each real
-    summary, capped) so reserving it keeps the payload under ``window_max``.
+    ``obligations`` is the session's open **awaited** obligations, fetched once
+    here (the unconditional ``get_open_obligations`` that decides the
+    ``return``/``error`` tool gate). #1514 removed the per-step obligations
+    tail-injection (the always-on #1413 block): outstanding tasks + their
+    acceptance contracts are now surfaced ONLY at the quiescence attempt (the
+    nudge), so the composer no longer renders an obligations block and reserves
+    no budget for one. The set is still fetched here purely to gate the
+    ``return``/``error`` tool surface (``owes_request``).
     """
 
     system_prompt: str
@@ -137,7 +138,6 @@ class StepPrelude:
     skill_versions: list[SkillVersion]
     tail_block_upper_bound_local: int
     obligations: list[Obligation]
-    obligations_block_upper_bound_local: int
 
 
 def prelude_overhead_local(prelude: StepPrelude) -> int:
@@ -146,10 +146,13 @@ def prelude_overhead_local(prelude: StepPrelude) -> int:
     ``read_windowed_events``.
 
     System prompt + tool schemas, plus the reserved upper bounds for the
-    post-windowing additions: the channels tail block, the obligations
-    tail block (#1413), and the omission marker (#738). All are reserved
-    unconditionally — any may not render, but the budget must hold when
-    they do.
+    post-windowing additions: the channels tail block and the omission
+    marker (#738). Both are reserved unconditionally — either may not
+    render, but the budget must hold when they do. #1514 removed the
+    per-step obligations tail block, so there is no longer an obligations
+    budget to reserve (the outstanding-task surface moved to the
+    quiescence-attempt nudge, which is an ordinary log event, not a
+    reserved tail).
     """
     return (
         approx_tokens(
@@ -157,7 +160,6 @@ def prelude_overhead_local(prelude: StepPrelude) -> int:
             tools=prelude.tools,
         )
         + prelude.tail_block_upper_bound_local
-        + prelude.obligations_block_upper_bound_local
         + OMISSION_MARKER_UPPER_BOUND_LOCAL
     )
 
@@ -200,7 +202,6 @@ async def compute_step_prelude(
         discover_session_mcp_tools,
     )
     from aios.harness.memory_stores import augment_with_memory_stores
-    from aios.harness.obligations import max_obligations_block_local
     from aios.harness.skills import augment_system_prompt
     from aios.services import skills as skills_service
 
@@ -214,14 +215,12 @@ async def compute_step_prelude(
     # an open request edge (#1123), not child-ness: a plain foreground session that
     # was invoked owes a response and must be handed the means to give one.
     #
-    # #1413: run ``get_open_obligations`` UNCONDITIONALLY (the prior background-child
-    # fast-path short-circuit is gone). The obligations tail block MUST be computed
-    # for background children too — their obligation is exactly what windowing
-    # erases, so they are the headline beneficiary of the always-on reminder. The
-    # ``return``/``error`` tool gate is preserved EXACTLY: ``owes_request`` is now
-    # ``bool(obligations)``, correctness-equivalent to the old gate (the same
-    # awaited anti-join), trading the fast-path for one indexed anti-join per
-    # background-child step (a stated, accepted cost).
+    # Run ``get_open_obligations`` UNCONDITIONALLY (no background-child fast-path
+    # short-circuit). #1514 dropped the per-step obligations tail block, so this no
+    # longer feeds a render — it now feeds ONLY the ``return``/``error`` tool gate:
+    # ``owes_request`` is ``bool(obligations)``, the same awaited anti-join, one
+    # indexed anti-join per step. (The outstanding-task surface + acceptance
+    # contracts moved to the quiescence-attempt nudge in ``services.sessions``.)
     async with pool.acquire() as conn:
         obligations = await queries.get_open_obligations(conn, session_id, account_id=account_id)
     owes_request = bool(obligations)
@@ -274,7 +273,6 @@ async def compute_step_prelude(
         skill_versions=skill_versions,
         tail_block_upper_bound_local=max_tail_block_local(channels),
         obligations=obligations,
-        obligations_block_upper_bound_local=max_obligations_block_local(obligations),
     )
 
 
@@ -381,7 +379,6 @@ async def compose_step_context(
     (custom, awaiting-confirm) gets the "external action" wording.
     """
     from aios.harness.channels import build_channels_tail_block
-    from aios.harness.obligations import build_obligations_tail_block
     from aios.services import accounts as accounts_service
     from aios.services import sessions as sessions_service
 
@@ -430,22 +427,14 @@ async def compose_step_context(
     if tail is not None and not _agent_owes_response(ctx.messages):
         ctx.messages.append(tail)
 
-    # Obligations tail block (#1413): the always-on reminder of every open
-    # awaited request the session owes a response to, rebuilt each step from the
-    # full log (``prelude.obligations``) so it survives windowing erasure of the
-    # original request user message. Appended AFTER the channels tail and BEFORE
-    # the merge so an unanswered obligation is the FINAL user-role line — the
-    # higher-priority stimulus (literal-minded models anchor on the last line).
-    #
-    # Gated on the open set being non-empty ALONE — deliberately NOT
-    # ``_agent_owes_response`` (which suppresses the channels tail on a trailing
-    # direct stimulus). The obligations block needs the OPPOSITE bias: an open
-    # obligation IS the stimulus to act on, so it renders even after a tool
-    # result (where ``build_obligations_tail_block`` returning non-None already
-    # encodes "non-empty").
-    obligations_block = build_obligations_tail_block(prelude.obligations, session_id=session.id)
-    if obligations_block is not None:
-        ctx.messages.append(obligations_block)
+    # #1514: the per-step obligations tail block (the always-on #1413 reminder) is
+    # GONE. Surfacing outstanding obligations on EVERY step was a continuous
+    # context-token tax for information that is only decision-relevant when the
+    # agent tries to stop. The outstanding-task list AND each task's acceptance
+    # contract (``output_schema``) are now surfaced ONLY at the quiescence attempt,
+    # in the quiescence-guard nudge (``services.sessions.append_assistant_and_guard_quiescence``).
+    # ``prelude.obligations`` is still fetched (it gates the ``return``/``error``
+    # tool surface) but no longer rendered into the per-step context here.
 
     # Merge consecutive user inbounds into one turn (Anthropic requires
     # alternating roles). This replaces the old "." placeholder separator,

@@ -579,12 +579,12 @@ class Settings(BaseSettings):
         "self-referential awaited obligations opened by the ``create_goal`` builtin "
         "(#1508). A self-goal pins a definition-of-done the session is held to (it "
         "cannot quiesce while one is open), so an unbounded count would let a "
-        "session paint itself into a corner it can never satisfy AND inflate the "
-        "reserved obligations-tail budget. A concurrency cap, not a lifetime budget: "
+        "session paint itself into a corner it can never satisfy AND bloat the "
+        "quiescence-nudge that lists every outstanding obligation + its acceptance "
+        "contract (#1514). A concurrency cap, not a lifetime budget: "
         "``complete_goal``/``fail_goal`` free slots, so a sequential goal loop is "
         "unbounded by design. On exceed, ``create_goal`` returns a clear tool error "
-        "(no obligation opened). Matched to ``MAX_RENDERED_OBLIGATIONS`` so the open "
-        "self-goals always render as full lines in the tail block.",
+        "(no obligation opened).",
     )
     workflow_runs_per_account_max: int = Field(
         default=100,

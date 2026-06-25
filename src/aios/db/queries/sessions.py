@@ -532,23 +532,28 @@ async def get_open_obligations(
     ``awaited=true`` COALESCE filter (so a fire-and-forget ``Tell`` edge is
     excluded), same ``ORDER BY req.seq ASC`` (oldest-first, deterministic). But
     instead of bare ``request_id``s it projects a full :class:`Obligation` per open
-    edge so the tail-injected obligations block (and the ``owed_requests`` read
-    model) can render it: ``caller_kind`` (``req.data->'caller'->>'kind'`` — the
-    **trusted** frame, not the forgeable ``metadata.request`` blob), ``opened_at``
-    (``req.created_at``, for age), and a short ``summary`` (``req.data->>'summary'``,
-    additive — absent on pre-#1413 frames -> ``None`` -> an id-only render line, no
-    migration).
+    edge so the quiescence nudge (and the ``owed_requests`` read model) can render
+    it: ``caller_kind`` (``req.data->'caller'->>'kind'`` — the **trusted** frame,
+    not the forgeable ``metadata.request`` blob), ``opened_at`` (``req.created_at``,
+    for age), a short ``summary`` (``req.data->>'summary'``, additive — absent on
+    pre-#1413 frames -> ``None``), and the ``output_schema`` acceptance contract
+    (#1514, additive — ``None`` when the edge declared no schema).
 
-    This is the data source for the always-on obligations reminder that survives
-    context-windowing erasure of the original request user message (the defect
-    #1413 fixes): a full-log query, not a slate-derived render-time marker.
+    Decision-relevant ONLY when the agent tries to stop, so this set is no longer
+    rendered per-step (#1514 removed the #1413 always-on tail block); it is surfaced
+    at the quiescence attempt by the nudge. Still a full-log query, not a
+    slate-derived render-time marker, so it survives context-windowing erasure of
+    the original request user message.
     """
     rows: list[asyncpg.Record] = await conn.fetch(
         "SELECT req.data->>'request_id' AS rid, "
         "req.data->'caller'->>'kind' AS caller_kind, "
         "req.data->'caller'->>'id' AS caller_id, "
         "req.created_at AS opened_at, "
-        "req.data->>'summary' AS summary "
+        "req.data->>'summary' AS summary, "
+        # #1514: the acceptance contract (definition-of-done) carried on the trusted
+        # edge -- surfaced ONLY at the quiescence attempt (the nudge), never per-step.
+        "req.data->'output_schema' AS output_schema "
         "FROM events req "
         "WHERE req.session_id = $1 AND req.account_id = $2 "
         "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
@@ -571,6 +576,11 @@ async def get_open_obligations(
             caller_id=r["caller_id"],
             opened_at=r["opened_at"],
             summary=r["summary"],
+            # ``output_schema`` is a jsonb column; the pool's jsonb codec hands it
+            # back already parsed (parse_jsonb is the passthrough that documents
+            # that), so the Obligation carries the real schema dict (None stays None)
+            # that the quiescence nudge renders as the task's acceptance contract.
+            output_schema=parse_jsonb(r["output_schema"]),
         )
         for r in rows
     ]

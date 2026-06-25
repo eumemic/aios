@@ -1,17 +1,15 @@
-"""Integration tests for the always-on obligations tail block (#1413).
+"""Integration tests: the per-step obligations tail block is REMOVED (#1514).
 
-DB-backed (testcontainer Postgres). The block's whole reason to exist is to
-survive context-window erasure of the original request user message: a long-lived
-child whose opening request scrolled out of the window must STILL see, every step,
-the request_id it owes a response to. These tests drive the real
-``compute_step_prelude`` → ``compose_step_context`` path and assert:
+#1413 tail-injected an always-on obligations block on EVERY step. #1514 removed
+that per-step injection: an outstanding obligation is only decision-relevant when
+the agent tries to stop, so it is surfaced ONLY at the quiescence attempt (the
+nudge — see ``tests/integration/test_wf_step.py``), never per-step.
 
-* a child that owns an open request gets the obligation rendered as the FINAL
-  user-role message — even when the original request message has been windowed out;
-* the rendered line names the literal request_id (what ``return(request_id=...)``
-  needs) and the caller origin;
-* an ordinary session that owes nothing gets no obligations block;
-* answering the request drops the block on the next compose (no stale reminder).
+These DB-backed tests drive the real ``compute_step_prelude`` → ``compose_step_context``
+path and assert the per-step context NO LONGER renders an obligations block, even
+for a child that owns an open request whose original ask has been windowed out
+(AC1 + AC4 — the token-cost motivation). A session that owes nothing is unchanged
+(AC3).
 """
 
 from __future__ import annotations
@@ -58,17 +56,19 @@ async def pool_env(
         await pool.close()
 
 
-def _final_user_text(messages: list[dict[str, Any]]) -> str | None:
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            c = m.get("content")
-            if isinstance(c, str):
-                return c
-            if isinstance(c, list):
-                for blk in c:
-                    if isinstance(blk, dict) and blk.get("type") == "text":
-                        return blk.get("text")
-    return None
+def _all_user_text(messages: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            parts.append(c)
+        elif isinstance(c, list):
+            for blk in c:
+                if isinstance(blk, dict) and blk.get("type") == "text":
+                    parts.append(blk.get("text") or "")
+    return "\n".join(parts)
 
 
 @pytest.fixture
@@ -113,12 +113,12 @@ async def _prelude_and_compose(
     return ctx.messages
 
 
-async def test_obligation_renders_when_original_request_is_windowed_out(
+async def test_no_per_step_obligations_block_even_with_open_request(
     pool_env: tuple[asyncpg.Pool[Any], str, str, str],
     _stub_tool_provider: None,
 ) -> None:
-    """The repro: the opening request message is NOT in the windowed slate, yet the
-    obligation block still names the owed request_id as the final user line."""
+    """AC1/AC4: a child that owns an open request (its ask windowed out) gets NO
+    per-step obligations block — the surface moved to the quiescence nudge."""
     pool, account_id, _agent_id, env_id = pool_env
     _agent, _env, session = await seed_agent_env_session(
         pool, account_id=account_id, prefix="obl_window"
@@ -134,26 +134,66 @@ async def test_obligation_renders_when_original_request_is_windowed_out(
             environment_id=env_id,
             frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
             vault_ids=[],
+            output_schema={"type": "object"},
             summary="summarise the dossier",
         )
 
-    # Hand the composer an EMPTY windowed slate — i.e. the original request user
-    # message has scrolled out. The block is rebuilt from prelude.obligations, which
-    # reads the full log, so it must still appear.
+    # Empty windowed slate (the original ask has scrolled out). The old #1413 block
+    # would still render here; #1514 renders nothing per-step.
     messages = await _prelude_and_compose(
         pool, account_id=account_id, session_id=session.id, events=[]
     )
-    final = _final_user_text(messages)
-    assert final is not None
-    assert "req-windowed" in final, "owed request_id must survive windowing erasure"
-    assert "summarise the dossier" in final
-    assert "[run]" in final
+    joined = _all_user_text(messages)
+    assert "req-windowed" not in joined, "no per-step obligations block (#1514)"
+    assert "Open obligations" not in joined  # the old #1413 header is gone
+    assert "summarise the dossier" not in joined
+
+
+async def test_owes_request_tool_gate_still_present(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+    _stub_tool_provider: None,
+) -> None:
+    """The obligations are still fetched in the prelude to gate the return/error
+    tool surface — removing the render must not remove the tools a session owing a
+    request needs to answer it."""
+    pool, account_id, _agent_id, env_id = pool_env
+    _agent, _env, session = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="obl_gate"
+    )
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.append_request_opened(
+            conn,
+            session_id=session.id,
+            account_id=account_id,
+            request_id="req-gate",
+            caller={"kind": "run", "id": "run_owner"},
+            depth=1,
+            environment_id=env_id,
+            frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+            vault_ids=[],
+        )
+    session_basic = await sessions_service.get_session_basic(
+        pool, session.id, account_id=account_id
+    )
+    agent = await agents_service.load_for_session(pool, session_basic, account_id=account_id)
+    prelude = await compute_step_prelude(
+        pool,
+        session.id,
+        account_id=account_id,
+        session=session_basic,
+        agent=agent,
+        channels=[],
+        memory_store_echoes=[],
+    )
+    tool_names = {t["function"]["name"] for t in prelude.tools if "function" in t}
+    assert {"return", "error"} <= tool_names
 
 
 async def test_no_obligation_block_for_session_owing_nothing(
     pool_env: tuple[asyncpg.Pool[Any], str, str, str],
     _stub_tool_provider: None,
 ) -> None:
+    """AC3: a session owing nothing is unchanged — no obligations surface at all."""
     pool, account_id, _agent_id, _env_id = pool_env
     _agent, _env, session = await seed_agent_env_session(
         pool, account_id=account_id, prefix="obl_none"
@@ -161,52 +201,5 @@ async def test_no_obligation_block_for_session_owing_nothing(
     messages = await _prelude_and_compose(
         pool, account_id=account_id, session_id=session.id, events=[]
     )
-    joined = "\n".join(
-        m["content"]
-        for m in messages
-        if m.get("role") == "user" and isinstance(m.get("content"), str)
-    )
-    assert "request_id" not in joined.lower() or "req-" not in joined
-
-
-async def test_answering_drops_the_block_on_next_compose(
-    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
-    _stub_tool_provider: None,
-) -> None:
-    pool, account_id, _agent_id, env_id = pool_env
-    _agent, _env, session = await seed_agent_env_session(
-        pool, account_id=account_id, prefix="obl_drop"
-    )
-    async with pool.acquire() as conn, conn.transaction():
-        await queries.append_request_opened(
-            conn,
-            session_id=session.id,
-            account_id=account_id,
-            request_id="req-drop",
-            caller={"kind": "session", "id": "ses_owner"},
-            depth=0,
-            environment_id=env_id,
-            frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
-            vault_ids=[],
-            summary="do work",
-        )
-    before = await _prelude_and_compose(
-        pool, account_id=account_id, session_id=session.id, events=[]
-    )
-    assert "req-drop" in (_final_user_text(before) or "")
-
-    async with pool.acquire() as conn:
-        await queries.write_response_if_absent(
-            conn,
-            session.id,
-            account_id=account_id,
-            request_id="req-drop",
-            is_error=False,
-            result={"ok": True},
-            error=None,
-        )
-
-    after = await _prelude_and_compose(
-        pool, account_id=account_id, session_id=session.id, events=[]
-    )
-    assert "req-drop" not in (_final_user_text(after) or "")
+    joined = _all_user_text(messages)
+    assert "Open obligations" not in joined

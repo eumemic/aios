@@ -1249,14 +1249,13 @@ async def _check_completion_injection(
     )
     child_tools = {t["function"]["name"] for t in child_prelude.tools}
     assert {"return", "error"} <= child_tools
-    # #1413 background-child path: get_open_obligations now runs UNCONDITIONALLY
-    # (the background-child fast-path short-circuit was removed), so the child's
-    # open `run` obligation is fetched onto the prelude -- the data the always-on
-    # obligations tail block renders. The fast-path removal did NOT regress the
-    # return/error gate (it stayed bool(obligations), asserted above).
+    # get_open_obligations runs UNCONDITIONALLY (no background-child fast-path
+    # short-circuit), so the child's open `run` obligation is fetched onto the
+    # prelude -- now used ONLY to gate the return/error tools (asserted above).
+    # #1514 removed the per-step obligations tail block, so there is no longer a
+    # reserved tail budget on the prelude; the obligation set is still computed.
     assert child_prelude.obligations, "background child's run obligation must be computed"
     assert child_prelude.obligations[0].caller_kind == "run"
-    assert child_prelude.obligations_block_upper_bound_local > 0
 
     fg = await sessions_service.create_session(
         pool,
@@ -1279,10 +1278,9 @@ async def _check_completion_injection(
     )
     fg_tools = {t["function"]["name"] for t in fg_prelude.tools}
     assert "return" not in fg_tools and "error" not in fg_tools
-    # An ordinary foreground session owes nothing -> no obligations, no reserved
-    # tail budget (the unconditional query returns []).
+    # An ordinary foreground session owes nothing -> empty obligation set (the
+    # unconditional query returns []); #1514 removed the reserved tail budget.
     assert fg_prelude.obligations == []
-    assert fg_prelude.obligations_block_upper_bound_local == 0
 
 
 async def test_return_writes_response_and_wakes_caller_without_archiving(
@@ -1790,6 +1788,67 @@ async def test_idle_with_open_request_is_nudged(
     assert open_ids == ["sha:n#0"]  # still open — nudging is not answering
     assert nudges == 1
     assert status == "active"  # the nudge user message keeps it alive, no idle window
+
+
+async def _last_nudge_text(pool: asyncpg.Pool[Any], session_id: str) -> str:
+    """The content of the most recent quiescence-guard nudge user message."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT data->>'content' AS content FROM events "
+            "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
+            "AND role = 'user' AND data->'metadata'->'nudged_request_ids' IS NOT NULL "
+            "ORDER BY seq DESC LIMIT 1",
+            session_id,
+            "acc_wf",
+        )
+    assert row is not None, "expected a nudge message"
+    return row["content"]
+
+
+async def test_quiescence_nudge_surfaces_acceptance_contract(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1514 AC2: at a quiescence attempt with an open obligation, the nudge surfaces
+    the outstanding-task list PLUS each task's acceptance contract (``output_schema``),
+    source-agnostic. The contract detail appears ONLY in the quiescence nudge, not
+    per-step (AC4 -- the per-step block is gone, asserted in the unit/per-step tests)."""
+    pool = wf_runtime
+    schema = {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "string"}}}
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:contract#0", output_schema=schema)
+
+    assistant = await _idle_assistant_turn(pool, cid)
+    result = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, cid, assistant, account_id="acc_wf"
+    )
+    assert result.nudged
+
+    content = await _last_nudge_text(pool, cid)
+    # The outstanding-task id is named...
+    assert "sha:contract#0" in content
+    # ...AND its acceptance contract (the literal output_schema) is surfaced.
+    assert "acceptance contract" in content
+    assert "answer" in content
+    assert "output_schema" in content
+
+
+async def test_quiescence_nudge_handles_obligation_without_schema(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1514 source-agnostic: an obligation with no ``output_schema`` (the common case,
+    and every pre-#1512 self-goal) still nudges -- its contract clause reads 'any
+    returned result closes it' (binary open/closed; no met-tracking)."""
+    pool = wf_runtime
+    _run_id, cid = await _spawn_child(pool, wf_agent_id, "sha:noschema#0")  # output_schema=None
+
+    assistant = await _idle_assistant_turn(pool, cid)
+    result = await sessions_service.append_assistant_and_guard_quiescence(
+        pool, cid, assistant, account_id="acc_wf"
+    )
+    assert result.nudged
+
+    content = await _last_nudge_text(pool, cid)
+    assert "sha:noschema#0" in content
+    assert "any returned result" in content
 
 
 async def test_tell_spawned_child_reaches_idle_with_zero_nudges(

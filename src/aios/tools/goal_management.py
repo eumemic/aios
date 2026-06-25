@@ -6,8 +6,10 @@ with ``caller={kind:"session", id:<this session>}``, ``awaited=true``) that the
 quiescence guard refuses to let the session quiesce past. The *gating* already
 exists and works — an open awaited obligation drives the quiescence-guard
 nudge / ``no_return`` loop (``db/queries/sessions.py`` + ``harness/context.py``
-``_agent_owes_response``) and renders in the "Open obligations" tail block
-(``harness/obligations.py``). The ONLY way to open a self-goal used to be the
+``_agent_owes_response``), and at the quiescence attempt the nudge surfaces the
+outstanding obligation + its acceptance contract (#1514; ``harness/obligations.py``
+keeps only the shared formatting helpers since the per-step tail block was removed).
+The ONLY way to open a self-goal used to be the
 cryptic ``call_session(session_id=<its own id>, input=…)`` awaited self-call
 (#1414) — undiscoverable, awkward, easy to forget.
 
@@ -161,8 +163,8 @@ async def create_goal_handler(
     # Admission cap: count THIS session's currently-open self-goals (concurrency,
     # not a lifetime budget — complete_goal/fail_goal free slots). Read-then-write
     # under the same pool; a benign race past the cap only over-admits by a small
-    # constant, which the obligations-tail render cap (MAX_RENDERED_OBLIGATIONS)
-    # still bounds.
+    # constant (the session_open_goals_max ceiling still bounds the quiescence-nudge
+    # that lists every outstanding obligation + its acceptance contract, #1514).
     cap = get_settings().session_open_goals_max
     open_goals = await _open_self_goals(pool, session_id, account_id=account_id)
     if len(open_goals) >= cap:
