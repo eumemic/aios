@@ -167,6 +167,71 @@ class TestMemoryListLimit:
         assert len(body["data"]) == 5
         assert body["has_more"] is True
 
+    async def test_has_more_false_when_count_equals_limit(
+        self, http_client: httpx.AsyncClient
+    ) -> None:
+        """Mode A: a store with exactly ``limit`` memories has no next page.
+
+        Pre-fix the router computed ``has_more = raw_count == limit``, so a
+        store with exactly ``limit`` rows reported ``has_more=True`` (the
+        classic ``count == limit`` off-by-one) even though the page was
+        complete.
+        """
+        store = await _create_store(http_client)
+        store_id = store["id"]
+        for i in range(5):
+            await _create_memory(http_client, store_id, f"/x-{i:03d}.md", f"b{i}")
+        r = await http_client.get(f"/v1/memory-stores/{store_id}/memories", params={"limit": 5})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert len(body["data"]) == 5
+        assert body["has_more"] is False, (
+            "exactly limit rows means the page is complete; has_more must be False."
+        )
+
+    async def test_has_more_true_under_depth_collapse(
+        self, http_client: httpx.AsyncClient
+    ) -> None:
+        """Mode B: depth-collapse must not hide a truncated raw fetch.
+
+        Seed K > limit memories all under one deep directory so ``depth=1``
+        collapses them into a single ``MemoryPrefix``. Pre-fix the raw fetch
+        was capped at ``limit`` and ``has_more`` was derived from the
+        post-collapse memory count (which excludes prefixes), so it dropped
+        below ``limit`` → ``has_more=False`` even though the raw fetch was
+        truncated and memories were silently omitted.
+        """
+        store = await _create_store(http_client)
+        store_id = store["id"]
+        for i in range(8):
+            await _create_memory(http_client, store_id, f"/a/deep/x{i:03d}.md", f"b{i}")
+        r = await http_client.get(
+            f"/v1/memory-stores/{store_id}/memories",
+            params={"order_by": "path", "depth": 1, "limit": 3},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["has_more"] is True, (
+            "the raw fetch was truncated at the limit; depth-collapse must not "
+            "turn that into a false has_more=False (silent data loss)."
+        )
+
+    async def test_has_more_false_under_depth_when_complete(
+        self, http_client: httpx.AsyncClient
+    ) -> None:
+        """Depth-collapse with the full result set fitting under the limit."""
+        store = await _create_store(http_client)
+        store_id = store["id"]
+        for i in range(3):
+            await _create_memory(http_client, store_id, f"/a/deep/x{i:03d}.md", f"b{i}")
+        r = await http_client.get(
+            f"/v1/memory-stores/{store_id}/memories",
+            params={"order_by": "path", "depth": 1, "limit": 10},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["has_more"] is False
+
 
 class TestMemoryCrud:
     async def test_create_retrieve_round_trip(self, http_client: httpx.AsyncClient) -> None:

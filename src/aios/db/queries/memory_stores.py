@@ -445,7 +445,7 @@ async def list_memories(
     order_by: str = "created_at",
     depth: int | None = None,
     limit: int = 100,
-) -> list[Memory | MemoryPrefix]:
+) -> tuple[list[Memory | MemoryPrefix], bool]:
     """List memories, optionally filtered by ``path_prefix`` and depth-clipped.
 
     ``depth`` requires ``order_by='path'`` (matches Anthropic's wire validation).
@@ -454,6 +454,15 @@ async def list_memories(
     ``limit`` caps the raw-row fetch — depth aggregation may then collapse
     that into fewer response entries, but the SQL bound prevents unbounded
     payloads on stores with thousands of memories.
+
+    Returns ``(items, has_more)``. Following the ``ListResponse.paginate``
+    idiom, the SQL fetches ``limit + 1`` raw rows and ``has_more`` is derived
+    from the *raw* fetch **before** any depth-collapse, then the extra row is
+    trimmed. Computing ``has_more`` from the raw fetch is essential: under
+    depth-collapse the raw rows fold into a few synthetic prefixes, so a
+    post-collapse count would understate truncation and silently drop
+    memories (any deep directory with more than ``limit`` entries would
+    otherwise be un-listable-to-completion at depth with no warning).
     """
     if depth is not None and order_by != "path":
         raise ConflictError(
@@ -470,14 +479,21 @@ async def list_memories(
         args.append(_escape_like(path_prefix))
         where += f" AND (path = ${len(args) - 1} OR path LIKE ${len(args)} || '%')"
     order_sql = "path ASC" if order_by == "path" else "created_at DESC"
-    args.append(limit)
+    # Fetch one extra row so we can detect a further page without a COUNT —
+    # mirrors ``ListResponse.paginate``.
+    args.append(limit + 1)
     rows = await conn.fetch(
         f"SELECT * FROM memories WHERE {where} ORDER BY {order_sql} LIMIT ${len(args)}", *args
     )
 
+    # ``has_more`` is decided from the raw fetch, before depth-collapse, then
+    # the sentinel extra row is trimmed.
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
     memories = [_row_to_memory(r, include_content=False) for r in rows]
     if depth is None:
-        return list(memories)
+        return list(memories), has_more
 
     base = path_prefix.rstrip("/") if path_prefix else ""
     out: list[Memory | MemoryPrefix] = []
@@ -494,7 +510,7 @@ async def list_memories(
             continue
         seen_prefixes.add(prefix_path)
         out.append(MemoryPrefix(path=prefix_path))
-    return out
+    return out, has_more
 
 
 async def update_memory_with_version(

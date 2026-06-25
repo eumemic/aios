@@ -232,7 +232,7 @@ async def list_memories(
     order_by: str = "created_at",
     depth: int | None = None,
     limit: int = 100,
-) -> list[Memory | MemoryPrefix]:
+) -> tuple[list[Memory | MemoryPrefix], bool]:
     async with pool.acquire() as conn:
         return await queries.list_memories(
             conn,
