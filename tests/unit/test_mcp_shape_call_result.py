@@ -88,9 +88,7 @@ class TestOutputSchemaPropagation:
         env = make_function_tool("mcp__srv__get_weather", tool)
         # The model must be told the tool produces structured output.
         assert "outputSchema" in env["function"]
-        assert env["function"]["outputSchema"]["properties"]["temperature"] == {
-            "type": "number"
-        }
+        assert env["function"]["outputSchema"]["properties"]["temperature"] == {"type": "number"}
 
     def test_no_output_schema_omits_key(self) -> None:
         tool = Tool(
