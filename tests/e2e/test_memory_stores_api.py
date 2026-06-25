@@ -189,9 +189,7 @@ class TestMemoryListLimit:
             "exactly limit rows means the page is complete; has_more must be False."
         )
 
-    async def test_has_more_true_under_depth_collapse(
-        self, http_client: httpx.AsyncClient
-    ) -> None:
+    async def test_has_more_true_under_depth_collapse(self, http_client: httpx.AsyncClient) -> None:
         """Mode B: depth-collapse must not hide a truncated raw fetch.
 
         Seed K > limit memories all under one deep directory so ``depth=1``
