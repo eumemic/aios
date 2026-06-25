@@ -958,8 +958,13 @@ async def _open_agent_capability(
         # child's effective api_base iff it equals the launcher's (a workflow run has
         # none → the default operator endpoint) OR sits in the operator trusted-endpoint
         # allowlist; else FAIL CLOSED with a catchable rejection, before any child row
-        # exists. Sound-by-precondition today (create_agent is operator-only); the clamp
-        # makes the boundary real + frozen ahead of native self-management.
+        # exists. Both clamps are needed and independent: the create-time
+        # surface-attenuation clamp (#1470, services.agents._enforce_surface_attenuation)
+        # bounds what a self-authoring agent may WRITE (declared ⊆ creator), while this
+        # spawn-edge re-clamp bounds what a given RUN may wield (agent ∩ run) and freezes
+        # model identity. With the create-time clamp in place this edge stays sound even
+        # with native self-management — it no longer rests on the old "create_agent is
+        # operator-only" precondition.
         child_litellm_extra = agent.litellm_extra or {}
         if not attenuation_service.model_identity_trusted(child_litellm_extra, None):
             redirect = api_base_of(child_litellm_extra)
