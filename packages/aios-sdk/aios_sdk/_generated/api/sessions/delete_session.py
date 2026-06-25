@@ -77,6 +77,9 @@ def sync_detailed(
     irreversible hard-delete (cascade of events / vaults / bindings) use
     ``POST /v1/sessions/{session_id}/purge``.
 
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
+
     Args:
         session_id (str):
         authorization (None | str | Unset):
@@ -117,6 +120,9 @@ def sync(
     irreversible hard-delete (cascade of events / vaults / bindings) use
     ``POST /v1/sessions/{session_id}/purge``.
 
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
+
     Args:
         session_id (str):
         authorization (None | str | Unset):
@@ -151,6 +157,9 @@ async def asyncio_detailed(
     retained. Bare DELETE is never silently destructive; for the
     irreversible hard-delete (cascade of events / vaults / bindings) use
     ``POST /v1/sessions/{session_id}/purge``.
+
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
 
     Args:
         session_id (str):
@@ -189,6 +198,9 @@ async def asyncio(
     retained. Bare DELETE is never silently destructive; for the
     irreversible hard-delete (cascade of events / vaults / bindings) use
     ``POST /v1/sessions/{session_id}/purge``.
+
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
 
     Args:
         session_id (str):

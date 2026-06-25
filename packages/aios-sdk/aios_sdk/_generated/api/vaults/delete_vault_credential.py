@@ -80,6 +80,9 @@ def sync_detailed(
     never silently destructive; for the irreversible hard-delete use
     ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
 
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
+
     Args:
         vault_id (str):
         credential_id (str):
@@ -123,6 +126,9 @@ def sync(
     never silently destructive; for the irreversible hard-delete use
     ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
 
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
+
     Args:
         vault_id (str):
         credential_id (str):
@@ -160,6 +166,9 @@ async def asyncio_detailed(
     ``archive_vault_credential``). The row persists for audit. Bare DELETE is
     never silently destructive; for the irreversible hard-delete use
     ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
+
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
 
     Args:
         vault_id (str):
@@ -201,6 +210,9 @@ async def asyncio(
     ``archive_vault_credential``). The row persists for audit. Bare DELETE is
     never silently destructive; for the irreversible hard-delete use
     ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
+
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
 
     Args:
         vault_id (str):
