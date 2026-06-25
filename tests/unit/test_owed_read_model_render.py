@@ -17,6 +17,7 @@ consumers (the quiescence-attempt surfacing via ``render_owed_listing`` and the
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from aios.harness.obligations import (
     _SCHEMA_MAX,
@@ -44,7 +45,7 @@ def _ob(
     caller_id: str | None = None,
     age: timedelta = timedelta(seconds=0),
     summary: str | None = "do the thing",
-    output_schema: dict | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> Obligation:
     return Obligation(
         request_id=rid,
