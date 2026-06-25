@@ -1416,7 +1416,7 @@ async def update_session(
 
 
 async def archive_session(
-    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, idempotent: bool = False
 ) -> Session:
     row = await _archive_scoped(
         conn,
@@ -1424,6 +1424,7 @@ async def archive_session(
         id_=session_id,
         account_id=account_id,
         noun="session",
+        idempotent=idempotent,
     )
     return _row_to_session(row)
 

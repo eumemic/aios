@@ -141,12 +141,21 @@ async def update_vault(
     return _row_to_vault(row)
 
 
-async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str) -> Vault:
+async def archive_vault(
+    conn: asyncpg.Connection[Any], vault_id: str, *, account_id: str, idempotent: bool = False
+) -> Vault:
     """Archive a vault and purge the encrypted blobs of its active credentials.
 
     Archive is an UPDATE, so ``ON DELETE CASCADE`` on the FK does not fire
     here — child credentials must be archived and zeroed explicitly. Both
     operations run in one transaction.
+
+    When ``idempotent`` is set, an already-archived (but still present) vault
+    is not an error: the existing row is returned unchanged. This backs the
+    bare ``DELETE`` verb (T2 soft-archive) — a second DELETE, or a DELETE
+    after an explicit ``/archive``, still reports the archived row with 200
+    rather than 404. Mirrors the ``_archive_scoped`` fallback used by the
+    other archive families.
     """
     async with conn.transaction():
         row = await conn.fetchrow(
@@ -156,6 +165,14 @@ async def archive_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account
             account_id,
         )
         if row is None:
+            if idempotent:
+                existing = await conn.fetchrow(
+                    "SELECT * FROM vaults WHERE id = $1 AND account_id = $2",
+                    vault_id,
+                    account_id,
+                )
+                if existing is not None:
+                    return _row_to_vault(existing)
             raise NotFoundError(
                 f"vault {vault_id} not found or already archived",
                 detail={"id": vault_id},
@@ -535,12 +552,20 @@ async def archive_vault_credential(
     credential_id: str,
     *,
     account_id: str,
+    idempotent: bool = False,
 ) -> VaultCredential:
     """Archive a credential and zero out its encrypted secret payload.
 
     The bytes are scrubbed at archive time so a future DB dump or query
     cannot leak the secret, even though ``WHERE archived_at IS NULL``
     filters in the read path already prevent resolution.
+
+    When ``idempotent`` is set, an already-archived (but still present)
+    credential is not an error: the existing row is returned unchanged. This
+    backs the bare ``DELETE`` verb (T2 soft-archive) — a second DELETE, or a
+    DELETE after an explicit ``/archive``, still reports the archived row with
+    200 rather than 404. Mirrors the ``_archive_scoped`` fallback used by the
+    other archive families.
     """
     row = await conn.fetchrow(
         "UPDATE vault_credentials "
@@ -552,6 +577,16 @@ async def archive_vault_credential(
         account_id,
     )
     if row is None:
+        if idempotent:
+            existing = await conn.fetchrow(
+                "SELECT * FROM vault_credentials "
+                "WHERE id = $1 AND vault_id = $2 AND account_id = $3",
+                credential_id,
+                vault_id,
+                account_id,
+            )
+            if existing is not None:
+                return _row_to_vault_credential(existing)
         raise NotFoundError(
             f"credential {credential_id} not found or already archived",
             detail={"id": credential_id, "vault_id": vault_id},

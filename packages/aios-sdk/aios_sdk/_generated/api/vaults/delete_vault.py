@@ -77,6 +77,9 @@ def sync_detailed(
     Bare DELETE is never silently destructive; for the irreversible
     hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
 
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
+
     Args:
         vault_id (str):
         authorization (None | str | Unset):
@@ -117,6 +120,9 @@ def sync(
     Bare DELETE is never silently destructive; for the irreversible
     hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
 
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
+
     Args:
         vault_id (str):
         authorization (None | str | Unset):
@@ -151,6 +157,9 @@ async def asyncio_detailed(
     ``archive_vault``). The rows persist for audit and history is retained.
     Bare DELETE is never silently destructive; for the irreversible
     hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
+
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
 
     Args:
         vault_id (str):
@@ -189,6 +198,9 @@ async def asyncio(
     ``archive_vault``). The rows persist for audit and history is retained.
     Bare DELETE is never silently destructive; for the irreversible
     hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
+
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
 
     Args:
         vault_id (str):

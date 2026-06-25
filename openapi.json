@@ -1952,7 +1952,7 @@
           "sessions"
         ],
         "summary": "Delete",
-        "description": "Soft-archive a session (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at`` and hides the session from default lists (same\nbehavior as ``archive_session``); events, vaults, and bindings are\nretained. Bare DELETE is never silently destructive; for the\nirreversible hard-delete (cascade of events / vaults / bindings) use\n``POST /v1/sessions/{session_id}/purge``.",
+        "description": "Soft-archive a session (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at`` and hides the session from default lists (same\nbehavior as ``archive_session``); events, vaults, and bindings are\nretained. Bare DELETE is never silently destructive; for the\nirreversible hard-delete (cascade of events / vaults / bindings) use\n``POST /v1/sessions/{session_id}/purge``.\n\nIdempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns\nthe existing archived row with 200, not 404.",
         "operationId": "delete_session",
         "parameters": [
           {
@@ -4578,7 +4578,7 @@
           "vaults"
         ],
         "summary": "Delete",
-        "description": "Soft-archive a vault (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at`` and hides the vault from default lists, zeroing the\nencrypted secret material of its credentials (same behavior as\n``archive_vault``). The rows persist for audit and history is retained.\nBare DELETE is never silently destructive; for the irreversible\nhard-delete use ``POST /v1/vaults/{vault_id}/purge``.",
+        "description": "Soft-archive a vault (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at`` and hides the vault from default lists, zeroing the\nencrypted secret material of its credentials (same behavior as\n``archive_vault``). The rows persist for audit and history is retained.\nBare DELETE is never silently destructive; for the irreversible\nhard-delete use ``POST /v1/vaults/{vault_id}/purge``.\n\nIdempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns\nthe existing archived row with 200, not 404.",
         "operationId": "delete_vault",
         "parameters": [
           {
@@ -5203,7 +5203,7 @@
           "vaults"
         ],
         "summary": "Delete Credential",
-        "description": "Soft-archive a credential (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at``, hides the credential from default lists, and zeroes\nits encrypted secret payload (same behavior as\n``archive_vault_credential``). The row persists for audit. Bare DELETE is\nnever silently destructive; for the irreversible hard-delete use\n``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.",
+        "description": "Soft-archive a credential (bare DELETE = soft-archive; T2 convention).\n\nSets ``archived_at``, hides the credential from default lists, and zeroes\nits encrypted secret payload (same behavior as\n``archive_vault_credential``). The row persists for audit. Bare DELETE is\nnever silently destructive; for the irreversible hard-delete use\n``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.\n\nIdempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns\nthe existing archived row with 200, not 404.",
         "operationId": "delete_vault_credential",
         "parameters": [
           {

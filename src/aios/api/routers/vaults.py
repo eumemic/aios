@@ -115,8 +115,11 @@ async def delete(vault_id: str, pool: PoolDep, account_id: AccountIdDep) -> Vaul
     ``archive_vault``). The rows persist for audit and history is retained.
     Bare DELETE is never silently destructive; for the irreversible
     hard-delete use ``POST /v1/vaults/{vault_id}/purge``.
+
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
     """
-    return await service.archive_vault(pool, vault_id, account_id=account_id)
+    return await service.archive_vault(pool, vault_id, account_id=account_id, idempotent=True)
 
 
 @router.post(
@@ -316,9 +319,12 @@ async def delete_credential(
     ``archive_vault_credential``). The row persists for audit. Bare DELETE is
     never silently destructive; for the irreversible hard-delete use
     ``POST /v1/vaults/{vault_id}/credentials/{credential_id}/purge``.
+
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
     """
     return await service.archive_vault_credential(
-        pool, vault_id, credential_id, account_id=account_id
+        pool, vault_id, credential_id, account_id=account_id, idempotent=True
     )
 
 

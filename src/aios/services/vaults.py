@@ -376,9 +376,13 @@ async def update_vault(
         )
 
 
-async def archive_vault(pool: asyncpg.Pool[Any], vault_id: str, *, account_id: str) -> Vault:
+async def archive_vault(
+    pool: asyncpg.Pool[Any], vault_id: str, *, account_id: str, idempotent: bool = False
+) -> Vault:
     async with pool.acquire() as conn:
-        archived = await queries.archive_vault(conn, vault_id, account_id=account_id)
+        archived = await queries.archive_vault(
+            conn, vault_id, account_id=account_id, idempotent=idempotent
+        )
     # Archiving a vault retires (zeroes) all its credentials' secrets, so the
     # pooled MCP sessions keyed on this vault must be evicted too (#1030).
     await _notify_evict_vault(pool, vault_id)
@@ -603,10 +607,11 @@ async def archive_vault_credential(
     credential_id: str,
     *,
     account_id: str,
+    idempotent: bool = False,
 ) -> VaultCredential:
     async with pool.acquire() as conn:
         archived = await queries.archive_vault_credential(
-            conn, vault_id, credential_id, account_id=account_id
+            conn, vault_id, credential_id, account_id=account_id, idempotent=idempotent
         )
     # Evict the pooled MCP session: the credential's secret is now retired (#1030).
     await _notify_evict_vault(pool, vault_id)

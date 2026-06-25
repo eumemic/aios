@@ -489,8 +489,11 @@ async def delete(session_id: str, pool: PoolDep, account_id: AccountIdDep) -> Se
     retained. Bare DELETE is never silently destructive; for the
     irreversible hard-delete (cascade of events / vaults / bindings) use
     ``POST /v1/sessions/{session_id}/purge``.
+
+    Idempotent: a repeat bare DELETE (or a DELETE after ``/archive``) returns
+    the existing archived row with 200, not 404.
     """
-    return await service.archive_session(pool, session_id, account_id=account_id)
+    return await service.archive_session(pool, session_id, account_id=account_id, idempotent=True)
 
 
 @router.post(
