@@ -581,9 +581,10 @@ class Settings(BaseSettings):
         "cannot quiesce while one is open), so an unbounded count would let a "
         "session paint itself into a corner it can never satisfy AND inflate the "
         "reserved obligations-tail budget. A concurrency cap, not a lifetime budget: "
-        "``complete_goal``/``fail_goal`` free slots, so a sequential goal loop is "
-        "unbounded by design. On exceed, ``create_goal`` returns a clear tool error "
-        "(no obligation opened). Matched to ``MAX_RENDERED_OBLIGATIONS`` so the open "
+        "closing a goal with ``return``/``error`` (its goal_id as request_id) frees "
+        "slots, so a sequential goal loop is unbounded by design. On exceed, "
+        "``create_goal`` returns a clear tool error (no obligation opened). Matched "
+        "to ``MAX_RENDERED_OBLIGATIONS`` so the open "
         "self-goals always render as full lines in the tail block.",
     )
     workflow_runs_per_account_max: int = Field(
