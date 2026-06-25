@@ -51,7 +51,7 @@ Three properties no task-scoped framework has, each a direct consequence of the 
 
 **Tools never block the model.** A user message landing mid-tool is processed by the very next step. You can redirect an agent in the middle of a 90-second fetch, fan out a dozen sub-agents without freezing the conversation, and cancel in-flight work cleanly — because a tool call is a detached task, not a blocking call inside a controller loop.
 
-**The event log *is* the assistant — derived state can't lie.** One append-only, gapless Postgres journal per session is the single source of truth. There is no stored status column: `active/idle/archived/errored`, token spend, `awaiting` ("what is it blocked on"), and `owed_requests` ("what does it owe an answer to") are all SQL arithmetic over the log. The read path and the worker's wake sweep share the **identical** predicate, so they cannot drift — designing out a whole class of "worker wakes with no work / skips a session" bugs. Context is a strictly monotonic function of the log, so the prompt prefix cache stays hot, and scrolled-out history is recalled losslessly with the `search_events` SQL tool.
+**The event log *is* the assistant — derived state can't lie.** One append-only, gapless Postgres journal per session is the single source of truth. There is no stored status column: `active/idle/archived/errored`, token spend, `awaiting` ("what is it blocked on"), and `obligations` ("what does it owe an answer to") are all SQL arithmetic over the log. The read path and the worker's wake sweep share the **identical** predicate, so they cannot drift — designing out a whole class of "worker wakes with no work / skips a session" bugs. Context is a strictly monotonic function of the log, so the prompt prefix cache stays hot, and scrolled-out history is recalled losslessly with the `search_events` SQL tool.
 
 **Durable, replayable workflows whose orchestration spends zero model tokens.** A workflow is the dual of an agent: deterministic Python where the model would be. A run's entire state is an append-only journal, replayed from memo on each wake — crash-, deploy-, and month-long-suspension-durable — while the orchestration logic itself costs **nothing**. The replayed steps are real LLM-agent invocations; the glue between them is free.
 
@@ -288,7 +288,7 @@ The harness turns the event log into a running agent. There is no controller loo
 - **Clone/fork at head** — copy the full event prefix (plus vaults, resources, triggers with counters reset) into a fresh session yielding a byte-identical next-step context. A/B a different model from an identical history.
 - **`archive_when_idle`** — self-reclaiming one-shot sessions that soft-archive the first time they go idle owing nothing (workflow children launch with this set).
 - **Outbound-suppression mode** — reads pass through to real credentials while writes return a *synthesized* success the agent can't distinguish from production, with an audit span. The atomic flip-v1→v2 lever for parallel-run cutovers.
-- **Two derived views** — `awaiting` (tool calls the session is blocked on) and `owed_requests` (requests it must answer), both computed from the log and surviving context-windowing erasure.
+- **Two derived views** — `awaiting` (tool calls the session is blocked on) and `obligations` (requests it must answer), both computed from the log and surviving context-windowing erasure.
 
 <details>
 <summary><b>Session & agent endpoints</b></summary>
@@ -297,7 +297,7 @@ The harness turns the event log into a running agent. There is no controller loo
 |---|---|---|
 | POST | `/v1/sessions` | Create (agent + env; optional version pin, vaults, resources, triggers, initial message). |
 | GET | `/v1/sessions` | Keyset-paginated list with derived-status filters. |
-| GET | `/v1/sessions/{id}` | Read view: derived status, `stop_reason`, `awaiting`, `owed_requests`, usage. |
+| GET | `/v1/sessions/{id}` | Read view: derived status, `stop_reason`, `awaiting`, `obligations`, usage. |
 | PUT | `/v1/sessions/{id}` | Rebind agent/version/model; flip outbound suppression. |
 | POST | `/v1/sessions/{id}/clone` | Fork at head (idle parents only). |
 | POST | `/v1/sessions/{id}/archive` | Soft-archive (terminal). |

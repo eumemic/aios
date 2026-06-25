@@ -532,7 +532,7 @@ async def get_open_obligations(
     ``awaited=true`` COALESCE filter (so a fire-and-forget ``Tell`` edge is
     excluded), same ``ORDER BY req.seq ASC`` (oldest-first, deterministic). But
     instead of bare ``request_id``s it projects a full :class:`Obligation` per open
-    edge so the tail-injected obligations block (and the ``owed_requests`` read
+    edge so the tail-injected obligations block (and the ``obligations`` read
     model) can render it: ``caller_kind`` (``req.data->'caller'->>'kind'`` — the
     **trusted** frame, not the forgeable ``metadata.request`` blob), ``opened_at``
     (``req.created_at``, for age), and a short ``summary`` (``req.data->>'summary'``,

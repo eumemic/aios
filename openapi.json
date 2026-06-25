@@ -14491,29 +14491,7 @@
         "title": "OAuthStartResponse",
         "description": "The authorization URL to redirect the user to, plus the flow's CSRF state."
       },
-      "OneShotSource": {
-        "properties": {
-          "kind": {
-            "type": "string",
-            "const": "one_shot",
-            "title": "Kind",
-            "default": "one_shot"
-          },
-          "fire_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Fire At"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "fire_at"
-        ],
-        "title": "OneShotSource",
-        "description": "One-shot source: fires once at an absolute UTC time, then self-deletes."
-      },
-      "OwedRequest": {
+      "Obligation": {
         "properties": {
           "request_id": {
             "type": "string",
@@ -14569,8 +14547,30 @@
           "caller_kind",
           "opened_at"
         ],
-        "title": "OwedRequest",
-        "description": "Read-model projection of an open obligation on the :class:`Session` view (#1413).\n\nParallel to ``Session.awaiting`` (tool-call-only), but for the request edges\nthe session owes a response to. Projected from the same ``get_open_obligations``\nrows. Load-bearing for the operator-cancel path (#1414) \u2014 it cannot enumerate\na session's open goal_ids otherwise.\n\n``output_schema`` (#1522) carries the request's acceptance contract \u2014 the same\nadditive projection added to :class:`Obligation`, from which this view is\nderived."
+        "title": "Obligation",
+        "description": "One still-open **awaited** request the session owes a response to (#1413).\n\nThe dual of :class:`AwaitingToolCall`: that view lists tool calls the session\nis *blocked on*; this one lists requests the session *owes an answer to*. An\nobligation is an open ``request_opened`` edge (#1123) \u2014 ``awaited=true``, with\nno paired ``request_response`` \u2014 and is the in-context surface the model reads\nto know which ``request_id`` to echo back to ``return``/``error``.\n\nDerived (oldest-first) from the trusted ``request_opened`` lifecycle frame via\n:func:`aios.db.queries.sessions.get_open_obligations`, NEVER the forgeable\n``metadata.request`` user-message blob (#1131-proof). ``caller_kind`` is the\ntrusted ``caller.kind`` (``api``|``session``|``run``); ``opened_at`` is the\nedge's ``created_at`` (for age); ``summary`` is a short truncated preview of\nthe request input (absent on pre-#1413 frames \u2192 ``None``, rendered id-only).\n\n``output_schema`` (#1522) is the JSON Schema the request demands of its\nresponse ``value`` \u2014 the **acceptance contract** the session must produce to\nanswer. It is the same datum :func:`aios.db.queries.sessions.get_request_output_schema`\nreads off the ``request_opened`` frame, now projected directly onto the owed\nread-model so a single renderer can show \"here is what you owe **and the\nformat**\". Additive: ``None`` when the request demands no schema (the common\ncase) or on a pre-#1522 frame \u2014 no migration."
+      },
+      "OneShotSource": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "one_shot",
+            "title": "Kind",
+            "default": "one_shot"
+          },
+          "fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Fire At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "fire_at"
+        ],
+        "title": "OneShotSource",
+        "description": "One-shot source: fires once at an absolute UTC time, then self-deletes."
       },
       "RecentChat": {
         "properties": {
@@ -15214,12 +15214,12 @@
             "type": "array",
             "title": "Awaiting"
           },
-          "owed_requests": {
+          "obligations": {
             "items": {
-              "$ref": "#/components/schemas/OwedRequest"
+              "$ref": "#/components/schemas/Obligation"
             },
             "type": "array",
-            "title": "Owed Requests"
+            "title": "Obligations"
           },
           "vault_ids": {
             "items": {
@@ -15368,7 +15368,7 @@
           "updated_at"
         ],
         "title": "Session",
-        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``status`` ({active, idle}) is derived per read from the event log; see\n:data:`SessionStatus`. ``stop_reason`` records why the most recent step\nended. Possible ``type`` values: ``\"end_turn\"``, ``\"interrupt\"``,\n``\"rescheduling\"``, ``\"error\"`` (``idle`` + ``error`` = the errored\nlanding pad). ``awaiting`` lists tool calls the session is blocked on\n(derived per read from the event log + agent tool specs). ``owed_requests``\nlists the still-open **awaited** request edges the session owes a response to\n(derived per read from the ``request_opened`` lifecycle frame \u2014 #1413)."
+        "description": "Read view of a session. Internal-only columns are not exposed.\n\n``status`` ({active, idle}) is derived per read from the event log; see\n:data:`SessionStatus`. ``stop_reason`` records why the most recent step\nended. Possible ``type`` values: ``\"end_turn\"``, ``\"interrupt\"``,\n``\"rescheduling\"``, ``\"error\"`` (``idle`` + ``error`` = the errored\nlanding pad). ``awaiting`` lists tool calls the session is blocked on\n(derived per read from the event log + agent tool specs). ``obligations``\nlists the still-open **awaited** request edges the session owes a response to\n(derived per read from the ``request_opened`` lifecycle frame \u2014 #1413)."
       },
       "SessionAwaitResponse": {
         "properties": {

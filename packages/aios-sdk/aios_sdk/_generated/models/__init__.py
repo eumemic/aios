@@ -147,9 +147,9 @@ from .o_auth_start_request_token_endpoint_auth_method_type_0 import (
     OAuthStartRequestTokenEndpointAuthMethodType0,
 )
 from .o_auth_start_response import OAuthStartResponse
+from .obligation import Obligation
+from .obligation_output_schema_type_0 import ObligationOutputSchemaType0
 from .one_shot_source import OneShotSource
-from .owed_request import OwedRequest
-from .owed_request_output_schema_type_0 import OwedRequestOutputSchemaType0
 from .post_connector_runtime_chat_lifecycle_response_post_connector_runtime_chat_lifecycle import (
     PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle,
 )
@@ -461,9 +461,9 @@ __all__ = (
     "OAuthStartRequest",
     "OAuthStartRequestTokenEndpointAuthMethodType0",
     "OAuthStartResponse",
+    "Obligation",
+    "ObligationOutputSchemaType0",
     "OneShotSource",
-    "OwedRequest",
-    "OwedRequestOutputSchemaType0",
     "PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle",

@@ -11,24 +11,36 @@ from dateutil.parser import isoparse
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
-    from ..models.owed_request_output_schema_type_0 import OwedRequestOutputSchemaType0
+    from ..models.obligation_output_schema_type_0 import ObligationOutputSchemaType0
 
 
-T = TypeVar("T", bound="OwedRequest")
+T = TypeVar("T", bound="Obligation")
 
 
 @_attrs_define
-class OwedRequest:
-    """Read-model projection of an open obligation on the :class:`Session` view (#1413).
+class Obligation:
+    """One still-open **awaited** request the session owes a response to (#1413).
 
-    Parallel to ``Session.awaiting`` (tool-call-only), but for the request edges
-    the session owes a response to. Projected from the same ``get_open_obligations``
-    rows. Load-bearing for the operator-cancel path (#1414) — it cannot enumerate
-    a session's open goal_ids otherwise.
+    The dual of :class:`AwaitingToolCall`: that view lists tool calls the session
+    is *blocked on*; this one lists requests the session *owes an answer to*. An
+    obligation is an open ``request_opened`` edge (#1123) — ``awaited=true``, with
+    no paired ``request_response`` — and is the in-context surface the model reads
+    to know which ``request_id`` to echo back to ``return``/``error``.
 
-    ``output_schema`` (#1522) carries the request's acceptance contract — the same
-    additive projection added to :class:`Obligation`, from which this view is
-    derived.
+    Derived (oldest-first) from the trusted ``request_opened`` lifecycle frame via
+    :func:`aios.db.queries.sessions.get_open_obligations`, NEVER the forgeable
+    ``metadata.request`` user-message blob (#1131-proof). ``caller_kind`` is the
+    trusted ``caller.kind`` (``api``|``session``|``run``); ``opened_at`` is the
+    edge's ``created_at`` (for age); ``summary`` is a short truncated preview of
+    the request input (absent on pre-#1413 frames → ``None``, rendered id-only).
+
+    ``output_schema`` (#1522) is the JSON Schema the request demands of its
+    response ``value`` — the **acceptance contract** the session must produce to
+    answer. It is the same datum :func:`aios.db.queries.sessions.get_request_output_schema`
+    reads off the ``request_opened`` frame, now projected directly onto the owed
+    read-model so a single renderer can show "here is what you owe **and the
+    format**". Additive: ``None`` when the request demands no schema (the common
+    case) or on a pre-#1522 frame — no migration.
 
         Attributes:
             request_id (str):
@@ -36,7 +48,7 @@ class OwedRequest:
             opened_at (datetime.datetime):
             caller_id (None | str | Unset):
             summary (None | str | Unset):
-            output_schema (None | OwedRequestOutputSchemaType0 | Unset):
+            output_schema (None | ObligationOutputSchemaType0 | Unset):
     """
 
     request_id: str
@@ -44,13 +56,11 @@ class OwedRequest:
     opened_at: datetime.datetime
     caller_id: None | str | Unset = UNSET
     summary: None | str | Unset = UNSET
-    output_schema: None | OwedRequestOutputSchemaType0 | Unset = UNSET
+    output_schema: None | ObligationOutputSchemaType0 | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.owed_request_output_schema_type_0 import (
-            OwedRequestOutputSchemaType0,
-        )
+        from ..models.obligation_output_schema_type_0 import ObligationOutputSchemaType0
 
         request_id = self.request_id
 
@@ -73,7 +83,7 @@ class OwedRequest:
         output_schema: dict[str, Any] | None | Unset
         if isinstance(self.output_schema, Unset):
             output_schema = UNSET
-        elif isinstance(self.output_schema, OwedRequestOutputSchemaType0):
+        elif isinstance(self.output_schema, ObligationOutputSchemaType0):
             output_schema = self.output_schema.to_dict()
         else:
             output_schema = self.output_schema
@@ -98,9 +108,7 @@ class OwedRequest:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.owed_request_output_schema_type_0 import (
-            OwedRequestOutputSchemaType0,
-        )
+        from ..models.obligation_output_schema_type_0 import ObligationOutputSchemaType0
 
         d = dict(src_dict)
         request_id = d.pop("request_id")
@@ -129,7 +137,7 @@ class OwedRequest:
 
         def _parse_output_schema(
             data: object,
-        ) -> None | OwedRequestOutputSchemaType0 | Unset:
+        ) -> None | ObligationOutputSchemaType0 | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -137,16 +145,16 @@ class OwedRequest:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
-                output_schema_type_0 = OwedRequestOutputSchemaType0.from_dict(data)
+                output_schema_type_0 = ObligationOutputSchemaType0.from_dict(data)
 
                 return output_schema_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(None | OwedRequestOutputSchemaType0 | Unset, data)
+            return cast(None | ObligationOutputSchemaType0 | Unset, data)
 
         output_schema = _parse_output_schema(d.pop("output_schema", UNSET))
 
-        owed_request = cls(
+        obligation = cls(
             request_id=request_id,
             caller_kind=caller_kind,
             opened_at=opened_at,
@@ -155,8 +163,8 @@ class OwedRequest:
             output_schema=output_schema,
         )
 
-        owed_request.additional_properties = d
-        return owed_request
+        obligation.additional_properties = d
+        return obligation
 
     @property
     def additional_keys(self) -> list[str]:
