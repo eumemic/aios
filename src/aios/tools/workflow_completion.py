@@ -190,9 +190,13 @@ async def _finish(
 def _validate_value(value: Any, schema: dict[str, Any]) -> str | None:
     """Validate a ``return`` ``value`` against the request's ``output_schema``.
 
-    ``None`` on success; otherwise a model-facing error enumerating every failure
-    (mirrors :func:`aios.tools.invoke.validate_arguments`' formatting) so the child
-    self-corrects and calls ``return`` again through the normal tool-error loop.
+    ``None`` on success; otherwise a model-facing ``output_schema_violation`` error
+    enumerating every failure (mirrors :func:`aios.tools.invoke.validate_arguments`'
+    formatting) so the child self-corrects and calls ``return`` again through the
+    normal tool-error loop. This is the single servicer-side schema gate every
+    obligation answered with ``return`` passes — self-goals (opened by
+    ``create_goal``) included, since their persisted ``output_schema`` is read off
+    the same ``request_opened`` edge.
     """
     errors = sorted(
         jsonschema.Draft202012Validator(schema).iter_errors(value),
@@ -201,7 +205,8 @@ def _validate_value(value: Any, schema: dict[str, Any]) -> str | None:
     if not errors:
         return None
     lines = [
-        f"`value` does not match the request's required schema. You sent: {json.dumps(value)}",
+        "output_schema_violation: `value` does not match the request's required "
+        f"output_schema. You sent: {json.dumps(value)}",
         "Errors:",
     ]
     for err in errors:

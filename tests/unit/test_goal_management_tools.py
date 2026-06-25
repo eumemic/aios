@@ -15,12 +15,15 @@ These stub the worker pool + services so they need no live Postgres. They cover:
 * **admission cap** — at/over the per-session open-goal cap ``create_goal`` returns
   a clear error and opens no edge.
 * **list_goals** filters the open-obligation set to self-caller goals only.
-* **complete_goal / fail_goal** close an open self-goal via ``respond_to_request``
-  (the return / error arms), and reject a goal_id that isn't an open self-goal.
-* **complete_goal validates result** — the ``result`` is checked against the goal's
-  persisted ``output_schema`` (reusing ``_validate_output`` / the
-  ``output_schema_violation`` path from ``invoke_session.py``); a non-conforming
-  result is rejected and no response is written.
+* **closing a self-goal goes through the general ``return``/``error`` verbs** —
+  ``complete_goal``/``fail_goal`` are retired (#1518). A self-goal IS an owed
+  obligation, so ``return(request_id=<goal_id>, value=…)`` closes it (its persisted
+  ``output_schema`` enforced servicer-side by ``return``'s own schema gate, with a
+  non-conforming value rejected as ``output_schema_violation`` and the goal left
+  open) and ``error(request_id=<goal_id>, message=…)`` abandons it. Those are
+  exercised in ``tests/unit/test_workflow_output_schema.py`` /
+  ``tests/integration/test_goal_management.py``; here we only assert the goal
+  surface no longer carries the retired close verbs.
 """
 
 from __future__ import annotations
@@ -95,12 +98,6 @@ def _stub_open_obligations(monkeypatch: Any, obligations: list[Obligation]) -> N
     monkeypatch.setattr(
         "aios.harness.runtime.require_pool", lambda: SimpleNamespace(acquire=lambda: _Conn())
     )
-
-
-def _stub_goal_schema(monkeypatch: Any, schema: dict[str, Any] | None) -> None:
-    """Stub the goal's persisted ``output_schema`` read (``get_request_output_schema``)
-    that ``complete_goal`` resolves to validate the result against."""
-    monkeypatch.setattr("aios.db.queries.get_request_output_schema", AsyncMock(return_value=schema))
 
 
 # ─── create_goal ─────────────────────────────────────────────────────────────
@@ -213,89 +210,15 @@ async def test_list_goals_empty(monkeypatch: Any) -> None:
     assert out == {"goals": []}
 
 
-# ─── complete_goal / fail_goal ───────────────────────────────────────────────
+# ─── retired close verbs (#1518) ─────────────────────────────────────────────
 
 
-async def test_complete_goal_closes_via_respond(monkeypatch: Any) -> None:
-    _stub_open_obligations(monkeypatch, [_self_goal("g1")])
-    _stub_goal_schema(monkeypatch, _SCHEMA)
-    respond = AsyncMock(return_value="responded")
-    monkeypatch.setattr("aios.tools.goal_management.respond_to_request", respond)
+@pytest.mark.parametrize("name", ["complete_goal", "fail_goal"])
+def test_complete_fail_goal_no_longer_registered(name: str) -> None:
+    """#1518: the self-only close verbs are gone. A self-goal IS an owed obligation,
+    so it is closed through the general source-agnostic ``return``/``error`` verbs
+    (which already enforce the persisted output_schema servicer-side). The redundant
+    surface must not be registered — a session never sees it."""
+    from aios.tools.registry import registry
 
-    out = await invoke_builtin(
-        _SELF, "complete_goal", {"goal_id": "g1", "result": {"shipped": True}}
-    )
-
-    assert out == {"goal_id": "g1", "status": "completed"}
-    assert respond.await_args is not None
-    kwargs = respond.await_args.kwargs
-    assert kwargs["request_id"] == "g1"
-    assert kwargs["is_error"] is False
-    # The conforming result is recorded verbatim as the closing response value.
-    assert kwargs["result"] == {"shipped": True}
-
-
-async def test_complete_goal_rejects_nonconforming_result(monkeypatch: Any) -> None:
-    """#1512: the result is validated against the goal's output_schema; a
-    non-conforming result is rejected with output_schema_violation and no response
-    is written (same semantics as the call_* / return output_schema path)."""
-    _stub_open_obligations(monkeypatch, [_self_goal("g1")])
-    _stub_goal_schema(monkeypatch, _SCHEMA)
-    respond = AsyncMock()
-    monkeypatch.setattr("aios.tools.goal_management.respond_to_request", respond)
-
-    out = await invoke_builtin(
-        _SELF, "complete_goal", {"goal_id": "g1", "result": {"shipped": "nope"}}
-    )
-
-    assert isinstance(out, ToolResult)
-    assert out.is_error
-    assert isinstance(out.content, str)
-    assert "output_schema_violation" in out.content
-    # No response written on a schema mismatch — the goal stays open.
-    respond.assert_not_awaited()
-
-
-async def test_fail_goal_closes_with_error(monkeypatch: Any) -> None:
-    _stub_open_obligations(monkeypatch, [_self_goal("g1")])
-    respond = AsyncMock(return_value="responded")
-    monkeypatch.setattr("aios.tools.goal_management.respond_to_request", respond)
-
-    out = await invoke_builtin(_SELF, "fail_goal", {"goal_id": "g1", "reason": "infeasible"})
-
-    assert out == {"goal_id": "g1", "status": "failed"}
-    assert respond.await_args is not None
-    kwargs = respond.await_args.kwargs
-    assert kwargs["is_error"] is True
-    assert kwargs["error"] == {"message": "infeasible"}
-
-
-async def test_fail_goal_requires_reason() -> None:
-    with pytest.raises(ToolBail):
-        await invoke_builtin(_SELF, "fail_goal", {"goal_id": "g1"})
-
-
-async def test_complete_goal_rejects_unknown_goal_id(monkeypatch: Any) -> None:
-    _stub_open_obligations(monkeypatch, [_self_goal("g1")])
-    respond = AsyncMock()
-    monkeypatch.setattr("aios.tools.goal_management.respond_to_request", respond)
-
-    out = await invoke_builtin(_SELF, "complete_goal", {"goal_id": "nope", "result": {}})
-
-    assert isinstance(out, ToolResult)
-    assert out.is_error
-    respond.assert_not_awaited()
-
-
-async def test_complete_goal_rejects_foreign_obligation(monkeypatch: Any) -> None:
-    """A caller-assigned (api/run/peer) obligation is NOT closeable via the goal surface
-    — that must go through return/error."""
-    _stub_open_obligations(monkeypatch, [_foreign("a1")])
-    respond = AsyncMock()
-    monkeypatch.setattr("aios.tools.goal_management.respond_to_request", respond)
-
-    out = await invoke_builtin(_SELF, "complete_goal", {"goal_id": "a1", "result": {}})
-
-    assert isinstance(out, ToolResult)
-    assert out.is_error
-    respond.assert_not_awaited()
+    assert not registry.has(name), f"{name} should be retired (#1518), closed via return/error"

@@ -1,12 +1,12 @@
-"""Integration tests for the explicit goal-management builtins (#1508, #1512).
+"""Integration tests for the explicit goal-management builtins (#1508, #1512, #1518).
 
 DB-backed (testcontainer Postgres). These drive the REAL service/query path —
 ``create_goal`` opening a self-referential awaited obligation via
 ``sessions_service.invoke`` (#1414 self-goal) carrying the REQUIRED ``output_schema``
-on its ``request_opened`` frame, and ``complete_goal`` / ``fail_goal`` writing the
-``request_response`` half via ``respond_to_request`` — and assert the acceptance
-criteria against the same open-obligation queries the quiescence guard and the
-obligations tail block read:
+on its ``request_opened`` frame, and the general ``return`` / ``error`` answer verbs
+writing the ``request_response`` half via ``respond_to_request`` — and assert the
+acceptance criteria against the same open-obligation queries the quiescence guard
+and the obligations tail block read:
 
 * ``create_goal`` opens an obligation that lands in the session's OPEN set
   (``get_open_request_ids`` / ``get_open_obligations``) as a ``self`` caller — so
@@ -14,10 +14,14 @@ obligations tail block read:
   and persists its ``output_schema`` on the trusted ``request_opened`` edge
   (``get_request_output_schema``), the same way ``call_*`` carry it (#1512);
 * ``list_goals`` enumerates exactly the open self-goals;
-* ``complete_goal`` validates its ``result`` against that persisted schema — a
-  conforming result drains the open set; a non-conforming one is rejected with
-  ``output_schema_violation`` and the obligation stays open (#1512);
-* ``fail_goal`` emits the ``request_response`` half, draining the open set;
+* a self-goal is closed through the general source-agnostic verbs (#1518: the
+  self-only ``complete_goal``/``fail_goal`` are retired). ``return`` validates its
+  ``value`` against that persisted schema servicer-side — a conforming value drains
+  the open set; a non-conforming one is rejected with ``output_schema_violation`` and
+  the obligation stays open (#1512), so no validation from #1513 is lost;
+* ``error`` abandons the goal, draining the open set;
+* ``return``/``error`` still refuse a ``request_id`` that is not an open obligation
+  of the session (unchanged behavior);
 * the per-session open-goal admission cap is enforced with a clear error.
 """
 
@@ -72,8 +76,9 @@ async def pool_session(
             pool, account_id=_ACCOUNT, prefix="goal_seed"
         )
         # The goal handlers drive the real service path (create_goal →
-        # sessions_service.invoke → defer_wake; complete_goal/fail_goal →
-        # respond_to_request → defer_wake/defer_run_wake). With no live worker
+        # sessions_service.invoke → defer_wake; closing a self-goal with the general
+        # return/error verbs → respond_to_request → defer_wake/defer_run_wake). With
+        # no live worker
         # the procrastinate app pool is never opened, so the deferrals are
         # patched out — matching the model-task-tools integration fixture.
         with (
@@ -129,7 +134,7 @@ async def test_create_goal_opens_holding_self_obligation(
     assert ob.caller_kind == "session"
     assert ob.caller_id == session_id
     # The completion contract is persisted on the trusted request_opened edge, the
-    # same way call_* carry output_schema (#1512) — complete_goal reads it from here.
+    # same way call_* carry output_schema (#1512) — `return` reads it from here.
     async with pool.acquire() as conn:
         persisted = await queries.get_request_output_schema(conn, session_id, request_id=goal_id)
     assert persisted == _SCHEMA
@@ -157,20 +162,24 @@ async def test_list_goals_enumerates_open_self_goals(
     assert out["goals"][0]["goal"]  # carries the summary text
 
 
-async def test_complete_goal_drains_open_set(
+async def test_return_closes_self_goal_with_schema_gate(
     pool_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
-    """complete_goal validates result against the goal's output_schema, then emits
-    the request_response half so the session may quiesce (#1512)."""
+    """#1518: a self-goal is closed with the general ``return`` verb (no
+    ``complete_goal``). ``return`` validates its ``value`` against the goal's
+    persisted ``output_schema`` SERVICER-SIDE — a non-conforming value is rejected
+    with ``output_schema_violation`` and the goal stays open (no validation from
+    #1513 is lost), a conforming value drains the open set so the session may quiesce.
+    """
     pool, _account, session_id = pool_session
     goal_id = _gid(
         await invoke_builtin(session_id, "create_goal", {"goal": "do it", "output_schema": _SCHEMA})
     )
     assert await _open_ids(pool, session_id) == [goal_id]
 
-    # A non-conforming result is rejected (output_schema_violation) — the goal stays open.
+    # A non-conforming value is rejected (output_schema_violation) — the goal stays open.
     bad = await invoke_builtin(
-        session_id, "complete_goal", {"goal_id": goal_id, "result": {"shipped": "nope"}}
+        session_id, "return", {"request_id": goal_id, "value": {"shipped": "nope"}}
     )
     assert isinstance(bad, ToolResult)
     assert bad.is_error
@@ -178,18 +187,21 @@ async def test_complete_goal_drains_open_set(
     assert "output_schema_violation" in bad.content
     assert await _open_ids(pool, session_id) == [goal_id]  # still owed
 
-    # A conforming result closes it.
+    # A conforming value closes it.
     out = await invoke_builtin(
-        session_id, "complete_goal", {"goal_id": goal_id, "result": {"shipped": True}}
+        session_id, "return", {"request_id": goal_id, "value": {"shipped": True}}
     )
-    assert out == {"goal_id": goal_id, "status": "completed"}
+    assert isinstance(out, dict)
+    assert out["status"] == "returned"
     # Obligation closed → open set empty → quiescence guard no longer holds.
     assert await _open_ids(pool, session_id) == []
 
 
-async def test_fail_goal_drains_open_set(
+async def test_error_abandons_self_goal(
     pool_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
+    """#1518: a self-goal is abandoned with the general ``error`` verb (no
+    ``fail_goal``), draining the open set."""
     pool, _account, session_id = pool_session
     goal_id = _gid(
         await invoke_builtin(session_id, "create_goal", {"goal": "do it", "output_schema": _SCHEMA})
@@ -197,10 +209,37 @@ async def test_fail_goal_drains_open_set(
     assert await _open_ids(pool, session_id) == [goal_id]
 
     out = await invoke_builtin(
-        session_id, "fail_goal", {"goal_id": goal_id, "reason": "infeasible"}
+        session_id, "error", {"request_id": goal_id, "message": "infeasible"}
     )
-    assert out == {"goal_id": goal_id, "status": "failed"}
+    assert isinstance(out, dict)
+    assert out["status"] == "errored"
     assert await _open_ids(pool, session_id) == []
+
+
+async def test_return_refuses_unknown_request_id(
+    pool_session: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """#1518 acceptance: ``return``/``error`` still refuse a ``request_id`` that is
+    not an open obligation of the session — unchanged behavior."""
+    pool, _account, session_id = pool_session
+    goal_id = _gid(
+        await invoke_builtin(session_id, "create_goal", {"goal": "do it", "output_schema": _SCHEMA})
+    )
+
+    out = await invoke_builtin(
+        session_id, "return", {"request_id": "req_does_not_exist", "value": {"shipped": True}}
+    )
+    assert isinstance(out, ToolResult)
+    assert out.is_error
+    # The real open goal is untouched by the bogus answer.
+    assert await _open_ids(pool, session_id) == [goal_id]
+
+    err = await invoke_builtin(
+        session_id, "error", {"request_id": "req_does_not_exist", "message": "nope"}
+    )
+    assert isinstance(err, ToolResult)
+    assert err.is_error
+    assert await _open_ids(pool, session_id) == [goal_id]
 
 
 async def test_open_goal_cap_enforced(
@@ -228,11 +267,12 @@ async def test_open_goal_cap_enforced(
         # No third obligation opened.
         assert len(await _open_ids(pool, session_id)) == 2
 
-    # Freeing a slot re-admits (concurrency cap, not a lifetime budget).
+    # Freeing a slot re-admits (concurrency cap, not a lifetime budget). The goal is
+    # closed through the general `return` verb (#1518: complete_goal is retired).
     with mock.patch("aios.tools.goal_management.get_settings") as gs:
         gs.return_value = mock.Mock(session_open_goals_max=2)
         await invoke_builtin(
-            session_id, "complete_goal", {"goal_id": a["goal_id"], "result": {"shipped": True}}
+            session_id, "return", {"request_id": a["goal_id"], "value": {"shipped": True}}
         )
         c = await invoke_builtin(
             session_id, "create_goal", {"goal": "g4", "output_schema": _SCHEMA}
