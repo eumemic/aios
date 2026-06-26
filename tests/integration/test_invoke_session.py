@@ -183,7 +183,7 @@ async def test_non_child_session_answers_via_respond_to_request(
         resolved = await queries.derive_response(
             conn, target.id, account_id=account_id, request_id=handle.request_id
         )
-    assert resolved == {"result": {"answer": 7}, "is_error": False, "error": None}
+    assert resolved == Ok(result={"answer": 7})
     # Single-shot: the request is now answered (no longer open).
     async with pool.acquire() as conn:
         open_ids = await queries.get_open_request_ids(conn, target.id, account_id=account_id)
