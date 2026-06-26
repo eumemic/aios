@@ -23,7 +23,7 @@ from typing import Any, Literal
 
 import asyncpg
 
-from aios.db.queries import parse_jsonb
+from aios.db.queries import open_request_anti_join, parse_jsonb
 
 NodeKind = Literal["run", "session"]
 
@@ -344,14 +344,14 @@ async def read_session_meta_batched(
         return {}
     rows = await conn.fetch(
         "SELECT s.id, s.stop_reason, s.archived_at, s.title, s.agent_id, s.created_at, "
-        "  (SELECT array_agg(req.data->>'request_id') FROM events req "
-        "   WHERE req.session_id = s.id AND req.account_id = $2 "
-        "   AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
-        "   AND req.data->>'request_id' IS NOT NULL "
-        "   AND NOT EXISTS (SELECT 1 FROM events resp "
-        "       WHERE resp.session_id = s.id AND resp.account_id = $2 "
-        "       AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
-        "       AND resp.data->>'request_id' = req.data->>'request_id')) AS open_request_ids, "
+        # The "owes a request" liveness for archived-root green-washing must
+        # match get_open_request_ids: it owes a *response*, which an unawaited
+        # ``Tell(NewSession)`` edge does not — so this composes the shared
+        # open_request_anti_join with awaited_only=True (genuinely mirroring
+        # get_open_request_ids via the one fragment).
+        "  (SELECT array_agg(req.data->>'request_id') FROM events req WHERE "
+        + open_request_anti_join(sid="s.id", acct="$2", awaited_only=True)
+        + ") AS open_request_ids, "
         # The oldest open request's written response, if any (deterministic
         # oldest-first, mirroring get_open_request_ids). For an archived session
         # this is NULL (the request is open precisely because nothing answered it);

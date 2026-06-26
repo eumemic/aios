@@ -19,6 +19,7 @@ from aios.db.queries import (
     _build_set_assignments,
     _get_scoped,
     _list_scoped,
+    open_request_anti_join,
     parse_jsonb,
 )
 from aios.errors import (
@@ -400,8 +401,15 @@ async def get_wake_priority_context(
     - no ``request_opened`` edge (an ordinary root / fg-user session) → foreground.
 
     Derives the demotion from the **latest still-open** edge — the most-recent
-    ``request_opened`` not yet answered by a ``request_response`` (the same
-    ``asked MINUS answered`` open set as :func:`get_open_request_ids`). A session
+    ``request_opened`` not yet answered by a ``request_response``, composed from
+    the shared :func:`open_request_anti_join` fragment with ``awaited_only=False``
+    (**intentional here**, unlike :func:`get_open_request_ids`). The demotion keys
+    off *any* triggering up-link, including a background fan-out's **unawaited**
+    ``Tell(NewSession)`` child: a ``Tell``-spawned child of a background run is a
+    fan-out descendant and *should* wake at background, so this open set is
+    deliberately a **superset** of :func:`get_open_request_ids`'s (which excludes
+    the unawaited ``Tell`` edges) — it is every still-open edge, awaited or not,
+    not the response-owing subset. A session
     that has served several requests wakes at the priority of the edge that
     triggered *this* wake, not its oldest-ever edge — reachable since ``invoke``
     with ``target_kind='session'`` (#1128) appends a second edge to a live session:
@@ -425,15 +433,9 @@ async def get_wake_priority_context(
         "      ELSE FALSE "
         "    END "
         "    FROM events req "
-        "    WHERE req.session_id = s.id AND req.account_id = s.account_id "
-        "    AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
-        "    AND req.data->>'request_id' IS NOT NULL "
-        "    AND NOT EXISTS ("
-        "      SELECT 1 FROM events resp "
-        "      WHERE resp.session_id = s.id AND resp.account_id = s.account_id "
-        "      AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
-        "      AND resp.data->>'request_id' = req.data->>'request_id') "
-        "    ORDER BY req.seq DESC LIMIT 1"
+        "    WHERE "
+        + open_request_anti_join(sid="s.id", acct="s.account_id", awaited_only=False)
+        + "    ORDER BY req.seq DESC LIMIT 1"
         "  ), FALSE) AS is_background "
         "FROM sessions s WHERE s.id = $1",
         session_id,
@@ -500,22 +502,9 @@ async def get_open_request_ids(
     a point lookup rather than a per-wake history scan.
     """
     rows: list[asyncpg.Record] = await conn.fetch(
-        "SELECT req.data->>'request_id' AS rid FROM events req "
-        "WHERE req.session_id = $1 AND req.account_id = $2 "
-        "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
-        "AND req.data->>'request_id' IS NOT NULL "
-        # #1197 awaited-triad filter: a ``Tell(NewSession)`` writes a real
-        # ``request_opened`` row with ``awaited=false`` (lineage/depth/surface
-        # carrier, no response obligation), so the open set must exclude it —
-        # else a fire-and-forget spawn would wrongly owe a response. An absent
-        # field reads as awaited=true (additive/legacy), so pre-#1197 rows keep
-        # their obligation.
-        "AND COALESCE((req.data->>'awaited')::boolean, TRUE) "
-        "AND NOT EXISTS (SELECT 1 FROM events resp "
-        "    WHERE resp.session_id = $1 AND resp.account_id = $2 "
-        "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
-        "    AND resp.data->>'request_id' = req.data->>'request_id') "
-        "ORDER BY req.seq ASC",
+        "SELECT req.data->>'request_id' AS rid FROM events req WHERE "
+        + open_request_anti_join(sid="$1", acct="$2", awaited_only=True)
+        + "ORDER BY req.seq ASC",
         session_id,
         account_id,
     )
@@ -528,9 +517,10 @@ async def get_open_obligations(
     """The session's still-open **awaited** obligations, oldest first (#1413).
 
     Modeled 1:1 on :func:`get_open_request_ids` — same
-    ``asked(request_opened) MINUS answered(request_response)`` anti-join, same
-    ``awaited=true`` COALESCE filter (so a fire-and-forget ``Tell`` edge is
-    excluded), same ``ORDER BY req.seq ASC`` (oldest-first, deterministic). But
+    ``asked(request_opened) MINUS answered(request_response)`` anti-join (the
+    shared :func:`open_request_anti_join` fragment, ``awaited_only=True`` so a
+    fire-and-forget ``Tell`` edge is excluded), same ``ORDER BY req.seq ASC``
+    (oldest-first, deterministic). But
     instead of bare ``request_id``s it projects a full :class:`Obligation` per open
     edge so the tail-injected obligations block (and the ``obligations`` read
     model) can render it: ``caller_kind`` (``req.data->'caller'->>'kind'`` — the
@@ -565,18 +555,9 @@ async def get_open_obligations(
         "req.created_at AS opened_at, "
         "req.data->>'summary' AS summary, "
         "req.data->'output_schema' AS output_schema "
-        "FROM events req "
-        "WHERE req.session_id = $1 AND req.account_id = $2 "
-        "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
-        "AND req.data->>'request_id' IS NOT NULL "
-        # #1197 awaited-triad filter -- lockstep with get_open_request_ids: an
-        # unawaited Tell edge owes no response. Absent reads as awaited=true.
-        "AND COALESCE((req.data->>'awaited')::boolean, TRUE) "
-        "AND NOT EXISTS (SELECT 1 FROM events resp "
-        "    WHERE resp.session_id = $1 AND resp.account_id = $2 "
-        "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
-        "    AND resp.data->>'request_id' = req.data->>'request_id') "
-        "ORDER BY req.seq ASC",
+        "FROM events req WHERE "
+        + open_request_anti_join(sid="$1", acct="$2", awaited_only=True)
+        + "ORDER BY req.seq ASC",
         session_id,
         account_id,
     )

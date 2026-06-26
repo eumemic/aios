@@ -179,7 +179,17 @@ def test_harness_append_path_has_no_route_to_request_opened() -> None:
 def _sql_literals(obj: Callable[..., object]) -> str:
     """Concatenate every string-constant literal in ``obj``'s body — i.e. the SQL
     fragments — EXCLUDING the docstring, so a docstring mention can't shadow the
-    real query text."""
+    real query text.
+
+    The open-request anti-join skeleton lives once in the shared
+    :func:`aios.db.queries.open_request_anti_join` builder (#1536), composed at
+    each reader instead of inlined. So when the body calls that builder, expand
+    the call to its produced SQL (with the call-site's ``awaited_only`` literal),
+    so a reader that *composes* the fragment reads the same as one that inlined
+    it — the structural guard now follows the literal into its single home.
+    """
+    from aios.db.queries import open_request_anti_join
+
     func = _func_def(obj, getattr(obj, "__name__", "?"))
     body = func.body[1:] if ast.get_docstring(func) is not None else func.body
     parts: list[str] = []
@@ -187,6 +197,19 @@ def _sql_literals(obj: Callable[..., object]) -> str:
         for node in ast.walk(stmt):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 parts.append(node.value)
+            elif isinstance(node, ast.Call) and _call_name(node) == "open_request_anti_join":
+                kwargs = {
+                    kw.arg: kw.value.value
+                    for kw in node.keywords
+                    if isinstance(kw.value, ast.Constant)
+                }
+                parts.append(
+                    open_request_anti_join(
+                        sid=str(kwargs.get("sid", "$1")),
+                        acct=str(kwargs.get("acct", "$2")),
+                        awaited_only=bool(kwargs.get("awaited_only", False)),
+                    )
+                )
     return "\n".join(parts)
 
 

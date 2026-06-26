@@ -50,7 +50,12 @@ async def pool_env(
 
 
 async def _open_edge(
-    pool: asyncpg.Pool[Any], *, session_id: str, request_id: str, caller: dict[str, Any]
+    pool: asyncpg.Pool[Any],
+    *,
+    session_id: str,
+    request_id: str,
+    caller: dict[str, Any],
+    awaited: bool = True,
 ) -> None:
     async with pool.acquire() as conn, conn.transaction():
         await queries.append_request_opened(
@@ -63,6 +68,7 @@ async def _open_edge(
             environment_id="env_x",
             frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
             vault_ids=[],
+            awaited=awaited,
         )
 
 
@@ -246,3 +252,32 @@ async def test_answered_edge_is_excluded(
     async with pool.acquire() as conn:
         ctx = await queries.get_wake_priority_context(conn, sid)
     assert ctx is not None and ctx[1] is False
+
+
+async def test_unawaited_tell_edge_still_demotes_background(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """A background-rooted session whose only open edge is an **unawaited**
+    ``Tell(NewSession)`` spawn (``awaited=false``, ``caller.kind='run'``) still
+    wakes **background**.
+
+    Pins the intentional ``awaited_only=False`` choice in
+    :func:`get_wake_priority_context`: the wake-priority demotion keys off *any*
+    triggering up-link — a ``Tell``-spawned child of a background run is a fan-out
+    descendant and must yield to user-facing sessions — so this query's open set
+    is deliberately a **superset** of :func:`get_open_request_ids`'s (which would
+    exclude this unawaited edge). A future "tidy" that adds the ``awaited`` filter
+    to this reader would break this case loudly.
+    """
+    pool, _account, agent_id, env_id = pool_env
+    sid = await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="background")
+    await _open_edge(
+        pool,
+        session_id=sid,
+        request_id="req_tell",
+        caller={"kind": "run", "id": "wfr_tell"},
+        awaited=False,
+    )
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, sid)
+    assert ctx is not None and ctx[1] is True
