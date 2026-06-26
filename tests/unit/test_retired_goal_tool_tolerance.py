@@ -92,7 +92,7 @@ def test_agent_row_with_retired_builtin_hydrates_clean() -> None:
         "archived_at": None,
     }
 
-    agent = _row_to_agent(row)  # type: ignore[arg-type]
+    agent = _row_to_agent(row)
 
     # The retired builtins are gone; the legitimate one survives. No exception = no wedge.
     assert [t.type for t in agent.tools] == ["bash"]
