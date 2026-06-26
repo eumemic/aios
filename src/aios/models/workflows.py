@@ -143,7 +143,12 @@ class WfRun(BaseModel):
     """
 
     id: str
-    workflow_id: str
+    # The source definition this run snapshotted, or ``None`` for an INLINE run
+    # (T5, #1466): a one-shot run launched directly from an inline ``{script,
+    # schemas, surface}`` body with NO ``workflows`` row created. A run has always
+    # pinned its own ``script`` snapshot at launch — the workflow row was merely the
+    # source — so an inline run simply has no source row to point at.
+    workflow_id: str | None = None
     account_id: str
     environment_id: str  # the run binds to an environment; agent() children inherit it
     # Lineage + the vertical depth cap's walk key. Set by nested workflow()
@@ -364,8 +369,45 @@ class WorkflowUpdate(BaseModel):
         return self
 
 
+class InlineScriptBody(BaseModel):
+    """The inline-script body of an anonymous run launch (T5, #1466).
+
+    The alternative to ``WfRunCreate.workflow_id``: a one-shot run launched directly
+    from this ``{script, schemas, surface}`` body, with NO ``workflows`` row created.
+    The run snapshots ``script`` exactly as it snapshots a registered workflow's, and
+    the declared surface (``tools``/``mcp_servers``/``http_servers``) is clamped to the
+    launcher with the same create-time clamp ``create_workflow`` uses (a surface
+    exceeding the launcher raises ``ForbiddenError``). The HTTP/operator path is
+    unattenuated operator authority; names-only http sugar is rejected there (no acting
+    agent to resolve a bare name against).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    script: str = Field(description=WORKFLOW_SCRIPT_CONTRACT)
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+    tools: list[ToolSpec] = Field(default_factory=list)
+    mcp_servers: list[McpServerSpec] = Field(default_factory=list)
+    http_servers: list[HttpServerRef] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_http_servers(self) -> InlineScriptBody:
+        validate_http_servers([s for s in self.http_servers if isinstance(s, HttpServerSpec)])
+        return self
+
+
 class WfRunCreate(BaseModel):
-    """Request body for ``POST /v1/runs`` — launch a run of a workflow.
+    """Request body for ``POST /v1/runs`` — launch a run.
+
+    Exactly ONE source arm (validated below):
+
+    * ``workflow_id`` (+ optional ``version``) — the registered path: snapshot a
+      pre-registered workflow's script + declared surface.
+    * ``inline`` (:class:`InlineScriptBody`) — the inline-script arm (T5, #1466): a
+      one-shot run launched from an inline ``{script, schemas, surface}`` body with NO
+      ``workflows`` row created. ``version`` is meaningless on this arm (no definition
+      history) and is rejected if combined with it.
 
     ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
     binds to ``environment_id`` (like a session), into which its ``agent()`` children
@@ -375,7 +417,20 @@ class WfRunCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    workflow_id: str
+    workflow_id: str | None = Field(
+        default=None,
+        description=(
+            "The registered workflow to run. Supply EITHER this or `inline` (exactly one). "
+            "Omit when launching an inline one-shot run."
+        ),
+    )
+    inline: InlineScriptBody | None = Field(
+        default=None,
+        description=(
+            "Inline-script body for an anonymous one-shot run (T5). Supply EITHER this or "
+            "`workflow_id` (exactly one). No `workflows` row is created."
+        ),
+    )
     environment_id: str
     version: int | None = Field(
         default=None,
@@ -386,7 +441,7 @@ class WfRunCreate(BaseModel):
             "snapshots that version's script + declared surface (clamped against the current "
             "launcher's authority) and binds `source_version` to it. Launching ANY version "
             "of an archived workflow is refused (409). This is a SELECTOR — distinct from the "
-            "trigger's `workflow_version` drift assertion."
+            "trigger's `workflow_version` drift assertion. Not valid with `inline`."
         ),
     )
     input: Any = None
@@ -407,6 +462,17 @@ class WfRunCreate(BaseModel):
         default=None,
         description="Optional model used by generic agent() children when they omit model=.",
     )
+
+    @model_validator(mode="after")
+    def _validate_source_arm(self) -> WfRunCreate:
+        if (self.workflow_id is None) == (self.inline is None):
+            got = "both" if self.inline is not None else "neither"
+            raise ValueError(
+                f"exactly one of workflow_id or inline must be provided (got {got})"
+            )
+        if self.inline is not None and self.version is not None:
+            raise ValueError("version is not valid for an inline run (no version history)")
+        return self
 
 
 class GateResume(BaseModel):

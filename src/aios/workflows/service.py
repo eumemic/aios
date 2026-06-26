@@ -14,13 +14,27 @@ import asyncpg
 from aios.config import get_settings
 from aios.db.queries import get_environment, get_session_bare, get_session_vault_ids
 from aios.db.queries import workflows as wf_queries
-from aios.errors import AiosError, ConflictError, ForbiddenError, NotFoundError, RateLimitedError
-from aios.models.attenuation import Surface, surface_of
+from aios.errors import (
+    AiosError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    RateLimitedError,
+    ValidationError,
+)
+from aios.models.agents import (
+    HttpServerRef,
+    McpServerSpec,
+    ToolSpec,
+    resolve_http_server_refs,
+)
+from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import WfRun
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
 from aios.services.wake import defer_run_wake
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
+from aios.workflows.script_validation import validate_workflow_script
 
 # The single shared trusted invoke-depth budget (#1124): how many trusted
 # hops a chain of invoke-edges (run→run sub-launches, run→session ``agent()``
@@ -47,11 +61,121 @@ class WorkflowRunDepthExceededError(AiosError):
     status_code = 409
 
 
+class InlineScript:
+    """The inline-script body of an anonymous run launch (T5, #1466).
+
+    The alternative to a ``workflow_id`` in :func:`create_run`: a one-shot run is
+    launched directly from this ``{script, schemas, surface}`` body, with NO
+    ``workflows`` row created. The run snapshots ``script`` exactly as it snapshots a
+    registered workflow's — the run already pins script-at-launch — so the inline
+    script lives only in the run's pinned snapshot.
+
+    ``input_schema`` / ``output_schema`` are the declared schemas (the run carries
+    ``request_output_schema`` as the launch obligation; ``input_schema`` is accepted
+    for surface parity with ``create_workflow`` and validation, not persisted on the
+    run today). ``tools`` / ``mcp_servers`` / ``http_servers`` are the declared
+    surface — clamped to the launcher with the same create-time clamp
+    ``create_workflow`` uses (``ForbiddenError`` on exceed), then snapshotted onto the
+    run like a registered launch's surface.
+    """
+
+    __slots__ = (
+        "http_servers",
+        "input_schema",
+        "mcp_servers",
+        "output_schema",
+        "script",
+        "tools",
+    )
+
+    def __init__(
+        self,
+        *,
+        script: str,
+        input_schema: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        tools: list[ToolSpec] | None = None,
+        mcp_servers: list[McpServerSpec] | None = None,
+        http_servers: list[HttpServerRef] | None = None,
+    ) -> None:
+        self.script = script
+        self.input_schema = input_schema
+        self.output_schema = output_schema
+        self.tools = tools or []
+        self.mcp_servers = mcp_servers or []
+        self.http_servers: list[HttpServerRef] = list(http_servers or [])
+
+
+async def _enforce_inline_surface(
+    *,
+    tools: list[ToolSpec],
+    mcp_servers: list[McpServerSpec],
+    http_servers: list[HttpServerRef],
+    launcher_agent: Any | None,
+) -> Surface:
+    """Clamp an inline run's declared surface to the launcher, the same create-time
+    clamp ``services.workflows._enforce_surface_attenuation`` applies at authoring.
+
+    Returns the effective (clamped) surface to snapshot onto the run; raises
+    :class:`ForbiddenError` when the declared surface exceeds the launcher's — an
+    agent cannot grant an inline run a tool/server it does not itself hold. http
+    servers are admitted by identity (name + base_url) and their routes inherited
+    launcher-frozen into storage; a names-only entry (#953) is resolved against the
+    launching agent first.
+
+    ``launcher_agent is None`` is the operator/HTTP path (no acting agent): the
+    declared surface binds verbatim (the lattice top), but names-only http sugar is
+    rejected (nothing to resolve a bare name against) — mirroring the operator path
+    of ``create_workflow``.
+    """
+    if launcher_agent is None:
+        bare = [s for s in http_servers if isinstance(s, str)]
+        if bare:
+            raise ForbiddenError(
+                "names-only http_servers require an acting agent to resolve against; "
+                "the operator path must declare full HttpServerSpec objects "
+                f"(got bare names {bare!r})",
+            )
+        return Surface(
+            tools,
+            mcp_servers,
+            [s for s in http_servers if not isinstance(s, str)],
+        )
+    # Resolve names-only entries against the launching agent (#953). An unknown name —
+    # a grant the agent does not hold — fails closed as ForbiddenError, the same
+    # authority breach as declaring a server the agent lacks by full identity.
+    try:
+        resolved_http = resolve_http_server_refs(http_servers, launcher_agent.http_servers)
+    except ValueError as exc:
+        raise ForbiddenError(
+            "inline run surface exceeds the launching agent's permissions",
+            detail={
+                "exceeds": {"http_servers": [r for r in http_servers if isinstance(r, str)]}
+            },
+        ) from exc
+    declared = Surface(tools, mcp_servers, resolved_http)
+    expected = attenuation_service.normalize(declared)
+    effective = attenuation_service.clamp(declared, surface_of(launcher_agent))
+    surviving_http = {(s.name, s.base_url) for s in effective.http_servers}
+    exceeds = (
+        effective.tools != expected.tools
+        or effective.mcp_servers != expected.mcp_servers
+        or any((s.name, s.base_url) not in surviving_http for s in expected.http_servers)
+    )
+    if exceeds:
+        raise ForbiddenError(
+            "inline run surface exceeds the launching agent's permissions",
+            detail={"exceeds": surface_diff(expected, effective)},
+        )
+    return effective
+
+
 async def create_run(
     pool: asyncpg.Pool[Any],
     *,
     account_id: str,
-    workflow_id: str,
+    workflow_id: str | None = None,
+    inline: InlineScript | None = None,
     environment_id: str,
     input: Any = None,
     vault_ids: list[str] | None = None,
@@ -66,7 +190,25 @@ async def create_run(
     budget_usd: float | None = None,
     default_child_model: str | None = None,
 ) -> WfRun:
-    """Create a run that snapshots the workflow's current script, then wake it.
+    """Create a run that snapshots a script, then wake it.
+
+    Two **mutually exclusive** source arms (exactly one required):
+
+    * ``workflow_id`` — the registered path: snapshot a pre-registered workflow's
+      script + declared surface (the existing behaviour, all the version/drift logic
+      below applies).
+    * ``inline`` (:class:`InlineScript`) — the **inline-script arm** (T5, #1466): a
+      one-shot run launched from an inline ``{script, schemas, surface}`` body with
+      **NO ``workflows`` row created**. The run snapshots the inline script (same as a
+      registered launch — a run already pins script-at-launch), and the inline script's
+      declared surface is clamped to the launcher with the same create-time clamp
+      ``create_workflow`` uses: a surface that exceeds the launcher raises
+      :class:`ForbiddenError` (vs the registered path's silent clamp, which can only
+      narrow a definition the author already passed that same gate). The inline run's
+      ``workflow_id`` / ``source_version`` are NULL; it execs identically to the
+      equivalent register-then-run, minus the persisted definition. ``version`` /
+      ``expected_version`` are meaningless on this arm (there is no definition history)
+      and are rejected if passed.
 
     The run carries its own immutable ``script`` (+ ``script_sha``), so every
     wake execs exactly that source regardless of later edits to the workflow.
@@ -120,6 +262,19 @@ async def create_run(
     *completing* run flips terminal without the lock, so a count can only be
     stale-high — a conservative early refusal, never a cap breach.)
     """
+    # Exactly one source arm: ``workflow_id`` (registered) XOR ``inline`` (T5, #1466).
+    if (workflow_id is None) == (inline is None):
+        raise ValidationError(
+            "create_run requires exactly one of workflow_id or inline (got "
+            f"{'both' if inline is not None else 'neither'})",
+        )
+    if inline is not None and (version is not None or expected_version is not None):
+        # version/expected_version select/assert a definition version; an inline run
+        # has no definition history, so they are meaningless on this arm.
+        raise ValidationError(
+            "version / expected_version are not valid for an inline run "
+            "(an inline run has no workflow version history)",
+        )
     requested = list(vault_ids or [])
     # #794 top edge: an agent-launched run cannot exceed the launcher's own surface.
     # #835: the launcher's effective surface is read INSIDE the run transaction (below),
@@ -144,43 +299,11 @@ async def create_run(
             if existing is not None and existing.account_id == account_id:
                 return existing
         await get_environment(conn, environment_id, account_id=account_id)  # 404s foreign/absent
-        # Load the LIVE workflow row: it drives the archived gate and the
-        # expected_version drift check — both must consult the live head, not a
-        # snapshot. (#1321 M2: the version row is loaded ADDITIONALLY below, never
-        # substituted — a version row has no ``archived_at``, so substituting it
-        # would silently drop the archived gate.)
-        workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
-        if workflow.archived_at is not None:
-            # Refuse launching ANY version of an archived workflow — the live gate
-            # applies even to a historical re-run.
-            raise ConflictError(f"workflow {workflow_id} is archived", detail={"id": workflow_id})
-        if expected_version is not None and workflow.version != expected_version:
-            raise ConflictError(
-                f"workflow version drift: pinned {expected_version}, current {workflow.version}",
-                detail={
-                    "pinned": expected_version,
-                    "current": workflow.version,
-                    "id": workflow_id,
-                },
-            )
-        # Resolve the SOURCE definition the run snapshots. Default (version=None)
-        # is the current head — use the live row directly (it IS the current
-        # version, and its surface row is identical). A pinned ``version`` loads
-        # the immutable ``workflow_versions`` snapshot for the script + declared
-        # surface; a missing version 404s. ``source`` carries both the snapshotted
-        # script and the chosen surface; ``source_version`` is bound onto the run.
-        if version is None:
-            source_script = workflow.script
-            source_surface = surface_of(workflow)
-            source_version = workflow.version
-        else:
-            source = await wf_queries.get_workflow_version(
-                conn, workflow_id, version, account_id=account_id
-            )
-            source_script = source.script
-            source_surface = surface_of(source)
-            source_version = source.version
-        script_sha = hashlib.sha256(source_script.encode("utf-8")).hexdigest()
+        # Read the launcher's surface ONCE up front (#835: inside the txn, threading
+        # ``conn``, the same consistency point as the snapshot write). Both arms need
+        # it: the registered arm to silently clamp the snapshotted surface, the inline
+        # arm to *enforce* attenuation (ForbiddenError on exceed).
+        launcher_agent = None
         if launcher_session_id is not None:
             launcher_session = await get_session_bare(
                 conn, launcher_session_id, account_id=account_id
@@ -190,13 +313,77 @@ async def create_run(
             )
             launcher_surface = surface_of(launcher_agent)
             run_default_child_model = launcher_agent.model
-        # Clamp the snapshot to the launcher's surface (sub-runs compose for free: a
-        # child launcher's load_for_session already returns its frozen clamp).
-        effective = (
-            attenuation_service.clamp(source_surface, launcher_surface)
-            if launcher_surface is not None
-            else source_surface
-        )
+        source_version: int | None
+        if inline is not None:
+            # ── inline-script arm (T5, #1466) ──────────────────────────────────
+            # No ``workflows`` row, no version history: snapshot the inline script
+            # directly. ``workflow_id`` / ``source_version`` stay NULL on the run.
+            # The script is validated (compile + ``async def main(input)`` + every
+            # literal ``tool("…")`` covered) exactly as ``create_workflow`` validates
+            # a registered script, so a malformed inline body fails as a clean
+            # ValidationError here rather than as a failed run later.
+            validate_workflow_script(inline.script, inline.tools)
+            source_script = inline.script
+            source_version = None
+            # Clamp the inline surface to the launcher with the create-time gate:
+            # exceeding the launcher raises ForbiddenError (vs the registered path's
+            # silent clamp — there the author already passed this same gate at
+            # create_workflow, so a re-clamp can only narrow, never breach).
+            effective = await _enforce_inline_surface(
+                tools=inline.tools,
+                mcp_servers=inline.mcp_servers,
+                http_servers=inline.http_servers,
+                launcher_agent=launcher_agent,
+            )
+        else:
+            assert workflow_id is not None
+            # Load the LIVE workflow row: it drives the archived gate and the
+            # expected_version drift check — both must consult the live head, not a
+            # snapshot. (#1321 M2: the version row is loaded ADDITIONALLY below, never
+            # substituted — a version row has no ``archived_at``, so substituting it
+            # would silently drop the archived gate.)
+            workflow = await wf_queries.get_workflow(conn, workflow_id, account_id=account_id)
+            if workflow.archived_at is not None:
+                # Refuse launching ANY version of an archived workflow — the live gate
+                # applies even to a historical re-run.
+                raise ConflictError(
+                    f"workflow {workflow_id} is archived", detail={"id": workflow_id}
+                )
+            if expected_version is not None and workflow.version != expected_version:
+                raise ConflictError(
+                    f"workflow version drift: pinned {expected_version}, "
+                    f"current {workflow.version}",
+                    detail={
+                        "pinned": expected_version,
+                        "current": workflow.version,
+                        "id": workflow_id,
+                    },
+                )
+            # Resolve the SOURCE definition the run snapshots. Default (version=None)
+            # is the current head — use the live row directly (it IS the current
+            # version, and its surface row is identical). A pinned ``version`` loads
+            # the immutable ``workflow_versions`` snapshot for the script + declared
+            # surface; a missing version 404s. ``source`` carries both the snapshotted
+            # script and the chosen surface; ``source_version`` is bound onto the run.
+            if version is None:
+                source_script = workflow.script
+                source_surface = surface_of(workflow)
+                source_version = workflow.version
+            else:
+                source = await wf_queries.get_workflow_version(
+                    conn, workflow_id, version, account_id=account_id
+                )
+                source_script = source.script
+                source_surface = surface_of(source)
+                source_version = source.version
+            # Clamp the snapshot to the launcher's surface (sub-runs compose for free: a
+            # child launcher's load_for_session already returns its frozen clamp).
+            effective = (
+                attenuation_service.clamp(source_surface, launcher_surface)
+                if launcher_surface is not None
+                else source_surface
+            )
+        script_sha = hashlib.sha256(source_script.encode("utf-8")).hexdigest()
         # The DOWN-counting trusted depth budget (#1124). An edgeless root
         # (operator/HTTP ``POST /runs``, a trigger fire with no completing-run
         # parent) seeds at the full budget; a nested launch reads the parent
