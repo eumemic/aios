@@ -173,7 +173,7 @@ async def test_request_opened_frame_shape(
         )
     assert row is not None
     assert row["kind"] == "lifecycle"
-    data = queries.parse_jsonb(row["data"])
+    data = row["data"]
     assert data["event"] == "request_opened"
     assert data["request_id"] == "req-shape"
     assert data["caller"] == {"kind": "session", "id": "ses_launcher"}
@@ -393,7 +393,7 @@ async def test_tell_new_session_writes_unawaited_edge_with_no_obligation(
             child_id,
         )
         assert row is not None  # a real edge row exists (lineage/depth/surface carrier)
-        data = queries.parse_jsonb(row["data"])
+        data = row["data"]
         assert data["awaited"] is False
         assert data["depth"] == 1  # depth still carried
         # ...but it is NOT in the open set — no response obligation.
@@ -498,7 +498,7 @@ async def test_tell_existing_session_appends_message_no_edge_channel_less(
             session.id,
         )
         assert msg is not None
-        assert queries.parse_jsonb(msg["data"])["content"] == "go look"
+        assert msg["data"]["content"] == "go look"
         # ...channel-less (never renders to a connector).
         assert msg["orig_channel"] is None
         # ...and NO request edge was opened.
@@ -751,7 +751,7 @@ async def test_get_open_obligations_summary_absent_reads_as_none(
             "AND kind = 'lifecycle' AND data->>'event' = 'request_opened'",
             session.id,
         )
-    data = queries.parse_jsonb(row["data"])
+    data = row["data"]
     assert "summary" not in data
     async with pool.acquire() as conn:
         obs = await queries.get_open_obligations(conn, session.id, account_id=account_id)

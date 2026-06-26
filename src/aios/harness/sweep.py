@@ -33,7 +33,6 @@ from aios.db.queries import (
     confirmed_unresolved_predicate,
     find_parked_servicer,
     list_session_ids_with_unharvested_cancel_marker,
-    parse_jsonb,
     session_active_predicate,
     session_errored_predicate,
 )
@@ -365,7 +364,7 @@ async def find_and_repair_ghosts(
 
     for row in asst_rows:
         sid = row["session_id"]
-        data = parse_jsonb(row["data"])
+        data = row["data"]
         created_at = row["created_at"]
         existing_results = results_by_session.get(sid, set())
         session_in_flight = in_flight.get(sid, set())
@@ -410,8 +409,8 @@ async def find_and_repair_ghosts(
 
     agent_surface_by_session: dict[str, _SweepAgentSurface] = {}
     for r in agent_rows:
-        tools_list = parse_jsonb(r["tools"])
-        http_list = parse_jsonb(r["http_servers"])
+        tools_list = r["tools"]
+        http_list = r["http_servers"]
         agent_surface_by_session[r["session_id"]] = _SweepAgentSurface(
             tools=load_tool_specs(tools_list or []),
             http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
@@ -849,7 +848,7 @@ async def _filter_incomplete_batches(
 def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        data = parse_jsonb(r["data"])
+        data = r["data"]
         grouped.setdefault(r["session_id"], []).append(data)
     return grouped
 

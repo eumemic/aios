@@ -136,9 +136,8 @@ async def test_injected_request_is_channel_less(
     assert rows, "expected the injected request message"
     for r in rows:
         assert r["orig_channel"] is None
-    from aios.db.queries import parse_jsonb
 
-    metas = [parse_jsonb(r["data"]).get("metadata", {}) for r in rows]
+    metas = [r["data"].get("metadata", {}) for r in rows]
     assert all("channel" not in m for m in metas)
 
 

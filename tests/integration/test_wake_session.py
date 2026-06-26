@@ -172,7 +172,7 @@ class TestWakeSessionIntegration:
                 target.id,
             )
         assert row is not None
-        data = queries.parse_jsonb(row["data"])
+        data = row["data"]
         assert data["content"] == "please escalate"
         assert data["metadata"]["wake_source_session_id"] == source.id
         assert data["metadata"]["wake_depth"] == 1

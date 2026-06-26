@@ -74,7 +74,6 @@ def test_underscore_and_nonfunc_names_reexported() -> None:
         "_list_scoped",
         "_archive_scoped",
         "_build_set_assignments",
-        "parse_jsonb",
         "_escape_like",
         "_derive_is_error",
         "_derive_sender_name",
@@ -93,6 +92,15 @@ def test_underscore_and_nonfunc_names_reexported() -> None:
     )
     for name in names:
         assert hasattr(q, name), f"package root is missing re-export {name!r}"
+
+
+def test_parse_jsonb_shim_is_deleted() -> None:
+    # The jsonb codec (aios.db.pool.register_jsonb_codec) is the single source
+    # of truth for JSONB decoding; the old passthrough shim must not return.
+    import aios.db.queries as q
+
+    assert not hasattr(q, "parse_jsonb")
+    assert "parse_jsonb" not in q.__all__
 
 
 def test_internal_callers_route_patched_fns_through_package() -> None:

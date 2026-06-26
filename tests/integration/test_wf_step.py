@@ -239,10 +239,9 @@ async def test_create_child_session_idempotent(
             "acc_wf",
         )
     assert user_msgs == 1
-    from aios.db.queries import parse_jsonb
 
     # The display blob carries the correlation id; the trusted caller is on the edge.
-    request = parse_jsonb(req["data"])["metadata"]["request"]
+    request = req["data"]["metadata"]["request"]
     assert request["request_id"] == "sha:x#0"
     async with pool.acquire() as conn:
         caller = await db_queries.get_request_caller(conn, cid, request_id="sha:x#0")
@@ -391,7 +390,7 @@ async def test_gate_opened_delivery_dedupes_by_call_key_on_replay(
             "acc_wf",
         )
     assert len(rows) == 1
-    assert db_queries.parse_jsonb(rows[0]["data"])["result"]["event"] == "gate_opened"
+    assert rows[0]["data"]["result"]["event"] == "gate_opened"
 
 
 async def test_non_launcher_cannot_resume_gate(
@@ -1403,7 +1402,7 @@ async def test_request_is_answered_exactly_once(
             "acc_wf",
         )
     assert len(rows) == 1  # exactly one response
-    response = db_queries.parse_jsonb(rows[0]["data"])
+    response = rows[0]["data"]
     assert response["is_error"] is False and response["result"] == "first"  # the first one won
     assert response["request_id"] == "sha:once#0"  # correlated to the request
 
@@ -1722,7 +1721,7 @@ async def test_model_failure_does_not_clobber_a_prior_response(
             "acc_wf",
         )
     assert len(rows) == 1  # still exactly one response
-    response = db_queries.parse_jsonb(rows[0]["data"])
+    response = rows[0]["data"]
     assert response["is_error"] is False and response["result"] == "real"  # the return() won
 
 
@@ -1826,7 +1825,7 @@ async def test_nudge_surfaces_owed_obligation_with_contract(
             cid,
         )
     assert row is not None
-    content = db_queries.parse_jsonb(row["data"])["content"]
+    content = row["data"]["content"]
     assert "sha:contract#0" in content  # the owed request_id
     assert "output_schema" in content  # the #1514 contract-bearing surfacing
     assert '"ok"' in content  # the actual schema body, rendered (bounded)

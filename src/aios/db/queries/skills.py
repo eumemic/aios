@@ -18,7 +18,6 @@ from aios.db.queries import (
     _get_versioned,
     _list_scoped,
     _list_versioned,
-    parse_jsonb,
 )
 from aios.errors import (
     NotFoundError,
@@ -44,7 +43,7 @@ def _row_to_skill(row: asyncpg.Record) -> Skill:
 
 
 def _row_to_skill_version(row: asyncpg.Record) -> SkillVersion:
-    files_data = parse_jsonb(row["files"])
+    files_data = row["files"]
     return SkillVersion(
         skill_id=row["skill_id"],
         version=row["version"],

@@ -95,7 +95,7 @@ async def _seed_session(db_url: str) -> str:
     # Use the project pool factory, not raw asyncpg.create_pool, so the pool
     # carries the jsonb codec (init=register_jsonb_codec). seed_agent_env_session
     # reads the agent back through _row_to_agent, which now relies on the codec
-    # to decode jsonb columns (parse_jsonb is a pure passthrough since #1062).
+    # to decode jsonb columns (reads arrive as native Python since #1062).
     pool = await create_pool(db_url, min_size=1, max_size=2)
     try:
         _agent, _env, session = await seed_agent_env_session(

@@ -17,7 +17,6 @@ from aios.db.queries import (
     _archive_scoped,
     _build_set_assignments,
     _escape_like,
-    parse_jsonb,
 )
 from aios.errors import (
     ConflictError,
@@ -51,7 +50,7 @@ from aios.models.memory_stores import (
 
 def _row_to_memory_store(row: asyncpg.Record) -> MemoryStore:
     raw_metadata = row["metadata"]
-    metadata = parse_jsonb(raw_metadata)
+    metadata = raw_metadata
     return MemoryStore(
         id=row["id"],
         name=row["name"],

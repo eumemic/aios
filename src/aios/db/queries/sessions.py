@@ -20,7 +20,6 @@ from aios.db.queries import (
     _get_scoped,
     _list_scoped,
     open_request_anti_join,
-    parse_jsonb,
 )
 from aios.errors import (
     ConflictError,
@@ -116,9 +115,9 @@ _SESSION_STATUS_EXPR = (
 
 def _row_to_session(row: asyncpg.Record) -> Session:
     raw_metadata = row["metadata"]
-    metadata = parse_jsonb(raw_metadata)
+    metadata = raw_metadata
     raw_stop = row["stop_reason"]
-    stop_reason = parse_jsonb(raw_stop)
+    stop_reason = raw_stop
     return Session(
         id=row["id"],
         agent_id=row["agent_id"],
@@ -336,9 +335,9 @@ async def get_session_frozen_surface(
     if not row["surface_frozen"]:
         return None
     return Surface(
-        tools=load_tool_specs(parse_jsonb(row["tools"])),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
-        http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
+        tools=load_tool_specs(row["tools"]),
+        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
     )
 
 
@@ -363,7 +362,7 @@ async def get_session_frozen_litellm_extra(
     if row is None:
         raise NotFoundError("session not found", detail={"session_id": session_id})
     raw = row["litellm_extra"]
-    return parse_jsonb(raw) if raw is not None else {}
+    return raw if raw is not None else {}
 
 
 async def get_session_workflow_context(
@@ -469,7 +468,7 @@ async def read_request_response(
         account_id,
         request_id,
     )
-    return parse_jsonb(row["data"]) if row is not None else None
+    return row["data"] if row is not None else None
 
 
 async def get_open_request_ids(
@@ -569,11 +568,9 @@ async def get_open_obligations(
             opened_at=r["opened_at"],
             summary=r["summary"],
             # ``output_schema`` is a JSONB column (``data->'output_schema'``) —
-            # parse_jsonb decodes it the same way get_request_output_schema does;
+            # the jsonb codec decodes it the same way get_request_output_schema does;
             # absent on a no-schema/pre-#1522 frame -> None (additive, no migration).
-            output_schema=parse_jsonb(r["output_schema"])
-            if r["output_schema"] is not None
-            else None,
+            output_schema=r["output_schema"] if r["output_schema"] is not None else None,
         )
         for r in rows
     ]
@@ -602,7 +599,7 @@ async def get_request_caller(
         session_id,
         request_id,
     )
-    return parse_jsonb(caller) if caller is not None else None
+    return caller if caller is not None else None
 
 
 async def get_request_output_schema(
@@ -629,7 +626,7 @@ async def get_request_output_schema(
         session_id,
         request_id,
     )
-    return parse_jsonb(schema) if schema is not None else None
+    return schema if schema is not None else None
 
 
 async def count_request_nudges(
@@ -715,7 +712,7 @@ async def derive_response(
     )
     assert row is not None
     if row["response"] is not None:
-        response = parse_jsonb(row["response"])
+        response = row["response"]
         return {
             "result": response.get("result"),
             "is_error": bool(response.get("is_error")),
@@ -1050,7 +1047,7 @@ async def get_session_provisioning(
     if row is None:
         raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
     raw_env = row["env"]
-    env: dict[str, str] = parse_jsonb(raw_env)
+    env: dict[str, str] = raw_env
     return row["workspace_volume_path"], env, row["spec_version"], row["snapshot_ref"]
 
 

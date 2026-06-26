@@ -23,7 +23,7 @@ from typing import Any, Literal
 
 import asyncpg
 
-from aios.db.queries import open_request_anti_join, parse_jsonb
+from aios.db.queries import open_request_anti_join
 
 NodeKind = Literal["run", "session"]
 
@@ -211,7 +211,7 @@ async def find_parked_servicer(
     )
     if sess is not None:
         schema = sess["output_schema"]
-        return ("session", sess["id"], sess["request_id"], parse_jsonb(schema) if schema else None)
+        return ("session", sess["id"], sess["request_id"], schema if schema else None)
 
     run = await conn.fetchrow(
         "SELECT r.id AS id, r.request_output_schema AS output_schema FROM wf_runs r "
@@ -224,7 +224,7 @@ async def find_parked_servicer(
     )
     if run is not None:
         schema = run["output_schema"]
-        return ("run", run["id"], None, parse_jsonb(schema) if schema else None)
+        return ("run", run["id"], None, schema if schema else None)
 
     return None
 
@@ -373,13 +373,9 @@ async def read_session_meta_batched(
     for r in rows:
         open_ids = list(r["open_request_ids"] or [])
         archived = r["archived_at"] is not None
-        written = (
-            parse_jsonb(r["owed_request_response"])
-            if r["owed_request_response"] is not None
-            else None
-        )
+        written = r["owed_request_response"] if r["owed_request_response"] is not None else None
         out[r["id"]] = {
-            "stop_reason": parse_jsonb(r["stop_reason"]) if r["stop_reason"] is not None else None,
+            "stop_reason": r["stop_reason"] if r["stop_reason"] is not None else None,
             "archived_at": r["archived_at"],
             "title": r["title"],
             "agent_id": r["agent_id"],
@@ -445,11 +441,11 @@ async def read_run_meta_batched(
     )
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
-        completed = parse_jsonb(r["completed"]) if r["completed"] is not None else None
+        completed = r["completed"] if r["completed"] is not None else None
         out[r["id"]] = {
             "status": r["status"],
             "workflow_id": r["workflow_id"],
-            "caller": parse_jsonb(r["caller"]) if r["caller"] is not None else None,
+            "caller": r["caller"] if r["caller"] is not None else None,
             "request_id": r["request_id"],
             "created_at": r["created_at"],
             "run_completed": completed,
@@ -484,7 +480,7 @@ async def read_run_journal_batched(
             {
                 "seq": r["seq"],
                 "type": r["type"],
-                "payload": parse_jsonb(r["payload"]),
+                "payload": r["payload"],
                 "created_at": r["created_at"],
             }
         )
@@ -518,7 +514,7 @@ async def read_session_journal_batched(
             {
                 "seq": r["seq"],
                 "kind": r["kind"],
-                "data": parse_jsonb(r["data"]),
+                "data": r["data"],
                 "created_at": r["created_at"],
             }
         )
