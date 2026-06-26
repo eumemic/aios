@@ -9,6 +9,7 @@ context builder renders into the child's request message.
 from __future__ import annotations
 
 import math
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import pytest
@@ -16,7 +17,11 @@ import pytest
 from aios.harness.context import render_user_event
 from aios.tools.workflow_completion import _validate_value
 from aios.workflows.determinism import canonical_schema_json
-from aios.workflows.step import _unresolvable_ref
+from aios.workflows.step import (
+    _reject_invalid_output_schema,
+    _SpawnResult,
+    _unresolvable_ref,
+)
 
 _CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
@@ -96,3 +101,70 @@ def test_unresolvable_ref_accepts_valid_rejects_broken() -> None:
     )
     assert _unresolvable_ref({"$ref": "https://example.com/s.json"}) == "https://example.com/s.json"
     assert _unresolvable_ref({"properties": {"a": {"$dynamicRef": "#nope"}}}) == "#nope"
+
+
+@pytest.mark.asyncio
+async def test_reject_invalid_output_schema_parity_between_arms() -> None:
+    """The single-source output_schema validity gate must reject identically for the
+    agent() and invoke_workflow() arms, modulo the call-name prefix + reject-kind.
+
+    This is only expressible because the two arms now share ``_reject_invalid_output_schema``;
+    on master each arm had its own copy and there was no single helper to call. If a future
+    edit diverges one arm's message, the prefix-stripped tails stop matching and this fails.
+    """
+    invalid_schemas = [
+        True,  # non-dict (bare boolean)
+        {"type": "nonsense-keyword-value", "minimum": "x"},  # check_schema failure
+        {"$ref": "#/$defs/missing"},  # unresolvable ref
+    ]
+
+    arms = [
+        ("agent()", "bad_agent_call"),
+        ("invoke_workflow()", "bad_invoke_workflow"),
+    ]
+
+    def _make_recording_reject(
+        sink: list[tuple[str, str]],
+    ) -> Callable[[str, str], Awaitable[_SpawnResult]]:
+        async def _reject(kind: str, message: str) -> _SpawnResult:
+            sink.append((kind, message))
+            return _SpawnResult(rejected=True, needs_rewake=False)
+
+        return _reject
+
+    for schema in invalid_schemas:
+        tails = []
+        for call_name, reject_kind in arms:
+            recorded: list[tuple[str, str]] = []
+            result = await _reject_invalid_output_schema(
+                schema,
+                call_name=call_name,
+                reject_kind=reject_kind,
+                reject=_make_recording_reject(recorded),
+            )
+            # rejected → returns the (already-journaled) _SpawnResult, not None.
+            assert result is not None
+            assert result.rejected is True
+            assert len(recorded) == 1
+            kind, message = recorded[0]
+            assert kind == reject_kind  # the passed reject-kind is journaled verbatim
+            assert message.startswith(call_name)  # message carries the call-name prefix
+            tails.append(message[len(call_name) :])
+
+        # The ONLY legitimate divergence between arms is the prefix + kind: tails identical.
+        assert tails[0] == tails[1]
+
+    # A valid schema sails through both arms → None (no reject recorded).
+    async def _reject_must_not_fire(kind: str, message: str) -> _SpawnResult:  # pragma: no cover
+        raise AssertionError("valid schema must not reject")
+
+    for call_name, reject_kind in arms:
+        assert (
+            await _reject_invalid_output_schema(
+                {"type": "object"},
+                call_name=call_name,
+                reject_kind=reject_kind,
+                reject=_reject_must_not_fire,
+            )
+            is None
+        )

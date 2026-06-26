@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import json
 import secrets
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
@@ -839,6 +840,45 @@ class _SpawnResult(NamedTuple):
     quota_exceeded: bool = False
 
 
+async def _reject_invalid_output_schema(
+    output_schema: Any,
+    *,
+    call_name: str,
+    reject_kind: str,
+    reject: Callable[[str, str], Awaitable[_SpawnResult]],
+) -> _SpawnResult | None:
+    """The shared author-facing output_schema validity gate for the agent() and
+    invoke_workflow() spawn arms — the single definition of "is this a usable
+    structured-output schema". Returns a rejecting _SpawnResult (already journaled
+    via ``reject``) on the first failing branch, or None if the schema is usable.
+
+    Three sequentially-dependent author-facing failures, each an early reject:
+    a non-object schema (a bare boolean is valid JSON Schema, but ``false``
+    rejects every value and ``true`` disables enforcement), a structurally-invalid
+    schema, and one with an unresolvable reference (passes check_schema but raises
+    at validation time, bricking the child).
+    """
+    if not isinstance(output_schema, dict):
+        return await reject(
+            reject_kind,
+            f"{call_name} output_schema must be a JSON object schema, "
+            f"got {type(output_schema).__name__}",
+        )
+    try:
+        jsonschema.Draft202012Validator.check_schema(output_schema)
+    except jsonschema.SchemaError as exc:
+        return await reject(
+            reject_kind, f"{call_name} output_schema is not a valid JSON Schema: {exc.message}"
+        )
+    if (bad_ref := _unresolvable_ref(output_schema)) is not None:
+        return await reject(
+            reject_kind,
+            f"{call_name} output_schema has an unresolvable reference {bad_ref!r} "
+            "(references must resolve within the schema; remote refs are unsupported)",
+        )
+    return None
+
+
 async def _open_agent_capability(
     conn: asyncpg.Connection[Any],
     pool: asyncpg.Pool[Any],
@@ -890,33 +930,19 @@ async def _open_agent_capability(
     output_schema = (
         json.loads(output_schema_raw) if isinstance(output_schema_raw, str) else output_schema_raw
     )
-    if output_schema is not None:
-        # Structured output: the child must return a value matching this schema (the
-        # return tool enforces it; see workflow_completion). Reject a bad schema here —
-        # author-facing — rather than letting it brick the child when it applies the
-        # schema. Three sequentially-dependent author-facing failures, each an early
-        # reject: a non-object schema (a bare boolean is valid JSON Schema, but `false`
-        # rejects every value and `true` disables enforcement), a structurally-invalid
-        # schema, and one with an unresolvable reference (passes check_schema but raises
-        # at validation time).
-        if not isinstance(output_schema, dict):
-            return await _reject(
-                "bad_agent_call",
-                f"agent() output_schema must be a JSON object schema, "
-                f"got {type(output_schema).__name__}",
+    if (
+        output_schema is not None
+        and (
+            rejected := await _reject_invalid_output_schema(
+                output_schema,
+                call_name="agent()",
+                reject_kind="bad_agent_call",
+                reject=_reject,
             )
-        try:
-            jsonschema.Draft202012Validator.check_schema(output_schema)
-        except jsonschema.SchemaError as exc:
-            return await _reject(
-                "bad_agent_call", f"agent() output_schema is not a valid JSON Schema: {exc.message}"
-            )
-        if (bad_ref := _unresolvable_ref(output_schema)) is not None:
-            return await _reject(
-                "bad_agent_call",
-                f"agent() output_schema has an unresolvable reference {bad_ref!r} "
-                "(references must resolve within the schema; remote refs are unsupported)",
-            )
+        )
+        is not None
+    ):
+        return rejected
     agent_id = spec.get("agent_id")
     if agent_id is not None and not isinstance(agent_id, str):
         return await _reject(
@@ -1110,26 +1136,19 @@ async def _open_invoke_workflow_capability(
     output_schema = (
         json.loads(output_schema_raw) if isinstance(output_schema_raw, str) else output_schema_raw
     )
-    if output_schema is not None:
-        if not isinstance(output_schema, dict):
-            return await _reject(
-                "bad_invoke_workflow",
-                "invoke_workflow() output_schema must be a JSON object schema, "
-                f"got {type(output_schema).__name__}",
+    if (
+        output_schema is not None
+        and (
+            rejected := await _reject_invalid_output_schema(
+                output_schema,
+                call_name="invoke_workflow()",
+                reject_kind="bad_invoke_workflow",
+                reject=_reject,
             )
-        try:
-            jsonschema.Draft202012Validator.check_schema(output_schema)
-        except jsonschema.SchemaError as exc:
-            return await _reject(
-                "bad_invoke_workflow",
-                f"invoke_workflow() output_schema is not a valid JSON Schema: {exc.message}",
-            )
-        if (bad_ref := _unresolvable_ref(output_schema)) is not None:
-            return await _reject(
-                "bad_invoke_workflow",
-                f"invoke_workflow() output_schema has an unresolvable reference {bad_ref!r} "
-                "(references must resolve within the schema; remote refs are unsupported)",
-            )
+        )
+        is not None
+    ):
+        return rejected
 
     sub_run_id = child_run_id(run.id, cap.call_key)
     run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=account_id)
