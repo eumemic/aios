@@ -70,15 +70,9 @@ async def sweep_reclaimable_ephemera(pool: asyncpg.Pool[Any]) -> PruneResult:
         # within the same sweep where ages line up. Order is not required for
         # correctness (each prune re-reads liveness), only for promptness.
         runs = await queries.prune_archived_runs(conn, retention_days=run_days)
-        agents = await queries.prune_unpinned_archived_agents(
-            conn, retention_days=def_days
-        )
-        workflows = await queries.prune_unpinned_archived_workflows(
-            conn, retention_days=def_days
-        )
-        skills = await queries.prune_unpinned_archived_skills(
-            conn, retention_days=def_days
-        )
+        agents = await queries.prune_unpinned_archived_agents(conn, retention_days=def_days)
+        workflows = await queries.prune_unpinned_archived_workflows(conn, retention_days=def_days)
+        skills = await queries.prune_unpinned_archived_skills(conn, retention_days=def_days)
 
     result = PruneResult(runs=runs, agents=agents, workflows=workflows, skills=skills)
     if result.total:

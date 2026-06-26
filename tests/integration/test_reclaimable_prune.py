@@ -147,9 +147,7 @@ async def _insert_session(
 
 
 async def _count(conn: asyncpg.Connection[Any], table: str, _id_col: str, _id: str) -> int:
-    return await conn.fetchval(
-        f"SELECT count(*) FROM {table} WHERE {_id_col} = $1", _id
-    )
+    return await conn.fetchval(f"SELECT count(*) FROM {table} WHERE {_id_col} = $1", _id)
 
 
 # ─── the headline acceptance test ───────────────────────────────────────────
@@ -182,9 +180,7 @@ async def test_prune_reclaims_ephemera_but_spares_sacred(
     )
 
     settings = get_settings()
-    pruned_runs = await prune_archived_runs(
-        conn, retention_days=settings.wf_runs_retention_days
-    )
+    pruned_runs = await prune_archived_runs(conn, retention_days=settings.wf_runs_retention_days)
     pruned_agents = await prune_unpinned_archived_agents(
         conn, retention_days=settings.archived_definition_retention_days
     )
@@ -199,10 +195,7 @@ async def test_prune_reclaims_ephemera_but_spares_sacred(
     assert pruned_agents == 0
     assert await _count(conn, "agents", "id", "ag_pinned") == 1
     assert (
-        await conn.fetchval(
-            "SELECT count(*) FROM agent_versions WHERE agent_id = 'ag_pinned'"
-        )
-        == 1
+        await conn.fetchval("SELECT count(*) FROM agent_versions WHERE agent_id = 'ag_pinned'") == 1
     )
 
     # The memory store is untouched.
@@ -281,10 +274,7 @@ async def test_agent_prune_spares_any_referenced_agent(
     assert await _count(conn, "agents", "id", "ag_free") == 0
     # The reclaimed agent's version history went with it.
     assert (
-        await conn.fetchval(
-            "SELECT count(*) FROM agent_versions WHERE agent_id = 'ag_free'"
-        )
-        == 0
+        await conn.fetchval("SELECT count(*) FROM agent_versions WHERE agent_id = 'ag_free'") == 0
     )
 
 
@@ -308,9 +298,7 @@ async def test_workflow_prune_spares_referenced_workflow(
     conn: asyncpg.Connection[Any],
 ) -> None:
     # A workflow with a run referencing it — held (cascade-safety + replay pin).
-    held = await wf_queries.insert_workflow(
-        conn, account_id="acc_root", name="held", script="x"
-    )
+    held = await wf_queries.insert_workflow(conn, account_id="acc_root", name="held", script="x")
     await wf_queries.insert_wf_run(
         conn,
         account_id="acc_root",
@@ -326,9 +314,7 @@ async def test_workflow_prune_spares_referenced_workflow(
         held.id,
     )
     # A run-free archived workflow — reclaimable.
-    free = await wf_queries.insert_workflow(
-        conn, account_id="acc_root", name="free", script="x"
-    )
+    free = await wf_queries.insert_workflow(conn, account_id="acc_root", name="free", script="x")
     await conn.execute(
         "UPDATE workflows SET archived_at = now() - make_interval(days => 90) WHERE id = $1",
         free.id,
@@ -358,7 +344,7 @@ async def test_skill_prune_spares_live_agent_binding(
     await conn.execute(
         "INSERT INTO agents (id, name, model, account_id, skills) "
         "VALUES ('ag_binder', 'binder', 'm', 'acc_root', "
-        "'[{\"skill_id\": \"sk_bound\", \"version\": 1}]'::jsonb)"
+        '\'[{"skill_id": "sk_bound", "version": 1}]\'::jsonb)'
     )
     # Unbound archived skill — reclaimable.
     await conn.execute(
@@ -375,10 +361,8 @@ async def test_skill_prune_spares_live_agent_binding(
     assert await _count(conn, "skills", "id", "sk_bound") == 1
     assert await _count(conn, "skills", "id", "sk_free") == 0
     assert (
-        await conn.fetchval("SELECT count(*) FROM skill_versions WHERE skill_id = 'sk_free'")
-        == 0
+        await conn.fetchval("SELECT count(*) FROM skill_versions WHERE skill_id = 'sk_free'") == 0
     )
     assert (
-        await conn.fetchval("SELECT count(*) FROM skill_versions WHERE skill_id = 'sk_bound'")
-        == 1
+        await conn.fetchval("SELECT count(*) FROM skill_versions WHERE skill_id = 'sk_bound'") == 1
     )
