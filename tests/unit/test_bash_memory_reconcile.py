@@ -475,6 +475,120 @@ class TestReconcile:
         )
         mock_create.assert_not_awaited()
 
+    async def test_unreadable_after_file_not_deleted(self, tmp_path: Path) -> None:
+        """File readable at before but unreadable at after: warned, not deleted."""
+        from aios.tools.bash_memory_reconcile import (
+            reconcile_memory_mounts,
+            snapshot_memory_mounts,
+        )
+
+        host_dir = self._make_host_dir(tmp_path)
+        notes = host_dir / "notes.md"
+        notes.write_text("notes content\n")
+
+        runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
+
+        # Build before from a real snapshot while the file is still readable.
+        with patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir):
+            before = snapshot_memory_mounts(SESSION_ID)
+        assert (STORE_A, "/notes.md") in before
+
+        # Make the file unreadable at after-time by patching Path.read_bytes to
+        # raise OSError for this specific path (deterministic across platforms).
+        real_read_bytes = Path.read_bytes
+
+        def _fake_read_bytes(self: Path) -> bytes:
+            if self == notes:
+                raise OSError("permission denied")
+            return real_read_bytes(self)
+
+        fake_memory = MagicMock()
+        fake_memory.id = "mem_01FAKE0000000000000000003"
+
+        with (
+            patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir),
+            patch.object(Path, "read_bytes", _fake_read_bytes),
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.create_memory",
+                new_callable=AsyncMock,
+            ) as mock_create,
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.get_memory_by_path",
+                new_callable=AsyncMock,
+                return_value=fake_memory,
+            ),
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.update_memory",
+                new_callable=AsyncMock,
+            ) as mock_update,
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.delete_memory",
+                new_callable=AsyncMock,
+            ) as mock_delete,
+        ):
+            warnings = await reconcile_memory_mounts(SESSION_ID, before=before)
+
+        mock_delete.assert_not_awaited()
+        mock_create.assert_not_awaited()
+        mock_update.assert_not_awaited()
+        assert any("/notes.md" in w for w in warnings)
+
+    async def test_unreadable_in_both_snapshots_is_unchanged(self, tmp_path: Path) -> None:
+        """Path unreadable in both before and after: no DB call, no warning."""
+        from aios.tools.bash_memory_reconcile import (
+            reconcile_memory_mounts,
+            snapshot_memory_mounts,
+        )
+
+        host_dir = self._make_host_dir(tmp_path)
+        notes = host_dir / "notes.md"
+        notes.write_text("notes content\n")
+
+        runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
+
+        real_read_bytes = Path.read_bytes
+
+        def _fake_read_bytes(self: Path) -> bytes:
+            if self == notes:
+                raise OSError("permission denied")
+            return real_read_bytes(self)
+
+        # before is built while the file is ALREADY unreadable, so it carries
+        # the sentinel sha — identical to the after sha → unchanged.
+        with (
+            patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir),
+            patch.object(Path, "read_bytes", _fake_read_bytes),
+        ):
+            before = snapshot_memory_mounts(SESSION_ID)
+        assert (STORE_A, "/notes.md") in before
+
+        with (
+            patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir),
+            patch.object(Path, "read_bytes", _fake_read_bytes),
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.create_memory",
+                new_callable=AsyncMock,
+            ) as mock_create,
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.get_memory_by_path",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.update_memory",
+                new_callable=AsyncMock,
+            ) as mock_update,
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.delete_memory",
+                new_callable=AsyncMock,
+            ) as mock_delete,
+        ):
+            warnings = await reconcile_memory_mounts(SESSION_ID, before=before)
+
+        mock_create.assert_not_awaited()
+        mock_update.assert_not_awaited()
+        mock_delete.assert_not_awaited()
+        assert warnings == []
+
     async def test_skips_read_only_mounts_in_reconcile(self, tmp_path: Path) -> None:
         """read_only mount; no DB call — files from read_only mounts never appear in before or after."""
         from aios.tools.bash_memory_reconcile import reconcile_memory_mounts

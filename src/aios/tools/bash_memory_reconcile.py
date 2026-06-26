@@ -37,17 +37,44 @@ log = get_logger("aios.tools.bash_memory_reconcile")
 _Snapshot = dict[tuple[str, str], str]
 
 
+class _Unreadable:
+    """Zero-field sentinel marking a walked file whose ``read_bytes()`` raised.
+
+    Stored in the bytes map in place of bytes so the path stays PRESENT in the
+    snapshot.  This keeps the diff from mistaking "unreadable" for "absent" and
+    reconciling it as a deletion (which would wipe the file's version history
+    while it is still on disk).
+    """
+
+
+# Module-singleton sentinel for unreadable files.
+UNREADABLE = _Unreadable()
+
+# Type of a bytes-map value: real bytes, or the unreadable sentinel.
+_BytesMap = dict[tuple[str, str], "bytes | _Unreadable"]
+
+# Fixed, content-independent digest for unreadable entries.  Stable across both
+# the before and after snapshots so an unchanged-but-unreadable file (unreadable
+# in both) compares equal and triggers no DB call.
+_UNREADABLE_SHA = hashlib.sha256(b"\x00aios:unreadable").hexdigest()
+
+
 def _bytes_map_to_sha_map(
-    bytes_map: dict[tuple[str, str], bytes],
+    bytes_map: _BytesMap,
 ) -> _Snapshot:
     """Convert a raw-bytes map to a sha256-hex map.
 
     For UTF-8 decodable bytes, sha is over the decoded string (matching the
     memory_stores convention).  For binary blobs, sha is over the raw bytes —
     this allows change detection even though binary files cannot be stored.
+    For the ``UNREADABLE`` sentinel, a fixed content-independent digest is
+    emitted so the path stays comparable without bytes.
     """
     result: _Snapshot = {}
     for (store_id, store_path), raw in bytes_map.items():
+        if isinstance(raw, _Unreadable):
+            result[(store_id, store_path)] = _UNREADABLE_SHA
+            continue
         try:
             content = raw.decode("utf-8")
             # sha256 over UTF-8 bytes of content — mirrors memory_stores._sha256_hex
@@ -91,17 +118,20 @@ def _walk_store_files(host_dir: Path) -> list[tuple[Path, str]]:
 
 def _snapshot_with_bytes(
     session_id: str,
-) -> dict[tuple[str, str], bytes]:
+) -> _BytesMap:
     """Return raw bytes for all eligible writable materialized mounts.
 
     Called internally by both ``snapshot_memory_mounts`` (which only needs
     sha digests) and ``reconcile_memory_mounts`` (which needs bytes to avoid
     a second scan).
 
-    Returns ``bytes_map``: ``(store_id, store_path) -> raw_bytes``.
+    Returns ``bytes_map``: ``(store_id, store_path) -> raw_bytes``.  A file that
+    is enumerated but whose ``read_bytes()`` raises ``OSError`` is recorded
+    under the ``UNREADABLE`` sentinel instead of being dropped, so the path
+    stays present in the snapshot and is never mistaken for a deletion.
     """
     echoes = runtime.get_session_memory_mounts(session_id)
-    bytes_map: dict[tuple[str, str], bytes] = {}
+    bytes_map: _BytesMap = {}
 
     for echo in echoes:
         if echo.access == "read_only":
@@ -116,9 +146,12 @@ def _snapshot_with_bytes(
 
         for fpath, store_path in _walk_store_files(host_dir):
             try:
-                raw = fpath.read_bytes()
+                raw: bytes | _Unreadable = fpath.read_bytes()
             except OSError:
-                continue
+                # Record the path as seen-but-unreadable rather than dropping it.
+                # Keeping it present (under UNREADABLE) means the diff cannot
+                # mistake it for an absent file and reconcile it as a deletion.
+                raw = UNREADABLE
             bytes_map[(store_id, store_path)] = raw
 
     return bytes_map
@@ -184,6 +217,29 @@ def _read_utf8_content(
     return content
 
 
+def _warn_unreadable(
+    store_id: str,
+    store_path: str,
+    warnings: list[str],
+    session_id: str,
+) -> None:
+    """Surface an unreadable file via the warnings channel and a log line.
+
+    Mirrors :func:`_read_utf8_content`'s structure: an unreadable file is the
+    third skipped class alongside binary and oversized files, surfaced instead
+    of being acted on as a create/update/delete.
+    """
+    warnings.append(
+        f"skipped {store_path!r} in store {store_id}: file became unreadable; not reconciled"
+    )
+    log.warning(
+        "memory_reconcile.unreadable_file_skipped",
+        session_id=session_id,
+        store_id=store_id,
+        store_path=store_path,
+    )
+
+
 async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[str]:
     """Diff memory mount state against ``before``; write DB changes.
 
@@ -214,6 +270,9 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
         if (store_id, store_path) in before:
             continue  # will be handled as modify or unchanged
         raw = after_bytes[(store_id, store_path)]
+        if isinstance(raw, _Unreadable):
+            _warn_unreadable(store_id, store_path, warnings, session_id)
+            continue
         maybe_content = _read_utf8_content(
             store_id,
             store_path,
@@ -251,6 +310,9 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
         if after_sha == before_sha:
             continue  # unchanged
         raw = after_bytes[(store_id, store_path)]
+        if isinstance(raw, _Unreadable):
+            _warn_unreadable(store_id, store_path, warnings, session_id)
+            continue
         maybe_content = _read_utf8_content(
             store_id,
             store_path,
