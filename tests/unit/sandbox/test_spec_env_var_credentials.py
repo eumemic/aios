@@ -445,6 +445,96 @@ async def test_secret_proxy_start_failure_does_not_double_stop() -> None:
     broker.register_session.assert_not_called()
 
 
+async def test_session_and_run_cleanup_share_one_envelope() -> None:
+    """Drift-guard: BOTH ``build_spec_from_session`` and ``build_spec_from_run``
+    route their post-``register_session`` failure cleanup through the single
+    shared ``_release_provision_allocations`` helper.
+
+    This is the thing that fails on master (where the helper doesn't exist, so
+    the ``patch`` target is missing → ``AttributeError`` at patch time) and that
+    would re-fail if someone later re-inlines a teardown into one envelope but
+    not the other. Each builder is driven to a raise AFTER the broker secret is
+    registered (the reserved-image gate), and we assert the helper is awaited
+    exactly once with the path-appropriate ``owner_id`` / ``git_proxy``:
+    the session passes its live ``git_proxy``; the run passes ``None``.
+    """
+    from aios.sandbox.spec import build_spec_from_run
+
+    from .test_spec_run_env_var_credentials import _RUN_ID, _patch_run_spec_deps
+
+    # --- session path: a started secret_proxy + a registered broker, then a
+    # reserved-image ValueError trips the failure envelope. ---
+    git_proxy = MagicMock()
+    git_proxy.stop = AsyncMock()
+    secret_proxy = MagicMock()
+    secret_proxy.start = AsyncMock()
+    secret_proxy.stop = AsyncMock()
+    broker = MagicMock()
+    broker.port = 54321
+    broker.register_session = MagicMock()
+    broker.unregister_session = MagicMock()
+    env_config = MagicMock()
+    env_config.image = "aios-sbx-victim"
+    env_config.networking = LimitedNetworking(type="limited", allowed_hosts=["api.github.com"])
+
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_config=env_config,
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+            github_clones=AsyncMock(return_value=([], git_proxy)),
+            tool_broker=broker,
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(
+            patch("aios.sandbox.spec.SecretEgressProxy", MagicMock(return_value=secret_proxy))
+        )
+        release = stack.enter_context(
+            patch("aios.sandbox.spec._release_provision_allocations", new_callable=AsyncMock)
+        )
+        with pytest.raises(ValueError, match="reserved"):
+            await build_spec_from_session("sess_01TEST")
+
+    release.assert_awaited_once()
+    assert release.await_args is not None
+    session_kwargs = release.await_args.kwargs
+    assert session_kwargs["owner_id"] == "sess_01TEST"
+    assert session_kwargs["git_proxy"] is git_proxy
+
+    # --- run path: same failure shape (reserved image), but the run never
+    # allocates a GitProxy, so the shared helper receives git_proxy=None. ---
+    run_broker = MagicMock()
+    run_broker.port = 54321
+    run_broker.register_session = MagicMock()
+    run_broker.unregister_session = MagicMock()
+    run_secret_proxy = MagicMock()
+    run_secret_proxy.start = AsyncMock()
+    run_secret_proxy.stop = AsyncMock()
+    run_env_config = MagicMock()
+    run_env_config.image = "aios-sbx-victim"
+    run_env_config.networking = LimitedNetworking(type="limited", allowed_hosts=["api.github.com"])
+    run_env_config.env = {}
+
+    with contextlib.ExitStack() as stack:
+        for ctx in _patch_run_spec_deps(
+            env_config=run_env_config,
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+            broker=run_broker,
+            secret_proxy_instance=run_secret_proxy,
+        ):
+            stack.enter_context(ctx)
+        release_run = stack.enter_context(
+            patch("aios.sandbox.spec._release_provision_allocations", new_callable=AsyncMock)
+        )
+        with pytest.raises(ValueError, match="reserved"):
+            await build_spec_from_run(_RUN_ID)
+
+    release_run.assert_awaited_once()
+    assert release_run.await_args is not None
+    run_kwargs = release_run.await_args.kwargs
+    assert run_kwargs["owner_id"] == _RUN_ID
+    assert run_kwargs["git_proxy"] is None
+
+
 def test_placeholder_is_stable_across_recycle() -> None:
     """The placeholder is a pure function of ``(account_salt, session_id,
     credential_id)`` — two mints with the same ids are equal.
