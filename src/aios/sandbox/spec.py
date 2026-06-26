@@ -87,6 +87,13 @@ if TYPE_CHECKING:
     # own ``aios.tools`` import (see that module's import-graph note).
     from aios.sandbox.secret_egress_proxy import SecretEgressProxy
 
+    # Typing-only: a runtime ``from aios.sandbox.tool_broker import ToolBroker``
+    # would re-enter the spec↔tools import cycle (``tool_broker`` →
+    # ``aios.tools`` → ``aios.tools.bash`` → ``aios.sandbox.spec``). The type is
+    # only used as a parameter annotation on ``_release_provision_allocations``,
+    # so a TYPE_CHECKING import keeps it honest without coupling at import time.
+    from aios.sandbox.tool_broker import ToolBroker
+
 log = get_logger("aios.sandbox.spec")
 
 # Path inside the sandbox container where the worker's tool-broker UDS
@@ -145,6 +152,48 @@ def cleanup_session_secret_file(session_id: str, tool_socket_host_path: Path | N
             path=str(secret_path),
             error=str(exc),
         )
+
+
+async def _release_provision_allocations(
+    *,
+    owner_id: str,
+    tool_broker: ToolBroker,
+    broker_registered: bool,
+    tool_socket_host_path: Path | None,
+    git_proxy: GitProxy | None,
+    secret_proxy: SecretEgressProxy | None,
+) -> None:
+    """Unwind every worker-process allocation a provision made before it
+    returns a :class:`ProvisioningPlan`.
+
+    Single teardown envelope for BOTH provision paths
+    (:func:`build_spec_from_session` and :func:`build_spec_from_run`), so the
+    cleanup can never drift between session and run. ``owner_id`` is the
+    session-OR-run ULID (the opaque owner label). Each proxy stop is guarded so
+    one failing teardown can't mask the primary exception or abort a sibling
+    teardown; ``git_proxy`` is ``None`` for the run path (a run never allocates
+    one). Idempotent against partial allocation: ``broker_registered`` gates the
+    broker/secret-file drop, and each ``*_proxy is None`` short-circuits.
+
+    Sibling of (but deliberately not unified with) the registry-side
+    ``registry._stop_proxy_silently`` quiet-stop — that one also destroys the
+    backend handle and mutates the registry's proxy-tracking maps, which this
+    pre-plan-return envelope has no business doing.
+    """
+    if broker_registered:
+        tool_broker.unregister_session(owner_id)
+        cleanup_session_secret_file(owner_id, tool_socket_host_path)
+    for proxy, kind in ((git_proxy, "git_proxy"), (secret_proxy, "secret_proxy")):
+        if proxy is None:
+            continue
+        try:
+            await proxy.stop()
+        except Exception as cleanup_err:
+            log.warning(
+                f"sandbox.{kind}_cleanup_after_spec_failure",
+                owner_id=owner_id,
+                error=str(cleanup_err),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,28 +717,16 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
         # (ports, token maps, secret-to-session bindings). Anything that
         # raises before we hand back a plan must clean up everything
         # allocated so far on the way out, otherwise state leaks for the
-        # worker's lifetime.
-        if broker_registered:
-            tool_broker.unregister_session(session_id)
-            cleanup_session_secret_file(session_id, tool_socket_host_path)
-        if git_proxy is not None:
-            try:
-                await git_proxy.stop()
-            except Exception as cleanup_err:
-                log.warning(
-                    "sandbox.git_proxy_cleanup_after_spec_failure",
-                    session_id=session_id,
-                    error=str(cleanup_err),
-                )
-        if secret_proxy is not None:
-            try:
-                await secret_proxy.stop()
-            except Exception as cleanup_err:
-                log.warning(
-                    "sandbox.secret_proxy_cleanup_after_spec_failure",
-                    session_id=session_id,
-                    error=str(cleanup_err),
-                )
+        # worker's lifetime. Shared with the run path's envelope so the
+        # teardown can never drift between session and run.
+        await _release_provision_allocations(
+            owner_id=session_id,
+            tool_broker=tool_broker,
+            broker_registered=broker_registered,
+            tool_socket_host_path=tool_socket_host_path,
+            git_proxy=git_proxy,
+            secret_proxy=secret_proxy,
+        )
         raise
 
 
@@ -785,18 +822,17 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
         )
     except BaseException:
         # Drop every worker-side allocation made before a plan is returned.
-        if broker_registered:
-            tool_broker.unregister_session(run_id)
-            cleanup_session_secret_file(run_id, tool_socket_host_path)
-        if secret_proxy is not None:
-            try:
-                await secret_proxy.stop()
-            except Exception as cleanup_err:
-                log.warning(
-                    "sandbox.secret_proxy_cleanup_after_spec_failure",
-                    session_id=run_id,
-                    error=str(cleanup_err),
-                )
+        # Shared envelope with the session path; a run never allocates a
+        # ``GitProxy``, so the git_proxy arm is dropped by passing the inert
+        # ``None`` rather than by omitting code.
+        await _release_provision_allocations(
+            owner_id=run_id,
+            tool_broker=tool_broker,
+            broker_registered=broker_registered,
+            tool_socket_host_path=tool_socket_host_path,
+            git_proxy=None,
+            secret_proxy=secret_proxy,
+        )
         raise
 
 
