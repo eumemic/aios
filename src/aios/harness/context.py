@@ -1358,13 +1358,18 @@ def stub_missing_reasoning_content(
 ) -> list[dict[str, Any]]:
     """Ensure every assistant message carries ``reasoning_content``.
 
-    Thinking-mode models (DeepSeek V4 Flash, etc.) reject transcripts
-    whose assistant turns lack this field: ``The reasoning_content in the
-    thinking mode must be passed back to the API``.  Non-thinking models
-    (Anthropic / OpenAI / Gemini / Llama / DeepSeek v3 — all probed)
-    ignore the field entirely, so setting an empty stub unconditionally
-    costs nothing and lets cross-model sessions use thinking models for
-    a single turn without poisoning their replay on other providers.
+    **Call this only for thinking-capable targets** (gate the call on
+    ``model_descriptor(model).supports_thinking``).  Thinking-mode models
+    (DeepSeek V4 Flash, etc.) reject transcripts whose assistant turns
+    lack this field: ``The reasoning_content in the thinking mode must be
+    passed back to the API``.
+
+    Non-thinking targets must NOT receive this stub: ``_strip_to_spec``
+    (in ``build_messages``) deliberately removes ``reasoning_content``
+    from their assistant turns, and re-adding an empty one here would
+    contradict that strip pass — reintroducing a field for providers that
+    never asked for it.  Gating both passes on the single
+    ``supports_thinking`` verdict keeps them in agreement.
 
     Mutates messages in place and returns the list for chaining.  Skips
     messages that already have a reasoning_content set (from a prior

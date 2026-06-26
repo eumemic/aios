@@ -57,6 +57,27 @@ def _full_pipeline(
     return merge_adjacent_user_messages(ctx.messages)
 
 
+def _full_pipeline_for_model(
+    events: list[Event],
+    model: str,
+) -> list[dict[str, Any]]:
+    """Compose the final message list for a concrete target model, exercising
+    the SAME tail ``compose_step_context`` runs: ``build_messages`` (which
+    strips reasoning fields for non-thinking targets) -> adjacent-user merge
+    -> the production ``supports_thinking``-gated reasoning-stub helper.
+
+    The stub step calls the real
+    ``step_context._stub_reasoning_content_for_thinking_target`` — the exact
+    seam the composer uses — so a regression that ungates it (re-adding the
+    field for non-thinking targets) is caught here without a DB-backed
+    ``compose_step_context`` round-trip."""
+    from aios.harness.step_context import _stub_reasoning_content_for_thinking_target
+
+    ctx = build_messages(events, system_prompt=None, model=model)
+    messages = merge_adjacent_user_messages(ctx.messages)
+    return _stub_reasoning_content_for_thinking_target(messages, model)
+
+
 # Fixed receipt time so the per-message ``received=`` envelope field
 # (see ``_format_received``) renders deterministically across assertions.
 _FIXED_CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -1947,6 +1968,59 @@ class TestStubMissingReasoningContent:
         stub_missing_reasoning_content(msgs)
         assert msgs[0]["reasoning_content"] == ""
         assert msgs[0]["tool_calls"] == [{"id": "a"}]
+
+
+class TestReasoningContentStubGate:
+    """End-to-end checks that the ``reasoning_content`` stub pass is gated on
+    the target's ``supports_thinking`` verdict — the same axis ``build_messages``
+    uses to strip/keep reasoning fields. On a non-thinking target the strip
+    pass removes ``reasoning_content`` and the (gated-off) stub pass must NOT
+    re-add it; on a thinking target the stub fills the missing field."""
+
+    def test_non_thinking_target_no_reasoning_content_stub(self) -> None:
+        # Assistant turn lacks reasoning_content; non-thinking target must
+        # ship it WITHOUT a synthesized empty stub. Fails on master, where
+        # the unconditional stub adds ``reasoning_content: ""``.
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        msgs = _full_pipeline_for_model(events, "openai/gpt-4o-mini")
+        assistant = [m for m in msgs if m.get("role") == "assistant"]
+        assert assistant, "expected at least one assistant turn"
+        for msg in assistant:
+            assert "reasoning_content" not in msg
+
+    def test_thinking_target_gets_reasoning_content_stub(self) -> None:
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        msgs = _full_pipeline_for_model(events, "anthropic/claude-haiku-4-5")
+        assistant = [m for m in msgs if m.get("role") == "assistant"]
+        assert assistant, "expected at least one assistant turn"
+        for msg in assistant:
+            assert msg["reasoning_content"] == ""
+
+    def test_thinking_target_preserves_real_reasoning_content(self) -> None:
+        # A thinking target whose assistant turn already carries
+        # reasoning_content keeps it verbatim (strip preserves it, stub
+        # skips already-set fields).
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["reasoning_content"] = "deep thoughts about hi"
+        msgs = _full_pipeline_for_model(events, "anthropic/claude-haiku-4-5")
+        assistant = [m for m in msgs if m.get("role") == "assistant"]
+        assert assistant[0]["reasoning_content"] == "deep thoughts about hi"
+
+    def test_gate_seam_capability_verdicts(self) -> None:
+        # The seam the call site gates on: non-thinking false, thinking true.
+        from aios.harness.completion import model_descriptor
+
+        assert model_descriptor("openai/gpt-4o-mini").supports_thinking is False
+        assert model_descriptor("anthropic/claude-haiku-4-5").supports_thinking is True
 
 
 class TestMergeAdjacentUserMessagesPipeline:
