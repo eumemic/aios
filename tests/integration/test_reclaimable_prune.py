@@ -147,7 +147,8 @@ async def _insert_session(
 
 
 async def _count(conn: asyncpg.Connection[Any], table: str, _id_col: str, _id: str) -> int:
-    return await conn.fetchval(f"SELECT count(*) FROM {table} WHERE {_id_col} = $1", _id)
+    count = await conn.fetchval(f"SELECT count(*) FROM {table} WHERE {_id_col} = $1", _id)
+    return int(count)
 
 
 # ─── the headline acceptance test ───────────────────────────────────────────
