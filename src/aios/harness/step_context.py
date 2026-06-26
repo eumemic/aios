@@ -354,6 +354,32 @@ def _agent_owes_response(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _stub_reasoning_content_for_thinking_target(
+    messages: list[dict[str, Any]], model: str
+) -> list[dict[str, Any]]:
+    """Stub ``reasoning_content`` onto bare assistant turns **only** for a
+    thinking-capable target.
+
+    Gated on the same capability axis the message pipeline already computes
+    (``model_descriptor(model).supports_thinking``). For a non-thinking
+    target, ``_strip_to_spec`` (in ``build_messages``) has already removed
+    ``reasoning_content`` from assistant turns; re-adding an empty stub here
+    would contradict that strip pass, so we leave the list untouched. For a
+    thinking target (DeepSeek V4 Flash, Claude family, …), the provider
+    rejects replayed assistant turns lacking the field, so we stub it.
+
+    Mutates and returns the list (the stub pass is in-place); a no-op gate
+    returns the list unchanged.
+    """
+    # Function-local import mirrors context.build_messages to avoid an
+    # import cycle with completion.py.
+    from aios.harness.completion import model_descriptor
+
+    if model_descriptor(model).supports_thinking:
+        stub_missing_reasoning_content(messages)
+    return messages
+
+
 async def compose_step_context(
     *,
     pool: asyncpg.Pool[Any],
@@ -452,11 +478,12 @@ async def compose_step_context(
     # which degenerate-poisoned literal models like claude-fable-5.
     messages = merge_adjacent_user_messages(ctx.messages)
 
-    # Unblock thinking-mode models: DeepSeek V4 Flash rejects assistant
-    # turns without reasoning_content.  Empty stub is ignored by all
-    # non-thinking providers we've tested (Anthropic, OpenAI, Gemini,
-    # Llama, non-thinking DeepSeek).
-    stub_missing_reasoning_content(messages)
+    # Unblock thinking-mode targets only: DeepSeek V4 Flash and other
+    # reasoning models reject replayed assistant turns that lack
+    # reasoning_content.  Non-thinking targets had the field correctly
+    # stripped by _strip_to_spec (build_messages); do NOT re-add it for
+    # them — that re-introduces a field the strip pass just removed.
+    messages = _stub_reasoning_content_for_thinking_target(messages, agent.model)
 
     return StepContext(
         model=agent.model,
