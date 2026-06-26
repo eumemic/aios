@@ -141,9 +141,7 @@ class _CallWorkflowArgs(BaseModel):
     def _validate_source_arm(self) -> _CallWorkflowArgs:
         if (self.workflow_id is None) == (self.inline is None):
             got = "both" if self.inline is not None else "neither"
-            raise ValueError(
-                f"exactly one of workflow_id or inline must be provided (got {got})"
-            )
+            raise ValueError(f"exactly one of workflow_id or inline must be provided (got {got})")
         return self
 
 

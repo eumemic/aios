@@ -44,7 +44,6 @@ class WfRun:
 
         Attributes:
             id (str):
-            workflow_id (str):
             account_id (str):
             environment_id (str):
             script (str):
@@ -55,6 +54,7 @@ class WfRun:
             last_event_seq (int):
             created_at (datetime.datetime):
             updated_at (datetime.datetime):
+            workflow_id (None | str | Unset):
             parent_run_id (None | str | Unset):
             launcher_session_id (None | str | Unset):
             depth (int | Unset):  Default: 0.
@@ -74,7 +74,6 @@ class WfRun:
     """
 
     id: str
-    workflow_id: str
     account_id: str
     environment_id: str
     script: str
@@ -84,6 +83,7 @@ class WfRun:
     last_event_seq: int
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    workflow_id: None | str | Unset = UNSET
     parent_run_id: None | str | Unset = UNSET
     launcher_session_id: None | str | Unset = UNSET
     depth: int | Unset = 0
@@ -111,8 +111,6 @@ class WfRun:
 
         id = self.id
 
-        workflow_id = self.workflow_id
-
         account_id = self.account_id
 
         environment_id = self.environment_id
@@ -130,6 +128,12 @@ class WfRun:
         created_at = self.created_at.isoformat()
 
         updated_at = self.updated_at.isoformat()
+
+        workflow_id: None | str | Unset
+        if isinstance(self.workflow_id, Unset):
+            workflow_id = UNSET
+        else:
+            workflow_id = self.workflow_id
 
         parent_run_id: None | str | Unset
         if isinstance(self.parent_run_id, Unset):
@@ -231,7 +235,6 @@ class WfRun:
         field_dict.update(
             {
                 "id": id,
-                "workflow_id": workflow_id,
                 "account_id": account_id,
                 "environment_id": environment_id,
                 "script": script,
@@ -243,6 +246,8 @@ class WfRun:
                 "updated_at": updated_at,
             }
         )
+        if workflow_id is not UNSET:
+            field_dict["workflow_id"] = workflow_id
         if parent_run_id is not UNSET:
             field_dict["parent_run_id"] = parent_run_id
         if launcher_session_id is not UNSET:
@@ -292,8 +297,6 @@ class WfRun:
         d = dict(src_dict)
         id = d.pop("id")
 
-        workflow_id = d.pop("workflow_id")
-
         account_id = d.pop("account_id")
 
         environment_id = d.pop("environment_id")
@@ -311,6 +314,15 @@ class WfRun:
         created_at = isoparse(d.pop("created_at"))
 
         updated_at = isoparse(d.pop("updated_at"))
+
+        def _parse_workflow_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        workflow_id = _parse_workflow_id(d.pop("workflow_id", UNSET))
 
         def _parse_parent_run_id(data: object) -> None | str | Unset:
             if data is None:
@@ -479,7 +491,6 @@ class WfRun:
 
         wf_run = cls(
             id=id,
-            workflow_id=workflow_id,
             account_id=account_id,
             environment_id=environment_id,
             script=script,
@@ -489,6 +500,7 @@ class WfRun:
             last_event_seq=last_event_seq,
             created_at=created_at,
             updated_at=updated_at,
+            workflow_id=workflow_id,
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
             depth=depth,

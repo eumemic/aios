@@ -258,9 +258,7 @@ async def test_inline_operator_surface_verbatim(wf_pool: asyncpg.Pool[Any]) -> N
 
 async def test_neither_arm_is_validation_error(wf_pool: asyncpg.Pool[Any]) -> None:
     with pytest.raises(ValidationError):
-        await service.create_run(
-            wf_pool, account_id="acc_inl", environment_id="env_inl"
-        )
+        await service.create_run(wf_pool, account_id="acc_inl", environment_id="env_inl")
 
 
 async def test_both_arms_is_validation_error(wf_pool: asyncpg.Pool[Any]) -> None:

@@ -9752,7 +9752,7 @@
           "runs"
         ],
         "summary": "Create Run",
-        "description": "Launch a run of a workflow. Snapshots the workflow's current script, binds\nthe run to ``environment_id`` (its ``agent()`` children spawn there) and to\n``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing\nworkflow or environment 404s. The HTTP path is unattenuated operator authority \u2014 no\n``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).",
+        "description": "Launch a run. Either a registered ``workflow_id`` (snapshots the workflow's\ncurrent script) OR an inline ``{script, schemas, surface}`` body (T5, #1466) \u2014 a\none-shot anonymous run with NO ``workflows`` row created (exactly one). Binds the\nrun to ``environment_id`` (its ``agent()`` children spawn there) and to ``vault_ids``\n(credentials it resolves at tool-call time), and wakes it. A missing workflow or\nenvironment 404s. The HTTP path is unattenuated operator authority \u2014 no\n``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).",
         "operationId": "create_run",
         "parameters": [
           {
@@ -12773,6 +12773,74 @@
             "deny_all": "#/components/schemas/DenyAll"
           }
         }
+      },
+      "InlineScriptBody": {
+        "properties": {
+          "script": {
+            "type": "string",
+            "title": "Script",
+            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.\n  - `invoke_workflow(workflow_id, input, *, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n  - `phase(label)`: record a phase marker on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): a per-call\n  idempotency token (stable across crash re-runs of the same call, distinct per call) is\n  available so you can have the external service drop a re-fired duplicate, or knowingly\n  accept at-least-once. Both deliveries opt in the same way with the same `$AIOS_IDEMPOTENCY_KEY`\n  ergonomic: in `tool('bash')` the environment exposes `$AIOS_IDEMPOTENCY_KEY`; in\n  `tool('http_request')` pass the sentinel string `\"$AIOS_IDEMPOTENCY_KEY\"` as an\n  `Idempotency-Key` header value and the worker substitutes the real token before dispatch.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        {\"task\": input[\"task\"]},\n        agent_id=input[\"agent_id\"],\n    )\n    return result\n```\n"
+          },
+          "input_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Schema"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Schema"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": "array",
+            "title": "Tools"
+          },
+          "mcp_servers": {
+            "items": {
+              "$ref": "#/components/schemas/McpServerSpec"
+            },
+            "type": "array",
+            "title": "Mcp Servers"
+          },
+          "http_servers": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/HttpServerSpec"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Http Servers"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "script"
+        ],
+        "title": "InlineScriptBody",
+        "description": "The inline-script body of an anonymous run launch (T5, #1466).\n\nThe alternative to ``WfRunCreate.workflow_id``: a one-shot run launched directly\nfrom this ``{script, schemas, surface}`` body, with NO ``workflows`` row created.\nThe run snapshots ``script`` exactly as it snapshots a registered workflow's, and\nthe declared surface (``tools``/``mcp_servers``/``http_servers``) is clamped to the\nlauncher with the same create-time clamp ``create_workflow`` uses (a surface\nexceeding the launcher raises ``ForbiddenError``). The HTTP/operator path is\nunattenuated operator authority; names-only http sugar is rejected there (no acting\nagent to resolve a bare name against)."
       },
       "LimitedNetworking": {
         "properties": {
@@ -18334,7 +18402,14 @@
             "title": "Id"
           },
           "workflow_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Workflow Id"
           },
           "account_id": {
@@ -18532,7 +18607,6 @@
         "type": "object",
         "required": [
           "id",
-          "workflow_id",
           "account_id",
           "environment_id",
           "script",
@@ -18549,8 +18623,27 @@
       "WfRunCreate": {
         "properties": {
           "workflow_id": {
-            "type": "string",
-            "title": "Workflow Id"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id",
+            "description": "The registered workflow to run. Supply EITHER this or `inline` (exactly one). Omit when launching an inline one-shot run."
+          },
+          "inline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InlineScriptBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Inline-script body for an anonymous one-shot run (T5). Supply EITHER this or `workflow_id` (exactly one). No `workflows` row is created."
           },
           "environment_id": {
             "type": "string",
@@ -18567,7 +18660,7 @@
               }
             ],
             "title": "Version",
-            "description": "Optional historical workflow version to run. `None` (default) launches the workflow's CURRENT version. An integer re-runs that specific version: the run snapshots that version's script + declared surface (clamped against the current launcher's authority) and binds `source_version` to it. Launching ANY version of an archived workflow is refused (409). This is a SELECTOR \u2014 distinct from the trigger's `workflow_version` drift assertion."
+            "description": "Optional historical workflow version to run. `None` (default) launches the workflow's CURRENT version. An integer re-runs that specific version: the run snapshots that version's script + declared surface (clamped against the current launcher's authority) and binds `source_version` to it. Launching ANY version of an archived workflow is refused (409). This is a SELECTOR \u2014 distinct from the trigger's `workflow_version` drift assertion. Not valid with `inline`."
           },
           "input": {
             "title": "Input"
@@ -18609,11 +18702,10 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "workflow_id",
           "environment_id"
         ],
         "title": "WfRunCreate",
-        "description": "Request body for ``POST /v1/runs`` \u2014 launch a run of a workflow.\n\n``input`` is arbitrary JSON (a workflow's input need not be an object). The run\nbinds to ``environment_id`` (like a session), into which its ``agent()`` children\nspawn. (``launcher_session_id`` is deliberately NOT a field \u2014 trusted ids never\nride in request bodies; the HTTP path is always an operator launch.)"
+        "description": "Request body for ``POST /v1/runs`` \u2014 launch a run.\n\nExactly ONE source arm (validated below):\n\n* ``workflow_id`` (+ optional ``version``) \u2014 the registered path: snapshot a\n  pre-registered workflow's script + declared surface.\n* ``inline`` (:class:`InlineScriptBody`) \u2014 the inline-script arm (T5, #1466): a\n  one-shot run launched from an inline ``{script, schemas, surface}`` body with NO\n  ``workflows`` row created. ``version`` is meaningless on this arm (no definition\n  history) and is rejected if combined with it.\n\n``input`` is arbitrary JSON (a workflow's input need not be an object). The run\nbinds to ``environment_id`` (like a session), into which its ``agent()`` children\nspawn. (``launcher_session_id`` is deliberately NOT a field \u2014 trusted ids never\nride in request bodies; the HTTP path is always an operator launch.)"
       },
       "WfRunEvent": {
         "properties": {

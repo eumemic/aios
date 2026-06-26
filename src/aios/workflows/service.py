@@ -149,9 +149,7 @@ async def _enforce_inline_surface(
     except ValueError as exc:
         raise ForbiddenError(
             "inline run surface exceeds the launching agent's permissions",
-            detail={
-                "exceeds": {"http_servers": [r for r in http_servers if isinstance(r, str)]}
-            },
+            detail={"exceeds": {"http_servers": [r for r in http_servers if isinstance(r, str)]}},
         ) from exc
     declared = Surface(tools, mcp_servers, resolved_http)
     expected = attenuation_service.normalize(declared)

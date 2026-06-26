@@ -467,9 +467,7 @@ class WfRunCreate(BaseModel):
     def _validate_source_arm(self) -> WfRunCreate:
         if (self.workflow_id is None) == (self.inline is None):
             got = "both" if self.inline is not None else "neither"
-            raise ValueError(
-                f"exactly one of workflow_id or inline must be provided (got {got})"
-            )
+            raise ValueError(f"exactly one of workflow_id or inline must be provided (got {got})")
         if self.inline is not None and self.version is not None:
             raise ValueError("version is not valid for an inline run (no version history)")
         return self
