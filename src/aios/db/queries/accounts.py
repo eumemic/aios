@@ -14,9 +14,6 @@ from typing import Any, cast
 import asyncpg
 
 from aios.crypto.vault import CryptoBox, EncryptedBlob
-from aios.db.queries import (
-    parse_jsonb,
-)
 from aios.errors import (
     ConflictError,
     NotFoundError,
@@ -184,8 +181,8 @@ async def resolve_runtime_token(
 
 
 def _row_to_account(row: asyncpg.Record) -> Account:
-    metadata = parse_jsonb(row["metadata"])
-    raw_config = parse_jsonb(row["config"])
+    metadata = row["metadata"]
+    raw_config = row["config"]
     # Lenient hydration: the strict model (extra="forbid" + IANA validation)
     # guards WRITES; re-running it here would make stored config a hard schema
     # constraint on every account read — including bearer auth

@@ -18,7 +18,6 @@ from aios.db.queries import (
     _get_versioned,
     _list_scoped,
     _list_versioned,
-    parse_jsonb,
 )
 from aios.errors import (
     ConflictError,
@@ -42,12 +41,12 @@ from aios.models.skills import AgentSkillRef
 
 
 def _row_to_agent(row: asyncpg.Record) -> Agent:
-    tools_data = parse_jsonb(row["tools"])
-    skills_data = parse_jsonb(row["skills"])
-    mcp_data = parse_jsonb(row.get("mcp_servers", []))
-    http_data = parse_jsonb(row.get("http_servers", []))
-    metadata = parse_jsonb(row["metadata"])
-    litellm_extra = parse_jsonb(row["litellm_extra"])
+    tools_data = row["tools"]
+    skills_data = row["skills"]
+    mcp_data = row.get("mcp_servers", [])
+    http_data = row.get("http_servers", [])
+    metadata = row["metadata"]
+    litellm_extra = row["litellm_extra"]
     return Agent(
         id=row["id"],
         version=row["version"],
@@ -70,11 +69,11 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
 
 
 def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
-    tools_data = parse_jsonb(row["tools"])
-    skills_data = parse_jsonb(row["skills"])
-    mcp_data = parse_jsonb(row.get("mcp_servers", []))
-    http_data = parse_jsonb(row.get("http_servers", []))
-    litellm_extra = parse_jsonb(row["litellm_extra"])
+    tools_data = row["tools"]
+    skills_data = row["skills"]
+    mcp_data = row.get("mcp_servers", [])
+    http_data = row.get("http_servers", [])
+    litellm_extra = row["litellm_extra"]
     return AgentVersion(
         agent_id=row["agent_id"],
         version=row["version"],

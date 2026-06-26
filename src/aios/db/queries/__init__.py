@@ -8,7 +8,7 @@ module. Two things live here:
 
 * the tenant-scoping helpers every resource module imports
   (:func:`_get_scoped`, :func:`_list_scoped`, :func:`_archive_scoped`,
-  :func:`_build_set_assignments`, :func:`_escape_like`, :func:`parse_jsonb`); and
+  :func:`_build_set_assignments`, :func:`_escape_like`); and
 * a re-export block at the bottom that lifts every name each submodule defines
   back onto the package root, so ``from aios.db.queries import foo`` and
   ``queries.foo`` resolve to the SAME object the submodule defines. That
@@ -26,25 +26,6 @@ from typing import Any
 import asyncpg
 
 from aios.errors import NotFoundError
-
-
-def parse_jsonb(raw: Any) -> Any:
-    """Normalize a JSONB cell to its parsed Python form.
-
-    The pool registers a ``jsonb`` codec (:func:`aios.db.pool.register_jsonb_codec`),
-    so every pool-sourced read already arrives as parsed Python — this helper is
-    now a pure passthrough and simply returns ``raw`` unchanged. It is retained
-    over the incremental Stage 2 sweep that deletes its ~140 call sites; once
-    those are gone, this helper is removed too.
-
-    It must NOT re-parse: a JSONB column may legitimately hold a bare top-level
-    JSON *string* (e.g. ``wf_runs.output`` stores a script's string return value
-    or an error message), which the codec decodes to a Python ``str``. The old
-    ``json.loads(raw) if isinstance(raw, str)`` guard would then try to JSON-parse
-    that already-decoded string and blow up on the first non-JSON character.
-    """
-    return raw
-
 
 # ─── shared scoping helpers ──────────────────────────────────────────────────
 #
@@ -850,7 +831,6 @@ __all__ = [
     "notify_management_call_dispatch",
     "notify_management_call_result",
     "open_request_anti_join",
-    "parse_jsonb",
     "precompute_event_append",
     "prune_trigger_runs",
     "read_events",

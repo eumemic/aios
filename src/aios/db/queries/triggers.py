@@ -14,9 +14,6 @@ from typing import Any, NamedTuple
 
 import asyncpg
 
-from aios.db.queries import (
-    parse_jsonb,
-)
 from aios.errors import (
     ConflictError,
     NotFoundError,
@@ -90,15 +87,15 @@ def _row_to_trigger_echo(row: asyncpg.Record) -> TriggerEcho:
         id=row["id"],
         name=row["name"],
         source=TRIGGER_SOURCE_ADAPTER.validate_python(
-            {"kind": row["source"], **parse_jsonb(row["source_spec"])}
+            {"kind": row["source"], **row["source_spec"]}
         ),
-        action=TRIGGER_ACTION_ADAPTER.validate_python(parse_jsonb(row["action"])),
+        action=TRIGGER_ACTION_ADAPTER.validate_python(row["action"]),
         enabled=row["enabled"],
         next_fire=row["next_fire"],
         last_fire_at=row["last_fire_at"],
         last_fire_status=row["last_fire_status"],
         consecutive_failures=row["consecutive_failures"],
-        metadata=parse_jsonb(row["metadata"]),
+        metadata=row["metadata"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -377,8 +374,8 @@ async def unscoped_get_trigger_row(
         account_id=row["account_id"],
         name=row["name"],
         source=row["source"],
-        source_spec=parse_jsonb(row["source_spec"]),
-        action=TRIGGER_ACTION_ADAPTER.validate_python(parse_jsonb(row["action"])),
+        source_spec=row["source_spec"],
+        action=TRIGGER_ACTION_ADAPTER.validate_python(row["action"]),
         enabled=row["enabled"],
         next_fire=row["next_fire"],
         running_since=row["running_since"],
@@ -490,8 +487,8 @@ async def fetch_and_claim_due_triggers(
                 account_id=r["account_id"],
                 name=r["name"],
                 source=r["source"],
-                source_spec=parse_jsonb(r["source_spec"]),
-                action=TRIGGER_ACTION_ADAPTER.validate_python(parse_jsonb(r["action"])),
+                source_spec=r["source_spec"],
+                action=TRIGGER_ACTION_ADAPTER.validate_python(r["action"]),
                 enabled=r["enabled"],
                 # next_fire on the returned row reflects the *advanced* value
                 # for cron, or the unchanged value for one-shot.
@@ -698,7 +695,7 @@ def _row_to_trigger_run_echo(row: asyncpg.Record) -> TriggerRunEcho:
         id=row["id"],
         trigger_id=row["trigger_id"],
         trigger_context=row["trigger_context"],
-        event=parse_jsonb(row["event"]) if row["event"] is not None else None,
+        event=row["event"] if row["event"] is not None else None,
         status=row["status"],
         result_id=row["result_id"],
         error_summary=row["error_summary"],
@@ -899,7 +896,7 @@ async def claim_trigger_run(
     )
     if row is None:
         return None
-    event = parse_jsonb(row["event"])
+    event = row["event"]
     # Both reactive carrier kinds always carry a dict event (run_completion's
     # synthesized {run_id,…}; external_event's ingress-validated object body).
     assert isinstance(event, dict)

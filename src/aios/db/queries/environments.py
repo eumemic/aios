@@ -17,7 +17,6 @@ from aios.db.queries import (
     _build_set_assignments,
     _get_scoped,
     _list_scoped,
-    parse_jsonb,
 )
 from aios.errors import (
     ConflictError,
@@ -33,7 +32,7 @@ from aios.models.environments import Environment, EnvironmentConfig
 
 def _row_to_environment(row: asyncpg.Record) -> Environment:
     raw_config = row["config"]
-    config_data = parse_jsonb(raw_config)
+    config_data = raw_config
     return Environment(
         id=row["id"],
         name=row["name"],
@@ -171,7 +170,7 @@ async def get_environment_config_for_id(
     )
     if row is None:
         return None
-    config_data = parse_jsonb(row["config"])
+    config_data = row["config"]
     return EnvironmentConfig.model_validate(config_data)
 
 
@@ -210,5 +209,5 @@ async def get_environment_config_for_session(
     if row is None:
         return None
     raw_config = row["config"]
-    config_data = parse_jsonb(raw_config)
+    config_data = raw_config
     return EnvironmentConfig.model_validate(config_data)

@@ -81,7 +81,7 @@ async def register_jsonb_codec(conn: asyncpg.Connection[Any]) -> None:
     carries the codec. Also exported so any code path that runs the
     ``aios.db.queries`` functions on a connection it opened directly (rather than
     acquiring from the pool) can opt the connection in — the query layer now
-    relies on this codec for jsonb (``parse_jsonb`` is a pure passthrough), so a
+    relies on this codec for jsonb (reads arrive as native Python), so a
     bare ``asyncpg.connect()`` running those functions MUST register it first or
     reads come back as raw JSON strings.
 

@@ -116,7 +116,7 @@ async def _children_by_payload(pool: asyncpg.Pool[Any], run_id: str) -> dict[str
                 child_id,
                 "acc_wf",
             )
-        request = db_queries.parse_jsonb(row["data"])
+        request = row["data"]
         children[request["content"]] = child_id
     return children
 

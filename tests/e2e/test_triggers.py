@@ -2310,7 +2310,7 @@ class TestMigrationToolRewrite:
         async with pool.acquire() as conn:
             await conn.execute(self._load_rewrite_sql())
             rows = {
-                r["id"]: queries.parse_jsonb(r["tools"])
+                r["id"]: r["tools"]
                 for r in await conn.fetch(
                     "SELECT id, tools FROM agents WHERE id = ANY($1)",
                     [empty_id, custom_id, legacy_id],

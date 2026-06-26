@@ -17,7 +17,6 @@ from pydantic import TypeAdapter
 from aios.crypto.vault import EncryptedBlob
 from aios.db.queries import (
     _escape_like,
-    parse_jsonb,
 )
 from aios.db.queries.inbound_policy import effective_inbound_policy
 from aios.errors import (
@@ -298,7 +297,7 @@ _CONNECTION_UPDATE_CTE_TAIL = """
 
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
-    raw_policy = parse_jsonb(row["inbound_policy"])
+    raw_policy = row["inbound_policy"]
     inbound_policy = (
         _INBOUND_POLICY_ADAPTER.validate_python(raw_policy) if raw_policy is not None else None
     )
@@ -308,7 +307,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         external_account_id=row["external_account_id"],
         session_id=row["binding_session_id"],
         session_template_id=row["binding_session_template_id"],
-        metadata=parse_jsonb(row["metadata"]),
+        metadata=row["metadata"],
         secrets_set=row["secrets_ciphertext"] is not None,
         created_at=row["created_at"],
         attached_at=row["binding_created_at"],
@@ -614,7 +613,7 @@ async def list_connection_tools_for_session(
     )
     out: list[dict[str, Any]] = []
     for row in rows:
-        out.extend(parse_jsonb(row["tools"]))
+        out.extend(row["tools"])
     return out
 
 
@@ -662,9 +661,7 @@ async def list_connection_capabilities_for_session(
         account_id,
     )
     return {
-        row["connector"]: ConnectorCapabilities.model_validate(
-            parse_jsonb(row["capabilities"]) or {}
-        )
+        row["connector"]: ConnectorCapabilities.model_validate(row["capabilities"] or {})
         for row in rows
     }
 
@@ -1365,7 +1362,7 @@ async def list_pending_management_calls_for_connector(
         {
             "call_id": row["id"],
             "method": row["method"],
-            "params": parse_jsonb(row["params"]),
+            "params": row["params"],
         }
         for row in rows
     ]
@@ -1396,9 +1393,9 @@ async def get_management_call(
         "id": row["id"],
         "connector": row["connector"],
         "method": row["method"],
-        "params": parse_jsonb(row["params"]),
+        "params": row["params"],
         "status": row["status"],
-        "result": parse_jsonb(row["result"]) if row["result"] is not None else None,
+        "result": row["result"] if row["result"] is not None else None,
         "is_error": row["is_error"],
     }
 

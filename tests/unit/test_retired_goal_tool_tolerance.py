@@ -76,8 +76,8 @@ def test_agent_row_with_retired_builtin_hydrates_clean() -> None:
         "name": "ultron",
         "model": "anthropic/claude-opus-4-6",
         "system": "",
-        # Pool reads arrive already parsed (the jsonb codec decodes), so ``parse_jsonb`` is a
-        # passthrough — pass parsed Python here, exactly what ``_row_to_agent`` receives in prod.
+        # Pool reads arrive already parsed (the jsonb codec decodes), so pass
+        # parsed Python here, exactly what ``_row_to_agent`` receives in prod.
         "tools": [{"type": "bash"}, {"type": "complete_goal"}, {"type": "fail_goal"}],
         "skills": [],
         "mcp_servers": [],

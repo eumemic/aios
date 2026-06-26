@@ -129,7 +129,7 @@ async def _tool_results(
             session_id,
             tool_call_id,
         )
-    return [queries.parse_jsonb(r["data"]) for r in rows]
+    return [r["data"] for r in rows]
 
 
 # ─── find_parked_servicer (the locator) ──────────────────────────────────────

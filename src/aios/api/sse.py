@@ -158,7 +158,7 @@ def _serialize_event(row: asyncpg.Record) -> dict[str, Any]:
     (e.g. the ``aios tail`` CLI) can tag user messages and spot
     wrong-channel sends without re-querying.
     """
-    parsed = queries.parse_jsonb(row["data"])
+    parsed = row["data"]
     return {
         "id": row["id"],
         "session_id": row["session_id"],
@@ -258,7 +258,7 @@ def _serialize_wf_event(row: asyncpg.Record) -> dict[str, Any]:
         "seq": row["seq"],
         "type": row["type"],
         "call_key": row["call_key"],
-        "payload": queries.parse_jsonb(row["payload"]),
+        "payload": row["payload"],
         "created_at": row["created_at"].isoformat(),
     }
 

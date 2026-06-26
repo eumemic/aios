@@ -17,9 +17,6 @@ from typing import Any, NamedTuple
 import asyncpg
 
 from aios.db import queries
-from aios.db.queries import (
-    parse_jsonb,
-)
 from aios.db.queries.connections import _session_bound_to_connection_predicate
 from aios.errors import (
     NotFoundError,
@@ -41,7 +38,7 @@ from aios.models.events import (
 
 def _row_to_event(row: asyncpg.Record) -> Event:
     raw_data = row["data"]
-    data = parse_jsonb(raw_data)
+    data = raw_data
     return Event(
         id=row["id"],
         session_id=row["session_id"],
@@ -483,7 +480,7 @@ async def lookup_tool_name_by_call_id(
     if row is None:
         return None, None
     focal: str | None = row["focal_channel_at_arrival"]
-    tool_calls = parse_jsonb(row["tool_calls"])
+    tool_calls = row["tool_calls"]
     if not isinstance(tool_calls, list):
         return None, focal
     for tc in tool_calls:
@@ -614,7 +611,7 @@ async def list_confirmed_unresolved_tool_calls(
         tool_call_id: str = row["tool_call_id"]
         if tool_call_id in seen:
             continue
-        tool_calls = parse_jsonb(row["tool_calls"])
+        tool_calls = row["tool_calls"]
         if not isinstance(tool_calls, list):
             continue
         for tc in tool_calls:
@@ -1008,7 +1005,7 @@ async def list_pending_calls_for_connector(
     )
     if cat_row is None:
         return []
-    tools_data = parse_jsonb(cat_row["tools"])
+    tools_data = cat_row["tools"]
     name_set = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
     if not name_set:
         return []
@@ -1134,7 +1131,7 @@ async def list_pending_calls_for_session_and_connection(
     )
     if conn_row is None:
         return []
-    tools_data = parse_jsonb(conn_row["tools"])
+    tools_data = conn_row["tools"]
     name_set = {t["name"] for t in tools_data if isinstance(t, dict) and "name" in t}
     if not name_set:
         return []
@@ -1246,14 +1243,14 @@ async def _unresolved_tool_calls(
     out: dict[str, list[dict[str, Any]]] = {}
     for row in asst_rows:
         sid: str = row["session_id"]
-        data = parse_jsonb(row["data"])
+        data = row["data"]
         completed: set[str] = results_by_sid.get(sid, set())
         for tc in data.get("tool_calls") or []:
             if tc.get("id") and tc["id"] not in completed:
                 # Shallow copy so the read-model carries the parent
                 # assistant turn's created_at without mutating the parsed
-                # source dict (parse_jsonb may return a shared reference if
-                # a JSONB codec is ever registered). Connector-SSE consumers
+                # source dict (the jsonb codec may return a shared reference).
+                # Connector-SSE consumers
                 # build their own explicit output dicts, so this extra key
                 # never leaks into their payloads.
                 out.setdefault(sid, []).append({**tc, "_pending_since": row["created_at"]})

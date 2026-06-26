@@ -183,7 +183,7 @@ async def test_two_completions_two_fires_two_runs(trig_runtime: asyncpg.Pool[Any
     assert [r["status"] for r in rows] == ["pending", "pending"]
     # The event writer's exact shape (resolution #3's writer test).
     for row, rid in zip(rows, [run_a, run_b], strict=True):
-        event = queries.parse_jsonb(row["event"])
+        event = row["event"]
         assert event == {"run_id": rid, "workflow_id": watched, "status": "completed"}
 
     for ref in refs:
@@ -199,7 +199,7 @@ async def test_two_completions_two_fires_two_runs(trig_runtime: asyncpg.Pool[Any
     # Obligation 1, half 1: the completing run is the lineage parent.
     assert [r["parent_run_id"] for r in launched] == [run_a, run_b]
     # The envelope reached the run: output rode by value.
-    first_input = queries.parse_jsonb(launched[0]["input"])
+    first_input = launched[0]["input"]
     # The envelope's source derives from the fire's ORIGIN (the carrier), not
     # the reloaded row — must agree with the audit's trigger_context.
     assert first_input["trigger"]["source"] == "run_completion"
@@ -686,7 +686,7 @@ async def test_one_shot_workflow_lifecycle(trig_runtime: asyncpg.Pool[Any]) -> N
     assert run is not None
     assert run["parent_run_id"] is None  # normal session: root run
     assert run["launcher_session_id"] == session.id  # owner authority anchor
-    composed = queries.parse_jsonb(run["input"])
+    composed = run["input"]
     assert composed["trigger"]["source"] == "one_shot"
     assert "run" not in composed["trigger"]
     assert composed["input"] == {"x": 1}
@@ -862,7 +862,7 @@ async def _events_of(pool: asyncpg.Pool[Any], session_id: str) -> list[dict[str,
             "SELECT kind, data FROM events WHERE session_id = $1 ORDER BY seq",
             session_id,
         )
-    return [{"kind": r["kind"], "data": queries.parse_jsonb(r["data"])} for r in rows]
+    return [{"kind": r["kind"], "data": r["data"]} for r in rows]
 
 
 async def test_wake_session_fire_delivers_to_named_target(
@@ -1064,7 +1064,7 @@ async def test_external_event_fire_roots_lineage_and_carries_body(
     assert launched is not None
     # Fresh lineage root: an external stimulus is not a continuation of any run.
     assert launched["parent_run_id"] is None
-    composed = queries.parse_jsonb(launched["input"])
+    composed = launched["input"]
     assert composed["trigger"]["source"] == "external_event"
     assert composed["trigger"]["event"] == body
     assert "run" not in composed["trigger"]

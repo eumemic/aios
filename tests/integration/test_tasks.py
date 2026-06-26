@@ -191,9 +191,8 @@ async def test_agent_output_schema_rides_the_edge(
             "SELECT data FROM events WHERE session_id = $1 AND kind = 'message' ORDER BY seq",
             handle.servicer_id,
         )
-    from aios.db.queries import parse_jsonb
 
-    metas = [parse_jsonb(r["data"]).get("metadata", {}).get("request") for r in rows]
+    metas = [r["data"].get("metadata", {}).get("request") for r in rows]
     matching = [m for m in metas if m and m.get("request_id") == handle.request_id]
     assert matching and matching[0]["output_schema"] == schema
     # Channel-less: the request never carries a connector channel.

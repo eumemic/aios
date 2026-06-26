@@ -19,7 +19,6 @@ from aios.db.queries import (
     _build_set_assignments,
     _get_scoped,
     _list_scoped,
-    parse_jsonb,
 )
 from aios.errors import (
     ConflictError,
@@ -38,7 +37,7 @@ from aios.models.vaults import AuthType, Vault, VaultCredential
 
 def _row_to_vault(row: asyncpg.Record) -> Vault:
     raw_metadata = row["metadata"]
-    metadata = parse_jsonb(raw_metadata)
+    metadata = raw_metadata
     return Vault(
         id=row["id"],
         display_name=row["display_name"],
@@ -206,7 +205,7 @@ async def delete_vault(conn: asyncpg.Connection[Any], vault_id: str, *, account_
 
 def _row_to_vault_credential(row: asyncpg.Record) -> VaultCredential:
     raw_metadata = row["metadata"]
-    metadata = parse_jsonb(raw_metadata)
+    metadata = raw_metadata
     return VaultCredential(
         id=row["id"],
         vault_id=row["vault_id"],

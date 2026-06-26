@@ -27,7 +27,6 @@ from aios.db.queries import (
     _get_versioned,
     _list_scoped,
     _list_versioned,
-    parse_jsonb,
 )
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
@@ -58,12 +57,12 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         name=row["name"],
         version=row["version"],
         script=row["script"],
-        input_schema=parse_jsonb(row["input_schema"]),
-        output_schema=parse_jsonb(row["output_schema"]),
+        input_schema=row["input_schema"],
+        output_schema=row["output_schema"],
         description=row["description"],
-        tools=load_tool_specs(parse_jsonb(row["tools"])),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
-        http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
+        tools=load_tool_specs(row["tools"]),
+        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -76,12 +75,12 @@ def _row_to_workflow_version(row: asyncpg.Record) -> WorkflowVersion:
         version=row["version"],
         name=row["name"],
         script=row["script"],
-        input_schema=parse_jsonb(row["input_schema"]),
-        output_schema=parse_jsonb(row["output_schema"]),
+        input_schema=row["input_schema"],
+        output_schema=row["output_schema"],
         description=row["description"],
-        tools=load_tool_specs(parse_jsonb(row["tools"])),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
-        http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
+        tools=load_tool_specs(row["tools"]),
+        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         created_at=row["created_at"],
     )
 
@@ -96,18 +95,18 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         launcher_session_id=row["launcher_session_id"],
         depth=row["depth"],
         request_id=row.get("request_id"),
-        caller=parse_jsonb(row.get("caller")),
-        request_output_schema=parse_jsonb(row.get("request_output_schema")),
+        caller=row.get("caller"),
+        request_output_schema=row.get("request_output_schema"),
         script=row["script"],
         script_sha=row["script_sha"],
         source_version=row.get("source_version"),
         host_semantics_epoch=row["host_semantics_epoch"],
-        tools=load_tool_specs(parse_jsonb(row["tools"])),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
-        http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
+        tools=load_tool_specs(row["tools"]),
+        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         status=row["status"],
-        input=parse_jsonb(row["input"]),
-        output=parse_jsonb(row["output"]),
+        input=row["input"],
+        output=row["output"],
         budget_usd=(
             row["budget_total_microusd"] / 1_000_000
             if row.get("budget_total_microusd") is not None
@@ -128,7 +127,7 @@ def _row_to_wf_run_event(row: asyncpg.Record) -> WfRunEvent:
         seq=row["seq"],
         type=row["type"],
         call_key=row["call_key"],
-        payload=parse_jsonb(row["payload"]),
+        payload=row["payload"],
         created_at=row["created_at"],
     )
 
@@ -138,7 +137,7 @@ def _row_to_wf_run_signal(row: asyncpg.Record) -> WfRunSignal:
         run_id=row["run_id"],
         call_key=row["call_key"],
         kind=row["kind"],
-        result=parse_jsonb(row["result"]),
+        result=row["result"],
         delivered_at=row["delivered_at"],
     )
 
@@ -210,8 +209,8 @@ async def _insert_workflow_version(conn: asyncpg.Connection[Any], wf_row: asyncp
     (``insert_workflow`` / ``update_workflow``); a torn write — a bumped
     ``workflows.version`` with no version row — would leave the head FK-dead in
     later phases, so the two writes must commit or roll back together."""
-    input_schema = parse_jsonb(wf_row["input_schema"])
-    output_schema = parse_jsonb(wf_row["output_schema"])
+    input_schema = wf_row["input_schema"]
+    output_schema = wf_row["output_schema"]
     await conn.execute(
         """
         INSERT INTO workflow_versions (
@@ -228,9 +227,9 @@ async def _insert_workflow_version(conn: asyncpg.Connection[Any], wf_row: asyncp
         json.dumps(input_schema) if input_schema is not None else None,
         json.dumps(output_schema) if output_schema is not None else None,
         wf_row["description"],
-        json.dumps(parse_jsonb(wf_row["tools"])),
-        json.dumps(parse_jsonb(wf_row["mcp_servers"])),
-        json.dumps(parse_jsonb(wf_row["http_servers"])),
+        json.dumps(wf_row["tools"]),
+        json.dumps(wf_row["mcp_servers"]),
+        json.dumps(wf_row["http_servers"]),
     )
 
 
@@ -1223,7 +1222,7 @@ async def derive_run_response(
     if status == "cancelled":
         return {"result": None, "is_error": True, "error": {"kind": "cancelled"}}
     if status in ("completed", "errored"):
-        completed = parse_jsonb(row["completed"]) if row["completed"] is not None else {}
+        completed = row["completed"] if row["completed"] is not None else {}
         is_error = bool(completed.get("is_error"))
         return {
             "result": None if is_error else completed.get("output"),

@@ -19,7 +19,6 @@ from aios.db.queries import (
     _build_set_assignments,
     _get_scoped,
     _list_scoped,
-    parse_jsonb,
 )
 from aios.errors import (
     ConflictError,
@@ -36,7 +35,7 @@ from aios.models.session_templates import SessionTemplate
 
 def _row_to_session_template(row: asyncpg.Record) -> SessionTemplate:
     raw_metadata = row["metadata"]
-    metadata = parse_jsonb(raw_metadata)
+    metadata = raw_metadata
     return SessionTemplate(
         id=row["id"],
         name=row["name"],

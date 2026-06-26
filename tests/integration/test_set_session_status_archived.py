@@ -12,7 +12,6 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
-from aios.db.queries import parse_jsonb
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
@@ -65,7 +64,7 @@ async def test_set_session_stop_reason_refuses_archived_silently(
             session_id,
         )
     assert row is not None
-    assert parse_jsonb(row["stop_reason"]) == {"type": "rescheduling"}, (
+    assert row["stop_reason"] == {"type": "rescheduling"}, (
         f"archived row was rewritten: stop_reason is {row['stop_reason']!r}."
     )
     assert row["archived_at"] is not None
