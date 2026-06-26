@@ -31,7 +31,7 @@ import json
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import asyncpg
 import jsonschema
@@ -163,6 +163,29 @@ async def _journal_agent_rejection(
         call_key=call_key,
         payload={"result": None, "is_error": True, "error": {"kind": kind, "message": message}},
     )
+
+
+# Post-replay step disposition (#1548): a single discriminated kind replacing the
+# old (owed_drive, needs_rewake) boolean pair. The arms are ordered by strength —
+# `owed_drive` ⊇ `harvest_now` ⊇ `settled` — so the illegal "owed a drive but don't
+# self-wake" state is unrepresentable: `"owed_drive"` is one token that BOTH selects
+# the 'running' flip AND satisfies `!= "settled"` (self-wake).
+#   - "settled"      → park 'suspended', no self-wake.
+#   - "harvest_now"  → park 'suspended', self-wake (a freshly-opened gate/child already
+#                      carries its signal/answer; harvest it next step, not next sweep).
+#   - "owed_drive"   → hand the lease back 'running' AND self-wake (a same-wake call_result
+#                      was journaled — budget read or catchable rejection — so the replay
+#                      must re-drive to throw the AgentError at the await).
+type StepDisposition = Literal["settled", "harvest_now", "owed_drive"]
+
+_RANK: dict[StepDisposition, int] = {"settled": 0, "harvest_now": 1, "owed_drive": 2}
+
+
+def _escalate(cur: StepDisposition, to: StepDisposition) -> StepDisposition:
+    """Monotone join over the disposition arms: a frontier that needs only a rewake
+    never downgrades one that owes a drive, and a later settled cap never clears an
+    earlier escalation."""
+    return to if _RANK[to] > _RANK[cur] else cur
 
 
 def _memo_outcome(call_result_payload: dict[str, Any]) -> dict[str, Any]:
@@ -480,14 +503,14 @@ async def _run_workflow_step_body(
     # Drive one wake in the credential-free subprocess (no DB conn held).
     outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
 
-    needs_rewake = False
-    # A same-wake call_result journaled this wake (budget read or catchable agent error). The run owes one
-    # more drive so the replay throws the AgentError at the await — so we DON'T settle into
-    # a quiet 'suspended' (which the next wake's quiet-wake guard would early-exit), we hand
-    # the lease back as 'running' and let the guaranteed self-wake (needs_rewake) drive it.
-    # One-shot by construction: a rejected call lands in memo, so its capability is skipped
-    # on replay (never re-journaled), and the driven wake re-suspends/completes normally.
-    owed_drive = False
+    # Post-replay step disposition (#1548). A same-wake call_result journaled this wake
+    # (budget read or catchable agent error) owes one more drive so the replay throws the
+    # AgentError at the await — so we DON'T settle into a quiet 'suspended' (which the next
+    # wake's quiet-wake guard would early-exit), we hand the lease back as 'running' and let
+    # the guaranteed self-wake drive it. One-shot by construction: a rejected call lands in
+    # memo, so its capability is skipped on replay (never re-journaled), and the driven wake
+    # re-suspends/completes normally.
+    disposition: StepDisposition = "settled"
     # (call_key, tool_name, input) for tool frontiers opened this wake — launched AFTER
     # the txn commits (below), so call_started is visible before a task can signal+wake.
     tools_to_launch: list[tuple[str, str, Any]] = []
@@ -652,7 +675,7 @@ async def _run_workflow_step_body(
                 # gates already inflight, so a self-wake harvests this freshly
                 # opened gate promptly instead of waiting for the periodic sweep.
                 if cap.call_key in signals:
-                    needs_rewake = True
+                    disposition = _escalate(disposition, "harvest_now")
             elif cap.capability_id == "agent":
                 if over_budget:
                     assert budget_usage is not None and run.budget_usd is not None
@@ -666,8 +689,7 @@ async def _run_workflow_step_body(
                             f"of ${run.budget_usd:.2f} — new agent() calls are refused"
                         ),
                     )
-                    owed_drive = True
-                    needs_rewake = True
+                    disposition = _escalate(disposition, "owed_drive")
                     continue
                 if slots > 0:
                     spawn = await _open_agent_capability(
@@ -700,9 +722,9 @@ async def _run_workflow_step_body(
                     # capability must NOT abort spawning the others, so continue the loop.
                     # needs_rewake (C1'/C4): a re-attached child already has its marker.
                     if spawn.rejected or spawn.needs_rewake:
-                        needs_rewake = True
+                        disposition = _escalate(disposition, "harvest_now")
                     if spawn.rejected:
-                        owed_drive = True
+                        disposition = _escalate(disposition, "owed_drive")
                     else:
                         # A real child was created (or re-attached): it counts toward the
                         # lifetime tally AND occupies a wave slot. A REJECTED cap consumes
@@ -740,10 +762,9 @@ async def _run_workflow_step_body(
                 # so self-wake to replay and throw the AgentError at the await.
                 spawn = await _open_invoke_workflow_capability(conn, pool, run, cap)
                 if spawn.rejected:
-                    needs_rewake = True
-                    owed_drive = True
+                    disposition = _escalate(disposition, "owed_drive")
                 elif spawn.needs_rewake:
-                    needs_rewake = True
+                    disposition = _escalate(disposition, "harvest_now")
             elif cap.capability_id == "budget":
                 usage = (
                     await wf_queries.run_children_usage(conn, run_id, account_id=account_id)
@@ -758,8 +779,7 @@ async def _run_workflow_step_body(
                     call_key=cap.call_key,
                     payload={"result": _budget_view(run, usage), "is_error": False},
                 )
-                owed_drive = True
-                needs_rewake = True
+                disposition = _escalate(disposition, "owed_drive")
             elif cap.capability_id == "tool":
                 spec = cap.spec if isinstance(cap.spec, dict) else {}
                 tool_name = spec.get("tool_name")
@@ -810,7 +830,10 @@ async def _run_workflow_step_body(
         # drive is owed: the self-wake replays and throws the catchable AgentError);
         # otherwise park as a settled 'suspended'.
         await wf_queries.set_run_status(
-            conn, run_id, "running" if owed_drive else "suspended", account_id=account_id
+            conn,
+            run_id,
+            "running" if disposition == "owed_drive" else "suspended",
+            account_id=account_id,
         )
 
     # Outside the txn (after the suspend commits): launch this wake's tool tasks — now
@@ -825,7 +848,7 @@ async def _run_workflow_step_body(
         run_sandbox.launch_sandbox_task(
             pool, run, call_key=launch_key, tool_name=launch_name, tool_input=launch_input
         )
-    if needs_rewake:
+    if disposition != "settled":
         await defer_run_wake(run_id)
 
 

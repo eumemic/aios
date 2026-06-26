@@ -5165,6 +5165,129 @@ async def test_budget_primitive_round_trip_and_no_ceiling(wf_runtime: asyncpg.Po
     assert r3 is not None and r3.output is None
 
 
+def test_step_disposition_admits_exactly_three_arms() -> None:
+    """Unit-level: the ``StepDisposition`` discriminated kind admits exactly the
+    three legal arms (``settled``/``harvest_now``/``owed_drive``) and ``_escalate`` is
+    a monotone join over them — the structural replacement for the old (owed_drive,
+    needs_rewake) boolean product where the fourth ``owed ∧ ¬rewake`` corner was
+    representable-but-illegal (#1548)."""
+    from typing import get_args
+
+    from aios.workflows.step import _RANK, StepDisposition, _escalate
+
+    assert set(get_args(StepDisposition.__value__)) == {"settled", "harvest_now", "owed_drive"}
+    assert set(_RANK) == {"settled", "harvest_now", "owed_drive"}
+    # Ordered by strength: owed_drive ⊇ harvest_now ⊇ settled.
+    assert _RANK["settled"] < _RANK["harvest_now"] < _RANK["owed_drive"]
+    # A weaker frontier never downgrades a stronger one, in either argument order.
+    assert _escalate("settled", "owed_drive") == "owed_drive"
+    assert _escalate("owed_drive", "settled") == "owed_drive"
+    assert _escalate("harvest_now", "owed_drive") == "owed_drive"
+    assert _escalate("owed_drive", "harvest_now") == "owed_drive"
+    assert _escalate("settled", "harvest_now") == "harvest_now"
+    assert _escalate("harvest_now", "settled") == "harvest_now"
+    assert _escalate("settled", "settled") == "settled"
+
+
+async def test_owed_drive_disposition_always_self_wakes_via_budget_read(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """STRUCTURAL COUPLING (#1548): a step that produces an ``owed_drive`` disposition
+    ALWAYS both flips the run to ``running`` AND self-wakes. Drive a ``budget()``-reading
+    script one wake and assert ``status == 'running'`` AND that the patched
+    ``defer_run_wake`` was awaited with the run_id. On master this holds by two
+    hand-paired assignments; on the branch the single ``owed_drive`` token makes the
+    pairing structural — there is no way to flip ``running`` without a self-wake."""
+    pool = wf_runtime
+    script = "async def main(input):\n    return await budget()\n"
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_wf", name="owed-budget", script=script
+        )
+    run = await service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=1.0
+    )
+    with mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()) as wake:
+        await run_workflow_step(run.id)
+    async with pool.acquire() as conn:
+        r = await wf_queries.get_run_for_step(conn, run.id)
+    # owed_drive: a same-wake call_result was journaled → run hands the lease back
+    # 'running' AND self-wakes (both selected by the one token).
+    assert r is not None and r.status == "running"
+    wake.assert_awaited_with(run.id)
+
+
+async def test_settled_disposition_suspends_without_self_wake(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Negative companion to the owed_drive coupling (#1548): a clean suspend
+    (``settled``) parks ``suspended`` and does NOT self-wake. A run that suspends at a
+    gate journals no same-wake call_result and opens no already-signalled frontier, so
+    its disposition stays ``settled``: ``status == 'suspended'`` AND ``defer_run_wake``
+    is never awaited."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, _GATE_SCRIPT)
+    with mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()) as wake:
+        await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        r = await wf_queries.get_run_for_step(conn, run_id)
+    assert r is not None and r.status == "suspended"
+    wake.assert_not_awaited()
+
+
+async def test_over_budget_rejection_flips_running_and_self_wakes(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """MASTER-FAILING GUARD (#1548): the over-budget agent rejection arm produces an
+    ``owed_drive`` disposition — assert BOTH ``status == 'running'`` AND that
+    ``defer_run_wake`` was awaited with the run_id. This locks the post-fix invariant
+    that no code path can flip ``running`` without a self-wake: with the boolean pair, a
+    site could set ``owed_drive=True`` and forget ``needs_rewake=True`` (a silent ~30s
+    sweep-tick latency regression); with the single token the flip and the wake are the
+    same decision."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        await agent('x', agent_id={wf_agent_id!r})\n"
+        "    except AgentError as e:\n"
+        "        return {'kind': e.kind, 'msg': str(e)}\n"
+    )
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_wf", name="over-budget-coupling", script=script
+        )
+    run = await service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=1.0
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agents (id, name, model, system, account_id) "
+            "VALUES ('agent_cost_seed2', 'cost-seed', 'm', 's', 'acc_wf')"
+        )
+        await conn.execute(
+            "INSERT INTO agent_versions (agent_id, version, model, system, account_id) "
+            "VALUES ('agent_cost_seed2', 1, 'm', 's', 'acc_wf')"
+        )
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, "
+            "workspace_volume_path, account_id, parent_run_id, cost_microusd) "
+            "VALUES ('ses_cost_seed2', 'agent_cost_seed2', 'env_wf', 1, NULL, '{}'::jsonb, "
+            "'/tmp/cost2', 'acc_wf', $1, 1000000)",
+            run.id,
+        )
+    with mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()) as wake:
+        await run_workflow_step(run.id)  # wake 1: journal the budget_exceeded rejection
+    async with pool.acquire() as conn:
+        r = await wf_queries.get_run_for_step(conn, run.id)
+        events = await wf_queries.list_run_events(conn, run.id)
+    # owed_drive: the catchable rejection was journaled this wake → 'running' AND self-wake.
+    assert r is not None and r.status == "running"
+    wake.assert_awaited_with(run.id)
+    cr = next(e for e in events if e.type == "call_result" and e.payload.get("is_error"))
+    assert cr.payload["error"]["kind"] == "budget_exceeded"
+
+
 async def test_over_budget_agent_refusal_is_catchable(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
