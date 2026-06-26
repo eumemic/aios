@@ -1344,7 +1344,11 @@ async def _commit_terminal_and_dispatch(
             await wf_queries.insert_run_signal(
                 conn, run_id=run_caller_id, call_key=run.request_id, kind="child_done"
             )
-        if inserted is not None:
+        # Inline-script runs carry no ``workflow_id`` (#1466): a ``run_completion``
+        # trigger always keys off a concrete ``workflow_id``, so a workflow-less run
+        # can never match one. Skip the query entirely — this also satisfies the
+        # ``insert_run_completion_fires`` ``workflow_id: str`` contract.
+        if inserted is not None and run.workflow_id is not None:
             fires = await db_queries.insert_run_completion_fires(
                 conn,
                 account_id=run.account_id,
