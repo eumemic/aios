@@ -65,10 +65,13 @@ from aios.errors import AiosError
 from aios.logging import get_logger
 from aios.mcp.client import call_mcp_tool, discover_mcp_tools
 from aios.models.agents import (
+    Agent,
+    AgentVersion,
     McpServerSpec,
     ToolSpec,
     resolve_mcp_enabled,
 )
+from aios.services import agents as agents_service
 from aios.tools.invoke import ToolBail, invoke_builtin
 from aios.tools.registry import ToolResult, effective_transport, registry
 
@@ -115,17 +118,6 @@ def _find_mcp_toolset(agent_tools: list[ToolSpec], server_name: str) -> ToolSpec
         if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name == server_name:
             return spec
     return None
-
-
-def _binding_id(agent: Any) -> str:
-    """Binding identity for the shared MCP tool-list cache (#1391).
-
-    The broker re-discovers on every model-initiated introspection
-    (``mcp list-methods`` / ``mcp schema``); keying the cache on the SAME
-    ``agent id + version`` the step prelude uses lets the two share a single
-    cached tool list instead of each re-paying a ``list_tools()`` RPC.
-    """
-    return f"{getattr(agent, 'id', '?')}:{getattr(agent, 'version', '?')}"
 
 
 def _find_builtin_spec(agent_tools: list[ToolSpec], name: str) -> ToolSpec | None:
@@ -389,7 +381,7 @@ class ToolBroker:
             return _err(403, "forbidden: unknown or expired secret")
         return session_id
 
-    async def _load_agent(self, session_id: str) -> Any:
+    async def _load_agent(self, session_id: str) -> Agent | AgentVersion:
         """Fetch the agent (or agent_version) attached to ``session_id``.
 
         Mirrors the loading dance in
@@ -398,7 +390,6 @@ class ToolBroker:
         avoid an import cycle at module load.
         """
         from aios.harness import runtime
-        from aios.services import agents as agents_service
         from aios.services import sessions as sessions_service
 
         pool = runtime.require_pool()
@@ -546,7 +537,7 @@ class ToolBroker:
 
     async def _resolve_mcp(
         self, request: Request, *, require_tool: bool
-    ) -> tuple[str, McpServerSpec, ToolSpec, str | None, Any] | Response:
+    ) -> tuple[str, McpServerSpec, ToolSpec, str | None, Agent | AgentVersion] | Response:
         """Resolve session, server, toolset, and (optionally) tool for an
         MCP route.
 
@@ -584,8 +575,6 @@ class ToolBroker:
                 f"{server_name!r} (transport={transport!r}). The model can "
                 f"still call it.",
             )
-        from aios.services import agents as agents_service
-
         perm = agents_service.effective_mcp_permission(qualified, agent.tools)
         if perm != "always_allow":
             return _err(
@@ -611,7 +600,7 @@ class ToolBroker:
                 headers,
                 server.name,
                 spec_headers=server.headers,
-                binding_id=_binding_id(agent),
+                binding_id=agents_service.tool_cache_binding_id(agent, session_id),
             )
         except Exception as exc:
             log.warning(
@@ -621,8 +610,6 @@ class ToolBroker:
                 exc_info=True,
             )
             return _transport_err(server.name, exc)
-
-        from aios.services import agents as agents_service
 
         out: list[dict[str, Any]] = []
         # Pass a single-element list containing this toolset to the
@@ -660,7 +647,7 @@ class ToolBroker:
                 headers,
                 server.name,
                 spec_headers=server.headers,
-                binding_id=_binding_id(agent),
+                binding_id=agents_service.tool_cache_binding_id(agent, session_id),
             )
         except Exception as exc:
             log.warning(
@@ -737,7 +724,6 @@ class ToolBroker:
     ) -> bool:
         """Whether an MCP call from the sandbox CLI is suppressed (#710)."""
         from aios.models.agents import mcp_tool_suppressed
-        from aios.services import agents as agents_service
         from aios.services import sessions as sessions_service
 
         session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from types import SimpleNamespace
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import patch
 
@@ -22,6 +22,7 @@ import pytest
 
 from aios.errors import CryptoDecryptError, ForbiddenError
 from aios.models.agents import (
+    AgentVersion,
     McpPermissionPolicy,
     McpServerSpec,
     McpToolConfig,
@@ -38,8 +39,21 @@ def _agent(
     *,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(tools=tools or [], mcp_servers=mcp_servers or [])
+) -> AgentVersion:
+    return AgentVersion(
+        agent_id="agt_1",
+        version=3,
+        model="test/dummy",
+        system="sys",
+        tools=tools or [],
+        skills=[],
+        mcp_servers=mcp_servers or [],
+        http_servers=[],
+        litellm_extra={},
+        window_min=1000,
+        window_max=100000,
+        created_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
 
 
 def _server(name: str = "tav", url: str = "https://tav.example/mcp") -> McpServerSpec:

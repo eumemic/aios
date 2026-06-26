@@ -333,6 +333,23 @@ async def _load_for_session_conn(
     return await queries.get_agent(conn, session.agent_id, account_id=account_id)
 
 
+def tool_cache_binding_id(agent: Agent | AgentVersion, session_id: str) -> str:
+    """Stable identity for the #1391 MCP tool-list cache key.
+
+    The cached tool set is static for a given *binding identity* — the
+    precondition that lets sibling sessions of the same agent/version share
+    one discovery. A real agent's identity is agent-level so siblings share;
+    a generic workflow child (no agent_id) has only its own attenuated
+    per-run surface, so it must key on its own session (no cross-session
+    sharing — surfaces differ).
+    """
+    if isinstance(agent, Agent):
+        return f"{agent.id}:{agent.version}"
+    if agent.agent_id:
+        return f"{agent.agent_id}:{agent.version}"
+    return f"child:{session_id}"
+
+
 async def load_for_session(
     pool: asyncpg.Pool[Any],
     session: Any,
