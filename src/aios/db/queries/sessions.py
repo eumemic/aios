@@ -32,7 +32,7 @@ from aios.ids import (
     TRIGGER,
     make_id,
 )
-from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
 from aios.models.attenuation import Surface
 from aios.models.sessions import Obligation, Session, SessionStatus, SessionUsage
 
@@ -335,7 +335,7 @@ async def get_session_frozen_surface(
     if not row["surface_frozen"]:
         return None
     return Surface(
-        tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
+        tools=load_tool_specs(parse_jsonb(row["tools"])),
         mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
         http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
     )
