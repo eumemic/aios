@@ -1241,11 +1241,24 @@ async def append_event(
     data: dict[str, Any],
     *,
     account_id: str,
+    orig_channel: str | None = None,
 ) -> Event:
-    """Append an arbitrary event. Used by the harness loop."""
+    """Append an arbitrary event. Used by the harness loop.
+
+    ``orig_channel`` is forwarded to :func:`queries.append_event` (which has
+    accepted it since #52). The wake-bearing chat-lifecycle route uses it to
+    stamp the per-counterparty budget key onto its ``kind='lifecycle'`` write so
+    the inbound rate budget can meter it (#1504/#1558); every other caller
+    leaves the default ``None`` and is byte-identical to pre-change.
+    """
     async with pool.acquire() as conn:
         return await queries.append_event(
-            conn, session_id=session_id, kind=kind, data=data, account_id=account_id
+            conn,
+            session_id=session_id,
+            kind=kind,
+            data=data,
+            account_id=account_id,
+            orig_channel=orig_channel,
         )
 
 
