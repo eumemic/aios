@@ -19,8 +19,8 @@ A *registered* run still sets ``workflow_id`` and remains fully enforced. No
 data migration is needed: every existing row already has a non-NULL
 ``workflow_id``; this only relaxes the column so future inline rows may be NULL.
 
-Revision ID: 0122
-Revises: 0121
+Revision ID: 0123
+Revises: 0122
 Create Date: 2026-06-25
 """
 
@@ -30,8 +30,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0122"
-down_revision: str = "0121"
+revision: str = "0123"
+down_revision: str = "0122"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

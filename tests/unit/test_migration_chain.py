@@ -26,9 +26,18 @@ def _script_directory() -> ScriptDirectory:
 
 
 def test_single_head() -> None:
-    """The migration ladder has exactly one head: ``0122``."""
+    """The migration ladder has exactly one head (no fork, no duplicate revision).
+
+    Asserts the head *count*, not a pinned literal: pinning the head revision
+    was a per-migration maintenance tax that added no safety — a colliding
+    duplicate revision number (two files claiming the same id) is exactly the
+    fork this guards, and it trips the count check regardless of the literal.
+    #1591: two PRs both landed ``0122``; the pinned literal had to be bumped on
+    every migration yet did not prevent the collision.
+    """
     script = _script_directory()
-    assert script.get_heads() == ["0122"]
+    heads = script.get_heads()
+    assert len(heads) == 1, f"expected a single migration head, found {heads}"
 
 
 def test_chain_is_linear() -> None:
