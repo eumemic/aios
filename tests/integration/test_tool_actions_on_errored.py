@@ -160,7 +160,7 @@ async def test_ghost_repair_skips_errored_session(
     assert repaired == [], (
         f"ghost-repair attempted on an errored session (got {repaired}); "
         f"find_and_repair_ghosts is missing the derived-errored exclusion "
-        f"(_errored_session_ids)."
+        f"(GHOST_ASST_SQL's pushed-down errored predicate)."
     )
 
 
