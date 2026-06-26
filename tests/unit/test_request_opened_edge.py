@@ -20,6 +20,22 @@ from aios.db.queries import sessions as sessions_q
 from aios.services import sessions as sessions_svc
 
 
+def test_create_child_session_takes_union_not_boolean() -> None:
+    """The Ask/Tell kind is the discriminant — no awaited:bool shim, no
+    request_id/output_schema re-derivation kwargs (KINDS NOT BOOLEANS)."""
+    params = inspect.signature(sessions_svc.create_child_session).parameters
+    assert "awaited" not in params  # FAILS on master (awaited:bool=True present)
+    assert "output_schema" not in params
+    assert "request_id" not in params
+    # the kind-bearing union is the first positional parameter
+    stim_param = next(
+        p
+        for p in params.values()
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.name not in ("pool",)
+    )
+    assert "AskNewSession" in str(stim_param.annotation)
+
+
 def _src(obj: Callable[..., object]) -> str:
     return textwrap.dedent(inspect.getsource(obj))
 
@@ -100,10 +116,10 @@ def test_create_child_session_calls_append_request_opened_after_first_spawn_guar
     ``if child is None: return False`` first-spawn guard, so a replayed wake (which
     early-returns at the guard) never re-opens the edge — exactly-once. Since #1197
     factored the three near-copy creation paths onto the private ``stimulate``
-    spine, the edge writer lives in ``_stimulate_new_session`` (the NewSession arm
-    ``create_child_session`` is now a thin caller of).
+    spine, the edge writer lives in ``create_child_session`` (the NewSession arm
+    of the spine, now the single public NewSession writer).
     """
-    func = _func_def(sessions_svc._stimulate_new_session, "_stimulate_new_session")
+    func = _func_def(sessions_svc.create_child_session, "create_child_session")
 
     # Find the line of `if child is None: return False`.
     guard_line: int | None = None
@@ -131,7 +147,7 @@ def test_create_child_session_opens_edge_inside_transaction() -> None:
 
     The edge writer lives in the spine's NewSession arm (#1197).
     """
-    func = _func_def(sessions_svc._stimulate_new_session, "_stimulate_new_session")
+    func = _func_def(sessions_svc.create_child_session, "create_child_session")
     txn = next(node for node in ast.walk(func) if isinstance(node, ast.AsyncWith))
     end = max(
         (n.lineno for n in ast.walk(txn) if hasattr(n, "lineno")),
@@ -324,11 +340,11 @@ def _writer_passes_summary(obj: Callable[..., object]) -> bool:
 
 
 def test_both_writers_pass_summary_to_append_request_opened() -> None:
-    """Both edge writers — the workflow-child (``_stimulate_new_session``) and the
+    """Both edge writers — the workflow-child (``create_child_session``) and the
     peer/api-invoke (``_stimulate_existing_ask``) — feed the additive #1413 summary
     so the obligations block has a human-readable preview (Issue C's set_goal
     inherits it free through ``_stimulate_existing_ask``)."""
-    assert _writer_passes_summary(sessions_svc._stimulate_new_session)
+    assert _writer_passes_summary(sessions_svc.create_child_session)
     assert _writer_passes_summary(sessions_svc._stimulate_existing_ask)
 
 

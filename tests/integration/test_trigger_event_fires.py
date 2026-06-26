@@ -269,6 +269,7 @@ async def test_timer_fire_threads_owner_lineage(trig_runtime: asyncpg.Pool[Any])
     a past-fire_at one-shot is create_run with a 0s delay)."""
     from aios.models.attenuation import Surface
     from aios.services import sessions as sessions_service
+    from aios.services.sessions import AskNewSession
 
     pool = trig_runtime
     agent, env, _ = await seed_agent_env_session(pool, account_id=ACC, prefix="lineage")
@@ -280,17 +281,19 @@ async def test_timer_fire_threads_owner_lineage(trig_runtime: asyncpg.Pool[Any])
     child_id = "sess_" + "0" * 22 + "TRIG"
     await sessions_service.create_child_session(
         pool,
-        session_id=child_id,
+        AskNewSession(
+            session_id=child_id,
+            agent_id=agent.id,
+            environment_id=env.id,
+            agent_version=agent.version,
+            model=None,
+            parent_run_id=parent_run.id,
+            surface=Surface([], [], []),
+            vault_ids=[],
+            request_id="req#0",
+            input="hi",
+        ),
         account_id=ACC,
-        agent_id=agent.id,
-        environment_id=env.id,
-        agent_version=agent.version,
-        model=None,
-        parent_run_id=parent_run.id,
-        surface=Surface([], [], []),
-        vault_ids=[],
-        request_id="req#0",
-        input="hi",
     )
     tid = await _add_trigger(
         pool,
