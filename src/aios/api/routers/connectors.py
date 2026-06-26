@@ -606,6 +606,17 @@ async def post_runtime_lifecycle(
     that received the event.  An empty list means no sessions were
     bound at the time of the call (e.g. the operator detached every
     session before the connector finished tearing down); not an error.
+
+    When a session is archived between the binding snapshot
+    (``list_session_ids_for_connection``, taken outside the append loop)
+    and its append, ``append_event`` raises a typed ``NotFoundError``;
+    that session is skipped and reported under ``skipped_session_ids``
+    (a flat ``list[str]``, present only when non-empty).  This is the one
+    benign per-session failure.  Any *other* append failure —
+    serialization, statement timeout, pool exhaustion, a broken
+    connection — is a real writer fault: it propagates uncaught and 500s
+    the call so the connector can retry, rather than being buried in a
+    201 body.
     """
     # Per-counterparty inbound budget (#1504): the broadcast lifecycle route is
     # deliberately LEFT UNCAPPED. It is connection-grain operator-control-plane
@@ -639,13 +650,19 @@ async def post_runtime_lifecycle(
         payload["reason"] = body.reason
     if body.data is not None:
         payload["data"] = body.data
-    # Per-session try/except: a single archived/missing session shouldn't
-    # 500 the whole call and leave callers unable to tell which sessions
-    # actually got the event.  Each successful append is committed by its
-    # own pool acquire in append_event, so partials are visible to clients
-    # whether or not we surface them — surface them.
+    # Archived/missing sessions are the one benign per-session failure: the
+    # broadcast snapshot (list_session_ids_for_connection, above) is taken
+    # outside the append loop, so a session may be archived between snapshot and
+    # append.  append_event raises a TYPED NotFoundError for that case
+    # (queries.append_event: UPDATE … WHERE archived_at IS NULL matches no row);
+    # skip it and report which sessions were skipped.  EVERY OTHER failure —
+    # serialization, statement timeout, pool exhaustion, a broken connection —
+    # is a real writer fault the connector must be able to retry on, so it
+    # propagates as a 500 (fail hard).  The single-target session-/chat-
+    # lifecycle siblings already let append_event surface uncaught; this is the
+    # broadcast analogue, narrowed to the benign kind only.
     appended: list[str] = []
-    failed: list[dict[str, str]] = []
+    skipped: list[str] = []
     for sess_id in session_ids:
         try:
             await sessions_service.append_event(
@@ -656,18 +673,11 @@ async def post_runtime_lifecycle(
                 account_id=account_id,
             )
             appended.append(sess_id)
-        except Exception as exc:
-            log.warning(
-                "connector.lifecycle.append_failed",
-                connection_id=body.connection_id,
-                session_id=sess_id,
-                error=type(exc).__name__,
-                detail=str(exc)[:300],
-            )
-            failed.append({"session_id": sess_id, "error": type(exc).__name__})
+        except NotFoundError:
+            skipped.append(sess_id)
     result: dict[str, Any] = {"appended_session_ids": appended}
-    if failed:
-        result["failed_session_ids"] = failed
+    if skipped:
+        result["skipped_session_ids"] = skipped
     return result
 
 
