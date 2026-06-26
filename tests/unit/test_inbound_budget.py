@@ -159,7 +159,7 @@ async def test_session_budget_decision(recent: int, threshold: int, expected: bo
 
 
 def test_rate_limited_maps_to_429() -> None:
-    err = _inbound_drop_error("rate_limited")
+    err = _inbound_drop_error(InboundDrop.RATE_LIMITED)
     assert isinstance(err, RateLimitedError)
     assert err.status_code == 429
     assert err.detail == {"drop_reason": "rate_limited"}
@@ -169,7 +169,7 @@ def test_rate_limited_status_is_not_fatal() -> None:
     """Regression pin (mirrors the spine's DENIED_BY_POLICY → 422 pin): the
     chosen throttle status must be non-fatal so a throttle never crash-restarts
     the connector container."""
-    status = _inbound_drop_error("rate_limited").status_code
+    status = _inbound_drop_error(InboundDrop.RATE_LIMITED).status_code
     assert status == 429
     assert _is_fatal_inbound_status(status) is False
     # The two non-fatal candidates the issue calls out both hold.

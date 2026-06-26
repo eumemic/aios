@@ -23,7 +23,7 @@ Section banners (``# ───`) below mark the boundary.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, assert_never
 
 from fastapi import APIRouter, File, Form, UploadFile, status
 from pydantic import BaseModel, ConfigDict
@@ -86,31 +86,44 @@ class ConnectorInboundResponse(BaseModel):
     deduped: bool
 
 
-def _inbound_drop_error(drop_reason: str) -> AiosError:
+def _inbound_drop_error(drop_reason: inbound_service.InboundDrop) -> AiosError:
     """Pick the right :class:`AiosError` subclass for a drop_reason.
 
     Each drop maps onto an existing error type — preserving HTTP status
     contracts without inventing a new error_type for every reason.
     Detail carries ``drop_reason`` so clients can branch on the
     machine-readable value.
+
+    The ``match`` is exhaustive over :class:`InboundDrop` by construction:
+    every member has an explicit arm and the final ``assert_never`` makes a
+    newly-added member a ``mypy`` error rather than a silent catch-all 500.
     """
-    detail = {"drop_reason": drop_reason}
-    msg = f"inbound dropped ({drop_reason})"
-    if drop_reason == "payload_too_large":
-        return PayloadTooLargeError(msg, detail=detail)
-    if drop_reason == "rate_limited":
-        # Per-counterparty inbound budget exceeded (#1504). 429 is a routine,
-        # NON-FATAL drop for the connector-http runner: ``_is_fatal_inbound_status``
-        # treats only 401/403/5xx as fatal (crash-restarts the container,
-        # killing every sibling connection), so a single over-budget stranger
-        # cannot take the container down — it just drops one envelope.
-        return RateLimitedError(msg, detail=detail)
-    if drop_reason in ("detached", "archived_template", "denied_by_policy"):
-        return ValidationError(msg, detail=detail)
-    if drop_reason == "session_missing":
-        return NotFoundError(msg, detail=detail)
-    # attachment_staging_failed (and any unrecognised reason) → 500.
-    return AiosError(msg, detail=detail)
+    detail = {"drop_reason": drop_reason.value}
+    msg = f"inbound dropped ({drop_reason.value})"
+    match drop_reason:
+        case inbound_service.InboundDrop.PAYLOAD_TOO_LARGE:
+            return PayloadTooLargeError(msg, detail=detail)
+        case inbound_service.InboundDrop.RATE_LIMITED:
+            # Per-counterparty inbound budget exceeded (#1504). 429 is a routine,
+            # NON-FATAL drop for the connector-http runner: ``_is_fatal_inbound_status``
+            # treats only 401/403/5xx as fatal (crash-restarts the container,
+            # killing every sibling connection), so a single over-budget stranger
+            # cannot take the container down — it just drops one envelope.
+            return RateLimitedError(msg, detail=detail)
+        case (
+            inbound_service.InboundDrop.DETACHED
+            | inbound_service.InboundDrop.ARCHIVED_TEMPLATE
+            | inbound_service.InboundDrop.DENIED_BY_POLICY
+        ):
+            # DENIED_BY_POLICY maps to a non-fatal 422 (#1504): a denied stranger
+            # must not be able to crash-restart the connector container.
+            return ValidationError(msg, detail=detail)
+        case inbound_service.InboundDrop.SESSION_MISSING:
+            return NotFoundError(msg, detail=detail)
+        case inbound_service.InboundDrop.ATTACHMENT_STAGING_FAILED:
+            return AiosError(msg, detail=detail)  # base class → 500
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 _DEFAULT_ATTACHMENT_CONTENT_TYPE = "application/octet-stream"
@@ -193,7 +206,7 @@ async def _do_inbound(
         account_id=account_id,
     )
     if result.drop_reason is not None:
-        raise _inbound_drop_error(result.drop_reason.value)
+        raise _inbound_drop_error(result.drop_reason)
     return ConnectorInboundResponse(
         appended_event_id=result.appended_event_id,
         session_id=result.session_id,

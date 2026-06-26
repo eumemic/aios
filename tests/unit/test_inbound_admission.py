@@ -113,7 +113,7 @@ async def test_resolve_passes_through_stored_policy() -> None:
 
 
 def test_denied_by_policy_maps_to_validation_error_422() -> None:
-    err = _inbound_drop_error("denied_by_policy")
+    err = _inbound_drop_error(InboundDrop.DENIED_BY_POLICY)
     assert isinstance(err, ValidationError)
     assert err.status_code == 422
     assert err.detail == {"drop_reason": "denied_by_policy"}
