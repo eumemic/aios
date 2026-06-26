@@ -269,6 +269,42 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def open_request_anti_join(*, sid: str, acct: str, awaited_only: bool) -> str:
+    """SQL predicate for the open-request anti-join: a ``request_opened`` edge on
+    (``sid``, ``acct``) with no answering ``request_response``.
+
+    ``sid`` / ``acct`` are the SQL expressions for the session-id and account-id
+    columns at the call site (e.g. ``"$1"``, ``"s.id"``) — always static literals
+    chosen by service code, never user input, so f-string interpolation carries
+    no injection risk (same contract as :func:`_get_scoped` et al.). This is the
+    single source of truth for the ``asked(request_opened) MINUS
+    answered(request_response)`` open set; every reader composes it instead of
+    inlining the literal, so the awaited discriminator can no longer drift.
+
+    ``awaited_only`` is the #1197 discriminator and MUST be passed explicitly so
+    each reader's inclusion/omission of it is a visible compositional choice, not
+    an accidental copy divergence:
+      * True  → only awaited (Ask-arm) edges; a ``Tell(NewSession)``
+                fire-and-forget spawn (``awaited=false``) owes no response and is
+                excluded. Absent field reads as awaited=true (additive/legacy),
+                so pre-#1197 rows keep their obligation.
+      * False → every still-open edge, awaited or not (e.g. wake-priority
+                demotion keys off any triggering edge, including a background
+                fan-out's unawaited ``Tell`` child).
+    """
+    awaited = "AND COALESCE((req.data->>'awaited')::boolean, TRUE) " if awaited_only else ""
+    return (
+        f"req.session_id = {sid} AND req.account_id = {acct} "
+        "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+        "AND req.data->>'request_id' IS NOT NULL "
+        f"{awaited}"
+        "AND NOT EXISTS (SELECT 1 FROM events resp "
+        f"    WHERE resp.session_id = {sid} AND resp.account_id = {acct} "
+        "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
+        "    AND resp.data->>'request_id' = req.data->>'request_id') "
+    )
+
+
 # ─── re-exports ──────────────────────────────────────────────────────────────
 #
 # Every public query plus every underscore-helper / class / constant each
@@ -813,6 +849,7 @@ __all__ = [
     "notify_connection_change",
     "notify_management_call_dispatch",
     "notify_management_call_result",
+    "open_request_anti_join",
     "parse_jsonb",
     "precompute_event_append",
     "prune_trigger_runs",
