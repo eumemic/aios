@@ -52,12 +52,13 @@ from __future__ import annotations
 from typing import Any
 
 import jsonschema
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.harness import runtime
 from aios.models.tasks import AwaitResponse
+from aios.models.workflows import InlineScriptBody
 from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
@@ -108,7 +109,21 @@ class _CallAgentArgs(BaseModel):
 class _CallWorkflowArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    workflow_id: str = Field(description="The id of the same-account workflow to run and await.")
+    workflow_id: str | None = Field(
+        default=None,
+        description=(
+            "The id of the same-account workflow to run and await. Supply EITHER this or "
+            "`inline` (exactly one). Omit to launch an inline one-shot run."
+        ),
+    )
+    inline: InlineScriptBody | None = Field(
+        default=None,
+        description=(
+            "Inline-script body for an anonymous one-shot run (T5): `{script, schemas, "
+            "surface}`. NO workflow is registered; the run snapshots the script and clamps "
+            "the declared surface to your own. Supply EITHER this or `workflow_id`."
+        ),
+    )
     input: Any = Field(default=None, description="The run input (JSON or a string).")
     output_schema: dict[str, Any] | None = Field(
         default=None,
@@ -121,6 +136,13 @@ class _CallWorkflowArgs(BaseModel):
     budget_usd: float | None = Field(
         default=None, gt=0, description="Optional shared USD spend ceiling for the run."
     )
+
+    @model_validator(mode="after")
+    def _validate_source_arm(self) -> _CallWorkflowArgs:
+        if (self.workflow_id is None) == (self.inline is None):
+            got = "both" if self.inline is not None else "neither"
+            raise ValueError(f"exactly one of workflow_id or inline must be provided (got {got})")
+        return self
 
 
 def _parse[M: BaseModel](model: type[M], arguments: dict[str, Any]) -> M:
@@ -317,10 +339,23 @@ async def call_workflow_handler(
     # Porcelain = launch the run as an awaited servicer + park on it (single-shot). The
     # run inherits THIS session's environment + lineage and is launched by it.
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
+    inline = (
+        wf_service.InlineScript(
+            script=args.inline.script,
+            input_schema=args.inline.input_schema,
+            output_schema=args.inline.output_schema,
+            tools=args.inline.tools,
+            mcp_servers=args.inline.mcp_servers,
+            http_servers=args.inline.http_servers,
+        )
+        if args.inline is not None
+        else None
+    )
     run, _request_id = await wf_service.launch_awaited_run(
         pool,
         account_id=account_id,
         workflow_id=args.workflow_id,
+        inline=inline,
         environment_id=session.environment_id,
         input=args.input,
         caller=_caller(session_id),
@@ -356,11 +391,14 @@ CALL_AGENT_DESCRIPTION = (
     "Single-shot; you stay responsive while waiting."
 )
 CALL_WORKFLOW_DESCRIPTION = (
-    "Launch a run of one of your workflows with `input` and wait for its result "
-    "({ok: output} on completion, an error if it errored/was cancelled). The run "
-    "uses your own environment. Optionally attach `vault_ids` (a subset of your own "
-    "vaults), set a shared `budget_usd` spend ceiling, and constrain the output with "
-    "`output_schema` (a non-conforming output is reported as an error). Single-shot per call."
+    "Launch a run and wait for its result ({ok: output} on completion, an error if it "
+    "errored/was cancelled). Run EITHER a registered workflow (`workflow_id`) OR an "
+    "inline one-shot script (`inline`: {script, schemas, surface}) with no workflow "
+    "registered — supply exactly one; inline is the ergonomic default for one-shot work. "
+    "An inline run's declared surface is clamped to your own. The run uses your own "
+    "environment. Optionally attach `vault_ids` (a subset of your own vaults), set a "
+    "shared `budget_usd` spend ceiling, and constrain the output with `output_schema` (a "
+    "non-conforming output is reported as an error). Single-shot per call."
 )
 
 

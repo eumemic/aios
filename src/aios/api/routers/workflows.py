@@ -38,6 +38,7 @@ from aios.models.workflows import (
 )
 from aios.services import trace as trace_service
 from aios.services import workflows as service
+from aios.workflows.service import InlineScript
 
 log = get_logger("aios.api.routers.workflows")
 
@@ -181,15 +182,30 @@ async def get_workflow_version(
 
 @runs_router.post("", operation_id="create_run", status_code=status.HTTP_201_CREATED)
 async def create_run(body: WfRunCreate, pool: PoolDep, account_id: AccountIdDep) -> WfRun:
-    """Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
-    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
-    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+    """Launch a run. Either a registered ``workflow_id`` (snapshots the workflow's
+    current script) OR an inline ``{script, schemas, surface}`` body (T5, #1466) — a
+    one-shot anonymous run with NO ``workflows`` row created (exactly one). Binds the
+    run to ``environment_id`` (its ``agent()`` children spawn there) and to ``vault_ids``
+    (credentials it resolves at tool-call time), and wakes it. A missing workflow or
+    environment 404s. The HTTP path is unattenuated operator authority — no
     ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped)."""
+    inline = (
+        InlineScript(
+            script=body.inline.script,
+            input_schema=body.inline.input_schema,
+            output_schema=body.inline.output_schema,
+            tools=body.inline.tools,
+            mcp_servers=body.inline.mcp_servers,
+            http_servers=body.inline.http_servers,
+        )
+        if body.inline is not None
+        else None
+    )
     return await service.create_run(
         pool,
         account_id=account_id,
         workflow_id=body.workflow_id,
+        inline=inline,
         environment_id=body.environment_id,
         input=body.input,
         version=body.version,

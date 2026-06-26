@@ -598,7 +598,7 @@ async def insert_wf_run(
     conn: asyncpg.Connection[Any],
     *,
     account_id: str,
-    workflow_id: str,
+    workflow_id: str | None,
     environment_id: str,
     script: str,
     script_sha: str,
@@ -621,6 +621,12 @@ async def insert_wf_run(
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
     ``launcher_session_id`` records the agent session that launched it (NULL = operator).
+
+    ``workflow_id`` is the source definition the snapshot came from, or ``None`` for an
+    INLINE run (T5, #1466) — a one-shot run launched from an inline script with NO
+    ``workflows`` row. The FKs are MATCH SIMPLE: a NULL ``workflow_id`` exempts the row
+    from both the ``workflows`` FK and the composite ``source_version`` FK (which an
+    inline run also leaves NULL).
 
     ``depth`` is the DOWN-counting trusted invoke-depth budget (#1124) carried on the run:
     the remaining hops this run may spend on its OUTGOING trusted edges. The caller

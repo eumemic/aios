@@ -45,9 +45,10 @@ from aios.workflows.script_validation import (
     extract_required_agent_ids,
     validate_workflow_script,
 )
-from aios.workflows.service import create_run, resume_gate
+from aios.workflows.service import InlineScript, create_run, resume_gate
 
 __all__ = [
+    "InlineScript",
     "archive_run",
     "archive_workflow",
     "cancel_run",
@@ -75,7 +76,8 @@ async def launch_awaited_run(
     pool: asyncpg.Pool[Any],
     *,
     account_id: str,
-    workflow_id: str,
+    workflow_id: str | None = None,
+    inline: InlineScript | None = None,
     environment_id: str,
     input: Any = None,
     caller: dict[str, Any],
@@ -94,12 +96,16 @@ async def launch_awaited_run(
     Returns ``(run, request_id)``; the caller awaits the run via the unified awaiter. The
     Tell-shaped trigger fire is deliberately NOT routed here — it launches fire-and-forget
     (no ``request_id``/``caller``) and calls :func:`create_run` directly.
+
+    Pass EITHER ``workflow_id`` (registered) OR ``inline`` (the T5 inline-script arm,
+    #1466) — :func:`create_run` enforces exactly-one.
     """
     request_id = make_id(REQUEST)
     run = await create_run(
         pool,
         account_id=account_id,
         workflow_id=workflow_id,
+        inline=inline,
         environment_id=environment_id,
         input=input,
         vault_ids=vault_ids,

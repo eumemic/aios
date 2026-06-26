@@ -78,6 +78,9 @@ from .http_validation_error import HTTPValidationError
 from .ingest_external_event_response_ingest_external_event import (
     IngestExternalEventResponseIngestExternalEvent,
 )
+from .inline_script_body import InlineScriptBody
+from .inline_script_body_input_schema_type_0 import InlineScriptBodyInputSchemaType0
+from .inline_script_body_output_schema_type_0 import InlineScriptBodyOutputSchemaType0
 from .limited_networking import LimitedNetworking
 from .list_connections_mode_type_0 import ListConnectionsModeType0
 from .list_response_agent import ListResponseAgent
@@ -398,6 +401,9 @@ __all__ = (
     "HttpServerSpec",
     "HTTPValidationError",
     "IngestExternalEventResponseIngestExternalEvent",
+    "InlineScriptBody",
+    "InlineScriptBodyInputSchemaType0",
+    "InlineScriptBodyOutputSchemaType0",
     "LimitedNetworking",
     "ListConnectionsModeType0",
     "ListResponseAgent",

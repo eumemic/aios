@@ -71,15 +71,26 @@ def sync_detailed(
 ) -> Response[HTTPValidationError | WfRun]:
     """Create Run
 
-     Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
-    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
-    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+     Launch a run. Either a registered ``workflow_id`` (snapshots the workflow's
+    current script) OR an inline ``{script, schemas, surface}`` body (T5, #1466) — a
+    one-shot anonymous run with NO ``workflows`` row created (exactly one). Binds the
+    run to ``environment_id`` (its ``agent()`` children spawn there) and to ``vault_ids``
+    (credentials it resolves at tool-call time), and wakes it. A missing workflow or
+    environment 404s. The HTTP path is unattenuated operator authority — no
     ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).
 
     Args:
         authorization (None | str | Unset):
-        body (WfRunCreate): Request body for ``POST /v1/runs`` — launch a run of a workflow.
+        body (WfRunCreate): Request body for ``POST /v1/runs`` — launch a run.
+
+            Exactly ONE source arm (validated below):
+
+            * ``workflow_id`` (+ optional ``version``) — the registered path: snapshot a
+              pre-registered workflow's script + declared surface.
+            * ``inline`` (:class:`InlineScriptBody`) — the inline-script arm (T5, #1466): a
+              one-shot run launched from an inline ``{script, schemas, surface}`` body with NO
+              ``workflows`` row created. ``version`` is meaningless on this arm (no definition
+              history) and is rejected if combined with it.
 
             ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
             binds to ``environment_id`` (like a session), into which its ``agent()`` children
@@ -114,15 +125,26 @@ def sync(
 ) -> HTTPValidationError | WfRun | None:
     """Create Run
 
-     Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
-    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
-    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+     Launch a run. Either a registered ``workflow_id`` (snapshots the workflow's
+    current script) OR an inline ``{script, schemas, surface}`` body (T5, #1466) — a
+    one-shot anonymous run with NO ``workflows`` row created (exactly one). Binds the
+    run to ``environment_id`` (its ``agent()`` children spawn there) and to ``vault_ids``
+    (credentials it resolves at tool-call time), and wakes it. A missing workflow or
+    environment 404s. The HTTP path is unattenuated operator authority — no
     ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).
 
     Args:
         authorization (None | str | Unset):
-        body (WfRunCreate): Request body for ``POST /v1/runs`` — launch a run of a workflow.
+        body (WfRunCreate): Request body for ``POST /v1/runs`` — launch a run.
+
+            Exactly ONE source arm (validated below):
+
+            * ``workflow_id`` (+ optional ``version``) — the registered path: snapshot a
+              pre-registered workflow's script + declared surface.
+            * ``inline`` (:class:`InlineScriptBody`) — the inline-script arm (T5, #1466): a
+              one-shot run launched from an inline ``{script, schemas, surface}`` body with NO
+              ``workflows`` row created. ``version`` is meaningless on this arm (no definition
+              history) and is rejected if combined with it.
 
             ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
             binds to ``environment_id`` (like a session), into which its ``agent()`` children
@@ -152,15 +174,26 @@ async def asyncio_detailed(
 ) -> Response[HTTPValidationError | WfRun]:
     """Create Run
 
-     Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
-    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
-    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+     Launch a run. Either a registered ``workflow_id`` (snapshots the workflow's
+    current script) OR an inline ``{script, schemas, surface}`` body (T5, #1466) — a
+    one-shot anonymous run with NO ``workflows`` row created (exactly one). Binds the
+    run to ``environment_id`` (its ``agent()`` children spawn there) and to ``vault_ids``
+    (credentials it resolves at tool-call time), and wakes it. A missing workflow or
+    environment 404s. The HTTP path is unattenuated operator authority — no
     ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).
 
     Args:
         authorization (None | str | Unset):
-        body (WfRunCreate): Request body for ``POST /v1/runs`` — launch a run of a workflow.
+        body (WfRunCreate): Request body for ``POST /v1/runs`` — launch a run.
+
+            Exactly ONE source arm (validated below):
+
+            * ``workflow_id`` (+ optional ``version``) — the registered path: snapshot a
+              pre-registered workflow's script + declared surface.
+            * ``inline`` (:class:`InlineScriptBody`) — the inline-script arm (T5, #1466): a
+              one-shot run launched from an inline ``{script, schemas, surface}`` body with NO
+              ``workflows`` row created. ``version`` is meaningless on this arm (no definition
+              history) and is rejected if combined with it.
 
             ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
             binds to ``environment_id`` (like a session), into which its ``agent()`` children
@@ -193,15 +226,26 @@ async def asyncio(
 ) -> HTTPValidationError | WfRun | None:
     """Create Run
 
-     Launch a run of a workflow. Snapshots the workflow's current script, binds
-    the run to ``environment_id`` (its ``agent()`` children spawn there) and to
-    ``vault_ids`` (credentials it resolves at tool-call time), and wakes it. A missing
-    workflow or environment 404s. The HTTP path is unattenuated operator authority — no
+     Launch a run. Either a registered ``workflow_id`` (snapshots the workflow's
+    current script) OR an inline ``{script, schemas, surface}`` body (T5, #1466) — a
+    one-shot anonymous run with NO ``workflows`` row created (exactly one). Binds the
+    run to ``environment_id`` (its ``agent()`` children spawn there) and to ``vault_ids``
+    (credentials it resolves at tool-call time), and wakes it. A missing workflow or
+    environment 404s. The HTTP path is unattenuated operator authority — no
     ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped).
 
     Args:
         authorization (None | str | Unset):
-        body (WfRunCreate): Request body for ``POST /v1/runs`` — launch a run of a workflow.
+        body (WfRunCreate): Request body for ``POST /v1/runs`` — launch a run.
+
+            Exactly ONE source arm (validated below):
+
+            * ``workflow_id`` (+ optional ``version``) — the registered path: snapshot a
+              pre-registered workflow's script + declared surface.
+            * ``inline`` (:class:`InlineScriptBody`) — the inline-script arm (T5, #1466): a
+              one-shot run launched from an inline ``{script, schemas, surface}`` body with NO
+              ``workflows`` row created. ``version`` is meaningless on this arm (no definition
+              history) and is rejected if combined with it.
 
             ``input`` is arbitrary JSON (a workflow's input need not be an object). The run
             binds to ``environment_id`` (like a session), into which its ``agent()`` children
