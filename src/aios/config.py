@@ -492,6 +492,46 @@ class Settings(BaseSettings):
         "Time-based by design — see ``prune_trigger_runs`` for why a "
         "count-cap would be unsafe.",
     )
+    # ── reclaimable-ephemera prune (T6, #1461) ────────────────────────────────
+    reclaimable_prune_enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the age-based prune of RECLAIMABLE instance "
+        "ephemera (T6): terminal+archived ``wf_runs`` (and their ``WfRunEvent`` "
+        "journals, which cascade) plus archived agent/skill/workflow definitions "
+        "no live session/run still pins. When False the maintenance sweep prunes "
+        "nothing (set ``AIOS_RECLAIMABLE_PRUNE_ENABLED=false``). NEVER touches the "
+        "sacred set: memory content, referenced session history, any version a "
+        "live session pins, or accounts. Time-based per the ``trigger_runs`` "
+        "doctrine — no count-cap (which could evict a young claim row).",
+    )
+    wf_runs_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="Days a TERMINAL+ARCHIVED workflow run (``wf_runs`` with "
+        "``archived_at`` set by ``archive_run``) is retained before the prune "
+        "sweep deletes it — dropping its ``wf_run_events`` journal (the unbounded-"
+        "growth driver) via ``ON DELETE CASCADE`` in the same statement. Modeled "
+        "on ``trigger_runs_retention_days``; age-keyed on ``archived_at``. "
+        "Time-based by design — a count-cap is explicitly rejected (#1461).",
+    )
+    archived_definition_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="Days an ARCHIVED agent/skill/workflow definition with NO live "
+        "session/run pinning it is retained before the prune sweep deletes it "
+        "(with its version history). Replay-stability holds any definition a live "
+        "session still pins — those versions are SACRED and survive regardless of "
+        "age. Modeled on ``trigger_runs_retention_days``; time-based.",
+    )
+    reclaimable_prune_interval_seconds: float = Field(
+        default=3600.0,
+        gt=0.0,
+        description="Interval for the periodic reclaimable-ephemera prune sweep "
+        "(an immediate first sweep runs at worker startup, then repeats at this "
+        "cadence — mirrors the host scratch-dir reaper). The sweep is idempotent "
+        "and safe to run repeatedly; it logs what it reclaimed.",
+    )
+
     schedule_wake_max_delay_seconds: int = Field(
         default=60 * 60 * 24 * 30,  # 30 days
         ge=60,
