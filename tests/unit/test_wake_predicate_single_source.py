@@ -75,8 +75,9 @@ def test_errored_sessions_sql_generated_from_session_errored_predicate() -> None
 def test_ghost_asst_sql_generated_from_session_errored_predicate() -> None:
     """``GHOST_ASST_SQL`` pushes the errored bound to skip parked sessions; it
     composes the SAME ``session_errored_predicate`` source as
-    ``ERRORED_SESSIONS_SQL`` and the read path, so its SQL pre-filter's errored
-    set equals the Python ``_errored_session_ids`` post-filter's."""
+    ``ERRORED_SESSIONS_SQL`` and the read path — this single-source composition
+    is what makes the SQL pre-filter the sole load-bearing errored-skip for
+    ghost repair."""
     ghost = _norm(sweep.GHOST_ASST_SQL.format(scope_clause=""))
     assert _norm(queries.session_errored_predicate("s")) in ghost
 

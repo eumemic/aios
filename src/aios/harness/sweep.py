@@ -134,15 +134,10 @@ class _SweepAgentSurface:
 #
 # Also bounded by the errored-session predicate (#897): an errored session is
 # parked until a user message recovers it, so its open tool_calls are part of
-# the terminal landing pad and must NOT be reaped.  ``find_and_repair_ghosts``
-# already drops these via the Python ``_errored_session_ids`` post-filter;
-# pushing the same predicate here stops the wasted event-log fetch on every 30s
-# sweep for the small set of errored sessions that still carry open calls.  This
-# ``NOT`` is composed from the SAME single source ``session_errored_predicate``
-# that backs ``ERRORED_SESSIONS_SQL`` (and the read path) — both consume the
-# maintained scalar columns (migration 0066), so the SQL pre-filter's errored
-# set EQUALS the Python post-filter's; the post-filter is retained as defense in
-# depth.
+# the terminal landing pad and must NOT be reaped.  This is the SOLE errored-skip
+# for ghost repair — composed from the same single source
+# ``session_errored_predicate`` that backs ``ERRORED_SESSIONS_SQL`` and the read
+# path, all consuming the maintained scalar columns (migration 0066).
 GHOST_ASST_SQL = f"""
     SELECT e.session_id, e.data, e.created_at
       FROM events e
@@ -351,19 +346,6 @@ async def find_and_repair_ghosts(
             return []
 
         session_ids = list({r["session_id"] for r in asst_rows})
-
-        # Skip errored sessions: their dispatched-but-unresolved tool calls are
-        # part of the terminal landing pad and stay unreaped until a user
-        # message recovers the session (mirrors the pre-derivation status skip).
-        # ``GHOST_ASST_SQL`` already pushes the identical errored predicate, so
-        # ``asst_rows`` carries no errored session here; this post-filter is
-        # retained as defense in depth (#897).
-        errored = await _errored_session_ids(conn, session_id=session_id)
-        if errored:
-            asst_rows = [r for r in asst_rows if r["session_id"] not in errored]
-            if not asst_rows:
-                return []
-            session_ids = [s for s in session_ids if s not in errored]
 
         result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, session_ids)
         results_by_session: dict[str, set[str]] = {}

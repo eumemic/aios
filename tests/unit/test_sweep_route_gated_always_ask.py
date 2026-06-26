@@ -134,10 +134,10 @@ async def test_route_gated_always_ask_not_ghost_repaired(monkeypatch: Any) -> No
             ],
         }
     ]
-    # Six fetches: GHOST_ASST_SQL, ERRORED_SESSIONS_SQL, ALL_RESULT_ROWS_SQL,
+    # Five fetches: GHOST_ASST_SQL, ALL_RESULT_ROWS_SQL,
     # GHOST_LIFECYCLE_SQL (no confirmation), agent_rows, GHOST_SPAN_START_SQL.
     conn = MagicMock()
-    conn.fetch = AsyncMock(side_effect=[ghost_rows, [], [], [], agent_rows, []])
+    conn.fetch = AsyncMock(side_effect=[ghost_rows, [], [], agent_rows, []])
     pool = fake_pool_yielding_conn(conn)
 
     append_mock = AsyncMock()
@@ -192,7 +192,7 @@ async def test_route_gated_always_ask_confirmed_is_ghost_repaired(monkeypatch: A
         }
     ]
     conn = MagicMock()
-    conn.fetch = AsyncMock(side_effect=[ghost_rows, [], [], lifecycle_rows, agent_rows, []])
+    conn.fetch = AsyncMock(side_effect=[ghost_rows, [], lifecycle_rows, agent_rows, []])
     pool = fake_pool_yielding_conn(conn)
 
     append_mock = AsyncMock()
