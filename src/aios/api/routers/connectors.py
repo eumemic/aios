@@ -67,7 +67,11 @@ from aios.services import inbound as inbound_service
 from aios.services import management_calls
 from aios.services import sessions as sessions_service
 from aios.services.attachment_staging import InboundAttachment
-from aios.services.inbound_budget import check_inbound_budget, check_inbound_budget_session
+from aios.services.inbound_budget import (
+    check_inbound_budget,
+    check_inbound_budget_session,
+    inbound_orig_channel,
+)
 from aios.services.wake import defer_wake
 
 log = get_logger("aios.api.routers.connectors")
@@ -775,6 +779,13 @@ async def post_runtime_session_lifecycle(
             "inbound rate budget exceeded for this session",
             detail={"drop_reason": "rate_limited", "session_id": body.session_id},
         )
+    if body.wake:
+        # Stamp the wake intent that fired the ``defer_wake`` so the budget's
+        # session-grain window can meter this inference-bearing write (#1558).
+        # The no-wake append stays byte-identical (no marker, uncounted); only
+        # ``wake=True`` lifecycle rows carry ``wake`` so internal harness
+        # lifecycle transitions (no ``wake`` key) never burn a budget.
+        payload["wake"] = True
     event = await sessions_service.append_event(
         pool,
         body.session_id,
@@ -895,12 +906,26 @@ async def post_runtime_chat_lifecycle(
                 "chat_id": body.chat_id,
             },
         )
+    # On the wake-bearing path, stamp the wake intent AND the per-counterparty
+    # ``orig_channel`` key so the chat-grain budget window counts this
+    # inference-bearing write on the same key the inbound path uses (#1558).
+    # ``_resolve_event_channel`` returns NULL for any non-``message`` kind, so
+    # stamping ``orig_channel`` on this ``kind='lifecycle'`` row is safe for the
+    # derived ``channel`` column. The no-wake append stays byte-identical (no
+    # marker, no ``orig_channel`` → uncounted).
+    lifecycle_orig_channel: str | None = None
+    if body.wake:
+        payload["wake"] = True
+        lifecycle_orig_channel = inbound_orig_channel(
+            connection.connector, connection.external_account_id, body.chat_id
+        )
     event = await sessions_service.append_event(
         pool,
         session_id,
         "lifecycle",
         payload,
         account_id=account_id,
+        orig_channel=lifecycle_orig_channel,
     )
     if body.wake:
         await defer_wake(

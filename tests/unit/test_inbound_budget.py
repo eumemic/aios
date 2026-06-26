@@ -291,3 +291,272 @@ async def test_within_budget_passes_into_resolution() -> None:
     check_budget.assert_awaited_once()
     resolve_target_session.assert_awaited_once()
     assert result.drop_reason is InboundDrop.DETACHED
+
+
+# ─── #1558: the inference-bearing union — wake-bearing lifecycle is counted ───
+
+
+def _pool_capturing_conn() -> tuple[MagicMock, MagicMock]:
+    """A pool whose acquired conn is the SAME ``MagicMock`` every time, so a
+    test can assert on the ``fetchval`` call args (the built SQL + params).
+    Returns ``(pool, conn)``."""
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=0)
+    pool = MagicMock()
+
+    class _Cm:
+        async def __aenter__(self) -> Any:
+            return conn
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+    pool.acquire.return_value = _Cm()
+    return pool, conn
+
+
+async def test_chat_counter_sql_includes_wake_lifecycle_arm() -> None:
+    """Predicate-level (master-failing): the chat-grain counter's SQL must
+    count the wake-bearing ``kind='lifecycle'`` arm, not just message/role.
+
+    On master the query has ONLY the ``kind = 'message' AND role='user'`` arm,
+    so the ``kind = 'lifecycle'`` ∧ ``wake`` assertion fails."""
+    pool, conn = _pool_capturing_conn()
+    await inbound_budget._count_recent_inbounds(
+        pool, account_id="acc_1", orig_channel="signal/+1/peer", window_seconds=3600
+    )
+    sql = _await_args(conn.fetchval).args[0]
+    # The new inference-bearing union arm.
+    assert "kind = 'lifecycle'" in sql
+    assert "data->>'wake')::boolean IS TRUE" in sql
+    # The original admitted-inbound arm is preserved.
+    assert "kind = 'message'" in sql
+    assert "data->>'role' = 'user'" in sql
+
+
+async def test_session_counter_sql_includes_wake_lifecycle_arm() -> None:
+    """Predicate-level (master-failing): same for the session-grain counter."""
+    pool, conn = _pool_capturing_conn()
+    await inbound_budget._count_recent_session_inbounds(
+        pool, account_id="acc_1", session_id="ses_1", window_seconds=3600
+    )
+    sql = _await_args(conn.fetchval).args[0]
+    assert "kind = 'lifecycle'" in sql
+    assert "data->>'wake')::boolean IS TRUE" in sql
+    assert "kind = 'message'" in sql
+    assert "data->>'role' = 'user'" in sql
+
+
+def test_both_counters_share_one_predicate_fragment() -> None:
+    """The inference-bearing shape is single-sourced (one shared SQL fragment),
+    not duplicated-by-vigilance, so the two counters can never drift apart."""
+    frag = inbound_budget._INFERENCE_BEARING_PREDICATE
+    assert "kind = 'message'" in frag
+    assert "data->>'role' = 'user'" in frag
+    assert "kind = 'lifecycle'" in frag
+    assert "(data->>'wake')::boolean IS TRUE" in frag
+
+
+# ─── #1558: route-level — the wake-bearing lifecycle write is stamped ─────────
+
+
+def _runtime_auth() -> tuple[str, str, str, list[str] | None]:
+    # (token, connector, account_id, connection_ids allowlist)
+    return ("tok", "signal", "acc_1", None)
+
+
+def _route_pool() -> MagicMock:
+    """A pool whose ``acquire()`` yields a conn usable for the routes' inline
+    ``async with pool.acquire() as conn`` lookups (all DB calls are patched at
+    the ``queries`` module, so the conn itself is an inert MagicMock)."""
+    pool = MagicMock()
+    conn = MagicMock()
+
+    class _Cm:
+        async def __aenter__(self) -> Any:
+            return conn
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+    pool.acquire.return_value = _Cm()
+    return pool
+
+
+def _fake_event() -> MagicMock:
+    ev = MagicMock()
+    ev.id = "evt_appended"
+    return ev
+
+
+def _await_args(mock: AsyncMock) -> Any:
+    """Return ``mock.await_args`` narrowed to non-``None`` (mypy/asserts)."""
+    call = mock.await_args
+    assert call is not None
+    return call
+
+
+async def test_session_lifecycle_wake_stamps_wake_marker() -> None:
+    """Route-level (master-failing): a ``wake=True`` session-lifecycle stamps
+    ``wake: True`` on the appended payload so the session-grain budget can meter
+    it. On master the payload has no ``wake`` key ⇒ this fails."""
+    from aios.api.routers.connectors import (
+        RuntimeSessionLifecycleRequest,
+        post_runtime_session_lifecycle,
+    )
+
+    body = RuntimeSessionLifecycleRequest(
+        connection_id="conn_1",
+        session_id="ses_1",
+        event="connector_delivery_failed",
+        wake=True,
+    )
+    append_event = AsyncMock(return_value=_fake_event())
+
+    with (
+        patch(
+            "aios.api.routers.connectors.queries.get_connection",
+            AsyncMock(return_value=_connection()),
+        ),
+        patch("aios.api.routers.connectors._check_runtime_scope", MagicMock()),
+        patch("aios.api.routers.connectors._check_runtime_connection_scope", MagicMock()),
+        patch(
+            "aios.api.routers.connectors.queries.is_session_bound_to_connection",
+            AsyncMock(return_value=True),
+        ),
+        # Budget enabled, and under threshold ⇒ admit (so we reach the append).
+        patch(
+            "aios.api.routers.connectors.check_inbound_budget_session", AsyncMock(return_value=True)
+        ),
+        patch("aios.api.routers.connectors.sessions_service.append_event", append_event),
+        patch("aios.api.routers.connectors.defer_wake", AsyncMock()),
+    ):
+        await post_runtime_session_lifecycle(body, _route_pool(), _runtime_auth())
+
+    call = _await_args(append_event)
+    payload = call.args[3]
+    assert payload["wake"] is True
+
+
+async def test_session_lifecycle_no_wake_omits_marker() -> None:
+    """Regression pin: a ``wake=False`` session-lifecycle writes NO ``wake``
+    marker (the free path stays byte-identical / uncounted)."""
+    from aios.api.routers.connectors import (
+        RuntimeSessionLifecycleRequest,
+        post_runtime_session_lifecycle,
+    )
+
+    body = RuntimeSessionLifecycleRequest(
+        connection_id="conn_1",
+        session_id="ses_1",
+        event="connector_message_delivered",
+        wake=False,
+    )
+    append_event = AsyncMock(return_value=_fake_event())
+    check = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "aios.api.routers.connectors.queries.get_connection",
+            AsyncMock(return_value=_connection()),
+        ),
+        patch("aios.api.routers.connectors._check_runtime_scope", MagicMock()),
+        patch("aios.api.routers.connectors._check_runtime_connection_scope", MagicMock()),
+        patch(
+            "aios.api.routers.connectors.queries.is_session_bound_to_connection",
+            AsyncMock(return_value=True),
+        ),
+        patch("aios.api.routers.connectors.check_inbound_budget_session", check),
+        patch("aios.api.routers.connectors.sessions_service.append_event", append_event),
+        patch("aios.api.routers.connectors.defer_wake", AsyncMock()),
+    ):
+        await post_runtime_session_lifecycle(body, _route_pool(), _runtime_auth())
+
+    call = _await_args(append_event)
+    payload = call.args[3]
+    assert "wake" not in payload
+    # The no-wake path never even consults the budget.
+    check.assert_not_called()
+
+
+async def test_chat_lifecycle_wake_stamps_wake_and_orig_channel() -> None:
+    """Route-level (master-failing): a ``wake=True`` chat-lifecycle stamps both
+    ``wake: True`` AND ``orig_channel`` (= ``inbound_orig_channel(...)``) so the
+    chat-grain budget counts it on the same key the inbound path uses. On
+    master neither is passed ⇒ this fails."""
+    from aios.api.routers.connectors import (
+        RuntimeChatLifecycleRequest,
+        post_runtime_chat_lifecycle,
+    )
+
+    connection = _connection()
+    body = RuntimeChatLifecycleRequest(
+        connection_id="conn_1",
+        chat_id="peer",
+        event="connector_delivery_failed",
+        wake=True,
+    )
+    append_event = AsyncMock(return_value=_fake_event())
+
+    with (
+        patch(
+            "aios.api.routers.connectors.queries.get_connection", AsyncMock(return_value=connection)
+        ),
+        patch("aios.api.routers.connectors._check_runtime_scope", MagicMock()),
+        patch("aios.api.routers.connectors._check_runtime_connection_scope", MagicMock()),
+        patch(
+            "aios.api.routers.connectors.queries.get_chat_session_row",
+            AsyncMock(return_value=("peer", "ses_resolved", datetime.now(UTC))),
+        ),
+        patch("aios.api.routers.connectors.check_inbound_budget", AsyncMock(return_value=True)),
+        patch("aios.api.routers.connectors.sessions_service.append_event", append_event),
+        patch("aios.api.routers.connectors.defer_wake", AsyncMock()),
+    ):
+        await post_runtime_chat_lifecycle(body, _route_pool(), _runtime_auth())
+
+    call = _await_args(append_event)
+    payload = call.args[3]
+    assert payload["wake"] is True
+    expected_oc = inbound_orig_channel(connection.connector, connection.external_account_id, "peer")
+    assert call.kwargs["orig_channel"] == expected_oc
+
+
+async def test_chat_lifecycle_no_wake_omits_wake_and_orig_channel() -> None:
+    """Regression pin: a ``wake=False`` chat-lifecycle writes no ``wake`` marker
+    and passes no ``orig_channel`` (free path stays uncounted)."""
+    from aios.api.routers.connectors import (
+        RuntimeChatLifecycleRequest,
+        post_runtime_chat_lifecycle,
+    )
+
+    body = RuntimeChatLifecycleRequest(
+        connection_id="conn_1",
+        chat_id="peer",
+        event="connector_message_delivered",
+        wake=False,
+    )
+    append_event = AsyncMock(return_value=_fake_event())
+    check = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "aios.api.routers.connectors.queries.get_connection",
+            AsyncMock(return_value=_connection()),
+        ),
+        patch("aios.api.routers.connectors._check_runtime_scope", MagicMock()),
+        patch("aios.api.routers.connectors._check_runtime_connection_scope", MagicMock()),
+        patch(
+            "aios.api.routers.connectors.queries.get_chat_session_row",
+            AsyncMock(return_value=("peer", "ses_resolved", datetime.now(UTC))),
+        ),
+        patch("aios.api.routers.connectors.check_inbound_budget", check),
+        patch("aios.api.routers.connectors.sessions_service.append_event", append_event),
+        patch("aios.api.routers.connectors.defer_wake", AsyncMock()),
+    ):
+        await post_runtime_chat_lifecycle(body, _route_pool(), _runtime_auth())
+
+    call = _await_args(append_event)
+    payload = call.args[3]
+    assert "wake" not in payload
+    assert call.kwargs.get("orig_channel") is None
+    check.assert_not_called()

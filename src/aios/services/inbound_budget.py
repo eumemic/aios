@@ -46,6 +46,22 @@ import asyncpg
 
 from aios.config import get_settings
 
+# The "inference-bearing inbound" shape, defined ONCE and shared by both
+# ``_count_recent_*`` counters (single-source rather than duplicated-by-
+# vigilance). Every counted row pairs an append with a ``defer_wake`` → one
+# ``run_session_step`` → one model inference:
+#   * an admitted inbound message (``kind='message'``, ``role='user'``), and
+#   * a wake-bearing connector lifecycle (``kind='lifecycle'`` stamped with
+#     ``wake=True`` by the two single-target wake routes, #1558).
+# ``(data->>'wake')::boolean IS TRUE`` matches ONLY the ``wake=True`` lifecycle
+# writes: a no-wake lifecycle and every internal harness lifecycle transition
+# carry no ``wake`` key (``->>`` yields ``NULL`` → not true), so the free paths
+# stay uncounted by construction.
+_INFERENCE_BEARING_PREDICATE = """
+              (kind = 'message'   AND data->>'role' = 'user')
+           OR (kind = 'lifecycle' AND (data->>'wake')::boolean IS TRUE)
+"""
+
 
 def inbound_orig_channel(connector: str, external_account_id: str, chat_id: str) -> str:
     """Build the ``orig_channel`` key a ``role=user`` event is stamped with.
@@ -73,13 +89,12 @@ async def _count_recent_inbounds(
     """
     async with pool.acquire() as conn:
         count = await conn.fetchval(
-            """
+            f"""
             SELECT count(*)
             FROM events
             WHERE account_id = $1
               AND orig_channel = $2
-              AND kind = 'message'
-              AND data->>'role' = 'user'
+              AND ({_INFERENCE_BEARING_PREDICATE})
               AND created_at > now() - make_interval(secs => $3::bigint)
             """,
             account_id,
@@ -108,13 +123,12 @@ async def _count_recent_session_inbounds(
     """
     async with pool.acquire() as conn:
         count = await conn.fetchval(
-            """
+            f"""
             SELECT count(*)
             FROM events
             WHERE account_id = $1
               AND session_id = $2
-              AND kind = 'message'
-              AND data->>'role' = 'user'
+              AND ({_INFERENCE_BEARING_PREDICATE})
               AND created_at > now() - make_interval(secs => $3::bigint)
             """,
             account_id,
