@@ -97,6 +97,17 @@ def sync_detailed(
     bound at the time of the call (e.g. the operator detached every
     session before the connector finished tearing down); not an error.
 
+    When a session is archived between the binding snapshot
+    (``list_session_ids_for_connection``, taken outside the append loop)
+    and its append, ``append_event`` raises a typed ``NotFoundError``;
+    that session is skipped and reported under ``skipped_session_ids``
+    (a flat ``list[str]``, present only when non-empty).  This is the one
+    benign per-session failure.  Any *other* append failure —
+    serialization, statement timeout, pool exhaustion, a broken
+    connection — is a real writer fault: it propagates uncaught and 500s
+    the call so the connector can retry, rather than being buried in a
+    201 body.
+
     Args:
         authorization (None | str | Unset):
         body (RuntimeLifecycleRequest): Body for ``POST /v1/connectors/runtime/lifecycle``.
@@ -158,6 +169,17 @@ def sync(
     bound at the time of the call (e.g. the operator detached every
     session before the connector finished tearing down); not an error.
 
+    When a session is archived between the binding snapshot
+    (``list_session_ids_for_connection``, taken outside the append loop)
+    and its append, ``append_event`` raises a typed ``NotFoundError``;
+    that session is skipped and reported under ``skipped_session_ids``
+    (a flat ``list[str]``, present only when non-empty).  This is the one
+    benign per-session failure.  Any *other* append failure —
+    serialization, statement timeout, pool exhaustion, a broken
+    connection — is a real writer fault: it propagates uncaught and 500s
+    the call so the connector can retry, rather than being buried in a
+    201 body.
+
     Args:
         authorization (None | str | Unset):
         body (RuntimeLifecycleRequest): Body for ``POST /v1/connectors/runtime/lifecycle``.
@@ -212,6 +234,17 @@ async def asyncio_detailed(
     that received the event.  An empty list means no sessions were
     bound at the time of the call (e.g. the operator detached every
     session before the connector finished tearing down); not an error.
+
+    When a session is archived between the binding snapshot
+    (``list_session_ids_for_connection``, taken outside the append loop)
+    and its append, ``append_event`` raises a typed ``NotFoundError``;
+    that session is skipped and reported under ``skipped_session_ids``
+    (a flat ``list[str]``, present only when non-empty).  This is the one
+    benign per-session failure.  Any *other* append failure —
+    serialization, statement timeout, pool exhaustion, a broken
+    connection — is a real writer fault: it propagates uncaught and 500s
+    the call so the connector can retry, rather than being buried in a
+    201 body.
 
     Args:
         authorization (None | str | Unset):
@@ -271,6 +304,17 @@ async def asyncio(
     that received the event.  An empty list means no sessions were
     bound at the time of the call (e.g. the operator detached every
     session before the connector finished tearing down); not an error.
+
+    When a session is archived between the binding snapshot
+    (``list_session_ids_for_connection``, taken outside the append loop)
+    and its append, ``append_event`` raises a typed ``NotFoundError``;
+    that session is skipped and reported under ``skipped_session_ids``
+    (a flat ``list[str]``, present only when non-empty).  This is the one
+    benign per-session failure.  Any *other* append failure —
+    serialization, statement timeout, pool exhaustion, a broken
+    connection — is a real writer fault: it propagates uncaught and 500s
+    the call so the connector can retry, rather than being buried in a
+    201 body.
 
     Args:
         authorization (None | str | Unset):
