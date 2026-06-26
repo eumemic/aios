@@ -27,6 +27,8 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from aios.harness.context import EPHEMERAL_TAIL_KEY
+
 if TYPE_CHECKING:
     from aios.models.sessions import Obligation
 
@@ -164,7 +166,7 @@ def build_obligations_tail_block(
     remaining = len(obligations) - len(rendered)
     if remaining > 0:
         lines.append(f"…(+{remaining} more)")
-    return {"role": "user", "content": "\n".join(lines)}
+    return {"role": "user", "content": "\n".join(lines), EPHEMERAL_TAIL_KEY: True}
 
 
 def render_owed_entry(obligation: Obligation, *, session_id: str, now: datetime) -> dict[str, Any]:

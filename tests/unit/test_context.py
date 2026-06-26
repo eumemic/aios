@@ -14,6 +14,7 @@ import pytest
 
 from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
+    EPHEMERAL_TAIL_KEY,
     _approx_count,
     _concat_user_messages,
     _is_degenerate_empty_assistant,
@@ -1828,6 +1829,25 @@ class TestConcatUserMessages:
                 {"type": "image_url", "image_url": {"url": "u"}},
             ],
         }
+
+    def test_ephemeral_marker_sticky_under_or(self) -> None:
+        """#1535: the ephemeral-tail marker propagates under OR — a merge of
+        any ephemeral message with anything is ephemeral (a dict containing
+        *any* per-step-mutating content cannot host the stable-prefix cache
+        breakpoint). Covers the trailing real-inbound + obligations case."""
+        inbound = {"role": "user", "content": "real peer text"}
+        ephemeral = {"role": "user", "content": "tail", EPHEMERAL_TAIL_KEY: True}
+        # ephemeral on either side -> merged dict is ephemeral.
+        assert _concat_user_messages(inbound, ephemeral).get(EPHEMERAL_TAIL_KEY) is True
+        assert _concat_user_messages(ephemeral, inbound).get(EPHEMERAL_TAIL_KEY) is True
+        # both ephemeral -> still ephemeral.
+        assert _concat_user_messages(ephemeral, ephemeral).get(EPHEMERAL_TAIL_KEY) is True
+
+    def test_no_marker_when_neither_ephemeral(self) -> None:
+        """Plain inbound + plain inbound stays unmarked - no spurious marker."""
+        a = {"role": "user", "content": "one"}
+        b = {"role": "user", "content": "two"}
+        assert EPHEMERAL_TAIL_KEY not in _concat_user_messages(a, b)
 
 
 class TestIsDegenerateEmptyAssistant:

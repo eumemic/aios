@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from aios.harness._text import join_blocks
+from aios.harness.context import EPHEMERAL_TAIL_KEY
 from aios.models.events import Event
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
@@ -229,7 +230,7 @@ def build_channels_tail_block(
             lines.append(f"○ channel_id={addr} — {count} unread{preview_clause}")
         else:
             lines.append(f"○ channel_id={addr} — 0 unread")
-    return {"role": "user", "content": "\n".join(lines)}
+    return {"role": "user", "content": "\n".join(lines), EPHEMERAL_TAIL_KEY: True}
 
 
 def _switch_marker(e: Event) -> dict[str, Any] | None:

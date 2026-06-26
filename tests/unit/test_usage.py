@@ -13,6 +13,7 @@ from aios.harness.completion import (
     inject_cache_breakpoints,
     model_descriptor,
 )
+from aios.harness.context import EPHEMERAL_TAIL_KEY
 
 
 @pytest.fixture(autouse=True)
@@ -152,6 +153,13 @@ def _msg(role: str, content: str = "") -> dict[str, Any]:
     return {"role": role, "content": content}
 
 
+def _tail(content: str) -> dict[str, Any]:
+    """Build an ephemeral-tail user message, tagged out-of-band like the
+    real channels/obligations tail producers (carries
+    :data:`EPHEMERAL_TAIL_KEY`)."""
+    return {"role": "user", "content": content, EPHEMERAL_TAIL_KEY: True}
+
+
 def _tool_def(name: str) -> dict[str, Any]:
     """Build a minimal OpenAI-format tool definition."""
     return {
@@ -236,7 +244,7 @@ class TestInjectCacheBreakpoints:
         cache never hits.  Breakpoint goes on the last *stable*
         message (the event-sourced one just before the tail).
         """
-        tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
         msgs = [
             _msg("system", "sys"),
             _msg("user", "hi there"),
@@ -263,7 +271,7 @@ class TestInjectCacheBreakpoints:
         still recognise one from any other source — pinned here against a
         hand-constructed separator.
         """
-        tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
         stable = _msg("user", "real peer message")
         separator = {"role": "assistant", "content": "."}
         msgs = [_msg("system", "sys"), stable, separator, tail]
@@ -280,7 +288,7 @@ class TestInjectCacheBreakpoints:
         """Degenerate case: only system + tail.  No stable conversation
         message exists — the last-stable-message rule produces nothing,
         but the system breakpoint still applies."""
-        tail = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
         msgs = [_msg("system", "sys"), tail]
         inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert msgs[0]["content"] == [
@@ -303,6 +311,68 @@ class TestInjectCacheBreakpoints:
         inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert "cache_control" not in msgs[1]["content"][0]
         assert msgs[1]["content"][1]["cache_control"] == _CACHE_CONTROL
+
+    def test_obligations_tail_after_tool_result_skipped_via_marker(self) -> None:
+        """Regression for #1535: an Anthropic-route session owing a response
+        (last log line a tool result) appends the always-on obligations tail
+        as the final user-role line. The breakpoint must land on the last
+        *stable* message (the tool result), NOT on the per-step-mutating
+        obligations block — which the old ``━━━ Channels ━━━`` substring
+        recognizer never matched, so it busted the prefix cache every step.
+        """
+        from aios.harness.obligations import _HEADER as _OBLIGATIONS_HEADER
+
+        obligations_tail = _tail(f"{_OBLIGATIONS_HEADER}\n• req_1 [api] (open 3s)")
+        msgs = [
+            _msg("system", "sys"),
+            _msg("user", "do the thing"),
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
+            {"role": "tool", "tool_call_id": "a", "content": "tool done"},
+            obligations_tail,
+        ]
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
+        # Breakpoint on the tool result (last stable), not the obligations tail.
+        assert msgs[3]["content"] == [
+            {"type": "text", "text": "tool done", "cache_control": _CACHE_CONTROL}
+        ]
+        # Obligations tail stays bare (content unchanged) and carries no marker.
+        assert msgs[4]["content"] == obligations_tail["content"]
+        assert EPHEMERAL_TAIL_KEY not in msgs[4]
+
+    def test_merged_inbound_plus_obligation_is_ephemeral(self) -> None:
+        """A trailing real user inbound + an open obligation fold into one
+        ``user`` dict via ``merge_adjacent_user_messages``; the merged dict
+        must inherit the ephemeral marker (sticky under OR) so the breakpoint
+        skips it. This is the latent merged-dict case the old substring
+        recognizer silently mishandled.
+        """
+        from aios.harness.context import merge_adjacent_user_messages
+
+        inbound = _msg("user", "real peer message")
+        obligation = _tail(
+            "━━━ Open obligations (answer with return/error) ━━━\n• r [api] (open 3s)"
+        )
+        merged = merge_adjacent_user_messages([inbound, obligation])
+        assert len(merged) == 1  # folded into one user turn
+        assert merged[0][EPHEMERAL_TAIL_KEY] is True  # marker is sticky
+
+        msgs = [_msg("system", "sys"), _msg("assistant", "hello"), merged[0]]
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
+        # Breakpoint lands on the stable assistant turn, skipping the merged
+        # ephemeral user dict.
+        assert msgs[1]["content"] == [
+            {"type": "text", "text": "hello", "cache_control": _CACHE_CONTROL}
+        ]
+        assert "cache_control" not in str(msgs[2].get("content"))
+        assert EPHEMERAL_TAIL_KEY not in msgs[2]
+
+    def test_marker_stripped_on_anthropic_route(self) -> None:
+        """No ``_aios_ephemeral_tail`` key may reach a provider: strip runs on
+        the Anthropic path after the recognizer consumes the markers."""
+        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        msgs = [_msg("system", "sys"), _msg("user", "hi"), tail]
+        inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
+        assert not any(EPHEMERAL_TAIL_KEY in m for m in msgs)
 
 
 class TestInjectCacheBreakpointsProviderGuard:
@@ -378,6 +448,19 @@ class TestInjectCacheBreakpointsProviderGuard:
         assert msgs[1]["content"] == [
             {"type": "text", "text": "hi", "cache_control": _CACHE_CONTROL}
         ]
+
+    def test_marker_stripped_on_non_anthropic_route(self) -> None:
+        """The ephemeral-tail marker is non-standard and must never reach a
+        provider — even on non-Anthropic routes that place no breakpoint but
+        still carry the tail dict to the wire (#1535: strip is unconditional,
+        not gated behind the Anthropic early return)."""
+        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        msgs = [_msg("system", "sys"), _msg("user", "hi"), tail]
+        inject_cache_breakpoints(msgs, None, "openai/gpt-4o")
+        # Gate held: no cache_control injected (content stays a plain string)…
+        assert msgs[1]["content"] == "hi"
+        # …but the marker is still stripped from every message.
+        assert not any(EPHEMERAL_TAIL_KEY in m for m in msgs)
 
 
 class TestModelDescriptor:
