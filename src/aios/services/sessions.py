@@ -1347,9 +1347,7 @@ async def write_gate_opened(
         session_id,
         account_id=account_id,
         request_id=request_id,
-        outcome=Ok(
-            result={"event": "gate_opened", "run_id": run_id, "gate_nonce": gate_nonce}
-        ),
+        outcome=Ok(result={"event": "gate_opened", "run_id": run_id, "gate_nonce": gate_nonce}),
     )
 
 

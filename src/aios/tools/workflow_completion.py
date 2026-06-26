@@ -157,9 +157,7 @@ async def fail_all_open_requests(
     async with pool.acquire() as conn:
         open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
     for request_id in open_ids:
-        await respond_to_request(
-            pool, session_id, request_id=request_id, outcome=Err(error=error)
-        )
+        await respond_to_request(pool, session_id, request_id=request_id, outcome=Err(error=error))
 
 
 async def _finish(
