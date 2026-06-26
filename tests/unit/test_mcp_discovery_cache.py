@@ -19,6 +19,7 @@ All MCP SDK + httpx interactions are mocked. No network calls.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,6 +32,8 @@ from aios.mcp.client import (
     discover_mcp_tools,
 )
 from aios.mcp.pool import McpSessionPool
+from aios.models.agents import Agent, AgentVersion, ToolSpec
+from aios.services.agents import tool_cache_binding_id
 
 URL = "https://m.example/"
 EMPTY_KEY = _headers_key(None)
@@ -154,6 +157,120 @@ class TestDiscoveryResultCache:
             await discover_mcp_tools(URL, "v", {}, "s", binding_id="agt_1:3")
 
         assert session.list_tools.await_count == 2
+
+
+# ── binding-identity accessor (#1554) ───────────────────────────────────────
+
+
+_DT = datetime(2024, 1, 1, tzinfo=UTC)
+
+
+def _agent_version(*, agent_id: str, version: int, tools: list[ToolSpec]) -> AgentVersion:
+    return AgentVersion(
+        agent_id=agent_id,
+        version=version,
+        model="test/dummy",
+        system="sys",
+        tools=tools,
+        skills=[],
+        mcp_servers=[],
+        http_servers=[],
+        litellm_extra={},
+        window_min=1000,
+        window_max=100000,
+        created_at=_DT,
+    )
+
+
+def _latest_agent(*, id: str, version: int) -> Agent:
+    return Agent(
+        id=id,
+        version=version,
+        name="a",
+        model="test/dummy",
+        system="sys",
+        tools=[],
+        skills=[],
+        mcp_servers=[],
+        http_servers=[],
+        description="d",
+        metadata={},
+        litellm_extra={},
+        window_min=1000,
+        window_max=100000,
+        created_at=_DT,
+        updated_at=_DT,
+    )
+
+
+class TestToolCacheBindingId:
+    """#1554: the binding identity that keys the #1391 tool-list cache must
+    distinguish distinct agents/sessions, never collapse them onto ``"?:..."``.
+    """
+
+    def test_distinct_version_pinned_agents_same_version_get_distinct_ids(self) -> None:
+        """Two version-pinned ``AgentVersion``s of *different* agents pinned to
+        the same version number must NOT collide. On master both duck-type to
+        ``"?:3"`` (the old ``getattr(agent, 'id', '?')``) — this asserts the
+        post-fix ``"agt_A:3"`` / ``"agt_B:3"`` and so fails on master."""
+        a = _agent_version(agent_id="agt_A", version=3, tools=[])
+        b = _agent_version(agent_id="agt_B", version=3, tools=[])
+        id_a = tool_cache_binding_id(a, "ses_1")
+        id_b = tool_cache_binding_id(b, "ses_2")
+        assert id_a == "agt_A:3"
+        assert id_b == "agt_B:3"
+        assert id_a != id_b
+
+    def test_distinct_generic_children_get_distinct_session_anchored_ids(self) -> None:
+        """Two generic workflow children (``agent_id=""``, ``version=0``) carry
+        distinct attenuated per-run surfaces; they must key on their own
+        ``session_id`` and so differ. On master both collapse to ``"?:0"``."""
+        a = _agent_version(agent_id="", version=0, tools=[])
+        b = _agent_version(agent_id="", version=0, tools=[])
+        id_a = tool_cache_binding_id(a, "ses_child_a")
+        id_b = tool_cache_binding_id(b, "ses_child_b")
+        assert id_a == "child:ses_child_a"
+        assert id_b == "child:ses_child_b"
+        assert id_a != id_b
+
+    def test_latest_agent_path_unchanged(self) -> None:
+        """The latest-``Agent`` path keeps its ``"<id>:<version>"`` form —
+        the one path that was already correct."""
+        agent = _latest_agent(id="agt_1", version=3)
+        assert tool_cache_binding_id(agent, "ses_x") == "agt_1:3"
+
+    async def test_cross_agent_pool_key_not_poisoned(self, pool_runtime: McpSessionPool) -> None:
+        """End-to-end: agent A's discovered tool list is NOT served to a
+        version-pinned agent B sharing one ``_PoolKey`` (same url/vault/headers).
+        On master both bind to ``"?:3"`` → B is served A's tools."""
+        a = _agent_version(agent_id="agt_A", version=3, tools=[])
+        b = _agent_version(agent_id="agt_B", version=3, tools=[])
+        bind_a = tool_cache_binding_id(a, "ses_a")
+        bind_b = tool_cache_binding_id(b, "ses_b")
+        # Distinct agents pinned to the same version must NOT share a cache slot.
+        assert bind_a != bind_b
+
+        # One transport session (same ``_PoolKey``) whose tool set changes between
+        # the two discoveries — A then B. If B shared A's cache key it would be
+        # served A's stale tool list (await_count stays 1); with distinct keys B
+        # re-discovers and sees its own.
+        session = _make_mock_session(["tool_for_A"])
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
+        ):
+            tools_a, _ = await discover_mcp_tools(URL, "v", {}, "s", binding_id=bind_a)
+            assert session.list_tools.await_count == 1
+
+            result_b = MagicMock()
+            result_b.tools = [_make_mock_tool("tool_for_B")]
+            session.list_tools = AsyncMock(return_value=result_b)
+            tools_b, _ = await discover_mcp_tools(URL, "v", {}, "s", binding_id=bind_b)
+
+        # B re-discovers (distinct key) and gets its own tool, not A's cached one.
+        assert session.list_tools.await_count == 1
+        assert tools_a[0]["function"]["name"] == "mcp__s__tool_for_A"
+        assert tools_b[0]["function"]["name"] == "mcp__s__tool_for_B"
 
 
 # ── per-server discovery timeout ────────────────────────────────────────────

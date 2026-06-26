@@ -49,6 +49,8 @@ from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.harness.tool_disposition import classify_tool_call
 from aios.logging import get_logger
 from aios.models.agents import (
+    Agent,
+    AgentVersion,
     McpServerSpec,
     is_mcp_tool_name,
 )
@@ -1060,7 +1062,7 @@ def _classify_tool_call(
 async def discover_session_mcp_tools(
     pool: Any,
     session_id: str,
-    agent: Any,
+    agent: Agent | AgentVersion,
     *,
     account_id: str,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -1076,9 +1078,9 @@ async def discover_session_mcp_tools(
     from aios.tools.registry import effective_transport
 
     enabled_server_names: set[str] = set()
-    for spec in agent.tools:
-        if spec.type == "mcp_toolset" and spec.enabled and spec.mcp_server_name:
-            enabled_server_names.add(spec.mcp_server_name)
+    for tool_spec in agent.tools:
+        if tool_spec.type == "mcp_toolset" and tool_spec.enabled and tool_spec.mcp_server_name:
+            enabled_server_names.add(tool_spec.mcp_server_name)
     servers: list[McpServerSpec] = [s for s in agent.mcp_servers if s.name in enabled_server_names]
     if not servers:
         return [], {}
@@ -1092,7 +1094,7 @@ async def discover_session_mcp_tools(
     # pays no per-step ``list_tools()`` RPC. Frozen-surface / version-pinned
     # sessions keep one (id, version) for the session lifetime, so they serve
     # from cache for the whole session with no rediscovery.
-    binding_id = f"{getattr(agent, 'id', '?')}:{getattr(agent, 'version', '?')}"
+    binding_id = agents_service.tool_cache_binding_id(agent, session_id)
 
     # Circuit breaker (#1391): skip a server whose discovery recently timed out /
     # failed so one unresponsive server can't re-stall the prelude every step —
