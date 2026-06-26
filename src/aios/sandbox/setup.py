@@ -50,6 +50,7 @@ from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError, SandboxHandle
 from aios.sandbox.egress_ca import CA_CERT_SANDBOX_PATH, get_egress_ca
+from aios.sandbox.env_keys import PATH_ENV_KEY
 
 log = get_logger("aios.sandbox.setup")
 
@@ -60,7 +61,7 @@ log = get_logger("aios.sandbox.setup")
 # no config PATH, so this must be set explicitly or the keepalive CMD
 # ``["tail","-f","/dev/null"]`` can't resolve ``tail`` (SEV-1 #935).
 WORKSPACE_RUNTIME_ENV: dict[str, str] = {
-    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    PATH_ENV_KEY: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 }
 
 

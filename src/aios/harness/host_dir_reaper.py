@@ -60,6 +60,7 @@ deletes nothing this pass (fail-closed): a DB hiccup must never be read as
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import time
 from dataclasses import dataclass
@@ -124,19 +125,23 @@ def _scan_children(root: Path, *, min_age_seconds: float, now: float) -> list[_C
     return candidates
 
 
-def _reap(candidates: list[_Candidate], reap_ids: set[str]) -> int:
+async def _reap(candidates: list[_Candidate], reap_ids: set[str]) -> int:
     """rmtree every candidate whose ``owner_id`` is in ``reap_ids``.
 
     Returns the count actually removed. Per-tree errors are logged and
     swallowed — one un-removable dir (perm drift, FS read-only) must not
     abort the rest of the sweep, and the next sweep retries it.
+
+    Each ``rmtree`` runs off the event loop via ``asyncio.to_thread`` so a
+    large tree (a multi-GB ``_session_repos/<id>`` clone, run scratch) doesn't
+    block every concurrent session sharing the worker loop for its duration.
     """
     removed = 0
     for cand in candidates:
         if cand.owner_id not in reap_ids:
             continue
         try:
-            shutil.rmtree(cand.path)
+            await asyncio.to_thread(shutil.rmtree, cand.path)
             removed += 1
         except OSError:
             log.exception("host_dir_reaper.rmtree_failed", path=str(cand.path))
@@ -167,7 +172,7 @@ async def _reap_session_repos(
         log.exception("host_dir_reaper.session_repos_liveness_failed")
         return 0  # fail-closed: never reap on a failed liveness read
     reap_ids = {oid for oid in owner_ids if oid not in live}
-    removed = _reap(candidates, reap_ids)
+    removed = await _reap(candidates, reap_ids)
     log.info(
         "host_dir_reaper.session_repos_swept",
         candidates=len(candidates),
@@ -194,7 +199,7 @@ async def _reap_runs(pool: asyncpg.Pool[Any], *, min_age_seconds: float, now: fl
     except (asyncpg.PostgresError, OSError):
         log.exception("host_dir_reaper.runs_liveness_failed")
         return 0  # fail-closed
-    removed = _reap(candidates, terminal)
+    removed = await _reap(candidates, terminal)
     log.info(
         "host_dir_reaper.runs_swept",
         candidates=len(candidates),

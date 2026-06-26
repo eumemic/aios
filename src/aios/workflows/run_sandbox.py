@@ -46,6 +46,10 @@ from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.workflows import WfRun
+from aios.sandbox.env_keys import (
+    AIOS_IDEMPOTENCY_KEY_ENV_KEY,
+    AIOS_RUN_ID_ENV_KEY,
+)
 from aios.services.wake import defer_run_wake
 from aios.workflows import run_tools
 from aios.workflows.idempotency_key import idempotency_key
@@ -183,7 +187,8 @@ async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any
 
     idem = idempotency_key(run.id, call_key)
     preamble = (
-        f"export AIOS_RUN_ID={shlex.quote(run.id)} AIOS_IDEMPOTENCY_KEY={shlex.quote(idem)}\n"
+        f"export {AIOS_RUN_ID_ENV_KEY}={shlex.quote(run.id)} "
+        f"{AIOS_IDEMPOTENCY_KEY_ENV_KEY}={shlex.quote(idem)}\n"
     )
     # Resolve the int container deadline the SAME way the bash tool does (#988):
     # floor a positive request to 1, then clamp to the bash ceiling. The floor is

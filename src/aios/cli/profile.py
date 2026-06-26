@@ -24,11 +24,51 @@ from datetime import datetime
 from statistics import median
 from typing import Any
 
+# The wake/step ``cause`` strings the codebase actually emits. Validated
+# against every ``defer_wake(cause=…)`` / step emit site in the tree (#1561) —
+# the classifier sets below are derived as *subsets* of this single list, so a
+# membership can no longer reference a phantom cause (one the code never emits)
+# and a typo here can't silently pass.
+#
+# NOTE: a fuller fix would lift the cause vocabulary into a shared ``StrEnum``
+# co-located with ``defer_wake`` / the step emitter so the profiler imports it
+# directly; that ripples across ``defer_wake``, ``trigger_runner``, ``loop``,
+# ``inbound``, and the routers (they pass bare string literals today) and is a
+# its own ``needs-design`` change. This is the minimal, in-scope correctness
+# fix: the two classifier sets are validated subsets of the emitted-cause list.
+_EMITTED_WAKE_CAUSES = frozenset(
+    {
+        "message",
+        "initial_message",
+        "inbound",
+        "trigger_wake",
+        "reschedule",
+        "sweep",
+        "tool_confirmation",
+        "custom_tool_result",
+        "connector_tool_result",
+        "request_nudge",
+        "api_invoke",
+        "cancel",
+        "workflow_child_spawn",
+    }
+)
+
 # Causes that start a new user-or-time-initiated turn. Their between-step
 # gap preceding them represents user idle / network wait, not glue overhead.
-_TURN_STARTING_CAUSES = frozenset({"message", "inbound_message", "initial_message", "scheduled"})
+# ``inbound`` is the real connector-inbound debounce cause (NOT the phantom
+# ``inbound_message``); ``trigger_wake`` is the real time/trigger-initiated turn
+# start. ``scheduled`` was a phantom (no step emits it) and is dropped.
+_TURN_STARTING_CAUSES = frozenset({"message", "initial_message", "inbound", "trigger_wake"})
 # Causes whose gap represents intentional delay — subtract delay_seconds.
-_DELAYED_CAUSES = frozenset({"scheduled", "reschedule"})
+# ``scheduled`` was a phantom here too (the one ``"scheduled": True`` hit is an
+# unrelated payload flag, not a cause); only the model-error backoff
+# ``reschedule`` carries a real delay.
+_DELAYED_CAUSES = frozenset({"reschedule"})
+
+# Both classifier sets must reference only causes the code actually emits.
+assert _TURN_STARTING_CAUSES <= _EMITTED_WAKE_CAUSES
+assert _DELAYED_CAUSES <= _EMITTED_WAKE_CAUSES
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,14 +101,14 @@ class PhaseStats:
 class GapCategory:
     """Between-step gaps grouped by the earliest wake_deferred.cause."""
 
-    name: str  # "same-turn", "cross-turn", "scheduled/reschedule"
+    name: str  # "same-turn", "cross-turn", "reschedule", "(no wake)"
     n: int
     total_s: float
     p50_s: float
     # Async work that ran in these gaps (tail sweep overlaps the next queue wait).
     tool_execute_s: float
     sweep_tail_s: float
-    # For scheduled/reschedule gaps only: the intentional delay that should
+    # For reschedule gaps only: the intentional delay that should
     # be subtracted when attributing orchestration cost.
     intentional_delay_s: float = 0.0
 
@@ -156,7 +196,7 @@ def _slice_last_turns(step_pairs: list[Pair], turns: int) -> list[Pair]:
     """Keep only the last ``turns`` turns of steps.
 
     A turn starts at a ``step_start`` whose ``cause`` is user- or
-    time-initiated (message, inbound_message, initial_message, scheduled).
+    time-initiated (message, initial_message, inbound, trigger_wake).
     Subsequent continuation steps (cause=sweep / tool_confirmation /
     custom_tool_result / reschedule) belong to the same turn.
     """
@@ -189,11 +229,11 @@ def _earliest_wake_cause_in(gap_spans: list[Span]) -> tuple[str | None, float]:
 def _gap_category_name(cause: str | None) -> str:
     if cause is None:
         return "(no wake)"
-    # Delayed causes win over turn-starting: "scheduled" appears in both sets
-    # (it starts a new turn AND carries intentional delay), and for gap
-    # classification the delay semantics are what matter.
+    # Delayed causes win over turn-starting when a cause is in both sets, for
+    # gap classification the delay semantics are what matter (currently only
+    # ``reschedule``, which is delay-only and not turn-starting).
     if cause in _DELAYED_CAUSES:
-        return "scheduled/reschedule"
+        return "reschedule"
     if cause in _TURN_STARTING_CAUSES:
         return "cross-turn"
     return "same-turn"
@@ -266,7 +306,7 @@ def compute_profile(
     # Between-step gaps: one per consecutive (step_end, next step_start).
     gap_buckets: dict[str, _GapAccumulator] = defaultdict(_GapAccumulator)
     cross_turn_total = 0.0
-    scheduled_delay_total = 0.0
+    reschedule_delay_total = 0.0
     for i in range(len(step_pairs) - 1):
         gap_start = step_pairs[i].end
         gap_end = step_pairs[i + 1].start
@@ -299,10 +339,10 @@ def compute_profile(
         if category == "cross-turn":
             cross_turn_total += duration
         if cause in _DELAYED_CAUSES:
-            scheduled_delay_total += delay
+            reschedule_delay_total += delay
 
     gap_cats: list[GapCategory] = []
-    for name in ("same-turn", "cross-turn", "scheduled/reschedule", "(no wake)"):
+    for name in ("same-turn", "cross-turn", "reschedule", "(no wake)"):
         if name not in gap_buckets:
             continue
         cat_bucket = gap_buckets[name]

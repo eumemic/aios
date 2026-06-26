@@ -18,6 +18,9 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from aios.models.environments import HOSTNAME_RE
+from aios.sandbox.env_keys import (
+    RESERVED_SANDBOX_ENV_KEYS as _RESERVED_SANDBOX_ENV_KEYS,
+)
 
 AuthType = Literal[
     "bearer_header",
@@ -27,30 +30,23 @@ AuthType = Literal[
     "environment_variable",
 ]
 
-# Env var names the harness injects into every sandbox (see
-# ``sandbox/spec.py`` ``merged_env`` and ``sandbox/egress_ca.py``
-# ``TRUST_STORE_ENV``). An ``environment_variable`` credential may not
-# claim one as its ``secret_name``: a collision either hijacks a load-bearing
-# sandbox variable (e.g. ``PATH`` repointed → unqualified-binary takeover) or
-# is silently shadowed by the harness's own merge order — both defects, and
-# ``secret_name`` is immutable post-create. Hardcoded here rather than
-# imported from ``sandbox.setup`` (that would cycle via ``aios.config``) or
-# ``sandbox.egress_ca`` (cycle-free, but would drag cryptography's x509
-# machinery into every models import); a unit test pins this set against
-# the live merge order so it can't drift.
-RESERVED_SANDBOX_ENV_KEYS: frozenset[str] = frozenset(
-    {
-        "PATH",
-        "SSL_CERT_FILE",
-        "REQUESTS_CA_BUNDLE",
-        "NODE_EXTRA_CA_CERTS",
-        "TOOL_BROKER_URL",
-        "TOOL_BROKER_SECRET",
-        "AIOS_SESSION_ID",
-        "AIOS_RUN_ID",
-        "AIOS_IDEMPOTENCY_KEY",
-    }
-)
+# Env var names the harness injects into every sandbox. An
+# ``environment_variable`` credential may not claim one as its ``secret_name``:
+# a collision either hijacks a load-bearing sandbox variable (e.g. ``PATH``
+# repointed → unqualified-binary takeover) or is silently shadowed by the
+# harness's own merge order — both defects, and ``secret_name`` is immutable
+# post-create.
+#
+# Derived (not hand-mirrored) from the producers' own declared key constants in
+# the dependency-free ``aios.sandbox.env_keys`` module — the single source of
+# truth that ``sandbox.setup`` / ``sandbox.egress_ca`` / ``sandbox.spec`` /
+# ``workflows.run_sandbox`` all build their env off. That module imports nothing
+# heavy, so pulling it in here doesn't cycle via ``aios.config`` (the reason
+# ``sandbox.setup`` couldn't be imported) or drag cryptography's x509 machinery
+# into every models import (the reason ``sandbox.egress_ca`` couldn't). Adding a
+# new injected key to a producer flows into this blocklist with no second edit,
+# so the set can no longer drift — the invariant is held by construction.
+RESERVED_SANDBOX_ENV_KEYS = _RESERVED_SANDBOX_ENV_KEYS
 
 # A path-prefix segment: RFC 3986 ``pchar`` minus percent-encoding. ``%`` is
 # excluded so stored entries stay canonical (the swap proxy owns request-side

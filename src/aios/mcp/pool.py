@@ -56,13 +56,15 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import InitializeResult
 
 from aios.logging import get_logger
+from aios.mcp._constants import _MCP_HTTPX_TIMEOUT as _MCP_HTTPX_TIMEOUT_SHARED
 
 log = get_logger("aios.mcp.pool")
 
-# Mirrors the per-call bound used by :mod:`aios.mcp.client`. The pool's
-# pooled sessions share a connection-level timeout so a stalled MCP server
-# can't keep the worker on a dead socket indefinitely.
-_MCP_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+# httpx client bounds for MCP transport — single definition in
+# :mod:`aios.mcp._constants`, shared with the per-call client transport
+# (re-exported here so existing ``pool._MCP_HTTPX_TIMEOUT`` references and their
+# test patches keep resolving).
+_MCP_HTTPX_TIMEOUT = _MCP_HTTPX_TIMEOUT_SHARED
 
 # Cap on live sessions per ``(url, vault_id, headers_key)``. Bounds session/connection growth
 # under a model that fires many concurrent calls at one server; at the cap an
@@ -662,11 +664,27 @@ class McpSessionPool:
         self._idle.clear()
         self._in_use.clear()
         self._conditions.clear()
-        if not entries:
+        # Snapshot the in-flight background-close tasks (discard/evict path,
+        # ``_schedule_background_close``) BEFORE awaiting: the done-callback
+        # mutates ``_close_tasks`` on completion, so iterating it directly
+        # would race. These and the idle/in-use snapshot are the complete set
+        # of sessions that must be unwound before the worker exits — without
+        # draining them a background close racing shutdown is abandoned with a
+        # half-unwound owner task / httpx client / SSE stream.
+        pending_closes = list(self._close_tasks)
+        if not entries and not pending_closes:
             return
-        log.info("mcp_pool.close_all", count=len(entries))
+        log.info(
+            "mcp_pool.close_all",
+            count=len(entries),
+            pending_closes=len(pending_closes),
+        )
         for entry in entries:
             try:
                 await entry.close()
             except Exception:
                 log.warning("mcp_pool.close_entry_failed", exc_info=True)
+        if pending_closes:
+            # Let in-flight background closes finish unwinding (errors swallowed
+            # — a failed background close must not abort shutdown).
+            await asyncio.gather(*pending_closes, return_exceptions=True)

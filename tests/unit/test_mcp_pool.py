@@ -340,6 +340,32 @@ class TestMcpSessionPool:
         await pool.close_all()
         assert not pool._idle and not pool._in_use
 
+    async def test_close_all_drains_background_close_tasks(self) -> None:
+        """close_all must await in-flight background close tasks (the
+        discard/evict ``_schedule_background_close`` path), not abandon them
+        half-unwound at shutdown (#1561)."""
+        completed = asyncio.Event()
+        started = asyncio.Event()
+
+        async def slow_close() -> None:
+            started.set()
+            await asyncio.sleep(0)  # yield so the task is genuinely in-flight
+            completed.set()
+
+        pool = McpSessionPool()
+        entry = MagicMock()
+        entry.close = AsyncMock(side_effect=slow_close)
+
+        # Spawn a fire-and-forget background close exactly as discard/evict do.
+        pool._schedule_background_close(entry, URL)
+        await started.wait()
+        assert pool._close_tasks, "background close task must be tracked"
+
+        await pool.close_all()
+
+        assert completed.is_set(), "close_all must await the background close"
+        assert not pool._close_tasks, "tracked tasks drain on completion"
+
     async def test_idle_reaper_closes_idle_skips_in_use(self) -> None:
         """The reaper closes a stale IDLE entry but never an in-use one (an
         in-use entry is by definition active)."""
