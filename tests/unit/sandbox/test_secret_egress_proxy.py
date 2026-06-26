@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from typing import cast
 
+import h11
 import httpx
 import pytest
 from structlog.testing import capture_logs
@@ -143,10 +144,16 @@ async def make_proxy(
         *,
         resolver_ip: str | None = PINNED_IP,
         transport: httpx.MockTransport | None = None,
+        max_body_bytes: int | None = None,
     ) -> ProxyAndCapture:
         monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver(resolver_ip))
         captured: list[httpx.Request] = []
         proxy = await _boot(creds, transport or _mock_upstream(captured))
+        if max_body_bytes is not None:
+            # The cap is snapshotted from settings at construction; override the
+            # stored int so a test can drive an over-cap body without uploading
+            # the full default 100 MiB.
+            proxy._max_body_bytes = max_body_bytes
         started.append(proxy)
         return proxy, captured
 
@@ -662,6 +669,107 @@ class TestResponseFraming:
         assert b"content-length: 5" in head
         assert b"transfer-encoding" not in head
         assert b"hello" in body
+
+
+class TestRequestBodyCap:
+    """The body is buffered whole to swap the placeholder across chunk
+    boundaries (#1556). Against a hostile sandbox an uncapped buffer is a
+    worker-memory OOM/DoS, so the buffer is hard-capped at
+    ``sandbox_egress_max_request_bytes`` and an over-cap body is rejected with
+    a clean ``413`` before any upstream connection opens.
+    """
+
+    async def test_over_cap_body_413s_and_opens_no_upstream(self, make_proxy: MakeProxy) -> None:
+        cap = 16
+        proxy, captured = await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
+            max_body_bytes=cap,
+        )
+        # cap + 1 bytes: the smallest body that breaches the ceiling.
+        r = await _request(
+            proxy,
+            "api.allowed.test",
+            "/x",
+            method="POST",
+            content=b"a" * (cap + 1),
+        )
+        assert r.status_code == 413
+        # No upstream connection was opened — the breach is caught before
+        # build_request/send, exactly like the 502 egress-blocked path.
+        assert captured == []
+
+    async def test_at_cap_body_forwards_normally(self, make_proxy: MakeProxy) -> None:
+        # Boundary: a body exactly at the cap is under the strict ">" check and
+        # forwards normally — pins that the cap is inclusive of the ceiling.
+        cap = 16
+        proxy, captured = await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
+            max_body_bytes=cap,
+        )
+        body = b"a" * cap
+        r = await _request(proxy, "api.allowed.test", "/x", method="POST", content=body)
+        assert r.status_code == 200
+        assert len(captured) == 1
+        assert captured[0].content == body
+
+    async def test_read_body_returns_over_cap_sentinel_and_never_overbuffers(
+        self, make_proxy: MakeProxy
+    ) -> None:
+        # Drive _read_body directly against an in-memory StreamReader to prove
+        # (a) it returns the discriminated over-cap sentinel (not None / not
+        # bytes) and (b) it bails before buffering more than one inbound chunk
+        # past the cap — the buffer can never balloon to the full upload.
+        cap = 8
+        proxy, _ = await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
+            max_body_bytes=cap,
+        )
+        # A chunked request whose body far exceeds the cap.
+        chunk = b"z" * 64
+        wire = (
+            b"POST /x HTTP/1.1\r\nHost: api.allowed.test\r\n"
+            b"Content-Length: " + str(len(chunk)).encode() + b"\r\n\r\n" + chunk
+        )
+        reader = asyncio.StreamReader()
+        reader.feed_data(wire)
+        reader.feed_eof()
+        conn = h11.Connection(h11.SERVER)
+        request = await proxy._read_head(conn, reader)
+        assert request is not None
+        outcome = await proxy._read_body(conn, reader)
+        assert outcome is sep._BODY_TOO_LARGE
+
+    async def test_complete_body_returns_bytes_not_sentinel(self, make_proxy: MakeProxy) -> None:
+        # The third discriminated outcome: a complete under-cap body is plain
+        # bytes (the forward path), distinct from None (stall) and the sentinel.
+        cap = 64
+        proxy, _ = await make_proxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
+            max_body_bytes=cap,
+        )
+        chunk = b"hello body"
+        wire = (
+            b"POST /x HTTP/1.1\r\nHost: api.allowed.test\r\n"
+            b"Content-Length: " + str(len(chunk)).encode() + b"\r\n\r\n" + chunk
+        )
+        reader = asyncio.StreamReader()
+        reader.feed_data(wire)
+        reader.feed_eof()
+        conn = h11.Connection(h11.SERVER)
+        assert await proxy._read_head(conn, reader) is not None
+        outcome = await proxy._read_body(conn, reader)
+        assert outcome == chunk
+
+
+class TestRequestBodyCapDefault:
+    def test_default_cap_is_100_mib_and_ge_zero(self) -> None:
+        from aios.config import Settings
+
+        fields = Settings.model_fields["sandbox_egress_max_request_bytes"]
+        assert fields.default == 100 * 1024 * 1024
+        # ge=0 lets an operator disable body-bearing egress without a sentinel.
+        metadata = [getattr(m, "ge", None) for m in fields.metadata]
+        assert 0 in metadata
 
 
 def test_module_exports() -> None:

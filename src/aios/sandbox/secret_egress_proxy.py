@@ -41,8 +41,10 @@ Named residuals (operator-facing):
   traffic is redirected here (#878), so a sandbox ``curl https://<ip>`` to an
   allowed host's IP gets its handshake reset rather than connecting.
 * The request body is buffered whole to swap across chunk boundaries (memory
-  bound = request size); responses stay streamed. Very large request uploads
-  are a documented residual.
+  bound = request size); responses stay streamed. The buffer is hard-capped at
+  ``sandbox_egress_max_request_bytes`` (default 100 MiB) — a body that exceeds
+  it is rejected with a clean ``413`` before any upstream connection opens, so
+  the per-request worker-memory ceiling is bounded even for a hostile sandbox.
 * The upstream connection pins a single resolved IP (IPv4 preferred); no
   dual-stack failover.
 
@@ -71,6 +73,7 @@ import h11
 import httpx
 from cryptography.hazmat.primitives import serialization
 
+from aios.config import get_settings
 from aios.logging import get_logger
 from aios.models.vaults import parse_allowed_host_entry
 from aios.sandbox.egress_ca import EgressCA, get_egress_ca, mint_server_leaf
@@ -96,6 +99,17 @@ _READ_CHUNK = 65536
 # never sends one) must not pin a handler indefinitely. Bounds idle time
 # between chunks, not total transfer, so a slow-but-steady upload is unaffected.
 _INBOUND_IDLE_TIMEOUT_S = 60.0
+
+
+class _BodyTooLarge:
+    """Distinguished ``_read_body`` outcome: the request body exceeded the
+    configured cap. Discriminated from ``None`` (client stalled mid-body) and
+    from ``bytes`` (complete body) so ``_serve_one`` can total-match the three
+    outcomes and send a ``413`` instead of conflating over-cap with a stall."""
+
+
+# Singleton sentinel — ``_serve_one`` discriminates it via ``isinstance``.
+_BODY_TOO_LARGE = _BodyTooLarge()
 
 # Stripped before forwarding the request upstream. ``authorization`` is
 # deliberately ABSENT: the placeholder rides in it and we swap+forward it.
@@ -296,6 +310,11 @@ class SecretEgressProxy:
         # ever reaches the mint path, so a hostile sandbox can't flood
         # distinct SNIs to balloon the leaf cache.
         self._allowed_hosts: frozenset[str] = frozenset(h for h, _, _, _ in self._rules)
+        # Hard cap on the whole-buffered request body (the placeholder→secret
+        # swap needs the body buffered, but the sandbox is untrusted, so an
+        # over-cap body 413s before any upstream connection). Snapshot the int
+        # once at construction so the hot read-loop touches a plain attribute.
+        self._max_body_bytes: int = get_settings().sandbox_egress_max_request_bytes
         self._ca: EgressCA = get_egress_ca()
         self._leaf_ctx: dict[str, ssl.SSLContext] = {}
         self._sni: weakref.WeakKeyDictionary[ssl.SSLObject, str] = weakref.WeakKeyDictionary()
@@ -493,6 +512,13 @@ class SecretEgressProxy:
         body = await self._read_body(conn, reader)
         if body is None:
             return  # client stalled mid-body
+        if isinstance(body, _BodyTooLarge):
+            # Over the worker-memory cap: fail hard before any upstream
+            # connection (parity with the 502 egress-blocked path above). No
+            # response has been sent yet, so the connection is still in
+            # SEND_RESPONSE and the 413 frames cleanly.
+            await self._send_simple(conn, writer, 413, b"request body too large")
+            return
 
         fwd_headers = self._forward_headers(request.headers.raw_items(), host, swaps)
         swapped_body = _apply_swaps_bytes(body, swaps)
@@ -548,11 +574,22 @@ class SecretEgressProxy:
                 return event
             return None  # connection closed before a request
 
-    async def _read_body(self, conn: h11.Connection, reader: asyncio.StreamReader) -> bytes | None:
+    async def _read_body(
+        self, conn: h11.Connection, reader: asyncio.StreamReader
+    ) -> bytes | None | _BodyTooLarge:
         """Read the request body (h11 ``Data`` events) up to ``EndOfMessage``.
 
         The body is buffered whole so the placeholder can be swapped across
         chunk boundaries; this runs only after the egress gate has passed.
+
+        Three discriminated outcomes (the caller total-matches them):
+
+        * ``bytes`` — the complete body (forward it upstream).
+        * ``None`` — the client stalled mid-body (idle timeout); drop.
+        * ``_BODY_TOO_LARGE`` — the body grew past ``self._max_body_bytes``;
+          the caller sends a ``413`` and opens no upstream connection. The
+          breach is caught as the ``bytearray`` grows so it can never exceed
+          the ceiling by more than one inbound chunk before we bail.
         """
         body = bytearray()
         while True:
@@ -565,6 +602,8 @@ class SecretEgressProxy:
                 continue
             if isinstance(event, h11.Data):
                 body += event.data
+                if len(body) > self._max_body_bytes:
+                    return _BODY_TOO_LARGE  # discriminated from the None stall
             else:  # EndOfMessage / ConnectionClosed / PAUSED
                 return bytes(body)
 
