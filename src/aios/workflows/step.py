@@ -49,6 +49,7 @@ from aios.models.attenuation import api_base_of, surface_of
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent, WfRunStatus
 from aios.services import attenuation as attenuation_service
 from aios.services.sessions import (
+    AskNewSession,
     create_child_session,
     fail_open_child_requests_conn,
     write_gate_opened,
@@ -997,20 +998,22 @@ async def _open_agent_capability(
 
     created = await create_child_session(
         pool,
-        session_id=child_id,
+        AskNewSession(
+            session_id=child_id,
+            agent_id=agent_id,
+            environment_id=run.environment_id,
+            agent_version=pinned,
+            model=stamped_model,
+            parent_run_id=run.id,
+            surface=child_surface,
+            vault_ids=run_vaults,
+            request_id=cap.call_key,  # the agent() call IS the request the child must answer
+            input=spec.get("input"),
+            output_schema=output_schema,
+            depth=run.depth - 1,
+            litellm_extra=child_litellm_extra,  # #823: frozen, clamped model identity
+        ),
         account_id=account_id,
-        agent_id=agent_id,
-        environment_id=run.environment_id,
-        agent_version=pinned,
-        model=stamped_model,
-        parent_run_id=run.id,
-        surface=child_surface,
-        vault_ids=run_vaults,
-        request_id=cap.call_key,  # the agent() call IS the request the child must answer
-        input=spec.get("input"),
-        output_schema=output_schema,
-        depth=run.depth - 1,
-        litellm_extra=child_litellm_extra,  # #823: frozen, clamped model identity
     )
     # On replay the row already carries its first-spawn version — journal THAT, so
     # call_started.child_agent_version always matches the version the child runs under.

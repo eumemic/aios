@@ -22,8 +22,10 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
+from aios.ids import REQUEST, make_id
 from aios.models.attenuation import Surface
 from aios.services import sessions as service
+from aios.services.sessions import AskNewSession, TellNewSession
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
@@ -194,18 +196,20 @@ async def test_create_child_session_opens_exactly_one_edge_and_replay_idempotent
 
     created = await service.create_child_session(
         pool,
-        session_id=child_id,
+        AskNewSession(
+            session_id=child_id,
+            agent_id=agent_id,
+            environment_id=env_id,
+            agent_version=1,
+            model="openrouter/test",
+            parent_run_id=parent_run_id,
+            surface=surface,
+            vault_ids=[],
+            request_id="req-child",
+            input="hello",
+            depth=1,
+        ),
         account_id=account_id,
-        agent_id=agent_id,
-        environment_id=env_id,
-        agent_version=1,
-        model="openrouter/test",
-        parent_run_id=parent_run_id,
-        surface=surface,
-        vault_ids=[],
-        request_id="req-child",
-        input="hello",
-        depth=1,
     )
     assert created is True
 
@@ -231,18 +235,20 @@ async def test_create_child_session_opens_exactly_one_edge_and_replay_idempotent
     # Replay: a second spawn hits ON CONFLICT → returns False → no second edge.
     replayed = await service.create_child_session(
         pool,
-        session_id=child_id,
+        AskNewSession(
+            session_id=child_id,
+            agent_id=agent_id,
+            environment_id=env_id,
+            agent_version=1,
+            model="openrouter/test",
+            parent_run_id=parent_run_id,
+            surface=surface,
+            vault_ids=[],
+            request_id="req-child",
+            input="hello",
+            depth=1,
+        ),
         account_id=account_id,
-        agent_id=agent_id,
-        environment_id=env_id,
-        agent_version=1,
-        model="openrouter/test",
-        parent_run_id=parent_run_id,
-        surface=surface,
-        vault_ids=[],
-        request_id="req-child",
-        input="hello",
-        depth=1,
     )
     assert replayed is False
     async with pool.acquire() as conn:
@@ -322,18 +328,20 @@ async def test_ask_create_child_session_writes_awaited_true(
 
     created = await service.create_child_session(
         pool,
-        session_id=child_id,
+        AskNewSession(
+            session_id=child_id,
+            agent_id=agent_id,
+            environment_id=env_id,
+            agent_version=1,
+            model="openrouter/test",
+            parent_run_id=parent_run_id,
+            surface=surface,
+            vault_ids=[],
+            request_id="req-ask",
+            input="hello",
+            depth=1,
+        ),
         account_id=account_id,
-        agent_id=agent_id,
-        environment_id=env_id,
-        agent_version=1,
-        model="openrouter/test",
-        parent_run_id=parent_run_id,
-        surface=surface,
-        vault_ids=[],
-        request_id="req-ask",
-        input="hello",
-        depth=1,
     )
     assert created is True
     async with pool.acquire() as conn:
@@ -362,18 +370,20 @@ async def test_tell_new_session_writes_unawaited_edge_with_no_obligation(
 
     created = await service.create_child_session(
         pool,
-        session_id=child_id,
+        TellNewSession(
+            session_id=child_id,
+            agent_id=agent_id,
+            environment_id=env_id,
+            agent_version=1,
+            model="openrouter/test",
+            parent_run_id=parent_run_id,
+            surface=surface,
+            vault_ids=[],
+            request_id=make_id(REQUEST),  # the natural Tell shape mints its own id
+            input="fire-and-forget",
+            depth=1,
+        ),
         account_id=account_id,
-        agent_id=agent_id,
-        environment_id=env_id,
-        agent_version=1,
-        model="openrouter/test",
-        parent_run_id=parent_run_id,
-        surface=surface,
-        vault_ids=[],
-        input="fire-and-forget",
-        depth=1,
-        awaited=False,  # the Tell arm — no request_id needed
     )
     assert created is True
     async with pool.acquire() as conn:
@@ -393,17 +403,15 @@ async def test_tell_new_session_writes_unawaited_edge_with_no_obligation(
 async def test_tell_new_session_rejects_output_schema(
     pool_env: tuple[asyncpg.Pool[Any], str, str, str],
 ) -> None:
-    """A ``Tell`` cannot carry an ``output_schema`` (it owes no response)."""
-    from aios.errors import ValidationError
-
+    """A ``Tell`` cannot carry an ``output_schema`` (it owes no response) — the
+    illegal state is unrepresentable, so ``TellNewSession`` refuses the field at
+    construction (``TypeError``), not via a service-layer ``ValidationError``."""
     pool, account_id, agent_id, env_id = pool_env
     parent_run_id = await _seed_parent_run(pool, account_id=account_id, environment_id=env_id)
     surface = Surface(tools=[], mcp_servers=[], http_servers=[])
-    with pytest.raises(ValidationError):
-        await service.create_child_session(
-            pool,
+    with pytest.raises(TypeError):
+        TellNewSession(
             session_id="ses_tell_bad",
-            account_id=account_id,
             agent_id=agent_id,
             environment_id=env_id,
             agent_version=1,
@@ -411,10 +419,10 @@ async def test_tell_new_session_rejects_output_schema(
             parent_run_id=parent_run_id,
             surface=surface,
             vault_ids=[],
+            request_id=make_id(REQUEST),
             input="x",
             depth=1,
-            awaited=False,
-            output_schema={"type": "object"},
+            output_schema={"type": "object"},  # type: ignore[call-arg]
         )
 
 

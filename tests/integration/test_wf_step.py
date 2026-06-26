@@ -29,6 +29,7 @@ from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
+from aios.ids import REQUEST, make_id
 from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.attenuation import Surface
 from aios.models.sessions import Session
@@ -39,6 +40,7 @@ from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
 from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
+from aios.services.sessions import AskNewSession, TellNewSession
 from aios.workflows import run_tools, service
 from aios.workflows.child_id import child_session_id
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH, CallKeyer
@@ -159,18 +161,20 @@ async def _spawn_child(
     cid = child_session_id(run_id, ordinal)
     await sessions_service.create_child_session(
         pool,
-        session_id=cid,
+        AskNewSession(
+            session_id=cid,
+            agent_id=agent_id,
+            environment_id="env_wf",
+            agent_version=1,
+            model=None,
+            parent_run_id=run_id,
+            surface=Surface([], [], []),
+            vault_ids=[],
+            request_id=ordinal,
+            input="hi",
+            output_schema=output_schema,
+        ),
         account_id="acc_wf",
-        agent_id=agent_id,
-        environment_id="env_wf",
-        agent_version=1,
-        model=None,
-        parent_run_id=run_id,
-        surface=Surface([], [], []),
-        vault_ids=[],
-        request_id=ordinal,
-        input="hi",
-        output_schema=output_schema,
     )
     return run_id, cid
 
@@ -187,33 +191,37 @@ async def test_create_child_session_idempotent(
 
     created = await sessions_service.create_child_session(
         pool,
-        session_id=cid,
+        AskNewSession(
+            session_id=cid,
+            agent_id=wf_agent_id,
+            environment_id="env_wf",
+            agent_version=1,
+            model=None,
+            parent_run_id=run_id,
+            surface=Surface([], [], []),
+            vault_ids=[],
+            request_id="sha:x#0",
+            input={"q": "hi"},
+        ),
         account_id="acc_wf",
-        agent_id=wf_agent_id,
-        environment_id="env_wf",
-        agent_version=1,
-        model=None,
-        parent_run_id=run_id,
-        surface=Surface([], [], []),
-        vault_ids=[],
-        request_id="sha:x#0",
-        input={"q": "hi"},
     )
     assert created is True
     # A replay (same id) is a rowcount-0 no-op — no double row, no double request.
     again = await sessions_service.create_child_session(
         pool,
-        session_id=cid,
+        AskNewSession(
+            session_id=cid,
+            agent_id=wf_agent_id,
+            environment_id="env_wf",
+            agent_version=1,
+            model=None,
+            parent_run_id=run_id,
+            surface=Surface([], [], []),
+            vault_ids=[],
+            request_id="sha:x#0",
+            input={"q": "hi"},
+        ),
         account_id="acc_wf",
-        agent_id=wf_agent_id,
-        environment_id="env_wf",
-        agent_version=1,
-        model=None,
-        parent_run_id=run_id,
-        surface=Surface([], [], []),
-        vault_ids=[],
-        request_id="sha:x#0",
-        input={"q": "hi"},
     )
     assert again is False
     async with pool.acquire() as conn:
@@ -1838,17 +1846,19 @@ async def test_tell_spawned_child_reaches_idle_with_zero_nudges(
     cid = child_session_id(run_id, "sha:tell#0")
     created = await sessions_service.create_child_session(
         pool,
-        session_id=cid,
+        TellNewSession(
+            session_id=cid,
+            agent_id=wf_agent_id,
+            environment_id="env_wf",
+            agent_version=1,
+            model=None,
+            parent_run_id=run_id,
+            surface=Surface([], [], []),
+            vault_ids=[],
+            request_id=make_id(REQUEST),  # the natural Tell shape mints its own id
+            input="fire-and-forget",
+        ),
         account_id="acc_wf",
-        agent_id=wf_agent_id,
-        environment_id="env_wf",
-        agent_version=1,
-        model=None,
-        parent_run_id=run_id,
-        surface=Surface([], [], []),
-        vault_ids=[],
-        input="fire-and-forget",
-        awaited=False,  # the Tell arm
     )
     assert created is True
 
@@ -2075,17 +2085,19 @@ async def test_per_request_count_is_independent_stuck_sibling_still_no_returns(
     cid = child_session_id(run_id, "sha:a#0")
     await sessions_service.create_child_session(
         pool,
-        session_id=cid,
+        AskNewSession(
+            session_id=cid,
+            agent_id=wf_agent_id,
+            environment_id="env_wf",
+            agent_version=1,
+            model=None,
+            parent_run_id=run_id,
+            surface=Surface([], [], []),
+            vault_ids=[],
+            request_id="sha:a#0",
+            input="hi",
+        ),
         account_id="acc_wf",
-        agent_id=wf_agent_id,
-        environment_id="env_wf",
-        agent_version=1,
-        model=None,
-        parent_run_id=run_id,
-        surface=Surface([], [], []),
-        vault_ids=[],
-        request_id="sha:a#0",
-        input="hi",
     )
     async with pool.acquire() as conn:
         # A second open awaited request edge + its delivered user message.

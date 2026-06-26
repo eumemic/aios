@@ -47,7 +47,7 @@ from aios.services import attenuation as attenuation_service
 from aios.services import sessions as sessions_service
 from aios.services import vaults as vaults_service
 from aios.services import workflows as wf_service
-from aios.services.sessions import create_child_session
+from aios.services.sessions import AskNewSession, create_child_session
 from aios.tools import workflow_management as wm
 from aios.workflows import service as wf_service_module
 from aios.workflows.child_id import child_session_id
@@ -1073,17 +1073,19 @@ async def _spawn_child(
     cid = child_session_id(run_id, "0")
     await create_child_session(
         pool,
-        session_id=cid,
+        AskNewSession(
+            session_id=cid,
+            agent_id=agent.id,
+            environment_id=ENV,
+            agent_version=agent.version,
+            model=None,
+            parent_run_id=run_id,
+            surface=surface,
+            vault_ids=vault_ids or [],
+            request_id="0",
+            input="hi",
+        ),
         account_id=ACC,
-        agent_id=agent.id,
-        environment_id=ENV,
-        agent_version=agent.version,
-        model=None,
-        parent_run_id=run_id,
-        surface=surface,
-        vault_ids=vault_ids or [],
-        request_id="0",
-        input="hi",
     )
     return await sessions_service.get_session_basic(pool, cid, account_id=ACC)
 
