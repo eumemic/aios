@@ -4273,11 +4273,11 @@ async def test_derive_run_response_reads_the_terminal_record(
         cancelled = await wf_queries.derive_run_response(conn, cancelled_run, account_id="acc_wf")
         pending = await wf_queries.derive_run_response(conn, pending_run, account_id="acc_wf")
 
-    assert ok == {"result": 7, "is_error": False, "error": None}
-    assert err is not None and err["is_error"] is True and err["result"] is None
-    assert err["error"]["kind"] == "author_exception"
+    assert ok == Ok(result=7)
+    assert isinstance(err, Err)
+    assert err.error["kind"] == "author_exception"
     # The cancel semantic the §3.6 merge had to preserve: cancelled, not child_gone.
-    assert cancelled == {"result": None, "is_error": True, "error": {"kind": "cancelled"}}
+    assert cancelled == Err(error={"kind": "cancelled"})
     assert pending is None
 
 
