@@ -130,12 +130,11 @@ def test_model_call_deadline_rejects_step_budget_or_above(
 ) -> None:
     from pydantic import ValidationError
 
-    from aios.config import Settings
-    from aios.harness.loop import _JOB_TIMEOUT_S
+    from aios.config import HARNESS_STEP_TIMEOUT_S, Settings
 
     secrets = tmp_path / "secrets.env"
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
-    monkeypatch.setenv("AIOS_MODEL_CALL_DEADLINE_S", str(_JOB_TIMEOUT_S))
+    monkeypatch.setenv("AIOS_MODEL_CALL_DEADLINE_S", str(HARNESS_STEP_TIMEOUT_S))
 
     with pytest.raises(ValidationError, match="AIOS_MODEL_CALL_DEADLINE_S"):
         Settings(_env_file=(str(secrets),))
@@ -148,15 +147,14 @@ def test_github_clone_session_timeout_below_step_budget(
     fit strictly inside the harness step budget so a hung clone doesn't
     burn the full harness turn.
     """
-    from aios.config import Settings
-    from aios.harness.loop import _JOB_TIMEOUT_S
+    from aios.config import HARNESS_STEP_TIMEOUT_S, Settings
 
     secrets = tmp_path / "secrets.env"
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_GITHUB_CLONE_SESSION_TIMEOUT_SECONDS", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
-    assert s.github_clone_session_timeout_seconds < _JOB_TIMEOUT_S
+    assert s.github_clone_session_timeout_seconds < HARNESS_STEP_TIMEOUT_S
 
 
 def test_github_clone_session_timeout_env_override(
@@ -193,17 +191,16 @@ def test_github_clone_session_timeout_rejects_above_step_budget(
         Settings(_env_file=(str(secrets),))
 
 
-def test_github_clone_session_timeout_mirror_matches_harness_constant(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The config-module mirror of ``_JOB_TIMEOUT_S`` must stay in sync with
-    the harness's own constant — otherwise the validator above starts
-    rejecting (or admitting) misconfigurations using a stale bound.
-    """
-    from aios.config import _HARNESS_STEP_TIMEOUT_S
-    from aios.harness.loop import _JOB_TIMEOUT_S
+def test_step_timeout_single_source() -> None:
+    """The harness step budget is defined once in config and consumed by the
+    Settings validators; no second copy exists to drift out of sync."""
+    import aios.config as config_mod
+    import aios.harness.loop as loop_mod
 
-    assert _HARNESS_STEP_TIMEOUT_S == _JOB_TIMEOUT_S
+    assert config_mod.HARNESS_STEP_TIMEOUT_S == 960.0
+    # loop imports the same object, not a private duplicate.
+    assert not hasattr(loop_mod, "_JOB_TIMEOUT_S")
+    assert loop_mod.HARNESS_STEP_TIMEOUT_S is config_mod.HARNESS_STEP_TIMEOUT_S
 
 
 def test_sandbox_snapshot_budget_bytes_default(

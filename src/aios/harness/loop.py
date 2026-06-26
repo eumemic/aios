@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 import litellm.exceptions as litellm_exceptions
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
+from aios.config import HARNESS_STEP_TIMEOUT_S as HARNESS_STEP_TIMEOUT_S
 from aios.config import get_settings
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
@@ -72,13 +73,13 @@ log = get_logger("aios.harness.loop")
 
 _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
 
-# Wall-clock cap on a single ``run_session_step`` call. The harness's
+# ``HARNESS_STEP_TIMEOUT_S`` (imported from ``aios.config`` above) is the
+# wall-clock cap on a single ``run_session_step`` call. The harness's
 # zero-hang guarantee: per-call timeouts (LiteLLM, MCP, tool dispatch, etc.)
 # are the precise instruments, but if any future code path bypasses them
 # this cap fires and forces a clean rescheduling. Sized as the default 900s
 # model-call deadline plus 60s of headroom for prologue, context-build, and
 # epilogue work that no longer compete with the model budget.
-_JOB_TIMEOUT_S = 960.0
 
 # litellm's standardized ``finish_reason`` for a safety refusal. Anthropic's
 # ``stop_reason: "refusal"`` maps here; OpenAI/Azure ``content_filter`` lands
@@ -339,13 +340,15 @@ async def run_session_step(
                         cause=cause,
                         account_id=account_id,
                     ),
-                    timeout=_JOB_TIMEOUT_S,
+                    timeout=HARNESS_STEP_TIMEOUT_S,
                 )
             except TimeoutError:
                 # Job-level safety net: a per-call timeout was missing or didn't
                 # fire. Force a reschedulable error state so the next wake can
                 # proceed (matches what the body's litellm-error handler does).
-                log.exception("step.job_timeout", session_id=session_id, timeout=_JOB_TIMEOUT_S)
+                log.exception(
+                    "step.job_timeout", session_id=session_id, timeout=HARNESS_STEP_TIMEOUT_S
+                )
                 result = _StepResult(
                     retry_delay=await _handle_step_timeout(pool, session_id, account_id=account_id)
                 )
@@ -1442,7 +1445,7 @@ async def _handle_step_timeout(pool: Any, session_id: str, *, account_id: str) -
         pool,
         session_id,
         "span",
-        {"event": "step_timeout", "timeout_seconds": _JOB_TIMEOUT_S, "is_error": True},
+        {"event": "step_timeout", "timeout_seconds": HARNESS_STEP_TIMEOUT_S, "is_error": True},
         account_id=account_id,
     )
     return await _apply_retry_or_failure(pool, session_id, account_id=account_id)
