@@ -210,7 +210,13 @@ async def list_memories(
     fetch (cursor pagination not yet supported; use ``path_prefix`` to
     narrow scope when a store has thousands of memories).
     """
-    items = await service.list_memories(
+    # The service fetches ``limit + 1`` raw rows and reports ``has_more`` from
+    # that raw fetch *before* any depth-collapse (mirroring
+    # ``ListResponse.paginate``). Deriving it post-collapse would be a
+    # false-negative under depth — collapsed prefixes hide the truncation and
+    # silently omit memories — so ``has_more`` is computed in the query layer
+    # and propagated here verbatim.
+    items, has_more = await service.list_memories(
         pool,
         store_id,
         path_prefix=path_prefix,
@@ -219,12 +225,6 @@ async def list_memories(
         limit=limit,
         account_id=account_id,
     )
-    # ``has_more`` signals the SQL cap was hit; depth aggregation may have
-    # collapsed those raw rows into fewer response entries, so compare the
-    # underlying memory count (entries that aren't MemoryPrefix) plus
-    # collapsed prefix groups against the limit.
-    raw_count = sum(1 for it in items if not isinstance(it, MemoryPrefix))
-    has_more = raw_count == limit
     return ListResponse[Memory | MemoryPrefix](data=items, has_more=has_more)
 
 
