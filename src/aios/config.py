@@ -164,6 +164,18 @@ class Settings(BaseSettings):
         "default (unlimited) in place. Minimum 4 MiB to satisfy Docker's "
         "own floor.",
     )
+    sandbox_egress_max_request_bytes: int = Field(
+        default=100 * 1024 * 1024,  # 100 MiB
+        ge=0,
+        description="Maximum request-body size the secret egress proxy will "
+        "buffer before forwarding upstream. The body is buffered whole so the "
+        "credential placeholder can be swapped across chunk boundaries, so this "
+        "is the per-request worker-memory ceiling for a sandbox-originated "
+        "upload. A request whose body exceeds this is rejected with 413 before "
+        "any upstream connection — the sandbox is untrusted, so this bounds the "
+        "OOM blast radius on the shared worker. Set via "
+        "AIOS_SANDBOX_EGRESS_MAX_REQUEST_BYTES.",
+    )
     sandbox_pids_limit: int | None = Field(
         default=None,
         ge=1,
