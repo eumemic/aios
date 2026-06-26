@@ -424,14 +424,14 @@ async def find_and_repair_ghosts(
             """,
             candidate_sids,
         )
-    from aios.models.agents import HttpServerSpec, ToolSpec
+    from aios.models.agents import HttpServerSpec, load_tool_specs
 
     agent_surface_by_session: dict[str, _SweepAgentSurface] = {}
     for r in agent_rows:
         tools_list = parse_jsonb(r["tools"])
         http_list = parse_jsonb(r["http_servers"])
         agent_surface_by_session[r["session_id"]] = _SweepAgentSurface(
-            tools=[ToolSpec.model_validate(t) for t in (tools_list or [])],
+            tools=load_tool_specs(tools_list or []),
             http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
         )
 

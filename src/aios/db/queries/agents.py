@@ -28,7 +28,14 @@ from aios.ids import (
     AGENT,
     make_id,
 )
-from aios.models.agents import Agent, AgentVersion, HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.agents import (
+    Agent,
+    AgentVersion,
+    HttpServerSpec,
+    McpServerSpec,
+    ToolSpec,
+    load_tool_specs,
+)
 from aios.models.skills import AgentSkillRef
 
 # ─── agents ───────────────────────────────────────────────────────────────────
@@ -47,7 +54,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         name=row["name"],
         model=row["model"],
         system=row["system"],
-        tools=[ToolSpec.model_validate(t) for t in tools_data],
+        tools=load_tool_specs(tools_data),
         skills=[AgentSkillRef.model_validate(s) for s in skills_data],
         mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
         http_servers=[HttpServerSpec.model_validate(s) for s in (http_data or [])],
@@ -73,7 +80,7 @@ def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
         version=row["version"],
         model=row["model"],
         system=row["system"],
-        tools=[ToolSpec.model_validate(t) for t in tools_data],
+        tools=load_tool_specs(tools_data),
         skills=[AgentSkillRef.model_validate(s) for s in skills_data],
         mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
         http_servers=[HttpServerSpec.model_validate(s) for s in (http_data or [])],

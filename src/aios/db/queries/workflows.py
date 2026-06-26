@@ -31,7 +31,7 @@ from aios.db.queries import (
 )
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
-from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     WfRun,
@@ -61,7 +61,7 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         input_schema=parse_jsonb(row["input_schema"]),
         output_schema=parse_jsonb(row["output_schema"]),
         description=row["description"],
-        tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
+        tools=load_tool_specs(parse_jsonb(row["tools"])),
         mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
         http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
         created_at=row["created_at"],
@@ -79,7 +79,7 @@ def _row_to_workflow_version(row: asyncpg.Record) -> WorkflowVersion:
         input_schema=parse_jsonb(row["input_schema"]),
         output_schema=parse_jsonb(row["output_schema"]),
         description=row["description"],
-        tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
+        tools=load_tool_specs(parse_jsonb(row["tools"])),
         mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
         http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
         created_at=row["created_at"],
@@ -102,7 +102,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         script_sha=row["script_sha"],
         source_version=row.get("source_version"),
         host_semantics_epoch=row["host_semantics_epoch"],
-        tools=[ToolSpec.model_validate(t) for t in parse_jsonb(row["tools"])],
+        tools=load_tool_specs(parse_jsonb(row["tools"])),
         mcp_servers=[McpServerSpec.model_validate(s) for s in parse_jsonb(row["mcp_servers"])],
         http_servers=[HttpServerSpec.model_validate(s) for s in parse_jsonb(row["http_servers"])],
         status=row["status"],
