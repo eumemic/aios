@@ -527,17 +527,20 @@ async def connection_discovery_stream(
             )
 
         while True:
-            payload = await queue.get()
-            # Payload format: "<event>|<connection_id>|<event_account_id>|<external_account_id>".
-            parts = payload.split("|", 3)
-            if len(parts) != 4:
-                log.warning("sse.discovery.malformed_payload", payload=payload)
+            raw = await queue.get()
+            try:
+                payload = json.loads(raw)
+                event = payload["event"]
+                connection_id = payload["connection_id"]
+                event_account_id = payload["account_id"]
+                external_account_id = payload["external_account_id"]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                log.warning("sse.discovery.malformed_payload", payload=raw)
                 continue
-            event, connection_id, event_account_id, external_account_id = parts
             # Tenant isolation: a runtime token scopes a subscriber to one
-            # tenant; dropping cross-tenant NOTIFY events here closes an
-            # existence-leak (sibling account_ids would otherwise surface
-            # via the tail).
+            # tenant; the named account_id field cannot be displaced by any
+            # other field's contents (no positional encoding), so this gate
+            # is correct by construction, not by field ordering.
             if event_account_id != account_id:
                 continue
             if allowlist is not None and connection_id not in allowlist:

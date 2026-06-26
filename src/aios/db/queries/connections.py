@@ -1226,17 +1226,25 @@ async def notify_connection_change(
 ) -> None:
     """Emit a ``connections_<connector>`` NOTIFY for discovery SSE consumers.
 
-    Payload: ``"<event>|<connection_id>|<account_id>|<external_account_id>"``
+    Payload: a JSON object
+    ``{"event", "connection_id", "account_id", "external_account_id"}``
     — the SSE generator parses this into an ``added``/``removed`` event
-    and uses ``account_id`` (tenant) to filter cross-tenant events.
-    Caller runs this on a pool-acquired (autocommit) connection OUTSIDE
-    any transaction so subscribers never see a payload for an
-    uncommitted row.
+    and keys the tenant gate on the named ``account_id`` field (so no
+    other field's contents can displace it). Caller runs this on a
+    pool-acquired (autocommit) connection OUTSIDE any transaction so
+    subscribers never see a payload for an uncommitted row.
     """
     await conn.execute(
         "SELECT pg_notify($1, $2)",
         f"connections_{connector}",
-        f"{event}|{connection_id}|{account_id}|{external_account_id}",
+        json.dumps(
+            {
+                "event": event,
+                "connection_id": connection_id,
+                "account_id": account_id,
+                "external_account_id": external_account_id,
+            }
+        ),
     )
 
 
