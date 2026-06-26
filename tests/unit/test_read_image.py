@@ -326,6 +326,70 @@ class TestImageBranch:
         assert "stat -c %s" in cmd_arg
         assert "base64 -w0" in cmd_arg
 
+    async def test_non_bind_mount_truncated_output_reports_too_large(
+        self,
+        temp_workspace_root: Path,
+        stub_handle: SandboxHandle,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """A large out-of-mount image whose base64 exec stdout is truncated
+        host-side (exit 0, ``truncated=True``) must report a 'too large' /
+        output-cap error — never the fabricated 'not readable' string."""
+        stub_get_session_model.value = "model/vision"
+        # Truncated base64 stream: exit 0 but ends in the host trailer, so a
+        # naive b64decode would raise. The helper must short-circuit on
+        # ``truncated`` before attempting decode.
+        truncated_stdout = (
+            f"99999999\n{base64.b64encode(b'x' * 4096).decode()}\n\n[output truncated]"
+        )
+        stub_runtime.exec = AsyncMock(
+            return_value=CommandResult(
+                exit_code=0,
+                stdout=truncated_stdout,
+                stderr="",
+                timed_out=False,
+                truncated=True,
+            )
+        )
+
+        result = await read_handler("sess_01TEST", {"path": "/etc/big.png"})
+
+        assert isinstance(result, ToolResult)
+        assert result.is_error is True
+        assert isinstance(result.content, str)
+        assert "too large" in result.content
+        assert "exec output cap" in result.content
+        assert "not readable" not in result.content
+
+    async def test_non_bind_mount_failure_surfaces_real_stderr(
+        self,
+        temp_workspace_root: Path,
+        stub_handle: SandboxHandle,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """A non-zero exec exit surfaces the real stderr to the model rather
+        than the fabricated 'not readable inside sandbox' string."""
+        stub_get_session_model.value = "model/vision"
+        stub_runtime.exec = AsyncMock(
+            return_value=CommandResult(
+                exit_code=1,
+                stdout="",
+                stderr="stat: cannot stat 'x': Permission denied",
+                timed_out=False,
+                truncated=False,
+            )
+        )
+
+        result = await read_handler("sess_01TEST", {"path": "/etc/secret.png"})
+
+        assert isinstance(result, ToolResult)
+        assert result.is_error is True
+        assert isinstance(result.content, str)
+        assert "Permission denied" in result.content
+        assert "file not readable inside sandbox" not in result.content
+
 
 class TestImagePathTraversalAttack:
     """End-to-end regression for the path-traversal vulnerability.
