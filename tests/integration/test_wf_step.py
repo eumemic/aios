@@ -32,7 +32,7 @@ from aios.harness import runtime
 from aios.ids import REQUEST, make_id
 from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.attenuation import Surface
-from aios.models.sessions import Session
+from aios.models.sessions import Err, Ok, Session
 from aios.models.vaults import VaultCredentialCreate
 from aios.models.workflows import WfRunStatus
 from aios.services import agents as agents_service
@@ -336,8 +336,8 @@ async def test_launcher_receives_gate_opened_and_resume_gate_happy_path(
             conn, launcher.id, account_id="acc_wf", request_id=gate_event.call_key or ""
         )
     assert delivered is not None
-    assert delivered["is_error"] is False
-    assert delivered["result"] == {
+    assert isinstance(delivered, Ok)
+    assert delivered.result == {
         "event": "gate_opened",
         "run_id": run.id,
         "gate_nonce": gate_event.payload["gate_nonce"],
@@ -1316,7 +1316,7 @@ async def test_return_writes_response_and_wakes_caller_without_archiving(
         )
         signals = await wf_queries.list_run_signals(conn, run_id)
     assert response is not None
-    assert response["is_error"] is False and response["result"] == {"answer": 42}
+    assert isinstance(response, Ok) and response.result == {"answer": 42}
     # The child_done side-marker committed with the response (#780): a lost caller
     # wake stays SQL-visible to the needs-step sweep.
     assert [(s.call_key, s.kind) for s in signals] == [("sha:d2#0", "child_done")]
@@ -1341,8 +1341,8 @@ async def test_error_marker_carries_message(
         marker = await db_queries.read_request_response(
             conn, cid, account_id="acc_wf", request_id="sha:d2e#0"
         )
-    assert marker is not None and marker["is_error"] is True
-    assert marker["error"] == {"message": "nope"}
+    assert isinstance(marker, Err)
+    assert marker.error == {"message": "nope"}
 
 
 async def test_return_from_non_child_fails_closed(
@@ -1454,7 +1454,7 @@ async def test_return_real_dispatch_appends_result_and_does_not_archive(
     assert result is not None and not bool(result.data.get("is_error"))
     spans = [e.data.get("event") for e in events if e.kind == "span"]
     assert spans.count("tool_execute_start") == 1 and spans.count("tool_execute_end") == 1
-    assert marker is not None and marker["result"] == "ok"
+    assert isinstance(marker, Ok) and marker.result == "ok"
     child = await sessions_service.get_session_basic(pool, cid, account_id="acc_wf")
     assert child.archived_at is None  # un-archived → a sibling tool's appends won't crash
 
@@ -1675,7 +1675,7 @@ async def test_model_failure_writes_error_response_and_run_resolves(
             conn, child_id, account_id="acc_wf", request_id=rid
         )
     assert response is not None
-    assert response["is_error"] is True and response["error"] == {"kind": "child_errored"}
+    assert isinstance(response, Err) and response.error == {"kind": "child_errored"}
 
     await run_workflow_step(run_id)  # harvest the error response -> resolve (no hang)
     async with pool.acquire() as conn:
@@ -1722,7 +1722,7 @@ async def test_model_failure_does_not_clobber_a_prior_response(
         )
     assert len(rows) == 1  # still exactly one response
     response = rows[0]["data"]
-    assert response["is_error"] is False and response["result"] == "real"  # the return() won
+    assert isinstance(response, Ok) and response.result == "real"  # the return() won
 
 
 # ─── R4 — the session-quiescence totality guard (nudge → no_return) ───────────
@@ -1949,7 +1949,7 @@ async def test_open_request_is_auto_errored_after_nudge_budget(
         open_ids = await db_queries.get_open_request_ids(conn, cid, account_id="acc_wf")
         status = await db_queries.derive_session_status(conn, cid, account_id="acc_wf")
         signals = await wf_queries.list_run_signals(conn, run_id)
-    assert resp is not None and resp["is_error"] is True and resp["error"] == {"kind": "no_return"}
+    assert isinstance(resp, Err) and resp.error == {"kind": "no_return"}
     assert open_ids == []  # answered (by the backstop) → no longer open
     assert status == "idle"  # nothing owed → free to rest
     # The backstop is the SECOND response writer — it too leaves the child_done
@@ -2067,7 +2067,7 @@ async def test_no_return_after_exactly_n_consecutive_idle_turns(
         resp = await db_queries.read_request_response(
             conn, cid, account_id="acc_wf", request_id="sha:stuck#0"
         )
-    assert resp is not None and resp["is_error"] and resp["error"] == {"kind": "no_return"}
+    assert isinstance(resp, Err) and resp.error == {"kind": "no_return"}
 
 
 async def test_per_request_count_is_independent_stuck_sibling_still_no_returns(
@@ -2143,9 +2143,7 @@ async def test_per_request_count_is_independent_stuck_sibling_still_no_returns(
             cid,
             account_id="acc_wf",
             request_id="sha:a#0",
-            is_error=False,
-            result="done-A",
-            error=None,
+            outcome=Ok(result="done-A"),
         )
         assert wrote
         count_a = await db_queries.count_request_nudges(
@@ -2182,8 +2180,8 @@ async def test_per_request_count_is_independent_stuck_sibling_still_no_returns(
         resp_b = await db_queries.read_request_response(
             conn, cid, account_id="acc_wf", request_id="sha:b#0"
         )
-    assert resp_a is not None and resp_a["is_error"] is False  # A's real answer stands
-    assert resp_b is not None and resp_b["error"] == {"kind": "no_return"}  # sibling not spared
+    assert isinstance(resp_a, Ok)  # A's real answer stands
+    assert isinstance(resp_b, Err) and resp_b.error == {"kind": "no_return"}  # sibling not spared
 
 
 async def test_non_answering_child_resolves_run_via_agent_no_return_error(
@@ -2338,9 +2336,7 @@ async def test_child_reclaimed_on_quiescence_and_parent_still_harvests(
             cid,
             account_id="acc_wf",
             request_id="sha:reclaim#0",
-            is_error=False,
-            result={"answer": 42},
-            error=None,
+            outcome=Ok(result={"answer": 42}),
         )
     result = await sessions_service.append_assistant_and_guard_quiescence(
         pool, cid, await _idle_assistant_turn(pool, cid), account_id="acc_wf"
@@ -2357,7 +2353,7 @@ async def test_child_reclaimed_on_quiescence_and_parent_still_harvests(
         resp = await db_queries.derive_response(
             conn, cid, account_id="acc_wf", request_id="sha:reclaim#0"
         )
-    assert resp is not None and resp["is_error"] is False and resp["result"] == {"answer": 42}
+    assert isinstance(resp, Ok) and resp.result == {"answer": 42}
 
 
 async def test_archive_when_idle_persists_across_launch_surfaces(
@@ -2447,7 +2443,7 @@ async def test_operator_archived_child_resolves_run_as_child_gone(
         resolved = await db_queries.derive_response(
             conn, child_id, account_id="acc_wf", request_id=request_id
         )
-    assert resolved == {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
+    assert resolved == Err(error={"kind": "child_gone"})
 
     await run_workflow_step(run_id)  # harvest -> child_gone -> AgentError -> caught
     async with pool.acquire() as conn:
@@ -2526,8 +2522,8 @@ async def test_archive_child_commits_response_and_child_done_atomically(
             child_id,
             "acc_wf",
         )
-    assert response is not None and response["is_error"] is True
-    assert response["error"] == {"kind": "child_gone"}
+    assert isinstance(response, Err)
+    assert response.error == {"kind": "child_gone"}
     assert signal is not None and signal.kind == "child_done"
     assert archived_at is not None
 
@@ -3151,7 +3147,7 @@ async def test_agent_call_times_out_when_child_never_responds(
         child = await db_queries.get_session_bare(conn, child_id, account_id="acc_wf")
     assert run is not None and run.status == "completed"
     assert run.output == {"timed_out": "timeout"}
-    assert resp is not None and resp["is_error"] is True and resp["error"] == {"kind": "timeout"}
+    assert isinstance(resp, Err) and resp.error == {"kind": "timeout"}
     assert child.archived_at is None  # left running — responding ≠ terminating
 
 
@@ -3194,7 +3190,7 @@ async def test_past_deadline_child_that_already_responded_keeps_its_real_respons
             conn, child_id, account_id="acc_wf", request_id=rid
         )
     assert run is not None and run.status == "completed" and run.output == "real"
-    assert resp is not None and resp["is_error"] is False and resp["result"] == "real"
+    assert isinstance(resp, Ok) and resp.result == "real"
 
 
 async def test_past_deadline_gone_child_resolves_as_child_gone_not_timeout(
@@ -3420,8 +3416,8 @@ async def test_epoch_mismatch_fails_child_open_requests(
         )
         signals = await wf_queries.list_run_signals(conn, run_id)
     assert response is not None
-    assert response["is_error"] is True
-    assert response["error"] == {"kind": "engine_semantics_changed"}
+    assert isinstance(response, Err)
+    assert response.error == {"kind": "engine_semantics_changed"}
     assert any(s.call_key == request_id and s.kind == "child_done" for s in signals)
 
 
@@ -3453,8 +3449,8 @@ async def test_nondeterministic_replay_fails_child_open_requests(
         )
     assert run is not None and run.status == "errored"
     assert response is not None
-    assert response["is_error"] is True
-    assert response["error"] == {"kind": "nondeterministic_replay"}
+    assert isinstance(response, Err)
+    assert response.error == {"kind": "nondeterministic_replay"}
 
 
 async def test_gate_parked_run_detects_epoch_mismatch_on_next_wake(
@@ -3874,7 +3870,7 @@ async def test_return_enforces_output_schema(
         resp = await db_queries.read_request_response(
             conn, cid, account_id="acc_wf", request_id="se:1"
         )
-    assert resp is not None and resp["result"] == {"answer": "yes"}
+    assert isinstance(resp, Ok) and resp.result == {"answer": "yes"}
 
 
 async def test_malformed_output_schema_errors_the_run(

@@ -24,6 +24,7 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.ids import REQUEST, make_id
 from aios.models.attenuation import Surface
+from aios.models.sessions import Ok
 from aios.services import sessions as service
 from aios.services.sessions import AskNewSession, TellNewSession
 from tests.integration.conftest import seed_agent_env_session
@@ -137,9 +138,7 @@ async def test_request_opened_appears_then_response_drops_it(
             session.id,
             account_id=account_id,
             request_id="req-1",
-            is_error=False,
-            result={"ok": True},
-            error=None,
+            outcome=Ok(result={"ok": True}),
         )
         assert wrote is True
     async with pool.acquire() as conn:
@@ -687,9 +686,7 @@ async def test_get_open_obligations_oldest_first_and_excludes_answered(
             session.id,
             account_id=account_id,
             request_id="req-2",
-            is_error=False,
-            result={"ok": True},
-            error=None,
+            outcome=Ok(result={"ok": True}),
         )
     async with pool.acquire() as conn:
         obs = await queries.get_open_obligations(conn, session.id, account_id=account_id)

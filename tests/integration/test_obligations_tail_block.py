@@ -28,6 +28,7 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import runtime
 from aios.harness.step_context import compose_step_context, compute_step_prelude
+from aios.models.sessions import Ok
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from tests.integration.conftest import seed_agent_env_session
@@ -201,9 +202,7 @@ async def test_answering_drops_the_block_on_next_compose(
             session.id,
             account_id=account_id,
             request_id="req-drop",
-            is_error=False,
-            result={"ok": True},
-            error=None,
+            outcome=Ok(result={"ok": True}),
         )
 
     after = await _prelude_and_compose(

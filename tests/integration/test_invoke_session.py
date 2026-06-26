@@ -32,6 +32,7 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import NotFoundError
 from aios.harness import runtime
+from aios.models.sessions import Ok
 from aios.services import sessions as service
 from aios.tools import workflow_completion
 from tests.integration.conftest import seed_agent_env_session
@@ -174,9 +175,7 @@ async def test_non_child_session_answers_via_respond_to_request(
         pool,
         target.id,
         request_id=handle.request_id,
-        is_error=False,
-        result={"answer": 7},
-        error=None,
+        outcome=Ok(result={"answer": 7}),
     )
     assert status == "responded"
 
@@ -215,7 +214,7 @@ async def test_session_owns_open_request_gate(
     assert await _owes()
 
     await workflow_completion.respond_to_request(
-        pool, target.id, request_id=handle.request_id, is_error=False, result="ok", error=None
+        pool, target.id, request_id=handle.request_id, outcome=Ok(result="ok")
     )
     assert not await _owes()
 
@@ -230,10 +229,10 @@ async def test_duplicate_answer_is_idempotent(
     )
 
     first = await workflow_completion.respond_to_request(
-        pool, target.id, request_id=handle.request_id, is_error=False, result=1, error=None
+        pool, target.id, request_id=handle.request_id, outcome=Ok(result=1)
     )
     second = await workflow_completion.respond_to_request(
-        pool, target.id, request_id=handle.request_id, is_error=False, result=2, error=None
+        pool, target.id, request_id=handle.request_id, outcome=Ok(result=2)
     )
     assert first == "responded"
     assert second == "duplicate"  # first-writer-wins

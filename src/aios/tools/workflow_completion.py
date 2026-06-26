@@ -38,6 +38,7 @@ import jsonschema
 
 from aios.db import queries
 from aios.harness import runtime
+from aios.models.sessions import Err, Ok, Outcome
 from aios.services import sessions as sessions_service
 from aios.services.wake import defer_run_wake
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
@@ -91,9 +92,7 @@ async def respond_to_request(
     session_id: str,
     *,
     request_id: str,
-    is_error: bool,
-    result: Any,
-    error: dict[str, Any] | None,
+    outcome: Outcome,
 ) -> str:
     """Write one request's response and wake its caller — the shared core behind
     every `invoke_session` response (``return``/``error``, the harness erroring
@@ -125,9 +124,7 @@ async def respond_to_request(
             conn,
             session_id,
             request_id=request_id,
-            is_error=is_error,
-            result=result,
-            error=error,
+            outcome=outcome,
         )
     if write.wake_run_id is not None:
         # batch: child completions are the high-frequency wake source — a fan-out's
@@ -161,12 +158,12 @@ async def fail_all_open_requests(
         open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
     for request_id in open_ids:
         await respond_to_request(
-            pool, session_id, request_id=request_id, is_error=True, result=None, error=error
+            pool, session_id, request_id=request_id, outcome=Err(error=error)
         )
 
 
 async def _finish(
-    session_id: str, *, request_id: Any, is_error: bool, result: Any, error: dict[str, Any] | None
+    session_id: str, *, request_id: Any, outcome: Outcome
 ) -> dict[str, Any] | ToolResult:
     # ``request_id`` is model-supplied (possibly missing or wrong-typed); a value
     # that isn't an open request resolves to ``unknown_request`` → a tool error the
@@ -175,16 +172,14 @@ async def _finish(
         runtime.require_pool(),
         session_id,
         request_id=request_id,
-        is_error=is_error,
-        result=result,
-        error=error,
+        outcome=outcome,
     )
     if status == "not_a_child":
         return _NOT_A_CHILD
     if status == "unknown_request":
         return _UNKNOWN_REQUEST
     # responded | duplicate — either way the request now has exactly one response.
-    return {"status": "errored" if is_error else "returned"}
+    return {"status": "errored" if isinstance(outcome, Err) else "returned"}
 
 
 def _validate_value(value: Any, schema: dict[str, Any]) -> str | None:
@@ -245,9 +240,7 @@ async def return_handler(session_id: str, arguments: dict[str, Any]) -> dict[str
     return await _finish(
         session_id,
         request_id=arguments.get("request_id"),
-        is_error=False,
-        result=arguments.get("value"),
-        error=None,
+        outcome=Ok(result=arguments.get("value")),
     )
 
 
@@ -255,9 +248,7 @@ async def error_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
     return await _finish(
         session_id,
         request_id=arguments.get("request_id"),
-        is_error=True,
-        result=None,
-        error={"message": arguments.get("message")},
+        outcome=Err(error={"message": arguments.get("message")}),
     )
 
 

@@ -39,6 +39,7 @@ from aios.db.listen import open_listen_for_events, open_listen_for_run_events
 from aios.db.queries import trace as trace_q
 from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError, ValidationError
+from aios.models.sessions import Err, Outcome
 from aios.models.tasks import AwaitResponse, OpenTask
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun
 from aios.services.await_completion import await_completion
@@ -96,7 +97,7 @@ async def _await_session(
         if await queries.read_session_watermarks(conn, session_id, account_id=account_id) is None:
             raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
 
-    async def _read() -> dict[str, Any] | None:
+    async def _read() -> Outcome | None:
         async with pool.acquire() as conn:
             return await queries.derive_response(
                 conn, session_id, account_id=account_id, request_id=request_id
@@ -160,23 +161,23 @@ async def _await_run(
     return AwaitResponse(outcome="errored", error=error)
 
 
-def _response_to_await(resolved: dict[str, Any] | None) -> AwaitResponse:
-    """Map a :func:`derive_response` ``{result, is_error, error}`` (or ``None``) to an envelope.
+def _response_to_await(resolved: Outcome | None) -> AwaitResponse:
+    """Map a :func:`derive_response` ``Outcome`` (or ``None``) to an envelope.
 
-    The one place the resolver's ``is_error`` bit becomes the 3-valued ``outcome``:
-    a ``cancelled``-kinded error surfaces as ``cancelled`` (uniform child-death
-    notify), any other error as ``errored``, a clean response as ``ok``. Keep the
+    The one place the resolved kind becomes the 3-valued ``outcome``: a
+    ``cancelled``-kinded ``Err`` surfaces as ``cancelled`` (uniform child-death
+    notify), any other ``Err`` as ``errored``, an ``Ok`` as ``ok``. Keep the
     error→outcome classification in lockstep with
     :func:`aios.services.trace_normalizer.normalize_response` (the display twin).
     """
     if resolved is None:
         return AwaitResponse(outcome=None)
-    if resolved.get("is_error"):
-        error = resolved.get("error")
+    if isinstance(resolved, Err):
+        error = resolved.error
         kind = error.get("kind") if isinstance(error, dict) else None
         outcome: Literal["errored", "cancelled"] = "cancelled" if kind == "cancelled" else "errored"
         return AwaitResponse(outcome=outcome, error=error)
-    return AwaitResponse(outcome="ok", result=resolved.get("result"))
+    return AwaitResponse(outcome="ok", result=resolved.result)
 
 
 async def cancel_task(

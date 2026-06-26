@@ -42,7 +42,10 @@ from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
     AwaitingToolCall,
+    Err,
     Obligation,
+    Ok,
+    Outcome,
     Session,
     SessionAwaitResponse,
     SessionResource,
@@ -1344,9 +1347,9 @@ async def write_gate_opened(
         session_id,
         account_id=account_id,
         request_id=request_id,
-        is_error=False,
-        result={"event": "gate_opened", "run_id": run_id, "gate_nonce": gate_nonce},
-        error=None,
+        outcome=Ok(
+            result={"event": "gate_opened", "run_id": run_id, "gate_nonce": gate_nonce}
+        ),
     )
 
 
@@ -1357,9 +1360,7 @@ async def write_child_response(
     account_id: str,
     parent_run_id: str,
     request_id: str,
-    is_error: bool,
-    result: Any,
-    error: dict[str, Any] | None,
+    outcome: Outcome,
 ) -> bool:
     """Write a workflow child's response AND its ``child_done`` side-marker, on the
     caller's open connection/transaction — THE seam for every external response
@@ -1376,9 +1377,7 @@ async def write_child_response(
         session_id,
         account_id=account_id,
         request_id=request_id,
-        is_error=is_error,
-        result=result,
-        error=error,
+        outcome=outcome,
     )
     if wrote:
         await wf_queries.insert_run_signal(
@@ -1433,9 +1432,7 @@ async def fail_open_child_requests_conn(
             account_id=account_id,
             parent_run_id=parent_run_id,
             request_id=request_id,
-            is_error=True,
-            result=None,
-            error=error,
+            outcome=Err(error=error),
         )
         wrote_any |= wrote
     return parent_run_id if wrote_any else None
@@ -1462,9 +1459,7 @@ async def respond_to_request_conn(
     session_id: str,
     *,
     request_id: str,
-    is_error: bool,
-    result: Any,
-    error: dict[str, Any] | None,
+    outcome: Outcome,
 ) -> RequestResponseWrite:
     """THE conn-level request-response writer + caller-kind router.
 
@@ -1504,9 +1499,7 @@ async def respond_to_request_conn(
             account_id=account_id,
             parent_run_id=parent_run_id,
             request_id=request_id,
-            is_error=is_error,
-            result=result,
-            error=error,
+            outcome=outcome,
         )
         return RequestResponseWrite(
             "responded" if wrote else "duplicate",
@@ -1519,9 +1512,7 @@ async def respond_to_request_conn(
         session_id,
         account_id=account_id,
         request_id=request_id,
-        is_error=is_error,
-        result=result,
-        error=error,
+        outcome=outcome,
     )
     wake_session_id = (
         caller["id"]
@@ -1579,9 +1570,7 @@ async def harvest_session_cancel_markers(
                 conn,
                 session_id,
                 request_id=marker.request_id,
-                is_error=True,
-                result=None,
-                error={"kind": "cancelled"},
+                outcome=Err(error={"kind": "cancelled"}),
             )
             wakes.append(write)
             await queries.mark_session_cancel_marker_harvested(
@@ -1726,9 +1715,7 @@ async def append_assistant_and_guard_quiescence(
                     conn,
                     session_id,
                     request_id=request_id,
-                    is_error=True,
-                    result=None,
-                    error={"kind": "no_return"},
+                    outcome=Err(error={"kind": "no_return"}),
                 )
                 if write.wake_run_id is not None:
                     autoerror_caller_run_id = write.wake_run_id

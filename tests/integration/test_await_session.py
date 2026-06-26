@@ -27,6 +27,7 @@ from aios.db.listen import open_listen_for_events
 from aios.db.pool import create_pool
 from aios.db.sse_lock import has_subscriber
 from aios.errors import NotFoundError
+from aios.models.sessions import Ok
 from aios.models.tasks import AwaitResponse
 from aios.services import sessions as service
 from aios.services import tasks as tasks_service
@@ -92,9 +93,7 @@ async def test_request_already_responded_ok_with_result(
             session_id,
             account_id=account_id,
             request_id="req1",
-            is_error=False,
-            result={"answer": 7},
-            error=None,
+            outcome=Ok(result={"answer": 7}),
         )
 
     resp = await _await_request(
@@ -161,9 +160,7 @@ async def test_request_wakes_on_response_during_wait(
                 session_id,
                 account_id=account_id,
                 request_id="req_race",
-                is_error=False,
-                result="hi",
-                error=None,
+                outcome=Ok(result="hi"),
             )
 
     resp, _ = await asyncio.gather(

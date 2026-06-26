@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from aios.models.sessions import Err, Outcome
 from aios.models.trace import TerminalState
 
 # Run statuses are persisted on ``wf_runs.status``; sessions have no status
@@ -22,24 +23,24 @@ from aios.models.trace import TerminalState
 _TERMINAL_RUN_STATUSES = {"completed", "errored", "cancelled"}
 
 
-def normalize_response(response: dict[str, Any] | None) -> tuple[TerminalState, str | None]:
+def normalize_response(response: Outcome | None) -> tuple[TerminalState, str | None]:
     """Normalize a **servicer** node's caller's-eye outcome from a resolved response.
 
-    ``response`` is the dict ``derive_response`` / ``derive_run_response``
+    ``response`` is the ``Outcome`` ``derive_response`` / ``derive_run_response``
     returns (or ``None`` when still pending):
 
     * ``None`` → still running (alive and unanswered). Note: an *absent* response
       means running — it is **never** ``no_return``. ``no_return`` is a
       *present* ``request_response`` with ``error.kind == 'no_return'`` (written
-      by the quiescence guard), so it lands in the ``is_error`` branch below.
-    * ``is_error`` → ``errored`` + the raw ``error.kind`` (``no_return``,
+      by the quiescence guard), so it lands in the ``Err`` branch below.
+    * ``Err`` → ``errored`` + the raw ``error.kind`` (``no_return``,
       ``child_gone``, …) passed through verbatim.
-    * otherwise → ``ok``.
+    * otherwise (``Ok``) → ``ok``.
     """
     if response is None:
         return "running", None
-    if response.get("is_error"):
-        error = response.get("error") or {}
+    if isinstance(response, Err):
+        error = response.error or {}
         kind = error.get("kind") if isinstance(error, dict) else None
         return "errored", kind
     return "ok", None

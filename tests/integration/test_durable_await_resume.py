@@ -37,6 +37,7 @@ from aios.harness import runtime
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_and_repair_ghosts
 from aios.models.agents import ToolSpec
+from aios.models.sessions import Ok
 from aios.services import workflows as wf_service
 from aios.tools import workflow_completion
 from tests.integration.conftest import seed_agent_env_session
@@ -311,7 +312,7 @@ async def test_resume_parked_lands_answer_without_start_span(
     )
     # The servicer already answered during the worker's downtime.
     await workflow_completion.respond_to_request(
-        pool, servicer, request_id="req_done", is_error=False, result={"v": 42}, error=None
+        pool, servicer, request_id="req_done", outcome=Ok(result={"v": 42})
     )
     # _park_on_task reads the LISTEN db_url off settings; point it at the test DB.
     monkeypatch.setattr(

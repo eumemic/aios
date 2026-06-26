@@ -11,6 +11,7 @@ Pins the locked decisions:
 
 from __future__ import annotations
 
+from aios.models.sessions import Err, Ok
 from aios.services import trace_normalizer as norm
 
 # ─── servicer nodes (derive_response / derive_run_response output) ────────────
@@ -22,21 +23,19 @@ def test_absent_response_is_running_not_no_return() -> None:
 
 
 def test_no_return_is_a_present_errored_response() -> None:
-    resp = {"result": None, "is_error": True, "error": {"kind": "no_return"}}
-    assert norm.normalize_response(resp) == ("errored", "no_return")
+    assert norm.normalize_response(Err(error={"kind": "no_return"})) == ("errored", "no_return")
 
 
 def test_child_gone_passes_through_verbatim() -> None:
-    resp = {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
-    assert norm.normalize_response(resp) == ("errored", "child_gone")
+    assert norm.normalize_response(Err(error={"kind": "child_gone"})) == ("errored", "child_gone")
 
 
 def test_ok_response() -> None:
-    assert norm.normalize_response({"result": 42, "is_error": False}) == ("ok", None)
+    assert norm.normalize_response(Ok(result=42)) == ("ok", None)
 
 
 def test_errored_without_error_kind_is_none() -> None:
-    assert norm.normalize_response({"is_error": True, "error": None}) == ("errored", None)
+    assert norm.normalize_response(Err(error={})) == ("errored", None)
 
 
 # ─── root runs (wf_runs.status + run_completed payload) ──────────────────────
