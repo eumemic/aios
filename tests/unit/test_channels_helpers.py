@@ -16,6 +16,7 @@ from aios.harness.channels import (
     build_channels_tail_block,
     build_focal_paradigm_block,
 )
+from aios.harness.context import EPHEMERAL_TAIL_KEY
 from aios.models.events import Event
 
 
@@ -184,7 +185,11 @@ class TestBuildChannelsTailBlock:
         assert block is not None
         assert block["role"] == "user"
         assert isinstance(block["content"], str)
-        assert set(block.keys()) <= {"role", "content"}
+        # The block is tagged out-of-band as a per-step-ephemeral tail so the
+        # cache-breakpoint recognizer skips it without re-parsing prose; the
+        # marker is stripped before the wire by ``inject_cache_breakpoints``.
+        assert block[EPHEMERAL_TAIL_KEY] is True
+        assert set(block.keys()) <= {"role", "content", EPHEMERAL_TAIL_KEY}
 
     def test_zero_unread_non_focal_still_listed(self) -> None:
         block = build_channels_tail_block(

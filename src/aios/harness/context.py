@@ -1376,6 +1376,28 @@ def stub_missing_reasoning_content(
     return messages
 
 
+EPHEMERAL_TAIL_KEY = "_aios_ephemeral_tail"
+"""Out-of-band marker key tagging a per-step-ephemeral tail message.
+
+Set to ``True`` at construction on the render-only tail blocks
+(:func:`~aios.harness.channels.build_channels_tail_block`,
+:func:`~aios.harness.obligations.build_obligations_tail_block`) whose
+content mutates every step (unread counts/previews; obligation ages/sets).
+
+The cache-breakpoint recognizer in ``completion.py`` reads this marker —
+never the rendered prose — to decide which message must NOT host the
+conversation prefix ``cache_control`` breakpoint.  It is a *property*
+("this message is per-step-ephemeral"), not a discriminated kind, so a
+boolean is the honest shape.
+
+The marker is non-standard (Anthropic rejects unknown message fields) and
+is stripped from every message by ``inject_cache_breakpoints`` before any
+provider call — on every route, including non-Anthropic early returns.
+``_concat_user_messages`` propagates it under OR so a merge of any
+ephemeral message with anything stays ephemeral.
+"""
+
+
 _USER_MESSAGE_SEPARATOR_CONTENT = "."
 """Single-byte placeholder for the role-transition separator.
 
@@ -1444,7 +1466,15 @@ def _concat_user_messages(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any
     """
     ca, cb = a.get("content"), b.get("content")
     if isinstance(ca, str) and isinstance(cb, str):
-        return {"role": "user", "content": f"{ca}\n\n{cb}"}
-    la = ca if isinstance(ca, list) else [{"type": "text", "text": ca or ""}]
-    lb = cb if isinstance(cb, list) else [{"type": "text", "text": cb or ""}]
-    return {"role": "user", "content": [*la, *lb]}
+        merged: dict[str, Any] = {"role": "user", "content": f"{ca}\n\n{cb}"}
+    else:
+        la = ca if isinstance(ca, list) else [{"type": "text", "text": ca or ""}]
+        lb = cb if isinstance(cb, list) else [{"type": "text", "text": cb or ""}]
+        merged = {"role": "user", "content": [*la, *lb]}
+    # Propagate the ephemeral-tail marker under OR: a dict that contains
+    # *any* per-step-mutating content cannot host the stable-prefix cache
+    # breakpoint, so the merge of any ephemeral message with anything is
+    # ephemeral. This fixes the trailing-inbound + obligations merge case.
+    if a.get(EPHEMERAL_TAIL_KEY) or b.get(EPHEMERAL_TAIL_KEY):
+        merged[EPHEMERAL_TAIL_KEY] = True
+    return merged
