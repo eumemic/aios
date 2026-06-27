@@ -274,9 +274,7 @@ class TestRuntimeBehaviour:
             "-c",
             'test "$(stat -c %u "$HOME")" = "$(id -u)" && echo ok',
         )
-        assert r.returncode == 0, (
-            f"$HOME owner != running uid: {r.stderr or r.stdout}"
-        )
+        assert r.returncode == 0, f"$HOME owner != running uid: {r.stderr or r.stdout}"
         assert r.stdout.strip() == "ok", f"expected ok, got {r.stdout.strip()!r}"
 
     def test_trust_store_layout_is_debian(self, pulled_image: str) -> None:
