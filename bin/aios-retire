@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""``aios-retire`` — emit a retirement's three lifecycle migrations from a descriptor.
+
+The migration generator (#1578, epic #1572) turns each new pattern retirement
+into a *fill-in-the-descriptor* exercise instead of three hand-written
+migrations. Given the name of a descriptor declared as data in
+``aios.retirements.registry`` (#1573), it emits the three lifecycle migrations in
+chain order on top of the current migration head:
+
+  * **expand**   (rev N)   — open the ledger (no data change),
+  * **backfill** (rev N+1) — EXISTS-pre-checked, batched, epoch-stamping rewrite,
+  * **contract** (rev N+2) — stamp the ledger + in-transaction abort-guard.
+
+The emitted SQL matches the merged 0116/0120/0122 shape and slots into the
+linear alembic ladder, so the migration-chain test stays green.
+
+Usage:
+  bin/aios-retire <DESCRIPTOR>            write the three migrations into migrations/versions/
+  bin/aios-retire <DESCRIPTOR> --dry-run  print the three files to stdout, write nothing
+  bin/aios-retire --list                  list the registered descriptor names
+  bin/aios-retire --help                  show this help
+
+``<DESCRIPTOR>`` is the module-level constant name in
+``aios.retirements.registry`` (e.g. ``LEGACY_BUILTIN_RENAMES``).
+
+Exit codes:
+  0  success
+  1  bad usage / unknown descriptor / non-single-headed ladder
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Make ``src`` importable when run from a source checkout without an install.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _REPO_ROOT / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from aios.retirements import Retirement  # noqa: E402
+from aios.retirements.migration_gen import (  # noqa: E402
+    current_head,
+    generate,
+    resolve_descriptor,
+)
+
+_MIGRATIONS_DIR = _REPO_ROOT / "migrations"
+_VERSIONS_DIR = _MIGRATIONS_DIR / "versions"
+
+
+def _list_descriptors() -> int:
+    from aios.retirements import registry as reg
+
+    names = sorted(attr for attr in dir(reg) if isinstance(getattr(reg, attr), Retirement))
+    for name in names:
+        desc: Retirement = getattr(reg, name)
+        toks = ", ".join(desc.tokens)
+        print(f"{name}\t[{desc.domain}/{desc.action}] {toks}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    args = list(argv)
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if args[:1] in ([], ["-h"], ["--help"]) else 1
+    if args[0] == "--list":
+        return _list_descriptors()
+
+    dry_run = False
+    if "--dry-run" in args:
+        dry_run = True
+        args.remove("--dry-run")
+    if len(args) != 1:
+        print(__doc__, file=sys.stderr)
+        return 1
+
+    descriptor_name = args[0]
+    try:
+        retirement, name = resolve_descriptor(descriptor_name)
+    except KeyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        head = current_head(str(_MIGRATIONS_DIR))
+    except RuntimeError as exc:
+        print(f"cannot generate: {exc}", file=sys.stderr)
+        return 1
+
+    chain = generate(retirement, head, descriptor_name=name)
+
+    if dry_run:
+        for migration in chain:
+            print(f"# ── {migration.filename} ".ljust(80, "─"))
+            print(migration.source)
+            print()
+        return 0
+
+    for migration in chain:
+        path = _VERSIONS_DIR / migration.filename
+        path.write_text(migration.source)
+        print(f"wrote {path.relative_to(_REPO_ROOT)} (rev {migration.revision})")
+    print(
+        f"generated expand/backfill/contract for {name} "
+        f"on top of head {head}: {chain.expand.revision} → "
+        f"{chain.backfill.revision} → {chain.contract.revision}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
