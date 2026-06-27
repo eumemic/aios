@@ -192,6 +192,8 @@ module = [
     "pytz",
     "pytz.*",
     "jsonschema",
+    "prometheus_client",
+    "prometheus_client.*",
 ]
 ignore_missing_imports = true
 

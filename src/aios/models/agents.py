@@ -16,6 +16,8 @@ from typing import Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aios.models.skills import AgentSkillRef
+from aios.retirements.registry import tolerated_rename_map
+from aios.retirements.telemetry import record_tolerance_hit
 
 # Built-in tool types. Custom tools use type="custom" with extra fields.
 BuiltinToolType = Literal[
@@ -92,22 +94,17 @@ _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
 # names in their `tools` JSONB; without a map they'd fail `ToolSpec` validation on read (a
 # deploy-breaker — every agent that exposed the renamed tool to its model would 500). The
 # `mode="before"` validator below maps them so old rows still load; the two-step
-# create_run/await_run launch tools fold into the unified `call_workflow`. The data migrations
-# (0116 for #1419, 0117 for #1428) rewrite the persisted rows to canonical; once they have run
-# everywhere this map + the validator can be removed (teardown tracked: #1432).
-_LEGACY_BUILTIN_RENAMES: dict[str, str] = {
-    "invoke": "call_session",
-    "invoke_agent": "call_agent",
-    "invoke_workflow": "call_workflow",
-    "create_run": "call_workflow",
-    "await_run": "call_workflow",
-    # #1428: the cancel_run MODEL tool is superseded by stop_task (which reaches a session
-    # servicer too, keyed on tool_call_id). The wf_service.cancel_run SERVICE is unaffected.
-    # Maps to a REGISTERED name (stop_task) — load-bearing: to_openai_tools' registry.get
-    # raises on an unregistered type, which would 500 every affected agent in the post-deploy
-    # window. The data migration (0117) rewrites persisted rows; this shim covers the window.
-    "cancel_run": "stop_task",
-}
+# create_run/await_run launch tools fold into the unified `call_workflow`.
+#
+# #1574: the rename map is no longer a hand-maintained constant here — it is sourced from the
+# retirement REGISTRY (#1573) via `tolerated_rename_map`, which tolerates a token ONLY while its
+# descriptor's `contract_rev IS NULL` (the data migration that rewrites persisted rows has not
+# yet been declared as the contract-point). Once a descriptor stamps `contract_rev`, its tokens
+# drop out of the map and the validator stops remapping them, so a stale legacy `type` then
+# correctly fails validation. Each tolerance fire emits `retirement_tolerance_hits{token}` +
+# stamps `last_seen` (corroboration only — NEVER the gate). Keeping this in a `mode="before"`
+# validator is deliberate: it travels to every `ToolSpec.model_validate` site automatically (the
+# eight read sites), so no loader choke-point is needed and the per-site property is preserved.
 
 # Read-tolerance for RETIRED builtins that have NO canonical successor (#1562). Unlike a
 # rename (mapped above), a retired builtin's persisted ``tools`` entry is DROPPED on read —
@@ -133,8 +130,10 @@ def load_tool_specs(raw: Iterable[Any]) -> list[ToolSpec]:
     would otherwise raise on the now-illegal Literal, poisoning the whole row's hydration.
 
     This is the list-level counterpart to the per-entry ``mode="before"`` *rename* shim
-    (:data:`_LEGACY_BUILTIN_RENAMES`): a rename can be done in-place inside a single ``ToolSpec``,
-    but dropping an element must happen where the array is iterated. Order is preserved; a row
+    (:meth:`ToolSpec._map_legacy_builtin_names`, now registry-driven via
+    :func:`aios.retirements.registry.tolerated_rename_map`): a rename can be done in-place inside a
+    single ``ToolSpec``, but dropping an element must happen where the array is iterated. Order is
+    preserved; a row
     that listed only retired builtins hydrates to ``[]``. Use this anywhere a persisted ``tools``
     array is loaded so the tolerance is uniform across agents / agent_versions / workflows /
     workflow_versions / wf_runs / sessions.
@@ -517,14 +516,30 @@ class ToolSpec(BaseModel):
         ``invoke``/``invoke_agent``/``invoke_workflow``/``create_run``/``await_run`` set or the
         #1428 ``cancel_run`` — still validates against the post-rename ``BuiltinToolType``
         Literal. The ``create_run``/``await_run`` collapse to ``call_workflow`` is deduped at the
-        list level (``to_openai_tools`` + migrations 0116/0117), not here. Temporary shim —
-        remove once 0116/0117 have rewritten all persisted rows. See
-        :data:`_LEGACY_BUILTIN_RENAMES`.
+        list level (``to_openai_tools`` + migrations 0116/0117), not here.
+
+        #1574: the tolerance map is read from the retirement REGISTRY (#1573) via
+        :func:`aios.retirements.registry.tolerated_rename_map`, which yields a token's canonical
+        successor ONLY while its descriptor's ``contract_rev IS NULL``. A token whose descriptor
+        has stamped ``contract_rev`` is absent from the map, so it is no longer remapped and would
+        correctly fail validation against the post-rename Literal. Staying ``mode="before"`` keeps
+        this per-site: it travels to every ``ToolSpec.model_validate`` site automatically.
+
+        Each fire records ``retirement_tolerance_hits{token}`` + stamps ``last_seen`` via
+        :func:`aios.retirements.telemetry.record_tolerance_hit` — **corroboration / telemetry
+        only**. The gate is the registry's ``contract_rev IS NULL`` predicate above; the telemetry
+        is never consulted to decide whether to tolerate, and a metrics failure can never wedge a
+        read.
         """
         if isinstance(data, dict):
             t = data.get("type")
-            if isinstance(t, str) and t in _LEGACY_BUILTIN_RENAMES:
-                data = {**data, "type": _LEGACY_BUILTIN_RENAMES[t]}
+            if isinstance(t, str):
+                # Registry-sourced, contract_rev-gated map (the GATE).
+                successor = tolerated_rename_map().get(t)
+                if successor is not None:
+                    # Corroboration only — NEVER the gate. Recorded after the gate decided.
+                    record_tolerance_hit(t)
+                    data = {**data, "type": successor}
         return data
 
     @model_validator(mode="after")
