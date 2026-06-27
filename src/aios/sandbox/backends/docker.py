@@ -647,7 +647,7 @@ class DockerBackend:
         changes = [
             'CMD ["/usr/bin/tail","-f","/dev/null"]',
             "WORKDIR /workspace",
-            "ENV HOME=/home/aios",
+            "ENV HOME=/root",
             f"LABEL {MANAGED_LABEL_KEY}={MANAGED_LABEL_VALUE}",
             f"LABEL {FLATTENED_LABEL_KEY}={FLATTENED_LABEL_VALUE}",
         ]
