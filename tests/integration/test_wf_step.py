@@ -1722,7 +1722,7 @@ async def test_model_failure_does_not_clobber_a_prior_response(
         )
     assert len(rows) == 1  # still exactly one response
     response = rows[0]["data"]
-    assert isinstance(response, Ok) and response.result == "real"  # the return() won
+    assert response["is_error"] is False and response["result"] == "real"  # the return() won
 
 
 # ─── R4 — the session-quiescence totality guard (nudge → no_return) ───────────
