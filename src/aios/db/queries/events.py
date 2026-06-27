@@ -316,8 +316,8 @@ async def model_token_class_ratios(
         )
         return dict(neutral)
 
-    ratios = _fit_class_ratios(rows)
-    if ratios is None:
+    fitted = _fit_class_ratios(rows)
+    if fitted is None:
         # Degenerate / singular system → fold back to neutral but cache
         # briefly (the data may settle as more varied spans arrive).
         neutral = _neutral_class_ratios()
@@ -329,9 +329,9 @@ async def model_token_class_ratios(
 
     _model_token_ratio_cache[cache_key] = (
         now + _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS,
-        ratios,
+        fitted,
     )
-    return dict(ratios)
+    return dict(fitted)
 
 
 def _fit_class_ratios(rows: list[Any]) -> dict[str, float] | None:
