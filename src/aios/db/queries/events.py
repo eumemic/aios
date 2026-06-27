@@ -21,6 +21,7 @@ from aios.db.queries.connections import _session_bound_to_connection_predicate
 from aios.errors import (
     NotFoundError,
 )
+from aios.harness.chat_type import ChatType, chat_type_of
 from aios.harness.window import WindowedEvents, WindowOmission
 from aios.ids import (
     EVENT,
@@ -1637,6 +1638,8 @@ async def read_events(
     after_seq: int = 0,
     before: int | None = None,
     kind: EventKind | None = None,
+    channels: list[str] | None = None,
+    chat_type: ChatType | None = None,
     limit: int = 200,
     newest_first: bool = False,
     error_only: bool = False,
@@ -1645,24 +1648,68 @@ async def read_events(
     # upper bound for tail-anchored backward paging (chat-style reverse scroll),
     # which is always newest-first. Both compose with ``kind``/``error_only``.
     order = "DESC" if newest_first or before is not None else "ASC"
-    params: list[Any] = [session_id, account_id]
-    where = "session_id = $1 AND account_id = $2"
-    if after_seq:
-        params.append(after_seq)
-        where += f" AND seq > ${len(params)}"
-    if before is not None:
-        params.append(before)
-        where += f" AND seq < ${len(params)}"
-    if kind is not None:
-        params.append(kind)
-        where += f" AND kind = ${len(params)}"
-    if error_only:
-        where += " AND is_error IS TRUE"
-    params.append(limit)
-    rows = await conn.fetch(
-        f"SELECT * FROM events WHERE {where} ORDER BY seq {order} LIMIT ${len(params)}",
-        *params,
-    )
+
+    def _build_query(lower_bound: int, upper_bound: int | None) -> tuple[str, list[Any]]:
+        params: list[Any] = [session_id, account_id]
+        where = "session_id = $1 AND account_id = $2"
+        if lower_bound:
+            params.append(lower_bound)
+            where += f" AND seq > ${len(params)}"
+        if upper_bound is not None:
+            params.append(upper_bound)
+            where += f" AND seq < ${len(params)}"
+        if kind is not None:
+            params.append(kind)
+            where += f" AND kind = ${len(params)}"
+        if channels:
+            # #1613: index-backed channel filter. ``channel = ANY($n)`` (OR
+            # over the requested channels) hits the partial index
+            # ``events_session_channel_seq_idx ON events(session_id, channel,
+            # seq) WHERE channel IS NOT NULL`` (migration 0022) — sargable, no
+            # scan. NULL-channel rows (lifecycle/span/switch_channel) are
+            # excluded by design: a channel-scoped LIST is message-row-only.
+            params.append(channels)
+            where += f" AND channel = ANY(${len(params)})"
+        if error_only:
+            where += " AND is_error IS TRUE"
+        params.append(limit)
+        return (
+            f"SELECT * FROM events WHERE {where} ORDER BY seq {order} LIMIT ${len(params)}",
+            params,
+        )
+
+    if chat_type is None:
+        sql, params = _build_query(after_seq, before)
+        rows = await conn.fetch(sql, *params)
+    else:
+        # #1613: ``chat_type`` is a pure function of the channel address
+        # (``chat_type_of``), not a column — so it is applied as a post-filter.
+        # To preserve LIMIT semantics across that filter, page forward (or
+        # backward) by ``seq`` until ``limit`` matching rows are collected or
+        # the log is exhausted. Each batch still rides the same index-backed
+        # WHERE; this only adds extra batches when most rows are filtered out.
+        collected: list[asyncpg.Record] = []
+        lo, hi = after_seq, before
+        while True:
+            sql, params = _build_query(lo, hi)
+            batch = await conn.fetch(sql, *params)
+            if not batch:
+                break
+            for r in batch:
+                if chat_type_of(r["channel"]) == chat_type:
+                    collected.append(r)
+                    if len(collected) >= limit:
+                        break
+            if len(collected) >= limit or len(batch) < limit:
+                break
+            # Advance the cursor past this batch's last seq (forward) or before
+            # its last seq (backward) to fetch the next page.
+            last_seq = int(batch[-1]["seq"])
+            if order == "ASC":
+                lo = last_seq
+            else:
+                hi = last_seq
+        rows = collected
     return [_row_to_event(r) for r in rows]
 
 
