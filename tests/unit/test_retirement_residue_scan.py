@@ -19,6 +19,8 @@ These tests pin two things:
 
 from __future__ import annotations
 
+import pytest
+
 from aios.retirements import Retirement, Surface
 from aios.retirements.residue_scan import (
     ResidueFinding,
@@ -185,7 +187,9 @@ def test_real_registry_builds_queries() -> None:
 # ── CLI opt-in gating (off-by-default no-ops without connecting) ─────────────
 
 
-def test_cli_off_by_default_noops(monkeypatch, capsys) -> None:
+def test_cli_off_by_default_noops(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     import json as _json
 
     from aios.retirements import residue_scan as rs
@@ -197,7 +201,9 @@ def test_cli_off_by_default_noops(monkeypatch, capsys) -> None:
     assert out == {"enabled": False, "findings": []}
 
 
-def test_cli_enabled_without_dsn_is_a_hard_error(monkeypatch) -> None:
+def test_cli_enabled_without_dsn_is_a_hard_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from aios.retirements import residue_scan as rs
 
     monkeypatch.setenv(rs.RESCAN_ENABLED_ENV, "1")
