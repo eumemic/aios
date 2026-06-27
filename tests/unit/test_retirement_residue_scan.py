@@ -73,9 +73,7 @@ def test_one_query_per_surface_and_token() -> None:
 
 def test_query_uses_surface_predicate_and_binds_token() -> None:
     q = next(
-        q
-        for q in iter_residue_queries((_ret(),))
-        if q.table == "agents" and q.token == "invoke"
+        q for q in iter_residue_queries((_ret(),)) if q.table == "agents" and q.token == "invoke"
     )
     assert isinstance(q, ResidueQuery)
     # The COUNT(*) wrapper selects rows the surface predicate matches.
@@ -98,9 +96,7 @@ def test_nullable_surface_is_null_guarded() -> None:
 
 def test_non_nullable_surface_is_not_null_guarded() -> None:
     q = next(
-        q
-        for q in iter_residue_queries((_ret(),))
-        if q.table == "agents" and q.token == "invoke"
+        q for q in iter_residue_queries((_ret(),)) if q.table == "agents" and q.token == "invoke"
     )
     assert "IS NOT NULL" not in q.sql
 

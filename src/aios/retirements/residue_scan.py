@@ -117,10 +117,7 @@ def iter_residue_queries(
         for surface in retirement.surfaces:
             guard = f"{surface.jsonb_col} IS NOT NULL AND " if surface.nullable else ""
             for token in retirement.tokens:
-                sql = (
-                    f"SELECT COUNT(*) FROM {surface.table} "
-                    f"WHERE {guard}{surface.predicate_sql}"
-                )
+                sql = f"SELECT COUNT(*) FROM {surface.table} WHERE {guard}{surface.predicate_sql}"
                 yield ResidueQuery(
                     table=surface.table,
                     column=surface.jsonb_col,

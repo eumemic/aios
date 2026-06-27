@@ -202,7 +202,10 @@ def resolve_rev_dates(
     """
 
     revs = {r.introduced_rev for r in registry}
-    return {rev: _git_landed_date(_migration_path_for_rev(rev, migrations_dir=migrations_dir)) for rev in revs}
+    return {
+        rev: _git_landed_date(_migration_path_for_rev(rev, migrations_dir=migrations_dir))
+        for rev in revs
+    }
 
 
 def _main(argv: list[str]) -> int:
