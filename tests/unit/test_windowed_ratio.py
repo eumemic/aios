@@ -29,10 +29,17 @@ class _FakeConn:
     """Minimal asyncpg.Connection stand-in.
 
     ``fetchval`` serves ``_latest_cumulative_tokens`` (total local tokens).
-    ``fetchrow`` serves ``model_token_ratio`` (the lifetime calibration
-    aggregate row) and the omission-complement aggregate, dispatched on
-    the SQL text.  ``fetch`` captures the bounded range scan's args so
-    tests can assert the computed ``drop_local``.
+    ``fetchrow`` serves the omission-complement aggregate.  ``fetch`` now
+    backs three queries, dispatched on SQL text (issue #1609):
+
+    * the per-class calibration scan (``model_token_class_ratios``) — we
+      return ``ratio_rows`` (empty => neutral all-1.0 fallback, the
+      backward-compat default these tests exercise);
+    * the retained-slate class-mass re-derivation (``_retained_class_mass``)
+      — returns ``mass_rows`` (empty => no composition signal, blend folds to
+      the coefficient mean = 1.0 under the neutral default);
+    * the bounded retained range scan — captured into ``fetch_calls`` so
+      tests can assert the computed ``drop_local``.
     """
 
     def __init__(
@@ -42,13 +49,19 @@ class _FakeConn:
         ratio_n: int,
         ratio_mean: float,
         omission_row: dict[str, Any] | None = None,
+        ratio_rows: list[Any] | None = None,
+        mass_rows: list[Any] | None = None,
     ) -> None:
         self.total_local = total_local
+        # Retained for signature back-compat; the per-class fit no longer
+        # consumes a single aggregate row.
         self.ratio_row = {"n": ratio_n, "mean_ratio": ratio_mean}
         self.omission_row = omission_row or {
             "began_at": _BEGAN_AT,
             "omitted_messages": 7,
         }
+        self.ratio_rows = ratio_rows or []
+        self.mass_rows = mass_rows or []
         self.fetch_calls: list[tuple[Any, ...]] = []
         self.omission_calls: list[tuple[Any, ...]] = []
 
@@ -61,7 +74,11 @@ class _FakeConn:
             return self.omission_row
         return self.ratio_row
 
-    async def fetch(self, _sql: str, *args: Any) -> list[Any]:
+    async def fetch(self, sql: str, *args: Any) -> list[Any]:
+        if "model_request_end" in sql:
+            return self.ratio_rows
+        if "WITH deltas" in sql:
+            return self.mass_rows
         self.fetch_calls.append(args)
         return []
 
@@ -113,8 +130,8 @@ async def test_insufficient_ratio_1_matches_today() -> None:
     """
     account_id = "acc_test_stub"  # PR 3 scaffolding
     conn = _FakeConn(total_local=3_000, ratio_n=4, ratio_mean=0.0)
-    # window_min=1000, window_max=2000 → chunk size 1000.
-    # total=3000 → overshoot 1000 → drop 1000 (one chunk).
+    # window_min=1000, window_max=2000 -> chunk size 1000.
+    # total=3000 -> overshoot 1000 -> drop 1000 (one chunk).
     await queries.read_windowed_events(
         conn,
         "sess_x",
@@ -131,19 +148,24 @@ async def test_insufficient_ratio_1_matches_today() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ratio_above_1_drops_more() -> None:
-    """ratio=1.5 inflates total_effective so the drop boundary crosses a
-    snap, and the returned drop_local ceil-divides back.
+async def test_ratio_above_1_drops_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A calibrated R_eff > 1 inflates total_effective so the drop boundary
+    crosses a snap, and the returned drop_local ceil-divides back.
 
-    total_local=1500, ratio≈1.5 → total_effective≈2250.
+    With a uniform calibrated coefficient of 1.5 the blend is R_eff=1.5 for
+    any composition, and the calibrated safety margin (x1.3) applies. So:
+
+    total_local=1500, eff factor = 1.5*1.3 = 1.95 -> total_effective≈2925.
     window_min=1000, window_max=2000, chunk=1000.
-    overshoot=250 → drop_effective=1000.
-    drop_local = ceil(1000 / ratio) = 667.
-
-    Uses ratio_n=100 so the sigma_prior bucket (0.004 at n=100) is tight
-    enough to quantize raw=1.5 to exactly 1.5.
+    overshoot=925 -> drop_effective=1000 (one chunk).
+    drop_local = ceil(1000 / 1.95) = 513.
     """
-    account_id = "acc_test_stub"  # PR 3 scaffolding
+    account_id = "acc_test_stub"
+    monkeypatch.setattr(
+        queries,
+        "model_token_class_ratios",
+        AsyncMock(return_value={c: 1.5 for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")}),
+    )
     conn = _FakeConn(total_local=1_500, ratio_n=100, ratio_mean=1.5)
     await queries.read_windowed_events(
         conn,
@@ -155,13 +177,21 @@ async def test_ratio_above_1_drops_more() -> None:
         account_id=account_id,
     )
     _session_id, drop_local, *_ = conn.fetch_calls[-1]
-    assert drop_local == 667
+    import math
+
+    assert drop_local == math.ceil(1_000 / (1.5 * 1.3))
 
 
 @pytest.mark.asyncio
-async def test_ratio_below_1_drops_fewer() -> None:
-    """ratio=0.5 deflates total_effective below window_max → no drop."""
-    account_id = "acc_test_stub"  # PR 3 scaffolding
+async def test_ratio_below_1_drops_fewer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A calibrated R_eff=0.5 deflates total_effective below window_max -> no
+    drop, even after the x1.3 calibrated safety margin (0.5*1.3=0.65)."""
+    account_id = "acc_test_stub"
+    monkeypatch.setattr(
+        queries,
+        "model_token_class_ratios",
+        AsyncMock(return_value={c: 0.5 for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")}),
+    )
     conn = _FakeConn(total_local=3_000, ratio_n=5, ratio_mean=0.5)
     result = await queries.read_windowed_events(
         conn,
@@ -172,7 +202,7 @@ async def test_ratio_below_1_drops_fewer() -> None:
         overhead_local=0,
         account_id=account_id,
     )
-    # total_effective = 1500 < 2000 → drop_effective = 0 → fallback.
+    # total_effective = round(3000*0.5*1.3) = 1950 < 2000 -> no drop -> fallback.
     assert result.events == _FALLBACK_SENTINEL
     assert result.omission is None
     assert not conn.fetch_calls
@@ -207,7 +237,7 @@ async def test_windowed_read_reports_omission() -> None:
 @pytest.mark.asyncio
 async def test_empty_complement_reports_no_omission() -> None:
     """drop > 0 but the boundary excludes nothing (oversized first event
-    straddling it) → omission is None, not a zero-count marker."""
+    straddling it) -> omission is None, not a zero-count marker."""
     account_id = "acc_test_stub"
     conn = _FakeConn(
         total_local=3_000,
@@ -237,11 +267,14 @@ async def test_ceil_div_never_overshoots_window(
     total_local = 10_000
     window_min, window_max = 3_000, 5_000
 
+    # A uniform calibrated coefficient makes R_eff == ratio for any
+    # composition; the windower then applies the x1.3 calibrated margin.
     monkeypatch.setattr(
         queries,
-        "model_token_ratio",
-        AsyncMock(return_value=ratio),
+        "model_token_class_ratios",
+        AsyncMock(return_value={c: ratio for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")}),
     )
+    eff = ratio * 1.3  # calibrated safety margin
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=total_local)
     conn.fetchrow = AsyncMock(  # serves the omission-complement aggregate
@@ -250,7 +283,12 @@ async def test_ceil_div_never_overshoots_window(
 
     captured: dict[str, int] = {}
 
-    async def _fetch(_sql: str, *args: Any) -> list[Any]:
+    async def _fetch(sql: str, *args: Any) -> list[Any]:
+        # Per-class calibration scan and retained-mass re-derivation also
+        # route through fetch — only the bounded retained scan carries the
+        # drop boundary as its second positional arg.
+        if "model_request_end" in sql or "WITH deltas" in sql:
+            return []
         captured["drop_local"] = args[1]
         return []
 
@@ -266,7 +304,9 @@ async def test_ceil_div_never_overshoots_window(
     )
     drop_local = captured["drop_local"]
     remaining_local = total_local - drop_local
-    remaining_effective = remaining_local * ratio
+    # Post-drop must fit under window_max in the *budgeted* effective space
+    # (incl. the safety margin) — the strong form of the cap guarantee.
+    remaining_effective = remaining_local * eff
     assert remaining_effective <= window_max, (
         f"post-drop {remaining_effective} exceeds window_max={window_max}"
     )
@@ -297,13 +337,19 @@ async def test_overhead_clamp_never_drops_entire_window(
     """
     account_id = "acc_test_stub"
     ratio = 1.2
-    total_local = 534
-    window_min, window_max, overhead_local = 1_000, 2_000, 1_400
-    # overhead_effective = round(1400*1.2) = 1680 → events_window_max = 320,
-    # events_window_min = max(0, 1000-1680) = 0; total_effective =
-    # round(534*1.2) = 641 > 320 → drop_effective = tokens_to_drop(641,
-    # min=0, max=320) = 640 → ceil(640/1.2) = 534 == total (drops everything).
-    monkeypatch.setattr(queries, "model_token_ratio", AsyncMock(return_value=ratio))
+    total_local = 483
+    window_min, window_max, overhead_local = 1_000, 2_000, 800
+    # A uniform calibrated coef => R_eff=1.2; calibrated safety margin x1.3 =>
+    # eff = 1.56. overhead_effective = round(800*1.56) = 1248 ->
+    # events_window_max = 752, events_window_min = max(0, 1000-1248) = 0.
+    # total_effective = round(483*1.56) = 753 > 752 -> drop_effective =
+    # tokens_to_drop(753, min=0, max=752) = 752 -> ceil(752/1.56) = 483 ==
+    # total: without the clamp the snap would drop the *entire* window.
+    monkeypatch.setattr(
+        queries,
+        "model_token_class_ratios",
+        AsyncMock(return_value={c: ratio for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")}),
+    )
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=total_local)
     conn.fetchrow = AsyncMock(  # omission complement matches every row here
@@ -311,7 +357,9 @@ async def test_overhead_clamp_never_drops_entire_window(
     )
     captured: dict[str, int] = {}
 
-    async def _fetch(_sql: str, *args: Any) -> list[Any]:
+    async def _fetch(sql: str, *args: Any) -> list[Any]:
+        if "model_request_end" in sql or "WITH deltas" in sql:
+            return []
         captured["drop_local"] = args[1]
         return []
 

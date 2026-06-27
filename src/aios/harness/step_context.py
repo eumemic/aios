@@ -26,7 +26,7 @@ work to honor the "byte-identical" promise.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aios.harness._text import join_blocks
 from aios.harness.context import (
@@ -140,25 +140,57 @@ class StepPrelude:
     obligations_block_upper_bound_local: int
 
 
-def prelude_overhead_local(prelude: StepPrelude) -> int:
-    """Token cost the composer adds on top of the windowed events, in
-    local (``approx_tokens``) units — the ``overhead_local`` argument to
-    ``read_windowed_events``.
+class PreludeOverheadSplit(NamedTuple):
+    """The step's overhead-local cost split by content class (#1609).
 
-    System prompt + tool schemas, plus the reserved upper bounds for the
-    post-windowing additions: the channels tail block, the obligations
-    tail block (#1413), and the omission marker (#738). All are reserved
-    unconditionally — any may not render, but the budget must hold when
-    they do.
+    The windower weights ``system`` and ``tools`` overhead by their own
+    per-class coefficients (the system prompt and tool schemas price
+    differently against the provider tokenizer), so the overhead is no
+    longer a single opaque scalar.  ``reserves`` is the post-windowing
+    reserved upper bounds (channels tail, obligations tail, omission
+    marker) — conservative text-shaped padding, weighted as ``text``.
+
+    ``total`` reproduces the pre-#1609 single ``overhead_local`` integer
+    (the three fields summed), so any caller that only needs the scalar
+    can read ``.total`` and stay byte-identical.
     """
-    return (
-        approx_tokens(
-            [{"role": "system", "content": prelude.system_prompt}],
-            tools=prelude.tools,
-        )
-        + prelude.tail_block_upper_bound_local
+
+    system: int
+    tools: int
+    reserves: int
+
+    @property
+    def total(self) -> int:
+        return self.system + self.tools + self.reserves
+
+
+def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
+    """Token cost the composer adds on top of the windowed events, split
+    by content class, in local (``approx_tokens``) units — the
+    ``overhead_local`` argument to ``read_windowed_events`` (#1609).
+
+    System prompt + tool schemas (each weighted separately by the
+    windower), plus the reserved upper bounds for the post-windowing
+    additions: the channels tail block, the obligations tail block
+    (#1413), and the omission marker (#738). All reserves are reserved
+    unconditionally — any may not render, but the budget must hold when
+    they do — and are accounted as ``text``-class padding.
+
+    Returns a :class:`PreludeOverheadSplit`; ``.total`` reproduces the
+    old single scalar exactly (system+tools costed together previously,
+    now costed separately and summed — same payload, same total).
+    """
+    system_local = approx_tokens([{"role": "system", "content": prelude.system_prompt}])
+    tools_local = approx_tokens([], tools=prelude.tools) if prelude.tools else 0
+    reserves_local = (
+        prelude.tail_block_upper_bound_local
         + prelude.obligations_block_upper_bound_local
         + OMISSION_MARKER_UPPER_BOUND_LOCAL
+    )
+    return PreludeOverheadSplit(
+        system=system_local,
+        tools=tools_local,
+        reserves=reserves_local,
     )
 
 
