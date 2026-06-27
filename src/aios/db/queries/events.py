@@ -410,9 +410,7 @@ async def model_token_ratio(
     :func:`model_token_class_ratios` + :func:`blended_r_eff`; this exists
     so legacy scalar call sites keep compiling during the #1609 rollout.
     """
-    ratios = await model_token_class_ratios(
-        conn, model, account_id=account_id, k_bucket=k_bucket
-    )
+    ratios = await model_token_class_ratios(conn, model, account_id=account_id, k_bucket=k_bucket)
     mean = sum(ratios.values()) / len(ratios)
     return max(mean, _MODEL_TOKEN_RATIO_MIN)
 

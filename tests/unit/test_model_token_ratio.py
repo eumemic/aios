@@ -51,9 +51,7 @@ def _mock_conn(rows: list[dict[str, Any]]) -> MagicMock:
     return conn
 
 
-def _linear_rows(
-    coefs: dict[str, float], *, n: int, base: int = 100
-) -> list[dict[str, Any]]:
+def _linear_rows(coefs: dict[str, float], *, n: int, base: int = 100) -> list[dict[str, Any]]:
     """Calibration rows where ``input_tokens`` is EXACTLY ``Σ coef_c·local_c``.
 
     The ridge fit (prior 1.0, small λ) should recover ``coefs`` closely.
@@ -119,7 +117,9 @@ class TestModelTokenClassRatios:
     @pytest.mark.asyncio
     async def test_passes_model_to_query(self) -> None:
         conn = _mock_conn([])
-        await model_token_class_ratios(conn, "anthropic/claude-sonnet-4-6", account_id="acc_test_stub")
+        await model_token_class_ratios(
+            conn, "anthropic/claude-sonnet-4-6", account_id="acc_test_stub"
+        )
         args = conn.fetch.await_args
         assert args is not None
         assert args.args[1] == "anthropic/claude-sonnet-4-6"
@@ -148,13 +148,17 @@ class TestModelTokenClassRatios:
     async def test_invalid_bucket_rejected(self) -> None:
         conn = _mock_conn(_linear_rows({"text": 2.0, "tool_result": 1.4, "thinking": 3.0}, n=20))
         with pytest.raises(ValueError, match="k_bucket must be positive"):
-            await model_token_class_ratios(conn, "model-x", k_bucket=0.0, account_id="acc_test_stub")
+            await model_token_class_ratios(
+                conn, "model-x", k_bucket=0.0, account_id="acc_test_stub"
+            )
 
     @pytest.mark.asyncio
     async def test_calibrated_ratios_are_cached(self) -> None:
         conn = _mock_conn(_linear_rows({"text": 2.0, "tool_result": 1.4, "thinking": 3.0}, n=20))
         first = await model_token_class_ratios(conn, "model-cache", account_id="acc_test_stub")
-        conn.fetch = AsyncMock(return_value=_linear_rows({"text": 5.0, "tool_result": 5.0, "thinking": 5.0}, n=20))
+        conn.fetch = AsyncMock(
+            return_value=_linear_rows({"text": 5.0, "tool_result": 5.0, "thinking": 5.0}, n=20)
+        )
         second = await model_token_class_ratios(conn, "model-cache", account_id="acc_test_stub")
         assert second == first, "expected cached reuse"
         conn.fetch.assert_not_awaited()
@@ -166,7 +170,9 @@ class TestModelTokenClassRatios:
         conn = _mock_conn(_linear_rows({"text": 2.0, "tool_result": 1.4, "thinking": 3.0}, n=2))
         first = await model_token_class_ratios(conn, "model-cold", account_id="acc_test_stub")
         assert first == {c: 1.0 for c in CONTENT_CLASSES}
-        conn.fetch = AsyncMock(return_value=_linear_rows({"text": 2.0, "tool_result": 1.4, "thinking": 3.0}, n=20))
+        conn.fetch = AsyncMock(
+            return_value=_linear_rows({"text": 2.0, "tool_result": 1.4, "thinking": 3.0}, n=20)
+        )
         second = await model_token_class_ratios(conn, "model-cold", account_id="acc_test_stub")
         assert second == first
         conn.fetch.assert_not_awaited()
@@ -213,7 +219,9 @@ class TestScalarShim:
     async def test_shim_neutral_below_threshold(self) -> None:
         conn = _mock_conn(_linear_rows({"text": 2.0, "tool_result": 1.4, "thinking": 3.0}, n=3))
         # All-neutral coefs ⇒ mean 1.0 (above the 0.5 clamp).
-        assert await model_token_ratio(conn, "model-x", account_id="acc_test_stub") == pytest.approx(1.0)
+        assert await model_token_ratio(
+            conn, "model-x", account_id="acc_test_stub"
+        ) == pytest.approx(1.0)
 
     @pytest.mark.asyncio
     async def test_shim_min_clamp(self) -> None:

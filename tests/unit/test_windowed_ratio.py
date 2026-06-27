@@ -164,7 +164,11 @@ async def test_ratio_above_1_drops_more(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(
         queries,
         "model_token_class_ratios",
-        AsyncMock(return_value={c: 1.5 for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")}),
+        AsyncMock(
+            return_value={
+                c: 1.5 for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")
+            }
+        ),
     )
     conn = _FakeConn(total_local=1_500, ratio_n=100, ratio_mean=1.5)
     await queries.read_windowed_events(
@@ -190,7 +194,11 @@ async def test_ratio_below_1_drops_fewer(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(
         queries,
         "model_token_class_ratios",
-        AsyncMock(return_value={c: 0.5 for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")}),
+        AsyncMock(
+            return_value={
+                c: 0.5 for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")
+            }
+        ),
     )
     conn = _FakeConn(total_local=3_000, ratio_n=5, ratio_mean=0.5)
     result = await queries.read_windowed_events(
@@ -272,7 +280,11 @@ async def test_ceil_div_never_overshoots_window(
     monkeypatch.setattr(
         queries,
         "model_token_class_ratios",
-        AsyncMock(return_value={c: ratio for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")}),
+        AsyncMock(
+            return_value={
+                c: ratio for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")
+            }
+        ),
     )
     eff = ratio * 1.3  # calibrated safety margin
     conn = MagicMock()
@@ -348,7 +360,11 @@ async def test_overhead_clamp_never_drops_entire_window(
     monkeypatch.setattr(
         queries,
         "model_token_class_ratios",
-        AsyncMock(return_value={c: ratio for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")}),
+        AsyncMock(
+            return_value={
+                c: ratio for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")
+            }
+        ),
     )
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=total_local)
