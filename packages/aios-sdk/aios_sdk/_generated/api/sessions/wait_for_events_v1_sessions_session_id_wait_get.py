@@ -7,6 +7,9 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
+from ...models.wait_for_events_v1_sessions_session_id_wait_get_chat_type_type_0 import (
+    WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0,
+)
 from ...models.wait_response import WaitResponse
 from ...types import UNSET, Response, Unset
 
@@ -16,6 +19,10 @@ def _get_kwargs(
     *,
     after: int | Unset = 0,
     timeout: int | Unset = 30,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: None
+    | Unset
+    | WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0 = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -27,6 +34,25 @@ def _get_kwargs(
     params["after"] = after
 
     params["timeout"] = timeout
+
+    json_channel: list[str] | None | Unset
+    if isinstance(channel, Unset):
+        json_channel = UNSET
+    elif isinstance(channel, list):
+        json_channel = channel
+
+    else:
+        json_channel = channel
+    params["channel"] = json_channel
+
+    json_chat_type: None | str | Unset
+    if isinstance(chat_type, Unset):
+        json_chat_type = UNSET
+    elif isinstance(chat_type, WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0):
+        json_chat_type = chat_type.value
+    else:
+        json_chat_type = chat_type
+    params["chat_type"] = json_chat_type
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -78,6 +104,10 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
     timeout: int | Unset = 30,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: None
+    | Unset
+    | WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0 = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | WaitResponse]:
     """Wait For Events
@@ -89,6 +119,9 @@ def sync_detailed(
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
 
+    Channel filter (#1613): ``?channel=C`` (repeatable, OR) / ``?chat_type=``
+    scope the returned events the same way as the SSE/LIST twins.
+
     Pass the response's ``next_after`` as ``?after=`` on the next call to
     resume from where you left off. (The query param was previously named
     ``after_seq``; see issue #389.)
@@ -97,6 +130,8 @@ def sync_detailed(
         session_id (str):
         after (int | Unset):  Default: 0.
         timeout (int | Unset):  Default: 30.
+        channel (list[str] | None | Unset):
+        chat_type (None | Unset | WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0):
         authorization (None | str | Unset):
 
     Raises:
@@ -111,6 +146,8 @@ def sync_detailed(
         session_id=session_id,
         after=after,
         timeout=timeout,
+        channel=channel,
+        chat_type=chat_type,
         authorization=authorization,
     )
 
@@ -127,6 +164,10 @@ def sync(
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
     timeout: int | Unset = 30,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: None
+    | Unset
+    | WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0 = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | WaitResponse | None:
     """Wait For Events
@@ -138,6 +179,9 @@ def sync(
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
 
+    Channel filter (#1613): ``?channel=C`` (repeatable, OR) / ``?chat_type=``
+    scope the returned events the same way as the SSE/LIST twins.
+
     Pass the response's ``next_after`` as ``?after=`` on the next call to
     resume from where you left off. (The query param was previously named
     ``after_seq``; see issue #389.)
@@ -146,6 +190,8 @@ def sync(
         session_id (str):
         after (int | Unset):  Default: 0.
         timeout (int | Unset):  Default: 30.
+        channel (list[str] | None | Unset):
+        chat_type (None | Unset | WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0):
         authorization (None | str | Unset):
 
     Raises:
@@ -161,6 +207,8 @@ def sync(
         client=client,
         after=after,
         timeout=timeout,
+        channel=channel,
+        chat_type=chat_type,
         authorization=authorization,
     ).parsed
 
@@ -171,6 +219,10 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
     timeout: int | Unset = 30,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: None
+    | Unset
+    | WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0 = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | WaitResponse]:
     """Wait For Events
@@ -182,6 +234,9 @@ async def asyncio_detailed(
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
 
+    Channel filter (#1613): ``?channel=C`` (repeatable, OR) / ``?chat_type=``
+    scope the returned events the same way as the SSE/LIST twins.
+
     Pass the response's ``next_after`` as ``?after=`` on the next call to
     resume from where you left off. (The query param was previously named
     ``after_seq``; see issue #389.)
@@ -190,6 +245,8 @@ async def asyncio_detailed(
         session_id (str):
         after (int | Unset):  Default: 0.
         timeout (int | Unset):  Default: 30.
+        channel (list[str] | None | Unset):
+        chat_type (None | Unset | WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0):
         authorization (None | str | Unset):
 
     Raises:
@@ -204,6 +261,8 @@ async def asyncio_detailed(
         session_id=session_id,
         after=after,
         timeout=timeout,
+        channel=channel,
+        chat_type=chat_type,
         authorization=authorization,
     )
 
@@ -218,6 +277,10 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     after: int | Unset = 0,
     timeout: int | Unset = 30,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: None
+    | Unset
+    | WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0 = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | WaitResponse | None:
     """Wait For Events
@@ -229,6 +292,9 @@ async def asyncio(
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
 
+    Channel filter (#1613): ``?channel=C`` (repeatable, OR) / ``?chat_type=``
+    scope the returned events the same way as the SSE/LIST twins.
+
     Pass the response's ``next_after`` as ``?after=`` on the next call to
     resume from where you left off. (The query param was previously named
     ``after_seq``; see issue #389.)
@@ -237,6 +303,8 @@ async def asyncio(
         session_id (str):
         after (int | Unset):  Default: 0.
         timeout (int | Unset):  Default: 30.
+        channel (list[str] | None | Unset):
+        chat_type (None | Unset | WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0):
         authorization (None | str | Unset):
 
     Raises:
@@ -253,6 +321,8 @@ async def asyncio(
             client=client,
             after=after,
             timeout=timeout,
+            channel=channel,
+            chat_type=chat_type,
             authorization=authorization,
         )
     ).parsed

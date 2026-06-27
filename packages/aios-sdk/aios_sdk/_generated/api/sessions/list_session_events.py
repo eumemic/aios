@@ -8,6 +8,9 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
 from ...models.list_response_event import ListResponseEvent
+from ...models.list_session_events_chat_type_type_0 import (
+    ListSessionEventsChatTypeType0,
+)
 from ...models.list_session_events_dir import ListSessionEventsDir
 from ...models.list_session_events_kind_type_0 import ListSessionEventsKindType0
 from ...types import UNSET, Response, Unset
@@ -20,6 +23,8 @@ def _get_kwargs(
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: ListSessionEventsChatTypeType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
@@ -57,6 +62,25 @@ def _get_kwargs(
     else:
         json_error_only = error_only
     params["error_only"] = json_error_only
+
+    json_channel: list[str] | None | Unset
+    if isinstance(channel, Unset):
+        json_channel = UNSET
+    elif isinstance(channel, list):
+        json_channel = channel
+
+    else:
+        json_channel = channel
+    params["channel"] = json_channel
+
+    json_chat_type: None | str | Unset
+    if isinstance(chat_type, Unset):
+        json_chat_type = UNSET
+    elif isinstance(chat_type, ListSessionEventsChatTypeType0):
+        json_chat_type = chat_type.value
+    else:
+        json_chat_type = chat_type
+    params["chat_type"] = json_chat_type
 
     json_limit: int | None | Unset
     if isinstance(limit, Unset):
@@ -117,6 +141,8 @@ def sync_detailed(
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: ListSessionEventsChatTypeType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
@@ -125,10 +151,17 @@ def sync_detailed(
      List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Channel/chat_type filter (#1613): ``?channel=C`` returns ONLY events whose
+    resolved ``channel == C`` (including the outbound tool-RESULT rows for that
+    channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
+    the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
+    response includes ``channel`` + ``orig_channel`` on each item.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
     — it only means no events match this page (e.g. a forward read past the
@@ -146,6 +179,8 @@ def sync_detailed(
         dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
         error_only (bool | None | Unset):
+        channel (list[str] | None | Unset):
+        chat_type (ListSessionEventsChatTypeType0 | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -163,6 +198,8 @@ def sync_detailed(
         dir_=dir_,
         kind=kind,
         error_only=error_only,
+        channel=channel,
+        chat_type=chat_type,
         limit=limit,
         authorization=authorization,
     )
@@ -182,6 +219,8 @@ def sync(
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: ListSessionEventsChatTypeType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
@@ -190,10 +229,17 @@ def sync(
      List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Channel/chat_type filter (#1613): ``?channel=C`` returns ONLY events whose
+    resolved ``channel == C`` (including the outbound tool-RESULT rows for that
+    channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
+    the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
+    response includes ``channel`` + ``orig_channel`` on each item.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
     — it only means no events match this page (e.g. a forward read past the
@@ -211,6 +257,8 @@ def sync(
         dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
         error_only (bool | None | Unset):
+        channel (list[str] | None | Unset):
+        chat_type (ListSessionEventsChatTypeType0 | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -229,6 +277,8 @@ def sync(
         dir_=dir_,
         kind=kind,
         error_only=error_only,
+        channel=channel,
+        chat_type=chat_type,
         limit=limit,
         authorization=authorization,
     ).parsed
@@ -242,6 +292,8 @@ async def asyncio_detailed(
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: ListSessionEventsChatTypeType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseEvent]:
@@ -250,10 +302,17 @@ async def asyncio_detailed(
      List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Channel/chat_type filter (#1613): ``?channel=C`` returns ONLY events whose
+    resolved ``channel == C`` (including the outbound tool-RESULT rows for that
+    channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
+    the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
+    response includes ``channel`` + ``orig_channel`` on each item.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
     — it only means no events match this page (e.g. a forward read past the
@@ -271,6 +330,8 @@ async def asyncio_detailed(
         dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
         error_only (bool | None | Unset):
+        channel (list[str] | None | Unset):
+        chat_type (ListSessionEventsChatTypeType0 | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -288,6 +349,8 @@ async def asyncio_detailed(
         dir_=dir_,
         kind=kind,
         error_only=error_only,
+        channel=channel,
+        chat_type=chat_type,
         limit=limit,
         authorization=authorization,
     )
@@ -305,6 +368,8 @@ async def asyncio(
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
+    channel: list[str] | None | Unset = UNSET,
+    chat_type: ListSessionEventsChatTypeType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseEvent | None:
@@ -313,10 +378,17 @@ async def asyncio(
      List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Channel/chat_type filter (#1613): ``?channel=C`` returns ONLY events whose
+    resolved ``channel == C`` (including the outbound tool-RESULT rows for that
+    channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
+    the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
+    response includes ``channel`` + ``orig_channel`` on each item.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
     — it only means no events match this page (e.g. a forward read past the
@@ -334,6 +406,8 @@ async def asyncio(
         dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
         error_only (bool | None | Unset):
+        channel (list[str] | None | Unset):
+        chat_type (ListSessionEventsChatTypeType0 | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -353,6 +427,8 @@ async def asyncio(
             dir_=dir_,
             kind=kind,
             error_only=error_only,
+            channel=channel,
+            chat_type=chat_type,
             limit=limit,
             authorization=authorization,
         )
