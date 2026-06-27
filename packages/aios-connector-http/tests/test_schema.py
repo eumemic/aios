@@ -123,6 +123,41 @@ class TestListTypes:
         prop = spec["input_schema"]["properties"]["files"]
         assert prop["type"] == "array"
         assert prop["items"]["type"] == "string"
+        assert "/workspace/" in prop["items"]["description"]
+        assert "cp into /workspace/" in prop["items"]["description"]
+
+    def test_scalar_sandbox_path_carries_marker_description(self) -> None:
+        class C(_DummyForBindings):
+            @tool()
+            async def t(self, *, f: SandboxPath) -> int:
+                return 1
+
+        spec = derive_tool_spec("t", C().t)
+        prop = spec["input_schema"]["properties"]["f"]
+        assert prop["type"] == "string"
+        assert "/workspace/" in prop["description"]
+        assert "/mnt/attachments/" in prop["description"]
+        assert "cp into /workspace/" in prop["description"]
+
+    def test_sandbox_path_docstring_merges_with_marker(self) -> None:
+        """An author ``Args:`` docstring on a ``SandboxPath`` param must be
+        preserved and the marker remedy appended, not clobbered.
+        """
+
+        class C(_DummyForBindings):
+            @tool()
+            async def t(self, *, f: SandboxPath) -> int:
+                """Do a thing.
+
+                Args:
+                    f: Author supplied hint here.
+                """
+                return 1
+
+        spec = derive_tool_spec("t", C().t)
+        prop = spec["input_schema"]["properties"]["f"]
+        assert "Author supplied hint here." in prop["description"]
+        assert "cp into /workspace/" in prop["description"]
 
 
 class TestRequiredAndDefaults:

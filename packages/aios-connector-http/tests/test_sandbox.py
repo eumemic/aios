@@ -327,6 +327,8 @@ class TestDispatchSandboxPathResolution:
         assert result["is_error"] is True
         body = json.loads(result["content"])
         assert "outside" in body["error"]
+        assert "/tmp" in body["error"]
+        assert "Copy the file into /workspace/" in body["error"]
 
     async def test_workspace_path_missing_surfaces_error(self, consumer: _PathConsumer) -> None:
         """Without ``workspace_path`` in the call dict, the resolver fails
