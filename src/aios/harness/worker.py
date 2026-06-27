@@ -43,6 +43,7 @@ from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.procrastinate_app import app as procrastinate_app
+from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
 from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
 from aios.harness.sweep import (
     reap_stalled_jobs,
@@ -390,6 +391,19 @@ async def worker_main() -> None:
         )
         _supervise(workspace_reaper_task, latch=supervised_latch, fatal=supervised_failure)
 
+        # Start the reclaimable-ephemera prune sweep (T6 #1461): age-based GC
+        # of terminal+archived runs (and their WfRunEvent journals) plus
+        # archived agent/skill/workflow definitions no live session/run pins —
+        # the unbounded DB-row growth the never-prune-anything regime left
+        # unaddressed. Immediate first sweep at boot, then periodic; honours
+        # the ``reclaimable_prune_enabled`` kill-switch. NEVER touches memory,
+        # referenced history, live-pinned versions, or accounts (the sacred set).
+        reclaimable_prune_task = asyncio.create_task(
+            _reclaimable_prune_loop(pool),
+            name="reclaimable_prune",
+        )
+        _supervise(reclaimable_prune_task, latch=supervised_latch, fatal=supervised_failure)
+
         # Start periodic sweep (every 30s).
         sweep_task = asyncio.create_task(
             _periodic_sweep(pool, inflight_tool_registry, interval=30),
@@ -677,6 +691,28 @@ async def _workspace_reaper_loop(pool: asyncpg.Pool[Any]) -> None:
                 )
         except Exception:
             log.exception("workspace_reaper.tick_failed")
+
+
+async def _reclaimable_prune_loop(pool: asyncpg.Pool[Any]) -> None:
+    """Background loop for the reclaimable-ephemera prune sweep (T6 #1461).
+
+    Same shape as the reaper loops: try/except INSIDE the loop so one DB hiccup
+    never silently disables the prune for the worker's lifetime, immediate first
+    sweep at boot, then every ``reclaimable_prune_interval_seconds``.
+    ``sweep_reclaimable_ephemera`` itself honours the ``reclaimable_prune_enabled``
+    kill-switch and logs what it reclaimed.
+    """
+    log = get_logger("aios.worker.reclaimable_prune")
+    interval = get_settings().reclaimable_prune_interval_seconds
+    first = True
+    while True:
+        try:
+            if not first:
+                await asyncio.sleep(interval)
+            first = False
+            await sweep_reclaimable_ephemera(pool)
+        except Exception:
+            log.exception("reclaimable_prune.tick_failed")
 
 
 async def _run_interrupt_listener(

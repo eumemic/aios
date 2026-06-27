@@ -498,6 +498,12 @@ from .memory_stores import (  # noqa: E402
     update_memory_with_version,
     update_session_github_repo_blob,
 )
+from .prune import (  # noqa: E402
+    prune_archived_runs,
+    prune_unpinned_archived_agents,
+    prune_unpinned_archived_skills,
+    prune_unpinned_archived_workflows,
+)
 from .sandboxes import (  # noqa: E402
     gc_snapshot_session_states,
     unscoped_clear_session_snapshot,
@@ -879,7 +885,11 @@ __all__ = [
     "outcome_from_jsonb",
     "outcome_to_jsonb",
     "precompute_event_append",
+    "prune_archived_runs",
     "prune_trigger_runs",
+    "prune_unpinned_archived_agents",
+    "prune_unpinned_archived_skills",
+    "prune_unpinned_archived_workflows",
     "read_events",
     "read_message_events",
     "read_request_response",
