@@ -14,6 +14,8 @@ gate. These tests pin the #1574 acceptance:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from pydantic import ValidationError
 
@@ -24,7 +26,7 @@ from aios.retirements import registry as reg
 
 
 @pytest.fixture(autouse=True)
-def _clear_telemetry() -> None:
+def _clear_telemetry() -> Iterator[None]:
     telemetry.reset()
     yield
     telemetry.reset()
