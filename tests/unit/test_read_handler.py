@@ -190,3 +190,37 @@ class TestErrorPath:
             f"pipe exit code; without it, missing files silently return empty "
             f"content. Got: {cmd!r}"
         )
+
+
+class TestReadDescriptionDocumentsImages:
+    """The tool's description + path param are the model's only capability
+    surface. The handler inlines sandbox-local images into the model's visual
+    context (``_read_image``), but issue #1564 documents a live incident where
+    an agent never tried because the description advertised only text. These
+    tests pin the image capability into the description so it stays
+    discoverable.
+    """
+
+    def test_description_documents_image_inlining(self) -> None:
+        from aios.tools.read import READ_DESCRIPTION
+
+        desc = READ_DESCRIPTION.lower()
+        assert "image" in desc, (
+            "READ_DESCRIPTION must mention images so agents can discover that "
+            "read inlines sandbox images into the model's visual context."
+        )
+        # The supported formats should be named so the model knows what works.
+        for fmt in ("png", "jpeg", "gif", "webp"):
+            assert fmt in desc, f"READ_DESCRIPTION should name the {fmt} image format"
+        # Vision-gating and the inline size cap are the two operational caveats.
+        assert "vision" in desc
+        assert "3.75" in desc or "mib" in desc
+
+    def test_path_param_description_mentions_images(self) -> None:
+        from aios.tools.read import READ_PARAMETERS_SCHEMA
+
+        path_desc = READ_PARAMETERS_SCHEMA["properties"]["path"]["description"].lower()
+        assert "image" in path_desc, (
+            "The path param description should note that an image path returns "
+            "the image into the model's visual context."
+        )
