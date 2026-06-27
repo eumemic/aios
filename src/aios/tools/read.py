@@ -55,14 +55,21 @@ class ReadArgumentError(AiosError):
 
 
 READ_DESCRIPTION = (
-    "Read a text file inside the session's sandbox. Returns content "
-    "prefixed with 1-indexed line numbers in `LINE_NUM<TAB>CONTENT` "
+    "Read a file inside the session's sandbox. For text files, returns "
+    "content prefixed with 1-indexed line numbers in `LINE_NUM<TAB>CONTENT` "
     "format. Use `offset` and `limit` to page through large files — "
     "`offset` is a 1-indexed line number to start from (default 1), "
     "`limit` is the max number of lines to return (default 2000). "
     "Paths may be absolute or relative to /workspace. Prefer this "
     "over `cat`/`head`/`tail` via the bash tool when you want "
-    "structured line-numbered output; use bash for one-off inspection."
+    "structured line-numbered output; use bash for one-off inspection. "
+    "For images (PNG/JPEG/GIF/WEBP), reading the file inlines the image "
+    "into your visual context so you can actually see it — use this to "
+    "view screenshots and other sandbox images directly (no need to "
+    "describe or measure them indirectly). This works when the bound "
+    "model supports vision and the file fits the inline cap (~3.75 MiB); "
+    "a larger image returns an explanatory text result instead of the "
+    "pixels, so capture at viewport size or downscale/JPEG to fit."
 )
 
 READ_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -70,7 +77,12 @@ READ_PARAMETERS_SCHEMA: dict[str, Any] = {
     "properties": {
         "path": {
             "type": "string",
-            "description": "Path to the file. Absolute or relative to /workspace.",
+            "description": (
+                "Path to the file. Absolute or relative to /workspace. An "
+                "image path (PNG/JPEG/GIF/WEBP) returns the image into your "
+                "visual context instead of text (vision-capable models, "
+                "images up to ~3.75 MiB)."
+            ),
         },
         "offset": {
             "type": "integer",
