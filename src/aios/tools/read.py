@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import os
 import shlex
+from dataclasses import dataclass
 from typing import Any
 
 from aios.config import get_settings
@@ -223,13 +224,25 @@ async def _read_image(
             return ToolResult(content=f"read failed: {err}", is_error=True)
         size = len(data)
     else:
-        result = await _stat_and_read_via_exec(handle, path, exec_timeout=exec_timeout)
-        if result is None:
-            return ToolResult(
-                content=f"read failed: file not readable inside sandbox: {path}",
-                is_error=True,
-            )
-        data, size = result
+        exec_result = await _stat_and_read_via_exec(handle, path, exec_timeout=exec_timeout)
+        match exec_result:
+            case _ExecImageOk(data=d, size=s):
+                data, size = d, s
+            case _ExecImageTruncated():
+                cap = get_settings().bash_max_output_bytes
+                return ToolResult(
+                    content=(
+                        f"Image at {path} is too large to read through the sandbox: "
+                        f"its base64 transfer exceeded the {cap}-byte exec output cap. "
+                        f"Stage it under /workspace, or process it in place with another tool."
+                    ),
+                    is_error=True,
+                )
+            case _ExecImageFailed(detail=detail):
+                return ToolResult(
+                    content=f"read failed inside sandbox: {path}: {detail}",
+                    is_error=True,
+                )
 
     if not can_inline_image(model=model, content_type=mime, size_bytes=size):
         vision = "yes" if supports_vision(model) else "no"
@@ -282,14 +295,44 @@ async def _read_image(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ExecImageOk:
+    data: bytes
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecImageTruncated:
+    """base64 stream exceeded the exec output cap (exit 0, truncated host-side)."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecImageFailed:
+    """stat/base64 failed or its output was unparseable; carries the real stderr."""
+
+    detail: str
+
+
+type _ExecImageResult = _ExecImageOk | _ExecImageTruncated | _ExecImageFailed
+
+
 async def _stat_and_read_via_exec(
     handle: SandboxHandle, path: str, *, exec_timeout: int
-) -> tuple[bytes, int] | None:
-    """Fetch ``(bytes, size)`` for non-bind-mount image paths via one docker-exec.
+) -> _ExecImageResult:
+    """Fetch image bytes for non-bind-mount paths via one docker-exec.
 
-    Returns ``None`` on any read failure (missing path, exec error,
-    unparseable size).  Combines stat + base64 into a single shell so
-    we don't pay two docker-exec round-trips.
+    Returns a kind-tagged :data:`_ExecImageResult` so the caller can render
+    each failure mode truthfully:
+
+    * :class:`_ExecImageOk` — bytes + size read successfully.
+    * :class:`_ExecImageTruncated` — the base64 stream exceeded the exec
+      output cap (host-side truncation, exit 0); the file is readable but
+      too large to ship through the cap.
+    * :class:`_ExecImageFailed` — stat/base64 failed or produced
+      unparseable output; carries the real stderr.
+
+    Combines stat + base64 into a single shell so we don't pay two
+    docker-exec round-trips.
     """
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
@@ -301,15 +344,23 @@ async def _stat_and_read_via_exec(
         timeout_seconds=exec_timeout,
         max_output_bytes=settings.bash_max_output_bytes,
     )
+    # Ordering is load-bearing: a truncated base64 stream both has
+    # ``exit_code == 0`` and fails ``b64decode`` (the host appends an
+    # ``[output truncated]`` trailer).  Checking ``truncated`` first makes
+    # mis-routing it into the parse-failure arm unrepresentable.
+    if result.truncated:
+        return _ExecImageTruncated()
     if result.exit_code != 0:
-        return None
+        return _ExecImageFailed(result.stderr.strip() or f"exit code {result.exit_code}")
     size_line, _, b64 = result.stdout.partition("\n")
     try:
         size = int(size_line.strip())
         data = base64.b64decode(b64.strip())
     except (ValueError, TypeError):
-        return None
-    return data, size
+        return _ExecImageFailed(
+            result.stderr.strip() or "stat/base64 output was not parseable (corrupt or unexpected)"
+        )
+    return _ExecImageOk(data=data, size=size)
 
 
 async def _read_probe_bytes(
