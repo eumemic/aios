@@ -24,6 +24,7 @@ redeploy.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, NamedTuple
 
 import asyncpg
@@ -48,13 +49,42 @@ class PruneResult(NamedTuple):
         return self.runs + self.agents + self.workflows + self.skills
 
 
+async def _prune_one_family(
+    pool: asyncpg.Pool[Any],
+    *,
+    family: str,
+    prune: Callable[[asyncpg.Connection[Any]], Awaitable[int]],
+) -> int:
+    """Run one family's prune in its OWN connection + try/except; 0 on failure.
+
+    Each family is isolated so one family's failure cannot silently disable the
+    others (the silent-failure mode the sweep is designed against): a raised
+    ``ForeignKeyViolationError`` — e.g. a not-yet-guarded reference pinning an
+    archived definition — must not skip the families that follow it. We log the
+    per-family failure at ``exception`` level (so it is visible, never swallowed
+    into a bare ``tick_failed``) and continue the sweep, returning 0 for that
+    family this tick. The next sweep retries it.
+
+    A fresh connection per family means a family's aborted transaction can never
+    poison a sibling's connection state.
+    """
+    try:
+        async with pool.acquire() as conn:
+            return await prune(conn)
+    except Exception:
+        log.exception("reclaimable_prune.family_failed", family=family)
+        return 0
+
+
 async def sweep_reclaimable_ephemera(pool: asyncpg.Pool[Any]) -> PruneResult:
     """Run one prune sweep over all reclaimable families; return the tally.
 
     Honours the ``reclaimable_prune_enabled`` kill-switch (returns an all-zero
     result, deleting nothing, when off). Each family is pruned in its own
-    statement/transaction, so a transient failure on one family does not roll
-    back another's reclaim. Idempotent: a second sweep over an already-pruned
+    connection and its own ``try/except``, so a failure on one family (a raise or
+    a transient error) neither rolls back another's reclaim NOR aborts the rest
+    of the sweep — the failing family logs and is skipped this tick (counted 0),
+    the others still run. Idempotent: a second sweep over an already-pruned
     window deletes nothing further.
     """
     settings = get_settings()
@@ -64,15 +94,32 @@ async def sweep_reclaimable_ephemera(pool: asyncpg.Pool[Any]) -> PruneResult:
     run_days = settings.wf_runs_retention_days
     def_days = settings.archived_definition_retention_days
 
-    async with pool.acquire() as conn:
-        # Runs first: drains terminal+archived runs (and their journals) so the
-        # subsequent workflow prune can reclaim a now-run-free archived workflow
-        # within the same sweep where ages line up. Order is not required for
-        # correctness (each prune re-reads liveness), only for promptness.
-        runs = await queries.prune_archived_runs(conn, retention_days=run_days)
-        agents = await queries.prune_unpinned_archived_agents(conn, retention_days=def_days)
-        workflows = await queries.prune_unpinned_archived_workflows(conn, retention_days=def_days)
-        skills = await queries.prune_unpinned_archived_skills(conn, retention_days=def_days)
+    # Runs first: drains terminal+archived runs (and their journals) so the
+    # subsequent workflow prune can reclaim a now-run-free archived workflow
+    # within the same sweep where ages line up. Order is not required for
+    # correctness (each prune re-reads liveness), only for promptness. Each
+    # family is independently isolated, so a failure mid-sweep does not skip the
+    # families that follow.
+    runs = await _prune_one_family(
+        pool,
+        family="runs",
+        prune=lambda c: queries.prune_archived_runs(c, retention_days=run_days),
+    )
+    agents = await _prune_one_family(
+        pool,
+        family="agents",
+        prune=lambda c: queries.prune_unpinned_archived_agents(c, retention_days=def_days),
+    )
+    workflows = await _prune_one_family(
+        pool,
+        family="workflows",
+        prune=lambda c: queries.prune_unpinned_archived_workflows(c, retention_days=def_days),
+    )
+    skills = await _prune_one_family(
+        pool,
+        family="skills",
+        prune=lambda c: queries.prune_unpinned_archived_skills(c, retention_days=def_days),
+    )
 
     result = PruneResult(runs=runs, agents=agents, workflows=workflows, skills=skills)
     if result.total:

@@ -22,7 +22,7 @@ import asyncpg
 import pytest
 
 from aios.config import get_settings
-from aios.db.pool import register_jsonb_codec
+from aios.db.pool import create_pool, register_jsonb_codec
 from aios.db.queries import workflows as wf_queries
 from aios.db.queries.prune import (
     prune_archived_runs,
@@ -30,6 +30,7 @@ from aios.db.queries.prune import (
     prune_unpinned_archived_skills,
     prune_unpinned_archived_workflows,
 )
+from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
 
@@ -367,3 +368,196 @@ async def test_skill_prune_spares_live_agent_binding(
     assert (
         await conn.fetchval("SELECT count(*) FROM skill_versions WHERE skill_id = 'sk_bound'") == 1
     )
+
+
+# ─── the session_templates FK guard + per-family sweep isolation ─────────────
+
+
+@pytest.fixture
+async def pool(migrated_db_url: str, _reset_db_state: None) -> AsyncIterator[asyncpg.Pool[Any]]:
+    """A pool over a DB seeded with ``acc_root`` + ``env_root`` (same scaffold as
+    the ``conn`` fixture), for exercising the full ``sweep_reclaimable_ephemera``
+    driver — which acquires its own connection(s) from a pool, not a bare conn."""
+    p = await create_pool(migrated_db_url, min_size=1, max_size=4)
+    try:
+        async with p.acquire() as c:
+            await c.execute(
+                "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+                "VALUES ('acc_root', NULL, TRUE, 'tenant-root')"
+            )
+            await c.execute(
+                "INSERT INTO environments (id, name, config, account_id) "
+                "VALUES ('env_root', 'env', '{}'::jsonb, 'acc_root')"
+            )
+        yield p
+    finally:
+        await p.close()
+
+
+async def _insert_session_template(
+    conn: asyncpg.Connection[Any], *, template_id: str, agent_id: str
+) -> None:
+    """Insert a minimal ``session_templates`` row pinning ``agent_id`` — the
+    THIRD non-cascade FK to ``agents(id)`` (migration 0027, no ``ON DELETE``)."""
+    await conn.execute(
+        "INSERT INTO session_templates (id, name, agent_id, environment_id, account_id) "
+        "VALUES ($1, $1, $2, 'env_root', 'acc_root')",
+        template_id,
+        agent_id,
+    )
+
+
+async def test_agent_prune_spares_template_pinned_agent(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    """A ``session_templates`` row pins its (archived, session-free, aged) agent.
+
+    Without the ``session_templates`` guard the agents prune raises
+    ``ForeignKeyViolationError`` on the non-cascade ``session_templates.agent_id``
+    FK; with the guard the template-pinned agent is simply held. This is the
+    unit-level proof of the predicate fix — it FAILS (raises) without the guard
+    and PASSES with it.
+    """
+    # Archived, aged, NO session referencing it — but a live session_template
+    # pins it. The bare ``sessions`` guard would mark it reclaimable and the
+    # DELETE would FK-violate against session_templates.agent_id.
+    await _insert_agent(conn, agent_id="ag_tmpl", name="tmpl", archived_days=90)
+    await _insert_session_template(conn, template_id="st_pin", agent_id="ag_tmpl")
+    # An unrelated archived+free agent so the prune still has real work to do.
+    await _insert_agent(conn, agent_id="ag_free2", name="free2", archived_days=90)
+
+    # No raise; the template-pinned agent survives, the free one is reclaimed.
+    pruned = await prune_unpinned_archived_agents(conn, retention_days=30)
+    assert pruned == 1
+    assert await _count(conn, "agents", "id", "ag_tmpl") == 1
+    assert (
+        await conn.fetchval("SELECT count(*) FROM agent_versions WHERE agent_id = 'ag_tmpl'") == 1
+    )
+    assert await _count(conn, "agents", "id", "ag_free2") == 0
+
+
+async def test_sweep_isolates_family_failure_and_spares_template_pinned_agent(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """The headline regression for the silent-failure blocker.
+
+    A template-pinned archived agent SURVIVES the full sweep (not deleted, no
+    raise propagates out of ``sweep_reclaimable_ephemera``) AND the other
+    families still prune in the SAME sweep. Before the fix the agents prune would
+    raise ``ForeignKeyViolationError``, which — with no per-family try/except —
+    skipped the workflows+skills prunes too and surfaced only as a generic
+    ``tick_failed`` in the loop, silently no-op'ing the whole disk-reclaim
+    mechanism. After the fix the agent is held by the predicate guard, so there
+    is no raise at all; the per-family isolation is the belt to that suspenders
+    (a future un-guarded reference would log + skip its own family, not the rest).
+    """
+    def_days = get_settings().archived_definition_retention_days
+
+    async with pool.acquire() as conn:
+        # The poison pill: an archived, session-free, aged agent pinned ONLY by a
+        # session_template. Sits in the SECOND family of the sweep (agents), so a
+        # raise here is exactly what would skip workflows+skills.
+        await _insert_agent(conn, agent_id="ag_pinned", name="pinned", archived_days=90)
+        await _insert_session_template(conn, template_id="st_pin", agent_id="ag_pinned")
+
+        # Reclaimable work in EVERY OTHER family, all past the window, so we can
+        # prove the sweep did not stop at the agents family:
+        #   runs: an aged terminal+archived run (+ its journal).
+        run_id = await _make_archived_run(conn, archived_age_days=def_days + 30)
+        assert await _count(conn, "wf_run_events", "run_id", run_id) == 2
+        #   workflows: a run-free aged archived workflow.
+        free_wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_root", name="free_wf", script="x"
+        )
+        await conn.execute(
+            "UPDATE workflows SET archived_at = now() - make_interval(days => $2) WHERE id = $1",
+            free_wf.id,
+            def_days + 30,
+        )
+        #   skills: an unbound aged archived skill (+ its version).
+        await conn.execute(
+            "INSERT INTO skills (id, display_title, latest_version, account_id, archived_at) "
+            "VALUES ('sk_free', 'free', 1, 'acc_root', now() - make_interval(days => $1))",
+            def_days + 30,
+        )
+        await conn.execute(
+            "INSERT INTO skill_versions (skill_id, version, directory, name, files, account_id) "
+            "VALUES ('sk_free', 1, '/d', 'free', '{}'::jsonb, 'acc_root')"
+        )
+
+    # The whole sweep — no exception escapes, and the tally proves every OTHER
+    # family still pruned in the same pass.
+    result = await sweep_reclaimable_ephemera(pool)
+    assert result.runs == 1
+    assert result.agents == 0  # the template-pinned agent is held, not deleted
+    assert result.workflows == 1
+    assert result.skills == 1
+
+    async with pool.acquire() as conn:
+        # The template-pinned agent (and its version) survived the sweep.
+        assert await _count(conn, "agents", "id", "ag_pinned") == 1
+        assert (
+            await conn.fetchval("SELECT count(*) FROM agent_versions WHERE agent_id = 'ag_pinned'")
+            == 1
+        )
+        # The session_template that pinned it is untouched (it was never a target).
+        assert await _count(conn, "session_templates", "id", "st_pin") == 1
+        # Every other family genuinely reclaimed its candidate.
+        assert await _count(conn, "wf_runs", "id", run_id) == 0
+        assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
+        assert await _count(conn, "workflows", "id", free_wf.id) == 0
+        assert await _count(conn, "skills", "id", "sk_free") == 0
+
+
+async def test_sweep_one_family_raise_does_not_disable_the_others(
+    pool: asyncpg.Pool[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct coverage of the per-family ``try/except`` isolation.
+
+    Force the AGENTS family (the second of four) to raise mid-sweep — the
+    failure mode that, with no per-family isolation, would skip the workflows +
+    skills prunes that follow and surface only as a generic ``tick_failed``. The
+    sweep must instead: NOT propagate the raise, count that family 0, and still
+    prune every OTHER family in the same pass.
+    """
+    def_days = get_settings().archived_definition_retention_days
+
+    async with pool.acquire() as conn:
+        run_id = await _make_archived_run(conn, archived_age_days=def_days + 30)
+        free_wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_root", name="free_wf2", script="x"
+        )
+        await conn.execute(
+            "UPDATE workflows SET archived_at = now() - make_interval(days => $2) WHERE id = $1",
+            free_wf.id,
+            def_days + 30,
+        )
+        await conn.execute(
+            "INSERT INTO skills (id, display_title, latest_version, account_id, archived_at) "
+            "VALUES ('sk_free2', 'free', 1, 'acc_root', now() - make_interval(days => $1))",
+            def_days + 30,
+        )
+        await conn.execute(
+            "INSERT INTO skill_versions (skill_id, version, directory, name, files, account_id) "
+            "VALUES ('sk_free2', 1, '/d', 'free', '{}'::jsonb, 'acc_root')"
+        )
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> int:
+        raise RuntimeError("simulated agents-prune failure")
+
+    monkeypatch.setattr(
+        "aios.harness.reclaimable_prune.queries.prune_unpinned_archived_agents", _boom
+    )
+
+    # The raise is caught per-family — the sweep returns normally.
+    result = await sweep_reclaimable_ephemera(pool)
+    assert result.agents == 0  # the failed family is skipped this tick
+    assert result.runs == 1  # the others still pruned
+    assert result.workflows == 1
+    assert result.skills == 1
+
+    async with pool.acquire() as conn:
+        assert await _count(conn, "wf_runs", "id", run_id) == 0
+        assert await _count(conn, "workflows", "id", free_wf.id) == 0
+        assert await _count(conn, "skills", "id", "sk_free2") == 0

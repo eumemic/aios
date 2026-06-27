@@ -108,6 +108,15 @@ async def prune_unpinned_archived_agents(
     still-referenced agent would FK-violate regardless. Holding on any session
     is therefore both the safe semantics and the FK-correct one.
 
+    There is a THIRD non-cascade FK to ``agents(id)``:
+    ``session_templates.agent_id NOT NULL REFERENCES agents(id)`` (migration 0027,
+    no ``ON DELETE`` → NO ACTION). A ``session_templates`` row (a frozen recipe
+    used for ``per_chat`` connector spawns) pins its agent regardless of either
+    party's archive state, so deleting a template-pinned archived agent would
+    ``ForeignKeyViolationError``. The same ``NOT EXISTS`` guard is therefore
+    applied against ``session_templates`` as well — making the prune FK-correct
+    on every non-cascade reference to ``agents(id)``.
+
     ``agent_versions REFERENCES agents(id)`` likewise has no cascade, so the
     version history of a now-unreferenced archived agent is deleted first, in the
     same transaction, before the parent row. Time-based, idempotent, unscoped.
@@ -123,6 +132,9 @@ async def prune_unpinned_archived_agents(
                AND NOT EXISTS (
                    SELECT 1 FROM sessions s WHERE s.agent_id = a.id
                )
+               AND NOT EXISTS (
+                   SELECT 1 FROM session_templates st WHERE st.agent_id = a.id
+               )
             """,
             retention_days,
         )
@@ -133,6 +145,9 @@ async def prune_unpinned_archived_agents(
                AND a.archived_at < now() - make_interval(days => $1)
                AND NOT EXISTS (
                    SELECT 1 FROM sessions s WHERE s.agent_id = a.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM session_templates st WHERE st.agent_id = a.id
                )
             """,
             retention_days,
