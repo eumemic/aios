@@ -1,0 +1,131 @@
+name: Retirement residue re-scan (opt-in)
+
+# OPT-IN, OFF-BY-DEFAULT scheduled re-scan (#1580 Part B, epic #1572).
+#
+# The next-boot residue scan is the fail-closed AUTHORITY: a retired token
+# reintroduced into a persisted surface (a connector-catalog `tools_schema`
+# write, or a thaw reviving an old row) is caught at the next boot and blocks it.
+# But between boots there is a window. This cron narrows it: it runs the SAME
+# registry-derived residue scan against LIVE prod RO between deploys and alerts on
+# any nonzero residue — so a reintroduction is seen in cron-period time, not
+# next-boot time. Enabling it does NOT change the fail-closed authority; the
+# next-boot scan still blocks. This only alerts faster.
+#
+# OFF BY DEFAULT to preserve the no-new-egress posture: the CI/ops-to-prod-RO
+# egress is a real cost kept off unless an operator explicitly turns it on. The
+# whole job is gated on the repo/environment variable
+# `AIOS_RETIREMENT_RESCAN_ENABLED` being truthy; absent/false → the job no-ops
+# without opening any connection. The DSN is supplied via the secret
+# `AIOS_RETIREMENT_RESCAN_DSN` (a read-only prod connection string) and is only
+# read when the flag is on.
+#
+# Security: no untrusted ${{ }} expression is interpolated into run: commands. The
+# alert title/label are workflow-authored constants; the issue body is built ONLY
+# from the scan's own JSON, passed as a quoted shell value, never eval'd. The DSN
+# is passed via env from a secret, never echoed.
+
+on:
+  schedule:
+    # Daily at 04:41 UTC. Off-minute by design. Cheap no-op when disabled
+    # (the gate check exits before any connection is opened).
+    - cron: "41 4 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  residue-rescan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run opt-in residue re-scan
+        id: rescan
+        # The CLI is itself the gate: when AIOS_RETIREMENT_RESCAN_ENABLED is
+        # off/absent it prints {"enabled": false, ...} and exits 0 WITHOUT
+        # connecting anywhere (no-new-egress). When on, it connects to the RO DSN,
+        # scans, and exits 1 on any residue. We capture the JSON regardless of
+        # exit (|| true) and decide alert/fail below.
+        env:
+          AIOS_RETIREMENT_RESCAN_ENABLED: ${{ vars.AIOS_RETIREMENT_RESCAN_ENABLED }}
+          AIOS_RETIREMENT_RESCAN_DSN: ${{ secrets.AIOS_RETIREMENT_RESCAN_DSN }}
+        run: |
+          set -uo pipefail
+          uv run python -m aios.retirements.residue_scan > findings.json || true
+          echo "findings:"; cat findings.json
+          ENABLED=$(uv run python -c "import json; print(json.load(open('findings.json')).get('enabled', False))")
+          COUNT=$(uv run python -c "import json; print(len(json.load(open('findings.json')).get('findings', [])))")
+          echo "enabled=${ENABLED}" >> "$GITHUB_OUTPUT"
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: Alert on nonzero residue
+        if: steps.rescan.outputs.enabled == 'True' && steps.rescan.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          TITLE="Retired-token residue found in live prod (opt-in re-scan)"
+
+          gh label create drift \
+            --color FBCA04 \
+            --description "Stale in-code signal surfaced by a drift canary" \
+            2>/dev/null || true
+
+          BODY=$(uv run python -c '
+          import json
+          data = json.load(open("findings.json"))["findings"]
+          lines = [
+              "The opt-in residue re-scan found **retired token(s) sitting in live prod surfaces** between deploys. The next-boot scan remains the fail-closed authority (it will block on the next boot); this alert surfaces the reintroduction faster.",
+              "",
+              "Investigate the reintroduction source (a connector-catalog write or a thaw is the usual culprit) and clear the residue.",
+              "",
+          ]
+          for f in data:
+              lines.append(
+                  "- **%s.%s**: token `%s` present in **%d** row(s)"
+                  % (f["table"], f["column"], f["token"], f["count"])
+              )
+          lines += [
+              "",
+              "---",
+              "Detected by `.github/workflows/retirement-residue-rescan.yml` (opt-in) via `src/aios/retirements/residue_scan.py`. NOT auto-closed.",
+          ]
+          print("\n".join(lines))
+          ')
+
+          EXISTING=$(gh issue list --label drift --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty" || echo "")
+
+          if [ -n "${EXISTING}" ]; then
+            echo "Updating existing residue issue #${EXISTING} (body replaced)."
+            gh issue edit "${EXISTING}" --body "${BODY}"
+          else
+            echo "Filing new residue issue."
+            gh issue create --title "${TITLE}" --label drift --body "${BODY}"
+          fi
+
+      - name: Fail on nonzero residue
+        if: steps.rescan.outputs.enabled == 'True' && steps.rescan.outputs.count != '0'
+        run: |
+          echo "::error::${{ steps.rescan.outputs.count }} retired-token residue finding(s) in live prod; alert filed."
+          exit 1
