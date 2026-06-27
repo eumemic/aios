@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import litellm
 
-from aios.harness.completion import _normalize_message
+from aios.harness.completion import _is_persistable_thinking_block, _normalize_message
 
 
 class TestNormalizeMessage:
@@ -176,6 +176,122 @@ class TestNormalizeMessageThinkingLift:
         }
         result = _normalize_message(msg)
         assert "thinking_blocks" not in result
+
+
+class TestNormalizeMessageSignatureGuard:
+    """The by-construction invariant of issue #1588: a persisted thinking
+    block always has a complete signature, or it is not persisted as a
+    thinking block. ``_normalize_message`` is the single persist
+    choke-point; a poison block (non-empty thinking text + empty/missing
+    signature, the streamed-reassembly delta-loss shape) must be DROPPED so
+    it can never reach the transcript and 400 on every replay."""
+
+    def test_empty_signature_block_dropped_from_psf(self) -> None:
+        """The RCA shape: real thinking text but ``signature == ""`` (the
+        signature delta lost during streaming reassembly). Lifted from
+        provider_specific_fields, it must be dropped, not persisted."""
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "provider_specific_fields": {
+                "thinking_blocks": [
+                    {"type": "thinking", "thinking": "real reasoning", "signature": ""}
+                ]
+            },
+        }
+        result = _normalize_message(msg)
+        assert "thinking_blocks" not in result
+
+    def test_missing_signature_block_dropped_from_psf(self) -> None:
+        """A block with thinking text but NO ``signature`` key at all
+        (incomplete reassembly) is dropped — Anthropic 400s ``Field
+        required`` on replay."""
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "provider_specific_fields": {
+                "thinking_blocks": [{"type": "thinking", "thinking": "real reasoning"}]
+            },
+        }
+        result = _normalize_message(msg)
+        assert "thinking_blocks" not in result
+
+    def test_empty_signature_block_dropped_from_top_level(self) -> None:
+        """A poison block already at the top level (the streaming
+        ``stream_chunk_builder`` path assembles ``thinking_blocks`` there)
+        is also guarded — not just the provider_specific_fields lift."""
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "thinking_blocks": [
+                {"type": "thinking", "thinking": "real reasoning", "signature": ""}
+            ],
+        }
+        result = _normalize_message(msg)
+        assert "thinking_blocks" not in result
+
+    def test_whitespace_signature_block_dropped(self) -> None:
+        """A signature that is only whitespace is as invalid as empty."""
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "thinking_blocks": [
+                {"type": "thinking", "thinking": "real reasoning", "signature": "   "}
+            ],
+        }
+        result = _normalize_message(msg)
+        assert "thinking_blocks" not in result
+
+    def test_mixed_keeps_only_fully_signed(self) -> None:
+        """In a mixed list, only blocks with BOTH content and a complete
+        signature survive; the poison (empty-signature) block is dropped."""
+        good = {"type": "thinking", "thinking": "kept", "signature": "sig"}
+        poison = {"type": "thinking", "thinking": "lost-sig", "signature": ""}
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "thinking_blocks": [good, poison],
+        }
+        result = _normalize_message(msg)
+        assert result["thinking_blocks"] == [good]
+
+    def test_fully_signed_block_preserved(self) -> None:
+        """A complete block (content + signature) is never dropped — the
+        guard is surgical, not a blanket thinking strip."""
+        good = {"type": "thinking", "thinking": "real reasoning", "signature": "sig"}
+        msg: dict[str, object] = {
+            "role": "assistant",
+            "content": "answer",
+            "thinking_blocks": [good],
+        }
+        result = _normalize_message(msg)
+        assert result["thinking_blocks"] == [good]
+
+
+class TestIsPersistableThinkingBlock:
+    """Direct unit coverage of the persist-path predicate."""
+
+    def test_complete_block_persistable(self) -> None:
+        assert _is_persistable_thinking_block(
+            {"type": "thinking", "thinking": "x", "signature": "s"}
+        )
+
+    def test_empty_signature_not_persistable(self) -> None:
+        assert not _is_persistable_thinking_block(
+            {"type": "thinking", "thinking": "x", "signature": ""}
+        )
+
+    def test_missing_signature_not_persistable(self) -> None:
+        assert not _is_persistable_thinking_block({"type": "thinking", "thinking": "x"})
+
+    def test_empty_thinking_not_persistable(self) -> None:
+        assert not _is_persistable_thinking_block(
+            {"type": "thinking", "thinking": "", "signature": "s"}
+        )
+
+    def test_non_dict_not_persistable(self) -> None:
+        assert not _is_persistable_thinking_block("not-a-dict")
+        assert not _is_persistable_thinking_block(None)
 
 
 def test_modify_params_enabled_on_import() -> None:

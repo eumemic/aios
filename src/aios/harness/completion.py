@@ -85,6 +85,37 @@ if TYPE_CHECKING:
     import asyncpg
 
 
+def _is_persistable_thinking_block(block: Any) -> bool:
+    """Whether a thinking block is safe to persist to the transcript.
+
+    The by-construction invariant (issue #1588): **a persisted thinking
+    block always has a complete signature, or it is not persisted as a
+    thinking block.** Two independent reasons a block is unsafe:
+
+    * **Empty thinking text** (the ``display: "omitted"`` default) -- a
+      signature without its content fails Anthropic-side validation on
+      replay ("Invalid `signature` in `thinking` block").
+    * **Empty/missing signature** -- the RCA poison shape. A streamed turn
+      can reassemble with non-empty thinking text but an empty-string
+      ``signature`` (the signature delta lost during stream reassembly).
+      Anthropic rejects ``signature: ""`` (and a missing ``signature``) on
+      EVERY replay with ``400 Invalid signature in thinking block`` /
+      ``Field required`` -- an unbreakable terminal-error loop, because
+      clearing the errored state alone leaves the poison block in the
+      context window. Live-API probes confirm a thinking-less turn always
+      replays 200, so dropping the block is always the safe choice.
+
+    Applied to lifted AND pre-existing top-level blocks alike (see
+    :func:`_normalize_message`), so a poison block can never reach the
+    transcript regardless of which path produced it.
+    """
+    if not isinstance(block, dict):
+        return False
+    if not (block.get("thinking") or "").strip():
+        return False
+    return bool((block.get("signature") or "").strip())
+
+
 def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     """Normalize provider quirks that break downstream consumers.
 
@@ -104,26 +135,43 @@ def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     ``thinking`` param — leaving models like claude-fable-5 running
     thinking-less, where they stochastically emit literal-empty turns that
     then poison the transcript (fable imitates degenerate turns in its own
-    history; see the empty-turn cascade incident, 2026-06-09). Blocks with
-    empty thinking text (the ``display: "omitted"`` default) are NOT
-    lifted: a signature without its content fails Anthropic-side
-    validation on replay ("Invalid `signature` in `thinking` block").
+    history; see the empty-turn cascade incident, 2026-06-09).
+
+    This is the single persist choke-point for the by-construction
+    invariant of issue #1588: **a persisted thinking block always has a
+    complete signature, or it is not persisted as a thinking block.** Every
+    candidate block -- whether lifted from ``provider_specific_fields``
+    (non-streaming ``model_dump``) or already at the top level (streaming
+    ``stream_chunk_builder`` reassembly) -- is filtered through
+    :func:`_is_persistable_thinking_block`, which drops any block with
+    empty thinking text OR an empty/missing signature. A poison block can
+    therefore never reach the transcript.
     """
     if "tool_calls" in msg and msg["tool_calls"] is None:
         del msg["tool_calls"]
     if msg.get("content") is None:
         msg["content"] = ""
-    if not msg.get("thinking_blocks"):
+
+    # Resolve the candidate thinking blocks: a truthy top-level value wins
+    # (already lifted on a prior pass, or assembled there by
+    # stream_chunk_builder); otherwise lift from provider_specific_fields.
+    blocks = msg.get("thinking_blocks")
+    if not blocks:
         psf = msg.get("provider_specific_fields")
         blocks = psf.get("thinking_blocks") if isinstance(psf, dict) else None
-        if isinstance(blocks, list):
-            kept = [b for b in blocks if isinstance(b, dict) and (b.get("thinking") or "").strip()]
-            if kept:
-                msg["thinking_blocks"] = kept
-            else:
-                msg.pop("thinking_blocks", None)
+
+    # Apply the persist-path guard to whichever source won. ``kept`` retains
+    # only blocks with complete content AND a complete signature; if nothing
+    # survives, the top-level key is removed so a falsy value never confuses
+    # downstream replay.
+    if isinstance(blocks, list):
+        kept = [b for b in blocks if _is_persistable_thinking_block(b)]
+        if kept:
+            msg["thinking_blocks"] = kept
         else:
             msg.pop("thinking_blocks", None)
+    else:
+        msg.pop("thinking_blocks", None)
     return msg
 
 

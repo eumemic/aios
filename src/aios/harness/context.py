@@ -802,6 +802,23 @@ def _correct_image_data_url_mimes(messages: list[dict[str, Any]]) -> None:
             messages[msg_idx] = {**msg, "content": new_content}
 
 
+def _is_replayable_thinking_block(block: Any) -> bool:
+    """Whether a persisted thinking block is safe to replay to the provider.
+
+    The read-path counterpart to ``completion._is_persistable_thinking_block``
+    (issue #1588). Anthropic rejects a thinking block whose ``signature`` is
+    empty or missing on EVERY replay (``400 Invalid signature in thinking
+    block``); a block whose signature is intact replays fine. We gate on the
+    signature alone here: the persist guard already drops empty-text blocks,
+    and an in-window block that somehow carries a signature but no text is
+    still replayable as long as the signature is complete. A non-dict block
+    is never replayable.
+    """
+    if not isinstance(block, dict):
+        return False
+    return bool((block.get("signature") or "").strip())
+
+
 def _strip_to_spec(
     msg: dict[str, Any],
     *,
@@ -817,6 +834,24 @@ def _strip_to_spec(
     if role == "assistant" and target_supports_thinking:
         allowed = allowed | _THINKING_FIELDS
     out = {k: v for k, v in msg.items() if k in allowed}
+    # Read-path mirror of the persist-time guard (see
+    # ``completion._is_persistable_thinking_block`` / issue #1588). A poison
+    # thinking block (non-empty thinking text, empty/missing ``signature``)
+    # persisted BEFORE the persist-path guard shipped — or carried in from
+    # another agent — would otherwise replay to Anthropic and 400 on EVERY
+    # turn with "Invalid signature in thinking block", an unbreakable
+    # terminal-error loop (clearing the errored state alone re-loops because
+    # the poison block stays in the window). Dropping it here quarantines
+    # the block by construction: a thinking-less turn always replays 200.
+    if raw_blocks := out.get("thinking_blocks"):
+        if isinstance(raw_blocks, list):
+            safe_blocks = [b for b in raw_blocks if _is_replayable_thinking_block(b)]
+            if safe_blocks:
+                out["thinking_blocks"] = safe_blocks
+            else:
+                del out["thinking_blocks"]
+        else:
+            del out["thinking_blocks"]
     if raw_tcs := out.get("tool_calls"):
         sanitized = _sanitize_tool_calls(raw_tcs)
         if sanitized:

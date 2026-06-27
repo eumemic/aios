@@ -1018,7 +1018,9 @@ class TestThinkingBlockPreservation:
         ]
         events[1].data.update(
             {
-                "thinking_blocks": [{"type": "thinking", "thinking": "..."}],
+                # Signature present so the read-path poison guard (issue #1588)
+                # keeps the block -- this test is about *other* provider fields.
+                "thinking_blocks": [{"type": "thinking", "thinking": "...", "signature": "sig"}],
                 "reasoning": "step 1",
                 "reasoning_details": [{"type": "thinking", "content": "..."}],
                 "reacting_to": 1,
@@ -1031,6 +1033,55 @@ class TestThinkingBlockPreservation:
         assert "reasoning" not in msgs[1]
         assert "reasoning_details" not in msgs[1]
         assert "reacting_to" not in msgs[1]
+
+    def test_poison_empty_signature_block_dropped_on_replay(self) -> None:
+        """A persisted poison thinking block -- real thinking text but an
+        empty ``signature`` (the Ultron transcript-poison shape, issue
+        #1588) -- is dropped on the read path so it never replays to
+        Anthropic and 400s with "Invalid signature in thinking block". A
+        thinking-less turn always replays 200, so dropping is safe."""
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["thinking_blocks"] = [
+            {"type": "thinking", "thinking": "real reasoning", "signature": ""}
+        ]
+        msgs = build_messages(
+            events, system_prompt=None, model="anthropic/claude-haiku-4-5"
+        ).messages
+        assert "thinking_blocks" not in msgs[1]
+
+    def test_poison_missing_signature_block_dropped_on_replay(self) -> None:
+        """A block with thinking text but NO ``signature`` key at all is
+        likewise quarantined on replay (Anthropic 400s ``Field
+        required``)."""
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        events[1].data["thinking_blocks"] = [{"type": "thinking", "thinking": "real reasoning"}]
+        msgs = build_messages(
+            events, system_prompt=None, model="anthropic/claude-haiku-4-5"
+        ).messages
+        assert "thinking_blocks" not in msgs[1]
+
+    def test_poison_block_dropped_but_signed_sibling_kept(self) -> None:
+        """In a mixed list, only the poison (empty-signature) block is
+        dropped; a fully-signed sibling still replays."""
+        events = [
+            _evt(1, "user", content="hi"),
+            _evt(2, "assistant", content="hey"),
+        ]
+        good = {"type": "thinking", "thinking": "kept", "signature": "sig"}
+        events[1].data["thinking_blocks"] = [
+            good,
+            {"type": "thinking", "thinking": "lost-sig", "signature": ""},
+        ]
+        msgs = build_messages(
+            events, system_prompt=None, model="anthropic/claude-haiku-4-5"
+        ).messages
+        assert msgs[1]["thinking_blocks"] == [good]
 
     @pytest.mark.parametrize(
         "model",
