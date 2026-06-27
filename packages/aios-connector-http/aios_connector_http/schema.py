@@ -61,7 +61,7 @@ import types
 from collections.abc import Callable
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
-from .sandbox import _SandboxPathMarker
+from .sandbox import _SandboxPathMarker, _SANDBOX_PATH_DESCRIPTION
 
 _INJECTED_PARAMS: frozenset[str] = frozenset({"connection_id", "external_account_id", "chat_id"})
 
@@ -100,7 +100,10 @@ def derive_tool_spec(name: str, fn: Callable[..., Any]) -> dict[str, Any]:
         else:
             prop["default"] = param.default
         if param_name in param_docs:
-            prop["description"] = param_docs[param_name]
+            existing = prop.get("description")
+            prop["description"] = (
+                f"{param_docs[param_name]} {existing}" if existing else param_docs[param_name]
+            )
         properties[param_name] = prop
     input_schema: dict[str, Any] = {"type": "object", "properties": properties}
     if required:
@@ -120,7 +123,9 @@ def _annotation_to_schema(hint: Any, *, param: str) -> dict[str, Any]:
     """Recursive type → JSON schema mapping.  See module docstring."""
     inner, nullable = _split_optional(hint)
     if _is_sandbox_path(inner):
-        return _wrap_nullable({"type": "string"}, nullable)
+        return _wrap_nullable(
+            {"type": "string", "description": _SANDBOX_PATH_DESCRIPTION}, nullable
+        )
     origin = get_origin(inner)
     if origin is Literal:
         values = list(get_args(inner))

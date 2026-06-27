@@ -1662,7 +1662,10 @@ def _resolve_one(value: Any, *, session_id: str, workspace_path: Path | None, na
             )
             raise SandboxPathError(f"{name!r}: workspace bind-mount unavailable for this call")
         raise SandboxPathError(
-            f"{name!r}: path {value!r} is outside /workspace/ and /mnt/attachments/"
+            f"{name!r}: path {value!r} is outside the connector-readable mounts. "
+            f"The connector can only read files under /workspace/ or /mnt/attachments/; "
+            f"files written elsewhere in the sandbox (e.g. /tmp) are invisible to it. "
+            f"Copy the file into /workspace/ and resend with that /workspace/ path."
         )
     return resolved
 
