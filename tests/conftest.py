@@ -162,7 +162,18 @@ def _truncate_sql(migrated_db_url: str) -> str:
     async def fetch() -> str:
         conn = await asyncpg.connect(migrated_db_url)
         try:
-            rows = await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            rows = await conn.fetch(
+                # ``alembic_version`` is schema-version *metadata*, not test
+                # data: it is stamped once by :func:`migrated_db_url` and must
+                # survive the per-test reset.  Truncating it leaves the DB
+                # reading as "unmigrated" (``version_num`` empty), which the
+                # boot-admission gate (tests/integration/test_boot_admission_gate_db.py)
+                # correctly treats as behind every ``contract_rev`` — so the
+                # clean-DB case wrongly raises ``DatabaseBehindContract``.
+                # Exclude it from the truncate so reset clears rows, not schema.
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+            )
         finally:
             await conn.close()
         if not rows:

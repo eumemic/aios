@@ -56,10 +56,14 @@ class _FakePool:
         return _FakeAcquireCM(_FakeConn(self._fetchval_impl))
 
 
-def _app_with_pool(pool: Any) -> FastAPI:
+def _app_with_pool(pool: Any, *, retirements_ok: bool = True) -> FastAPI:
     app = FastAPI()
     app.include_router(health.router)
     app.state.pool = pool
+    # The boot-admission gate (#1575) flips this True only after it has proven
+    # the live DB is safe for this code. Default True here so the DB-path tests
+    # exercise the SELECT-1 branch; the gate-refusal case sets it False.
+    app.state.retirements_ok = retirements_ok
     return app
 
 
@@ -105,6 +109,36 @@ def test_ready_503_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("aios.api.routers.health.asyncio.timeout", _tiny_timeout)
     client = TestClient(_app_with_pool(_FakePool(_slow)))
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "unavailable"}
+
+
+def test_ready_503_when_boot_gate_not_admitted() -> None:
+    """Before the boot-admission gate (#1575) flips green, ``/ready`` is 503.
+
+    Even with a perfectly healthy DB, an un-admitted process (the boot gate is
+    still looping on a behind / residue-bearing DB) must report unready — that
+    is what keeps the NEW container out of rotation while the OLD healthy one
+    serves under a rolling deploy. The DB is never even queried.
+    """
+
+    async def _ok(_query: str) -> int:
+        raise AssertionError("/ready must not query the DB while un-admitted")
+
+    client = TestClient(_app_with_pool(_FakePool(_ok), retirements_ok=False))
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "unavailable"}
+
+
+def test_ready_503_when_retirements_flag_absent() -> None:
+    """A missing ``retirements_ok`` attribute fails closed (unready)."""
+    app = FastAPI()
+    app.include_router(health.router)
+    app.state.pool = _FakePool(lambda _q: None)
+    # Deliberately do NOT set app.state.retirements_ok.
+    client = TestClient(app)
     resp = client.get("/ready")
     assert resp.status_code == 503
     assert resp.json() == {"status": "unavailable"}

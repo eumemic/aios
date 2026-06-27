@@ -32,7 +32,7 @@
     "/ready": {
       "get": {
         "summary": "Ready",
-        "description": "Readiness probe. Unauthenticated; ``SELECT 1`` under a short timeout.\n\nReturns 200 ``{\"status\": \"ready\"}`` when Postgres answers, 503\n``{\"status\": \"unavailable\"}`` when the pool can't be acquired, the query\nraises, or it exceeds the 2 s budget. This is the signal the Docker/compose\nhealthcheck watches, so a silent post-startup DB outage becomes a visibly\nunhealthy container instead of a 200-returning black hole.",
+        "description": "Readiness probe. Unauthenticated; ``SELECT 1`` under a short timeout.\n\nReturns 200 ``{\"status\": \"ready\"}`` when Postgres answers AND the\nfail-closed boot-admission gate (#1575) has admitted this process; 503\n``{\"status\": \"unavailable\"}`` when the pool can't be acquired, the query\nraises, it exceeds the 2 s budget, OR the boot-gate has not yet admitted.\nThis is the signal the Docker/compose healthcheck watches, so a silent\npost-startup DB outage becomes a visibly unhealthy container instead of a\n200-returning black hole.\n\nThe boot-gate flag (``app.state.retirements_ok``) stays ``False`` from\nprocess start until the gate proves the live DB is safe for this code\n(alembic at/past every ``contract_rev`` AND zero live residue). Under a\nrolling deploy this keeps the NEW container unready \u2014 so the OLD healthy\ncontainer keeps serving \u2014 until the post-deploy migrate lands. Checked\nBEFORE the DB round-trip: an un-admitted process is unready regardless of\nDB liveness.",
         "operationId": "get_ready",
         "responses": {
           "200": {

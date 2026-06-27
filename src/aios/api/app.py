@@ -8,6 +8,7 @@ operate the management plane via the same Bearer auth as the HTTP API.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -42,7 +43,37 @@ from aios.errors import install_exception_handlers
 from aios.harness import runtime
 from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
+from aios.retirements.boot_gate import (
+    RetirementsNotAdmissible,
+    assert_retirements_admissible,
+)
 from aios.sandbox.volumes import attachments_root, memory_stores_root, uploads_root
+
+# How long the api startup loops between boot-admission proof attempts while the
+# DB is behind / unreachable. Short enough that readiness flips green promptly
+# once the post-deploy migrate lands; long enough not to hammer the DB.
+_BOOT_GATE_RETRY_SECONDS = 2.0
+
+
+async def _await_retirements_admissible(pool: Any, log: Any) -> None:
+    """Loop the fail-closed boot-admission gate until the DB is provably safe.
+
+    Refuses to return — keeping the api unready (``app.state.retirements_ok``
+    stays ``False``, so ``/ready`` answers 503) — until
+    :func:`assert_retirements_admissible` passes. Under Coolify's rolling
+    deploy this is exactly the window where the old healthy container keeps
+    serving while the new one waits out the post-deploy migrate (#1575).
+    """
+    logged_wait = False
+    while True:
+        try:
+            await assert_retirements_admissible(pool)
+            return
+        except RetirementsNotAdmissible as exc:
+            if not logged_wait:
+                log.warning("api.boot_gate.refusing_readiness", reason=str(exc))
+                logged_wait = True
+            await asyncio.sleep(_BOOT_GATE_RETRY_SECONDS)
 
 
 def create_app() -> FastAPI:
@@ -60,6 +91,11 @@ def create_app() -> FastAPI:
         app.state.crypto_box = crypto_box
         app.state.procrastinate = procrastinate_app
         app.state.db_url = settings.db_url
+        # Readiness stays RED until the fail-closed boot-admission gate proves
+        # the live DB is safe for this code. ``/ready`` reads this flag, so a
+        # behind / residue-bearing / unreachable DB never lets the new
+        # container serve while the old one is still healthy (#1575).
+        app.state.retirements_ok = False
 
         # #959: the api runs as uid 1000 and can't repair ownership (no
         # CAP_CHOWN). If the worker (root) created a shared root first and
@@ -94,6 +130,15 @@ def create_app() -> FastAPI:
         prev_tool_provider = runtime.tool_provider
         runtime.crypto_box = crypto_box
         runtime.tool_provider = SubsystemToolProvider()
+
+        # Fail-closed boot-admission gate (#1575): block here — readiness RED —
+        # until the live DB is proven safe for this code (alembic at/past every
+        # contract_rev AND zero live residue on every registered surface). This
+        # runs on EVERY boot, including raw restores, and is never cached.
+        await _await_retirements_admissible(pool, log)
+        app.state.retirements_ok = True
+        log.info("api.boot_gate.admitted")
+
         try:
             yield
         finally:

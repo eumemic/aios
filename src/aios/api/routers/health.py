@@ -29,12 +29,24 @@ async def health() -> dict[str, str]:
 async def ready(request: Request) -> Response:
     """Readiness probe. Unauthenticated; ``SELECT 1`` under a short timeout.
 
-    Returns 200 ``{"status": "ready"}`` when Postgres answers, 503
+    Returns 200 ``{"status": "ready"}`` when Postgres answers AND the
+    fail-closed boot-admission gate (#1575) has admitted this process; 503
     ``{"status": "unavailable"}`` when the pool can't be acquired, the query
-    raises, or it exceeds the 2 s budget. This is the signal the Docker/compose
-    healthcheck watches, so a silent post-startup DB outage becomes a visibly
-    unhealthy container instead of a 200-returning black hole.
+    raises, it exceeds the 2 s budget, OR the boot-gate has not yet admitted.
+    This is the signal the Docker/compose healthcheck watches, so a silent
+    post-startup DB outage becomes a visibly unhealthy container instead of a
+    200-returning black hole.
+
+    The boot-gate flag (``app.state.retirements_ok``) stays ``False`` from
+    process start until the gate proves the live DB is safe for this code
+    (alembic at/past every ``contract_rev`` AND zero live residue). Under a
+    rolling deploy this keeps the NEW container unready — so the OLD healthy
+    container keeps serving — until the post-deploy migrate lands. Checked
+    BEFORE the DB round-trip: an un-admitted process is unready regardless of
+    DB liveness.
     """
+    if not getattr(request.app.state, "retirements_ok", False):
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
     pool = request.app.state.pool
     try:
         # The timeout intentionally covers both ``pool.acquire()`` and the query: a
