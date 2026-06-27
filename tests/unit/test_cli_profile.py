@@ -252,19 +252,52 @@ class TestGapClassification:
             "not by the next step's cause (message)"
         )
 
-    def test_scheduled_gap_records_intentional_delay(self) -> None:
+    def test_reschedule_gap_records_intentional_delay(self) -> None:
         s = _Stream()
         _full_step(s, cause="message", model_request_ms=50)
         s.advance(100)
-        s.span("wake_deferred", cause="scheduled", delay_seconds=30)
+        s.span("wake_deferred", cause="reschedule", delay_seconds=30)
         s.advance(200)
-        _full_step(s, cause="scheduled", model_request_ms=50)
+        _full_step(s, cause="reschedule", model_request_ms=50)
 
         profile = compute_profile(s.events)
 
-        scheduled = next((g for g in profile.gaps if g.name == "scheduled/reschedule"), None)
-        assert scheduled is not None
-        assert scheduled.intentional_delay_s == 30.0
+        delayed = next((g for g in profile.gaps if g.name == "reschedule"), None)
+        assert delayed is not None
+        assert delayed.intentional_delay_s == 30.0
+
+    def test_inbound_gap_is_cross_turn(self) -> None:
+        # ``inbound`` (the real connector-inbound debounce cause) must be
+        # recognized as a turn boundary — previously the phantom
+        # ``inbound_message`` was keyed, so inbound turns were mislabeled
+        # as same-turn continuations (#1561).
+        s = _Stream()
+        _full_step(s, cause="message", model_request_ms=50)
+        s.advance(100)
+        s.span("wake_deferred", cause="inbound")
+        s.advance(5)
+        _full_step(s, cause="inbound", model_request_ms=50)
+
+        profile = compute_profile(s.events)
+
+        assert any(g.name == "cross-turn" for g in profile.gaps)
+        assert not any(g.name == "same-turn" for g in profile.gaps)
+
+    def test_trigger_wake_gap_is_cross_turn(self) -> None:
+        # ``trigger_wake`` (the real time/trigger-initiated turn start) must be
+        # recognized as a turn boundary — it was absent from the turn-starting
+        # set, so trigger-fired turns were misclassified as same-turn glue.
+        s = _Stream()
+        _full_step(s, cause="message", model_request_ms=50)
+        s.advance(100)
+        s.span("wake_deferred", cause="trigger_wake")
+        s.advance(5)
+        _full_step(s, cause="trigger_wake", model_request_ms=50)
+
+        profile = compute_profile(s.events)
+
+        assert any(g.name == "cross-turn" for g in profile.gaps)
+        assert not any(g.name == "same-turn" for g in profile.gaps)
 
 
 class TestWastedWake:

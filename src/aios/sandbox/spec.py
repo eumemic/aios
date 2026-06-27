@@ -55,6 +55,11 @@ from aios.sandbox.backends.base import (
     Unrestricted,
 )
 from aios.sandbox.egress_ca import TRUST_STORE_ENV
+from aios.sandbox.env_keys import (
+    AIOS_SESSION_ID_ENV_KEY,
+    TOOL_BROKER_SECRET_ENV_KEY,
+    TOOL_BROKER_URL_ENV_KEY,
+)
 from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.github_clone import (
     GithubCloneError,
@@ -905,13 +910,13 @@ def _assemble_plan(
         **placeholder_env,
         # Trailers last so nothing shadows them — a placeholder can't reach
         # them anyway (secret_name can't be a reserved key, models/vaults.py).
-        "TOOL_BROKER_URL": tool_broker_url,
-        "TOOL_BROKER_SECRET": tool_broker_secret,
+        TOOL_BROKER_URL_ENV_KEY: tool_broker_url,
+        TOOL_BROKER_SECRET_ENV_KEY: tool_broker_secret,
         # A ``sandbox_command`` fire escalates back into its session via
         # ``tool wake_self '{"content": "..."}'`` (timing lives in the
         # trigger primitive, not inside the sandbox). AIOS_SESSION_ID is
         # exposed so the bash can name its own session in logs / messages.
-        "AIOS_SESSION_ID": session_id,
+        AIOS_SESSION_ID_ENV_KEY: session_id,
     }
 
     # Bind the per-session attachments and uploads dirs at every provision

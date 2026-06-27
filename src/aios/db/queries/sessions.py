@@ -576,6 +576,53 @@ async def get_open_obligations(
     ]
 
 
+async def get_open_obligations_batch(
+    conn: asyncpg.Connection[Any], session_ids: list[str], *, account_id: str
+) -> dict[str, list[Obligation]]:
+    """Batched dual of :func:`get_open_obligations` (#1561).
+
+    One indexed anti-join across the whole batch (``req.session_id = ANY($1)``)
+    instead of one round-trip per session, then in-memory grouping by
+    ``session_id``. Same ``asked(request_opened) MINUS answered(request_response)``
+    open set (the shared :func:`open_request_anti_join` fragment,
+    ``awaited_only=True``) and same per-row :class:`Obligation` projection as the
+    single-session reader, oldest-first within each session (``ORDER BY
+    req.session_id, req.seq ASC``). Used by
+    :func:`services.sessions.compute_obligations` so the list-sessions /
+    get-session obligations view pays exactly one DB round-trip for a batch of N
+    sessions.
+    """
+    if not session_ids:
+        return {}
+    rows: list[asyncpg.Record] = await conn.fetch(
+        "SELECT req.session_id AS sid, "
+        "req.data->>'request_id' AS rid, "
+        "req.data->'caller'->>'kind' AS caller_kind, "
+        "req.data->'caller'->>'id' AS caller_id, "
+        "req.created_at AS opened_at, "
+        "req.data->>'summary' AS summary, "
+        "req.data->'output_schema' AS output_schema "
+        "FROM events req WHERE "
+        + open_request_anti_join(sid="ANY($1::text[])", acct="$2", awaited_only=True)
+        + "ORDER BY req.session_id, req.seq ASC",
+        session_ids,
+        account_id,
+    )
+    out: dict[str, list[Obligation]] = {}
+    for r in rows:
+        out.setdefault(r["sid"], []).append(
+            Obligation(
+                request_id=r["rid"],
+                caller_kind=r["caller_kind"] or "",
+                caller_id=r["caller_id"],
+                opened_at=r["opened_at"],
+                summary=r["summary"],
+                output_schema=r["output_schema"] if r["output_schema"] is not None else None,
+            )
+        )
+    return out
+
+
 async def get_request_caller(
     conn: asyncpg.Connection[Any], session_id: str, *, request_id: str
 ) -> dict[str, Any] | None:

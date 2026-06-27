@@ -1019,25 +1019,10 @@ async def compute_obligations(
     """
     if not sessions:
         return {}
-    out: dict[str, list[Obligation]] = {}
     async with pool.acquire() as conn:
-        for session in sessions:
-            obligations = await queries.get_open_obligations(
-                conn, session.id, account_id=account_id
-            )
-            if obligations:
-                out[session.id] = [
-                    Obligation(
-                        request_id=o.request_id,
-                        caller_kind=o.caller_kind,
-                        caller_id=o.caller_id,
-                        opened_at=o.opened_at,
-                        summary=o.summary,
-                        output_schema=o.output_schema,
-                    )
-                    for o in obligations
-                ]
-    return out
+        return await queries.get_open_obligations_batch(
+            conn, [s.id for s in sessions], account_id=account_id
+        )
 
 
 async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:

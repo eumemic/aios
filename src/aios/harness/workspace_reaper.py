@@ -81,6 +81,7 @@ Six guardrails (irreversible deletion — never-delete care)
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import shutil
@@ -383,7 +384,9 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
             )
             continue
         try:
-            shutil.rmtree(target)
+            # Off the event loop: a multi-GB tree's rmtree would otherwise block
+            # every concurrent session sharing the worker loop for its duration.
+            await asyncio.to_thread(shutil.rmtree, target)
         except OSError:
             # One un-removable dir (perm drift, read-only FS) must not abort the
             # rest of the sweep; the next sweep retries it.

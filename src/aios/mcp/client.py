@@ -31,6 +31,7 @@ from mcp.types import InitializeResult
 from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.db import queries
 from aios.logging import get_logger
+from aios.mcp._constants import _MCP_HTTPX_TIMEOUT as _MCP_HTTPX_TIMEOUT_SHARED
 from aios.mcp.pool import HttpErrorSink
 from aios.mcp.schema import make_function_tool
 from aios.models.vaults import AuthType
@@ -119,11 +120,11 @@ _DISCOVERY_TIMEOUT_S = 30.0
 # re-stalling each step (#1391).
 _DISCOVERY_UNHEALTHY_BACKOFF_S = 60.0
 
-# httpx client bounds for MCP transport. ``read`` is the longest leg —
-# tool calls that do real work (DB lookups, external APIs) commonly take
-# tens of seconds. Connect/write/pool are tight because they're network
-# fast paths.
-_MCP_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+# httpx client bounds for MCP transport — single definition in
+# :mod:`aios.mcp._constants`, shared with the pool's pooled sessions
+# (re-exported here so existing ``client._MCP_HTTPX_TIMEOUT`` references and
+# their test patches keep resolving).
+_MCP_HTTPX_TIMEOUT = _MCP_HTTPX_TIMEOUT_SHARED
 
 
 async def _open_session(

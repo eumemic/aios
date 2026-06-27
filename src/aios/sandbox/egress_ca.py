@@ -44,6 +44,11 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from aios.config import get_settings
 from aios.crypto.vault import KEY_BYTES, CryptoBox
+from aios.sandbox.env_keys import (
+    NODE_EXTRA_CA_CERTS_ENV_KEY,
+    REQUESTS_CA_BUNDLE_ENV_KEY,
+    SSL_CERT_FILE_ENV_KEY,
+)
 
 # HKDF domain-separation context for the CA seed; bump the suffix if the
 # derivation scheme ever changes incompatibly.
@@ -67,9 +72,9 @@ SYSTEM_CA_BUNDLE_PATH = "/etc/ssl/certs/ca-certificates.crt"
 # override them — the escape hatch for custom images (#724) with a
 # non-Debian trust-store layout.
 TRUST_STORE_ENV: dict[str, str] = {
-    "SSL_CERT_FILE": SYSTEM_CA_BUNDLE_PATH,
-    "REQUESTS_CA_BUNDLE": SYSTEM_CA_BUNDLE_PATH,
-    "NODE_EXTRA_CA_CERTS": CA_CERT_SANDBOX_PATH,
+    SSL_CERT_FILE_ENV_KEY: SYSTEM_CA_BUNDLE_PATH,
+    REQUESTS_CA_BUNDLE_ENV_KEY: SYSTEM_CA_BUNDLE_PATH,
+    NODE_EXTRA_CA_CERTS_ENV_KEY: CA_CERT_SANDBOX_PATH,
 }
 
 _CA_SUBJECT = x509.Name(

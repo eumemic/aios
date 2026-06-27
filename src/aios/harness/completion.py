@@ -33,26 +33,6 @@ from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, EPHEMERAL_TAIL
 # tool-call-only turns; modify_params tells LiteLLM to sanitize them.
 litellm.modify_params = True
 
-# litellm 1.83.4 predates claude-fable-5, so its model_cost map has no entry for
-# it — ``response_cost`` comes back None and every fable-5 turn records
-# ``cost_usd=null``. Register pricing + capabilities explicitly so ``_extract_cost``
-# works and so per-agent thinking params are accepted for the model. Both the bare
-# id and the ``anthropic/``-prefixed routing id are registered; litellm may look up
-# by either. ``setdefault`` so a future litellm that ships its own entry wins.
-_FABLE5_MODEL_COST = {
-    "input_cost_per_token": 10e-6,
-    "output_cost_per_token": 50e-6,
-    "litellm_provider": "anthropic",
-    "mode": "chat",
-    "supports_reasoning": True,
-    "supports_function_calling": True,
-    "supports_prompt_caching": True,
-    "max_input_tokens": 1_000_000,
-    "max_output_tokens": 128_000,
-}
-for _fable5_key in ("claude-fable-5", "anthropic/claude-fable-5"):
-    litellm.model_cost.setdefault(_fable5_key, _FABLE5_MODEL_COST)
-
 # LiteLLM 1.83.4's Anthropic adapter silently DROPS a requested ``thinking``
 # param whenever the last tool-calling assistant message in the replayed
 # history lacks ``thinking_blocks`` (guard for upstream issue #18926). The
