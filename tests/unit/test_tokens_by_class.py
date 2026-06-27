@@ -111,10 +111,13 @@ class TestApproxTokensByClass:
         bc = approx_tokens_by_class([{"role": "user", "content": "hi"}], tools=tools)
         assert bc["tools"] > 0
 
-    def test_sum_is_the_local_tokens_baseline(self) -> None:
-        # local_tokens = sum(by_class.values()) is the new stored baseline
-        # (issue #1609 loop.py change). It must be a positive, deterministic
-        # function of the same neutral counter — never crash, never negative.
+    def test_sum_is_positive_and_nonnegative_per_class(self) -> None:
+        # The per-class split must be a positive, deterministic function of the
+        # same neutral counter — never crash, never negative. It is NOT the
+        # stored baseline: loop.py stamps local_tokens = approx_tokens(...) (a
+        # single call) and by_class separately, so sum(by_class.values()) may
+        # exceed local_tokens (each slice carries its own framing overhead).
+        # The implementation deliberately does not enforce that equality.
         msgs = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "hello"},
@@ -124,6 +127,11 @@ class TestApproxTokensByClass:
         bc = approx_tokens_by_class(msgs)
         assert sum(bc.values()) > 0
         assert all(v >= 0 for v in bc.values())
+        # The per-class split sums to AT LEAST the neutral baseline (each slice
+        # is costed in isolation and re-pays per-message framing), so it must
+        # never be MISTAKEN for the stored baseline: loop.py keeps them as two
+        # separate counts on purpose (issue #1609 constraint #1).
+        assert sum(bc.values()) >= approx_tokens(msgs)
 
     def test_neutral_counter_unchanged(self) -> None:
         # Constraint #1: approx_tokens (the stored baseline) is untouched.

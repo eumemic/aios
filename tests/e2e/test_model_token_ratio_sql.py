@@ -26,12 +26,17 @@ from tests.e2e.harness import Harness
 
 def _by_class(local_tokens: int) -> dict[str, float]:
     """Spread a model-neutral ``local_tokens`` total evenly across every
-    content class, mirroring the ``local_tokens_by_class`` vector that
-    ``harness/loop.py`` stamps (``local_tokens == sum(by_class.values())``).
+    content class, as a stand-in for the ``local_tokens_by_class`` vector that
+    ``harness/loop.py`` stamps.
 
-    The per-class ridge fit (#1609) trains on this vector; an even spread
-    makes every class identifiable with the same actual/local coefficient,
-    so the scalar shim's unweighted mean reproduces ``input/local``.
+    This is a *test convenience*, not the production contract: ``loop.py``
+    counts ``local_tokens`` and ``local_tokens_by_class`` with two separate
+    ``litellm`` calls, so in production the per-class slices each carry their
+    own framing overhead and ``sum(by_class.values()) >= local_tokens`` (the
+    implementation deliberately does NOT enforce equality). The even spread
+    used here happens to sum back to ``local_tokens`` only so the scalar
+    shim's unweighted mean reproduces ``input/local`` for these SQL-path
+    assertions; the per-class ridge fit (#1609) does not depend on that.
     """
     per = local_tokens / len(CONTENT_CLASSES)
     return {c: per for c in CONTENT_CLASSES}
