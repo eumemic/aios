@@ -47,6 +47,7 @@ from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimite
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of, surface_of
+from aios.models.sessions import Err, Outcome
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent, WfRunStatus
 from aios.services import attenuation as attenuation_service
 from aios.services.sessions import (
@@ -188,15 +189,16 @@ def _escalate(cur: StepDisposition, to: StepDisposition) -> StepDisposition:
     return to if _RANK[to] > _RANK[cur] else cur
 
 
-def _memo_outcome(call_result_payload: dict[str, Any]) -> dict[str, Any]:
-    """Map a ``call_result`` payload to the host memo's tagged outcome: a value the
-    driver fast-forwards into the await (``{"ok": value}``), or an error it throws
-    there as ``AgentError`` (``{"error": {...}}``). The discriminated union lets the
-    host tell "the agent answered" from "the agent failed" even when the answer is
-    itself a dict — the real value always nests one level under ``"ok"``."""
-    if call_result_payload.get("is_error"):
-        return {"error": call_result_payload.get("error")}
-    return {"ok": call_result_payload.get("result")}
+def _memo_outcome(outcome: Outcome) -> dict[str, Any]:
+    """Map an ``Outcome`` to the host memo's tagged shape: a value the driver
+    fast-forwards into the await (``{"ok": value}``), or an error it throws there as
+    ``AgentError`` (``{"error": {...}}``). The discriminated union lets the host tell
+    "the agent answered" from "the agent failed" even when the answer is itself a
+    dict — the real value always nests one level under ``"ok"``. The kind is the
+    discriminator; no ``is_error`` re-derivation."""
+    if outcome.kind == "ok":
+        return {"ok": outcome.result}
+    return {"error": outcome.error}
 
 
 async def _resolve_agent_call(
@@ -208,7 +210,7 @@ async def _resolve_agent_call(
     started_at: datetime,
     now: datetime,
     deadline: timedelta,
-) -> dict[str, Any] | None:
+) -> Outcome | None:
     """The outcome of one inflight ``agent()`` call, or ``None`` if it is still
     pending and within its wall-clock deadline.
 
@@ -235,9 +237,7 @@ async def _resolve_agent_call(
             child_id,
             account_id=account_id,
             request_id=request_id,
-            is_error=True,
-            result=None,
-            error={"kind": "timeout"},
+            outcome=Err(error={"kind": "timeout"}),
         )
     resolved = await db_queries.derive_response(
         conn, child_id, account_id=account_id, request_id=request_id
@@ -363,7 +363,7 @@ async def _run_workflow_step_body(
             return
 
         memo: dict[str, Any] = {
-            e.call_key: _memo_outcome(e.payload)
+            e.call_key: _memo_outcome(db_queries.outcome_from_jsonb(e.payload))
             for e in events
             if e.type == "call_result" and e.call_key is not None
         }
@@ -397,7 +397,7 @@ async def _run_workflow_step_body(
             if cap_payload.get("capability") == "agent":
                 # The child was invoked with request_id = call_key (the agent() call
                 # IS the request), so its outcome is derived under that same id.
-                result_payload = await _resolve_agent_call(
+                call_outcome = await _resolve_agent_call(
                     conn,
                     account_id=account_id,
                     child_id=cap_payload["child_session_id"],
@@ -406,11 +406,13 @@ async def _run_workflow_step_body(
                     now=now,
                     deadline=agent_deadline,
                 )
-                if result_payload is None:
+                if call_outcome is None:
                     continue  # still pending, within deadline — stay suspended
+                # Serialize the kind to the flat call_result JSONB once (the journal
+                # shape is unchanged), then merge the agent-only usage enrichment.
                 result_payload = await _enrich_agent_result(
                     conn,
-                    result_payload,
+                    db_queries.outcome_to_jsonb(call_outcome),
                     account_id=account_id,
                     child_id=cap_payload["child_session_id"],
                     started_at=cap_event.created_at,
@@ -424,13 +426,14 @@ async def _run_workflow_step_body(
                 # await: a replay re-drives this fold from the journaled
                 # call_result (memo already carries the outcome; this arm is not
                 # reached), and a fresh wake resolves it from the durable log.
-                result_payload = await wf_queries.derive_run_response(
+                call_outcome = await wf_queries.derive_run_response(
                     conn,
                     cap_payload["child_run_id"],
                     account_id=account_id,
                 )
-                if result_payload is None:
+                if call_outcome is None:
                     continue  # sub-run still in-flight and unanswered — stay suspended
+                result_payload = db_queries.outcome_to_jsonb(call_outcome)
             elif cap_payload.get("capability") == "tool":
                 sig = signals.get(call_key)
                 if sig is None and not run_tools.has_inflight(run_id, call_key):
@@ -482,7 +485,7 @@ async def _run_workflow_step_body(
             )
             # memo carries the host's tagged outcome (R3): an `{ok}` value to
             # fast-forward into the await, or an `{error}` to throw as AgentError.
-            memo[call_key] = _memo_outcome(result_payload)
+            memo[call_key] = _memo_outcome(db_queries.outcome_from_jsonb(result_payload))
             del inflight[call_key]
             harvested = True
 

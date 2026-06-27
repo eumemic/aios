@@ -24,6 +24,7 @@ from aios.db.pool import create_pool
 from aios.errors import NotFoundError
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_sessions_needing_inference
+from aios.models.sessions import Err
 from aios.services import sessions as service
 from aios.services import tasks as tasks_service
 from tests.integration.conftest import seed_agent_env_session
@@ -110,7 +111,7 @@ async def test_cancel_marked_session_is_swept_then_leaf_answers_cancelled(
         resolved = await queries.derive_response(
             conn, session_id, account_id=_ACCOUNT, request_id="req_c"
         )
-        assert resolved == {"result": None, "is_error": True, "error": {"kind": "cancelled"}}
+        assert resolved == Err(error={"kind": "cancelled"})
         # The request is closed (answered), and the marker is harvested → no re-wake.
         assert await queries.get_open_request_ids(conn, session_id, account_id=_ACCOUNT) == []
         marker = await queries.get_session_cancel_marker(
@@ -166,7 +167,7 @@ async def test_cancel_task_session_seeds_tombstone_and_marker_end_to_end(
         resolved = await queries.derive_response(
             conn, session_id, account_id=_ACCOUNT, request_id="req_x"
         )
-        assert resolved == {"result": None, "is_error": True, "error": {"kind": "cancelled"}}
+        assert resolved == Err(error={"kind": "cancelled"})
 
     # Idempotent: re-cancelling the same edge is a no-op (ON CONFLICT).
     await tasks_service.cancel_task(

@@ -18,6 +18,7 @@ import asyncio
 from typing import Any
 
 from aios.db.queries.trace import ChildNode
+from aios.models.sessions import Ok
 from aios.services import trace as svc
 
 
@@ -53,9 +54,9 @@ def test_build_entries_dfs_preorder_and_depth() -> None:
         session_journals={},
         run_journals={},
         responses={
-            "sess_a": {"is_error": False},
-            "wfr_b": {"is_error": False},
-            "sess_c": {"is_error": False},
+            "sess_a": Ok(),
+            "wfr_b": Ok(),
+            "sess_c": Ok(),
         },
         verbose=False,
     )
@@ -98,7 +99,7 @@ def test_agent_call_frame_merged_into_child_not_double_listed() -> None:
         run_meta={"wfr_root": {"status": "running"}},
         session_journals={},
         run_journals=run_journals,
-        responses={"sess_child": {"is_error": False}},
+        responses={"sess_child": Ok()},
         verbose=True,
     )
     # The call_started for the spawned child is NOT emitted as a frame.

@@ -31,6 +31,7 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.db.queries import trace as trace_q
 from aios.db.queries import workflows as wf_queries
+from aios.models.sessions import Outcome
 from aios.models.trace import (
     TraceEntry,
     TraceResponse,
@@ -107,7 +108,7 @@ async def get_trace(
         run_journals = await trace_q.read_run_journal_batched(conn, run_ids, account_id=account_id)
         # Resolve each servicer node's caller's-eye response under the SAME
         # snapshot (reusing the #1126 resolvers).
-        responses: dict[str, dict[str, Any] | None] = {}
+        responses: dict[str, Outcome | None] = {}
         for n in nodes:
             if n.request_id is None:
                 continue
@@ -206,7 +207,7 @@ def build_entries(
     run_meta: dict[str, dict[str, Any]],
     session_journals: dict[str, list[dict[str, Any]]],
     run_journals: dict[str, list[dict[str, Any]]],
-    responses: dict[str, dict[str, Any] | None],
+    responses: dict[str, Outcome | None],
     verbose: bool,
     truncated: bool = False,
 ) -> list[TraceEntry]:
@@ -254,7 +255,7 @@ def build_entries(
 def _session_node_entry(
     node: _Node,
     session_meta: dict[str, dict[str, Any]],
-    responses: dict[str, dict[str, Any] | None],
+    responses: dict[str, Outcome | None],
 ) -> TraceEntry:
     meta = session_meta.get(node.id, {})
     if node.request_id is not None:
@@ -287,7 +288,7 @@ def _session_node_entry(
 def _run_node_entry(
     node: _Node,
     run_meta: dict[str, dict[str, Any]],
-    responses: dict[str, dict[str, Any] | None],
+    responses: dict[str, Outcome | None],
 ) -> TraceEntry:
     meta = run_meta.get(node.id, {})
     if node.request_id is not None:

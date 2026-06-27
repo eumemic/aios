@@ -26,6 +26,7 @@ from typing import Any
 import asyncpg
 
 from aios.errors import NotFoundError
+from aios.models.sessions import Err, Ok, Outcome
 
 # ─── shared scoping helpers ──────────────────────────────────────────────────
 #
@@ -284,6 +285,39 @@ def open_request_anti_join(*, sid: str, acct: str, awaited_only: bool) -> str:
         "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
         "    AND resp.data->>'request_id' = req.data->>'request_id') "
     )
+
+
+# ─── request-answer outcome codec (#1555) ────────────────────────────────────
+#
+# The single serialize/deserialize pair where the discriminated ``Ok | Err``
+# answer kind meets the on-disk JSONB. This is the ONLY code that names the flat
+# ``is_error`` / ``result`` / ``error`` keys for the request-answer domain — the
+# kind is the source of truth, the flat keys are a derived echo. The flat keys
+# are kept on disk (additive, no migration) so an old reader during the deploy
+# window still parses new events and a new reader still parses old ones.
+
+
+def outcome_to_jsonb(outcome: Outcome) -> dict[str, Any]:
+    """Serialize an ``Outcome`` to the flat ``request_response`` JSONB shape.
+
+    Additive: keeps the ``is_error`` / ``result`` / ``error`` keys readable by an
+    old reader across the deploy window, but DERIVES them from the kind — the kind
+    is the source of truth, the flat keys are echo.
+    """
+    if outcome.kind == "ok":
+        return {"is_error": False, "result": outcome.result, "error": None}
+    return {"is_error": True, "result": None, "error": outcome.error}
+
+
+def outcome_from_jsonb(data: dict[str, Any]) -> Outcome:
+    """Deserialize a flat ``{is_error, result, error}`` JSONB blob to an ``Outcome``.
+
+    Read-tolerant of both the new (kind-derived) and any legacy flat shape: the
+    ``is_error`` discriminant alone picks the arm.
+    """
+    if data.get("is_error"):
+        return Err(error=data["error"])
+    return Ok(result=data.get("result"))
 
 
 # ─── re-exports ──────────────────────────────────────────────────────────────
@@ -619,6 +653,9 @@ __all__ = [
     "ClaimedTriggerRun",
     "EnvVarCredentialEcho",
     "EnvVarCredentialRow",
+    "Err",
+    "Ok",
+    "Outcome",
     "ResolvedExternalEventTrigger",
     "TriggerFireRef",
     "TriggerRow",
@@ -833,6 +870,8 @@ __all__ = [
     "notify_management_call_dispatch",
     "notify_management_call_result",
     "open_request_anti_join",
+    "outcome_from_jsonb",
+    "outcome_to_jsonb",
     "precompute_event_append",
     "prune_trigger_runs",
     "read_events",

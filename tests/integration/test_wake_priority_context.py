@@ -21,6 +21,7 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
+from aios.models.sessions import Ok
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
@@ -98,9 +99,7 @@ async def _close_edge(pool: asyncpg.Pool[Any], *, session_id: str, request_id: s
             session_id,
             account_id=_ACCOUNT,
             request_id=request_id,
-            is_error=False,
-            result={"ok": True},
-            error=None,
+            outcome=Ok(result={"ok": True}),
         )
     assert wrote
 

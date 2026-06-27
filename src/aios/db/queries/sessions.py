@@ -34,7 +34,14 @@ from aios.ids import (
 )
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
 from aios.models.attenuation import Surface
-from aios.models.sessions import Obligation, Session, SessionStatus, SessionUsage
+from aios.models.sessions import (
+    Err,
+    Obligation,
+    Outcome,
+    Session,
+    SessionStatus,
+    SessionUsage,
+)
 
 # ─── sessions ─────────────────────────────────────────────────────────────────
 
@@ -444,7 +451,7 @@ async def get_wake_priority_context(
 
 async def read_request_response(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
-) -> dict[str, Any] | None:
+) -> Outcome | None:
     """A specific request's written **response** (`request_response` event), or
     ``None`` if none has been written.
 
@@ -468,7 +475,7 @@ async def read_request_response(
         account_id,
         request_id,
     )
-    return row["data"] if row is not None else None
+    return queries.outcome_from_jsonb(row["data"]) if row is not None else None
 
 
 async def get_open_request_ids(
@@ -727,7 +734,7 @@ async def count_request_nudges(
 
 async def derive_response(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
-) -> dict[str, Any] | None:
+) -> Outcome | None:
     """A request's **terminal outcome**, or ``None`` if it is still pending.
 
     The single resolver the run harvest asks "what became of this ``agent()``?" — a
@@ -759,14 +766,9 @@ async def derive_response(
     )
     assert row is not None
     if row["response"] is not None:
-        response = row["response"]
-        return {
-            "result": response.get("result"),
-            "is_error": bool(response.get("is_error")),
-            "error": response.get("error"),
-        }
+        return queries.outcome_from_jsonb(row["response"])
     if not row["live"]:
-        return {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
+        return Err(error={"kind": "child_gone"})
     return None
 
 
@@ -836,9 +838,7 @@ async def write_response_if_absent(
     *,
     account_id: str,
     request_id: str,
-    is_error: bool,
-    result: Any,
-    error: dict[str, Any] | None,
+    outcome: Outcome,
 ) -> bool:
     """Write a request's response, **exactly once per request** (first-writer-wins).
 
@@ -873,9 +873,7 @@ async def write_response_if_absent(
             data={
                 "event": "request_response",
                 "request_id": request_id,
-                "is_error": is_error,
-                "result": result,
-                "error": error,
+                **queries.outcome_to_jsonb(outcome),
             },
         )
     return True

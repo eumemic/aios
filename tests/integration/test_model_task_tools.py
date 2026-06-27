@@ -29,6 +29,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.models.agents import ToolSpec
+from aios.models.sessions import Ok
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools import tasks as task_tools
@@ -180,7 +181,7 @@ async def test_list_open_tasks_only_open_and_own(
         request_id="req_answered",
     )
     await workflow_completion.respond_to_request(
-        pool, servicer_done, request_id="req_answered", is_error=False, result={"v": 1}, error=None
+        pool, servicer_done, request_id="req_answered", outcome=Ok(result={"v": 1})
     )
     # tc_run: a run servicer, pending → listed.
     run_id = await _seed_run(
@@ -323,7 +324,7 @@ async def test_stop_task_already_resolved(env: tuple[asyncpg.Pool[Any], str]) ->
         request_id="req_done",
     )
     await workflow_completion.respond_to_request(
-        pool, servicer, request_id="req_done", is_error=False, result={"v": 9}, error=None
+        pool, servicer, request_id="req_done", outcome=Ok(result={"v": 9})
     )
 
     out = await task_tools.stop_task_handler(caller, {"tool_call_id": "tc_done"})

@@ -30,6 +30,7 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import NotFoundError, ValidationError
 from aios.harness import runtime
+from aios.models.sessions import Ok
 from aios.services import sessions as service
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
@@ -151,9 +152,7 @@ async def test_agent_request_correlates_await_to_response(
             handle.servicer_id,
             account_id=account_id,
             request_id=handle.request_id,
-            is_error=False,
-            result={"answer": 42},
-            error=None,
+            outcome=Ok(result={"answer": 42}),
         )
 
     resp = await tasks_service.await_task(

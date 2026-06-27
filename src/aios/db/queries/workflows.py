@@ -31,6 +31,7 @@ from aios.db.queries import (
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
+from aios.models.sessions import Err, Ok, Outcome
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     WfRun,
@@ -1191,7 +1192,7 @@ async def resolve_run_error(conn: asyncpg.Connection[Any], run_id: str) -> dict[
 
 async def derive_run_response(
     conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
-) -> dict[str, Any] | None:
+) -> Outcome | None:
     """A run-servicer's **terminal outcome** for its inbound request, or ``None`` if pending.
 
     The run-kind branch of the kind-agnostic resolver (the dual of the session-side
@@ -1223,20 +1224,21 @@ async def derive_run_response(
         account_id,
     )
     if row is None:  # the run vanished entirely → can never answer
-        return {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
+        return Err(error={"kind": "child_gone"})
     status = row["status"]
     if status == "cancelled":
-        return {"result": None, "is_error": True, "error": {"kind": "cancelled"}}
+        return Err(error={"kind": "cancelled"})
     if status in ("completed", "errored"):
         completed = row["completed"] if row["completed"] is not None else {}
-        is_error = bool(completed.get("is_error"))
-        return {
-            "result": None if is_error else completed.get("output"),
-            "is_error": is_error,
-            "error": completed.get("error"),
-        }
+        # The run_completed bookend carries its OWN flat {output, is_error, error}
+        # triple (a second on-disk product, untouched here). Collapse it into the
+        # same Outcome kind at the read, rename-tolerant (output ↔ result), rather
+        # than re-pair the triple downstream.
+        if completed.get("is_error"):
+            return Err(error=completed["error"])
+        return Ok(result=completed.get("output"))
     if row["archived"]:  # non-terminal but archived → can never answer
-        return {"result": None, "is_error": True, "error": {"kind": "child_gone"}}
+        return Err(error={"kind": "child_gone"})
     return None
 
 

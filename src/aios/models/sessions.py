@@ -35,6 +35,37 @@ from aios.models.triggers import (
     validate_triggers,
 )
 
+# ─── request-answer outcome kind (#1555) ─────────────────────────────────────
+#
+# The canonical in-memory answer to a #1123 request: a discriminated ``Ok | Err``
+# union, constructed once at each answer site. ``Ok`` carries a result and has no
+# error slot; ``Err`` always carries an error. The legal states are exactly two,
+# so the six illegal ``(is_error, result, error)`` product combinations are
+# unrepresentable. The flat on-disk shape lives behind the single codec in
+# ``aios.db.queries`` (``outcome_to_jsonb`` / ``outcome_from_jsonb``).
+
+
+class Ok(BaseModel):
+    """A request answered successfully — carries a result, no error slot."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["ok"] = "ok"
+    result: Any = None
+
+
+class Err(BaseModel):
+    """A request answered with a failure — always carries an error kind."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["err"] = "err"
+    error: dict[str, Any]
+
+
+type Outcome = Annotated[Ok | Err, Field(discriminator="kind")]
+
+
 # Discriminated union over resource types. New types extend this union.
 SessionResource = Annotated[
     MemoryStoreResource | GithubRepositoryResource,
