@@ -75,9 +75,17 @@ TOOL_SURFACES: tuple[Surface, ...] = (
 #: tools ``invoke``→``call_session``, ``invoke_agent``→``call_agent``, and the
 #: ``invoke_workflow``/``create_run``/``await_run`` launch trio folded into the
 #: unified ``call_workflow``; ``cancel_run``→``stop_task`` followed in #1428.
-#: The read-tolerance shim lives as ``_LEGACY_BUILTIN_RENAMES`` in
-#: ``models/agents.py`` (introduced with migration 0116); the data migrations
-#: 0116 (#1419) and 0117 (#1428) rewrite persisted rows to canonical.
+#: The read-tolerance shim is the ``mode="before"`` validator in
+#: ``models/agents.py`` (introduced with migration 0116), now registry-driven via
+#: :func:`tolerated_rename_map` (#1574); the data migrations 0116 (#1419) and
+#: 0117 (#1428) rewrite persisted rows to canonical.
+#:
+#: ``contract_rev`` is ``None``: this retirement is still in its **expand span**,
+#: so the registry-driven before-validator keeps tolerating these tokens at every
+#: ``ToolSpec.model_validate`` site (no regression to the pre-#1574 unconditional
+#: shim). Stamping ``contract_rev`` here is what makes the validator stop
+#: remapping these tokens — that post-contract teardown is sequenced + exercised
+#: in the live-exercise issue, not #1574.
 LEGACY_BUILTIN_RENAMES = Retirement(
     domain=TOOL_SURFACE_DOMAIN,
     action="rename",
@@ -91,7 +99,7 @@ LEGACY_BUILTIN_RENAMES = Retirement(
     ),
     surfaces=TOOL_SURFACES,
     introduced_rev="0116",
-    contract_rev="0117",
+    contract_rev=None,
     sla_days=30,
 )
 
@@ -123,3 +131,44 @@ REGISTRY: tuple[Retirement, ...] = (
     LEGACY_BUILTIN_RENAMES,
     RETIRED_GOAL_OUTCOME_BUILTINS,
 )
+
+
+def tolerated_rename_map(
+    domain: str = TOOL_SURFACE_DOMAIN,
+    *,
+    registry: tuple[Retirement, ...] = REGISTRY,
+) -> dict[str, str]:
+    """``token -> successor`` for every *still-tolerated* rename in ``domain``.
+
+    This is the gate the ``mode="before"`` read-tolerance validator
+    (``models/agents.py``) consults instead of a hand-maintained constant: a
+    token is tolerated (mapped to its canonical successor on read) **only while
+    its descriptor's ``contract_rev IS NULL``** — i.e. the data migration that
+    rewrites persisted rows to canonical has not yet been declared. Once a
+    descriptor names a ``contract_rev``, its tokens drop out of this map and the
+    validator stops remapping them, so a stale legacy ``type`` would then
+    correctly fail ``ToolSpec`` validation (the post-contract behaviour exercised
+    in the live-exercise issue).
+
+    Only ``action="rename"`` descriptors contribute — a ``drop`` has no successor
+    to map to and is handled at the list level (``load_tool_specs``), not by the
+    per-``ToolSpec`` before-validator. ``registry`` is injectable so callers and
+    tests can scope the lookup to a synthetic set of descriptors.
+
+    The ``contract_rev IS NULL`` predicate here is the single tolerance gate;
+    :mod:`aios.retirements.telemetry` records fires only as corroboration and is
+    never consulted to decide tolerance.
+    """
+
+    out: dict[str, str] = {}
+    for retirement in registry:
+        if retirement.domain != domain:
+            continue
+        if retirement.action != "rename":
+            continue
+        if retirement.contract_rev is not None:
+            continue
+        for token, successor in retirement.token_map().items():
+            if successor is not None:
+                out[token] = successor
+    return out
