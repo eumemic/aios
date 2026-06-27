@@ -42,6 +42,7 @@ from aios.models.sessions import (
     SessionStatus,
     SessionUsage,
 )
+from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
 
 # ─── sessions ─────────────────────────────────────────────────────────────────
 
@@ -293,11 +294,12 @@ async def insert_child_session(
                 id, agent_id, environment_id, agent_version, model, title, metadata,
                 workspace_volume_path, env, focal_channel, focal_locked,
                 account_id, parent_run_id, origin, archive_when_idle,
-                tools, mcp_servers, http_servers, surface_frozen, litellm_extra
+                tools, mcp_servers, http_servers, surface_frozen, litellm_extra,
+                tools_vocab_epoch
             )
             VALUES ($1, $2, $3, $4, $5, NULL, '{}'::jsonb, $6, '{}'::jsonb,
                     NULL, FALSE, $7, $8, 'background', TRUE,
-                    $9::jsonb, $10::jsonb, $11::jsonb, TRUE, $12::jsonb)
+                    $9::jsonb, $10::jsonb, $11::jsonb, TRUE, $12::jsonb, $13)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -313,6 +315,7 @@ async def insert_child_session(
             json.dumps([s.model_dump() for s in mcp_servers]),
             json.dumps([s.model_dump() for s in http_servers]),
             json.dumps(litellm_extra or {}),
+            TOOLS_VOCAB_EPOCH,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(

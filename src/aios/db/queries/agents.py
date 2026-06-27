@@ -36,6 +36,7 @@ from aios.models.agents import (
     load_tool_specs,
 )
 from aios.models.skills import AgentSkillRef
+from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
 
 # ─── agents ───────────────────────────────────────────────────────────────────
 
@@ -125,10 +126,10 @@ async def insert_agent(
                 INSERT INTO agents (
                     id, name, model, system, tools, skills, mcp_servers, http_servers,
                     description, metadata, litellm_extra,
-                    window_min, window_max, version, account_id
+                    window_min, window_max, version, account_id, tools_vocab_epoch
                 )
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb,
-                        $9, $10::jsonb, $11::jsonb, $12, $13, 1, $14)
+                        $9, $10::jsonb, $11::jsonb, $12, $13, 1, $14, $15)
                 RETURNING *
                 """,
                 new_id,
@@ -145,6 +146,7 @@ async def insert_agent(
                 window_min,
                 window_max,
                 account_id,
+                TOOLS_VOCAB_EPOCH,
             )
             assert row is not None
             # Snapshot version 1 into agent_versions.
@@ -152,10 +154,10 @@ async def insert_agent(
                 """
                 INSERT INTO agent_versions (
                     agent_id, version, model, system, tools, skills, mcp_servers, http_servers,
-                    litellm_extra, window_min, window_max, account_id
+                    litellm_extra, window_min, window_max, account_id, tools_vocab_epoch
                 )
                 VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb,
-                        $8::jsonb, $9, $10, $11)
+                        $8::jsonb, $9, $10, $11, $12)
                 """,
                 new_id,
                 model,
@@ -168,6 +170,7 @@ async def insert_agent(
                 window_min,
                 window_max,
                 account_id,
+                TOOLS_VOCAB_EPOCH,
             )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -368,10 +371,10 @@ async def update_agent(
             """
             INSERT INTO agent_versions (
                 agent_id, version, model, system, tools, skills, mcp_servers, http_servers,
-                litellm_extra, window_min, window_max, account_id
+                litellm_extra, window_min, window_max, account_id, tools_vocab_epoch
             )
             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb,
-                    $9::jsonb, $10, $11, $12)
+                    $9::jsonb, $10, $11, $12, $13)
             """,
             agent_id,
             new_version,
@@ -385,6 +388,7 @@ async def update_agent(
             new_wmin,
             new_wmax,
             account_id,
+            TOOLS_VOCAB_EPOCH,
         )
     return _row_to_agent(row)
 
