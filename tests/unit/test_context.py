@@ -1020,9 +1020,7 @@ class TestThinkingBlockPreservation:
             {
                 # Signature present so the read-path poison guard (issue #1588)
                 # keeps the block -- this test is about *other* provider fields.
-                "thinking_blocks": [
-                    {"type": "thinking", "thinking": "...", "signature": "sig"}
-                ],
+                "thinking_blocks": [{"type": "thinking", "thinking": "...", "signature": "sig"}],
                 "reasoning": "step 1",
                 "reasoning_details": [{"type": "thinking", "content": "..."}],
                 "reacting_to": 1,
@@ -1062,9 +1060,7 @@ class TestThinkingBlockPreservation:
             _evt(1, "user", content="hi"),
             _evt(2, "assistant", content="hey"),
         ]
-        events[1].data["thinking_blocks"] = [
-            {"type": "thinking", "thinking": "real reasoning"}
-        ]
+        events[1].data["thinking_blocks"] = [{"type": "thinking", "thinking": "real reasoning"}]
         msgs = build_messages(
             events, system_prompt=None, model="anthropic/claude-haiku-4-5"
         ).messages
