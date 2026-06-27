@@ -135,7 +135,7 @@ async def test_channel_filter_excludes_cross_channel_inbound(
     a_channels = {e.channel for e in a_events}
     assert a_channels == {CHAN_A}, a_channels
     # The A slice contains the inbound, the assistant send, and its tool result.
-    a_roles = sorted(e.data.get("role") for e in a_events)
+    a_roles = sorted(str(e.data.get("role")) for e in a_events)
     assert a_roles == ["assistant", "tool", "user"], a_roles
     # The cross-channel B inbound is EXCLUDED from the A slice (the bug).
     assert all(e.data.get("content") != "from B" for e in a_events)
@@ -175,7 +175,7 @@ async def test_channel_filter_send_after_switch_attributes_to_origin(
         )
 
     # The tool result attributes to A (parent's focal), not B.
-    a_roles = sorted(e.data.get("role") for e in a_events)
+    a_roles = sorted(str(e.data.get("role")) for e in a_events)
     assert a_roles == ["assistant", "tool", "user"], a_roles
     assert all(e.channel == CHAN_A for e in a_events)
     # No event leaked into the B slice.

@@ -76,8 +76,8 @@ async def _drain_backfill(
             out.append({"__done__": True})
             break
         if sse.event == "event":
-            out.append(json.loads(sse.data))
-    await gen.aclose()
+            out.append(json.loads(str(sse.data)))
+    await gen.aclose()  # type: ignore[attr-defined]
     return out
 
 
