@@ -31,6 +31,7 @@ from aios.ids import (
 from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.connectors import ConnectorCapabilities
 from aios.models.inbound_policy import InboundPolicy
+from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
 
 # Discriminated-union adapter for the ``connections.inbound_policy`` jsonb
 # column. Parses NULL→None (handled by the caller) or a validated union member
@@ -1266,14 +1267,16 @@ async def update_connector_tools_schema(
     """
     await conn.execute(
         """
-        INSERT INTO connectors (connector, tools_schema, created_at, updated_at)
-        VALUES ($1, $2::jsonb, now(), now())
+        INSERT INTO connectors (connector, tools_schema, created_at, updated_at, tools_vocab_epoch)
+        VALUES ($1, $2::jsonb, now(), now(), $3)
         ON CONFLICT (connector) DO UPDATE
-           SET tools_schema = EXCLUDED.tools_schema,
-               updated_at   = now()
+           SET tools_schema       = EXCLUDED.tools_schema,
+               tools_vocab_epoch  = EXCLUDED.tools_vocab_epoch,
+               updated_at         = now()
         """,
         connector,
         json.dumps(tools_schema),
+        TOOLS_VOCAB_EPOCH,
     )
 
 

@@ -172,3 +172,31 @@ def tolerated_rename_map(
             if successor is not None:
                 out[token] = successor
     return out
+
+
+def dropped_tokens(
+    domain: str = TOOL_SURFACE_DOMAIN,
+    *,
+    registry: tuple[Retirement, ...] = REGISTRY,
+) -> frozenset[str]:
+    """Every token an ``action="drop"`` retirement removes outright in ``domain``.
+
+    The drop counterpart to :func:`tolerated_rename_map`: a ``drop`` token has no
+    successor (e.g. ``complete_goal``/``fail_goal``, which fold into the general
+    ``return``/``error`` step verbs, not any model-listed builtin), so a
+    persisted occurrence is *removed* rather than remapped. This is the single
+    list the re-upcast hook (:mod:`aios.retirements.upcast`) consults to scrub
+    drops, mirroring the list-level drop the read shim
+    (``load_tool_specs``) applies. ``registry`` is injectable for tests.
+    """
+
+    out: set[str] = set()
+    for retirement in registry:
+        if retirement.domain != domain:
+            continue
+        if retirement.action != "drop":
+            continue
+        for token, successor in retirement.token_map().items():
+            if successor is None:
+                out.add(token)
+    return frozenset(out)

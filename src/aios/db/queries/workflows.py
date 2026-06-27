@@ -43,6 +43,7 @@ from aios.models.workflows import (
     Workflow,
     WorkflowVersion,
 )
+from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
 
 # A reserved ``call_key`` for the run-cancel side-marker. Real call_keys are
 # call-site hashes, so this sentinel never collides; the ``(run_id, call_key)`` PK
@@ -174,9 +175,9 @@ async def insert_workflow(
                 """
                 INSERT INTO workflows
                     (id, account_id, name, version, script, input_schema, output_schema,
-                     description, tools, mcp_servers, http_servers)
+                     description, tools, mcp_servers, http_servers, tools_vocab_epoch)
                 VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6::jsonb, $7,
-                        $8::jsonb, $9::jsonb, $10::jsonb)
+                        $8::jsonb, $9::jsonb, $10::jsonb, $11)
                 RETURNING *
                 """,
                 new_id,
@@ -189,6 +190,7 @@ async def insert_workflow(
                 json.dumps([t.model_dump() for t in (tools or [])]),
                 json.dumps([s.model_dump() for s in (mcp_servers or [])]),
                 json.dumps([s.model_dump() for s in (http_servers or [])]),
+                TOOLS_VOCAB_EPOCH,
             )
             assert row is not None
             await _insert_workflow_version(conn, row)
@@ -216,9 +218,11 @@ async def _insert_workflow_version(conn: asyncpg.Connection[Any], wf_row: asyncp
         """
         INSERT INTO workflow_versions (
             workflow_id, account_id, version, name, script,
-            input_schema, output_schema, description, tools, mcp_servers, http_servers
+            input_schema, output_schema, description, tools, mcp_servers, http_servers,
+            tools_vocab_epoch
         )
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11::jsonb,
+                $12)
         """,
         wf_row["id"],
         wf_row["account_id"],
@@ -231,6 +235,9 @@ async def _insert_workflow_version(conn: asyncpg.Connection[Any], wf_row: asyncp
         json.dumps(wf_row["tools"]),
         json.dumps(wf_row["mcp_servers"]),
         json.dumps(wf_row["http_servers"]),
+        # Mirror the head's stamp: the version snapshots the same canonical
+        # ``tools`` blob written in this transaction, so it is born current too.
+        wf_row["tools_vocab_epoch"],
     )
 
 
@@ -313,7 +320,7 @@ async def update_workflow(
                    SET version = workflows.version + 1, name = $3, script = $4,
                        input_schema = $5::jsonb, output_schema = $6::jsonb, description = $7,
                        tools = $8::jsonb, mcp_servers = $9::jsonb, http_servers = $10::jsonb,
-                       updated_at = now()
+                       tools_vocab_epoch = $12, updated_at = now()
                  WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND version = $11
                 RETURNING *
                 """,
@@ -328,6 +335,10 @@ async def update_workflow(
                 json.dumps([s.model_dump() for s in new_mcp]),
                 json.dumps([s.model_dump() for s in new_http]),
                 expected_version,
+                # The new ``tools`` blob is written from canonical model objects,
+                # so the bumped head is current — re-stamp it (and the version
+                # snapshot it drives) to the current epoch.
+                TOOLS_VOCAB_EPOCH,
             )
             if row is None:
                 # No row matched (id, account_id, version): a stale/raced
@@ -648,10 +659,10 @@ async def insert_wf_run(
                  launcher_session_id, request_id, caller, request_output_schema,
                  script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
-                 depth)
+                 depth, tools_vocab_epoch)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13,
                     'pending', $14::jsonb,
-                    $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, $20)
+                    $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, $20, $21)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -675,6 +686,7 @@ async def insert_wf_run(
             round(budget_usd * 1_000_000) if budget_usd is not None else None,
             default_child_model,
             depth,
+            TOOLS_VOCAB_EPOCH,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
