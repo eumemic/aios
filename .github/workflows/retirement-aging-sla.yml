@@ -1,0 +1,143 @@
+name: Retirement aging-SLA check
+
+# Anti-rot forcing function against the #1432 "teardown tracked, never closed"
+# rot (R5), epic #1572. A retirement descriptor with `contract_rev IS NULL` is an
+# OPEN teardown: its read-tolerance shim is still load-bearing because the data
+# migration that would let it be torn down has not been declared. The descriptor
+# ledger row is the tracker, and it ACTIVELY AGES — measured from its
+# `introduced_rev` migration's landing date, an open descriptor that has sat past
+# `sla_days` is an SLA breach. This job FAILS master and files an issue on any
+# breach, so the ledger row (not a comment) is what forces the close-out.
+#
+# Why a scheduled job and not a unit test: the verdict rots on a CLOCK, not at
+# merge. A descriptor that was compliant when it landed silently crosses its SLA
+# days/weeks later, in no PR at all — invisible to any PR-time check. So the
+# breach has to be re-evaluated on a schedule. The aging core
+# (src/aios/retirements/aging.py) is pure + offline (it derives landing dates from
+# the in-tree git history of each migration file), so the job is fast and needs no
+# DB.
+#
+# Security: no untrusted ${{ }} expression is interpolated into run: commands. The
+# issue title/label are workflow-authored constants; the issue body is built ONLY
+# from the aging core's own JSON over committed source + git history, passed as a
+# quoted shell value, never eval'd. Only trusted contexts (secrets.GITHUB_TOKEN,
+# github.server_url / github.repository / github.run_id / github.sha) are
+# referenced.
+
+on:
+  schedule:
+    # Daily at 07:23 UTC. Off-minute by design (not :00/:30) to dodge the
+    # top-of-hour scheduler stampede. Daily (not weekly) because the SLA is a
+    # days-granularity clock — a weekly cadence could let a breach sit ~6 extra
+    # days past its deadline.
+    - cron: "23 7 * * *"
+  workflow_dispatch: {}
+
+# Serialize, and never cancel an in-flight run mid-filing: this is the
+# authoritative "is any retirement past SLA" verdict, and a later run must not
+# abort one whose issue write is still in progress.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  aging-sla:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Full history: the aging core dates each migration file by its earliest
+      # commit (`git log --reverse`). A shallow checkout would lose that history
+      # and misdate (or fail to date) the landing of a shim.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Compute aging-SLA verdict
+        id: verdict
+        # The aging CLI prints {"breaches": [...]} and exits 1 on any breach. We
+        # capture the JSON regardless of exit code (|| true) so the next step can
+        # build the issue body, then fail the job explicitly at the end.
+        run: |
+          set -uo pipefail
+          uv run python -m aios.retirements.aging > breaches.json || true
+          echo "breaches:"; cat breaches.json
+          COUNT=$(uv run python -c "import json,sys; print(len(json.load(open('breaches.json'))['breaches']))")
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: File or update SLA-breach issue
+        if: steps.verdict.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          TITLE="Retirement past aging-SLA on master"
+
+          # The drift label is docs/process hygiene drift, not a production
+          # outage, so it must NOT land in the incident queue. Created
+          # idempotently (it may not exist yet).
+          gh label create drift \
+            --color FBCA04 \
+            --description "Stale in-code signal surfaced by a drift canary" \
+            2>/dev/null || true
+
+          BODY=$(uv run python -c '
+          import json
+          data = json.load(open("breaches.json"))["breaches"]
+          lines = [
+              "One or more retirement descriptors have sat with `contract_rev IS NULL` PAST their `sla_days` — the read-tolerance shim is overdue for teardown (the #1432 R5 rot).",
+              "",
+              "Fix forward for each: write the contract migration and stamp `contract_rev` on the descriptor (the close-out), OR consciously bump `sla_days` with a reason. The descriptor ledger row is the forcing function — do not just close this issue.",
+              "",
+          ]
+          for b in data:
+              toks = ", ".join("`%s`" % t for t in b["tokens"])
+              lines.append(
+                  "- **%s** (action=%s, introduced_rev=%s): aged %d day(s), SLA %d, **over by %d** — tokens: %s"
+                  % (b["domain"], b["action"], b["introduced_rev"], b["age_days"], b["sla_days"], b["over_by_days"], toks)
+              )
+          lines += [
+              "",
+              "---",
+              "Detected by `.github/workflows/retirement-aging-sla.yml` via the offline aging core `src/aios/retirements/aging.py`. NOT auto-closed — close it yourself once the descriptor(s) are torn down or re-SLA'd.",
+          ]
+          print("\n".join(lines))
+          ')
+
+          # One drift issue, body REPLACED each run (not appended) so a
+          # deliberately-deferred breach doesn't pile a fresh comment daily.
+          # List by label (REST list is immediately consistent, unlike the
+          # eventually-consistent search index) and exact-match the title in jq.
+          EXISTING=$(gh issue list --label drift --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty" || echo "")
+
+          if [ -n "${EXISTING}" ]; then
+            echo "Updating existing SLA-breach issue #${EXISTING} (body replaced)."
+            gh issue edit "${EXISTING}" --body "${BODY}"
+          else
+            echo "Filing new SLA-breach issue."
+            gh issue create --title "${TITLE}" --label drift --body "${BODY}"
+          fi
+
+      - name: Fail master on any breach
+        if: steps.verdict.outputs.count != '0'
+        run: |
+          echo "::error::${{ steps.verdict.outputs.count }} retirement descriptor(s) past aging-SLA; issue filed/updated."
+          exit 1
