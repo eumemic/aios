@@ -92,9 +92,7 @@ async def test_residue_on_real_surface_refuses(pool: asyncpg.Pool[Any]) -> None:
         await assert_retirements_admissible(pool)
 
     alerts = [
-        r
-        for r in logs
-        if r.get("event") == "boot_gate.live_residue" and r.get("algedonic") is True
+        r for r in logs if r.get("event") == "boot_gate.live_residue" and r.get("algedonic") is True
     ]
     assert alerts, logs
     # The breach names the real surface it found the token on.

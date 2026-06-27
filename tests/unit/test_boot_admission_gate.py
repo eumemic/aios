@@ -119,8 +119,7 @@ def _single_contracted() -> Retirement:
                 table="agents",
                 jsonb_col="tools",
                 predicate_sql=(
-                    "EXISTS(SELECT 1 FROM jsonb_array_elements(tools) e "
-                    "WHERE e->>'type' = :token)"
+                    "EXISTS(SELECT 1 FROM jsonb_array_elements(tools) e WHERE e->>'type' = :token)"
                 ),
             ),
         ),
@@ -171,9 +170,7 @@ async def test_nonzero_residue_refuses_and_alerts(patch_registry: Any) -> None:
     assert any(token == "complete_goal" for _sql, token in conn.count_queries)
     # An algedonic alert was emitted.
     alerts = [
-        r
-        for r in logs
-        if r.get("event") == "boot_gate.live_residue" and r.get("algedonic") is True
+        r for r in logs if r.get("event") == "boot_gate.live_residue" and r.get("algedonic") is True
     ]
     assert alerts, logs
 
