@@ -65,6 +65,14 @@ async def _fetchval(db_url: str, sql: str, *args: Any) -> Any:
         await conn.close()
 
 
+async def _fetchrow(db_url: str, sql: str, *args: Any) -> Any:
+    conn = await asyncpg.connect(db_url)
+    try:
+        return await conn.fetchrow(sql, *args)
+    finally:
+        await conn.close()
+
+
 async def _execute(db_url: str, sql: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
@@ -87,18 +95,25 @@ def test_epoch_column_and_index_added_to_all_seven_surfaces(postgres: object) ->
     assert up.returncode == 0, f"upgrade to 0124 failed:\n{up.stderr}\n{up.stdout}"
 
     for table in _SURFACE_TABLES:
-        # Column exists, smallint, NOT NULL, server default 0.
-        coltype, notnull, default = asyncio.run(
-            _fetchval(
+        # Column exists, smallint, NOT NULL, server default 0. Select the three
+        # attributes as separate columns (NOT a ``(a, b, c)`` row constructor):
+        # asyncpg has no decoder for an anonymous composite, so a row-tuple
+        # SELECT raises ``no decoder for composite type element`` at decode time.
+        col_row = asyncio.run(
+            _fetchrow(
                 db_url,
                 """
-                SELECT (data_type, is_nullable, column_default)
+                SELECT data_type, is_nullable, column_default
                 FROM information_schema.columns
                 WHERE table_name = $1 AND column_name = 'tools_vocab_epoch'
                 """,
                 table,
             )
         )
+        assert col_row is not None, f"{table}.tools_vocab_epoch missing"
+        coltype = col_row["data_type"]
+        notnull = col_row["is_nullable"]
+        default = col_row["column_default"]
         assert coltype == "smallint", f"{table}.tools_vocab_epoch is {coltype}"
         assert notnull == "NO", f"{table}.tools_vocab_epoch is nullable"
         assert default is not None and "0" in default, f"{table} default={default!r}"
