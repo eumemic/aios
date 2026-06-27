@@ -115,11 +115,14 @@ def test_internal_callers_route_patched_fns_through_package() -> None:
 
     # ``read_windowed_events`` (events.py) internally calls two functions that
     # tests patch at the package attribute — ``read_windowed_context_events``
-    # (fallback load-all path) and ``model_token_ratio`` (test_windowed_ratio.py).
-    # Both live in events.py too, so the same-module calls must route through the
-    # package or the monkeypatch is bypassed. (The retained-window range scan
-    # calls ``read_windowed_context_events`` bare on purpose, so the fallback
-    # stub does not intercept it — that bare call is not asserted here.)
+    # (fallback load-all path) and ``model_token_class_ratios``
+    # (test_windowed_ratio.py).  Both live in events.py too, so the same-module
+    # calls must route through the package or the monkeypatch is bypassed. (The
+    # retained-window range scan calls ``read_windowed_context_events`` bare on
+    # purpose, so the fallback stub does not intercept it — that bare call is not
+    # asserted here.)  Since #1609 the per-content-class calibration replaced the
+    # legacy scalar ``model_token_ratio``; the windowing path now routes through
+    # ``model_token_class_ratios`` (which the windowed-ratio tests patch).
     windowed_src = inspect.getsource(events.read_windowed_events)
     assert "queries.read_windowed_context_events(" in windowed_src
-    assert "queries.model_token_ratio(" in windowed_src
+    assert "queries.model_token_class_ratios(" in windowed_src

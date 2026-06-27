@@ -44,7 +44,7 @@ from aios.harness.step_context import (
     prelude_overhead_local,
 )
 from aios.harness.sweep import find_sessions_needing_inference
-from aios.harness.tokens import approx_tokens
+from aios.harness.tokens import approx_tokens, approx_tokens_by_class
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.harness.tool_disposition import classify_tool_call
 from aios.logging import get_logger
@@ -746,7 +746,17 @@ async def _run_session_step_body(
     # un-stamped; its ``is_error=True`` alone is enough to keep it out of
     # calibration reads (the partial index and the aggregate query both
     # filter on ``is_error=false``).
+    # Per-class breakdown (issue #1609): the regression's training data.
+    # ``local_tokens`` stays the model-neutral ``approx_tokens`` total so the
+    # stored baseline is byte-identical to the pre-#1609 value — ``by_class``
+    # only *attributes* that payload across content classes for the
+    # per-(model, class) calibration.  The per-class split costs each class
+    # slice in isolation, so its sum carries per-message framing overhead
+    # more than once and must NOT be used as the baseline (it would skew the
+    # stored ``local_tokens`` away from ``cumulative_tokens`` and from what
+    # callers recompute via ``approx_tokens``).
     local_tokens = approx_tokens(messages, tools=tools)
+    by_class = approx_tokens_by_class(messages, tools=tools)
     cost_microusd = _resolve_cost_microusd(agent.model, usage, cost_usd, session_id=session_id)
     await sessions_service.append_event(
         pool,
@@ -759,6 +769,7 @@ async def _run_session_step_body(
             "model_usage": usage,
             "cost_usd": cost_usd,
             "local_tokens": local_tokens,
+            "local_tokens_by_class": by_class,
             "model": agent.model,
         },
         account_id=account_id,

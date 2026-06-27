@@ -12,7 +12,7 @@ import math
 import time
 from datetime import UTC, datetime
 from types import EllipsisType
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import asyncpg
 
@@ -32,6 +32,26 @@ from aios.models.events import (
     EventKind,
     is_errored_lifecycle_event,
 )
+
+
+@runtime_checkable
+class OverheadLocalSplit(Protocol):
+    """Structural type for the overhead-local split the windower weights.
+
+    :class:`aios.harness.step_context.PreludeOverheadSplit` satisfies this.
+    Declared structurally here so ``events.py`` does not import the harness
+    composer (avoids a layering cycle).  ``system`` / ``tools`` / ``reserves``
+    are the per-class local token costs; ``total`` is their sum (the
+    pre-#1609 single ``overhead_local`` scalar).
+    """
+
+    system: int
+    tools: int
+    reserves: int
+
+    @property
+    def total(self) -> int: ...
+
 
 # ─── events ───────────────────────────────────────────────────────────────────
 
@@ -83,7 +103,46 @@ _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS = 10.0
 # function of ``(n, mean)`` only, independent of the noisy observed-
 # stddev estimate that wobbles at small n.
 _MODEL_TOKEN_RATIO_SIGMA_PRIOR = 0.02
-_model_token_ratio_cache: dict[tuple[str, float], tuple[float, float]] = {}
+
+# ── per-class calibration (issue #1609) ───────────────────────────────────
+# The single lifetime scalar R is generalized to a per-content-class
+# coefficient vector, fit by collinearity-robust ridge least squares over
+# logged ``model_request_end`` spans (response = provider input_tokens,
+# regressors = the stamped ``local_tokens_by_class`` vector).  The windower
+# consumes only the *blended* R_eff (a composition-weighted average of the
+# coefficients) — the raw per-class coefficients are NOT individually
+# load-bearing (they are collinear; see the issue's robustness note).
+from aios.harness.tokens import CONTENT_CLASSES  # noqa: E402
+
+# Ridge regularization strength.  Pulls each coefficient toward a neutral
+# prior of 1.0 (the old scalar's degenerate "no correction" value).  The
+# regressors are severely collinear (tool_result x thinking r~0.979), so a
+# bare OLS fit lets mass swing wildly between two coefficients as spans
+# arrive; ridge damps that while leaving the *blend* the windower sees
+# stable.  Tuned so a single calibration class folds back toward neutral
+# 1.0 when it is under-identified rather than swinging past the ±25%
+# stability gate (issue #1609 acceptance #8).
+_MODEL_TOKEN_CLASS_RIDGE_LAMBDA = 1e-2
+# Per-coefficient prior the ridge penalty shrinks toward: neutral 1.0, so
+# the byte-identical-fallback property holds class-by-class.
+_MODEL_TOKEN_CLASS_PRIOR = 1.0
+# Physical clamps on a fitted coefficient: a provider tokenizer never
+# prices a class below 0 tok/local-tok, and the windower divides by the
+# blend so a near-zero blend must be guarded.  Mirrors the scalar's
+# ``_MODEL_TOKEN_RATIO_MIN`` lower bound and adds a generous upper bound.
+_MODEL_TOKEN_CLASS_MIN = 0.0
+_MODEL_TOKEN_CLASS_MAX = 8.0
+
+# Safety-margin slack between the budgeted window and the provider hard cap
+# (issue #1609 acceptance #4).  Sized to the per-class residual MAX, not the
+# mean: honest out-of-sample LOO max APE = 29.2%, so ~30% of slack means a
+# composition shift toward the heaviest class degrades to "drops one chunk
+# early," never a cap breach.  The windower inflates the budgeted total by
+# this factor before the snap math, so the *real* sent prompt sits at least
+# this far under ``window_max``.
+_WINDOW_SAFETY_MARGIN = 0.30
+
+_model_token_ratio_cache: dict[tuple[str, float], tuple[float, dict[str, float]]] = {}
 
 
 def _clear_model_token_ratio_cache() -> None:
@@ -91,64 +150,129 @@ def _clear_model_token_ratio_cache() -> None:
     _model_token_ratio_cache.clear()
 
 
-async def model_token_ratio(
+# Back-compat alias: the package re-exports the per-class names, but keep the
+# old private clearer name working for any in-tree caller / test that imported
+# it directly.
+_clear_model_token_class_ratios_cache = _clear_model_token_ratio_cache
+
+
+def _neutral_class_ratios() -> dict[str, float]:
+    """The all-1.0 coefficient dict — reduces the windower to today's
+    byte-identical model-neutral behavior (issue #1609 acceptance #5)."""
+    return {c: 1.0 for c in CONTENT_CLASSES}
+
+
+def _solve_ridge(
+    rows: list[tuple[list[float], float]],
+    *,
+    n_features: int,
+    lam: float,
+    prior: float,
+) -> list[float] | None:
+    """Ridge-regularized linear least squares via the normal equations.
+
+    Solves ``min over beta of sum_i (x_i . beta - y_i)^2 + lam . sum_j (beta_j - prior)^2`` for the small
+    fixed-size system (``n_features`` ≈ 6 class regressors).  Pure Python
+    (no numpy dependency — this is a fleet-wide harness module).  Returns
+    ``None`` if the regularized normal matrix is singular (degenerate
+    data), so the caller folds back to the neutral all-1.0 vector.
+
+    The ridge shift toward ``prior`` (here 1.0) is what damps the
+    collinear coefficient swings and gives the neutral-fallback its
+    class-by-class meaning.
+    """
+    p = n_features
+    # Normal equations: (XᵀX + λI) β = Xᵀy + λ·prior·1
+    ata = [[0.0] * p for _ in range(p)]
+    aty = [0.0] * p
+    for x, y in rows:
+        for j in range(p):
+            aty[j] += x[j] * y
+            xj = x[j]
+            row_j = ata[j]
+            for k in range(p):
+                row_j[k] += xj * x[k]
+    for j in range(p):
+        ata[j][j] += lam
+        aty[j] += lam * prior
+    return _gaussian_solve(ata, aty)
+
+
+def _gaussian_solve(a: list[list[float]], b: list[float]) -> list[float] | None:
+    """Solve ``a·x = b`` by Gaussian elimination with partial pivoting.
+
+    Returns ``None`` if ``a`` is (numerically) singular.
+    """
+    n = len(b)
+    # Work on copies.
+    m = [[*row[:], b[i]] for i, row in enumerate(a)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(m[r][col]))
+        if abs(m[pivot][col]) < 1e-12:
+            return None
+        m[col], m[pivot] = m[pivot], m[col]
+        piv = m[col][col]
+        for r in range(n):
+            if r == col:
+                continue
+            factor = m[r][col] / piv
+            if factor == 0.0:
+                continue
+            for c in range(col, n + 1):
+                m[r][c] -= factor * m[col][c]
+    return [m[i][n] / m[i][i] for i in range(n)]
+
+
+async def model_token_class_ratios(
     conn: asyncpg.Connection[Any],
     model: str,
     *,
     account_id: str,
     k_bucket: float = 2.0,
-) -> float:
-    """Per-model actual/local token correction.
+) -> dict[str, float]:
+    """Per-(model, content-class) actual/local token coefficients (#1609).
 
-    Treats R as a fixed tokenizer parameter estimated from noisy
-    observed spans.  Returns the lifetime unweighted mean of per-span
-    ``actual/local`` ratios, quantized to a prior-shaped bucket
-    ``max(k_bucket * sigma_prior / sqrt(n), 0.001)``.  With very little
-    data, returns ``1.0`` so newly seen models preserve the old
-    model-agnostic windowing behavior until calibration is meaningful.
+    Generalizes the old single lifetime scalar ``R`` into a coefficient
+    dict over :data:`~aios.harness.tokens.CONTENT_CLASSES`, fit by
+    **collinearity-robust ridge least squares** over logged
+    ``model_request_end`` spans:
 
-    ``sigma_prior`` is a fixed per-sample spread prior (see
-    :data:`_MODEL_TOKEN_RATIO_SIGMA_PRIOR`).  Using the prior instead of
-    the observed sample stddev is what makes the bucket width a
-    deterministic function of ``n`` alone — the quantized R depends on
-    ``(n, mean)`` only.
+    * **response** = the provider's ``input_tokens`` usage value;
+    * **regressors** = the stamped ``local_tokens_by_class`` vector
+      (model-neutral per-class local counts).
 
-    The bucket floor (``0.001``) guards against float rounding nudging
-    the drop boundary across an event at very large ``n``.  The returned
-    ratio is clamped to ``0.5`` as a physical lower bound: when
-    calibration data is pathological, prefer near-neutral windowing over
-    dividing by a near-zero R.
+    The ridge penalty shrinks each coefficient toward the neutral prior
+    ``1.0``.  The regressors are severely collinear (``tool_result x
+    thinking`` r≈0.979), so a bare OLS fit would let mass swing wildly
+    between two coefficients as new spans arrive; the regularizer damps
+    that while leaving the **blended R_eff** the windower actually
+    consumes stable.  **Do NOT depend on the raw per-class coefficients
+    as individually meaningful** — they are self-validated until ≥10
+    substantial-thinking windows from ≥3 distinct sessions accumulate
+    (issue #1609 acceptance #2).
 
-    Mature calibrated ratios are cached in-process for 60 seconds.  The
-    lifetime aggregate is intentionally slow-moving, and caching prevents
-    every windowing call from rescanning all historical calibration spans.
-    Below-threshold results (returning the neutral ``1.0``) are cached for
-    a shorter 10-second TTL so a freshly deployed model doesn't pay the
-    aggregate scan on every step before calibration kicks in; activation
-    once samples accumulate is therefore delayed by at most one TTL.
+    Below the per-model sample threshold (or when the regularized normal
+    system is degenerate / singular), every coefficient is the neutral
+    ``1.0`` — so a freshly deployed model preserves the old
+    model-agnostic windowing behavior **byte-identically** until
+    calibration is meaningful (acceptance #5).  Old spans lacking
+    ``local_tokens_by_class`` are excluded by a ``data ?`` predicate
+    (zero backfill — identical to the existing ``data ? 'local_tokens'``
+    guard), so the regression trains only on NEW spans and self-heals as
+    they accumulate (same contract as #160).
 
-    ``model`` is the raw model string (``agent.model``) — NO NORMALIZATION.
-    Different LiteLLM routes (``anthropic/...`` vs
-    ``openrouter/anthropic/...``) hit different provider tokenizers and
-    must partition separately.  The same string must appear at stamp time
-    and at query time for the same step — always plumb ``agent.model`` on
-    both sides.  aios sessions do not carry a model override; the session's
-    active model is always its agent's configured model.
+    Same cache machinery as the scalar: mature fits cached 60 s,
+    below-threshold neutral results cached 10 s (bounding the activation
+    lag).  ``k_bucket`` is accepted for signature/cache-key compatibility
+    with the scalar contract (it keyed the bucket width); the per-class
+    fit's stability comes from the ridge regularizer, not bucket
+    quantization, so ``k_bucket`` only partitions the cache here.
 
-    Scope: the aggregate pools samples across every session in this
-    database.  Token counts are scalar only — no content crosses between
-    sessions — but the ratio reflects the mixed workload of whatever
-    traffic has accumulated.
-
-    "actual" is the provider's ``input_tokens`` usage value, which
-    LiteLLM normalizes to the OpenAI convention: ``input_tokens`` is
-    **the full prompt count**, including any cached-read or
-    cache-creation portion.  Do NOT sum ``cache_read_input_tokens`` or
-    ``cache_creation_input_tokens`` on top — they are breakdown metrics
-    within the same total, not disjoint extensions.  Output tokens are
-    excluded: we're correcting the size of the context we sent, not
-    what the model returned.  Uses the
-    ``events_model_request_end_calibration_idx`` partial index
+    ``model`` is the raw model string (``agent.model``) — NO
+    NORMALIZATION; the same string must appear at stamp and query time.
+    "actual" is the provider's ``input_tokens`` (the full prompt count,
+    cached portions included — do NOT add ``cache_*`` breakdowns).  Uses
+    the ``events_model_request_end_calibration_idx`` partial index
     (migration 0024).
     """
     if k_bucket <= 0:
@@ -158,56 +282,151 @@ async def model_token_ratio(
     now = time.monotonic()
     cached = _model_token_ratio_cache.get(cache_key)
     if cached is not None:
-        expires_at, ratio = cached
+        expires_at, ratios = cached
         if expires_at > now:
-            return ratio
+            return dict(ratios)
         del _model_token_ratio_cache[cache_key]
 
-    row = await conn.fetchrow(
+    rows = await conn.fetch(
         """
-        WITH calibration AS (
-            SELECT
-                (data->'model_usage'->>'input_tokens')::float AS it,
-                (data->>'local_tokens')::bigint                AS lt
-            FROM events
-            WHERE kind = 'span'
-              AND data->>'event' = 'model_request_end'
-              AND (data->>'is_error')::boolean = false
-              AND data->>'model' = $1
-              AND data ? 'local_tokens'
-              AND data ? 'model'
-              -- Exclude old/malformed success spans before casting.
-              AND (data->'model_usage') ? 'input_tokens'
-              AND (data->'model_usage'->>'input_tokens') IS NOT NULL
-              AND (data->>'local_tokens')::bigint > 0
-        )
         SELECT
-            COUNT(*)::bigint                            AS n,
-            COALESCE(AVG(it / NULLIF(lt, 0)), 0)::float AS mean_ratio
-        FROM calibration
+            (data->'model_usage'->>'input_tokens')::float AS it,
+            data->'local_tokens_by_class'                 AS by_class
+        FROM events
+        WHERE kind = 'span'
+          AND data->>'event' = 'model_request_end'
+          AND (data->>'is_error')::boolean = false
+          AND data->>'model' = $1
+          AND data ? 'local_tokens'
+          AND data ? 'local_tokens_by_class'
+          AND data ? 'model'
+          -- Exclude old/malformed success spans before casting.
+          AND (data->'model_usage') ? 'input_tokens'
+          AND (data->'model_usage'->>'input_tokens') IS NOT NULL
+          AND (data->>'local_tokens')::bigint > 0
         """,
         model,
     )
-    assert row is not None
-    if row["n"] < _MODEL_TOKEN_RATIO_MIN_SAMPLES:
+
+    if len(rows) < _MODEL_TOKEN_RATIO_MIN_SAMPLES:
+        neutral = _neutral_class_ratios()
         _model_token_ratio_cache[cache_key] = (
             now + _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS,
-            1.0,
+            neutral,
         )
-        return 1.0
+        return dict(neutral)
 
-    raw = float(row["mean_ratio"])
-    bucket = max(
-        k_bucket * _MODEL_TOKEN_RATIO_SIGMA_PRIOR / math.sqrt(float(row["n"])),
-        _MODEL_TOKEN_RATIO_BUCKET_FLOOR,
-    )
-    quantized = round(raw / bucket) * bucket
-    ratio = max(quantized, _MODEL_TOKEN_RATIO_MIN)
+    fitted = _fit_class_ratios(rows)
+    if fitted is None:
+        # Degenerate / singular system → fold back to neutral but cache
+        # briefly (the data may settle as more varied spans arrive).
+        neutral = _neutral_class_ratios()
+        _model_token_ratio_cache[cache_key] = (
+            now + _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS,
+            neutral,
+        )
+        return dict(neutral)
+
     _model_token_ratio_cache[cache_key] = (
         now + _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS,
-        ratio,
+        fitted,
     )
-    return ratio
+    return dict(fitted)
+
+
+def _fit_class_ratios(rows: list[Any]) -> dict[str, float] | None:
+    """Ridge-fit the per-class coefficient dict from calibration rows.
+
+    Each row carries provider ``it`` (input_tokens) and the stamped
+    ``by_class`` local vector.  Builds the design matrix over
+    :data:`~aios.harness.tokens.CONTENT_CLASSES` (skipping classes that
+    are identically zero across all spans — they are unidentified, and
+    fold to the neutral ``1.0``), fits ridge least squares, then clamps
+    each coefficient.  Returns ``None`` if the system is singular.
+    """
+    classes = list(CONTENT_CLASSES)
+
+    design: list[list[float]] = []
+    responses: list[float] = []
+    col_mass = [0.0] * len(classes)
+    for r in rows:
+        raw = r["by_class"]
+        by_class = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(by_class, dict):
+            continue
+        x = [float(by_class.get(c, 0) or 0) for c in classes]
+        design.append(x)
+        responses.append(float(r["it"]))
+        for j, v in enumerate(x):
+            col_mass[j] += v
+
+    if len(design) < _MODEL_TOKEN_RATIO_MIN_SAMPLES:
+        return None
+
+    # Classes with no mass across the whole sample are unidentified — drop
+    # them from the fit (they keep the neutral 1.0).  This also lets the
+    # ridge prior anchor the present classes without a spurious zero
+    # regressor inflating the conditioning.
+    active = [j for j in range(len(classes)) if col_mass[j] > 0.0]
+    if not active:
+        return None
+
+    fit_rows = [([x[j] for j in active], y) for x, y in zip(design, responses, strict=True)]
+    coefs = _solve_ridge(
+        fit_rows,
+        n_features=len(active),
+        lam=_MODEL_TOKEN_CLASS_RIDGE_LAMBDA,
+        prior=_MODEL_TOKEN_CLASS_PRIOR,
+    )
+    if coefs is None:
+        return None
+
+    out = _neutral_class_ratios()
+    for idx, j in enumerate(active):
+        c = coefs[idx]
+        # Clamp to the physical range; the windower divides by the blend.
+        c = max(_MODEL_TOKEN_CLASS_MIN, min(_MODEL_TOKEN_CLASS_MAX, c))
+        out[classes[j]] = c
+    return out
+
+
+# Back-compat scalar wrapper: a few call sites / tests still want a single
+# blended R.  Re-derive it from the per-class dict against a uniform class
+# mix (every class weighted equally) so the contract is "the average of the
+# fitted coefficients".  Real windowing weights by the actual composition
+# (see ``blended_r_eff``); this uniform default is only for the legacy
+# scalar shape.
+async def model_token_ratio(
+    conn: asyncpg.Connection[Any],
+    model: str,
+    *,
+    account_id: str,
+    k_bucket: float = 2.0,
+) -> float:
+    """Deprecated scalar shim over :func:`model_token_class_ratios`.
+
+    Returns the unweighted mean of the fitted per-class coefficients,
+    clamped to the scalar's historical ``0.5`` lower bound.  Prefer
+    :func:`model_token_class_ratios` + :func:`blended_r_eff`; this exists
+    so legacy scalar call sites keep compiling during the #1609 rollout.
+    """
+    ratios = await model_token_class_ratios(conn, model, account_id=account_id, k_bucket=k_bucket)
+    mean = sum(ratios.values()) / len(ratios)
+    return max(mean, _MODEL_TOKEN_RATIO_MIN)
+
+
+def blended_r_eff(ratios: dict[str, float], local_by_class: dict[str, float]) -> float:
+    """Composition-weighted blended effective ratio ``R_eff`` (#1609).
+
+    ``R_eff = Σ_c coef_c · local_c / Σ_c local_c`` — the only quantity the
+    windower consumes from the per-class fit.  When the composition has no
+    mass (all-zero), falls back to the unweighted mean of the coefficients
+    (degenerate; the windower guards the all-zero case separately).
+    """
+    total = sum(local_by_class.get(c, 0.0) for c in ratios)
+    if total <= 0:
+        return sum(ratios.values()) / len(ratios)
+    return sum(ratios[c] * float(local_by_class.get(c, 0.0)) for c in ratios) / total
 
 
 def _derive_tool_name(kind: str, data: dict[str, Any]) -> str | None:
@@ -1580,6 +1799,95 @@ async def read_windowed_context_events(
     return [_row_to_event(r) for r in rows]
 
 
+class _NormalizedOverhead(NamedTuple):
+    system: int
+    tools: int
+    reserves: int
+
+    @property
+    def total(self) -> int:
+        return self.system + self.tools + self.reserves
+
+
+def _normalize_overhead(overhead_local: int | OverheadLocalSplit) -> _NormalizedOverhead:
+    """Coerce the windower's ``overhead_local`` argument to a class split.
+
+    Accepts both the new :class:`OverheadLocalSplit` (system/tools/reserves)
+    and the legacy bare ``int`` (preview tooling / test scaffolds that pass
+    a single scalar, e.g. ``0``). A bare int is treated as undifferentiated
+    ``text``-class overhead via the ``reserves`` slot, so the blend weights
+    it neutrally — preserving the legacy contract for those callers.
+    """
+    if isinstance(overhead_local, int):
+        return _NormalizedOverhead(system=0, tools=0, reserves=overhead_local)
+    return _NormalizedOverhead(
+        system=int(overhead_local.system),
+        tools=int(overhead_local.tools),
+        reserves=int(overhead_local.reserves),
+    )
+
+
+async def _retained_class_mass(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> dict[str, float]:
+    """Per-content-class neutral token mass of the session's message slate.
+
+    Re-derives each message's neutral token mass from the
+    ``cumulative_tokens`` delta against the previous message (the stored
+    running sum), classifies it by role + data shape (matching
+    :func:`aios.harness.tokens.content_class`), and sums per class. The
+    windower blends the per-class coefficients over this composition.
+
+    Pooled over the whole session's message slate (not just the retained
+    tail): the composition is what selects ``R_eff``, and the full-slate
+    mix is a stable, prefix-cache-friendly estimator of it — it does not
+    jump as the drop boundary advances within a snap chunk. Returns an
+    empty dict when no message has cumulative data.
+    """
+    rows = await conn.fetch(
+        """
+        WITH deltas AS (
+            SELECT
+                CASE
+                    WHEN data->>'role' = 'tool' THEN 'tool_result'
+                    WHEN data->>'role' = 'assistant'
+                         AND (data ? 'tool_calls')
+                         AND (data->'tool_calls') IS NOT NULL
+                         AND jsonb_typeof(data->'tool_calls') = 'array'
+                         AND jsonb_array_length(data->'tool_calls') > 0
+                        THEN 'tool_use'
+                    WHEN data->>'role' = 'assistant'
+                         AND ((data ? 'reasoning_content') OR (data ? 'thinking_blocks'))
+                        THEN 'thinking'
+                    ELSE 'text'
+                END AS cls,
+                cumulative_tokens
+                - COALESCE(LAG(cumulative_tokens) OVER (ORDER BY seq), 0) AS delta
+            FROM events
+            WHERE session_id = $1
+              AND account_id = $2
+              AND kind = 'message'
+              AND cumulative_tokens IS NOT NULL
+        )
+        SELECT cls, SUM(delta)::float AS mass
+        FROM deltas
+        GROUP BY cls
+        """,
+        session_id,
+        account_id,
+    )
+    out: dict[str, float] = {}
+    for r in rows:
+        mass = float(r["mass"] or 0.0)
+        if mass < 0:
+            mass = 0.0
+        out[r["cls"]] = out.get(r["cls"], 0.0) + mass
+    return out
+
+
 async def read_windowed_events(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -1588,7 +1896,7 @@ async def read_windowed_events(
     window_min: int,
     window_max: int,
     model: str,
-    overhead_local: int,
+    overhead_local: int | OverheadLocalSplit,
 ) -> WindowedEvents:
     """Read message events for the session's trailing context window.
 
@@ -1651,12 +1959,49 @@ async def read_windowed_events(
             omission=None,
         )
 
-    ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
+    # Per-class coefficients (issue #1609). The windower consumes only the
+    # composition-weighted *blended* R_eff — the raw per-class coefficients
+    # are not individually load-bearing (collinear; see the issue's
+    # robustness note). When the model is below the calibration sample
+    # threshold (or any class unseen), every coefficient is 1.0 and R_eff
+    # reduces to today's neutral behavior, byte-identical.
+    coefs = await queries.model_token_class_ratios(conn, model, account_id=account_id)
+
+    # Re-derive the session's retained-slate class mix in-process from
+    # role+data already in the log (per-class neutral token mass via
+    # cumulative_tokens deltas). Combined with the overhead split, this is
+    # the composition R_eff is blended over.
+    overhead = _normalize_overhead(overhead_local)
+    events_mass = await _retained_class_mass(conn, session_id, account_id=account_id)
+
+    # Build the full composition vector: events (text/tool_result/thinking/
+    # tool_use) plus the overhead split (system/tools, and reserves folded
+    # into text as conservative text-shaped padding).
+    composition: dict[str, float] = dict(events_mass)
+    composition["system"] = composition.get("system", 0.0) + overhead.system
+    composition["tools"] = composition.get("tools", 0.0) + overhead.tools
+    composition["text"] = composition.get("text", 0.0) + overhead.reserves
+
+    ratio = blended_r_eff(coefs, composition)
+
+    # SAFETY MARGIN (acceptance #4): inflate the budgeted provider total by
+    # the per-class residual MAX (~30%) so a composition shift toward the
+    # heaviest class degrades to "drops one chunk early," never a cap
+    # breach. ``effective`` units are now "budgeted provider tokens incl.
+    # safety slack"; the snap math operates entirely in this space.
+    #
+    # The margin is gated on a CALIBRATED fit. When the model is below the
+    # sample threshold every coefficient is exactly the neutral 1.0; in that
+    # case we keep margin == 1.0 so the windower reproduces today's
+    # byte-identical drop boundary (acceptance #5) — the slack ships only
+    # together with the Layer-2 calibrated coefficients it protects.
+    calibrated = any(c != 1.0 for c in coefs.values())
+    margin = (1.0 + _WINDOW_SAFETY_MARGIN) if calibrated else 1.0
 
     # Shrink the effective window by the caller's overhead contribution.
-    # Apply R to overhead_local up-front so the subtraction happens in the
-    # same effective (provider-token) space tokens_to_drop operates in.
-    overhead_effective = round(overhead_local * ratio)
+    # Apply R_eff (x margin) to the overhead up-front so the subtraction
+    # happens in the same effective space tokens_to_drop operates in.
+    overhead_effective = round(overhead.total * ratio * margin)
     events_window_max = window_max - overhead_effective
     events_window_min = max(0, window_min - overhead_effective)
     if events_window_max <= 0:
@@ -1665,7 +2010,7 @@ async def read_windowed_events(
             f"exceeds window_max ({window_max}); no budget remains for events"
         )
 
-    total_effective = round(total * ratio)
+    total_effective = round(total * ratio * margin)
     if total_effective <= events_window_max:
         return WindowedEvents(
             events=await queries.read_windowed_context_events(
@@ -1692,7 +2037,7 @@ async def read_windowed_events(
             omission=None,
         )
 
-    drop = math.ceil(drop_effective / ratio)
+    drop = math.ceil(drop_effective / (ratio * margin))
 
     # Never drop the entire window: the window must keep a non-empty tail.
     # Here ``events_window_min`` can clamp to 0 when overhead exceeds

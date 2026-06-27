@@ -1983,8 +1983,10 @@ async def read_windowed_events(
     window_min: int,
     window_max: int,
     model: str,
-    overhead_local: int,
+    overhead_local: Any,
 ) -> WindowedEvents:
+    # ``overhead_local`` is opaquely forwarded (#1609): the caller passes a
+    # ``PreludeOverheadSplit`` (or a legacy bare int); the windower normalizes.
     async with pool.acquire() as conn:
         return await queries.read_windowed_events(
             conn,

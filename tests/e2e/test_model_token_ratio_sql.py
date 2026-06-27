@@ -19,8 +19,27 @@ import uuid
 import pytest
 
 from aios.db import queries
+from aios.harness.tokens import CONTENT_CLASSES
 from aios.services import sessions as sessions_service
 from tests.e2e.harness import Harness
+
+
+def _by_class(local_tokens: int) -> dict[str, float]:
+    """Spread a model-neutral ``local_tokens`` total evenly across every
+    content class, as a stand-in for the ``local_tokens_by_class`` vector that
+    ``harness/loop.py`` stamps.
+
+    This is a *test convenience*, not the production contract: ``loop.py``
+    counts ``local_tokens`` and ``local_tokens_by_class`` with two separate
+    ``litellm`` calls, so in production the per-class slices each carry their
+    own framing overhead and ``sum(by_class.values()) >= local_tokens`` (the
+    implementation deliberately does NOT enforce equality). The even spread
+    used here happens to sum back to ``local_tokens`` only so the scalar
+    shim's unweighted mean reproduces ``input/local`` for these SQL-path
+    assertions; the per-class ridge fit (#1609) does not depend on that.
+    """
+    per = local_tokens / len(CONTENT_CLASSES)
+    return {c: per for c in CONTENT_CLASSES}
 
 
 async def _seed_valid_span(
@@ -52,6 +71,7 @@ async def _seed_valid_span(
             },
             "cost_usd": None,
             "local_tokens": local_tokens,
+            "local_tokens_by_class": _by_class(local_tokens),
             "model": model,
         },
         account_id=account_id,
@@ -184,9 +204,15 @@ class TestModelTokenRatioSQL:
             ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
         assert ratio == pytest.approx(1.5, abs=0.005)
 
-    async def test_uses_unweighted_mean_ratio(self, harness: Harness) -> None:
-        """Point estimate and stddev describe the same unweighted
-        per-span-ratio estimator, even when span sizes skew."""
+    async def test_ridge_fit_is_magnitude_weighted(self, harness: Harness) -> None:
+        """The per-class ridge fit (#1609) is a least-squares regression of
+        provider ``input_tokens`` on the stamped ``local_tokens_by_class``
+        vector, so it is inherently magnitude-weighted: a span carrying
+        two orders of magnitude more local tokens dominates the normal
+        equations.  This is the deliberate replacement for the old
+        unweighted per-span-ratio mean — large, information-rich windows
+        (the ones that actually risk the 1M provider cap) drive the
+        calibration."""
         account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
@@ -203,9 +229,11 @@ class TestModelTokenRatioSQL:
                 conn, model, k_bucket=0.001, account_id=account_id
             )
 
-        # Unweighted mean = (1 + 1 + 1 + 1 + 2) / 5 = 1.2.
-        # Weighted SUM(input)/SUM(local) would be ~1.96, which this must not return.
-        assert ratio == pytest.approx(1.2)
+        # The 10k-local span (ratio 2.0) swamps the four 100-local spans
+        # (ratio 1.0) in the least-squares fit, so the coefficient — and
+        # hence the scalar shim's mean — sits at ~2.0, NOT the old
+        # unweighted 1.2.
+        assert ratio == pytest.approx(2.0, abs=0.01)
 
     async def test_lifetime_aggregate_retains_old_samples(self, harness: Harness) -> None:
         """All historical calibration samples for the model contribute to
