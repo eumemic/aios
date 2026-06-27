@@ -23,6 +23,7 @@ from sse_starlette import ServerSentEvent
 
 from aios.api.sse import connection_discovery_stream
 from aios.db.listen import ListenSubscription
+from aios.db.queries.connections import notify_connection_change
 from aios.models.connections import Connection
 
 
@@ -52,6 +53,18 @@ def _mk_connection(cid: str, external: str) -> Connection:
         secrets_set=False,
         created_at=now,
         updated_at=now,
+    )
+
+
+def _notify(event: str, connection_id: str, account_id: str, external_account_id: str) -> str:
+    """Build a NOTIFY payload exactly as ``notify_connection_change`` emits it."""
+    return json.dumps(
+        {
+            "event": event,
+            "connection_id": connection_id,
+            "account_id": account_id,
+            "external_account_id": external_account_id,
+        }
     )
 
 
@@ -142,9 +155,104 @@ async def test_live_tail_dedups_already_backfilled_added(
 
     # A duplicate "added" arriving on the live tail must be suppressed; only the
     # subsequent distinct event is emitted.
-    await queue.put("added|con_1|acct_X|ext_1")
-    await queue.put("added|con_2|acct_X|ext_2")
+    await queue.put(_notify("added", "con_1", "acct_X", "ext_1"))
+    await queue.put(_notify("added", "con_2", "acct_X", "ext_2"))
     nxt = await gen.__anext__()
     assert _payload(nxt)["connection_id"] == "con_2"
 
     await gen.aclose()  # type: ignore[attr-defined]
+
+
+async def test_live_tail_drops_cross_tenant_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tenant gate holds against a crafted ``external_account_id`` that, under
+    the old positional ``split("|", 3)`` decode, would have displaced a
+    sibling tenant's id into the slot the gate compares.
+
+    The subscriber is scoped to ``acc_VICTIM``; the producer emits an event for
+    ``acc_ATTACKER`` with ``external_account_id="acc_VICTIM|x"``. The old
+    pipe-encoded string was
+    ``"added|con_9|acc_ATTACKER|acc_VICTIM|x"`` — a naive re-split could
+    surface ``acc_VICTIM`` in a displaced position. The JSON decode keys the
+    gate on the named ``account_id`` (``acc_ATTACKER``), so the event is
+    dropped and never leaks to the victim subscriber.
+    """
+    monkeypatch.setattr(
+        "aios.services.connections.queries.list_connections",
+        AsyncMock(return_value=[]),
+    )
+    subscription, queue = _mk_subscription()
+    pool = _mk_pool()
+
+    gen = connection_discovery_stream(subscription, pool, "telegram", account_id="acc_VICTIM")
+
+    # Cross-tenant event with a crafted external_account_id; must be dropped.
+    await queue.put(_notify("added", "con_9", "acc_ATTACKER", "acc_VICTIM|x"))
+    # A legitimate event for the victim follows; only it should surface.
+    await queue.put(_notify("added", "con_ok", "acc_VICTIM", "ext_ok"))
+
+    nxt = await gen.__anext__()
+    assert _payload(nxt) == {
+        "event": "added",
+        "connection_id": "con_ok",
+        "external_account_id": "ext_ok",
+    }
+
+    await gen.aclose()  # type: ignore[attr-defined]
+
+
+async def test_live_tail_skips_malformed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A payload that isn't valid JSON, or is missing a required key, is a
+    producer-side defect: log-and-skip, then continue serving the tail."""
+    monkeypatch.setattr(
+        "aios.services.connections.queries.list_connections",
+        AsyncMock(return_value=[]),
+    )
+    subscription, queue = _mk_subscription()
+    pool = _mk_pool()
+
+    gen = connection_discovery_stream(subscription, pool, "telegram", account_id="acct_X")
+
+    await queue.put("not json at all")
+    await queue.put(json.dumps({"event": "added"}))  # missing keys
+    await queue.put(_notify("added", "con_2", "acct_X", "ext_2"))
+
+    nxt = await gen.__anext__()
+    assert _payload(nxt)["connection_id"] == "con_2"
+
+    await gen.aclose()  # type: ignore[attr-defined]
+
+
+def test_notify_payload_round_trips_json() -> None:
+    """``notify_connection_change`` emits a JSON object that round-trips back to
+    the exact dict, including an ``external_account_id`` with JSON-significant
+    and ``|`` characters."""
+    captured: dict[str, str] = {}
+
+    class _FakeConn:
+        async def execute(self, _sql: str, channel: str, payload: str) -> None:
+            captured["channel"] = channel
+            captured["payload"] = payload
+
+    tricky = 'acc_VICTIM|x"\\{}'
+    asyncio.run(
+        notify_connection_change(
+            _FakeConn(),
+            account_id="acc_ATTACKER",
+            connector="telegram",
+            connection_id="con_9",
+            external_account_id=tricky,
+            event="added",
+        )
+    )
+
+    assert captured["channel"] == "connections_telegram"
+    assert json.loads(captured["payload"]) == {
+        "event": "added",
+        "connection_id": "con_9",
+        "account_id": "acc_ATTACKER",
+        "external_account_id": tricky,
+    }
