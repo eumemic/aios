@@ -87,9 +87,7 @@ def test_epoch_ignores_other_domains() -> None:
 def test_live_epoch_matches_registry_latest_tool_surface_contract() -> None:
     # The shipped constant tracks the live registry — the latest declared
     # tool_surface backfill (currently rev 0122, the goal-outcome drop).
-    assert epoch_mod.latest_backfill_rev(
-        reg.TOOL_SURFACE_DOMAIN
-    ) == epoch_mod.TOOLS_VOCAB_EPOCH
+    assert epoch_mod.latest_backfill_rev(reg.TOOL_SURFACE_DOMAIN) == epoch_mod.TOOLS_VOCAB_EPOCH
     assert epoch_mod.TOOLS_VOCAB_EPOCH == 122
 
 
@@ -200,9 +198,7 @@ def test_reupcast_current_blob_passes_through_restamped() -> None:
     # An already-current blob is NOT rewritten (no canonicalization), only its
     # stamp is normalized to current — a forward stamp is never lowered.
     blob = [{"type": "invoke"}, {"type": "custom", "name": "x"}]
-    out_blob, out_epoch = upcast_mod.reupcast_tool_surface(
-        blob, epoch_mod.TOOLS_VOCAB_EPOCH
-    )
+    out_blob, out_epoch = upcast_mod.reupcast_tool_surface(blob, epoch_mod.TOOLS_VOCAB_EPOCH)
     assert out_blob == blob  # untouched: a current row is trusted as-is
     assert out_epoch == epoch_mod.TOOLS_VOCAB_EPOCH
 

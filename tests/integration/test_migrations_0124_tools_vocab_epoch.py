@@ -107,8 +107,7 @@ def test_epoch_column_and_index_added_to_all_seven_surfaces(postgres: object) ->
         idx = asyncio.run(
             _fetchval(
                 db_url,
-                "SELECT indexdef FROM pg_indexes "
-                "WHERE tablename = $1 AND indexname = $2",
+                "SELECT indexdef FROM pg_indexes WHERE tablename = $1 AND indexname = $2",
                 table,
                 f"ix_{table}_tools_vocab_epoch_stale",
             )

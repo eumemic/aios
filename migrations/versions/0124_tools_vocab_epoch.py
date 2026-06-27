@@ -79,10 +79,7 @@ def upgrade() -> None:
         # (unlike the host-semantics epoch in 0092): a write path / raw restore
         # that omits the column must still produce a stale row, never a
         # silently-current one.
-        op.execute(
-            f"ALTER TABLE {table} "
-            "ADD COLUMN tools_vocab_epoch smallint NOT NULL DEFAULT 0"
-        )
+        op.execute(f"ALTER TABLE {table} ADD COLUMN tools_vocab_epoch smallint NOT NULL DEFAULT 0")
         # Partial index over the stale residue only: the boot scan reads this to
         # locate rows needing re-upcast in O(index), and can fast-path a table
         # to "clean" when the index is empty (MIN(epoch) >= horizon).
