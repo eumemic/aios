@@ -52,6 +52,10 @@ from aios.harness.trigger_runner import sweep_trigger_fires
 from aios.harness.workspace_reaper import sweep_archived_workspaces
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
+from aios.retirements.boot_gate import (
+    RetirementsNotAdmissible,
+    assert_retirements_admissible,
+)
 from aios.sandbox.backends import select_sandbox_backend
 from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
 from aios.sandbox.registry import SandboxRegistry
@@ -79,6 +83,38 @@ _WORKER_SINGLETON_LOCK_KEY_TEXT = "aios_worker_connector_supervisor"
 _HEARTBEAT_FILENAME = "aios-worker-alive"
 _CONTAINER_HEARTBEAT_FILE = Path("/var/run") / _HEARTBEAT_FILENAME
 _HEARTBEAT_INTERVAL_SECONDS = 15
+
+# How long the worker startup loops between boot-admission proof attempts while
+# the DB is behind / unreachable. Matches the api gate's cadence.
+_BOOT_GATE_RETRY_SECONDS = 2.0
+
+
+async def _await_retirements_admissible(
+    pool: asyncpg.Pool[Any],
+    log: Any,
+    latch: asyncio.Event,
+) -> None:
+    """Loop the fail-closed boot-admission gate until the DB is provably safe.
+
+    Refuses to return — keeping the worker pre-heartbeat, so the container
+    HEALTHCHECK reports unhealthy — until
+    :func:`assert_retirements_admissible` passes (#1575). The ``latch`` is the
+    worker's supervision/shutdown event: if it fires while we're waiting
+    (SIGTERM, a supervised task died), abandon the wait so shutdown isn't
+    blocked behind an unreachable DB.
+    """
+    logged_wait = False
+    while not latch.is_set():
+        try:
+            await assert_retirements_admissible(pool)
+            return
+        except RetirementsNotAdmissible as exc:
+            if not logged_wait:
+                log.warning("worker.boot_gate.refusing_readiness", reason=str(exc))
+                logged_wait = True
+            with contextlib.suppress(asyncio.TimeoutError):
+                # Wake early if shutdown fires; otherwise retry after the delay.
+                await asyncio.wait_for(latch.wait(), timeout=_BOOT_GATE_RETRY_SECONDS)
 
 
 def _resolve_heartbeat_path() -> Path:
@@ -260,6 +296,18 @@ async def worker_main() -> None:
         repaired = await asyncio.to_thread(repair_workspace_ownership)
         if repaired:
             log.info("worker.workspace_ownership_repaired", count=repaired)
+
+        # Fail-closed boot-admission gate (#1575): before this worker does ANY
+        # work — before it opens procrastinate, sweeps, or touches the liveness
+        # heartbeat that the container HEALTHCHECK watches — prove the live DB
+        # is safe for this code (alembic at/past every contract_rev AND zero
+        # live residue on every registered surface). A behind / residue-bearing
+        # / unreachable DB loops here, keeping the heartbeat file absent, so the
+        # new container reports unhealthy and the old one keeps serving under a
+        # rolling deploy. The proof re-runs on EVERY boot, including raw
+        # restores, and is never cached.
+        await _await_retirements_admissible(pool, log, supervised_latch)
+        log.info("worker.boot_gate.admitted")
 
         await procrastinate_app.open_async()
         procrastinate_opened = True

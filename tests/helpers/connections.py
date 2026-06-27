@@ -72,6 +72,12 @@ def wired_app(pool: Any) -> FastAPI:
     app.state.crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
     app.state.db_url = settings.db_url
     app.state.procrastinate = mock.MagicMock()
+    # The real lifespan flips this True only after the boot-admission gate
+    # (#1575) proves the DB safe; these helpers bind state directly without
+    # running the lifespan, and the test DB is migrated to head with no
+    # retired-token residue, so mark the process admitted so ``/ready`` and
+    # the routes behave as they would post-gate.
+    app.state.retirements_ok = True
     return app
 
 
