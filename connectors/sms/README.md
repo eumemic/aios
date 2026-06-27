@@ -3,8 +3,9 @@
 Provider-neutral SMS connector for aios (`connector = "sms"`), Twilio-first.
 See `docs/design/sms-connector.md` for the full design.
 
-This package currently implements the **inbound / transport layer** slice
-(#1253, design §3.1–§3.3):
+This package implements the **inbound / transport layer** slice
+(#1253, design §3.1–§3.3) plus the **public HTTPS ingress + ingress
+config** slice (#1265, design §5.3, §6):
 
 - One container-wide `aiohttp` webhook listener stood up in `setup(tg)`
   (the signal shared-daemon fan-out shape), serving:
@@ -48,6 +49,65 @@ Listener settings are read from `AIOS_SMS_*` env (see `config.py`):
 | `AIOS_SMS_HOST` | `0.0.0.0` | listener bind host |
 | `AIOS_SMS_PORT` | `8080` | listener bind port |
 | `AIOS_SMS_PUBLIC_BASE_URL` | _(none)_ | operator-configured public origin Twilio posts to — the **preferred** canonical signing URL |
+| `AIOS_SMS_PUBLIC_PORT` | `443` | the public port Twilio signs over (SMS over HTTPS **keeps the port**); pins the expected port from config |
+| `AIOS_SMS_ALLOWED_HOSTS` | _(empty)_ | comma/space-separated hostnames Twilio may post to — gates the forwarded-header fallback (see below) |
+| `AIOS_SMS_TRUSTED_PROXIES` | _(empty)_ | comma/space-separated IPs/CIDRs of ingress proxies whose forwarded headers we trust, matched against the **socket-peer** IP |
+| `AIOS_SMS_SELF_TEST_ENABLED` | `true` | run the startup ingress self-test (only when a public base URL is set) |
+| `AIOS_SMS_SELF_TEST_FAIL_FAST` | `true` | fail the container start on a self-test failure (fail-closed) |
+| `AIOS_SMS_SELF_TEST_TIMEOUT_SECONDS` | `10.0` | self-test HTTP timeout |
+
+### Signing-URL reconstruction & the forwarded-header fallback (design §5.4)
+
+`X-Twilio-Signature` is computed over the **exact public URL** Twilio
+posted to. We reconstruct it in priority order:
+
+1. **Prefer `AIOS_SMS_PUBLIC_BASE_URL`** — the operator-registered webhook
+   origin, which is by construction the URL Twilio signed. **Strongly
+   recommended in production.** With it set, forwarded headers are
+   ignored for signing.
+2. **Fallback to `X-Forwarded-Proto` / `X-Forwarded-Host`** only when no
+   base URL is configured — and only behind a fail-closed gate
+   (`ingress.py`): the **socket-peer IP must be in `AIOS_SMS_TRUSTED_PROXIES`**
+   *and* the `X-Forwarded-Host` must be a valid RFC-1123 host (no `@`
+   userinfo) present in a **non-empty `AIOS_SMS_ALLOWED_HOSTS`**. Any gate
+   miss → uniform **403** (fail closed). Empty allowlist or empty
+   trusted-proxy set disables the fallback entirely.
+
+For SMS over HTTPS the **port is kept** in the signed URL (Twilio drops it
+only for Voice). Because the HMAC key is the per-connection `auth_token`
+selected by the *signed* `To`, controlling the URL component alone cannot
+forge a signature — a misconfig fails **closed** (availability), never open.
+
+### Startup ingress self-test (design §6)
+
+The public HTTPS ingress is a **first-class deliverable**: the only
+inbound-reachable surface in the fleet, and signature correctness depends
+on the TLS-termination point, the configured base URL, the trusted-proxy
+set, the `allowedHosts` list, and the port-keeping rule. On start (when a
+public base URL is configured) the sidecar **POSTs a synthetic signed
+request through its own public URL** and asserts it verifies (200). A
+mismatch (host/port/proto/cert drift) → loud `sms.selftest.failed` log and,
+by default, a **fail-closed container start** — catching the drift *before
+it silently eats traffic* (every real Twilio webhook would otherwise 403).
+
+## Paired eumemic-ops deliverable (lockstep — design §6)
+
+Per the durable-sandboxes promote-gate precedent (*never ship the code
+half without the ops half*), this connector requires a paired
+**eumemic-ops** change, tracked alongside this slice:
+
+- a dedicated Traefik/Coolify route + **TLS** for the SMS sidecar;
+- a **Twilio source-IP allowlist + rate-limiting** at the edge;
+- **strip client-supplied `X-Forwarded-Host`** and set it authoritatively
+  (so the connector's forwarded-header fallback can only ever see a value
+  the proxy vouched for);
+- **monitoring**: cert expiry, a `403`-signature-failure rate `> 0`, and a
+  sustained inbound-rate drop.
+
+The connector-side config above is written *against* those ops artifacts:
+`AIOS_SMS_PUBLIC_BASE_URL` must equal the Traefik route's public origin,
+`AIOS_SMS_TRUSTED_PROXIES` must list the proxy's egress IP(s), and
+`AIOS_SMS_PUBLIC_PORT` must match the TLS listener port.
 
 SMS deployments should set the aios-api server config
 `inbound_debounce_seconds > 0` (#799) so a carrier that splits a

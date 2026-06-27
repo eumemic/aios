@@ -28,6 +28,8 @@ from aios_connector_http import HttpConnector
 
 from .addressing import normalize_e164
 from .config import Settings
+from .ingress import IngressPolicy
+from .selftest import run_ingress_self_test
 from .state import SmsConnectionState
 from .webhook import DemuxEntry, InboundEnvelope, WebhookListener
 
@@ -57,7 +59,14 @@ class SmsConnector(HttpConnector):
     ) -> None:
         super().__init__(base_url=base_url, token=token)
         self._settings = settings or Settings()
-        self._listener = WebhookListener(public_base_url=self._settings.public_base_url)
+        self._listener = WebhookListener(
+            public_base_url=self._settings.public_base_url,
+            public_port=self._settings.public_port,
+            ingress_policy=IngressPolicy(
+                allowed_hosts=self._settings.allowed_hosts,
+                trusted_proxies=self._settings.trusted_proxies,
+            ),
+        )
         self._runner: web.AppRunner | None = None
 
     # ── lifecycle ─────────────────────────────────────────────────────
@@ -72,6 +81,8 @@ class SmsConnector(HttpConnector):
         """
         self._runner = await self._listener.start(self._settings.host, self._settings.port)
 
+        await self._run_startup_self_test()
+
         async def _serve_forever() -> None:
             # The AppRunner is already serving on its own; this task just
             # keeps a TaskGroup member alive for the listener's lifetime
@@ -82,6 +93,51 @@ class SmsConnector(HttpConnector):
                 await self._listener_cleanup()
 
         tg.create_task(_serve_forever(), name="sms-webhook-listener")
+
+    async def _run_startup_self_test(self) -> None:
+        """POST a synthetic signed request through the public URL and assert
+        it verifies (design §6).
+
+        Catches host/port/proto/cert drift before it silently eats traffic.
+        Skipped when no ``public_base_url`` is configured (nothing to probe)
+        or when explicitly disabled. On failure, fail the container start
+        when ``self_test_fail_fast`` (the fail-closed default); otherwise
+        log loudly and continue.
+        """
+        settings = self._settings
+        if not settings.self_test_enabled:
+            log.info("sms.selftest.skipped", reason="disabled")
+            return
+        if not settings.public_base_url:
+            # Nothing to probe through — the configured base URL *is* the
+            # thing under test. Without it the listener falls back to
+            # forwarded-header reconstruction, which the gate already
+            # fails closed; warn so this isn't a silent skip in prod.
+            log.warning("sms.selftest.skipped", reason="no_public_base_url")
+            return
+
+        result = await run_ingress_self_test(
+            self._listener,
+            public_base_url=settings.public_base_url,
+            timeout_seconds=settings.self_test_timeout_seconds,
+        )
+        if result.ok:
+            log.info(
+                "sms.selftest.ok",
+                public_base_url=settings.public_base_url,
+                status=result.status,
+            )
+            return
+
+        log.error(
+            "sms.selftest.failed",
+            public_base_url=settings.public_base_url,
+            status=result.status,
+            detail=result.detail,
+            fail_fast=settings.self_test_fail_fast,
+        )
+        if settings.self_test_fail_fast:
+            raise RuntimeError(f"SMS ingress self-test failed: {result.detail}")
 
     async def teardown(self) -> None:
         await self._listener_cleanup()

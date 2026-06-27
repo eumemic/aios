@@ -49,6 +49,7 @@ from .config import (
     MAX_BODY_BYTES,
     TWIML_CONTENT_TYPE,
 )
+from .ingress import IngressPolicy
 from .verify import is_valid, reconstruct_signed_url
 
 __all__ = [
@@ -102,9 +103,18 @@ class WebhookListener:
         self,
         *,
         public_base_url: str | None,
+        public_port: int = 443,
+        ingress_policy: IngressPolicy | None = None,
         verify_fn: Callable[..., Awaitable[bool]] | None = None,
     ) -> None:
         self._public_base_url = public_base_url
+        self._public_port = public_port
+        # The forwarded-header trust gate is only consulted on the fallback
+        # path (no configured base). Default = an all-empty policy that
+        # refuses every forwarded host (fail closed).
+        self._ingress_policy = ingress_policy or IngressPolicy(
+            allowed_hosts=frozenset(), trusted_proxies=frozenset()
+        )
         # normalized E.164 → demux entry. The same map is keyed by our
         # owned number; inbound routes by ``To`` (= our number), status
         # routes by ``From`` (= our number) — both our-number axes.
@@ -139,8 +149,31 @@ class WebhookListener:
         """Run the synchronous HMAC off the event loop (design §5.3c)."""
         return await asyncio.to_thread(is_valid, auth_token, url, params, signature)
 
-    def _signed_url(self, request: web.Request) -> str:
-        """Reconstruct the URL Twilio signed for this request."""
+    def _signed_url(self, request: web.Request) -> str | None:
+        """Reconstruct the URL Twilio signed for this request.
+
+        With a configured ``public_base_url`` this is unconditional (the
+        configured base is the canonical signing origin — design §5.4).
+
+        Without one, the forwarded-header fallback is gated by the
+        :class:`IngressPolicy`: the immediate socket peer must be a trusted
+        proxy, the ``X-Forwarded-Host`` must be a valid RFC-1123 host in
+        the non-empty ``allowedHosts`` set, else we return ``None`` and the
+        caller fails the request **closed** (design §3.2 step 3, §5.4).
+        """
+        if self._public_base_url is None:
+            forwarded_host = request.headers.get("X-Forwarded-Host")
+            peer_ip = request.remote
+            if not self._ingress_policy.trusts_forwarded(
+                peer_ip=peer_ip, forwarded_host=forwarded_host
+            ):
+                log.warning(
+                    "sms.webhook.forwarded_host_refused",
+                    peer_ip=peer_ip,
+                    forwarded_host=forwarded_host,
+                )
+                return None
+
         return reconstruct_signed_url(
             configured_base_url=self._public_base_url,
             path=request.path,
@@ -210,6 +243,11 @@ class WebhookListener:
             return web.Response(status=503, text="connection not yet ready")
 
         url = self._signed_url(request)
+        if url is None:
+            # Forwarded-header fallback refused (untrusted peer / host).
+            # Uniform 403 — fail closed.
+            return self._forbidden()
+
         valid = await self._verify_fn(entry.auth_token, url, params, signature)
         if not valid:
             log.warning(
