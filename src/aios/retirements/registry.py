@@ -29,8 +29,7 @@ TOOL_SURFACE_DOMAIN = "tool_surface"
 #: Shared predicate for the tool-surface domain. ``<jsonb_col>`` is substituted
 #: with each surface's column; ``:token`` is bound to the retired ``type``.
 TOOL_SURFACE_PREDICATE_SQL = (
-    "EXISTS(SELECT 1 FROM jsonb_array_elements(<jsonb_col>) e "
-    "WHERE e->>'type' = :token)"
+    "EXISTS(SELECT 1 FROM jsonb_array_elements(<jsonb_col>) e WHERE e->>'type' = :token)"
 )
 
 

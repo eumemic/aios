@@ -125,13 +125,9 @@ class Retirement:
         if not self.domain:
             raise ValueError("Retirement.domain must be non-empty")
         if not self.surfaces:
-            raise ValueError(
-                f"Retirement({self.domain!r}) must register at least one surface"
-            )
+            raise ValueError(f"Retirement({self.domain!r}) must register at least one surface")
         if self.token is None and not self.mappings:
-            raise ValueError(
-                f"Retirement({self.domain!r}) must declare a token or mappings"
-            )
+            raise ValueError(f"Retirement({self.domain!r}) must declare a token or mappings")
         if self.token is not None and self.mappings:
             raise ValueError(
                 f"Retirement({self.domain!r}) declares both a single token and "
@@ -142,8 +138,7 @@ class Retirement:
         for tok, succ in self.token_map().items():
             if self.action == "rename" and succ is None:
                 raise ValueError(
-                    f"Retirement({self.domain!r}) action=rename but token "
-                    f"{tok!r} has no successor"
+                    f"Retirement({self.domain!r}) action=rename but token {tok!r} has no successor"
                 )
             if self.action == "drop" and succ is not None:
                 raise ValueError(

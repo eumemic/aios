@@ -38,8 +38,7 @@ def test_every_descriptor_registers_all_seven_surfaces() -> None:
     for retirement in reg.REGISTRY:
         pairs = {(s.table, s.jsonb_col) for s in retirement.surfaces}
         assert pairs == EXPECTED_TOOL_SURFACES, (
-            f"{retirement.domain} retirement is missing surfaces: "
-            f"{EXPECTED_TOOL_SURFACES - pairs}"
+            f"{retirement.domain} retirement is missing surfaces: {EXPECTED_TOOL_SURFACES - pairs}"
         )
         # Exactly seven, no dupes.
         assert len(retirement.surfaces) == 7
@@ -48,9 +47,7 @@ def test_every_descriptor_registers_all_seven_surfaces() -> None:
 def test_seventh_surface_is_the_connectors_tools_schema() -> None:
     # The silent hole the original ad-hoc retirement missed.
     for retirement in reg.REGISTRY:
-        connector_surfaces = [
-            s for s in retirement.surfaces if s.table == "connectors"
-        ]
+        connector_surfaces = [s for s in retirement.surfaces if s.table == "connectors"]
         assert len(connector_surfaces) == 1
         assert connector_surfaces[0].jsonb_col == "tools_schema"
 
