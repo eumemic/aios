@@ -41,7 +41,14 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from aios.harness.image_resize import (
+    ImageDownsampleError,
+    _blocking_downsample,
+    is_oversize_image,
+)
 from aios.harness.vision import (
+    INLINE_MAX_DIMENSION,
+    INLINE_SIZE_CAP_BYTES,
     PROVIDER_INLINE_IMAGE_FORMATS,
     can_inline_image,
     correct_image_mime_b64,
@@ -802,6 +809,99 @@ def _correct_image_data_url_mimes(messages: list[dict[str, Any]]) -> None:
             messages[msg_idx] = {**msg, "content": new_content}
 
 
+def _clamp_oversize_image_data_urls(messages: list[dict[str, Any]]) -> None:
+    """Downscale persisted ``data:<mime>;base64,...`` image parts whose
+    decoded longest edge exceeds :data:`INLINE_MAX_DIMENSION` (2000px).
+
+    Sibling pass to :func:`_correct_image_data_url_mimes`, called in the
+    same place on every ``build_messages``. ``read()`` now downsamples on
+    the inline path (issue #1616 Part A), but an image frozen at full
+    resolution in a historical ``tool_result`` event from BEFORE that fix
+    replays verbatim forever — and once >20 such parts accumulate and one
+    is >2000px on a side, Anthropic HARD-REJECTS the many-image request
+    (400, no server-side resize), wedging every wake. This pass re-checks
+    persisted parts each build and rewrites any oversize one to a bounded
+    copy, so an already-wedged session self-heals on its next build with
+    no manual log surgery.
+
+    Decode cost is bounded: ``_blocking_downsample`` does a header-only
+    size check first and returns ``None`` (no decode, bytes untouched)
+    for any part already <=2000px/side and <=cap — which, after Part A
+    ships, is everything except the pre-fix backlog.
+
+    Mutates by *replacing* part dicts with fresh copies — never in place —
+    matching :func:`_correct_image_data_url_mimes`'s contract (the message
+    list aliases the immutable ``Event.data``). A part that cannot be
+    downscaled (undecodable / above the pre-resize ceiling) degrades to a
+    short inert text placeholder rather than being dropped, preserving the
+    surrounding content-list / message structure.
+    """
+    for msg_idx, msg in enumerate(messages):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        new_content: list[Any] | None = None
+        for i, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
+                continue
+            url = image_url.get("url")
+            if not isinstance(url, str) or not url.startswith("data:"):
+                continue
+            head, sep, data_b64 = url.partition(",")
+            if not sep or ";base64" not in head:
+                continue
+            try:
+                raw = base64.b64decode(data_b64, validate=True)
+            except Exception:
+                # Malformed base64 — leave it; the mime corrector and the
+                # provider's own decode handle that orthogonal failure.
+                continue
+            # Header-only oversize check first: this pass is scoped to the
+            # DIMENSION wedge only. A part that already fits both caps is left
+            # exactly as the mime corrector produced it (an undecodable-but-
+            # small part is the mime corrector's / provider's concern, not a
+            # dimension wedge — degrading it here would clobber that contract).
+            if not is_oversize_image(raw):
+                continue
+            try:
+                # Blocking (not awaited): build_messages is sync. We only
+                # reach here for genuine >2000px (or over-cap) parts — the
+                # pre-fix backlog — so the re-encode cost is bounded.
+                resized = _blocking_downsample(raw, INLINE_SIZE_CAP_BYTES, INLINE_MAX_DIMENSION)
+            except ImageDownsampleError:
+                # Oversize AND un-shrinkable (above the pre-resize ceiling, or
+                # the byte cap is unreachable even at the bottom of the quality
+                # ladder): a part we cannot bound is a wedge if left in place.
+                # Replace it with an inert text placeholder, preserving list
+                # shape rather than dropping the message.
+                if new_content is None:
+                    new_content = list(content)
+                new_content[i] = {
+                    "type": "text",
+                    "text": "[image omitted: too large to display inline]",
+                }
+                continue
+            if resized is None:
+                # Header check said oversize but the downsample disagreed
+                # (e.g. a race on the cap boundary) — nothing to rewrite.
+                continue
+            encoded = base64.b64encode(resized.data).decode("ascii")
+            if new_content is None:
+                new_content = list(content)
+            new_content[i] = {
+                **part,
+                "image_url": {
+                    **image_url,
+                    "url": f"data:{resized.content_type};base64,{encoded}",
+                },
+            }
+        if new_content is not None:
+            messages[msg_idx] = {**msg, "content": new_content}
+
+
 def _is_replayable_thinking_block(block: Any) -> bool:
     """Whether a persisted thinking block is safe to replay to the provider.
 
@@ -1245,6 +1345,7 @@ def build_messages(
         messages.insert(0, {"role": "system", "content": system_prompt})
 
     _correct_image_data_url_mimes(messages)
+    _clamp_oversize_image_data_urls(messages)
 
     # Resolve the thinking-capability sniff through the shared provider-quirk
     # resolver in ``completion.py`` (consolidated from the prior inline

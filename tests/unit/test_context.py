@@ -403,6 +403,136 @@ class TestBuildMessages:
             f"walker should have corrected image/png → image/jpeg, got {url[:40]}"
         )
 
+    def test_oversize_persisted_image_clamped_at_replay(self) -> None:
+        """A session whose tool_result log already holds a >2000px persisted
+        ``data:`` image part (the pre-Part-A backlog, e.g. Ultron) must, on its
+        next build_messages, assemble a message list in which that part is
+        <=2000px on each side — self-healing the wedge without manual log edits.
+        Opaque image switches PNG -> JPEG; the sibling text part and message
+        structure are preserved.
+        """
+        import base64 as _b64
+        import io as _io
+
+        from PIL import Image as _Image
+
+        from aios.harness.vision import INLINE_MAX_DIMENSION
+
+        buf = _io.BytesIO()
+        _Image.new("RGB", (4000, 4000), (10, 20, 30)).save(buf, format="PNG")
+        big_b64 = _b64.b64encode(buf.getvalue()).decode("ascii")
+        big_url = f"data:image/png;base64,{big_b64}"
+        events = [
+            _evt(1, "user", content="show photo"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="read")]),
+            Event(
+                id="evt_3",
+                session_id="sess_01TEST",
+                seq=3,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "a",
+                    "content": [
+                        {"type": "text", "text": "Image: huge.png"},
+                        {"type": "image_url", "image_url": {"url": big_url}},
+                    ],
+                },
+                created_at=datetime.now(tz=UTC),
+                orig_channel=None,
+                focal_channel_at_arrival=None,
+            ),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        tool_msg = msgs[2]
+        assert tool_msg["role"] == "tool"
+        # Sibling text part preserved, list structure intact.
+        assert tool_msg["content"][0] == {"type": "text", "text": "Image: huge.png"}
+        url = tool_msg["content"][1]["image_url"]["url"]
+        head, _, b64 = url.partition(",")
+        mime = head.removeprefix("data:").split(";", 1)[0]
+        img = _Image.open(_io.BytesIO(_b64.b64decode(b64)))
+        assert img.width <= INLINE_MAX_DIMENSION
+        assert img.height <= INLINE_MAX_DIMENSION
+        assert mime == "image/jpeg"  # opaque -> JPEG
+
+    def test_persisted_small_image_untouched_at_replay(self) -> None:
+        """An already <=2000px/side, <=cap persisted ``data:`` part is replayed
+        with its bytes UNTOUCHED — the header-only fast path returns None, no
+        re-encode (the by-reference-equivalent acceptance criterion)."""
+        import base64 as _b64
+        import io as _io
+
+        from PIL import Image as _Image
+
+        buf = _io.BytesIO()
+        _Image.new("RGB", (64, 64), (10, 20, 30)).save(buf, format="PNG")
+        small_b64 = _b64.b64encode(buf.getvalue()).decode("ascii")
+        small_url = f"data:image/png;base64,{small_b64}"
+        events = [
+            _evt(1, "user", content="show photo"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="read")]),
+            Event(
+                id="evt_3",
+                session_id="sess_01TEST",
+                seq=3,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "a",
+                    "content": [
+                        {"type": "text", "text": "Image: small.png"},
+                        {"type": "image_url", "image_url": {"url": small_url}},
+                    ],
+                },
+                created_at=datetime.now(tz=UTC),
+                orig_channel=None,
+                focal_channel_at_arrival=None,
+            ),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        assert msgs[2]["content"][1]["image_url"]["url"] == small_url
+
+    def test_undecodable_persisted_image_degrades_to_placeholder(self) -> None:
+        """A persisted ``data:`` image part whose bytes can't be downscaled
+        (undecodable / over the pre-resize ceiling) degrades to a short inert
+        text placeholder rather than being dropped — list structure preserved,
+        no wedge."""
+        import base64 as _b64
+
+        # Valid PNG magic, garbage body — Pillow can't decode it. Padded
+        # past the byte cap so is_oversize_image flags it (the dimension
+        # clamp only acts on oversize parts; a small undecodable part is left
+        # to the mime/provider path).
+        corrupt = b"\x89PNG\r\n\x1a\n" + b"not-a-real-png" * (4 * 1024 * 1024 // 14)
+        bad_url = f"data:image/png;base64,{_b64.b64encode(corrupt).decode('ascii')}"
+        events = [
+            _evt(1, "user", content="show photo"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="read")]),
+            Event(
+                id="evt_3",
+                session_id="sess_01TEST",
+                seq=3,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "a",
+                    "content": [
+                        {"type": "text", "text": "Image: broken.png"},
+                        {"type": "image_url", "image_url": {"url": bad_url}},
+                    ],
+                },
+                created_at=datetime.now(tz=UTC),
+                orig_channel=None,
+                focal_channel_at_arrival=None,
+            ),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        content = msgs[2]["content"]
+        assert content[0] == {"type": "text", "text": "Image: broken.png"}
+        assert content[1]["type"] == "text"
+        assert "image omitted" in content[1]["text"]
+
     def test_prune_orphan_tool_results_at_start(self) -> None:
         """If DB windowing drops an assistant but keeps its tool results,
         those orphan tool results should be pruned from the start."""

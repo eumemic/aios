@@ -46,3 +46,39 @@ def valid_tiff_bytes() -> bytes:
     provider accepts for inlining, used to exercise the render boundary's
     provider-format gate. See :func:`_valid_image`."""
     return _valid_image("TIFF")
+
+
+def large_png_bytes(side: int = 4000, *, noisy: bool = False) -> bytes:
+    """A genuinely-decodable opaque RGB PNG ``side``x``side`` px.
+
+    Used by the read()-inline and replay-clamp tests to exercise the
+    dimension-downscale path: an opaque image >2000px must come back
+    re-encoded as JPEG and <=2000px on each side. ``noisy`` fills the
+    image with high-entropy pixels so the JPEG/PNG re-encode can't trivially
+    compress it to nothing (useful for cap-pressure tests).
+    """
+    from PIL import Image
+
+    if noisy:
+        import os
+
+        img = Image.frombytes("RGB", (side, side), os.urandom(side * side * 3))
+    else:
+        img = Image.new("RGB", (side, side), (10, 20, 30))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def large_transparent_png_bytes(side: int = 4000) -> bytes:
+    """A genuinely-decodable RGBA PNG ``side``x``side`` px with transparency.
+
+    Used to assert the read()-inline / replay-clamp transparency path keeps
+    a PNG (or palette-PNG) content type rather than flattening to JPEG.
+    """
+    from PIL import Image
+
+    img = Image.new("RGBA", (side, side), (10, 20, 30, 128))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()

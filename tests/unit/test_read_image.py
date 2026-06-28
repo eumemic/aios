@@ -20,12 +20,26 @@ from aios.sandbox.volumes import session_attachments_dir, workspace_dir_for
 from aios.tools.read import read_handler
 from aios.tools.registry import ToolResult
 from tests.helpers.images import (
+    large_png_bytes,
+    large_transparent_png_bytes,
     valid_gif_bytes,
     valid_jpeg_bytes,
     valid_png_bytes,
     valid_tiff_bytes,
     valid_webp_bytes,
 )
+
+
+def _decode_data_uri_image(url: str) -> tuple[str, Any]:
+    """Return ``(declared_mime, PIL.Image)`` for a ``data:...;base64,`` URI."""
+    import base64 as _b64
+    import io as _io
+
+    from PIL import Image as _Image
+
+    head, _, b64 = url.partition(",")
+    mime = head.removeprefix("data:").split(";", 1)[0]
+    return mime, _Image.open(_io.BytesIO(_b64.b64decode(b64)))
 
 
 class _StubRegistry:
@@ -151,6 +165,117 @@ class TestImageBranch:
             "type": "image_url",
             "image_url": {"url": f"data:image/png;base64,{base64.b64encode(payload).decode()}"},
         }
+        assert result.is_error is False
+
+    async def test_oversize_image_downscaled_to_dimension_cap_on_inline(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """A read() on a 4000x4000 opaque PNG must inline an image_url whose
+        decoded dimensions are <=2000px on EACH side (re-decode the emitted
+        data URI). Opaque images switch PNG -> JPEG (issue #1616 Part A)."""
+        from aios.harness.vision import INLINE_MAX_DIMENSION
+
+        stub_get_session_model.value = "model/vision"
+        _stage_workspace_image("sess_01TEST", "huge.png", large_png_bytes(4000))
+
+        result = await read_handler("sess_01TEST", {"path": "/workspace/huge.png"})
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list)
+        url = result.content[1]["image_url"]["url"]
+        mime, img = _decode_data_uri_image(url)
+        assert img.width <= INLINE_MAX_DIMENSION
+        assert img.height <= INLINE_MAX_DIMENSION
+        # Opaque PNG -> JPEG; the text marker and data URI use the returned mime.
+        assert mime == "image/jpeg"
+        assert "image/jpeg" in result.content[0]["text"]
+        assert result.is_error is False
+
+    async def test_oversize_transparent_image_keeps_png_path(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """A transparent >2000px PNG downscales but stays PNG (or palette PNG),
+        never flattening transparency to JPEG."""
+        from aios.harness.vision import INLINE_MAX_DIMENSION
+
+        stub_get_session_model.value = "model/vision"
+        _stage_workspace_image("sess_01TEST", "huge_alpha.png", large_transparent_png_bytes(4000))
+
+        result = await read_handler("sess_01TEST", {"path": "/workspace/huge_alpha.png"})
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list)
+        url = result.content[1]["image_url"]["url"]
+        mime, img = _decode_data_uri_image(url)
+        assert img.width <= INLINE_MAX_DIMENSION
+        assert img.height <= INLINE_MAX_DIMENSION
+        assert mime == "image/png"
+        assert result.is_error is False
+
+    async def test_small_image_inlined_unchanged_no_reencode(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+    ) -> None:
+        """An image already <=2000px/side and <=cap inlines the ORIGINAL bytes
+        unchanged — maybe_downsample returns None, no re-encode/quality loss."""
+        stub_get_session_model.value = "model/vision"
+        payload = valid_png_bytes()
+        _stage_workspace_image("sess_01TEST", "small.png", payload)
+
+        result = await read_handler("sess_01TEST", {"path": "/workspace/small.png"})
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list)
+        assert result.content[1]["image_url"]["url"] == (
+            f"data:image/png;base64,{base64.b64encode(payload).decode()}"
+        )
+
+    async def test_uses_maybe_downsample_on_inline_path(self) -> None:
+        """Regression guard for the two-inline-paths-drift recurrence (#1564):
+        read.py must import and call maybe_downsample so the read() inline path
+        cannot silently diverge from the bounded attachment path again."""
+        import inspect
+
+        from aios.tools import read as read_module
+
+        assert hasattr(read_module, "maybe_downsample")
+        src = inspect.getsource(read_module._read_image)
+        assert "maybe_downsample(" in src
+
+    async def test_undecodable_oversize_returns_marker_not_inline(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When maybe_downsample raises ImageDownsampleError (above ceiling or
+        undecodable past the format gate), read() degrades to a text marker —
+        never a raised exception, never a full-res inline (the wedge)."""
+        from aios.harness.image_resize import ImageDownsampleError
+
+        stub_get_session_model.value = "model/vision"
+        _stage_workspace_image("sess_01TEST", "weird.png", valid_png_bytes())
+
+        async def boom(_data: bytes, _mime: str, **_kw: Any) -> Any:
+            raise ImageDownsampleError("simulated undecodable/over-ceiling")
+
+        monkeypatch.setattr("aios.tools.read.maybe_downsample", boom)
+
+        result = await read_handler("sess_01TEST", {"path": "/workspace/weird.png"})
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, str)
+        assert "image_url" not in result.content
+        assert "could not be prepared for inline viewing" in result.content
         assert result.is_error is False
 
     async def test_undecodable_or_unsupported_image_returns_marker_not_inline(
