@@ -29,6 +29,7 @@ from aios.errors import (
     RateLimitedError,
     ValidationError,
 )
+from aios.harness.chat_type import ChatType
 from aios.harness.window import WindowedEvents
 from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, REQUEST, make_id, split_id
 from aios.models.agents import (
@@ -1914,6 +1915,8 @@ async def read_events(
     after_seq: int = 0,
     before: int | None = None,
     kind: EventKind | None = None,
+    channels: list[str] | None = None,
+    chat_type: ChatType | None = None,
     limit: int = 200,
     newest_first: bool = False,
     error_only: bool = False,
@@ -1925,6 +1928,8 @@ async def read_events(
             after_seq=after_seq,
             before=before,
             kind=kind,
+            channels=channels,
+            chat_type=chat_type,
             limit=limit,
             newest_first=newest_first,
             account_id=account_id,

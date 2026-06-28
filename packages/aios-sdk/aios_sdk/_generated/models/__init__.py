@@ -111,6 +111,7 @@ from .list_response_wf_run import ListResponseWfRun
 from .list_response_wf_run_event import ListResponseWfRunEvent
 from .list_response_workflow import ListResponseWorkflow
 from .list_response_workflow_version import ListResponseWorkflowVersion
+from .list_session_events_chat_type_type_0 import ListSessionEventsChatTypeType0
 from .list_session_events_dir import ListSessionEventsDir
 from .list_session_events_kind_type_0 import ListSessionEventsKindType0
 from .list_sessions_status_type_0 import ListSessionsStatusType0
@@ -229,6 +230,9 @@ from .skill_version import SkillVersion
 from .skill_version_create import SkillVersionCreate
 from .skill_version_create_files import SkillVersionCreateFiles
 from .skill_version_files import SkillVersionFiles
+from .stream_events_v1_sessions_session_id_stream_get_chat_type_type_0 import (
+    StreamEventsV1SessionsSessionIdStreamGetChatTypeType0,
+)
 from .task_handle import TaskHandle
 from .task_handle_servicer_kind import TaskHandleServicerKind
 from .task_request import TaskRequest
@@ -285,6 +289,9 @@ from .vault_credential_update_metadata_type_0 import VaultCredentialUpdateMetada
 from .vault_metadata import VaultMetadata
 from .vault_update import VaultUpdate
 from .vault_update_metadata_type_0 import VaultUpdateMetadataType0
+from .wait_for_events_v1_sessions_session_id_wait_get_chat_type_type_0 import (
+    WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0,
+)
 from .wait_response import WaitResponse
 from .wait_response_session_status import WaitResponseSessionStatus
 from .wait_response_session_stop_reason_type_0 import WaitResponseSessionStopReasonType0
@@ -430,6 +437,7 @@ __all__ = (
     "ListResponseWfRunEvent",
     "ListResponseWorkflow",
     "ListResponseWorkflowVersion",
+    "ListSessionEventsChatTypeType0",
     "ListSessionEventsDir",
     "ListSessionEventsKindType0",
     "ListSessionsStatusType0",
@@ -530,6 +538,7 @@ __all__ = (
     "SkillVersionCreate",
     "SkillVersionCreateFiles",
     "SkillVersionFiles",
+    "StreamEventsV1SessionsSessionIdStreamGetChatTypeType0",
     "TaskHandle",
     "TaskHandleServicerKind",
     "TaskRequest",
@@ -586,6 +595,7 @@ __all__ = (
     "VaultMetadata",
     "VaultUpdate",
     "VaultUpdateMetadataType0",
+    "WaitForEventsV1SessionsSessionIdWaitGetChatTypeType0",
     "WaitResponse",
     "WaitResponseSessionStatus",
     "WaitResponseSessionStopReasonType0",

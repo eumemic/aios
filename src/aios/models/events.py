@@ -114,7 +114,10 @@ class Event(BaseModel):
     data: dict[str, Any]
     cumulative_tokens: int | None = Field(default=None, exclude=True)
     created_at: datetime
-    orig_channel: str | None = Field(default=None, exclude=True)
+    # Un-hidden (#1613) so LIST consumers can distinguish "where the inbound
+    # came from" from the resolved turn ``channel`` — parity with the SSE
+    # serializer, which already emits ``orig_channel``.
+    orig_channel: str | None = None
     focal_channel_at_arrival: str | None = Field(default=None, exclude=True)
     # Derived "which channel does this event belong to?" — stamped at
     # append time. For user events, == orig_channel; for assistant
@@ -123,4 +126,8 @@ class Event(BaseModel):
     # started in A and completing after a switch to B still belongs to
     # A). NULL for non-message events and for events that belong to no
     # channel (e.g. assistant emitted while focal was cleared).
-    channel: str | None = Field(default=None, exclude=True)
+    #
+    # Un-hidden (#1613): the LIST API now emits ``channel`` so historical
+    # consumers (relay/cockpit/audit) can read the authoritative per-event
+    # channel instead of reconstructing it by heuristic focal-tracking.
+    channel: str | None = None

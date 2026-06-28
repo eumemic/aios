@@ -37,6 +37,7 @@ from sse_starlette import EventSourceResponse, ServerSentEvent
 from aios.db import queries
 from aios.db.listen import EVENTS_ARCHIVED_NOTIFY
 from aios.errors import SSEPreflightFailedError
+from aios.harness.chat_type import ChatType, chat_type_of
 from aios.logging import get_logger
 from aios.models.workflows import TERMINAL_RUN_STATUSES
 from aios.services import connections as connections_service
@@ -171,11 +172,36 @@ def _serialize_event(row: asyncpg.Record) -> dict[str, Any]:
     }
 
 
+def _passes_channel_filter(
+    payload: dict[str, Any],
+    channels: list[str] | None,
+    chat_type: ChatType | None,
+) -> bool:
+    """#1613 SSE-side channel/chat_type filter.
+
+    NULL-channel rows (lifecycle/terminal/span/switch_channel) ALWAYS pass so
+    ``done``/``terminated``/archive-sentinel reach the consumer even on a
+    channel-scoped stream — only message rows that carry a channel are filtered.
+    With no filter, everything passes (byte-identical to today).
+    """
+    if not channels and chat_type is None:
+        return True
+    chan = payload.get("channel")
+    if chan is None:
+        # Lifecycle/terminal/span/switch_channel — never channel-scoped.
+        return True
+    if channels and chan not in channels:
+        return False
+    return not (chat_type is not None and chat_type_of(chan) != chat_type)
+
+
 async def sse_event_stream(
     subscription: ListenSubscription,
     pool: asyncpg.Pool[Any],
     session_id: str,
     after_seq: int = 0,
+    channels: list[str] | None = None,
+    chat_type: ChatType | None = None,
 ) -> AsyncIterator[ServerSentEvent]:
     """Yield ServerSentEvents for a session, backfilling from ``after_seq``
     and then tailing live notifications.
@@ -184,22 +210,42 @@ async def sse_event_stream(
     ``open_listen_for_events`` before this generator runs — the
     LISTEN-before-backfill invariant requires it.  This generator owns
     terminating the subscription in ``finally``.
+
+    ``channels`` / ``chat_type`` (#1613) scope the stream to message rows on the
+    requested channel(s); NULL-channel lifecycle/terminal rows and transient
+    deltas always pass so the consumer still observes end-of-stream.
     """
     queue = subscription.queue
     try:
         cursor = after_seq
 
-        # Backfill: read all events with seq > after_seq, in order.
+        # Backfill: read all events with seq > after_seq, in order. The
+        # channel filter (#1613) is pushed into the SELECT (index-backed via
+        # ``events_session_channel_seq_idx``) so a channel-scoped tail of a
+        # large session does NOT transfer every row. NULL-channel
+        # lifecycle/terminal rows are OR'd back in so end-of-stream survives;
+        # chat_type (a derived post-filter) is applied row-side below.
         async with pool.acquire() as conn:
-            backfill_rows = await conn.fetch(
-                "SELECT * FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq ASC",
-                session_id,
-                after_seq,
-            )
+            if channels:
+                backfill_rows = await conn.fetch(
+                    "SELECT * FROM events WHERE session_id = $1 AND seq > $2 "
+                    "AND (channel = ANY($3) OR channel IS NULL) ORDER BY seq ASC",
+                    session_id,
+                    after_seq,
+                    channels,
+                )
+            else:
+                backfill_rows = await conn.fetch(
+                    "SELECT * FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq ASC",
+                    session_id,
+                    after_seq,
+                )
 
         for row in backfill_rows:
             payload = _serialize_event(row)
             cursor = max(cursor, payload["seq"])
+            if not _passes_channel_filter(payload, channels, chat_type):
+                continue
             yield _event_to_sse(payload)
             if _is_terminal(payload):
                 yield ServerSentEvent(data="{}", event="done")
@@ -239,6 +285,11 @@ async def sse_event_stream(
             if event_data["seq"] <= cursor:
                 continue
             cursor = event_data["seq"]
+            # #1613: drop message rows outside the requested channel(s) before
+            # yielding; NULL-channel lifecycle/terminal rows always pass so the
+            # consumer still observes end-of-stream.
+            if not _passes_channel_filter(event_data, channels, chat_type):
+                continue
             yield _event_to_sse(event_data)
             if _is_terminal(event_data):
                 yield ServerSentEvent(data="{}", event="done")

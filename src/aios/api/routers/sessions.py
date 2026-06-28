@@ -33,6 +33,7 @@ from aios.db.listen import (
     open_listen_for_events,
 )
 from aios.errors import ValidationError
+from aios.harness.chat_type import ChatType
 from aios.ids import GITHUB_REPOSITORY, split_id
 from aios.logging import get_logger
 from aios.models.common import ListResponse
@@ -678,6 +679,12 @@ async def list_events(
     direction: Annotated[Direction, Query(alias="dir")] = "forward",
     kind: EventKind | None = None,
     error_only: bool | None = None,
+    # #1613: repeatable channel filter (OR semantics) + derived chat_type
+    # filter. Both are index/derivation-backed authoritative slices for
+    # relays/cockpit/audit — see ``read_events``. Omitting them is
+    # byte-identical to the prior behaviour.
+    channel: Annotated[list[str] | None, Query()] = None,
+    chat_type: ChatType | None = None,
     # Higher cap than the standard 200: operators page full event logs via
     # ``aios sessions events``; 500 is the audit-recommended ceiling.
     limit: EventPageLimit = None,
@@ -685,10 +692,17 @@ async def list_events(
     """List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` + ``?limit=``. Subsequent pages:
+    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
     ``backward`` loads the newest-first tail and pages into the past.
+
+    Channel/chat_type filter (#1613): ``?channel=C`` returns ONLY events whose
+    resolved ``channel == C`` (including the outbound tool-RESULT rows for that
+    channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
+    the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
+    response includes ``channel`` + ``orig_channel`` on each item.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a "session reset"
     — it only means no events match this page (e.g. a forward read past the
@@ -709,6 +723,8 @@ async def list_events(
         {
             "kind": kind,
             "error_only": error_only,
+            "channel": channel,
+            "chat_type": chat_type,
             "limit": limit,
             "dir": direction if direction != "forward" else None,
         },
@@ -717,6 +733,10 @@ async def list_events(
         direction = st.direction
         kind = st.filters.get("kind")
         error_only = bool(st.filters.get("error_only"))
+        # #1613: carry the channel/chat_type filters across cursor pages so a
+        # paged consumer never leaks other-channel rows on later pages.
+        channel = st.filters.get("channel") or None
+        chat_type = st.filters.get("chat_type")
         seq = cursor_as_int(st.cursor)
         after_seq, before = (seq, None) if direction == "forward" else (0, seq)
     else:
@@ -730,6 +750,8 @@ async def list_events(
         after_seq=after_seq,
         before=before,
         kind=kind,
+        channels=channel,
+        chat_type=chat_type,
         limit=page_limit + 1,
         newest_first=direction == "backward",
         error_only=error_only,
@@ -740,7 +762,12 @@ async def list_events(
         page_limit,
         cursor=lambda x: x.seq,
         direction=direction,
-        filters={"kind": kind, "error_only": error_only},
+        filters={
+            "kind": kind,
+            "error_only": error_only,
+            "channel": channel,
+            "chat_type": chat_type,
+        },
     )
 
 
@@ -873,6 +900,11 @@ async def stream_events(
     pool: PoolDep,
     account_id: AccountIdDep,
     after_seq: int = 0,
+    # #1613: repeatable channel filter (OR) + derived chat_type filter.
+    # Backfill AND live-tail honor it; NULL-channel lifecycle/terminal events
+    # (done, archive) always pass so the consumer still sees end-of-stream.
+    channel: Annotated[list[str] | None, Query()] = None,
+    chat_type: ChatType | None = None,
 ) -> EventSourceResponse:
     """Stream session events as Server-Sent Events.
 
@@ -881,6 +913,12 @@ async def stream_events(
     testcontainer warmup or a brief Postgres outage surfaces as a clean
     503 with proper headers rather than a half-open chunked stream
     after 200 OK has gone out.
+
+    Channel filter (#1613): ``?channel=C`` (repeatable, OR) / ``?chat_type=``
+    scope both the backfill and the live tail to message rows on the requested
+    channel(s). NULL-channel lifecycle/terminal events (``done``, the archive
+    sentinel) and transient deltas always pass through so the consumer still
+    observes end-of-stream. Omitting the filter is byte-identical to today.
     """
     await service.get_session_basic(pool, session_id, account_id=account_id)
     subscription = await preflight_subscription(
@@ -892,7 +930,14 @@ async def stream_events(
     )
     return make_sse_response(
         subscription,
-        sse_event_stream(subscription, pool, session_id, after_seq=after_seq),
+        sse_event_stream(
+            subscription,
+            pool,
+            session_id,
+            after_seq=after_seq,
+            channels=channel,
+            chat_type=chat_type,
+        ),
     )
 
 
@@ -904,6 +949,10 @@ async def wait_for_events(
     account_id: AccountIdDep,
     after: int = 0,
     timeout_seconds: Annotated[int, Query(alias="timeout", ge=0, le=60)] = 30,
+    # #1613: repeatable channel filter (OR) + derived chat_type filter, mirroring
+    # the SSE twin for Node-fetch consumers and the relay's psql successor.
+    channel: Annotated[list[str] | None, Query()] = None,
+    chat_type: ChatType | None = None,
 ) -> WaitResponse:
     """Long-poll for new events past sequence number ``after``.
 
@@ -912,6 +961,9 @@ async def wait_for_events(
     stack can't reliably consume server-sent events (notably Node's
     ``fetch`` — see issue #40).
 
+    Channel filter (#1613): ``?channel=C`` (repeatable, OR) / ``?chat_type=``
+    scope the returned events the same way as the SSE/LIST twins.
+
     Pass the response's ``next_after`` as ``?after=`` on the next call to
     resume from where you left off. (The query param was previously named
     ``after_seq``; see issue #389.)
@@ -919,7 +971,14 @@ async def wait_for_events(
     await service.get_session_basic(pool, session_id, account_id=account_id)
 
     async with listen_for_events(db_url, session_id) as queue:
-        events = await service.read_events(pool, session_id, after_seq=after, account_id=account_id)
+        events = await service.read_events(
+            pool,
+            session_id,
+            after_seq=after,
+            channels=channel,
+            chat_type=chat_type,
+            account_id=account_id,
+        )
         if not events and timeout_seconds > 0:
             # The channel carries both committed-event IDs and transient
             # streaming delta payloads (shaped like {"delta": "..."}); only
@@ -943,7 +1002,12 @@ async def wait_for_events(
                 if payload == EVENTS_ARCHIVED_NOTIFY:
                     break
                 events = await service.read_events(
-                    pool, session_id, after_seq=after, account_id=account_id
+                    pool,
+                    session_id,
+                    after_seq=after,
+                    channels=channel,
+                    chat_type=chat_type,
+                    account_id=account_id,
                 )
                 if events:
                     break
