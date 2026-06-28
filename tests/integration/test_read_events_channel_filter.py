@@ -282,13 +282,24 @@ async def test_channel_filter_uses_partial_index(
         for i in range(50):
             await _inbound(conn, account_id, session_id, CHAN_A, f"a{i}")
             await _inbound(conn, account_id, session_id, CHAN_B, f"b{i}")
+        # ``ANALYZE`` so the planner has row statistics (otherwise the default
+        # estimate on this small, freshly-loaded table makes it walk the
+        # ``(session_id, seq)`` unique index instead). ``enable_seqscan = off``
+        # then forces the cost-based planner to choose an *index* path: the
+        # acceptance criterion is that the channel filter rides the partial
+        # ``events_session_channel_seq_idx`` rather than a full seq-scan of the
+        # whole log. The single-channel filter is emitted as a scalar
+        # ``channel = $n`` (the relay/cockpit hot path), matching the
+        # index-sargable form ``read_events`` produces for one channel.
+        await conn.execute("ANALYZE events")
+        await conn.execute("SET enable_seqscan = off")
         plan = await conn.fetch(
             "EXPLAIN SELECT * FROM events "
-            "WHERE session_id = $1 AND account_id = $2 AND channel = ANY($3) "
+            "WHERE session_id = $1 AND account_id = $2 AND channel = $3 "
             "ORDER BY seq ASC LIMIT 200",
             session_id,
             account_id,
-            [CHAN_A],
+            CHAN_A,
         )
     plan_text = "\n".join(r["QUERY PLAN"] for r in plan)
     assert "events_session_channel_seq_idx" in plan_text, plan_text

@@ -1662,14 +1662,24 @@ async def read_events(
             params.append(kind)
             where += f" AND kind = ${len(params)}"
         if channels:
-            # #1613: index-backed channel filter. ``channel = ANY($n)`` (OR
-            # over the requested channels) hits the partial index
+            # #1613: index-backed channel filter against the partial index
             # ``events_session_channel_seq_idx ON events(session_id, channel,
-            # seq) WHERE channel IS NOT NULL`` (migration 0022) — sargable, no
-            # scan. NULL-channel rows (lifecycle/span/switch_channel) are
-            # excluded by design: a channel-scoped LIST is message-row-only.
-            params.append(channels)
-            where += f" AND channel = ANY(${len(params)})"
+            # seq) WHERE channel IS NOT NULL`` (migration 0022). NULL-channel
+            # rows (lifecycle/span/switch_channel) are excluded by design: a
+            # channel-scoped LIST is message-row-only.
+            #
+            # Single channel (the relay/cockpit hot path) emits a scalar
+            # ``channel = $n`` so the planner can walk the index in
+            # ``(session_id, channel, seq)`` order and satisfy ``ORDER BY seq``
+            # directly — an ordered Index Scan, no Sort. ``channel = ANY($n)``
+            # over a set cannot yield globally seq-ordered output from that
+            # index, so multi-channel keeps the OR form (still index-backed,
+            # with a Sort/merge on top).
+            params.append(channels[0] if len(channels) == 1 else channels)
+            if len(channels) == 1:
+                where += f" AND channel = ${len(params)}"
+            else:
+                where += f" AND channel = ANY(${len(params)})"
         if error_only:
             where += " AND is_error IS TRUE"
         params.append(limit)
