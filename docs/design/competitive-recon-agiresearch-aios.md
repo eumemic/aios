@@ -156,8 +156,28 @@ Checking our own tracker first reshaped the plan — two top items already exist
 | 7 · Cost-aware inbound triage | extends `Connection` | **Defer, don't file** — #1504's rolling-count budget already bounds inbound spend; revisit only when spend is measured and shown triage-dominated | — |
 
 Two of our own findings the mirror surfaced, fileable independently of adopting anything:
-- **Lattice-visibility gap** (security; #794-class) — `ToolProvider`-prelude-injected tools bypass `surface_of`/the attenuation meet today. Folded into item 6's body; merits a standalone security issue.
-- **Trigger invariant broken window** — make `enabled ⟺ next_fire IS NOT NULL` a CHECK/generated column, retiring the #957 heal.
+- **Lattice-visibility gap** (security; #794-class) — `ToolProvider`-prelude-injected tools bypass `surface_of`/the attenuation meet today. Filed as #1627 (the design red-team **promoted it to shovel-ready** — its only open fork dissolved against the existing `parent_run_id`/`surface_frozen` primitive).
+- **Trigger invariant broken window** — make `enabled ⟺ next_fire IS NOT NULL` a CHECK/generated column, retiring the #957 heal. *(Not filed in this batch — noted for a follow-up.)*
+
+### Filed (2026-06-27)
+
+Items 5 and 6 decomposed into epics with separable, distinctly-ratified slices (the honest epic test). **11 issues, 2 epics + 3 singles + 6 subs; 2 shovel-ready, 7 needs-design.**
+
+| # | Issue | Ratification |
+|---|---|---|
+| **#1629** | Hybrid semantic+keyword memory recall (pgvector 2nd RRF signal) — *item 1* | needs-design |
+| **#1630** | Per-agent model fallback chain (discriminated `ModelPolicy`) — *item 3* | needs-design |
+| **#1631** | Agent export/import as `name@version` artifact — *item 4* | needs-design |
+| **#1621** | *Epic:* GUI/browser computer-use sandbox layer — *item 5* | epic |
+| ↳ #1623 | Headless-Chromium sandbox image + GHCR publish | **shovel-ready** |
+| ↳ #1624 | In-tree browser action builtins | needs-design |
+| ↳ #1625 | Accessibility-tree filter + Set-of-Mark grounding | needs-design |
+| ↳ #1626 | Limited-networking + secret-egress preset for authed browsing | needs-design |
+| **#1622** | *Epic:* External tool-provider seam — *item 6* | epic |
+| ↳ #1627 | Close the `surface_of`/ToolProvider attenuation-visibility gap | **shovel-ready** |
+| ↳ #1628 | `ToolProvider` arm on the ToolSpec union (declared, surface-visible) | needs-design |
+
+Item 2 → **[#418 Option D](https://github.com/eumemic/aios/issues/418)** (comment). Item 7 → deferred (not filed). This doc → PR #1620.
 
 ## Bottom line
 
