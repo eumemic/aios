@@ -217,9 +217,14 @@ async def test_resume_integrity_path_home_pwd(
 
     A plain commit PRESERVES the base image's HOME (so the resumed value equals
     a fresh base container's HOME); flatten strips all config and RESTORES the
-    sandbox's canonical ``/home/aios``. (In a current deployment the base sets
-    HOME=/home/aios, so both are /home/aios; capturing the base HOME keeps the
-    test robust to base-image build variance.)"""
+    sandbox's canonical ``/root``. (In a current deployment the base sets
+    HOME=/root, so both are /root; capturing the base HOME keeps the test
+    robust to base-image build variance.)
+
+    Either way the resumed container must satisfy the ownership invariant
+    ownership-checking tools enforce -- ``stat -c %u "$HOME" == id -u`` -- so a
+    HOME/uid regression that only manifests post-thaw (e.g. ``_flatten``
+    restoring a foreign-owned HOME) fails here."""
     backend, instance_id, session_id, workspace = daemon
     tag = snapshot_tag(instance_id, session_id)
 
@@ -266,9 +271,18 @@ async def test_resume_integrity_path_home_pwd(
         rc, path = await run_sandbox(backend, h2, 'printf %s "$PATH"')
         assert rc == 0 and path.strip(), "resumed container has an empty PATH (CMD would not exec)"
         rc, home = await run_sandbox(backend, h2, 'printf %s "$HOME"')
-        expected_home = "/home/aios" if flatten else base_home
+        expected_home = "/root" if flatten else base_home
         assert home.strip() == expected_home, (
             f"HOME mismatch: got {home!r}, expected {expected_home!r} (flatten={flatten})"
+        )
+        # The ownership invariant ownership-checking tools enforce: $HOME's
+        # owner uid == the running uid, surviving the (possibly flattened)
+        # round-trip.
+        rc, owner_ok = await run_sandbox(
+            backend, h2, 'test "$(stat -c %u "$HOME")" = "$(id -u)" && echo ok'
+        )
+        assert rc == 0 and owner_ok.strip() == "ok", (
+            f"$HOME owner != running uid after resume (flatten={flatten}): {owner_ok!r}"
         )
         rc, pwd = await run_sandbox(backend, h2, "pwd")
         assert pwd.strip() == "/workspace", f"pwd not /workspace: {pwd!r}"

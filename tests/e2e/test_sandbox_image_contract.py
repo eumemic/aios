@@ -231,28 +231,51 @@ class TestRuntimeBehaviour:
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "aios", f"expected user aios, got {r.stdout.strip()!r}"
 
-    def test_user_1000_has_writable_home(self, pulled_image: str) -> None:
-        """uid 1000 owns /home/aios (created via --create-home) and ENV
-        HOME=/home/aios applies under `--user` (docker --user does not reset
-        HOME), so the agent can write to $HOME."""
+    def test_user_1000_owns_aios_home(self, pulled_image: str) -> None:
+        """The `aios` user (uid 1000) and its --create-home /home/aios are kept
+        as harmless leftovers (so a `--user 1000:1000` exec still resolves to a
+        named user with a writable home), but nothing depends on them: the
+        agent runs as root with HOME=/root. /home/aios stays owned by uid 1000
+        — note this is exactly the ownership mismatch that made HOME=/home/aios
+        a footgun for the root agent, which is why HOME no longer points here.
+
+        ENV HOME is unconditional (docker --user does not reset HOME), so a
+        uid-1000 exec would see HOME=/root, not /home/aios; this test probes
+        /home/aios directly rather than via $HOME."""
         r = _docker_run(
             pulled_image,
             "bash",
             "-c",
-            "touch $HOME/.probe && echo ok",
+            "touch /home/aios/.probe && echo ok",
             user="1000:1000",
         )
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "ok", (
-            f"expected writable $HOME, got {r.stdout.strip()!r}: {r.stderr}"
+            f"expected uid 1000 to own/write /home/aios, got {r.stdout.strip()!r}: {r.stderr}"
         )
 
-    def test_home_env_is_aios_home_for_root(self, pulled_image: str) -> None:
-        """Root (default) execs inherit ENV HOME=/home/aios too — the ENV is
-        unconditional, not gated on uid."""
+    def test_home_env_is_root_home_for_root(self, pulled_image: str) -> None:
+        """Root (default) execs inherit ENV HOME=/root — root's natural,
+        root-owned home, so $HOME's owner matches the running uid and
+        ownership-checking tools (Firefox/Camoufox, ssh, gpg) don't refuse."""
         r = _docker_run(pulled_image, "bash", "-c", "echo $HOME")
         assert r.returncode == 0, r.stderr
-        assert r.stdout.strip() == "/home/aios", f"expected /home/aios, got {r.stdout.strip()!r}"
+        assert r.stdout.strip() == "/root", f"expected /root, got {r.stdout.strip()!r}"
+
+    def test_home_owner_equals_running_uid(self, pulled_image: str) -> None:
+        """The exact invariant ownership-aware tools (Firefox/Camoufox, ssh,
+        gpg, sudo) enforce: $HOME's owner uid == the running uid. A regression
+        that re-points HOME at a foreign-owned dir (the historical
+        HOME=/home/aios footgun, /home/aios owned by uid 1000 while the agent
+        runs as root) fails here."""
+        r = _docker_run(
+            pulled_image,
+            "bash",
+            "-c",
+            'test "$(stat -c %u "$HOME")" = "$(id -u)" && echo ok',
+        )
+        assert r.returncode == 0, f"$HOME owner != running uid: {r.stderr or r.stdout}"
+        assert r.stdout.strip() == "ok", f"expected ok, got {r.stdout.strip()!r}"
 
     def test_trust_store_layout_is_debian(self, pulled_image: str) -> None:
         """The trust-store contract the egress-CA wiring depends on: a

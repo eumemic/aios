@@ -72,18 +72,22 @@ RUN chmod 0755 /usr/local/bin/tool
 # DELIBERATELY no top-level `USER aios` directive. The image runs on a
 # one-shot-exec model: `CMD ["/usr/bin/tail","-f","/dev/null"]` keeps the
 # container alive as **root**, and every tool call is a separate
-# `docker exec`. The agent uid is supplied per-exec via
-# `docker exec --user 1000:1000 ...` (follow-up seam issue), never as the
-# image default. Root must remain the default exec uid because setup
-# execs run apt and the iptables networking lockdown, which require uid 0
-# (the contract test `test_runs_as_root` asserts this).
+# `docker exec`. The agent always runs as root (uid 0): aios uses the
+# agent-root model (root-on-Docker, safe-root via microVM/gVisor isolation;
+# ref aios#1014). There is no privilege-drop -- the planned `--user 1000:1000`
+# exec-user seam (aios#806/#850) is CLOSED / NOT_PLANNED. Root is required
+# because setup execs run apt and the iptables networking lockdown, which need
+# uid 0 (the contract test `test_runs_as_root` asserts this).
 #
-# `--create-home` makes /home/aios owned by uid 1000 so the agent exec can
-# write there; `ENV HOME=/home/aios` applies to every exec (docker
-# `--user` does not reset HOME), so both root and uid-1000 execs see it.
-# This is inert until the follow-up flips agent execs to `--user 1000:1000`.
+# `HOME` MUST point at a home owned by the running uid, or ownership-checking
+# tools (Firefox/Camoufox, ssh, gpg, sudo) refuse to run when $HOME's owner
+# != the running uid. The agent is root, so HOME=/root (root-owned, present in
+# the base image). The legacy uid-1000-owned /home/aios is no longer used by
+# anything (the uid-1000 exec phase it was scaffolded for is dead). The `aios`
+# user is kept only so a `--user 1000:1000` exec still resolves to a named
+# user; nothing depends on /home/aios.
 RUN groupadd --gid 1000 aios && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/aios aios
-ENV HOME=/home/aios
+ENV HOME=/root
 
 # Default broker URL for bash scripts inside the sandbox that read
 # $TOOL_BROKER_URL directly (the python ``tool`` CLI has its own
