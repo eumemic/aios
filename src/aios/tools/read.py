@@ -21,6 +21,7 @@ from typing import Any
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.harness.image_resize import ImageDownsampleError, maybe_downsample
 from aios.harness.vision import (
     INLINE_SIZE_CAP_BYTES,
     PROVIDER_INLINE_IMAGE_FORMATS,
@@ -294,6 +295,36 @@ async def _read_image(
             ),
             is_error=False,
         )
+
+    # Downscale full-resolution bytes to the inline dimension cap before
+    # encoding. ``read()`` previously inlined the raw bytes at full
+    # resolution; once >20 such images accumulate in a window and at least
+    # one exceeds 2000px on a side, Anthropic HARD-REJECTS the many-image
+    # request (400, no server-side resize), wedging every subsequent wake
+    # (the bytes are frozen in the tool_result event and replayed verbatim).
+    # ``maybe_downsample`` returns ``None`` for the common case (already
+    # <=2000px on each side and <=cap) via a header-only check, so the hot
+    # path pays no decode/re-encode cost and loses no quality.
+    try:
+        resized = await maybe_downsample(data, mime)
+    except ImageDownsampleError as err:
+        # Oversize-beyond-ceiling or undecodable: degrade to a text marker
+        # the model can still act on — same stance as the non-inlinable
+        # branches above. Do NOT inline the oversize original; that is the
+        # wedge vector.
+        return ToolResult(
+            content=(
+                f"Image at {path} ({human_size(size)}, {mime}) is present but could "
+                f"not be prepared for inline viewing ({err}). Use other tools to "
+                f"process it, or capture/downscale it to <=2000px on the longest edge."
+            ),
+            is_error=False,
+        )
+    if resized is not None:
+        # Use the RETURNED content_type — ``maybe_downsample`` switches an
+        # opaque PNG to JPEG, so reusing the original ``mime`` would mislabel
+        # the data URI.
+        data, mime, size = resized.data, resized.content_type, len(resized.data)
 
     encoded = base64.b64encode(data).decode("ascii")
     return ToolResult(

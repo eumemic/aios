@@ -175,3 +175,33 @@ class TestResultShape:
         assert isinstance(result.content_type, str)
         assert isinstance(result.width, int)
         assert isinstance(result.height, int)
+
+
+class TestIsOversizeImage:
+    """Header-only oversize predicate used by the replay-time dimension clamp
+    (issue #1616 Part B). Scoped to the dimension/byte caps; undecodable input
+    is deliberately NOT flagged (it is the mime/provider path's concern)."""
+
+    def test_small_image_is_not_oversize(self) -> None:
+        from aios.harness.image_resize import is_oversize_image
+
+        data = _encode(_noisy_rgb(64, 64), "PNG")
+        assert is_oversize_image(data) is False
+
+    def test_dimension_over_cap_is_oversize(self) -> None:
+        from aios.harness.image_resize import is_oversize_image
+
+        data = _encode(Image.new("RGB", (INLINE_MAX_DIMENSION + 1, 10)), "PNG")
+        assert is_oversize_image(data) is True
+
+    def test_byte_size_over_cap_is_oversize(self) -> None:
+        from aios.harness.image_resize import is_oversize_image
+
+        # Header check never reached: byte length alone exceeds the cap.
+        blob = b"\x89PNG\r\n\x1a\n" + b"\x00" * (INLINE_SIZE_CAP_BYTES + 1)
+        assert is_oversize_image(blob) is True
+
+    def test_undecodable_small_is_not_oversize(self) -> None:
+        from aios.harness.image_resize import is_oversize_image
+
+        assert is_oversize_image(b"\x89PNG\r\n\x1a\ngarbage") is False

@@ -110,6 +110,31 @@ async def maybe_downsample(
     return await asyncio.to_thread(_blocking_downsample, data, cap_bytes, max_dim)
 
 
+def is_oversize_image(
+    data: bytes,
+    *,
+    cap_bytes: int = INLINE_SIZE_CAP_BYTES,
+    max_dim: int = INLINE_MAX_DIMENSION,
+) -> bool:
+    """Whether ``data`` exceeds either inline cap (dimension or byte size).
+
+    Header-only — parses ``.width``/``.height`` via ``Image.open`` without
+    decoding pixels, so it is cheap to call on every persisted part. Returns
+    ``False`` for bytes Pillow can't even open a header for: an undecodable
+    part is not a *dimension* wedge and is handled by the orthogonal mime /
+    provider-decode path; callers scoping work to the dimension cap must not
+    treat it as oversize.
+    """
+    if len(data) > cap_bytes:
+        return True
+    pil = _pillow()
+    try:
+        img = pil.open(io.BytesIO(data))
+        return bool(img.width > max_dim or img.height > max_dim)
+    except Exception:
+        return False
+
+
 def _blocking_downsample(
     data: bytes,
     cap_bytes: int,
