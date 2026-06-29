@@ -724,9 +724,7 @@ async def call_litellm(
     message, usage, cost, finish_reason = _unpack_litellm_response(
         response, source="litellm.acompletion"
     )
-    return LlmResponse.from_message(
-        message, usage=usage, cost=cost, finish_reason=finish_reason
-    )
+    return LlmResponse.from_message(message, usage=usage, cost=cost, finish_reason=finish_reason)
 
 
 async def stream_litellm(
@@ -872,9 +870,7 @@ async def stream_litellm(
     # path: only fires when the wire actually carried a ``content_filter``.
     if saw_content_filter and finish_reason != "content_filter":
         finish_reason = "content_filter"
-    return LlmResponse.from_message(
-        message, usage=usage, cost=cost, finish_reason=finish_reason
-    )
+    return LlmResponse.from_message(message, usage=usage, cost=cost, finish_reason=finish_reason)
 
 
 async def _notify_delta(
