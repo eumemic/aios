@@ -115,6 +115,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
             else None
         ),
         default_child_model=row.get("default_child_model"),
+        call_llm_cost_microusd=row.get("call_llm_cost_microusd", 0) or 0,
         last_event_seq=row["last_event_seq"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -747,6 +748,49 @@ async def run_children_usage(
         cache_read_input_tokens=row["cache_read_input_tokens"],
         cache_creation_input_tokens=row["cache_creation_input_tokens"],
         cost_microusd=row["cost_microusd"],
+    )
+
+
+async def get_run_call_llm_cost_microusd(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
+) -> int:
+    """Read the run's own ``call_llm`` inference-cost meter (#1633).
+
+    The run-level ledger of raw inference spend charged by ``call_llm()`` — the
+    spend that has no child-session row (``call_llm`` runs on the worker at the
+    run's own inference site, not inside an ``agent()`` child). The over-budget
+    gate adds this to ``run_children_usage`` before comparing against the run's
+    ``budget_usd`` ceiling. Account-scoped like every run read; a missing/foreign
+    run reads ``0`` (the column is ``NOT NULL DEFAULT 0``, so a present run never
+    reads NULL).
+    """
+    row = await conn.fetchrow(
+        "SELECT call_llm_cost_microusd FROM wf_runs WHERE id = $1 AND account_id = $2",
+        run_id,
+        account_id,
+    )
+    return int(row["call_llm_cost_microusd"]) if row is not None else 0
+
+
+async def add_run_call_llm_cost_microusd(
+    conn: asyncpg.Connection[Any], run_id: str, delta_microusd: int, *, account_id: str
+) -> None:
+    """Charge ``delta_microusd`` to the run's ``call_llm`` inference meter (#1633).
+
+    The increment is a single atomic ``col = col + $delta`` so concurrent charges
+    never lose an update; ``delta_microusd`` is clamped at ``0`` (an unreported
+    LiteLLM cost is ``None`` → charged as 0, never negative). Charge **once at the
+    inference site**, in the same transaction that journals the ``call_llm``
+    result, so a budget read on the next step sees the spend.
+    """
+    if delta_microusd <= 0:
+        return
+    await conn.execute(
+        "UPDATE wf_runs SET call_llm_cost_microusd = call_llm_cost_microusd + $2 "
+        "WHERE id = $1 AND account_id = $3",
+        run_id,
+        delta_microusd,
+        account_id,
     )
 
 
