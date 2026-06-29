@@ -35,7 +35,7 @@ via ``repark_stranded_model_dispatch``.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 from unittest.mock import AsyncMock
 
@@ -182,11 +182,12 @@ async def _inner_run_ids(pool: asyncpg.Pool[Any], session_id: str) -> list[str]:
 
 async def _run_caller(pool: asyncpg.Pool[Any], run_id: str) -> dict[str, Any]:
     async with pool.acquire() as conn:
-        return await conn.fetchval(
+        caller = await conn.fetchval(
             "SELECT caller FROM wf_runs WHERE id = $1 AND account_id = $2",
             run_id,
             _ACCOUNT,
         )
+    return cast("dict[str, Any]", caller)
 
 
 async def _account_spent(pool: asyncpg.Pool[Any]) -> int:
