@@ -273,6 +273,75 @@ def tool(name: str, input: Any) -> _Capability:
     return _Capability("tool", {"tool_name": name, "input": input})
 
 
+def call_llm(request: Any) -> _Capability:
+    """Run one raw inference turn and await its result — the workflow author's
+    *inference primitive*.
+
+    Unlike :func:`agent` (a full child session that *executes* tools and returns a
+    digested value), ``call_llm`` returns the **raw assistant turn**: its text, its
+    *unexecuted* ``tool_calls``, the standardized ``finish_reason``, normalized
+    ``usage``, and the per-request ``cost``. A subconscious uses it to route, judge,
+    or fact-check *around* inference — the script decides what (if anything) to do
+    with any requested tool calls; nothing is run on its behalf.
+
+    ``request`` is the inference payload — either a mapping or an object carrying
+    the :class:`aios.harness.completion.LlmRequest` fields:
+
+    * ``model`` — the model string to call. May be computed. A ``workflow:`` target
+      is **rejected at runtime** (``call_llm`` is leaf-only — it must not recurse
+      into a workflow binding). Omit it to use the run's default child model.
+    * ``messages`` — the chat-completions message list (required).
+    * ``tools`` — the tool schemas offered, or ``None``/omitted for a tool-free call.
+      Offered schemas only: the model may *request* a call, ``call_llm`` never runs it.
+    * ``params`` — provider-passthrough knobs (e.g. ``temperature``); an ``api_base``
+      here is clamped to the operator's trusted-endpoint allowlist (a redirect to an
+      untrusted endpoint is rejected).
+
+    The result is a plain dict the script branches on: ``{"content", "tool_calls",
+    "finish_reason", "usage", "cost", "message"}`` on success, or ``{"error": …}``
+    on a rejected/failed call (a model error resolves as a VALUE, it does not raise).
+
+    **Cost is metered against the run's ``budget_usd`` ceiling.** Each call's cost is
+    charged once, at the inference site, to the run-level inference meter the
+    ``budget()`` gate reads — so a budget-exhausted run refuses further ``call_llm``
+    (its result is the budget ``{"error": …}`` value). The inference runs on the
+    **worker** (the script subprocess is credential-free), exactly like ``tool()``.
+
+    **Crash semantics: at-least-once.** A worker crash mid-call re-drives the
+    inference on resume — a second, billable model call. Inference is read-only
+    (no external mutation), so a re-drive is safe beyond the duplicated spend.
+    """
+    spec = _llm_request_spec(request)
+    return _Capability("call_llm", spec)
+
+
+def _llm_request_spec(request: Any) -> dict[str, Any]:
+    """Project the author's ``call_llm`` request into the JSON spec the worker resolves.
+
+    Accepts a mapping (``{"model", "messages", "tools", "params", "session_id"}``)
+    or any object exposing those as attributes (e.g. an ``LlmRequest``-shaped value
+    the binding layer hands through). ``messages`` is required and must be a list;
+    everything else is optional. The shape is validated here — in the deterministic
+    script process — so a malformed request is a replay-identical author error.
+    """
+
+    def _get(name: str) -> Any:
+        if isinstance(request, dict):
+            return request.get(name)
+        return getattr(request, name, None)
+
+    messages = _get("messages")
+    if not isinstance(messages, list):
+        raise ValueError("call_llm() requires a 'messages' list")
+    return {
+        "model": _get("model"),
+        "messages": messages,
+        "tools": _get("tools"),
+        "params": _get("params"),
+        "session_id": _get("session_id"),
+    }
+
+
 async def _branch(thunk: Any) -> Any:
     """Run one parallel branch: call the thunk, await whatever it returns. Wrapping
     it in a coroutine lets the driver schedule a uniform set of branches and lets a
@@ -547,6 +616,7 @@ def author_namespace() -> dict[str, Any]:
         "agent": agent,
         "invoke_workflow": invoke_workflow,
         "tool": tool,
+        "call_llm": call_llm,
         "budget": budget,
         "parallel": parallel,
         "pipeline": pipeline,

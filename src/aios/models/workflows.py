@@ -200,6 +200,11 @@ class WfRun(BaseModel):
     output: Any = None  # arbitrary JSON: the script's return value
     budget_usd: float | None = None
     default_child_model: str | None = None
+    # The run's own ``call_llm`` inference spend (#1633), in micro-USD. Raw inference
+    # the run runs on the worker (``call_llm()``) has no child-session row, so it lives
+    # in this run-level meter; the ``budget_usd`` gate is the SUM of this and the
+    # child-session rollup (``usage.cost_microusd``). Charged once at the inference site.
+    call_llm_cost_microusd: int = 0
     last_event_seq: int
     created_at: datetime
     updated_at: datetime
@@ -259,6 +264,7 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
   - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.
   - `invoke_workflow(workflow_id, input, *, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.
   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
+  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED — the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed.
   - `gate()`: suspend until an external resume delivers a value.
   - `budget()`: read this run's shared child-spend budget, or None when unset.
   - `parallel(thunks)`: run zero-argument callables concurrently (for example,

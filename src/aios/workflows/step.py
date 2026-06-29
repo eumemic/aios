@@ -58,7 +58,7 @@ from aios.services.sessions import (
 )
 from aios.services.wake import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.tools.registry import tool_executes_class
-from aios.workflows import run_sandbox, run_tools
+from aios.workflows import run_llm, run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.child_run_id import child_run_id
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
@@ -137,10 +137,14 @@ def _usage_payload(usage: wf_queries.RunChildrenUsage) -> dict[str, Any]:
     }
 
 
-def _budget_view(run: WfRun, usage: wf_queries.RunChildrenUsage) -> dict[str, float] | None:
+def _budget_view(
+    run: WfRun, usage: wf_queries.RunChildrenUsage, call_llm_cost_microusd: int = 0
+) -> dict[str, float] | None:
     if run.budget_usd is None:
         return None
-    spent = usage.cost_microusd / 1_000_000
+    # The script-facing spend must match what the over-budget gate enforces: the
+    # child-session rollup PLUS the run's own call_llm inference meter (#1633).
+    spent = (usage.cost_microusd + call_llm_cost_microusd) / 1_000_000
     return {
         "total_usd": run.budget_usd,
         "spent_usd": spent,
@@ -470,6 +474,25 @@ async def _run_workflow_step_body(
                 if sig is None:
                     continue  # a live task is still running — stay suspended, it will signal
                 result_payload = {"result": sig.result, "is_error": False}
+            elif cap_payload.get("capability") == "call_llm":
+                # call_llm mirrors the tool park-and-harvest: its worker task writes a
+                # ``tool_result`` signal (and charges the run's inference meter in the same
+                # txn). Cold re-dispatch (no signal, no live task, no crashed-but-committed
+                # signal) re-launches the inference — at-least-once, a second billable call.
+                sig = signals.get(call_key)
+                if sig is None and not run_llm.has_inflight(run_id, call_key):
+                    sig = await wf_queries.read_run_signal(conn, run_id, call_key)
+                    if sig is None:
+                        run_llm.launch_call_llm_task(
+                            pool,
+                            run,
+                            call_key=call_key,
+                            spec=cap_payload.get("spec") or {},
+                        )
+                        continue
+                if sig is None:
+                    continue  # a live task is still running — stay suspended, it will signal
+                result_payload = {"result": sig.result, "is_error": False}
             else:  # gate: the resume value lives in the signal
                 sig = signals.get(call_key)
                 if sig is None:
@@ -520,6 +543,9 @@ async def _run_workflow_step_body(
     # Same shape + same post-commit launch discipline, for tool frontiers whose tool
     # runs in the run's sandbox (bash) rather than on the worker.
     sandboxes_to_launch: list[tuple[str, str, Any]] = []
+    # (call_key, spec) for call_llm frontiers opened this wake — the worker-side raw
+    # inference task, launched post-commit like the tool launchers above (#1633).
+    call_llm_to_launch: list[tuple[str, dict[str, Any]]] = []
     async with pool.acquire() as conn:
         # Journal this wake's progress annotations (log()/phase()) FIRST — before the
         # raised/returned/suspended dispatch — so a line emitted just before a crash or
@@ -641,13 +667,24 @@ async def _run_workflow_step_body(
             if run.budget_usd is not None
             else None
         )
+        # The run's OWN call_llm inference spend (#1633): raw inference runs on the worker
+        # at the run's own inference site, so it has no child-session row — it lives in the
+        # run-level meter. The budget gate is the SUM: child-session rollup + this meter.
+        call_llm_spent_microusd = (
+            await wf_queries.get_run_call_llm_cost_microusd(conn, run_id, account_id=account_id)
+            if run.budget_usd is not None
+            else 0
+        )
         budget_total_microusd = (
             round(run.budget_usd * 1_000_000) if run.budget_usd is not None else None
+        )
+        budget_spent_microusd = (
+            budget_usage.cost_microusd + call_llm_spent_microusd if budget_usage is not None else 0
         )
         over_budget = (
             budget_usage is not None
             and budget_total_microusd is not None
-            and budget_usage.cost_microusd >= budget_total_microusd
+            and budget_spent_microusd >= budget_total_microusd
         )
 
         # Suspended: open any *new* frontier capability, then park.
@@ -774,13 +811,22 @@ async def _run_workflow_step_body(
                     if run.budget_usd is not None
                     else wf_queries.RunChildrenUsage(0, 0, 0, 0, 0)
                 )
+                # Include the run's own call_llm inference meter (#1633) so the author's
+                # budget() view reports the same spend the over-budget gate enforces.
+                meter = (
+                    await wf_queries.get_run_call_llm_cost_microusd(
+                        conn, run_id, account_id=account_id
+                    )
+                    if run.budget_usd is not None
+                    else 0
+                )
                 await wf_queries.append_run_event(
                     conn,
                     account_id=account_id,
                     run_id=run_id,
                     type="call_result",
                     call_key=cap.call_key,
-                    payload={"result": _budget_view(run, usage), "is_error": False},
+                    payload={"result": _budget_view(run, usage, meter), "is_error": False},
                 )
                 disposition = _escalate(disposition, "owed_drive")
             elif cap.capability_id == "tool":
@@ -818,6 +864,53 @@ async def _run_workflow_step_body(
                     sandboxes_to_launch.append((cap.call_key, tool_name, spec.get("input")))
                 else:
                     tools_to_launch.append((cap.call_key, tool_name, spec.get("input")))
+            elif cap.capability_id == "call_llm":
+                # Raw inference (#1633). Charges the run's call_llm meter, which the
+                # budget gate reads — so an exhausted budget refuses it here. Unlike
+                # agent()'s budget refusal (a catchable AgentError), call_llm errors are
+                # VALUES: the refusal is journaled as the call's recoverable {"error": …}
+                # result, which the script branches on (matching call_llm's "errors
+                # resolve" contract). The call_started/result pair fully resolves it —
+                # no worker task launches, so no inference (and no spend) occurs.
+                llm_spec = cap.spec if isinstance(cap.spec, dict) else {}
+                if over_budget:
+                    assert run.budget_usd is not None
+                    await wf_queries.append_run_event(
+                        conn,
+                        account_id=account_id,
+                        run_id=run_id,
+                        type="call_started",
+                        call_key=cap.call_key,
+                        payload={"capability": "call_llm", "spec": llm_spec},
+                    )
+                    await wf_queries.append_run_event(
+                        conn,
+                        account_id=account_id,
+                        run_id=run_id,
+                        type="call_result",
+                        call_key=cap.call_key,
+                        payload={
+                            "result": {
+                                "error": (
+                                    f"run budget exhausted: spent "
+                                    f"${budget_spent_microusd / 1_000_000:.2f} of "
+                                    f"${run.budget_usd:.2f} — call_llm is refused"
+                                )
+                            },
+                            "is_error": False,
+                        },
+                    )
+                    disposition = _escalate(disposition, "owed_drive")
+                    continue
+                await wf_queries.append_run_event(
+                    conn,
+                    account_id=account_id,
+                    run_id=run_id,
+                    type="call_started",
+                    call_key=cap.call_key,
+                    payload={"capability": "call_llm", "spec": llm_spec},
+                )
+                call_llm_to_launch.append((cap.call_key, llm_spec))
             else:
                 # parallel/pipeline reach the step as their `agent` leaves (B2.G);
                 # any other capability id is unknown.
@@ -851,6 +944,8 @@ async def _run_workflow_step_body(
         run_sandbox.launch_sandbox_task(
             pool, run, call_key=launch_key, tool_name=launch_name, tool_input=launch_input
         )
+    for launch_key, launch_spec in call_llm_to_launch:
+        run_llm.launch_call_llm_task(pool, run, call_key=launch_key, spec=launch_spec)
     if disposition != "settled":
         await defer_run_wake(run_id)
 

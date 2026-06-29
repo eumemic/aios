@@ -46,6 +46,13 @@ class InlineScriptBody:
                 run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with
                 the target's; a failed or gone sub-run raises like a failed `agent`.
                   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
+                  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model`
+                (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional
+                `tools` (schemas OFFERED — the model may request a call, but call_llm never runs it), and optional `params`
+                (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or
+                `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd`
+                ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around
+                inference; use `agent(...)` when you want the tool calls executed.
                   - `gate()`: suspend until an external resume delivers a value.
                   - `budget()`: read this run's shared child-spend budget, or None when unset.
                   - `parallel(thunks)`: run zero-argument callables concurrently (for example,
