@@ -39,6 +39,16 @@ from aios.harness.completion import (
     estimate_cost_usd,
     stream_litellm,
 )
+from aios.harness.model_binding import (
+    BindingBoundaryError,
+    map_run_output_to_response,
+    parse_workflow_model,
+)
+from aios.harness.model_workflow import (
+    HarvestedInference,
+    launch_model_workflow_park,
+    take_pending_harvest,
+)
 from aios.harness.step_context import (
     compose_step_context,
     compute_step_prelude,
@@ -650,71 +660,152 @@ async def _run_session_step_body(
     # (header inlining, system-prompt augmentation, tool list shape).
     await _dump_context_if_enabled(session_id, agent.model, messages, tools)
 
-    # Emit span start so consumers can measure inference latency.
-    start_event = await sessions_service.append_event(
-        pool,
-        session_id,
-        "span",
-        {"event": "model_request_start"},
-        account_id=account_id,
-    )
-
-    # Call the model exactly once.  Stream deltas via pg_notify only when
-    # an SSE subscriber is attached (issue #81); otherwise run the faster
-    # non-streaming path.  OpenRouter-style proxies can be 2-3x slower on
-    # the streaming path when nobody is consuming the deltas.
-    subscribed = await has_subscriber(pool, session_id)
     llm_request = LlmRequest(
         messages=messages,
         tools=tools if tools else None,
         params=agent.litellm_extra or None,
         session_id=session_id,
     )
-    try:
-        if subscribed:
-            llm_response = await stream_litellm(
-                llm_request,
-                model=agent.model,
-                pool=pool,
-            )
-        else:
-            llm_response = await call_litellm(
-                llm_request,
-                model=agent.model,
-            )
-    except ModelCallDeadlineError as exc:
-        log.exception(
-            "step.model_call_deadline", session_id=session_id, chunks_seen=exc.chunks_seen
-        )
-        if exc.chunks_seen > 0:
-            await _handle_streaming_model_deadline(
+
+    # ── workflow: model binding — async two-step model-dispatch + harvest (#1634) ──
+    #
+    # When ``agent.model`` is ``workflow:<wf_id>[@version]`` the inference is produced
+    # by a workflow run, not a raw provider call. The whole step is under the 960s cap
+    # (config.py) and "stay responsive while parked" is a tool-task property — so we do
+    # NOT await the inner deliberation inline. Instead:
+    #
+    #   * HARVEST (step N+1): a prior step already parked owing an assistant message; the
+    #     bound run has resolved, so fold its structured return into ``assistant_msg`` and
+    #     run the existing append/charge/dispatch tail. NO re-charge — the inner inference
+    #     charged once at its own ``call_llm`` site; we record only a span. ``reacting_to``
+    #     was sealed at park (not recomputed here).
+    #   * PARK (step N): no harvest pending → open an awaited run, journal the park (sealing
+    #     ``reacting_to``), and end the step owing an assistant message. The run resolves
+    #     async; its completion wakes the session, which lands on the harvest branch above.
+    workflow_ref = parse_workflow_model(agent.model)
+    # ``no_recharge`` / ``reacting_to_override`` are the two ways the harvest path
+    # differs from the inline-model tail it shares: the inner inference already
+    # charged at its own ``call_llm`` site (record a span, do NOT re-charge), and
+    # the assistant turn carries the watermark sealed at park (NOT step_ctx's, which
+    # may have advanced as stimuli arrived during the inner deliberation).
+    no_recharge = False
+    reacting_to_override: int | None = None
+    harvested: HarvestedInference | None = None
+    if workflow_ref is not None:
+        harvested = await take_pending_harvest(pool, session_id, account_id=account_id)
+        if harvested is None:
+            await launch_model_workflow_park(
                 pool,
                 session_id,
-                start_event_id=start_event.id,
-                usage=exc.usage,
-                cost_usd=exc.cost_usd,
-                model=agent.model,
+                ref=workflow_ref,
+                request=llm_request,
+                reacting_to=step_ctx.reacting_to,
                 account_id=account_id,
-                provider_error=_provider_error_detail(exc),
+            )
+            # End the step owing an assistant message — a new step disposition. The run's
+            # async resolution wakes the session for the harvest; no inference ran here, so
+            # no model_request span, no charge, no assistant turn.
+            return _StepResult()
+
+    if harvested is not None:
+        # ── HARVEST: fold the resolved bound run into the shared dispatch tail ──
+        if harvested.outcome != "ok":
+            # The bound run errored / was cancelled — no assistant turn to dispatch.
+            # Latch errored so the session parks for recovery (a user message lifts it).
+            log.warning(
+                "step.model_workflow_errored",
+                session_id=session_id,
+                run_id=harvested.run_id,
+                outcome=harvested.outcome,
+                error=harvested.error,
+            )
+            await _latch_errored_turn(
+                pool,
+                session_id,
+                error_kind="model_workflow_run_errored",
+                stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                account_id=account_id,
             )
             return _StepResult()
-        await _append_model_request_error_span(
+        try:
+            llm_response = map_run_output_to_response(harvested.output)
+        except BindingBoundaryError as exc:
+            # The bound workflow returned a structurally invalid assistant shape — the
+            # binding boundary fails loud. Latch the turn errored (same shape as a model
+            # terminal error): the turn produced no usable inference.
+            log.warning(
+                "step.model_workflow_invalid_shape",
+                session_id=session_id,
+                run_id=harvested.run_id,
+                error=str(exc),
+            )
+            await _latch_errored_turn(
+                pool,
+                session_id,
+                error_kind="model_workflow_invalid_shape",
+                stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                account_id=account_id,
+            )
+            return _StepResult()
+        # Record the harvest as the step's model span (NO re-charge); seal the
+        # park-time watermark; fall through to the shared append/dispatch tail.
+        no_recharge = True
+        reacting_to_override = harvested.reacting_to
+        start_event = await sessions_service.append_event(
             pool,
             session_id,
-            start_event_id=start_event.id,
+            "span",
+            {
+                "event": "model_workflow_harvest_end",
+                "run_id": harvested.run_id,
+                "model": agent.model,
+                "is_error": False,
+            },
             account_id=account_id,
-            provider_error=_provider_error_detail(exc),
         )
-        return _StepResult(
-            retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+    else:
+        # ── Inline model call: stream deltas via pg_notify only when an SSE
+        # subscriber is attached (issue #81); otherwise run the faster
+        # non-streaming path.  OpenRouter-style proxies can be 2-3x slower on
+        # the streaming path when nobody is consuming the deltas.
+        #
+        # Emit span start so consumers can measure inference latency.
+        start_event = await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {"event": "model_request_start"},
+            account_id=account_id,
         )
-    except Exception as exc:
-        if _is_terminal_model_error(exc):
-            log.warning(
-                "step.model_terminal_error",
-                session_id=session_id,
-                error_class=type(exc).__name__,
+        subscribed = await has_subscriber(pool, session_id)
+        try:
+            if subscribed:
+                llm_response = await stream_litellm(
+                    llm_request,
+                    model=agent.model,
+                    pool=pool,
+                )
+            else:
+                llm_response = await call_litellm(
+                    llm_request,
+                    model=agent.model,
+                )
+        except ModelCallDeadlineError as exc:
+            log.exception(
+                "step.model_call_deadline", session_id=session_id, chunks_seen=exc.chunks_seen
             )
+            if exc.chunks_seen > 0:
+                await _handle_streaming_model_deadline(
+                    pool,
+                    session_id,
+                    start_event_id=start_event.id,
+                    usage=exc.usage,
+                    cost_usd=exc.cost_usd,
+                    model=agent.model,
+                    account_id=account_id,
+                    provider_error=_provider_error_detail(exc),
+                )
+                return _StepResult()
             await _append_model_request_error_span(
                 pool,
                 session_id,
@@ -722,25 +813,42 @@ async def _run_session_step_body(
                 account_id=account_id,
                 provider_error=_provider_error_detail(exc),
             )
-            await _latch_errored_turn(
+            return _StepResult(
+                retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+            )
+        except Exception as exc:
+            if _is_terminal_model_error(exc):
+                log.warning(
+                    "step.model_terminal_error",
+                    session_id=session_id,
+                    error_class=type(exc).__name__,
+                )
+                await _append_model_request_error_span(
+                    pool,
+                    session_id,
+                    start_event_id=start_event.id,
+                    account_id=account_id,
+                    provider_error=_provider_error_detail(exc),
+                )
+                await _latch_errored_turn(
+                    pool,
+                    session_id,
+                    error_kind="model_terminal_error",
+                    stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                    account_id=account_id,
+                )
+                return _StepResult()  # no retry_delay → no defer_wake → session parks errored
+            log.exception("step.litellm_failed", session_id=session_id)
+            await _append_model_request_error_span(
                 pool,
                 session_id,
-                error_kind="model_terminal_error",
-                stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                start_event_id=start_event.id,
                 account_id=account_id,
+                provider_error=_provider_error_detail(exc),
             )
-            return _StepResult()  # no retry_delay → no defer_wake → session parks errored
-        log.exception("step.litellm_failed", session_id=session_id)
-        await _append_model_request_error_span(
-            pool,
-            session_id,
-            start_event_id=start_event.id,
-            account_id=account_id,
-            provider_error=_provider_error_detail(exc),
-        )
-        return _StepResult(
-            retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
-        )
+            return _StepResult(
+                retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+            )
 
     # Project the named ``LlmResponse`` back to the locals the rest of the step
     # threads. ``assistant_msg`` is the opaque, normalized provider message dict
@@ -794,14 +902,24 @@ async def _run_session_step_body(
     # refusal still consumed tokens, so it charges too — after _handle_refusal
     # records its span and latches errored.
     async def _charge_usage() -> int:
+        # Harvest path: the inner inference already charged at its own ``call_llm``
+        # site inside the bound run, so re-charging here would double-bill. A
+        # zero-delta increment is a pure read of the running account total — it
+        # leaves spend untouched (so the warning-threshold check below sees delta 0)
+        # while keeping a single return path.
+        in_tok = 0 if no_recharge else usage.get("input_tokens", 0)
+        out_tok = 0 if no_recharge else usage.get("output_tokens", 0)
+        cache_r = 0 if no_recharge else usage.get("cache_read_input_tokens", 0)
+        cache_c = 0 if no_recharge else usage.get("cache_creation_input_tokens", 0)
+        charge = 0 if no_recharge else cost_microusd
         return await sessions_service.increment_usage(
             pool,
             session_id,
-            input_tokens=usage.get("input_tokens", 0),
-            output_tokens=usage.get("output_tokens", 0),
-            cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
-            cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
-            cost_microusd=cost_microusd,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_read_input_tokens=cache_r,
+            cache_creation_input_tokens=cache_c,
+            cost_microusd=charge,
             account_id=account_id,
         )
 
@@ -840,7 +958,12 @@ async def _run_session_step_body(
     # Record the seq of the latest user/tool event in the context this
     # response was based on; events after this seq are "new" on the next
     # wake. ``find_sessions_needing_inference`` uses it as the watermark.
-    assistant_msg["reacting_to"] = step_ctx.reacting_to
+    # The harvest path uses the watermark sealed at PARK (``reacting_to_override``),
+    # not step_ctx's — which may have advanced as stimuli arrived during the inner
+    # deliberation, and must not retroactively widen what this turn "reacted to".
+    assistant_msg["reacting_to"] = (
+        reacting_to_override if reacting_to_override is not None else step_ctx.reacting_to
+    )
 
     # Append assistant message to the session log (unfenced — procrastinate lock
     # provides mutual exclusion) and, in the SAME transaction, enforce request

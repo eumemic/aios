@@ -2141,3 +2141,58 @@ async def read_windowed_events(
         else None
     )
     return WindowedEvents(events=events, omission=omission)
+
+
+async def find_latest_model_workflow_park(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> dict[str, Any] | None:
+    """Return the ``data`` of the most recent ``model_workflow_park`` span, or ``None``.
+
+    The workflow-bound model dispatch (#1634) journals one park per inference it
+    defers; the latest one names the run the next step harvests. A park whose
+    assistant turn already folded in is superseded by that turn's ``reacting_to``
+    advance, so the harvest read pairs this park with its matching harvest event.
+    """
+    row = await conn.fetchrow(
+        "SELECT data FROM events "
+        "WHERE session_id = $1 AND account_id = $2 AND kind = 'span' "
+        "AND data->>'event' = 'model_workflow_park' "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        return None
+    data = row["data"]
+    return data if isinstance(data, dict) else None
+
+
+async def find_model_workflow_harvest(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    run_id: str,
+    account_id: str,
+) -> dict[str, Any] | None:
+    """Return the ``data`` of the ``model_workflow_harvest`` span for ``run_id``, or ``None``.
+
+    ``None`` while the bound run has not resolved (the step ends owing the message
+    again). Keyed on ``run_id`` so the dedup guard on the harvest write is exact.
+    """
+    row = await conn.fetchrow(
+        "SELECT data FROM events "
+        "WHERE session_id = $1 AND account_id = $2 AND kind = 'span' "
+        "AND data->>'event' = 'model_workflow_harvest' "
+        "AND data->>'run_id' = $3 "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+        account_id,
+        run_id,
+    )
+    if row is None:
+        return None
+    data = row["data"]
+    return data if isinstance(data, dict) else None
