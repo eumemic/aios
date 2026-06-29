@@ -255,7 +255,7 @@ class TestWorkflowModelBindingPrivilege:
         # rejects a workflow: model before _enforce_surface_attenuation hits the DB.
         with pytest.raises(ForbiddenError, match="operator-only"):
             await agents_service.create_agent(
-                None,  # type: ignore[arg-type]  # guard fires before the pool is touched
+                None,  # guard fires before the pool is touched
                 account_id="acc_x",
                 name="a",
                 model="workflow:wf_1",
@@ -271,7 +271,7 @@ class TestWorkflowModelBindingPrivilege:
     async def test_update_agent_self_authoring_workflow_model_forbidden(self) -> None:
         with pytest.raises(ForbiddenError, match="operator-only"):
             await agents_service.update_agent(
-                None,  # type: ignore[arg-type]
+                None,
                 "agt_1",
                 account_id="acc_x",
                 expected_version=1,
@@ -307,7 +307,7 @@ class TestWorkflowModelBindingPrivilege:
         # The guard must NOT raise; the AssertionError below proves we passed it.
         with pytest.raises(AssertionError, match="reached the insert"):
             await agents_service.create_agent(
-                _FakePool(),  # type: ignore[arg-type]
+                _FakePool(),
                 account_id="acc_x",
                 name="a",
                 model="test/dummy",
