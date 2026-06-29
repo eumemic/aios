@@ -33,6 +33,7 @@ from aios.config import get_settings
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
 from aios.harness.completion import (
+    LlmRequest,
     ModelCallDeadlineError,
     call_litellm,
     estimate_cost_usd,
@@ -663,23 +664,23 @@ async def _run_session_step_body(
     # non-streaming path.  OpenRouter-style proxies can be 2-3x slower on
     # the streaming path when nobody is consuming the deltas.
     subscribed = await has_subscriber(pool, session_id)
+    llm_request = LlmRequest(
+        messages=messages,
+        tools=tools if tools else None,
+        params=agent.litellm_extra or None,
+        session_id=session_id,
+    )
     try:
         if subscribed:
-            assistant_msg, usage, cost_usd, finish_reason = await stream_litellm(
+            llm_response = await stream_litellm(
+                llm_request,
                 model=agent.model,
-                messages=messages,
-                tools=tools if tools else None,
-                extra=agent.litellm_extra or None,
                 pool=pool,
-                session_id=session_id,
             )
         else:
-            assistant_msg, usage, cost_usd, finish_reason = await call_litellm(
+            llm_response = await call_litellm(
+                llm_request,
                 model=agent.model,
-                messages=messages,
-                tools=tools if tools else None,
-                extra=agent.litellm_extra or None,
-                session_id=session_id,
             )
     except ModelCallDeadlineError as exc:
         log.exception(
@@ -740,6 +741,15 @@ async def _run_session_step_body(
         return _StepResult(
             retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
         )
+
+    # Project the named ``LlmResponse`` back to the locals the rest of the step
+    # threads. ``assistant_msg`` is the opaque, normalized provider message dict
+    # (retained on the response) that the harness persists intact — content,
+    # tool_calls, thinking_blocks, and any provider extensions all survive.
+    assistant_msg = llm_response.message
+    usage = llm_response.usage
+    cost_usd = llm_response.cost
+    finish_reason = llm_response.finish_reason
 
     # ``local_tokens`` costs the full payload (messages + tools) so it
     # matches what the provider counts.  The error branch above stays

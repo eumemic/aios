@@ -131,10 +131,12 @@ async def test_stream_litellm_raises_timeout_on_stalled_stream(
 
     with pytest.raises(TimeoutError):
         await completion.stream_litellm(
+            completion.LlmRequest(
+                messages=[{"role": "user", "content": "ping"}],
+                session_id="sess_test",
+            ),
             model="anthropic/claude-sonnet-4-6",
-            messages=[{"role": "user", "content": "ping"}],
             pool=_StubPool(),
-            session_id="sess_test",
         )
 
     assert resp.aclose_count == 1
@@ -170,10 +172,12 @@ async def test_stream_litellm_raises_deadline_with_salvaged_usage(
 
     with pytest.raises(completion.ModelCallDeadlineError) as excinfo:
         await completion.stream_litellm(
+            completion.LlmRequest(
+                messages=[{"role": "user", "content": "ping"}],
+                session_id="sess_test",
+            ),
             model="anthropic/claude-sonnet-4-6",
-            messages=[{"role": "user", "content": "ping"}],
             pool=_StubPool(),
-            session_id="sess_test",
         )
 
     assert excinfo.value.chunks_seen == 1
@@ -201,8 +205,10 @@ async def test_call_litellm_deadline_raises_typed_error(
 
     with pytest.raises(completion.ModelCallDeadlineError) as excinfo:
         await completion.call_litellm(
+            completion.LlmRequest(
+                messages=[{"role": "user", "content": "ping"}],
+            ),
             model="anthropic/claude-sonnet-4-6",
-            messages=[{"role": "user", "content": "ping"}],
         )
 
     assert excinfo.value.chunks_seen == 0
@@ -232,12 +238,15 @@ async def test_stream_litellm_long_ttft_succeeds_when_inter_chunk_is_fast(
         },
     )
 
-    message, _, _, _ = await completion.stream_litellm(
+    response = await completion.stream_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "ping"}],
+            session_id="sess_test",
+        ),
         model="anthropic/claude-sonnet-4-6",
-        messages=[{"role": "user", "content": "ping"}],
         pool=_StubPool(),
-        session_id="sess_test",
     )
+    message = response.message
 
     assert message["content"] == "hello"
 
@@ -272,10 +281,12 @@ async def test_stream_litellm_passes_timeout_kwargs(
     )
 
     await completion.stream_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "ping"}],
+            session_id="sess_test",
+        ),
         model="anthropic/claude-sonnet-4-6",
-        messages=[{"role": "user", "content": "ping"}],
         pool=_StubPool(),
-        session_id="sess_test",
     )
 
     assert captured["timeout"] == completion._REQUEST_TIMEOUT_S
@@ -316,9 +327,11 @@ async def test_extra_overrides_default_timeout(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "ping"}],
+            params={"timeout": 1234.0},
+        ),
         model="anthropic/claude-sonnet-4-6",
-        messages=[{"role": "user", "content": "ping"}],
-        extra={"timeout": 1234.0},
     )
 
     assert captured["timeout"] == 1234.0
@@ -363,12 +376,15 @@ async def test_stream_litellm_tolerates_empty_choices_chunk(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     monkeypatch.setattr(litellm, "stream_chunk_builder", fake_builder)
 
-    message, _, _, _ = await completion.stream_litellm(
+    response = await completion.stream_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "ping"}],
+            session_id="sess_test",
+        ),
         model="openrouter/anthropic/claude-sonnet-4-6",
-        messages=[{"role": "user", "content": "ping"}],
         pool=_StubPool(),
-        session_id="sess_test",
     )
+    message = response.message
 
     assert message["content"] == "hello"
     # The usage-summary chunk must reach stream_chunk_builder so usage data
@@ -414,10 +430,12 @@ async def test_stream_litellm_raises_typed_error_on_zero_chunks(
 
     with pytest.raises(Exception) as excinfo:
         await completion.stream_litellm(
+            completion.LlmRequest(
+                messages=[{"role": "user", "content": "ping"}],
+                session_id="sess_test",
+            ),
             model="anthropic/claude-sonnet-4-6",
-            messages=[{"role": "user", "content": "ping"}],
             pool=_StubPool(),
-            session_id="sess_test",
         )
 
     # Pre-fix: AttributeError("'NoneType' object has no attribute 'get'").
@@ -451,10 +469,12 @@ async def test_stream_litellm_closes_stream_on_mid_stream_exception(
 
     with pytest.raises(RuntimeError, match="adapter exploded mid-stream"):
         await completion.stream_litellm(
+            completion.LlmRequest(
+                messages=[{"role": "user", "content": "ping"}],
+                session_id="sess_test",
+            ),
             model="anthropic/claude-sonnet-4-6",
-            messages=[{"role": "user", "content": "ping"}],
             pool=_StubPool(),
-            session_id="sess_test",
         )
 
     assert resp.aclose_count == 1
@@ -482,12 +502,15 @@ async def test_stream_litellm_closes_stream_on_normal_drain(
         },
     )
 
-    message, _, _, _ = await completion.stream_litellm(
+    response = await completion.stream_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "ping"}],
+            session_id="sess_test",
+        ),
         model="anthropic/claude-sonnet-4-6",
-        messages=[{"role": "user", "content": "ping"}],
         pool=_StubPool(),
-        session_id="sess_test",
     )
+    message = response.message
 
     assert message["content"] == "hello"
     assert resp.aclose_count == 1

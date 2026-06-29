@@ -5,6 +5,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.harness.completion import LlmResponse
 from aios.harness.loop import (
     _crossed_spend_warning_threshold,
     _limit_to_microusd,
@@ -311,11 +312,11 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
         patch(
             "aios.harness.loop.call_litellm",
             AsyncMock(
-                return_value=(
+                return_value=LlmResponse.from_message(
                     {"role": "assistant", "content": "hi"},
-                    {"input_tokens": 10, "output_tokens": 5},
-                    0.001,
-                    "stop",
+                    usage={"input_tokens": 10, "output_tokens": 5},
+                    cost=0.001,
+                    finish_reason="stop",
                 )
             ),
         ),

@@ -19,8 +19,25 @@ import pytest
 from procrastinate import App
 from procrastinate.testing import InMemoryConnector
 
+from aios.harness.completion import LlmResponse
 from aios.harness.window import WindowedEvents
 from aios.services.sessions import AssistantAppendResult
+
+
+def _llm_response(
+    message: dict[str, object],
+    *,
+    usage: dict[str, int] | None = None,
+    cost: float | None = 0.0,
+    finish_reason: str | None = None,
+) -> LlmResponse:
+    """Build an ``LlmResponse`` the way ``call_litellm``/``stream_litellm`` do."""
+    return LlmResponse.from_message(
+        dict(message),
+        usage=usage or {},
+        cost=cost,
+        finish_reason=finish_reason,
+    )
 
 
 class TestE2EConftestMockSignatures:
@@ -374,11 +391,11 @@ class TestStepStartEndSpans:
             ),
             patch(
                 "aios.harness.loop.call_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
+                AsyncMock(return_value=_llm_response({"role": "assistant", "content": "ok"})),
             ),
             patch(
                 "aios.harness.loop.stream_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
+                AsyncMock(return_value=_llm_response({"role": "assistant", "content": "ok"})),
             ),
             patch(
                 "aios.harness.loop.sessions_service.increment_usage",
@@ -480,7 +497,7 @@ class TestStepStartEndSpans:
             patch("aios.harness.loop.sessions_service.reclaim_session_if_idle", reclaim),
             patch(
                 "aios.harness.loop.stream_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
+                AsyncMock(return_value=_llm_response({"role": "assistant", "content": "ok"})),
             ),
             patch("aios.harness.loop.sessions_service.increment_usage", AsyncMock()),
             patch("aios.db.sse_lock.has_subscriber", AsyncMock(return_value=False)),
@@ -584,7 +601,7 @@ class TestStepStartEndSpans:
             patch("aios.harness.loop.defer_wake", defer_wake_mock),
             patch(
                 "aios.harness.loop.stream_litellm",
-                AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
+                AsyncMock(return_value=_llm_response({"role": "assistant", "content": "ok"})),
             ),
             patch("aios.harness.loop.sessions_service.increment_usage", AsyncMock()),
             patch("aios.db.sse_lock.has_subscriber", AsyncMock(return_value=False)),
@@ -764,7 +781,7 @@ async def _harness_with_guard(
         ),
         patch(
             "aios.harness.loop.stream_litellm",
-            AsyncMock(return_value=({"role": "assistant", "content": "ok"}, {}, 0.0, None)),
+            AsyncMock(return_value=_llm_response({"role": "assistant", "content": "ok"})),
         ),
         patch("aios.harness.loop.sessions_service.increment_usage", AsyncMock()),
         patch("aios.db.sse_lock.has_subscriber", AsyncMock(return_value=False)),
