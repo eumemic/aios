@@ -34,6 +34,7 @@ an ``LlmResponse`` at harvest time, where a malformed shape fails loud.
 from __future__ import annotations
 
 import asyncio
+import enum
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,6 +62,30 @@ HARVEST_EVENT = "model_workflow_harvest"
 # Per-park await poll budget — bounded so an unbounded park can't pin a connection
 # forever between polls (mirrors ``invoke_session._AWAIT_POLL_SECONDS``).
 _AWAIT_POLL_SECONDS = 300.0
+
+
+class ParkState(enum.Enum):
+    """Three-way disposition of a session's parked workflow-model inference.
+
+    Distinguishing :data:`PARK_PENDING` from "no park" is the load-bearing fix for
+    the multi-dispatch / multi-billing defect (#1634 review): a parked step writes
+    a ``span`` event, which does NOT advance ``last_stimulus_seq`` /
+    ``last_reacted_seq`` — so the unreacted-stimulus inequality that caused the park
+    STILL holds afterwards and the periodic sweep re-wakes the session every tick
+    while the inner run deliberates. If the harvest read collapses "park open &
+    unresolved" into the same ``None`` as "no park", the caller re-parks on every
+    re-wake → N parallel paid inner runs per turn. Surfacing :data:`PARK_PENDING`
+    lets the caller end the step WITHOUT launching a second run, so **exactly one
+    inner awaited run is launched per workflow-model turn** regardless of how many
+    sweep ticks elapse during deliberation.
+    """
+
+    #: No open park — the caller should launch a fresh awaited run (the park branch).
+    NO_PARK = "no_park"
+    #: A park is open but its run has not resolved — the caller ends the step owing
+    #: the assistant message again, re-parking on NOTHING (no new run). The harvest
+    #: task's ``defer_wake`` (or a sweep re-wake) lands the resolved harvest later.
+    PARK_PENDING = "park_pending"
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,13 +283,23 @@ async def _harvest_exists(
 
 async def take_pending_harvest(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
-) -> HarvestedInference | None:
-    """Return the resolved harvest for the latest open park, or ``None``.
+) -> HarvestedInference | ParkState:
+    """Disposition the latest open park: harvest, still-pending, or none.
 
-    ``None`` in two cases: the session owes no parked inference, or it owes one
-    whose run has not resolved yet (no harvest event — the step ends owing the
-    message again, re-waking via the sweep). When a harvest is present it is
-    returned with the park's sealed ``reacting_to``.
+    Returns one of three values (the three-way distinction is the multi-dispatch
+    fix — see :class:`ParkState`):
+
+    * :data:`ParkState.NO_PARK` — the session owes no parked inference whose run is
+      still unharvested. The caller launches a fresh awaited run (the park branch).
+    * :data:`ParkState.PARK_PENDING` — a park is open but its run has NOT resolved
+      yet (no harvest event). The caller ends the step owing the assistant message
+      again WITHOUT launching a second run; a later wake (the harvest task's
+      ``defer_wake``, or a sweep re-wake) re-enters and harvests.
+    * :class:`HarvestedInference` — the open park's run has resolved; folded into the
+      dispatch tail with the park's sealed ``reacting_to``.
+
+    A malformed park (no usable run id) is treated as :data:`ParkState.NO_PARK` — it
+    cannot be harvested and must not wedge the turn; the caller re-parks.
     """
     from aios.db import queries
 
@@ -276,15 +311,17 @@ async def take_pending_harvest(
             conn, session_id, account_id=account_id
         )
         if park is None:
-            return None
+            return ParkState.NO_PARK
         run_id = park.get("run_id")
         if not isinstance(run_id, str):
-            return None
+            return ParkState.NO_PARK
         harvest = await queries.find_model_workflow_harvest(
             conn, session_id, run_id=run_id, account_id=account_id
         )
     if harvest is None:
-        return None
+        # Park open, run unresolved: do NOT re-park (no new run) — end the step owing
+        # the message; the harvest's ``defer_wake`` (or a sweep re-wake) re-enters.
+        return ParkState.PARK_PENDING
     return HarvestedInference(
         outcome=str(harvest.get("outcome")),
         output=harvest.get("output"),

@@ -46,6 +46,7 @@ from aios.harness.model_binding import (
 )
 from aios.harness.model_workflow import (
     HarvestedInference,
+    ParkState,
     launch_model_workflow_park,
     take_pending_harvest,
 )
@@ -692,8 +693,18 @@ async def _run_session_step_body(
     reacting_to_override: int | None = None
     harvested: HarvestedInference | None = None
     if workflow_ref is not None:
-        harvested = await take_pending_harvest(pool, session_id, account_id=account_id)
-        if harvested is None:
+        disposition = await take_pending_harvest(pool, session_id, account_id=account_id)
+        if disposition is ParkState.PARK_PENDING:
+            # A park is OPEN and its run has not resolved yet. The park wrote a
+            # ``span`` event, which does not advance ``last_stimulus_seq`` /
+            # ``last_reacted_seq`` — so the unreacted-stimulus inequality that caused
+            # the park still holds and the sweep keeps re-waking this session every
+            # tick while the inner run deliberates. End the step WITHOUT launching a
+            # second run (re-parking on nothing): exactly ONE inner awaited run runs
+            # per turn regardless of how many sweep ticks elapse. The harvest task's
+            # ``defer_wake`` (or a later sweep re-wake) re-enters and harvests.
+            return _StepResult()
+        if disposition is ParkState.NO_PARK:
             await launch_model_workflow_park(
                 pool,
                 session_id,
@@ -706,6 +717,7 @@ async def _run_session_step_body(
             # async resolution wakes the session for the harvest; no inference ran here, so
             # no model_request span, no charge, no assistant turn.
             return _StepResult()
+        harvested = disposition
 
     if harvested is not None:
         # ── HARVEST: fold the resolved bound run into the shared dispatch tail ──

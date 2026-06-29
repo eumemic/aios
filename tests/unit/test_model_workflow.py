@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from aios.harness import model_workflow
-from aios.harness.model_workflow import HarvestedInference, take_pending_harvest
+from aios.harness.model_workflow import HarvestedInference, ParkState, take_pending_harvest
 
 
 class _FakeConn:
@@ -54,15 +54,18 @@ def patched_queries(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_no_park_returns_none(patched_queries: dict[str, Any]) -> None:
-    assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is None
+async def test_no_park_returns_no_park_state(patched_queries: dict[str, Any]) -> None:
+    # No open park → the caller launches a fresh awaited run (the park branch).
+    assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is ParkState.NO_PARK
 
 
 @pytest.mark.asyncio
-async def test_park_without_harvest_returns_none(patched_queries: dict[str, Any]) -> None:
-    # Parked, run not resolved yet → the step ends owing the message again.
+async def test_park_without_harvest_returns_park_pending(patched_queries: dict[str, Any]) -> None:
+    # Parked, run not resolved yet → the step ends owing the message again WITHOUT
+    # re-parking (no new run). Distinguishing this from "no park" is the multi-billing
+    # fix: collapsing both into the same value re-dispatched a run on every sweep tick.
     patched_queries["park"] = {"run_id": "run_1", "reacting_to": 7}
-    assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is None
+    assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is ParkState.PARK_PENDING
 
 
 @pytest.mark.asyncio
@@ -88,7 +91,8 @@ async def test_resolved_harvest_projects_with_sealed_watermark(
 
 @pytest.mark.asyncio
 async def test_harvest_for_other_run_does_not_pair(patched_queries: dict[str, Any]) -> None:
-    # A harvest exists but for a stale run id (e.g. a superseded park) → no pairing.
+    # A harvest exists but for a stale run id (e.g. a superseded park) → no pairing;
+    # the open park is still unresolved, so the caller must NOT re-park.
     patched_queries["park"] = {"run_id": "run_2", "reacting_to": 3}
     patched_queries["harvest"] = {
         "run_id": "run_1",
@@ -96,7 +100,7 @@ async def test_harvest_for_other_run_does_not_pair(patched_queries: dict[str, An
         "output": {"content": "x"},
         "error": None,
     }
-    assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is None
+    assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is ParkState.PARK_PENDING
 
 
 @pytest.mark.asyncio
@@ -109,17 +113,18 @@ async def test_errored_outcome_is_carried_through(patched_queries: dict[str, Any
         "error": {"kind": "boom", "message": "inner run failed"},
     }
     result = await take_pending_harvest(_FakePool(), "s1", account_id="a1")
-    assert result is not None
+    assert isinstance(result, HarvestedInference)
     assert result.outcome == "errored"
     assert result.output is None
     assert result.error == {"kind": "boom", "message": "inner run failed"}
 
 
 @pytest.mark.asyncio
-async def test_park_with_non_string_run_id_returns_none(patched_queries: dict[str, Any]) -> None:
-    # A malformed park (no usable run id) does not crash the harvest read.
+async def test_park_with_non_string_run_id_returns_no_park(patched_queries: dict[str, Any]) -> None:
+    # A malformed park (no usable run id) does not crash the harvest read; it cannot
+    # be harvested and must not wedge the turn, so it reads as NO_PARK (caller re-parks).
     patched_queries["park"] = {"run_id": None, "reacting_to": 1}
-    assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is None
+    assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is ParkState.NO_PARK
 
 
 def test_event_kind_constants() -> None:
