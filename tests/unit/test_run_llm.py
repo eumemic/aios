@@ -21,9 +21,7 @@ from aios.workflows.wf_script_host import call_llm
 
 
 def _run(*, default_child_model: str | None = "gpt-4o-mini") -> Any:
-    return SimpleNamespace(
-        id="wfr_1", account_id="acc_t", default_child_model=default_child_model
-    )
+    return SimpleNamespace(id="wfr_1", account_id="acc_t", default_child_model=default_child_model)
 
 
 def _spec(**over: Any) -> dict[str, Any]:
@@ -71,9 +69,7 @@ def test_call_llm_shim_rejects_missing_messages() -> None:
 
 async def test_returns_raw_assistant_turn() -> None:
     resp = _response()
-    with patch(
-        "aios.workflows.run_llm.call_litellm", AsyncMock(return_value=resp)
-    ) as m:
+    with patch("aios.workflows.run_llm.call_litellm", AsyncMock(return_value=resp)) as m:
         result, cost = await invoke_call_llm(run=_run(), spec=_spec())
     # The RAW turn: content + (unexecuted) tool_calls + finish_reason + usage + cost.
     assert result == {
@@ -110,9 +106,7 @@ async def test_unexecuted_tool_calls_passthrough() -> None:
 
 async def test_workflow_model_target_rejected() -> None:
     with patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as m:
-        result, cost = await invoke_call_llm(
-            run=_run(), spec=_spec(model="workflow:wf_x")
-        )
+        result, cost = await invoke_call_llm(run=_run(), spec=_spec(model="workflow:wf_x"))
     assert "error" in result and "workflow:" in result["error"]
     assert cost == 0
     m.assert_not_awaited()  # the inference never ran
@@ -129,12 +123,8 @@ async def test_no_model_anywhere_is_recoverable_error() -> None:
 
 
 async def test_model_defaults_to_run_default_child_model() -> None:
-    with patch(
-        "aios.workflows.run_llm.call_litellm", AsyncMock(return_value=_response())
-    ) as m:
-        await invoke_call_llm(
-            run=_run(default_child_model="claude-x"), spec=_spec(model=None)
-        )
+    with patch("aios.workflows.run_llm.call_litellm", AsyncMock(return_value=_response())) as m:
+        await invoke_call_llm(run=_run(default_child_model="claude-x"), spec=_spec(model=None))
     assert m.await_args.kwargs["model"] == "claude-x"
 
 
@@ -159,9 +149,7 @@ async def test_trusted_api_base_admitted() -> None:
     settings = Settings(trusted_inference_api_bases=["https://ok.example"])
     with (
         patch("aios.services.attenuation.get_settings", return_value=settings),
-        patch(
-            "aios.workflows.run_llm.call_litellm", AsyncMock(return_value=_response())
-        ) as m,
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock(return_value=_response())) as m,
     ):
         result, _ = await invoke_call_llm(
             run=_run(), spec=_spec(params={"api_base": "https://ok.example"})

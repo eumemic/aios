@@ -132,9 +132,7 @@ async def _run_call_llm_task(
         _INFLIGHT.pop((run.id, call_key), None)
 
 
-async def invoke_call_llm(
-    *, run: WfRun, spec: dict[str, Any]
-) -> tuple[dict[str, Any], int]:
+async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str, Any], int]:
     """Resolve one ``call_llm`` call. Returns ``(result, cost_microusd)``.
 
     ``result`` is the script-facing dict — the raw assistant turn on success, or a
@@ -196,9 +194,7 @@ async def invoke_call_llm(
 
     tools = spec.get("tools") if isinstance(spec.get("tools"), list) else None
     session_id = spec.get("session_id") if isinstance(spec.get("session_id"), str) else None
-    request = LlmRequest(
-        messages=messages, tools=tools, params=params, session_id=session_id
-    )
+    request = LlmRequest(messages=messages, tools=tools, params=params, session_id=session_id)
 
     try:
         response = await call_litellm(request, model=model)

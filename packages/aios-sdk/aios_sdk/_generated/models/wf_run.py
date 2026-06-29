@@ -69,6 +69,7 @@ class WfRun:
             output (Any | Unset):
             budget_usd (float | None | Unset):
             default_child_model (None | str | Unset):
+            call_llm_cost_microusd (int | Unset):  Default: 0.
             archived_at (datetime.datetime | None | Unset):
             usage (None | Unset | WfRunUsage):
     """
@@ -98,6 +99,7 @@ class WfRun:
     output: Any | Unset = UNSET
     budget_usd: float | None | Unset = UNSET
     default_child_model: None | str | Unset = UNSET
+    call_llm_cost_microusd: int | Unset = 0
     archived_at: datetime.datetime | None | Unset = UNSET
     usage: None | Unset | WfRunUsage = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -214,6 +216,8 @@ class WfRun:
         else:
             default_child_model = self.default_child_model
 
+        call_llm_cost_microusd = self.call_llm_cost_microusd
+
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
             archived_at = UNSET
@@ -276,6 +280,8 @@ class WfRun:
             field_dict["budget_usd"] = budget_usd
         if default_child_model is not UNSET:
             field_dict["default_child_model"] = default_child_model
+        if call_llm_cost_microusd is not UNSET:
+            field_dict["call_llm_cost_microusd"] = call_llm_cost_microusd
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
         if usage is not UNSET:
@@ -455,6 +461,8 @@ class WfRun:
             d.pop("default_child_model", UNSET)
         )
 
+        call_llm_cost_microusd = d.pop("call_llm_cost_microusd", UNSET)
+
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -515,6 +523,7 @@ class WfRun:
             output=output,
             budget_usd=budget_usd,
             default_child_model=default_child_model,
+            call_llm_cost_microusd=call_llm_cost_microusd,
             archived_at=archived_at,
             usage=usage,
         )

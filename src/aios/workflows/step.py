@@ -679,9 +679,7 @@ async def _run_workflow_step_body(
             round(run.budget_usd * 1_000_000) if run.budget_usd is not None else None
         )
         budget_spent_microusd = (
-            budget_usage.cost_microusd + call_llm_spent_microusd
-            if budget_usage is not None
-            else 0
+            budget_usage.cost_microusd + call_llm_spent_microusd if budget_usage is not None else 0
         )
         over_budget = (
             budget_usage is not None
