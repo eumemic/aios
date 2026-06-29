@@ -17,12 +17,16 @@ wakes, never block one step).
   ``model_workflow_harvest`` event with the run's structured output + wakes the
   session. The step ends **owing an assistant message** — it does NOT await.
 
-* **Harvest (step N+1).** :func:`take_pending_harvest` reads the latest park and
-  its matching harvest (if the run has resolved). When present it returns a
-  :class:`HarvestedInference` the step folds into ``assistant_msg`` and runs the
-  existing append/charge/dispatch tail — **no re-charge** (the inner inference
-  charged once at its own ``call_llm`` site; the harvest records only a span) and
-  the ``reacting_to`` it sealed at park (never recomputed at harvest).
+* **Harvest (step N+1).** :func:`take_pending_harvest` reads the latest
+  *un-consumed* park and its matching harvest (if the run has resolved). When
+  present it returns a :class:`HarvestedInference` the step folds into
+  ``assistant_msg`` and runs the existing append/charge/dispatch tail — **no
+  re-charge** (the inner inference charged once at its own ``call_llm`` site; the
+  harvest records only a span) and the ``reacting_to`` it sealed at park (never
+  recomputed at harvest). Folding the harvest writes a ``model_workflow_harvest_end``
+  span for the run id, which marks the park **consumed**: the next read excludes it
+  (:func:`aios.db.queries.events.find_latest_model_workflow_park`), so a later
+  stimulus opens a fresh park rather than re-folding the stale harvest.
 
 The park/harvest pair keys off the run id, so a session can only owe one parked
 inference at a time (a step that parks ends the turn; the next inference is the
@@ -304,9 +308,12 @@ async def take_pending_harvest(
     from aios.db import queries
 
     async with pool.acquire() as conn:
-        # The latest park; a park whose harvest already folded into an assistant
-        # turn is superseded by that turn (the assistant message's ``reacting_to``
-        # advances ``last_reacted_seq`` so the park no longer counts as open work).
+        # The latest park that has NOT yet been consumed. A park is consumed once
+        # its harvest is folded (any fold path writes a ``model_workflow_harvest_end``
+        # span for its run id); ``find_latest_model_workflow_park`` excludes parks
+        # with that marker, so once a turn folds its harvest this returns ``None``
+        # and a fresh stimulus re-enters the NO_PARK / launch branch instead of
+        # re-folding the same (now stale) harvest forever.
         park = await queries.find_latest_model_workflow_park(
             conn, session_id, account_id=account_id
         )

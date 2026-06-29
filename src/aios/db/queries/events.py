@@ -2149,18 +2149,38 @@ async def find_latest_model_workflow_park(
     *,
     account_id: str,
 ) -> dict[str, Any] | None:
-    """Return the ``data`` of the most recent ``model_workflow_park`` span, or ``None``.
+    """Return the ``data`` of the most recent *un-consumed* ``model_workflow_park`` span, or ``None``.
 
     The workflow-bound model dispatch (#1634) journals one park per inference it
-    defers; the latest one names the run the next step harvests. A park whose
-    assistant turn already folded in is superseded by that turn's ``reacting_to``
-    advance, so the harvest read pairs this park with its matching harvest event.
+    defers; the latest one names the run the next step harvests. The harvest read
+    (:func:`aios.harness.model_workflow.take_pending_harvest`) pairs this park with
+    its matching harvest event.
+
+    A park is **consumed** once its harvest has been folded into a turn — the fold
+    step appends exactly one ``model_workflow_harvest_end`` span carrying the
+    park's ``run_id`` (on every fold path: a folded assistant turn AND the
+    errored / invalid-shape latches). This query EXCLUDES any park whose ``run_id``
+    already has that consumed-marker span, so a session that has finished a parked
+    turn reads ``None`` and the caller launches a *fresh* park for the next
+    stimulus. Without this filter the unconditional ``ORDER BY seq DESC LIMIT 1``
+    would keep returning the most recent (already-harvested) park, and a later
+    stimulus would re-fold the stale inner answer forever — the park-time
+    ``reacting_to`` never reaches the new stimulus seq, so the session stays a
+    sweep candidate and re-wakes onto the same stale park (a permanent wedge).
+    The exclusion is what makes the consumed park un-returnable; it is the
+    enforcing mechanism, not a narrative assumption about ``reacting_to``.
     """
     row = await conn.fetchrow(
-        "SELECT data FROM events "
-        "WHERE session_id = $1 AND account_id = $2 AND kind = 'span' "
-        "AND data->>'event' = 'model_workflow_park' "
-        "ORDER BY seq DESC LIMIT 1",
+        "SELECT p.data FROM events p "
+        "WHERE p.session_id = $1 AND p.account_id = $2 AND p.kind = 'span' "
+        "AND p.data->>'event' = 'model_workflow_park' "
+        "AND NOT EXISTS ("
+        "    SELECT 1 FROM events h "
+        "    WHERE h.session_id = $1 AND h.account_id = $2 AND h.kind = 'span' "
+        "    AND h.data->>'event' = 'model_workflow_harvest_end' "
+        "    AND h.data->>'run_id' = p.data->>'run_id'"
+        ") "
+        "ORDER BY p.seq DESC LIMIT 1",
         session_id,
         account_id,
     )

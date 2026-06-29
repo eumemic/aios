@@ -69,6 +69,7 @@ from aios.models.agents import (
 from aios.models.events import (
     ERRORED_LIFECYCLE_STATUS,
     ERRORED_LIFECYCLE_STOP_REASON,
+    Event,
 )
 from aios.services import accounts as accounts_service
 from aios.services import agents as agents_service
@@ -721,6 +722,15 @@ async def _run_session_step_body(
 
     if harvested is not None:
         # ── HARVEST: fold the resolved bound run into the shared dispatch tail ──
+        # EVERY fold path below writes exactly one ``model_workflow_harvest_end``
+        # span carrying this ``run_id``. That span is the durable *park-consumed*
+        # marker: ``find_latest_model_workflow_park`` EXCLUDES any park whose run
+        # already has it (see its docstring), so once a parked turn is folded the
+        # park is un-returnable and the next stimulus launches a FRESH park instead
+        # of re-folding this (stale) harvest forever. Writing it on the errored /
+        # invalid-shape paths too — not just the ok path — is what stops an errored
+        # workflow-model turn from re-erroring on the same stale park each time a
+        # user message tries to recover the session.
         if harvested.outcome != "ok":
             # The bound run errored / was cancelled — no assistant turn to dispatch.
             # Latch errored so the session parks for recovery (a user message lifts it).
@@ -736,6 +746,17 @@ async def _run_session_step_body(
                 session_id,
                 error_kind="model_workflow_run_errored",
                 stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                account_id=account_id,
+            )
+            # Consume the park AFTER the errored latch lands: the session is now
+            # ``errored`` (sweep-skipped) so nothing re-reads the park before this
+            # marker is written; a later recovering user message reads NO_PARK.
+            await _append_harvest_consumed_marker(
+                pool,
+                session_id,
+                run_id=harvested.run_id,
+                model=agent.model,
+                is_error=True,
                 account_id=account_id,
             )
             return _StepResult()
@@ -758,21 +779,27 @@ async def _run_session_step_body(
                 stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
                 account_id=account_id,
             )
+            await _append_harvest_consumed_marker(
+                pool,
+                session_id,
+                run_id=harvested.run_id,
+                model=agent.model,
+                is_error=True,
+                account_id=account_id,
+            )
             return _StepResult()
         # Record the harvest as the step's model span (NO re-charge); seal the
-        # park-time watermark; fall through to the shared append/dispatch tail.
+        # park-time watermark; fall through to the shared append/dispatch tail. This
+        # span is ALSO the park-consumed marker for the ok path (see the block note
+        # above) — it is the same event the errored paths write.
         no_recharge = True
         reacting_to_override = harvested.reacting_to
-        start_event = await sessions_service.append_event(
+        start_event = await _append_harvest_consumed_marker(
             pool,
             session_id,
-            "span",
-            {
-                "event": "model_workflow_harvest_end",
-                "run_id": harvested.run_id,
-                "model": agent.model,
-                "is_error": False,
-            },
+            run_id=harvested.run_id,
+            model=agent.model,
+            is_error=False,
             account_id=account_id,
         )
     else:
@@ -1377,6 +1404,39 @@ async def _append_model_request_error_span(
         session_id,
         "span",
         payload,
+        account_id=account_id,
+    )
+
+
+async def _append_harvest_consumed_marker(
+    pool: Any,
+    session_id: str,
+    *,
+    run_id: str,
+    model: str,
+    is_error: bool,
+    account_id: str,
+) -> Event:
+    """Append the ``model_workflow_harvest_end`` span that marks a park *consumed* (#1634).
+
+    Written on EVERY fold path (ok / errored / invalid-shape), exactly once per
+    ``run_id`` per turn — the fold step runs once and ends owing no further park.
+    :func:`aios.db.queries.events.find_latest_model_workflow_park` excludes any park
+    whose run already has this span, so a folded park is un-returnable and the next
+    stimulus opens a fresh park instead of re-folding the stale harvest forever. On
+    the ok path the returned span doubles as the step's model-request start span
+    (its id pairs the downstream ``model_request_end``).
+    """
+    return await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "model_workflow_harvest_end",
+            "run_id": run_id,
+            "model": model,
+            "is_error": is_error,
+        },
         account_id=account_id,
     )
 

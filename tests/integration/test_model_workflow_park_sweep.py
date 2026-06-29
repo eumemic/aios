@@ -208,6 +208,29 @@ async def _park_events(pool: asyncpg.Pool[Any], session_id: str) -> int:
         )
 
 
+async def _harvest_end_events(pool: asyncpg.Pool[Any], session_id: str) -> int:
+    """Count the ``model_workflow_harvest_end`` park-consumed markers (one per fold)."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval(  # type: ignore[no-any-return]
+            "SELECT count(*) FROM events WHERE session_id = $1 AND kind = 'span' "
+            "AND data->>'event' = 'model_workflow_harvest_end'",
+            session_id,
+        )
+
+
+async def _session_seqs(pool: asyncpg.Pool[Any], session_id: str) -> tuple[int, int, int]:
+    """``(last_event_seq, last_stimulus_seq, last_reacted_seq)`` — the sweep-gate scalars."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT last_event_seq, last_stimulus_seq, last_reacted_seq "
+            "FROM sessions WHERE id = $1 AND account_id = $2",
+            session_id,
+            _ACCOUNT,
+        )
+    assert row is not None
+    return row["last_event_seq"], row["last_stimulus_seq"], row["last_reacted_seq"]
+
+
 async def _assistant_messages(pool: asyncpg.Pool[Any], session_id: str) -> list[dict[str, Any]]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -361,3 +384,106 @@ async def test_deliberation_spanning_multiple_wakes_does_not_trip_cap(
 
     # Still exactly one inner run across the whole multi-wake deliberation.
     assert await _inner_run_ids(pool, session_id) == [inner_run_id]
+
+
+async def test_second_turn_launches_fresh_park_not_stale_refold(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A SECOND user turn opens a FRESH park — it does NOT re-fold the first turn's
+    already-harvested park, and the session does not wedge.
+
+    The second multi-billing-class defect (#1634 follow-up): nothing marked a park
+    *consumed*, so ``find_latest_model_workflow_park``'s ``ORDER BY seq DESC LIMIT 1``
+    kept returning the FIRST turn's (already-harvested) park on every later wake. A
+    new user stimulus at a higher seq would then re-fold the STALE inner answer whose
+    ``reacting_to`` was sealed at the first park — below the new stimulus seq — so
+    ``last_reacted_seq`` never reached the new stimulus, the session stayed a sweep
+    candidate, and it re-woke onto the same stale park forever (a permanent wedge:
+    the old answer replayed, the new message never reacted to, no new park launched).
+
+    The fix: folding a harvest writes a ``model_workflow_harvest_end`` marker for the
+    run id, and ``find_latest_model_workflow_park`` excludes any park with that
+    marker → the consumed park is un-returnable → the second turn reads NO_PARK and
+    launches a fresh awaited run.
+
+    Drives the REAL path against testcontainer Postgres: park → resolve → harvest
+    (turn 1), THEN a new user message → assert a second park exists, the stale answer
+    is not replayed, and ``last_reacted_seq`` advances to the new stimulus seq.
+    """
+    pool = mwf_runtime
+    session_id, _ = await _make_bound_session(pool)
+
+    # ── TURN 1: park → resolve → harvest (fold the inner answer into one turn). ──
+    await run_session_step(session_id)
+    [first_run_id] = await _inner_run_ids(pool, session_id)
+    await _resolve_inner_run_and_harvest(pool, session_id, first_run_id)
+    await run_session_step(session_id, cause="model_workflow_harvest")
+
+    assistants_after_t1 = await _assistant_messages(pool, session_id)
+    assert len(assistants_after_t1) == 1, "turn 1 folds the harvest into exactly one turn"
+    assert assistants_after_t1[0]["content"] == "inner answer"
+    assert await _park_events(pool, session_id) == 1
+    assert await _harvest_end_events(pool, session_id) == 1, (
+        "the fold must write exactly one park-consumed marker"
+    )
+    # After turn 1 the session has reacted to its stimulus and is NOT a sweep
+    # candidate — the parked turn closed cleanly.
+    _, stim_after_t1, reacted_after_t1 = await _session_seqs(pool, session_id)
+    assert reacted_after_t1 >= stim_after_t1, "turn 1 must leave the session fully reacted"
+    needing_after_t1 = await find_sessions_needing_inference(
+        pool, runtime.require_inflight_tool_registry()
+    )
+    assert session_id not in needing_after_t1, "a cleanly-folded turn is not a sweep candidate"
+
+    # ── A NEW user message at a higher seq — the second stimulus. ──
+    await sessions_service.append_user_message(
+        pool, session_id, "and now this", account_id=_ACCOUNT
+    )
+    _, new_stimulus_seq, reacted_before_t2 = await _session_seqs(pool, session_id)
+    assert new_stimulus_seq > reacted_before_t2, (
+        "the new user message is an unreacted stimulus (the sweep precondition)"
+    )
+
+    # ── TURN 2 step: the FIX makes this read NO_PARK and launch a FRESH park. ──
+    # Pre-fix: ``find_latest_model_workflow_park`` returns the consumed turn-1 park,
+    # the step re-folds the stale harvest → a second "inner answer" assistant turn
+    # carrying the stale park's ``reacting_to`` (< new_stimulus_seq) → no new park,
+    # ``last_reacted_seq`` never reaches ``new_stimulus_seq`` → permanent wedge.
+    await run_session_step(session_id)
+
+    # A genuinely new park was opened (count 1 → 2) by a fresh awaited run.
+    assert await _park_events(pool, session_id) == 2, (
+        "the second turn must launch a FRESH park, not re-fold the consumed one"
+    )
+    run_ids = await _inner_run_ids(pool, session_id)
+    assert len(run_ids) == 2 and first_run_id in run_ids, (
+        "exactly one new inner run launched for turn 2 (plus turn 1's)"
+    )
+    # The stale answer was NOT replayed: parking ends the step owing a message, so
+    # there is STILL only the one turn-1 assistant message (the fresh run is unresolved).
+    assert await _assistant_messages(pool, session_id) == assistants_after_t1, (
+        "turn 2 must NOT replay the stale inner answer (no re-fold)"
+    )
+    # No second consumed-marker yet — nothing was folded this turn.
+    assert await _harvest_end_events(pool, session_id) == 1
+
+    # ── Resolve + harvest the SECOND park → it folds into a distinct second turn. ──
+    second_run_id = next(r for r in run_ids if r != first_run_id)
+    await _resolve_inner_run_and_harvest(pool, session_id, second_run_id)
+    await run_session_step(session_id, cause="model_workflow_harvest")
+
+    assistants_after_t2 = await _assistant_messages(pool, session_id)
+    assert len(assistants_after_t2) == 2, "turn 2's harvest folds into a SECOND assistant turn"
+    # The session is no longer wedged: ``last_reacted_seq`` has advanced to (at least)
+    # the new stimulus — the turn-2 assistant message reacted to it, which the stale
+    # re-fold (pre-fix) could never do because it carried the turn-1 park's watermark.
+    _, _, reacted_after_t2 = await _session_seqs(pool, session_id)
+    assert reacted_after_t2 >= new_stimulus_seq, (
+        "the session reacted to the new stimulus — no wedge (pre-fix this never reaches it)"
+    )
+    assert await _harvest_end_events(pool, session_id) == 2
+    # And the session is genuinely settled — not a sweep candidate after turn 2.
+    needing_after_t2 = await find_sessions_needing_inference(
+        pool, runtime.require_inflight_tool_registry()
+    )
+    assert session_id not in needing_after_t2, "turn 2 settled cleanly — no re-wake wedge"
