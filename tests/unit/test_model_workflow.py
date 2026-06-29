@@ -10,6 +10,8 @@ the focused queries to pin the pairing + supersession logic without a database.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from aios.harness import model_workflow
@@ -30,14 +32,14 @@ class _FakePool:
 
 
 @pytest.fixture
-def patched_queries(monkeypatch: pytest.MonkeyPatch):
+def patched_queries(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stub the two focused queries; tests set ``state['park']`` / ``state['harvest']``."""
-    state: dict[str, object] = {"park": None, "harvest": None}
+    state: dict[str, Any] = {"park": None, "harvest": None}
 
-    async def _find_park(conn, session_id, *, account_id):
+    async def _find_park(conn: object, session_id: str, *, account_id: str) -> Any:
         return state["park"]
 
-    async def _find_harvest(conn, session_id, *, run_id, account_id):
+    async def _find_harvest(conn: object, session_id: str, *, run_id: str, account_id: str) -> Any:
         harvest = state["harvest"]
         if harvest is None:
             return None
@@ -52,19 +54,21 @@ def patched_queries(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_no_park_returns_none(patched_queries) -> None:
+async def test_no_park_returns_none(patched_queries: dict[str, Any]) -> None:
     assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is None
 
 
 @pytest.mark.asyncio
-async def test_park_without_harvest_returns_none(patched_queries) -> None:
+async def test_park_without_harvest_returns_none(patched_queries: dict[str, Any]) -> None:
     # Parked, run not resolved yet → the step ends owing the message again.
     patched_queries["park"] = {"run_id": "run_1", "reacting_to": 7}
     assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is None
 
 
 @pytest.mark.asyncio
-async def test_resolved_harvest_projects_with_sealed_watermark(patched_queries) -> None:
+async def test_resolved_harvest_projects_with_sealed_watermark(
+    patched_queries: dict[str, Any],
+) -> None:
     patched_queries["park"] = {"run_id": "run_1", "reacting_to": 7}
     patched_queries["harvest"] = {
         "run_id": "run_1",
@@ -83,7 +87,7 @@ async def test_resolved_harvest_projects_with_sealed_watermark(patched_queries) 
 
 
 @pytest.mark.asyncio
-async def test_harvest_for_other_run_does_not_pair(patched_queries) -> None:
+async def test_harvest_for_other_run_does_not_pair(patched_queries: dict[str, Any]) -> None:
     # A harvest exists but for a stale run id (e.g. a superseded park) → no pairing.
     patched_queries["park"] = {"run_id": "run_2", "reacting_to": 3}
     patched_queries["harvest"] = {
@@ -96,7 +100,7 @@ async def test_harvest_for_other_run_does_not_pair(patched_queries) -> None:
 
 
 @pytest.mark.asyncio
-async def test_errored_outcome_is_carried_through(patched_queries) -> None:
+async def test_errored_outcome_is_carried_through(patched_queries: dict[str, Any]) -> None:
     patched_queries["park"] = {"run_id": "run_1", "reacting_to": 0}
     patched_queries["harvest"] = {
         "run_id": "run_1",
@@ -112,7 +116,7 @@ async def test_errored_outcome_is_carried_through(patched_queries) -> None:
 
 
 @pytest.mark.asyncio
-async def test_park_with_non_string_run_id_returns_none(patched_queries) -> None:
+async def test_park_with_non_string_run_id_returns_none(patched_queries: dict[str, Any]) -> None:
     # A malformed park (no usable run id) does not crash the harvest read.
     patched_queries["park"] = {"run_id": None, "reacting_to": 1}
     assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is None
