@@ -123,15 +123,12 @@ def parse_workflow_model(model: str) -> WorkflowModelRef | None:
             version = int(version_str)
         except ValueError as exc:
             raise BindingBoundaryError(
-                f"workflow model binding {model!r} has a non-integer @version pin "
-                f"({version_str!r})"
+                f"workflow model binding {model!r} has a non-integer @version pin ({version_str!r})"
             ) from exc
     else:
         workflow_id = body
     if not workflow_id:
-        raise BindingBoundaryError(
-            f"workflow model binding {model!r} names no workflow id"
-        )
+        raise BindingBoundaryError(f"workflow model binding {model!r} names no workflow id")
     return WorkflowModelRef(workflow_id=workflow_id, version=version)
 
 
@@ -140,15 +137,11 @@ def _coerce_tool_calls(raw: Any) -> list[dict[str, Any]]:
     if raw is None:
         return []
     if not isinstance(raw, list) or not all(isinstance(tc, dict) for tc in raw):
-        raise BindingBoundaryError(
-            "bound workflow return 'tool_calls' must be a list of objects"
-        )
+        raise BindingBoundaryError("bound workflow return 'tool_calls' must be a list of objects")
     return raw
 
 
-def map_finish_reason(
-    inner: str | None, *, has_content: bool, has_tool_calls: bool
-) -> str:
+def map_finish_reason(inner: str | None, *, has_content: bool, has_tool_calls: bool) -> str:
     """Map an inner ``finish_reason`` onto the outer standardized vocabulary.
 
     See the module docstring for the full mapping. ``has_content`` /
@@ -191,9 +184,7 @@ def map_run_output_to_response(output: Any) -> LlmResponse:
     elif isinstance(content_raw, str):
         content = content_raw
     else:
-        raise BindingBoundaryError(
-            "bound workflow return 'content' must be a string or null"
-        )
+        raise BindingBoundaryError("bound workflow return 'content' must be a string or null")
 
     tool_calls = _coerce_tool_calls(output.get("tool_calls"))
 
@@ -217,9 +208,7 @@ def map_run_output_to_response(output: Any) -> LlmResponse:
     elif isinstance(message_raw, dict):
         message = dict(message_raw)
     else:
-        raise BindingBoundaryError(
-            "bound workflow return 'message' must be an object or null"
-        )
+        raise BindingBoundaryError("bound workflow return 'message' must be an object or null")
 
     usage_raw = output.get("usage")
     usage: dict[str, int] = usage_raw if isinstance(usage_raw, dict) else {}

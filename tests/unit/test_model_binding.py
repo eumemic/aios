@@ -25,7 +25,6 @@ from aios.harness.model_binding import (
     parse_workflow_model,
 )
 
-
 # ─── parse_workflow_model ────────────────────────────────────────────────────
 
 
@@ -65,36 +64,22 @@ def test_parse_non_integer_version_fails_loud() -> None:
 
 @pytest.mark.parametrize("inner", ["content_filter", "refusal"])
 def test_inner_refusal_maps_to_content_filter(inner: str) -> None:
-    assert (
-        map_finish_reason(inner, has_content=True, has_tool_calls=False)
-        == "content_filter"
-    )
+    assert map_finish_reason(inner, has_content=True, has_tool_calls=False) == "content_filter"
 
 
 def test_empty_result_maps_to_content_filter() -> None:
     # No content and no tool_calls — an empty inner deliberation is a non-answer.
-    assert (
-        map_finish_reason("stop", has_content=False, has_tool_calls=False)
-        == "content_filter"
-    )
-    assert (
-        map_finish_reason(None, has_content=False, has_tool_calls=False)
-        == "content_filter"
-    )
+    assert map_finish_reason("stop", has_content=False, has_tool_calls=False) == "content_filter"
+    assert map_finish_reason(None, has_content=False, has_tool_calls=False) == "content_filter"
 
 
 def test_length_passes_through() -> None:
-    assert (
-        map_finish_reason("length", has_content=True, has_tool_calls=False)
-        == "length"
-    )
+    assert map_finish_reason("length", has_content=True, has_tool_calls=False) == "length"
 
 
 def test_default_terminal_derives_from_presence() -> None:
     assert map_finish_reason("stop", has_content=True, has_tool_calls=False) == "stop"
-    assert (
-        map_finish_reason(None, has_content=False, has_tool_calls=True) == "tool_calls"
-    )
+    assert map_finish_reason(None, has_content=False, has_tool_calls=True) == "tool_calls"
     # An unknown inner reason normalizes to the presence-derived terminal.
     assert map_finish_reason("weird", has_content=True, has_tool_calls=True) == "tool_calls"
 
