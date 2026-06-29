@@ -134,14 +134,16 @@ class TestStreamStickyContentFilter:
         monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
         monkeypatch.setattr(litellm, "stream_chunk_builder", _clobbered_builder("stop"))
 
-        _msg, _usage, _cost, finish_reason = await completion.stream_litellm(
+        response = await completion.stream_litellm(
+            completion.LlmRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                session_id="sess_refusal",
+            ),
             model="anthropic/claude-fable-5",
-            messages=[{"role": "user", "content": "hi"}],
             pool=_StubPool(),
-            session_id="sess_refusal",
         )
         # Without the sticky-capture this would be "stop" (the clobbered value).
-        assert finish_reason == "content_filter"
+        assert response.finish_reason == "content_filter"
 
     @pytest.mark.asyncio
     async def test_no_spurious_override_on_normal_stream(
@@ -160,10 +162,12 @@ class TestStreamStickyContentFilter:
         monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
         monkeypatch.setattr(litellm, "stream_chunk_builder", _clobbered_builder("stop"))
 
-        _msg, _usage, _cost, finish_reason = await completion.stream_litellm(
+        response = await completion.stream_litellm(
+            completion.LlmRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                session_id="sess_ok",
+            ),
             model="anthropic/claude-fable-5",
-            messages=[{"role": "user", "content": "hi"}],
             pool=_StubPool(),
-            session_id="sess_ok",
         )
-        assert finish_reason == "stop"
+        assert response.finish_reason == "stop"

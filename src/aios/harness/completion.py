@@ -1,13 +1,15 @@
 """Wrapper around :func:`litellm.acompletion`.
 
-Provides two variants:
+Provides two variants, both consuming a named :class:`LlmRequest` and
+returning a named :class:`LlmResponse` (the internal, payload-shaped types —
+not OpenAI wire format — shared with the future ``call_llm()`` builtin):
 
-* :func:`call_litellm` — non-streaming, returns ``(message, usage, cost)``.
+* :func:`call_litellm` — non-streaming.
 * :func:`stream_litellm` — streaming, delivers per-token deltas via
-  ``pg_notify`` and returns ``(message, usage, cost)``.
+  ``pg_notify``.
 
-``cost`` is the LiteLLM-computed USD cost for the request, or ``None``
-when the provider/model didn't report one.
+``LlmResponse.cost`` is the LiteLLM-computed USD cost for the request, or
+``None`` when the provider/model didn't report one.
 
 Model API keys are resolved by LiteLLM from standard environment variables
 (``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, etc.) based on the model string
@@ -83,6 +85,87 @@ class ModelCallDeadlineError(Exception):
 
 if TYPE_CHECKING:
     import asyncpg
+
+
+@dataclass(frozen=True, slots=True)
+class LlmRequest:
+    """A named, payload-shaped inference request (not OpenAI wire format).
+
+    The internal shape shared by the session model-call path and the future
+    ``call_llm()`` builtin / ``workflow:`` model binding (the
+    Workflows-as-Models epic). Deliberately *not* OpenAI wire format: no
+    HTTP, no headers — just the inference payload as named fields.
+
+    * ``messages`` — the chat-completions message list to send.
+    * ``tools`` — the tool schemas offered, or ``None`` for a tool-free call.
+    * ``params`` — provider-passthrough knobs; carries the agent's
+      ``litellm_extra`` (e.g. ``api_base``, ``thinking``, per-call timeouts).
+      Round-trips ``litellm_extra`` verbatim.
+    * ``session_id`` — the cache/owner index ("session-aware, not
+      context-free"): forwarded as the provider prompt-cache key so
+      successive turns of the same session share a cache bucket.
+    """
+
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None = None
+    params: dict[str, Any] | None = None
+    session_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LlmResponse:
+    """A named, payload-shaped inference response (not OpenAI wire format).
+
+    The named counterpart to the legacy positional
+    ``(message, usage, cost, finish_reason)`` tuple. ``content`` and
+    ``tool_calls`` are the projected, payload-shaped fields the subconscious
+    work consumes; ``message`` is retained as the opaque, normalized
+    provider message dict (carrying ``role``, ``thinking_blocks``, and any
+    provider-specific extensions) so the existing session path can persist it
+    intact with no behavior change.
+
+    * ``content`` — assistant text (normalized to ``""`` rather than ``None``).
+    * ``tool_calls`` — the requested tool calls (``[]`` when none).
+    * ``finish_reason`` — litellm's standardized stop reason for the choice
+      (``"stop"``, ``"tool_calls"``, ``"length"``, ``"content_filter"`` for a
+      safety refusal, …), or ``None`` when the provider omits it.
+    * ``usage`` — usage normalized to our canonical field names.
+    * ``cost`` — LiteLLM's per-request USD figure, or ``None`` when the
+      provider doesn't report it.
+    * ``message`` — the full normalized provider message dict (opaque).
+    """
+
+    content: str
+    tool_calls: list[dict[str, Any]]
+    finish_reason: str | None
+    usage: dict[str, int]
+    cost: float | None
+    message: dict[str, Any]
+
+    @classmethod
+    def from_message(
+        cls,
+        message: dict[str, Any],
+        *,
+        usage: dict[str, int],
+        cost: float | None,
+        finish_reason: str | None,
+    ) -> LlmResponse:
+        """Build from a normalized message dict + the unpacked usage/cost/finish.
+
+        Projects ``content``/``tool_calls`` out of the (already
+        ``_normalize_message``-cleaned) message while retaining the full dict
+        as ``message``. ``content`` is the message's text (``""`` when the
+        turn is tool-calls-only); ``tool_calls`` is ``[]`` when absent.
+        """
+        return cls(
+            content=message.get("content") or "",
+            tool_calls=message.get("tool_calls") or [],
+            finish_reason=finish_reason,
+            usage=usage,
+            cost=cost,
+            message=message,
+        )
 
 
 def _is_persistable_thinking_block(block: Any) -> bool:
@@ -594,37 +677,38 @@ def _unpack_litellm_response(
 
 
 async def call_litellm(
+    request: LlmRequest,
     *,
     model: str,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None = None,
-    api_base: str | None = None,
-    extra: dict[str, Any] | None = None,
-    session_id: str | None = None,
-) -> tuple[dict[str, Any], dict[str, int], float | None, str | None]:
-    """Call ``litellm.acompletion`` and return ``(message, usage, cost, finish_reason)``.
+) -> LlmResponse:
+    """Call ``litellm.acompletion`` and return an :class:`LlmResponse`.
 
-    Returns the message exactly as litellm produced it, including any
-    provider-specific extensions like ``reasoning_content`` or
-    ``thinking_blocks``. The harness stores the message dict opaquely.
-    Usage is normalized to our canonical field names. Cost is LiteLLM's
-    per-request USD figure, or ``None`` when the provider doesn't report it.
-    ``finish_reason`` is litellm's standardized stop reason for the choice
-    (notably ``"content_filter"`` for a safety refusal — see
-    ``_unpack_litellm_response``).
+    Consumes a named :class:`LlmRequest` (``messages``/``tools``/``params``/
+    ``session_id``) — the shared shape between the session model-call path and
+    the future ``call_llm()`` builtin — and ``model`` (the model string, which
+    is a binding concern, not part of the payload).
 
-    ``session_id`` (when provided on the openai provider path) is forwarded
-    as OpenAI's ``prompt_cache_key`` so successive turns of the same
+    The returned :class:`LlmResponse` retains the message exactly as litellm
+    produced it (including provider-specific extensions like
+    ``reasoning_content`` or ``thinking_blocks``) under ``message``, projects
+    ``content``/``tool_calls`` as named fields, and carries normalized
+    ``usage``, LiteLLM's per-request ``cost`` (``None`` when unreported), and
+    the standardized ``finish_reason`` (notably ``"content_filter"`` for a
+    safety refusal — see ``_unpack_litellm_response``).
+
+    ``request.session_id`` (when provided on the openai provider path) is
+    forwarded as OpenAI's ``prompt_cache_key`` so successive turns of the same
     session share a cache bucket. See ``_apply_provider_cache_hints``.
+    ``request.params`` carries the agent's ``litellm_extra`` verbatim.
     """
-    inject_cache_breakpoints(messages, tools, model)
+    inject_cache_breakpoints(request.messages, request.tools, model)
     kwargs = _build_litellm_kwargs(
         model=model,
-        messages=messages,
-        tools=tools,
-        api_base=api_base,
-        extra=extra,
-        session_id=session_id,
+        messages=request.messages,
+        tools=request.tools,
+        api_base=None,
+        extra=request.params,
+        session_id=request.session_id,
         stream=False,
     )
     deadline_s = get_settings().model_call_deadline_s
@@ -637,38 +721,49 @@ async def call_litellm(
             cost_usd=None,
             chunks_seen=0,
         ) from exc
-    return _unpack_litellm_response(response, source="litellm.acompletion")
+    message, usage, cost, finish_reason = _unpack_litellm_response(
+        response, source="litellm.acompletion"
+    )
+    return LlmResponse.from_message(
+        message, usage=usage, cost=cost, finish_reason=finish_reason
+    )
 
 
 async def stream_litellm(
+    request: LlmRequest,
     *,
     model: str,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None = None,
-    api_base: str | None = None,
-    extra: dict[str, Any] | None = None,
     pool: asyncpg.Pool[Any],
-    session_id: str,
-) -> tuple[dict[str, Any], dict[str, int], float | None, str | None]:
-    """Call ``litellm.acompletion`` with streaming, returning ``(message, usage, cost, finish_reason)``.
+) -> LlmResponse:
+    """Call ``litellm.acompletion`` with streaming, returning an :class:`LlmResponse`.
+
+    Consumes a named :class:`LlmRequest` and ``model`` (see
+    :func:`call_litellm`). ``request.session_id`` is required on this path —
+    it names the ``pg_notify`` channel for per-token deltas as well as the
+    provider cache bucket.
 
     Each content delta fires a transient ``pg_notify`` on the session's
     event channel. SSE clients receive these as ``event: delta`` — no DB
     row is created. After the stream exhausts, the complete message is
-    assembled via ``litellm.stream_chunk_builder`` and returned for
-    storage as a normal event. ``stream_chunk_builder`` reassembles the
-    ``finish_reason`` with an unconditional last-wins loop, so a trailing
-    chunk can clobber a ``content_filter`` refusal; the loop below captures
-    the refusal off the wire and re-asserts it so the signal survives the
-    streaming path too.
+    assembled via ``litellm.stream_chunk_builder`` and returned (under
+    ``LlmResponse.message``) for storage as a normal event.
+    ``stream_chunk_builder`` reassembles the ``finish_reason`` with an
+    unconditional last-wins loop, so a trailing chunk can clobber a
+    ``content_filter`` refusal; the loop below captures the refusal off the
+    wire and re-asserts it so the signal survives the streaming path too.
     """
+    messages = request.messages
+    tools = request.tools
+    session_id = request.session_id
+    if session_id is None:
+        raise ValueError("stream_litellm requires request.session_id (it names the delta channel)")
     inject_cache_breakpoints(messages, tools, model)
     kwargs = _build_litellm_kwargs(
         model=model,
         messages=messages,
         tools=tools,
-        api_base=api_base,
-        extra=extra,
+        api_base=None,
+        extra=request.params,
         session_id=session_id,
         stream=True,
     )
@@ -777,7 +872,9 @@ async def stream_litellm(
     # path: only fires when the wire actually carried a ``content_filter``.
     if saw_content_filter and finish_reason != "content_filter":
         finish_reason = "content_filter"
-    return message, usage, cost, finish_reason
+    return LlmResponse.from_message(
+        message, usage=usage, cost=cost, finish_reason=finish_reason
+    )
 
 
 async def _notify_delta(

@@ -66,9 +66,11 @@ async def test_call_litellm_openai_path_sends_prompt_cache_key(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="sess_abc123",
+        ),
         model="openai/gpt-5.5",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_abc123",
     )
 
     extra_body = captured.get("extra_body")
@@ -111,10 +113,12 @@ async def test_stream_litellm_openai_path_sends_prompt_cache_key(
     from tests.unit.test_completion_timeouts import _StubPool
 
     await completion.stream_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="sess_xyz789",
+        ),
         model="openai/gpt-5.5",
-        messages=[{"role": "user", "content": "hi"}],
         pool=_StubPool(),
-        session_id="sess_xyz789",
     )
 
     extra_body = captured.get("extra_body")
@@ -147,9 +151,11 @@ async def test_call_litellm_openrouter_openai_route_sends_prompt_cache_key(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="sess_openrouter",
+        ),
         model="openrouter/openai/gpt-4o",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_openrouter",
     )
 
     extra_body = captured.get("extra_body")
@@ -177,9 +183,11 @@ async def test_call_litellm_azure_path_sends_prompt_cache_key(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="sess_azure",
+        ),
         model="azure/gpt-4o",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_azure",
     )
 
     extra_body = captured.get("extra_body")
@@ -208,9 +216,11 @@ async def test_call_litellm_openrouter_non_openai_route_omits_prompt_cache_key(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="sess_openrouter_claude",
+        ),
         model="openrouter/anthropic/claude-3-5-sonnet",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_openrouter_claude",
     )
 
     assert "prompt_cache_key" not in captured
@@ -240,9 +250,11 @@ async def test_call_litellm_anthropic_path_omits_prompt_cache_key(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="sess_anthropic",
+        ),
         model="anthropic/claude-opus-4-6",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_anthropic",
     )
 
     assert "prompt_cache_key" not in captured
@@ -268,8 +280,10 @@ async def test_call_litellm_openai_path_session_id_optional(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+        ),
         model="openai/gpt-5.5",
-        messages=[{"role": "user", "content": "hi"}],
     )
 
     assert "prompt_cache_key" not in captured
@@ -298,10 +312,12 @@ async def test_call_litellm_extra_overrides_prompt_cache_key(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="sess_default",
+            params={"extra_body": {"prompt_cache_key": "shared-bucket"}},
+        ),
         model="openai/gpt-5.5",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_default",
-        extra={"extra_body": {"prompt_cache_key": "shared-bucket"}},
     )
 
     extra_body = captured.get("extra_body")
@@ -331,10 +347,12 @@ async def test_call_litellm_openai_preserves_agent_extra_body_siblings(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="sess_merge",
+            params={"extra_body": {"provider": {"order": ["anthropic"]}}},
+        ),
         model="openai/gpt-5.5",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_merge",
-        extra={"extra_body": {"provider": {"order": ["anthropic"]}}},
     )
 
     extra_body = captured.get("extra_body")
@@ -389,10 +407,12 @@ async def test_call_litellm_openai_path_prompt_cache_key_reaches_http_body(
     )
 
     await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="sess_wire",
+            params={"client": mock_client},
+        ),
         model="openai/gpt-5.5",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_wire",
-        extra={"client": mock_client},
     )
 
     assert captured_body.get("prompt_cache_key") == "sess_wire"
