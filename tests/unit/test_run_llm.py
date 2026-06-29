@@ -82,6 +82,7 @@ async def test_returns_raw_assistant_turn() -> None:
     }
     assert cost == 2000  # 0.002 USD → 2000 micro-USD (charged at the inference site)
     # The model string is a binding concern passed alongside the request payload.
+    assert m.await_args is not None
     assert m.await_args.kwargs["model"] == "gpt-4o-mini"
 
 
@@ -125,6 +126,7 @@ async def test_no_model_anywhere_is_recoverable_error() -> None:
 async def test_model_defaults_to_run_default_child_model() -> None:
     with patch("aios.workflows.run_llm.call_litellm", AsyncMock(return_value=_response())) as m:
         await invoke_call_llm(run=_run(default_child_model="claude-x"), spec=_spec(model=None))
+    assert m.await_args is not None
     assert m.await_args.kwargs["model"] == "claude-x"
 
 
@@ -156,6 +158,7 @@ async def test_trusted_api_base_admitted() -> None:
         )
     assert "error" not in result
     # params (carrying the trusted api_base) round-trips into the LlmRequest.
+    assert m.await_args is not None
     assert m.await_args.args[0].params == {"api_base": "https://ok.example"}
 
 
