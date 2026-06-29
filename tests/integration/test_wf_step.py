@@ -984,6 +984,133 @@ async def test_generic_agent_spawn_creates_agentless_child_with_run_surface(
     assert frozen == Surface(tools=[ToolSpec(type="web_search")], mcp_servers=[], http_servers=[])
 
 
+# ── #1636: the workflow: model-binding privilege at the spawn-edge seam ──────────
+#
+# The runtime guard keys on the run's owning principal: a run with a
+# ``launcher_session_id`` (an agent launched it) is self-authoring (non-operator)
+# and may NOT select a ``workflow:`` model for a child; an edgeless operator/HTTP
+# run may. Covers the two unnamed spawn arms — the per-call ``agent(model=…)``
+# override and the generic agentless child's resolved model.
+
+
+async def _make_agent_launched_run(pool: asyncpg.Pool[Any], script: str, agent_id: str) -> str:
+    """A run LAUNCHED BY AN AGENT (self-authoring principal): ``launcher_session_id``
+    is set, so ``run.launcher_session_id is None`` is False and the binding privilege
+    treats it as non-operator."""
+    launcher = await _make_launcher_session(pool, agent_id)
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_wf", name="self-authored-w", script=script
+        )
+    run = await service.create_run(
+        pool,
+        account_id="acc_wf",
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        launcher_session_id=launcher.id,
+    )
+    return run.id
+
+
+async def test_self_authoring_run_cannot_select_workflow_model_generic_child(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1636: a self-authoring (agent-launched) run may NOT route a generic agentless
+    child's inference through a ``workflow:`` model. The spawn edge journals a
+    catchable ``workflow_model_forbidden`` rejection BEFORE any child row exists."""
+    pool = wf_runtime
+    script = "async def main(input):\n    return await agent('go', model='workflow:wf_bound')\n"
+    run_id = await _make_agent_launched_run(pool, script, wf_agent_id)
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    result_evt = next(e for e in events if e.type == "call_result")
+    assert result_evt.payload["error"]["kind"] == "workflow_model_forbidden"
+    assert children == 0  # refused before write — no child session created
+
+
+async def test_self_authoring_run_cannot_override_named_agent_to_workflow_model(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1636: the per-call ``agent(model=…)`` override arm — a self-authoring run may
+    not redirect even a NAMED agent's child onto a ``workflow:`` model."""
+    pool = wf_runtime
+    script = (
+        "async def main(input):\n"
+        f"    return await agent('go', agent_id={wf_agent_id!r}, model='workflow:wf_bound')\n"
+    )
+    run_id = await _make_agent_launched_run(pool, script, wf_agent_id)
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    result_evt = next(e for e in events if e.type == "call_result")
+    assert result_evt.payload["error"]["kind"] == "workflow_model_forbidden"
+    assert children == 0
+
+
+async def test_self_authoring_run_cannot_select_workflow_bound_named_agent(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#1636: a NAMED agent whose stored ``model`` is a ``workflow:`` binding cannot be
+    SELECTED by a self-authoring run either (no override needed) — the guard reads the
+    agent's own model when no per-call override is given."""
+    pool = wf_runtime
+    bound = await agents_service.create_agent(
+        pool,
+        account_id="acc_wf",
+        name="workflow-bound-agent",
+        model="workflow:wf_bound",  # operator-authored binding (HTTP/operator path)
+        system="bound child",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    script = f"async def main(input):\n    return await agent('go', agent_id={bound.id!r})\n"
+    run_id = await _make_agent_launched_run(pool, script, bound.id)
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    result_evt = next(e for e in events if e.type == "call_result")
+    assert result_evt.payload["error"]["kind"] == "workflow_model_forbidden"
+    assert children == 0
+
+
+async def test_operator_run_may_select_workflow_model_generic_child(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#1636: the operator arm — an edgeless operator/HTTP run (no launcher session) MAY
+    route a generic child's inference through a ``workflow:`` model; the child spawns and
+    its model is stamped with the binding."""
+    pool = wf_runtime
+    script = "async def main(input):\n    return await agent('go', model='workflow:wf_bound')\n"
+    run_id = await _make_run(pool, script)  # edgeless root → operator-owned
+    with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()):
+        await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+        started = next(e for e in events if e.type == "call_started")
+        child = await db_queries.get_session_bare(
+            conn, started.payload["child_session_id"], account_id="acc_wf"
+        )
+    assert not [e for e in events if e.type == "call_result"]  # no rejection journaled
+    assert child.model == "workflow:wf_bound"  # the binding is admitted + stamped
+
+
 async def test_agent_spawn_idempotent_on_replay(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:

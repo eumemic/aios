@@ -25,6 +25,7 @@ from aios.models.agents import (
 from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
+from aios.services.model_binding_authz import enforce_workflow_binding_privilege
 from aios.workflows.generic_child import GENERIC_CHILD_SYSTEM
 
 
@@ -118,6 +119,10 @@ async def create_agent(
     surface ⊆ the run at spawn time and is unchanged by this path.
     """
     if creator_session_id is not None:
+        # #1636: the model-binding privilege. A ``creator_session_id`` IS a
+        # self-authoring (non-operator) principal — it may not bind a ``workflow:``
+        # model. The operator/HTTP path (no creator) passes ``is_operator=True``.
+        enforce_workflow_binding_privilege(model, is_operator=False)
         await _enforce_surface_attenuation(
             pool,
             account_id=account_id,
@@ -204,6 +209,11 @@ async def update_agent(
     updated.
     """
     if editor_session_id is not None:
+        # #1636: the model-binding privilege, keyed on the editor being a
+        # self-authoring (non-operator) principal. ``model is None`` (the field is
+        # being preserved) introduces no new binding and is a no-op; a non-None
+        # ``workflow:`` model is rejected. The operator/HTTP path skips this.
+        enforce_workflow_binding_privilege(model, is_operator=False)
         current = await get_agent(pool, agent_id, account_id=account_id)
         await _enforce_surface_attenuation(
             pool,

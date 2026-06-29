@@ -50,6 +50,7 @@ from aios.models.attenuation import api_base_of, surface_of
 from aios.models.sessions import Err, Outcome
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent, WfRunStatus
 from aios.services import attenuation as attenuation_service
+from aios.services.model_binding_authz import is_workflow_binding
 from aios.services.sessions import (
     AskNewSession,
     create_child_session,
@@ -1122,6 +1123,23 @@ async def _open_agent_capability(
                 f"endpoint ({redirect!r}); add it to the operator "
                 f"trusted_inference_api_bases allowlist to permit this spawn",
             )
+    # #1636: the ``workflow:`` model-binding privilege at the spawn-edge dispatch seam,
+    # keyed on the RUN's owning principal — operator iff the run is operator/HTTP-launched
+    # (no launcher session). Covers BOTH unnamed paths: the per-call ``agent(model=…)``
+    # override and the generic agentless child's resolved model (``stamped_model``); a
+    # NAMED child additionally inherits the agent's stored ``model`` when no override is
+    # given, so that string is checked too. A self-authoring run may neither select nor
+    # bind a ``workflow:`` model — a catchable rejection, before any child row exists.
+    # Orthogonal to the #823 api_base clamp above (that bounds *where* inference routes;
+    # this bounds *whether* it may route through a workflow at all).
+    is_operator_run = run.launcher_session_id is None
+    selected_model = stamped_model if agent_id is None else (model or agent.model)
+    if not is_operator_run and is_workflow_binding(selected_model):
+        return await _reject(
+            "workflow_model_forbidden",
+            f"selecting a workflow: model ({selected_model!r}) is operator-only; this "
+            "self-authoring run may not route a child's inference through a workflow",
+        )
     # Lifetime cap (H1) enforced HERE — past every rejection gate, before the child is
     # created — so only caps that genuinely spawn count. ``agent_spawns`` already excludes
     # rejected caps; this child would be the (agent_spawns + 1)-th, so cap it on strict ``>``.

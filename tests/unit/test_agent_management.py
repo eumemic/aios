@@ -31,6 +31,7 @@ import pytest
 import aios.tools  # noqa: F401 — registers the builtins
 from aios.errors import ConflictError, CryptoDecryptError, ForbiddenError
 from aios.models.agents import Agent
+from aios.services import agents as agents_service
 from aios.tools import agent_management as am
 from aios.tools.invoke import ToolBail, invoke_builtin
 from aios.tools.registry import openai_tool_entry, registry
@@ -236,6 +237,88 @@ class TestErrorPropagation:
         )
         with pytest.raises(CryptoDecryptError):
             await am.create_agent_handler("ses_1", {"name": "a", "model": "test/dummy"})
+
+
+class TestWorkflowModelBindingPrivilege:
+    """#1636: a self-authoring (non-operator) principal — the create/update_agent
+    model-tool path always carries a ``creator_session_id`` / ``editor_session_id``
+    — may NOT bind a ``workflow:`` model. The guard fires BEFORE any DB call, so it
+    exercises the real service with a ``None`` pool.
+
+    The companion spawn-edge arms (per-call ``agent(model=…)`` override + the generic
+    agentless child) live in the workflow-step integration suite, where a run row and
+    its owning principal exist.
+    """
+
+    async def test_create_agent_self_authoring_workflow_model_forbidden(self) -> None:
+        # The real service: a creator_session_id is set, so the binding privilege
+        # rejects a workflow: model before _enforce_surface_attenuation hits the DB.
+        with pytest.raises(ForbiddenError, match="operator-only"):
+            await agents_service.create_agent(
+                None,  # type: ignore[arg-type]  # guard fires before the pool is touched
+                account_id="acc_x",
+                name="a",
+                model="workflow:wf_1",
+                system="s",
+                tools=[],
+                description=None,
+                metadata={},
+                window_min=1000,
+                window_max=100000,
+                creator_session_id="ses_self",
+            )
+
+    async def test_update_agent_self_authoring_workflow_model_forbidden(self) -> None:
+        with pytest.raises(ForbiddenError, match="operator-only"):
+            await agents_service.update_agent(
+                None,  # type: ignore[arg-type]
+                "agt_1",
+                account_id="acc_x",
+                expected_version=1,
+                model="workflow:wf_1@2",
+                editor_session_id="ses_self",
+            )
+
+    async def test_create_agent_self_authoring_raw_model_passes_guard(
+        self, monkeypatch: Any
+    ) -> None:
+        # A raw provider model is admissible for a self-authoring principal — the
+        # guard is a no-op and the flow proceeds to the surface-attenuation clamp
+        # (stubbed here to a no-op) and the insert (stubbed to return an agent).
+        monkeypatch.setattr(
+            "aios.services.agents._enforce_surface_attenuation", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(
+            "aios.services.agents.skills_service.resolve_skill_refs",
+            AsyncMock(return_value=[]),
+        )
+        monkeypatch.setattr(
+            "aios.services.agents.skills_service.serialize_skills_for_snapshot",
+            lambda *a, **k: "[]",
+        )
+
+        class _FakePool:
+            def acquire(self) -> Any:
+                raise AssertionError("reached the insert — guard admitted the raw model")
+
+        monkeypatch.setattr(
+            "aios.services.agents.queries.insert_agent", AsyncMock(return_value=_agent())
+        )
+        # The guard must NOT raise; the AssertionError below proves we passed it.
+        with pytest.raises(AssertionError, match="reached the insert"):
+            await agents_service.create_agent(
+                _FakePool(),  # type: ignore[arg-type]
+                account_id="acc_x",
+                name="a",
+                model="test/dummy",
+                system="s",
+                tools=[],
+                description=None,
+                metadata={},
+                window_min=1000,
+                window_max=100000,
+                creator_session_id="ses_self",
+            )
 
 
 class TestReturnShape:

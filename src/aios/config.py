@@ -472,10 +472,11 @@ class Settings(BaseSettings):
         "allowlist; otherwise the spawn fails closed with an "
         "``untrusted_api_base`` rejection. Empty (the default) means *no* "
         "redirected endpoint is trusted: a child may only run on the default "
-        "endpoint. This is sound today (``create_agent`` is operator-only, so no "
-        "runtime principal can mint a hostile ``api_base``); the clamp makes the "
-        "boundary real and frozen ahead of native self-management, where the "
-        "trusted-catalog precondition lapses. Values are matched verbatim against "
+        "endpoint. The clamp makes this boundary real and frozen independent of "
+        "native self-management: the api_base axis is enforced at the spawn edge "
+        "regardless of who authored the agent (the ``workflow:`` model-binding "
+        "privilege, #1636, is the companion runtime guard on the orthogonal "
+        "model/binding axis). Values are matched verbatim against "
         "the agent's ``litellm_extra['api_base']`` string.",
     )
 
