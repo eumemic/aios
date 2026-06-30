@@ -498,6 +498,45 @@ def attenuate(
     return Surface(out_tools, out_mcp, out_http)
 
 
+def admit_provider_tools(
+    provider: list[ToolSpec],
+    effective: Surface,
+    *,
+    default_mcp_permission: PermissionPolicy,
+    builtin_transports: dict[str, ToolTransport],
+) -> list[ToolSpec]:
+    """Clamp provider-injected tools against an already-frozen effective surface.
+
+    The per-step prelude injects ``ToolProvider`` tools (connection-declared custom
+    tools) AFTER the declared-surface tools, with no attenuation pass. For a workflow
+    child / run whose declared surface was clamped (#794), this re-grants authority the
+    run dropped — a live #794-class ambient-authority gap. This helper closes it: a
+    provider tool survives iff its ``_tool_key`` is present in ``effective`` (the frozen
+    clamped surface, ``surface_of(agent)`` for a born-clamped child); the surviving entry
+    carries the per-dimension meet (``always_ask`` wins, transport GLB).
+
+    A clamped child that legitimately wants a connector tool must DECLARE it (so the run
+    grants it) — silent re-grant via the provider seam is exactly the bug. Reuses the
+    exact meet-loop body of :func:`attenuate` (the ``_tool_key`` join + ``_meet_builtin``);
+    it adds no new primitive.
+    """
+    canon = canonicalize(
+        effective,
+        default_mcp_permission=default_mcp_permission,
+        builtin_transports=builtin_transports,
+    )
+    eff = {_tool_key(t): t for t in canon.tools}
+    out: list[ToolSpec] = []
+    for t in provider:
+        match = eff.get(_tool_key(t))
+        if match is None:
+            continue
+        met = _meet_builtin(_canon_builtin(t, transport_default="both"), match)
+        if met is not None:
+            out.append(met)
+    return out
+
+
 def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
     """Per-section identity-keys present in ``expected`` but dropped/narrowed in ``actual``.
 

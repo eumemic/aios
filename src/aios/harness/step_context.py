@@ -288,6 +288,18 @@ async def compute_step_prelude(
     )
     if connection_tool_dicts:
         connection_tools = [ToolSpec.model_validate(d) for d in connection_tool_dicts]
+        if session.parent_run_id is not None:
+            # Born clamped (#794, #1627): a workflow-spawned child's ``agent.tools`` is
+            # already the frozen effective surface (services/agents.py load_for_session
+            # overlays it), so ``surface_of(agent)`` IS the clamped surface. Clamp the
+            # provider-injected tools against it so the ToolProvider seam can't re-grant
+            # a connector tool the run dropped. A foreground session (parent_run_id is
+            # None) declared its own surface and never had the connector tools in
+            # ``surface_of(agent)``, so it passes through unchanged (connector UX intact).
+            from aios.models.attenuation import surface_of
+            from aios.services.attenuation import admit_provider
+
+            connection_tools = admit_provider(connection_tools, surface_of(agent))
         tools.extend(to_openai_tools(connection_tools))
 
     skill_versions = (
