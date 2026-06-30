@@ -1,0 +1,96 @@
+{
+  "tier": "coding_aios",
+  "status": "PARTIAL \u2014 blocked on shared OpenRouter credit depletion",
+  "finding": "coding tier HAS headroom (opus pass@1=0.375, unlike reasoning ceiling)",
+  "blocker": "OpenRouter shared-key affordance shrank 47864->9749 tokens mid-run; het-R1/self-fusion (route via OpenRouter for the substrate-different Verifier/Worker) not completed to avoid exhausting a shared fleet resource",
+  "test_account_spend_usd_approx": 6.76,
+  "opus_calibration_full": [
+    {
+      "id": "c01",
+      "verdict": "PASS",
+      "headroom": "HIGH",
+      "cost_uusd": 336054
+    },
+    {
+      "id": "c05",
+      "verdict": "fail",
+      "headroom": "HIGH",
+      "cost_uusd": 104298
+    },
+    {
+      "id": "c06",
+      "verdict": "SKIP",
+      "headroom": "HIGH",
+      "cost_uusd": 700910
+    },
+    {
+      "id": "c07",
+      "verdict": "fail",
+      "headroom": "HIGH",
+      "cost_uusd": 163410
+    },
+    {
+      "id": "c08",
+      "verdict": "fail",
+      "headroom": "HIGH",
+      "cost_uusd": 173041
+    },
+    {
+      "id": "c12",
+      "verdict": "PASS",
+      "headroom": "HIGH",
+      "cost_uusd": 103910
+    },
+    {
+      "id": "c13",
+      "verdict": "PASS",
+      "headroom": "HIGH",
+      "cost_uusd": 292704
+    },
+    {
+      "id": "c16",
+      "verdict": "fail",
+      "headroom": "LOW",
+      "cost_uusd": 722872
+    },
+    {
+      "id": "c20",
+      "verdict": "fail",
+      "headroom": "LOW",
+      "cost_uusd": 210079
+    }
+  ],
+  "gpt_calibration_partial": [
+    {
+      "id": "c01",
+      "verdict": "PASS",
+      "headroom": "HIGH",
+      "cost_uusd": 243270
+    },
+    {
+      "id": "c05",
+      "verdict": "fail",
+      "headroom": "HIGH",
+      "cost_uusd": 101815
+    },
+    {
+      "id": "c06",
+      "verdict": "SKIP",
+      "headroom": "HIGH",
+      "cost_uusd": 533475
+    },
+    {
+      "id": "c07",
+      "verdict": "fail",
+      "headroom": "HIGH",
+      "cost_uusd": 263280
+    },
+    {
+      "id": "c08",
+      "verdict": "fail",
+      "headroom": "HIGH",
+      "cost_uusd": 0
+    }
+  ],
+  "ground_truth_self_check": "14/14 corpus items pass (provenance certified)"
+}
