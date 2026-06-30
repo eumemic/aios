@@ -35,6 +35,7 @@ class Workflow:
         updated_at (datetime.datetime):
         input_schema (None | Unset | WorkflowInputSchemaType0):
         output_schema (None | Unset | WorkflowOutputSchemaType0):
+        output_model (None | str | Unset):
         description (None | str | Unset):
         tools (list[ToolSpec] | Unset):
         mcp_servers (list[McpServerSpec] | Unset):
@@ -51,6 +52,7 @@ class Workflow:
     updated_at: datetime.datetime
     input_schema: None | Unset | WorkflowInputSchemaType0 = UNSET
     output_schema: None | Unset | WorkflowOutputSchemaType0 = UNSET
+    output_model: None | str | Unset = UNSET
     description: None | str | Unset = UNSET
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
@@ -91,6 +93,12 @@ class Workflow:
             output_schema = self.output_schema.to_dict()
         else:
             output_schema = self.output_schema
+
+        output_model: None | str | Unset
+        if isinstance(self.output_model, Unset):
+            output_model = UNSET
+        else:
+            output_model = self.output_model
 
         description: None | str | Unset
         if isinstance(self.description, Unset):
@@ -144,6 +152,8 @@ class Workflow:
             field_dict["input_schema"] = input_schema
         if output_schema is not UNSET:
             field_dict["output_schema"] = output_schema
+        if output_model is not UNSET:
+            field_dict["output_model"] = output_model
         if description is not UNSET:
             field_dict["description"] = description
         if tools is not UNSET:
@@ -218,6 +228,15 @@ class Workflow:
 
         output_schema = _parse_output_schema(d.pop("output_schema", UNSET))
 
+        def _parse_output_model(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        output_model = _parse_output_model(d.pop("output_model", UNSET))
+
         def _parse_description(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -281,6 +300,7 @@ class Workflow:
             updated_at=updated_at,
             input_schema=input_schema,
             output_schema=output_schema,
+            output_model=output_model,
             description=description,
             tools=tools,
             mcp_servers=mcp_servers,
