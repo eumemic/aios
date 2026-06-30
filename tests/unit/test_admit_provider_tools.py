@@ -44,9 +44,7 @@ def test_admit_provider_tools_drops_absent() -> None:
     provider = [_custom("X")]
     effective = Surface([_custom("Y")], [], [])  # X's key is not present
     assert (
-        admit_provider_tools(
-            provider, effective, default_mcp_permission=DMP, builtin_transports=BT
-        )
+        admit_provider_tools(provider, effective, default_mcp_permission=DMP, builtin_transports=BT)
         == []
     )
 
