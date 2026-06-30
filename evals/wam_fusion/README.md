@@ -253,3 +253,78 @@ substrate different from every panel member). The matched-fan-in machinery, R1 r
 stats, and provisioning proven here **carry forward unchanged**; only the corpus + scorer
 swap (the harness already takes `--tasks <file>`; a coding scorer replaces `scoring.py`'s
 checkable-answer compare with a hidden-test runner).
+
+---
+
+# Phase B — CODING tier (pass@1 on real aios PRs): scorer + corpus built & validated; headroom CONFIRMED; full 3-condition run BLOCKED on shared OpenRouter credit
+
+Phase B moves the fusion question to a tier with real headroom — coding, where the best
+single model genuinely fails a meaningful fraction (unlike reasoning, which ceiling'd).
+
+## What's built & VALIDATED
+
+- **Hidden-test pass@1 scorer** (`coding_scorer.py`): clone aios at the item's
+  `base_parent_sha` via `git archive` into a temp dir, overwrite the candidate's
+  `src_files`, drop in the held-out `test_files` from the merge commit, run ONLY those
+  tests with **`PYTHONPATH=<tmp>/src` first** (so the patched tree shadows the editable
+  aios install — without this the test silently scores the canonical checkout, the
+  subtlest possible fake-pass), under a per-item timeout. pass@1 = green; non-applying
+  patch = fail; env that can't stand up = **SKIP** (logged, excluded — one bad item never
+  wedges or biases the run). **Built-in ground-truth self-check**: scoring each item's
+  merge-commit source against its held-out test MUST pass — **all 14 corpus items pass**,
+  certifying provenance (base/merge SHAs, file paths, test isolatability) before any model
+  is scored.
+- **Coding corpus** (`tasks/coding_aios.json`): 14 real merged aios PRs (12 HIGH-headroom
+  subtle correctness bugs + 2 LOW) whose held-out test is ISOLATABLE (pure-logic pytest,
+  no DB/network/docker), each with full provenance (pr#, issue#, base/merge SHA, src/test
+  files). 9 are single-file (the clean pass@1 set — a multi-file item can fail merely by
+  the model omitting a file, a confound).
+- **Coding harness** (`run_coding.py`): the SAME matched-fan-in 3-condition design,
+  R1 recipe, McNemar/Holm/bootstrap stats, calibration, and no-double-charge assertion as
+  Phase A — only the prompt (`coding_prompt.py`: ask for full corrected file content in a
+  path-tagged fence) and scorer swap.
+
+## Finding 1 — the CODING TIER HAS HEADROOM (the headroom Phase A's reasoning tier lacked)
+
+Calibration that completed cleanly (Opus, on Anthropic — no gateway-credit issue):
+**pass@1 = 0.375** (3 pass / 5 fail / 1 env-skip on the 9 single-file items). The best
+single model genuinely FAILS ~60% of these subtle bugs — exactly the room fusion needs to
+have any measurable effect. Per-item discrimination confirmed (c01/c12/c13 pass; c05/c07/
+c08/c16/c20 fail; c06 env-skip). **This is the qualitative result Phase A was missing**:
+a tier where the matched-fan-in test could, in principle, discriminate.
+
+## Finding 2 (BLOCKER) — the full 3-condition verdict is blocked on shared OpenRouter credit
+
+The substrate-different-verdict invariant REQUIRES a non-Anthropic model for the Verifier
+(Verifier ≠ Worker substrate). The only non-Anthropic gateway reachable on the worker is
+**OpenRouter** (Phase A finding) — and **OpenRouter's shared key is credit-limited**:
+mid-run it began returning HTTP 402 ("requires more credits, or fewer max_tokens"), and the
+remaining affordance **shrank 47864 → 18525 → 9749 tokens** as the coding run (large ~20KB
+contexts) consumed it. A harness fix (cap `max_tokens=24000` for OpenRouter models —
+shipped in `recipes.py`) bought headroom but did not stop the depletion. Continuing would
+(a) risk exhausting a SHARED FLEET resource other constellation agents depend on, and
+(b) produce a credit-corrupted result (silently-zeroed conditions). So per the
+"don't overspend a shared resource / don't fake a result" rule, the het-R1 and self-fusion
+conditions (both route through OpenRouter for the heterogeneous Verifier/Worker) were NOT
+completed. Test-account spend was ~$6.76 (under the $50 cap) — the blocker is the OpenRouter
+credit, not the test-account budget.
+
+**To unblock (ops, not eval):** top up / raise the monthly limit on the worker's OpenRouter
+key, OR wire a second non-Anthropic provider with its own credit (the oai-proxy/native
+GPT-5.5 path that didn't resolve in Phase A — see that ops note). With either, the SAME
+harness + corpus + scorer runs the full 3-condition coding measurement unchanged.
+
+## Secondary note — Opus run-to-run variance
+
+Opus-4-8 runs temperature-free (it rejects `temperature`), so its calibration swings
+(pass@1 0.714 on one partial run, 0.375 on another). A clean coding verdict wants either a
+temperature-respecting best-single OR multiple seeds per item to average out the variance —
+worth pre-declaring when the full run is unblocked.
+
+## Phase B files
+
+- `coding_scorer.py` — hidden-test pass@1 scorer (git-archive sandbox, PYTHONPATH-forced patched tree, SKIP-on-env-break, ground-truth self-check).
+- `coding_prompt.py` — coding prompt + path-tagged-fence source extraction.
+- `run_coding.py` — the coding measuring harness (same matched-fan-in design as Phase A).
+- `tasks/coding_aios.json` — 14 provenance-tagged real-PR coding items (9 single-file).
+- `coding_results.json` — last run's record (git-ignored).

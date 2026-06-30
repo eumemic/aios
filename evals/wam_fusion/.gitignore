@@ -3,3 +3,4 @@ results.json
 __pycache__/
 *.pyc
 fusion_results.json
+coding_results.json

@@ -133,16 +133,27 @@ async def main(input):
 """
 
 
+# OpenRouter rejects a request whose max_tokens exceeds the key's REMAINING credit
+# affordance (HTTP 402: "requires more credits, or fewer max_tokens"). gpt-5.5's default
+# max_tokens (65536) blows that on a low-credit key, erroring every coding call (which
+# would silently zero out a condition's accuracy). Cap it to a value that (a) fits the
+# affordance and (b) is large enough to regenerate the biggest corpus source file
+# (loop.py ~ 18.5k tokens) with headroom. Anthropic (ant-proxy) has no such cap need.
+_OPENROUTER_MAX_TOKENS = 24000
+
+
 def _params_for(model: str) -> dict:
-    """Per-model params, handling the opus-4-8 'temperature is deprecated' gotcha.
+    """Per-model params: handle the opus-4-8 'temperature deprecated' gotcha AND the
+    OpenRouter max_tokens affordance cap (see ``_OPENROUTER_MAX_TOKENS``).
 
     Opus-4-8 rejects ``temperature`` entirely (provider BadRequest); every other
-    reachable pool model accepts ``temperature=0``. So determinism is pinned with
-    temp=0 everywhere EXCEPT Opus, which runs at its (low-variance) default.
+    reachable pool model accepts ``temperature=0``. OpenRouter-routed models also need
+    a bounded ``max_tokens`` so a low-credit key can afford the request.
     """
-    if "opus-4-8" in model:
-        return {}
-    return {"temperature": 0}
+    params: dict = {} if "opus-4-8" in model else {"temperature": 0}
+    if model.startswith("openrouter/"):
+        params["max_tokens"] = _OPENROUTER_MAX_TOKENS
+    return params
 
 
 def build_r1_script(a_model: str, b_model: str, c_model: str) -> str:
