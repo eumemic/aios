@@ -20,10 +20,16 @@ from unittest.mock import AsyncMock
 import asyncpg
 import pytest
 
+from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
+from aios.models.agents import ToolSpec
+from aios.models.attenuation import surface_of
+from aios.models.sessions import Session
 from aios.models.workflows import WfRun
+from aios.services import agents as agents_service
+from aios.services import sessions as sessions_service
 from aios.workflows import run_tools, service
 from aios.workflows.child_run_id import child_run_id
 from aios.workflows.step import run_workflow_step
@@ -284,3 +290,264 @@ async def test_invoke_workflow_missing_target_is_catchable(
 async def _list(pool: asyncpg.Pool[Any], run_id: str) -> list[Any]:
     async with pool.acquire() as conn:
         return list(await wf_queries.list_run_events(conn, run_id))
+
+
+# ── #1653: invoke_workflow sub-run principal lineage (privilege-escalation fix) ──
+#
+# An ``invoke_workflow`` sub-run is created via ``create_run`` WITHOUT the
+# originating principal threaded through, so it defaulted to ``launcher_session_id
+# = NULL`` and was mis-classified as an OPERATOR run. That gives a self-authoring
+# agent two escalations through the run→sub-run seam:
+#
+#   * the #1636 ``workflow:`` model-binding guard (keyed on
+#     ``run.launcher_session_id is None``) is BYPASSED — a sub-run may bind the
+#     operator-only ``workflow:`` model for its children;
+#   * the #794 launcher surface clamp (``service.py``: gated on
+#     ``launcher_session_id is not None``) is SKIPPED — the sub-run runs
+#     un-attenuated on the tool/mcp/http axis.
+#
+# The fix threads the parent run's ``launcher_session_id`` down the
+# ``parent_run_id`` lineage so ``is_operator_run`` reflects the ORIGINATING
+# principal, not the sub-run's absent launcher. Both exposures close at once.
+
+
+async def _make_launcher_session(pool: asyncpg.Pool[Any], agent_id: str) -> Session:
+    return await sessions_service.create_session(
+        pool,
+        account_id="acc_wf",
+        agent_id=agent_id,
+        environment_id="env_wf",
+        title=None,
+        metadata={},
+    )
+
+
+async def _narrow_launcher(pool: asyncpg.Pool[Any]) -> str:
+    """A launcher SESSION whose agent has an EMPTY tool surface — the originating
+    (non-operator) principal. Its surface is the lattice floor, so any tool a
+    sub-workflow declares must be clamped away once the sub-run inherits it.
+
+    Returns the session id (what ``launcher_session_id`` must be)."""
+    agent = await agents_service.create_agent(
+        pool,
+        account_id="acc_wf",
+        name="narrow-launcher",
+        model="test/dummy",
+        system="narrow launcher",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    session = await _make_launcher_session(pool, agent.id)
+    return session.id
+
+
+async def _agent_launched_parent(
+    pool: asyncpg.Pool[Any], parent_script: str, *, input: Any, launcher_id: str
+) -> str:
+    """A parent run LAUNCHED BY AN AGENT (non-operator originating principal)."""
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_wf", name="parent-1653", script=parent_script
+        )
+    run = await service.create_run(
+        pool,
+        account_id="acc_wf",
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        input=input,
+        launcher_session_id=launcher_id,
+    )
+    return run.id
+
+
+# Parent A: invoke sub-workflow B (no args needed beyond its id).
+_INVOKE_PARENT = "async def main(input):\n    return await invoke_workflow(input['wf'], {})\n"
+# Sub-workflow B: route a child's inference through an operator-only workflow: model.
+_BINDS_WORKFLOW_MODEL = (
+    "async def main(input):\n    return await agent('go', model='workflow:wf_bound')\n"
+)
+
+
+async def test_agent_originated_invoke_workflow_subrun_cannot_bind_workflow_model(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#1653: A→B→Y chain. An agent launches parent A (``invoke_workflow(B)``); B's
+    script binds a ``workflow:`` model for a child. The sub-run B inherits A's
+    originating principal, so it is NON-operator and the #1636 guard REJECTS the
+    binding (``workflow_model_forbidden``) before any child row exists.
+
+    On master this FAILS: the sub-run defaults to ``launcher_session_id = NULL`` →
+    mis-classified operator → the binding sails through and a child is spawned."""
+    pool = wf_runtime
+    launcher_id = await _narrow_launcher(pool)
+    child_wf = await _insert_workflow(pool, "binds-wf-model", _BINDS_WORKFLOW_MODEL)
+    parent_run = await _agent_launched_parent(
+        pool, _INVOKE_PARENT, input={"wf": child_wf}, launcher_id=launcher_id
+    )
+
+    # Step 1: parent A spawns the sub-run B and suspends.
+    await run_workflow_step(parent_run)
+    async with pool.acquire() as conn:
+        cs = next(
+            e
+            for e in await wf_queries.list_run_events(conn, parent_run)
+            if e.type == "call_started"
+        )
+    sub_run_id = cs.payload["child_run_id"]
+
+    # The sub-run carries the ORIGINATING principal (not a NULL/operator launcher).
+    sub = await _run(pool, sub_run_id)
+    assert sub.launcher_session_id == launcher_id
+
+    # Step 2: drive sub-run B — its agent(model='workflow:…') binding must be
+    # REJECTED as operator-only, and NO child session may be created.
+    await run_workflow_step(sub_run_id)
+    async with pool.acquire() as conn:
+        sub_events = await wf_queries.list_run_events(conn, sub_run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", sub_run_id
+        )
+    result_evt = next(e for e in sub_events if e.type == "call_result")
+    assert result_evt.payload["error"]["kind"] == "workflow_model_forbidden"
+    assert children == 0  # refused before write — no escalated child
+
+
+async def test_agent_originated_invoke_workflow_subrun_surface_is_attenuated(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#1653 (the bonus exposure): an ``invoke_workflow`` sub-run launched off an
+    agent-originated parent must be CLAMPED to the launcher's surface (#794), not
+    snapshotted verbatim. The launcher holds NO tools, so a sub-workflow declaring
+    a tool must have it clamped AWAY on the sub-run.
+
+    On master this FAILS: the NULL launcher skips the clamp → the declared tool
+    survives un-attenuated on the sub-run."""
+    pool = wf_runtime
+    launcher_id = await _narrow_launcher(pool)  # empty tool surface
+    # Sub-workflow declares a `read` tool (a surface broader than the launcher's).
+    async with pool.acquire() as conn:
+        child_wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name="broad-surface-child",
+            script="async def main(input):\n    return 1\n",
+            tools=[ToolSpec(type="read")],
+        )
+    parent_run = await _agent_launched_parent(
+        pool, _INVOKE_PARENT, input={"wf": child_wf.id}, launcher_id=launcher_id
+    )
+
+    await run_workflow_step(parent_run)
+    async with pool.acquire() as conn:
+        cs = next(
+            e
+            for e in await wf_queries.list_run_events(conn, parent_run)
+            if e.type == "call_started"
+        )
+    sub = await _run(pool, cs.payload["child_run_id"])
+
+    # The sub-run inherits the originating principal AND its surface is clamped to
+    # the launcher's (empty) — the declared `read` tool is attenuated away.
+    assert sub.launcher_session_id == launcher_id
+    assert surface_of(sub).tools == []
+
+
+async def test_operator_originated_invoke_workflow_subrun_may_bind_workflow_model(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#1653 NO-OVER-RESTRICTION: a genuine operator/HTTP ``invoke_workflow`` chain
+    (edgeless root parent → no launcher all the way down) stays operator-classified,
+    so the operator privilege to bind a ``workflow:`` model survives in the sub-run.
+
+    Guards against a fix that over-restricts by blanket-blocking every sub-run."""
+    pool = wf_runtime
+    child_wf = await _insert_workflow(pool, "binds-wf-model", _BINDS_WORKFLOW_MODEL)
+    parent_wf = await _insert_workflow(pool, "op-parent", _INVOKE_PARENT)
+    # Edgeless root: no launcher_session_id → operator-owned, like POST /runs.
+    parent_run = await _make_run(pool, parent_wf, input={"wf": child_wf})
+
+    await run_workflow_step(parent_run)
+    async with pool.acquire() as conn:
+        cs = next(
+            e
+            for e in await wf_queries.list_run_events(conn, parent_run)
+            if e.type == "call_started"
+        )
+    sub_run_id = cs.payload["child_run_id"]
+    sub = await _run(pool, sub_run_id)
+    assert sub.launcher_session_id is None  # operator lineage preserved
+
+    # The sub-run binds the workflow: model freely (operator privilege) — the child
+    # spawns and its model is stamped, with NO rejection journaled.
+    with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()):
+        await run_workflow_step(sub_run_id)
+    async with pool.acquire() as conn:
+        sub_events = await wf_queries.list_run_events(conn, sub_run_id)
+        started = next(e for e in sub_events if e.type == "call_started")
+        child = await db_queries.get_session_bare(
+            conn, started.payload["child_session_id"], account_id="acc_wf"
+        )
+    assert not [e for e in sub_events if e.type == "call_result"]  # no rejection
+    assert child.model == "workflow:wf_bound"  # binding admitted + stamped
+
+
+# A→B→C→Y. A invokes a fixed B forwarding {'wf': C}; B invokes input['wf'] (= C).
+_INVOKE_FIXED_FORWARDING_NEXT = (
+    "async def main(input):\n    return await invoke_workflow(input['b'], {'wf': input['c']})\n"
+)
+_INVOKE_FROM_INPUT = "async def main(input):\n    return await invoke_workflow(input['wf'], {})\n"
+
+
+async def test_agent_originated_nested_invoke_workflow_propagates_principal(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#1653 self-review: the principal must propagate at EVERY depth of a nested
+    ``invoke_workflow → invoke_workflow → …`` chain, since each sub-run inherits its
+    parent run's launcher verbatim. An agent launches A; A invokes B; B invokes C; C
+    binds a ``workflow:`` model. The grandchild sub-run C is STILL non-operator (the
+    launcher threads through both hops), so the #1636 guard rejects the binding."""
+    pool = wf_runtime
+    launcher_id = await _narrow_launcher(pool)
+    c_wf = await _insert_workflow(pool, "leaf-binds-wf-model", _BINDS_WORKFLOW_MODEL)
+    b_wf = await _insert_workflow(pool, "mid-invoker", _INVOKE_FROM_INPUT)
+    # A invokes B (fixed), forwarding {'wf': C}; B then invokes C.
+    a_run = await _agent_launched_parent(
+        pool,
+        _INVOKE_FIXED_FORWARDING_NEXT,
+        input={"b": b_wf, "c": c_wf},
+        launcher_id=launcher_id,
+    )
+
+    # Hop 1: A spawns B (the mid invoker).
+    await run_workflow_step(a_run)
+    async with pool.acquire() as conn:
+        b_cs = next(
+            e for e in await wf_queries.list_run_events(conn, a_run) if e.type == "call_started"
+        )
+    b_run_id = b_cs.payload["child_run_id"]
+    b_sub = await _run(pool, b_run_id)
+    assert b_sub.launcher_session_id == launcher_id  # hop-1 inherits the originator
+
+    # Hop 2: drive B → it invokes C. C inherits B's launcher (= the originator).
+    await run_workflow_step(b_run_id)
+    async with pool.acquire() as conn:
+        c_cs = next(
+            e for e in await wf_queries.list_run_events(conn, b_run_id) if e.type == "call_started"
+        )
+    c_run_id = c_cs.payload["child_run_id"]
+    c_sub = await _run(pool, c_run_id)
+    assert c_sub.launcher_session_id == launcher_id  # hop-2 STILL the originator
+
+    # The grandchild C is non-operator → its workflow: binding is rejected.
+    await run_workflow_step(c_run_id)
+    async with pool.acquire() as conn:
+        c_events = await wf_queries.list_run_events(conn, c_run_id)
+        grandkids = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", c_run_id
+        )
+    result_evt = next(e for e in c_events if e.type == "call_result")
+    assert result_evt.payload["error"]["kind"] == "workflow_model_forbidden"
+    assert grandkids == 0
