@@ -100,6 +100,38 @@ def is_workflow_model(model: str) -> bool:
     return model.startswith(WORKFLOW_MODEL_PREFIX)
 
 
+def effective_capability_model(model: str, *, output_model: str | None) -> str:
+    """The model string the capability gates should key on for ``model`` (#1637).
+
+    Capability gates — vision (:func:`aios.harness.vision.supports_vision`),
+    extended-thinking continuity (``model_descriptor(...).supports_thinking``),
+    and token-window calibration (``read_windowed_events(model=...)``) — all key
+    on the **literal model string**. A raw provider model resolves to itself, so
+    those gates behave exactly as before for the common case.
+
+    A ``workflow:<id>[@version]`` binding matches none of those gates, so without
+    this resolver a bound model **silently degrades**: image inlining is dropped,
+    extended-thinking blocks are stripped from every assistant turn, and token
+    counting reverts to the model-neutral under-counting path. The binding instead
+    carries a **declared effective model** (the inner workflow's ``output_model``
+    — the raw provider model the workflow ultimately emits). When set, the gates
+    resolve to that effective model so a vision-capable bound model inlines images,
+    a thinking-capable bound model preserves thinking-block continuity, and
+    token-window calibration accrues against the effective inner model.
+
+    When the binding declares **no** effective model (``output_model is None``) the
+    raw ``workflow:`` string is returned unchanged — the pre-#1637 degraded posture,
+    which is the only safe default we can pick blind (no worse than today).
+
+    A non-``workflow:`` model returns unchanged regardless of ``output_model``.
+    """
+    if not is_workflow_model(model):
+        return model
+    if output_model:
+        return output_model
+    return model
+
+
 def parse_workflow_model(model: str) -> WorkflowModelRef | None:
     """Parse ``workflow:<id>[@version]`` → :class:`WorkflowModelRef`, else ``None``.
 

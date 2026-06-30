@@ -35,11 +35,30 @@ class TestWorkflowCreate:
             **payload,
             "input_schema": {"type": "object"},
             "output_schema": {"type": "integer"},
+            "output_model": None,
             "description": None,
             "tools": [],
             "mcp_servers": [],
             "http_servers": [],
         }
+
+    def test_output_model_round_trips(self) -> None:
+        # The declared effective model the ``workflow:`` binding carries (#1637).
+        wf = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "output_model": "anthropic/claude-opus-4-6",
+            }
+        )
+        assert wf.output_model == "anthropic/claude-opus-4-6"
+
+    def test_output_model_rejects_empty_string(self) -> None:
+        # ``min_length=1``: an empty effective model is meaningless, not a clear.
+        with pytest.raises(ValidationError):
+            WorkflowCreate.model_validate(
+                {"name": "w", "script": "async def main(i): return 1", "output_model": ""}
+            )
 
     def test_declared_surface_round_trips(self) -> None:
         wf = WorkflowCreate.model_validate(

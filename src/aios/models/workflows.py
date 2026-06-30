@@ -54,6 +54,14 @@ class Workflow(BaseModel):
     script: str
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+    # The declared effective model for a ``workflow:`` model binding (#1637): the raw
+    # provider model this workflow ultimately emits (e.g. ``anthropic/claude-opus-4-6``).
+    # When an agent's ``model`` is ``workflow:<this-id>``, the capability gates (vision /
+    # extended-thinking continuity / token-window calibration) key on THIS string instead
+    # of the opaque ``workflow:`` string — otherwise a bound model silently degrades
+    # (images dropped, thinking-blocks stripped, token counting under-counts). ``None``
+    # keeps the pre-#1637 degraded posture (raw ``workflow:`` string drives the gates).
+    output_model: str | None = None
     description: str | None = None  # optional human blurb (the agent ``description`` analog)
     # The declared tool surface — the verbatim agent envelope. A run reaches these
     # (authed MCP / http_request / builtins) directly via ``tool()`` (a later slice);
@@ -83,6 +91,7 @@ class WorkflowVersion(BaseModel):
     script: str
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+    output_model: str | None = None  # declared effective model for the binding (#1637)
     description: str | None = None
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
@@ -320,6 +329,10 @@ class WorkflowCreate(BaseModel):
     script: str = Field(description=WORKFLOW_SCRIPT_CONTRACT)
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+    # The declared effective model for a ``workflow:`` model binding (#1637) — the raw
+    # provider model this workflow emits, so the capability gates resolve to it instead
+    # of the opaque ``workflow:`` string. See :class:`Workflow.output_model`.
+    output_model: str | None = Field(default=None, min_length=1)
     description: str | None = None
     # The declared tool surface (verbatim agent envelope). When an agent authors a
     # workflow, these must be a subset of the creating agent's own surface; the HTTP
@@ -361,6 +374,9 @@ class WorkflowUpdate(BaseModel):
     script: str | None = Field(default=None, description=WORKFLOW_SCRIPT_CONTRACT)
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+    # ``None`` preserves the current declared effective model (cannot be cleared back to
+    # null, as on the other nullable fields). See :class:`Workflow.output_model` (#1637).
+    output_model: str | None = Field(default=None, min_length=1)
     description: str | None = None
     tools: list[ToolSpec] | None = None
     mcp_servers: list[McpServerSpec] | None = None

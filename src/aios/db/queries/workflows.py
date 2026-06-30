@@ -61,6 +61,7 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         script=row["script"],
         input_schema=row["input_schema"],
         output_schema=row["output_schema"],
+        output_model=row["output_model"],
         description=row["description"],
         tools=load_tool_specs(row["tools"]),
         mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
@@ -79,6 +80,7 @@ def _row_to_workflow_version(row: asyncpg.Record) -> WorkflowVersion:
         script=row["script"],
         input_schema=row["input_schema"],
         output_schema=row["output_schema"],
+        output_model=row["output_model"],
         description=row["description"],
         tools=load_tool_specs(row["tools"]),
         mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
@@ -156,6 +158,7 @@ async def insert_workflow(
     script: str,
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
+    output_model: str | None = None,
     description: str | None = None,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
@@ -176,9 +179,10 @@ async def insert_workflow(
                 """
                 INSERT INTO workflows
                     (id, account_id, name, version, script, input_schema, output_schema,
-                     description, tools, mcp_servers, http_servers, tools_vocab_epoch)
-                VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6::jsonb, $7,
-                        $8::jsonb, $9::jsonb, $10::jsonb, $11)
+                     output_model, description, tools, mcp_servers, http_servers,
+                     tools_vocab_epoch)
+                VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6::jsonb, $7, $8,
+                        $9::jsonb, $10::jsonb, $11::jsonb, $12)
                 RETURNING *
                 """,
                 new_id,
@@ -187,6 +191,7 @@ async def insert_workflow(
                 script,
                 json.dumps(input_schema) if input_schema is not None else None,
                 json.dumps(output_schema) if output_schema is not None else None,
+                output_model,
                 description,
                 json.dumps([t.model_dump() for t in (tools or [])]),
                 json.dumps([s.model_dump() for s in (mcp_servers or [])]),
@@ -219,11 +224,11 @@ async def _insert_workflow_version(conn: asyncpg.Connection[Any], wf_row: asyncp
         """
         INSERT INTO workflow_versions (
             workflow_id, account_id, version, name, script,
-            input_schema, output_schema, description, tools, mcp_servers, http_servers,
-            tools_vocab_epoch
+            input_schema, output_schema, output_model, description, tools, mcp_servers,
+            http_servers, tools_vocab_epoch
         )
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11::jsonb,
-                $12)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb, $11::jsonb,
+                $12::jsonb, $13)
         """,
         wf_row["id"],
         wf_row["account_id"],
@@ -232,6 +237,7 @@ async def _insert_workflow_version(conn: asyncpg.Connection[Any], wf_row: asyncp
         wf_row["script"],
         json.dumps(input_schema) if input_schema is not None else None,
         json.dumps(output_schema) if output_schema is not None else None,
+        wf_row["output_model"],
         wf_row["description"],
         json.dumps(wf_row["tools"]),
         json.dumps(wf_row["mcp_servers"]),
@@ -252,6 +258,7 @@ async def update_workflow(
     script: str | None = None,
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
+    output_model: str | None = None,
     description: str | None = None,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
@@ -289,6 +296,7 @@ async def update_workflow(
     new_script = script if script is not None else current.script
     new_input_schema = input_schema if input_schema is not None else current.input_schema
     new_output_schema = output_schema if output_schema is not None else current.output_schema
+    new_output_model = output_model if output_model is not None else current.output_model
     new_desc = description if description is not None else current.description
     new_tools = tools if tools is not None else current.tools
     new_mcp = mcp_servers if mcp_servers is not None else current.mcp_servers
@@ -299,6 +307,7 @@ async def update_workflow(
         and new_script == current.script
         and new_input_schema == current.input_schema
         and new_output_schema == current.output_schema
+        and new_output_model == current.output_model
         and new_desc == current.description
         and new_tools == current.tools
         and new_mcp == current.mcp_servers
@@ -321,7 +330,7 @@ async def update_workflow(
                    SET version = workflows.version + 1, name = $3, script = $4,
                        input_schema = $5::jsonb, output_schema = $6::jsonb, description = $7,
                        tools = $8::jsonb, mcp_servers = $9::jsonb, http_servers = $10::jsonb,
-                       tools_vocab_epoch = $12, updated_at = now()
+                       tools_vocab_epoch = $12, output_model = $13, updated_at = now()
                  WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND version = $11
                 RETURNING *
                 """,
@@ -340,6 +349,7 @@ async def update_workflow(
                 # so the bumped head is current — re-stamp it (and the version
                 # snapshot it drives) to the current epoch.
                 TOOLS_VOCAB_EPOCH,
+                new_output_model,
             )
             if row is None:
                 # No row matched (id, account_id, version): a stale/raced
