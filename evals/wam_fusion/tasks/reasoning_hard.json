@@ -1,0 +1,156 @@
+{
+  "_comment": "Phase A HARD REASONING tier \u2014 checkable-answer items chosen to break the ceiling effect: problems where a strong single frontier model errs on a MEANINGFUL fraction (multi-step traps, counterintuitive combinatorics/probability, careful-counting, base/clock/calendar arithmetic, classic 'gotcha' word problems). Programmatic scoring (ANSWER: <value>). If the best single model still near-ceilings here, that is itself the honest finding (frontier models have closed this gap) \u2014 but these are calibrated to leave headroom for fusion to help.",
+  "answer_format_instruction": "Solve carefully. End with a final line of EXACTLY: ANSWER: <value>",
+  "items": [
+    {
+      "id": "h01",
+      "prompt": "A snail climbs a 30-foot well. Each day it climbs 3 feet, but each night it slips back 2 feet. On which day does it reach the top?",
+      "answer": "28"
+    },
+    {
+      "id": "h02",
+      "prompt": "How many times do the hour and minute hands of a clock overlap in a 24-hour period?",
+      "answer": "22"
+    },
+    {
+      "id": "h03",
+      "prompt": "If a bat and a ball cost $1.10 together, and the bat costs $1.00 more than the ball, how many cents does the ball cost?",
+      "answer": "5"
+    },
+    {
+      "id": "h04",
+      "prompt": "A regular dodecahedron has how many edges?",
+      "answer": "30"
+    },
+    {
+      "id": "h05",
+      "prompt": "In how many ways can 8 rooks be placed on a chessboard so that no two attack each other?",
+      "answer": "40320"
+    },
+    {
+      "id": "h06",
+      "prompt": "What is the last two digits of 3 raised to the 2024th power?",
+      "answer": "81"
+    },
+    {
+      "id": "h07",
+      "prompt": "Three people check into a hotel room costing $30, paying $10 each. The clerk realizes the room is $25 and sends $5 back via a bellhop, who keeps $2 and returns $1 to each guest. Each guest paid $9, totaling $27, plus the bellhop's $2 is $29. Where is the missing dollar? Answer with the number of dollars actually unaccounted for.",
+      "answer": "0"
+    },
+    {
+      "id": "h08",
+      "prompt": "How many positive integers from 1 to 1000 inclusive contain the digit 7 at least once?",
+      "answer": "271"
+    },
+    {
+      "id": "h09",
+      "prompt": "A frog is at the bottom of a 10-step staircase and can hop 1 or 2 steps at a time. How many distinct ways can it reach the top?",
+      "answer": "89"
+    },
+    {
+      "id": "h10",
+      "prompt": "What is the sum of all the interior angles, in degrees, of a polygon with 15 sides?",
+      "answer": "2340"
+    },
+    {
+      "id": "h11",
+      "prompt": "A number is a palindrome and a perfect square less than 1000. How many such numbers are there (include single digits)?",
+      "answer": "6"
+    },
+    {
+      "id": "h12",
+      "prompt": "Two trains 120 miles apart travel toward each other, one at 30 mph and one at 50 mph. A bird flies back and forth between them at 80 mph until they meet. How many total miles does the bird fly?",
+      "answer": "120"
+    },
+    {
+      "id": "h13",
+      "prompt": "How many trailing zeros are in 100 factorial?",
+      "answer": "24"
+    },
+    {
+      "id": "h14",
+      "prompt": "You have 12 identical-looking coins, one of which is counterfeit (lighter). What is the minimum number of weighings on a balance scale guaranteed to find it?",
+      "answer": "3"
+    },
+    {
+      "id": "h15",
+      "prompt": "A standard 6-sided die is rolled 3 times. What is the probability that the values are in strictly increasing order? Give the answer as a fraction in lowest terms.",
+      "answer": "5/54"
+    },
+    {
+      "id": "h16",
+      "prompt": "What is the 100th digit after the decimal point in the decimal expansion of 1/7?",
+      "answer": "8"
+    },
+    {
+      "id": "h17",
+      "prompt": "A cube is painted on all 6 faces, then cut into 27 equal smaller cubes. How many of the small cubes have exactly two painted faces?",
+      "answer": "12"
+    },
+    {
+      "id": "h18",
+      "prompt": "If January 1st of a non-leap year is a Monday, what day of the week is December 31st of that same year?",
+      "answer": "Monday"
+    },
+    {
+      "id": "h19",
+      "prompt": "How many distinct ways can you make change for a dollar using only quarters, dimes, and nickels?",
+      "answer": "29"
+    },
+    {
+      "id": "h20",
+      "prompt": "The product of two consecutive positive integers is 1806. What is the larger integer?",
+      "answer": "43"
+    },
+    {
+      "id": "h21",
+      "prompt": "In a round-robin tournament with 8 teams where each team plays every other team exactly once, how many total games are played?",
+      "answer": "28"
+    },
+    {
+      "id": "h22",
+      "prompt": "What is the smallest integer GREATER THAN 1 that leaves a remainder of 1 when divided by 2, 3, 4, 5, and 6?",
+      "answer": "61"
+    },
+    {
+      "id": "h23",
+      "prompt": "A 3x3x3 cube made of unit cubes has its surface completely painted. How many unit cubes have no paint on them at all?",
+      "answer": "1"
+    },
+    {
+      "id": "h24",
+      "prompt": "How many distinct anagrams (including the word itself) can be formed from the letters of the word MISSISSIPPI?",
+      "answer": "34650"
+    },
+    {
+      "id": "h25",
+      "prompt": "A car travels from A to B at 40 mph and returns from B to A at 60 mph along the same route. What is the average speed for the whole round trip, in mph?",
+      "answer": "48"
+    },
+    {
+      "id": "h26",
+      "prompt": "What is the remainder when the sum 1 + 2 + 3 + ... + 100 is divided by 7?",
+      "answer": "3"
+    },
+    {
+      "id": "h27",
+      "prompt": "Five pirates must split 100 gold coins. The most senior proposes a split; all vote; if at least half agree it passes, else the proposer is thrown overboard and the next senior proposes. Pirates are perfectly rational and prefer more gold, then prefer throwing others overboard. How many coins does the most senior pirate keep?",
+      "answer": "98"
+    },
+    {
+      "id": "h28",
+      "prompt": "How many positive divisors does the number 360 have?",
+      "answer": "24"
+    },
+    {
+      "id": "h29",
+      "prompt": "A clock loses 10 minutes every hour. If it is set correctly at noon, what is the actual time when the clock first shows 6:00 PM? Give the answer in HH:MM 24-hour format.",
+      "answer": "19:12"
+    },
+    {
+      "id": "h30",
+      "prompt": "In a group of 23 people, two are said to share a birthday with probability just over 50%. For a group of exactly how many people does the probability of a shared birthday first exceed 50%? (Assume 365 equally likely birthdays.)",
+      "answer": "23"
+    }
+  ]
+}
