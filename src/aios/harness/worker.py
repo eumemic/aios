@@ -336,6 +336,13 @@ async def worker_main() -> None:
         #      re-enqueued in the same pass.
         #   2. Repair tool-call ghosts and wake sessions needing inference.
         await reap_stalled_jobs(procrastinate_app.job_manager)
+        # Every model-dispatch harvest task from a predecessor loop is provably gone (the
+        # singleton lock handed off), so clear the in-flight-harvest key set before the
+        # startup sweep — otherwise a stale key could make the crash-recovery re-park (#1635)
+        # treat a genuinely lost park as still-serviced and skip it.
+        from aios.harness.model_workflow import reset_inflight_harvests
+
+        reset_inflight_harvests()
         sweep = await wake_sessions_needing_inference(pool, inflight_tool_registry)
         if sweep.woken_sessions or sweep.repaired_ghosts:
             log.info(

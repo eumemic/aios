@@ -58,6 +58,32 @@ log = get_logger("aios.harness.model_workflow")
 # discards itself on completion; the sweep re-park is the crash backstop.
 _PARK_TASKS: set[asyncio.Task[None]] = set()
 
+# The ``(session_id, run_id)`` keys of harvest tasks currently in-flight in THIS
+# worker — the model-dispatch analog of ``InflightToolRegistry`` for ``call_*``
+# parks (#1635). The crash-recovery sweep re-parks a session whose unharvested
+# model-dispatch park has NO live harvest task; this set lets a re-park skip a key
+# already serviced in-process (the harvest write is idempotent, so a double-launch
+# is safe — but checking spares the redundant ``await_task`` poll). Cleared at
+# worker boot via :func:`reset_inflight_harvests`, before the boot sweep runs, so a
+# stale key from a previous loop can never mask a genuinely lost task.
+_INFLIGHT_HARVESTS: set[tuple[str, str]] = set()
+
+
+def reset_inflight_harvests() -> None:
+    """Drop all in-flight-harvest keys (worker boot, before the crash-recovery sweep).
+
+    At boot every harvest task from the previous loop is provably gone (the worker
+    died), so the set must start empty — otherwise a stale key would make the boot
+    sweep treat a genuinely lost park as still-serviced and skip its re-park (#1635).
+    """
+    _INFLIGHT_HARVESTS.clear()
+
+
+def inflight_harvest_keys() -> frozenset[tuple[str, str]]:
+    """The ``(session_id, run_id)`` keys of harvest tasks live in THIS worker (#1635)."""
+    return frozenset(_INFLIGHT_HARVESTS)
+
+
 # Event ``kind`` is ``"span"`` (excluded from the message-replay window like the
 # other harness bookkeeping events); the ``event`` discriminator names the role.
 PARK_EVENT = "model_workflow_park"
@@ -145,7 +171,13 @@ async def launch_model_workflow_park(
         version=ref.version,
         environment_id=session.environment_id,
         input=run_input,
-        caller={"kind": "session", "id": session_id},
+        # ``purpose='model_dispatch'`` is the tool_call_id-less servicer discriminant
+        # (#1635): a ``call_*`` park stamps a ``tool_call_id`` on its caller edge, but
+        # a model-dispatch park has none (the assistant message is the run's OUTPUT,
+        # produced only after the park resolves). This marker is what
+        # ``find_unharvested_model_dispatch_parks`` keys on so the crash-recovery sweep
+        # can re-derive the park's run from the durable edge alone.
+        caller={"kind": "session", "id": session_id, "purpose": "model_dispatch"},
         launcher_session_id=session_id,
         parent_run_id=session.parent_run_id,
     )
@@ -178,13 +210,50 @@ async def launch_model_workflow_park(
 def _launch_harvest_task(
     pool: asyncpg.Pool[Any], session_id: str, *, run_id: str, account_id: str
 ) -> None:
-    """Spawn the fire-and-forget park task (held in ``_PARK_TASKS``; the sweep is the backstop)."""
+    """Spawn the fire-and-forget park task (held in ``_PARK_TASKS``; the sweep is the backstop).
+
+    The ``(session_id, run_id)`` key is registered in ``_INFLIGHT_HARVESTS`` for the task's
+    lifetime so the crash-recovery sweep (#1635) does not re-park a key already serviced in
+    this worker — and cleared in the done-callback (it fires on success, error, AND cancel,
+    so a key is never leaked).
+    """
+    key = (session_id, run_id)
+    _INFLIGHT_HARVESTS.add(key)
     task = asyncio.create_task(
         _park_and_signal(pool, session_id, run_id=run_id, account_id=account_id),
         name=f"model_workflow_park:{session_id}:{run_id}",
     )
     _PARK_TASKS.add(task)
-    task.add_done_callback(_PARK_TASKS.discard)
+
+    def _done(t: asyncio.Task[None]) -> None:
+        _PARK_TASKS.discard(t)
+        _INFLIGHT_HARVESTS.discard(key)
+
+    task.add_done_callback(_done)
+
+
+def relaunch_model_dispatch_park(
+    pool: asyncpg.Pool[Any], session_id: str, *, run_id: str, account_id: str
+) -> bool:
+    """Re-park a stranded model-dispatch harvest task whose in-memory task was lost (#1635).
+
+    The model-dispatch analog of :func:`aios.harness.tool_dispatch.relaunch_parked_task`.
+    A worker crash takes the fire-and-forget harvest task down with it; on restart the
+    crash-recovery sweep re-derives the unharvested park
+    (:func:`aios.db.queries.find_unharvested_model_dispatch_parks`) and calls this to spawn
+    a fresh harvest task. The task is a pure read of the run's durable terminal state
+    followed by one idempotent harvest append (dedup-guarded on ``run_id``), so a re-park
+    that races a real harvest is safe — first write wins.
+
+    Returns ``True`` if a task was launched, ``False`` if one is already in-flight in THIS
+    worker for ``(session_id, run_id)`` (the live task will write the harvest; re-parking
+    would only duplicate the ``await_task`` poll). The sweep counts launches.
+    """
+    if (session_id, run_id) in _INFLIGHT_HARVESTS:
+        return False
+    _launch_harvest_task(pool, session_id, run_id=run_id, account_id=account_id)
+    log.info("model_workflow.reparked", session_id=session_id, run_id=run_id)
+    return True
 
 
 async def _park_and_signal(
@@ -231,10 +300,10 @@ async def _park_and_signal(
             outcome=resp.outcome,
         )
     except asyncio.CancelledError:
-        # Worker shutdown: no harvest written. The sweep re-derives the unharvested
-        # park and re-parks (crash-recovery of the park is a separate issue, #1634
-        # out-of-scope — but the sweep's periodic re-wake of a parked session is the
-        # backstop that keeps the turn from stranding silently).
+        # Worker shutdown: no harvest written. The crash-recovery sweep (#1635)
+        # re-derives the unharvested park (``find_unharvested_model_dispatch_parks``)
+        # and re-parks via ``relaunch_model_dispatch_park`` — the durable backstop that
+        # keeps the turn from stranding when this in-process task dies with the worker.
         raise
     except Exception:
         log.exception("model_workflow.park_failed", session_id=session_id, run_id=run_id)

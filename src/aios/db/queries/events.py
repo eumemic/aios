@@ -2190,6 +2190,65 @@ async def find_latest_model_workflow_park(
     return data if isinstance(data, dict) else None
 
 
+async def find_unharvested_model_dispatch_parks(
+    conn: asyncpg.Connection[Any],
+    *,
+    session_id: str | None = None,
+) -> list[tuple[str, str, str]]:
+    """Return ``(session_id, run_id, account_id)`` for every **stranded** model-dispatch park.
+
+    The crash-recovery query (#1635). A model-dispatch park is *stranded* when:
+
+    * it is the session's latest **un-consumed** park — no ``model_workflow_harvest_end``
+      span for its ``run_id`` (it has not been folded), AND
+    * its run has **not been harvested** — no ``model_workflow_harvest`` span for its
+      ``run_id`` (the bound run's terminal state was never written back to the session).
+
+    Such a park owes a harvest task that this worker (or its predecessor) must run. On a
+    normal park the live in-process task writes the harvest; after a worker crash that
+    task is gone, so the sweep re-derives this set and re-parks each one. The harvest
+    write is idempotent on ``run_id`` (:func:`aios.harness.model_workflow.write_harvest_event`),
+    so re-parking a park whose harvest a racing task is about to write is harmless.
+
+    Unlike the ``call_*`` ghost scan this does NOT key on a ``tool_call_id`` in a
+    persisted assistant message — a model-dispatch park has neither (the assistant
+    message is the run's output, produced only once the park resolves). It keys on the
+    ``model_workflow_park`` span itself, the durable park record.
+
+    Scoped to one ``session_id`` when given (the per-session sweep); otherwise
+    cross-session (the boot / periodic sweep). Returns at most one row per session: the
+    park/harvest pair keys off the run id and a session owes at most one parked inference
+    at a time, so the latest un-consumed, un-harvested park is the only stranded one.
+    """
+    scope_clause = "AND p.session_id = $1" if session_id else ""
+    params: list[Any] = [session_id] if session_id else []
+    rows = await conn.fetch(
+        "SELECT DISTINCT ON (p.session_id) p.session_id, p.account_id, "
+        "    p.data->>'run_id' AS run_id "
+        "FROM events p "
+        "WHERE p.kind = 'span' AND p.data->>'event' = 'model_workflow_park' "
+        f"{scope_clause} "
+        # not yet folded (consumed)
+        "AND NOT EXISTS ("
+        "    SELECT 1 FROM events c "
+        "    WHERE c.session_id = p.session_id AND c.account_id = p.account_id "
+        "    AND c.kind = 'span' AND c.data->>'event' = 'model_workflow_harvest_end' "
+        "    AND c.data->>'run_id' = p.data->>'run_id'"
+        ") "
+        # not yet harvested (the run's terminal state was never written back)
+        "AND NOT EXISTS ("
+        "    SELECT 1 FROM events h "
+        "    WHERE h.session_id = p.session_id AND h.account_id = p.account_id "
+        "    AND h.kind = 'span' AND h.data->>'event' = 'model_workflow_harvest' "
+        "    AND h.data->>'run_id' = p.data->>'run_id'"
+        ") "
+        "AND p.data->>'run_id' IS NOT NULL "
+        "ORDER BY p.session_id, p.seq DESC",
+        *params,
+    )
+    return [(r["session_id"], r["run_id"], r["account_id"]) for r in rows]
+
+
 async def find_model_workflow_harvest(
     conn: asyncpg.Connection[Any],
     session_id: str,

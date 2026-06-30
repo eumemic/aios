@@ -32,6 +32,7 @@ from aios.config import get_settings
 from aios.db.queries import (
     confirmed_unresolved_predicate,
     find_parked_servicer,
+    find_unharvested_model_dispatch_parks,
     list_session_ids_with_unharvested_cancel_marker,
     session_active_predicate,
     session_errored_predicate,
@@ -640,6 +641,55 @@ async def find_and_repair_ghosts(
     return repaired
 
 
+async def repark_stranded_model_dispatch(
+    pool: asyncpg.Pool[Any],
+    *,
+    session_id: str | None = None,
+) -> int:
+    """Re-park sessions stranded on a model-dispatch park whose harvest task was lost (#1635).
+
+    The model-dispatch analog of the ``call_*`` re-park inside
+    :func:`find_and_repair_ghosts`. The existing ghost scan only re-parks servicers backed
+    by an open ``tool_call_id`` in a *persisted assistant message* — a model-dispatch park
+    has neither (the assistant message is the bound run's OUTPUT, produced only after the
+    park resolves), so a worker crash while parked strands the session: the run completes
+    and writes its response, but nothing re-parks the outer session to consume it.
+
+    This branch closes that gap. :func:`queries.find_unharvested_model_dispatch_parks`
+    re-derives every session whose latest un-consumed park has no harvest event yet (the
+    run's terminal state was never written back); for each, a fresh harvest task is
+    launched via :func:`model_workflow.relaunch_model_dispatch_park`. That task is a pure
+    read of the run's durable terminal state followed by one idempotent harvest append
+    (dedup-guarded on ``run_id``), so it is safe to run even if the original task is in
+    fact still alive — and ``relaunch_model_dispatch_park`` skips a key already in-flight
+    in this worker, so a steady-state park (its live task running) is never double-parked.
+
+    Returns the number of harvest tasks launched (the recovery count).
+    """
+    # Lazy import: ``sweep`` is imported widely at harness boot; ``model_workflow`` pulls
+    # in the workflows service layer, so deferring the import keeps the import graph flat
+    # (mirrors the lazy ``tool_dispatch`` import in ``find_and_repair_ghosts``).
+    from aios.harness.model_workflow import relaunch_model_dispatch_park
+
+    async with pool.acquire() as conn:
+        stranded = await find_unharvested_model_dispatch_parks(conn, session_id=session_id)
+
+    reparked = 0
+    for sid, run_id, account_id in stranded:
+        # Per-park isolation: cross-session at boot, so one transient failure must not
+        # abort recovery of the others. ``relaunch_model_dispatch_park`` is synchronous
+        # (it only spawns the task) — wrap defensively all the same.
+        try:
+            if relaunch_model_dispatch_park(pool, sid, run_id=run_id, account_id=account_id):
+                reparked += 1
+        except Exception:
+            log.exception("sweep.model_dispatch_repark_failed", session_id=sid, run_id=run_id)
+            continue
+    if reparked:
+        log.info("sweep.model_dispatch_reparked", count=reparked)
+    return reparked
+
+
 def _was_dispatched(
     candidate: _Candidate,
     confirmed_ids: set[str],
@@ -929,6 +979,13 @@ async def wake_sessions_needing_inference(
     ``sweep_end`` span can stamp both without unrolling the composition.
     """
     repaired = await find_and_repair_ghosts(pool, inflight_tool_registry, session_id=session_id)
+    # Crash-recovery for the model-dispatch park (#1635). A model-dispatch park is NOT
+    # discoverable via the assistant-tool_call ghost scan above (it has no tool_call_id and
+    # no persisted assistant message), so it needs its own re-park branch: re-launch the
+    # harvest task for any session stranded with an unharvested park. Runs alongside ghost
+    # repair every sweep (boot + periodic) — the harvest task it launches asynchronously
+    # writes the harvest event and wakes the session, which then lands on the harvest fold.
+    await repark_stranded_model_dispatch(pool, session_id=session_id)
     woken = await find_sessions_needing_inference(
         pool, inflight_tool_registry, session_id=session_id
     )
