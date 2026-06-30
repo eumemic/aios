@@ -1305,6 +1305,18 @@ async def _open_invoke_workflow_capability(
             vault_ids=run_vaults,
             run_id=sub_run_id,
             parent_run_id=run.id,
+            # #1653: propagate the ORIGINATING principal down the ``parent_run_id``
+            # lineage. Without this the sub-run's ``launcher_session_id`` defaults to
+            # NULL, so ``is_operator_run`` (this module) and the launcher surface clamp
+            # (service.py) both mis-read it as an edgeless operator/HTTP run — letting a
+            # self-authoring agent (1) bind the operator-only ``workflow:`` model for a
+            # grandchild and (2) run the sub-run un-attenuated on the tool axis. The
+            # parent run already carries the originating principal: a NON-NULL session
+            # for an agent- or trigger-launched chain (the sub-run inherits it and is
+            # correctly non-operator), or NULL for a genuine operator/HTTP root (the
+            # sub-run stays operator, like the parent). Inheriting it verbatim is the
+            # whole fix — it reflects the originator at every depth of a nested chain.
+            launcher_session_id=run.launcher_session_id,
             request_id=cap.call_key,  # the invoke_workflow() call IS the request
             caller={"kind": "run", "id": run.id, "awaited": True},
             request_output_schema=output_schema,
