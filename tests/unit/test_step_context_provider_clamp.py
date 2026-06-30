@@ -91,7 +91,7 @@ async def _prelude_tool_names(agent: Agent, session: Any) -> list[str]:
     try:
         with mock.patch("aios.db.queries.get_open_obligations", new=AsyncMock(return_value=[])):
             prelude = await compute_step_prelude(
-                _StubPool(),  # type: ignore[arg-type]
+                _StubPool(),
                 _SESSION,
                 account_id=_ACCOUNT,
                 session=session,
