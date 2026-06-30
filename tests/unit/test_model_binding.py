@@ -19,6 +19,7 @@ from aios.harness.completion import LlmResponse
 from aios.harness.model_binding import (
     BindingBoundaryError,
     WorkflowModelRef,
+    effective_capability_model,
     is_workflow_model,
     map_finish_reason,
     map_run_output_to_response,
@@ -152,3 +153,34 @@ def test_usage_and_cost_carried_for_span_only() -> None:
 def test_malformed_return_fails_loud(bad: object) -> None:
     with pytest.raises(BindingBoundaryError):
         map_run_output_to_response(bad)
+
+
+# ── effective_capability_model (#1637) ──
+
+
+def test_effective_model_raw_model_returns_itself() -> None:
+    # A raw provider model resolves to itself regardless of output_model.
+    assert effective_capability_model("anthropic/claude-opus-4-6", output_model=None) == (
+        "anthropic/claude-opus-4-6"
+    )
+    assert (
+        effective_capability_model("anthropic/claude-opus-4-6", output_model="something/else")
+        == "anthropic/claude-opus-4-6"
+    )
+
+
+def test_effective_model_binding_with_declared_model_resolves_to_it() -> None:
+    assert (
+        effective_capability_model("workflow:wf_123", output_model="anthropic/claude-opus-4-6")
+        == "anthropic/claude-opus-4-6"
+    )
+    assert (
+        effective_capability_model("workflow:wf_123@4", output_model="anthropic/claude-opus-4-6")
+        == "anthropic/claude-opus-4-6"
+    )
+
+
+def test_effective_model_binding_without_declared_model_keeps_raw_string() -> None:
+    # The pre-#1637 degraded posture: no declared effective model → the opaque string.
+    assert effective_capability_model("workflow:wf_123", output_model=None) == "workflow:wf_123"
+    assert effective_capability_model("workflow:wf_123", output_model="") == "workflow:wf_123"

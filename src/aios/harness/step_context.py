@@ -423,11 +423,18 @@ async def compose_step_context(
     events: list[Event],
     in_flight_tool_call_ids: frozenset[str] = frozenset(),
     omission: WindowOmission | None = None,
+    capability_model: str | None = None,
 ) -> StepContext:
     """Compose the chat-completions payload for a step.
 
     Takes a prelude built by :func:`compute_step_prelude` and the
     windowed events slate; glues them into the final message list.
+
+    ``capability_model`` is the model string the capability gates (vision
+    inlining, extended-thinking continuity) key on (#1637): for a ``workflow:``
+    model binding it is the bound workflow's declared effective model, so a bound
+    model does not silently degrade those gates. Defaults to ``agent.model`` when
+    not given (every raw-model caller — the gate keys on the agent's own model).
 
     ``pool`` + ``account_id`` back a single read-only query — the
     session's ``workspace_volume_path`` — so the renderer can resolve
@@ -442,6 +449,11 @@ async def compose_step_context(
     from aios.harness.obligations import build_obligations_tail_block
     from aios.services import accounts as accounts_service
     from aios.services import sessions as sessions_service
+
+    # The capability gates (vision inlining + thinking-block continuity) key on the
+    # EFFECTIVE model — the bound workflow's declared output model for a ``workflow:``
+    # binding (#1637), else ``agent.model`` unchanged.
+    gate_model = capability_model if capability_model is not None else agent.model
 
     # Issue #630 follow-up: the renderer's ``/workspace`` attachment branch
     # needs the actual bind-mount source.  Read it from the session row
@@ -465,7 +477,7 @@ async def compose_step_context(
     ctx = build_messages(
         events,
         system_prompt=prelude.system_prompt,
-        model=agent.model,
+        model=gate_model,
         session_id=session.id,
         workspace_path=workspace_path,
         in_flight_tool_call_ids=in_flight_tool_call_ids,
@@ -515,7 +527,7 @@ async def compose_step_context(
     # reasoning_content.  Non-thinking targets had the field correctly
     # stripped by _strip_to_spec (build_messages); do NOT re-add it for
     # them — that re-introduces a field the strip pass just removed.
-    messages = _stub_reasoning_content_for_thinking_target(messages, agent.model)
+    messages = _stub_reasoning_content_for_thinking_target(messages, gate_model)
 
     return StepContext(
         model=agent.model,

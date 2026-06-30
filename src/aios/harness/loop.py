@@ -41,6 +41,7 @@ from aios.harness.completion import (
 )
 from aios.harness.model_binding import (
     BindingBoundaryError,
+    effective_capability_model,
     map_run_output_to_response,
     parse_workflow_model,
 )
@@ -222,6 +223,49 @@ def _resolve_cost_microusd(
         log.warning("usage.model_cost_unmapped", model=model, session_id=session_id)
         return 0
     return round(effective_cost_usd * 1_000_000)
+
+
+async def _resolve_capability_model(pool: asyncpg.Pool[Any], model: str, *, account_id: str) -> str:
+    """Resolve the model the capability gates should key on for ``model`` (#1637).
+
+    For a raw provider model this is ``model`` unchanged (the common case — no DB
+    read). For a ``workflow:<id>[@version]`` binding it is the bound workflow's
+    declared effective model (``output_model``), looked up from the workflow
+    definition, so the vision / thinking / token-window gates resolve to the
+    inner model instead of silently degrading on the opaque ``workflow:`` string.
+
+    A binding whose workflow declares no ``output_model`` — or whose lookup fails
+    (deleted workflow, malformed binding) — falls back to the raw ``workflow:``
+    string: the pre-#1637 degraded posture, never an error (the gate resolution
+    must not wedge the step; the binding's own dispatch path validates the ref).
+    """
+    ref = parse_workflow_model(model)
+    if ref is None:
+        return model
+    from aios.services import workflows as wf_service
+
+    output_model: str | None = None
+    try:
+        if ref.version is not None:
+            version = await wf_service.get_workflow_version(
+                pool, ref.workflow_id, ref.version, account_id=account_id
+            )
+            output_model = version.output_model
+        else:
+            workflow = await wf_service.get_workflow(pool, ref.workflow_id, account_id=account_id)
+            output_model = workflow.output_model
+    except Exception as err:
+        # A missing/archived workflow or a transient read error must not wedge the
+        # step here — the binding's dispatch path (the park) surfaces a real ref
+        # error. Degrade the gates to the raw string (no worse than pre-#1637).
+        log.warning(
+            "step.capability_model_lookup_failed",
+            model=model,
+            workflow_id=ref.workflow_id,
+            error=str(err),
+        )
+        return model
+    return effective_capability_model(model, output_model=output_model)
 
 
 def _crossed_spend_warning_threshold(
@@ -508,6 +552,19 @@ async def _run_session_step_body(
 
     mcp_server_map: dict[str, McpServerSpec] = {s.name: s for s in agent.mcp_servers}
 
+    # ── workflow: binding capability descriptor (#1637) ──
+    #
+    # The capability gates — vision (``supports_vision``), extended-thinking
+    # continuity (``model_descriptor(...).supports_thinking``), and token-window
+    # calibration (``read_windowed_events(model=...)``) — all key on the literal
+    # model string. A ``workflow:<id>`` binding matches none, so a bound model
+    # would silently degrade: images dropped, thinking-blocks stripped, token
+    # counting under-counts. Resolve the binding to its declared EFFECTIVE model
+    # (the bound workflow's ``output_model``) ONCE here and key every downstream
+    # gate on that effective string instead of the opaque ``workflow:`` one. A
+    # raw provider model resolves to itself, so the common case is unchanged.
+    capability_model = await _resolve_capability_model(pool, agent.model, account_id=account_id)
+
     # Build the events-independent prelude (system prompt + tools)
     # before windowing so its overhead can be subtracted from the
     # window budget — otherwise the sent prompt can exceed window_max
@@ -527,7 +584,7 @@ async def _run_session_step_body(
         session_id,
         window_min=agent.window_min,
         window_max=agent.window_max,
-        model=agent.model,
+        model=capability_model,
         overhead_local=prelude_overhead_local(prelude),
         account_id=account_id,
     )
@@ -618,6 +675,7 @@ async def _run_session_step_body(
                 inflight_tool_registry.in_flight_tool_call_ids(session_id)
             ),
             omission=windowed.omission,
+            capability_model=capability_model,
         )
     except Exception:
         await sessions_service.append_event(

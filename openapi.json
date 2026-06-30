@@ -19174,6 +19174,17 @@
             ],
             "title": "Output Schema"
           },
+          "output_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Model"
+          },
           "description": {
             "anyOf": [
               {
@@ -19395,6 +19406,18 @@
             ],
             "title": "Output Schema"
           },
+          "output_model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Model"
+          },
           "description": {
             "anyOf": [
               {
@@ -19498,6 +19521,18 @@
               }
             ],
             "title": "Output Schema"
+          },
+          "output_model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Model"
           },
           "description": {
             "anyOf": [
@@ -19609,6 +19644,17 @@
               }
             ],
             "title": "Output Schema"
+          },
+          "output_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Model"
           },
           "description": {
             "anyOf": [
