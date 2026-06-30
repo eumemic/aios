@@ -163,18 +163,21 @@ def test_effective_model_raw_model_returns_itself() -> None:
     assert effective_capability_model("anthropic/claude-opus-4-6", output_model=None) == (
         "anthropic/claude-opus-4-6"
     )
-    assert effective_capability_model(
-        "anthropic/claude-opus-4-6", output_model="something/else"
-    ) == "anthropic/claude-opus-4-6"
+    assert (
+        effective_capability_model("anthropic/claude-opus-4-6", output_model="something/else")
+        == "anthropic/claude-opus-4-6"
+    )
 
 
 def test_effective_model_binding_with_declared_model_resolves_to_it() -> None:
-    assert effective_capability_model(
-        "workflow:wf_123", output_model="anthropic/claude-opus-4-6"
-    ) == "anthropic/claude-opus-4-6"
-    assert effective_capability_model(
-        "workflow:wf_123@4", output_model="anthropic/claude-opus-4-6"
-    ) == "anthropic/claude-opus-4-6"
+    assert (
+        effective_capability_model("workflow:wf_123", output_model="anthropic/claude-opus-4-6")
+        == "anthropic/claude-opus-4-6"
+    )
+    assert (
+        effective_capability_model("workflow:wf_123@4", output_model="anthropic/claude-opus-4-6")
+        == "anthropic/claude-opus-4-6"
+    )
 
 
 def test_effective_model_binding_without_declared_model_keeps_raw_string() -> None:

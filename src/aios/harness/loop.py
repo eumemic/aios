@@ -225,9 +225,7 @@ def _resolve_cost_microusd(
     return round(effective_cost_usd * 1_000_000)
 
 
-async def _resolve_capability_model(
-    pool: asyncpg.Pool[Any], model: str, *, account_id: str
-) -> str:
+async def _resolve_capability_model(pool: asyncpg.Pool[Any], model: str, *, account_id: str) -> str:
     """Resolve the model the capability gates should key on for ``model`` (#1637).
 
     For a raw provider model this is ``model`` unchanged (the common case — no DB
@@ -254,9 +252,7 @@ async def _resolve_capability_model(
             )
             output_model = version.output_model
         else:
-            workflow = await wf_service.get_workflow(
-                pool, ref.workflow_id, account_id=account_id
-            )
+            workflow = await wf_service.get_workflow(pool, ref.workflow_id, account_id=account_id)
             output_model = workflow.output_model
     except Exception as err:
         # A missing/archived workflow or a transient read error must not wedge the
@@ -567,9 +563,7 @@ async def _run_session_step_body(
     # (the bound workflow's ``output_model``) ONCE here and key every downstream
     # gate on that effective string instead of the opaque ``workflow:`` one. A
     # raw provider model resolves to itself, so the common case is unchanged.
-    capability_model = await _resolve_capability_model(
-        pool, agent.model, account_id=account_id
-    )
+    capability_model = await _resolve_capability_model(pool, agent.model, account_id=account_id)
 
     # Build the events-independent prelude (system prompt + tools)
     # before windowing so its overhead can be subtracted from the
