@@ -13,9 +13,10 @@ from __future__ import annotations
 from typing import Any
 
 from aios.config import get_settings
-from aios.models.agents import PermissionPolicy, ToolTransport
+from aios.models.agents import PermissionPolicy, ToolSpec, ToolTransport
 from aios.models.attenuation import (
     Surface,
+    admit_provider_tools,
     api_base_of,
     api_base_trusted,
     attenuate,
@@ -35,6 +36,22 @@ def clamp(declared: Surface, launcher: Surface) -> Surface:
     return attenuate(
         declared,
         launcher,
+        default_mcp_permission=default_mcp,
+        builtin_transports=builtin_transports,
+    )
+
+
+def admit_provider(provider: list[ToolSpec], effective: Surface) -> list[ToolSpec]:
+    """``admit_provider_tools`` bound to this process's operator defaults (#1627).
+
+    Clamps provider-injected (connection-declared) tools against an already-frozen
+    effective surface, closing the per-step prelude's attenuation-visibility gap for a
+    born-clamped workflow child.
+    """
+    default_mcp, builtin_transports = _defaults()
+    return admit_provider_tools(
+        provider,
+        effective,
         default_mcp_permission=default_mcp,
         builtin_transports=builtin_transports,
     )
