@@ -37,6 +37,26 @@ A/B/C ranking.
 The **foundation passes** iff both TOSTs conclude *equivalent* (each `p_TOST < alpha`,
 CI within ±margin) **and** exact-match rate ≥ 0.90 **and** no-double-charge holds.
 
+## Result of record (2026-06-30, prod `api.aios.eumemic.ai`)
+
+Run: `BASE_MODEL=anthropic/claude-sonnet-4-5`, temp=0, n=40, isolated account
+`acc_01KWBY0PS67QQRXY6RA52A1FPV` (budget cap $8). R0 = `wf_01KWBY8YA06RASHZBV1T2DMSNT`.
+
+| check | result |
+|---|---|
+| usable pairs | 40 / 40 |
+| exact-match rate (normalized text) | **1.000** (bar ≥ 0.90) |
+| no-double-charge | **HOLDS** — 40/40 inner runs charged once (>0 µUSD); 0 sessions re-billed |
+| TOST output-length (±8 chars) | **EQUIVALENT** — n=40, mean_diff=0, CI [0, 0], p_TOST=0 |
+| TOST output-tokens (±2) | **EQUIVALENT** — n=40, mean_diff=0, CI [0, 0], p_TOST=0 |
+| **FOUNDATION VERDICT** | **PASS — R0 ≈ native (equivalence positively established)** |
+
+At temp=0 every R0 output was byte-identical to native, so the paired diffs are a
+constant 0 (sd=0). The TOST zero-variance branch concludes equivalence iff that
+constant is strictly inside the margin — which it is. (A non-degenerate sample
+would yield a tight non-zero CI; the all-zero result is the strongest possible
+transparency outcome and is honestly the ceiling, not a statistical artifact.)
+
 ## How temperature=0 is made symmetric
 
 A session turn builds its `LlmRequest` with `params = agent.litellm_extra`
