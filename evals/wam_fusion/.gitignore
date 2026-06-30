@@ -1,0 +1,4 @@
+# Per-run artifact (regenerated; can be large). Keep the harness, not the output.
+results.json
+__pycache__/
+*.pyc
