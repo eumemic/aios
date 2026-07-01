@@ -86,6 +86,104 @@ async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: s
     return val
 
 
+# The four per-message content classes whose neutral token mass the windower
+# blends R_eff over (issue #1657). This is deliberately the *message-level*
+# subset of :data:`aios.harness.tokens.CONTENT_CLASSES` -- the ``system`` and
+# ``tools`` classes come from the caller's overhead split, never from a stored
+# message row, so they carry no cumulative column.
+_MESSAGE_CONTENT_CLASSES = ("text", "tool_result", "thinking", "tool_use")
+
+# Per-class cumulative-mass column names, keyed by content class. Kept next to
+# the classifier so the append-time increment and the read-time seek share one
+# source of truth for the column <-> class mapping.
+_CLASS_MASS_COLUMN = {
+    "text": "cumulative_text_mass",
+    "tool_result": "cumulative_tool_result_mass",
+    "thinking": "cumulative_thinking_mass",
+    "tool_use": "cumulative_tool_use_mass",
+}
+
+
+def _message_content_class(role: str | None, data: dict[str, Any]) -> str:
+    """Classify a message event into its dominant content class.
+
+    Mirrors :func:`aios.harness.tokens.content_class` AND the ``CASE`` that
+    :func:`_retained_class_mass` used to run in SQL -- the append-time
+    per-class running sum must partition mass into exactly the buckets the
+    (now-removed) full-slate WindowAgg produced, or the stored cumulative
+    would diverge from the fallback estimator on the same slate.
+
+    Message events never carry ``role == 'system'`` (the system prompt is
+    composed at build time, not logged), so unlike ``content_class`` this
+    returns only one of :data:`_MESSAGE_CONTENT_CLASSES`. A defensive
+    ``system`` role folds into ``text`` (its neutral shape), keeping every
+    message's mass attributable to a stored bucket.
+    """
+    if role == "tool":
+        return "tool_result"
+    if role == "assistant":
+        tool_calls = data.get("tool_calls")
+        if isinstance(tool_calls, list) and len(tool_calls) > 0:
+            return "tool_use"
+        if any(data.get(f) for f in ("reasoning_content", "thinking_blocks")):
+            return "thinking"
+    return "text"
+
+
+class _CumulativeState(NamedTuple):
+    """The running-sum state carried on the latest message row (issue #1657).
+
+    ``tokens`` is the pre-existing ``cumulative_tokens`` total; ``messages`` is
+    the running count of user+assistant messages (secondary term); ``mass`` is
+    the per-content-class running neutral-token mass (primary term). ``None``
+    fields mean "no prior cumulative data" -- the append path seeds from 0 and
+    the read path falls back to the full-scan estimator.
+    """
+
+    tokens: int | None
+    messages: int | None
+    mass: dict[str, int | None]
+
+
+async def _latest_cumulative_state(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> _CumulativeState:
+    """Fetch the running cumulative counters from the most recent message row.
+
+    One index seek on ``events_session_cumtokens_idx`` (``ORDER BY seq DESC``,
+    the latest message). Returns the ``cumulative_tokens`` total plus the
+    ``cumulative_messages`` count and the four per-class mass running sums the
+    append path increments (issue #1657). All-``None`` when the session has no
+    message with cumulative data yet (pre-backfill / brand-new session).
+    """
+    row = await conn.fetchrow(
+        "SELECT cumulative_tokens, cumulative_messages, "
+        "       cumulative_text_mass, cumulative_tool_result_mass, "
+        "       cumulative_thinking_mass, cumulative_tool_use_mass "
+        "FROM events "
+        "WHERE session_id = $1 AND kind = 'message' "
+        "AND cumulative_tokens IS NOT NULL "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+    )
+    if row is None:
+        return _CumulativeState(
+            tokens=None,
+            messages=None,
+            mass={c: None for c in _MESSAGE_CONTENT_CLASSES},
+        )
+    return _CumulativeState(
+        tokens=row["cumulative_tokens"],
+        messages=row["cumulative_messages"],
+        mass={
+            "text": row["cumulative_text_mass"],
+            "tool_result": row["cumulative_tool_result_mass"],
+            "thinking": row["cumulative_thinking_mass"],
+            "tool_use": row["cumulative_tool_use_mass"],
+        },
+    )
+
+
 _MODEL_TOKEN_RATIO_MIN_SAMPLES = 5
 _MODEL_TOKEN_RATIO_MIN = 0.5
 _MODEL_TOKEN_RATIO_BUCKET_FLOOR = 0.001
@@ -1115,10 +1213,33 @@ async def append_event(
         # bounded and absorbed by ``model_token_ratio`` calibration in
         # :func:`read_windowed_events` (see PR #218); exact matching is
         # impossible anyway, since a later tz/vision change re-renders history.
+        # cumulative_messages / cumulative_*_mass extend the SAME append-time
+        # running-sum machinery (issue #1657): read the prior running state
+        # (one index seek on the latest message row), then increment. The
+        # per-class mass attributes THIS event's whole token ``delta`` to its
+        # dominant content class (``_message_content_class`` mirrors the CASE
+        # the old full-slate ``_retained_class_mass`` WindowAgg ran), and
+        # ``cumulative_messages`` counts user/assistant messages only — exactly
+        # the ``FILTER (role IN ('user','assistant'))`` the omission read used.
+        # Every counter is NULL on non-message events (as ``cumulative_tokens``
+        # is), so the read path's fallback stays byte-identical for them.
         cum_tokens: int | None = None
+        cum_messages: int | None = None
+        cum_mass: dict[str, int | None] = {c: None for c in _MESSAGE_CONTENT_CLASSES}
         if kind == "message":
-            prev = await _latest_cumulative_tokens(conn, session_id)
-            cum_tokens = (prev or 0) + delta
+            prev = await _latest_cumulative_state(conn, session_id)
+            cum_tokens = (prev.tokens or 0) + delta
+            counts_as_message = role in ("user", "assistant")
+            cum_messages = (prev.messages or 0) + (1 if counts_as_message else 0)
+            cls = _message_content_class(role, data)
+            for c in _MESSAGE_CONTENT_CLASSES:
+                base = prev.mass.get(c) or 0
+                # A negative ``delta`` cannot lower a class below its prior
+                # running sum: clamp per-event so the stored cumulative stays
+                # monotonic, matching the old query's ``if mass < 0: mass = 0``
+                # per-class flooring of the summed deltas.
+                add = delta if c == cls else 0
+                cum_mass[c] = max(0, base + add)
 
         channel = _resolve_event_channel(
             kind, data, orig_channel, focal_at_arrival, resolved_tool_channel
@@ -1130,16 +1251,24 @@ async def append_event(
         row = await conn.fetchrow(
             "INSERT INTO events "
             "(id, session_id, seq, kind, data, cumulative_tokens, "
+            " cumulative_messages, cumulative_text_mass, "
+            " cumulative_tool_result_mass, cumulative_thinking_mass, "
+            " cumulative_tool_use_mass, "
             " orig_channel, focal_channel_at_arrival, channel, "
             " role, tool_name, is_error, sender_name, account_id) "
-            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, "
-            " $10, $11, $12, $13, $14) RETURNING *",
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, "
+            " $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *",
             new_id,
             session_id,
             seq,
             kind,
             data_json,
             cum_tokens,
+            cum_messages,
+            cum_mass["text"],
+            cum_mass["tool_result"],
+            cum_mass["thinking"],
+            cum_mass["tool_use"],
             orig_channel,
             focal_at_arrival,
             channel,
@@ -1892,56 +2021,49 @@ async def _retained_class_mass(
 ) -> dict[str, float]:
     """Per-content-class neutral token mass of the session's message slate.
 
-    Re-derives each message's neutral token mass from the
-    ``cumulative_tokens`` delta against the previous message (the stored
-    running sum), classifies it by role + data shape (matching
-    :func:`aios.harness.tokens.content_class`), and sums per class. The
-    windower blends the per-class coefficients over this composition.
-
-    Pooled over the whole session's message slate (not just the retained
+    Pooled over the WHOLE session's message slate (not just the retained
     tail): the composition is what selects ``R_eff``, and the full-slate
-    mix is a stable, prefix-cache-friendly estimator of it — it does not
-    jump as the drop boundary advances within a snap chunk. Returns an
-    empty dict when no message has cumulative data.
+    mix is a stable, prefix-cache-friendly estimator of it -- it does not
+    jump as the drop boundary advances within a snap chunk.
+
+    O(1) read (issue #1657). The four per-class running sums are maintained
+    at append time (``append_event`` increments ``cumulative_*_mass`` from
+    the prior message's totals, classifying by role+data with
+    ``_message_content_class``). Because the mass pools over the whole slate,
+    the answer is just the LATEST message row's four cumulative totals -- one
+    index seek on ``events_session_cumtokens_idx`` (``ORDER BY seq DESC``),
+    replacing the O(session-size) full-slate ``LAG() OVER (ORDER BY seq)``
+    WindowAgg (measured 3.8s / 90k rows / 46 MB spill on Ultron) entirely.
+
+    Returns an empty dict when the latest message carries no per-class
+    cumulative data (pre-backfill sessions / rolling deploys, where every
+    ``cumulative_*_mass`` is ``NULL``): the caller then blends over the
+    overhead split alone, the same neutral behavior as before backfill. Any
+    class whose stored running sum is ``NULL`` is simply omitted (unseen).
     """
-    rows = await conn.fetch(
-        """
-        WITH deltas AS (
-            SELECT
-                CASE
-                    WHEN data->>'role' = 'tool' THEN 'tool_result'
-                    WHEN data->>'role' = 'assistant'
-                         AND (data ? 'tool_calls')
-                         AND (data->'tool_calls') IS NOT NULL
-                         AND jsonb_typeof(data->'tool_calls') = 'array'
-                         AND jsonb_array_length(data->'tool_calls') > 0
-                        THEN 'tool_use'
-                    WHEN data->>'role' = 'assistant'
-                         AND ((data ? 'reasoning_content') OR (data ? 'thinking_blocks'))
-                        THEN 'thinking'
-                    ELSE 'text'
-                END AS cls,
-                cumulative_tokens
-                - COALESCE(LAG(cumulative_tokens) OVER (ORDER BY seq), 0) AS delta
-            FROM events
-            WHERE session_id = $1
-              AND account_id = $2
-              AND kind = 'message'
-              AND cumulative_tokens IS NOT NULL
-        )
-        SELECT cls, SUM(delta)::float AS mass
-        FROM deltas
-        GROUP BY cls
-        """,
+    row = await conn.fetchrow(
+        "SELECT cumulative_text_mass, cumulative_tool_result_mass, "
+        "       cumulative_thinking_mass, cumulative_tool_use_mass "
+        "FROM events "
+        "WHERE session_id = $1 AND account_id = $2 "
+        "AND kind = 'message' AND cumulative_tokens IS NOT NULL "
+        "ORDER BY seq DESC LIMIT 1",
         session_id,
         account_id,
     )
+    if row is None:
+        return {}
+    stored = {
+        "text": row["cumulative_text_mass"],
+        "tool_result": row["cumulative_tool_result_mass"],
+        "thinking": row["cumulative_thinking_mass"],
+        "tool_use": row["cumulative_tool_use_mass"],
+    }
     out: dict[str, float] = {}
-    for r in rows:
-        mass = float(r["mass"] or 0.0)
-        if mass < 0:
-            mass = 0.0
-        out[r["cls"]] = out.get(r["cls"], 0.0) + mass
+    for cls, mass in stored.items():
+        if mass is None:
+            continue
+        out[cls] = float(mass) if mass > 0 else 0.0
     return out
 
 
@@ -2115,31 +2237,60 @@ async def read_windowed_events(
     events = await read_windowed_context_events(conn, session_id, account_id=account_id, drop=drop)
 
     # The omitted complement: same boundary expression as the retained
-    # scan (``<=`` vs ``>``), and a seq-prefix of the log — so its
-    # ``min(created_at)`` IS the conversation start, and NULL means the
-    # boundary excludes nothing (oversized first event straddling it).
-    # The aggregate re-scans the omitted span each windowed step; if it
-    # ever profiles hot, the escape hatch is a ``cumulative_messages``
-    # counter column (the ``cumulative_tokens`` mechanism).
-    omission_row = await conn.fetchrow(
-        "SELECT min(created_at) AS began_at, "
-        "count(*) FILTER (WHERE role IN ('user', 'assistant')) AS omitted_messages "
+    # scan (``<=`` vs ``>``), a seq-prefix of the log. Its ``omitted_messages``
+    # (user+assistant only) is now the boundary row's ``cumulative_messages``
+    # running count -- O(1), the escape hatch the in-code comment named
+    # (issue #1657): the boundary row is the message with the greatest
+    # ``cumulative_tokens <= drop`` (one index seek on the same
+    # ``events_session_cumtokens_idx``), and its running count IS the count of
+    # user/assistant messages through it = the omitted count. ``began_at`` is
+    # the conversation start = the FIRST message's ``created_at`` (a seq-ASC
+    # LIMIT 1 index seek, not a ``min()`` aggregate scan). NULL boundary row
+    # means the drop excludes no message (oversized first event straddling it)
+    # -> no omission.
+    boundary_row = await conn.fetchrow(
+        "SELECT cumulative_messages, created_at "
         "FROM events "
         "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
-        "AND cumulative_tokens <= $2",
+        "AND cumulative_tokens <= $2 "
+        "ORDER BY cumulative_tokens DESC LIMIT 1",
         session_id,
         drop,
         account_id,
     )
-    assert omission_row is not None  # aggregate query always returns one row
-    omission = (
-        WindowOmission(
-            began_at=omission_row["began_at"],
-            omitted_messages=omission_row["omitted_messages"],
+    if boundary_row is None:
+        # Nothing omitted.
+        return WindowedEvents(events=events, omission=None)
+
+    omitted_messages = boundary_row["cumulative_messages"]
+    if omitted_messages is None:
+        # Pre-backfill boundary row (``cumulative_messages`` is NULL, as it is
+        # on every message that predates migration 0127). Fall back to the
+        # role-filtered ``count(*)`` over the omitted prefix -- the same value,
+        # just O(omitted-prefix). Bounded by the ``cumulative_tokens <= drop``
+        # index cond, and only for the un-backfilled tail (transient across a
+        # rolling deploy), so it never re-introduces the O(session-size) term.
+        omitted_messages = await conn.fetchval(
+            "SELECT count(*) FILTER (WHERE role IN ('user', 'assistant')) "
+            "FROM events "
+            "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
+            "AND cumulative_tokens <= $2",
+            session_id,
+            drop,
+            account_id,
         )
-        if omission_row["began_at"] is not None
-        else None
+
+    # Conversation start: the first message's ``created_at``. A seq-ASC index
+    # seek, not an aggregate over the omitted span. Guaranteed present here
+    # (``boundary_row`` proves at least one omitted message exists).
+    began_at = await conn.fetchval(
+        "SELECT created_at FROM events "
+        "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
+        "ORDER BY seq ASC LIMIT 1",
+        session_id,
+        account_id,
     )
+    omission = WindowOmission(began_at=began_at, omitted_messages=omitted_messages)
     return WindowedEvents(events=events, omission=omission)
 
 

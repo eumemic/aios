@@ -105,8 +105,14 @@ class TestNoInLockCompute:
 
     def test_only_cumulative_query_between_update_and_insert(self) -> None:
         """In the region between the seq-allocating UPDATE and the INSERT, the
-        only awaited query helper is ``_latest_cumulative_tokens`` — no
-        tokenizer, no channel lookup, no focal read."""
+        only awaited query helper is ``_latest_cumulative_state`` — no
+        tokenizer, no channel lookup, no focal read.
+
+        (``_latest_cumulative_state`` is the single-index-seek read of the
+        prior message row's running counters — ``cumulative_tokens`` plus the
+        ``cumulative_messages`` count and per-class mass added in issue #1657;
+        it replaced the narrower ``_latest_cumulative_tokens`` fetch here so
+        every running sum advances off one seek, still under the row lock.)"""
         func = _append_event_def()
 
         update_lineno = _str_literal_lineno(func, "UPDATE sessions ")
@@ -118,9 +124,9 @@ class TestNoInLockCompute:
 
         # The region is correctly identified AND non-trivial: the cumulative
         # read must land inside it.
-        cumulative = [n for n in _call_linenos(func, "_latest_cumulative_tokens") if in_region(n)]
+        cumulative = [n for n in _call_linenos(func, "_latest_cumulative_state") if in_region(n)]
         assert cumulative, (
-            "_latest_cumulative_tokens must be called between the UPDATE and the INSERT"
+            "_latest_cumulative_state must be called between the UPDATE and the INSERT"
         )
 
         # Nothing heavier may run in that region.

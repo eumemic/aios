@@ -28,18 +28,20 @@ _FALLBACK_SENTINEL: list[Any] = ["_fallback_sentinel"]
 class _FakeConn:
     """Minimal asyncpg.Connection stand-in.
 
-    ``fetchval`` serves ``_latest_cumulative_tokens`` (total local tokens).
-    ``fetchrow`` serves the omission-complement aggregate.  ``fetch`` now
-    backs three queries, dispatched on SQL text (issue #1609):
+    Since the per-turn read path became O(1) (issue #1657) it reads from
+    stored running-counter columns instead of re-aggregating the slate, so
+    the stubs dispatch on SQL text:
 
-    * the per-class calibration scan (``model_token_class_ratios``) — we
-      return ``ratio_rows`` (empty => neutral all-1.0 fallback, the
-      backward-compat default these tests exercise);
-    * the retained-slate class-mass re-derivation (``_retained_class_mass``)
-      — returns ``mass_rows`` (empty => no composition signal, blend folds to
-      the coefficient mean = 1.0 under the neutral default);
-    * the bounded retained range scan — captured into ``fetch_calls`` so
-      tests can assert the computed ``drop_local``.
+    * ``fetchval`` serves ``_latest_cumulative_tokens`` (``cumulative_tokens``
+      total local), and the O(1) ``began_at`` seek (``created_at`` of the
+      first message). Both return scalars; dispatched on SQL text.
+    * ``fetchrow`` serves two O(1) index seeks: ``_retained_class_mass``'s
+      latest-row per-class cumulative mass (``mass_row``), and the omission
+      boundary row (``omission_row``: its ``cumulative_messages`` running count
+      + ``created_at``). Dispatched on SQL text.
+    * ``fetch`` backs the per-class calibration scan
+      (``model_token_class_ratios`` -> ``ratio_rows``) and the bounded retained
+      range scan (captured into ``fetch_calls`` for the drop-boundary asserts).
     """
 
     def __init__(
@@ -50,35 +52,53 @@ class _FakeConn:
         ratio_mean: float,
         omission_row: dict[str, Any] | None = None,
         ratio_rows: list[Any] | None = None,
-        mass_rows: list[Any] | None = None,
+        mass_row: dict[str, Any] | None = None,
     ) -> None:
         self.total_local = total_local
         # Retained for signature back-compat; the per-class fit no longer
         # consumes a single aggregate row.
         self.ratio_row = {"n": ratio_n, "mean_ratio": ratio_mean}
-        self.omission_row = omission_row or {
-            "began_at": _BEGAN_AT,
-            "omitted_messages": 7,
-        }
+        # The omission boundary row: a non-None ``cumulative_messages`` means
+        # the drop excluded that many user/assistant messages; a None row means
+        # the boundary excluded nothing. Default: 7 omitted, boundary present.
+        if omission_row is None:
+            omission_row = {"cumulative_messages": 7, "created_at": _BEGAN_AT}
+        self.omission_row = omission_row
         self.ratio_rows = ratio_rows or []
-        self.mass_rows = mass_rows or []
+        # The latest-message per-class cumulative mass row (all-None => no
+        # composition signal, blend folds to the coefficient mean = 1.0 under
+        # the neutral default).
+        self.mass_row = mass_row
         self.fetch_calls: list[tuple[Any, ...]] = []
         self.omission_calls: list[tuple[Any, ...]] = []
 
-    async def fetchval(self, _sql: str, *_args: Any) -> int | None:
+    async def fetchval(self, sql: str, *args: Any) -> Any:
+        if "SELECT created_at FROM events" in sql:
+            # ``began_at`` O(1) seek — present iff there is an omitted message.
+            row = self.omission_row
+            if row is None:
+                return None
+            return row.get("created_at")
+        if "count(*) FILTER" in sql:
+            # Pre-backfill fallback count (only hit when the boundary row's
+            # ``cumulative_messages`` is None); these tests seed it non-None.
+            row = self.omission_row or {}
+            return row.get("omitted_messages")
+        # ``_latest_cumulative_tokens`` — the session's total local tokens.
         return self.total_local
 
-    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any]:
-        if "began_at" in sql:
+    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
+        if "cumulative_messages" in sql and "ORDER BY cumulative_tokens DESC" in sql:
             self.omission_calls.append(args)
             return self.omission_row
+        if "cumulative_text_mass" in sql:
+            # ``_retained_class_mass`` latest-row per-class mass seek.
+            return self.mass_row
         return self.ratio_row
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:
         if "model_request_end" in sql:
             return self.ratio_rows
-        if "WITH deltas" in sql:
-            return self.mass_rows
         self.fetch_calls.append(args)
         return []
 
@@ -222,7 +242,12 @@ async def test_ratio_below_1_drops_fewer(monkeypatch: pytest.MonkeyPatch) -> Non
 @pytest.mark.asyncio
 async def test_windowed_read_reports_omission() -> None:
     """A real drop returns the omitted-span facts, queried against the
-    SAME boundary value as the retained range scan (exact complements)."""
+    SAME boundary value as the retained range scan (exact complements).
+
+    Post-#1657 the omitted count is the boundary row's ``cumulative_messages``
+    running counter (O(1) index seek), not a ``count(*)`` scan — but the
+    boundary value it is read at must still equal the retained scan's drop.
+    """
     account_id = "acc_test_stub"
     conn = _FakeConn(total_local=3_000, ratio_n=4, ratio_mean=0.0)
     result = await queries.read_windowed_events(
@@ -235,8 +260,9 @@ async def test_windowed_read_reports_omission() -> None:
         account_id=account_id,
     )
     assert result.omission == WindowOmission(began_at=_BEGAN_AT, omitted_messages=7)
-    # Complement check: both queries saw the same drop boundary.
-    assert conn.omission_calls, "expected the omission aggregate to be queried"
+    # Complement check: both the retained scan and the omission boundary seek
+    # saw the same drop boundary.
+    assert conn.omission_calls, "expected the omission boundary row to be queried"
     _sid, retained_drop, *_ = conn.fetch_calls[-1]
     _sid2, omitted_drop, *_ = conn.omission_calls[-1]
     assert retained_drop == omitted_drop
@@ -245,14 +271,20 @@ async def test_windowed_read_reports_omission() -> None:
 @pytest.mark.asyncio
 async def test_empty_complement_reports_no_omission() -> None:
     """drop > 0 but the boundary excludes nothing (oversized first event
-    straddling it) -> omission is None, not a zero-count marker."""
+    straddling it) -> omission is None, not a zero-count marker.
+
+    A None boundary row means no message satisfies ``cumulative_tokens <=
+    drop`` — the O(1) seek returns nothing, so there is no omission.
+    """
     account_id = "acc_test_stub"
     conn = _FakeConn(
         total_local=3_000,
         ratio_n=4,
         ratio_mean=0.0,
-        omission_row={"began_at": None, "omitted_messages": 0},
+        omission_row=None,
     )
+    # Force the "no boundary row" case explicitly (default seeds a present one).
+    conn.omission_row = None
     result = await queries.read_windowed_events(
         conn,
         "sess_x",
@@ -263,6 +295,39 @@ async def test_empty_complement_reports_no_omission() -> None:
         account_id=account_id,
     )
     assert result.omission is None
+
+
+@pytest.mark.asyncio
+async def test_omission_prebackfill_falls_back_to_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A boundary row that predates migration 0127 carries a NULL
+    ``cumulative_messages``; the omission count then falls back to the
+    role-filtered ``count(*)`` over the omitted prefix — same value, bounded
+    by the ``cumulative_tokens <= drop`` index cond (issue #1657)."""
+    account_id = "acc_test_stub"
+    # Boundary row present (created_at set) but cumulative_messages is None:
+    # the un-backfilled tail. The fallback count(*) returns 5.
+    conn = _FakeConn(
+        total_local=3_000,
+        ratio_n=4,
+        ratio_mean=0.0,
+        omission_row={
+            "cumulative_messages": None,
+            "created_at": _BEGAN_AT,
+            "omitted_messages": 5,
+        },
+    )
+    result = await queries.read_windowed_events(
+        conn,
+        "sess_x",
+        window_min=1_000,
+        window_max=2_000,
+        model="m",
+        overhead_local=0,
+        account_id=account_id,
+    )
+    assert result.omission == WindowOmission(began_at=_BEGAN_AT, omitted_messages=5)
 
 
 @pytest.mark.asyncio
@@ -289,17 +354,17 @@ async def test_ceil_div_never_overshoots_window(
     eff = ratio * 1.3  # calibrated safety margin
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=total_local)
-    conn.fetchrow = AsyncMock(  # serves the omission-complement aggregate
-        return_value={"began_at": None, "omitted_messages": 0}
-    )
+    # No message satisfies the boundary here (oversized first event) -> no
+    # omission; the boundary-row seek returns None.
+    conn.fetchrow = AsyncMock(return_value=None)
 
     captured: dict[str, int] = {}
 
     async def _fetch(sql: str, *args: Any) -> list[Any]:
-        # Per-class calibration scan and retained-mass re-derivation also
-        # route through fetch — only the bounded retained scan carries the
-        # drop boundary as its second positional arg.
-        if "model_request_end" in sql or "WITH deltas" in sql:
+        # Per-class calibration scan routes through fetch too — only the
+        # bounded retained scan carries the drop boundary as its second
+        # positional arg.
+        if "model_request_end" in sql:
             return []
         captured["drop_local"] = args[1]
         return []
@@ -368,13 +433,15 @@ async def test_overhead_clamp_never_drops_entire_window(
     )
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=total_local)
-    conn.fetchrow = AsyncMock(  # omission complement matches every row here
-        return_value={"began_at": _BEGAN_AT, "omitted_messages": 7}
+    # Omission boundary row present here (matches every row); its
+    # ``cumulative_messages`` seek returns a count.
+    conn.fetchrow = AsyncMock(
+        return_value={"cumulative_messages": 7, "created_at": _BEGAN_AT}
     )
     captured: dict[str, int] = {}
 
     async def _fetch(sql: str, *args: Any) -> list[Any]:
-        if "model_request_end" in sql or "WITH deltas" in sql:
+        if "model_request_end" in sql:
             return []
         captured["drop_local"] = args[1]
         return []
