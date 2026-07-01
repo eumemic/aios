@@ -100,7 +100,18 @@ async def test_root_account_can_publish_tools_schema(
         pool,
         connector="echo",
         account_id=root_id,
-        tools_schema=[{"name": "send", "description": "send a message", "parameters": {}}],
+        # A valid ToolSpec entry — the shape the SDK's ``derive_tool_spec``
+        # actually publishes and that ``compute_step_prelude`` reads back
+        # via ``ToolSpec.model_validate`` (must pass the #1652 PUT-boundary
+        # validation).
+        tools_schema=[
+            {
+                "type": "custom",
+                "name": "send",
+                "description": "send a message",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
     )
 
     async with pool.acquire() as conn:
