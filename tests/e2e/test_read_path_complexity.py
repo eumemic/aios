@@ -163,17 +163,21 @@ async def seed_large_session(
                          || '"reasoning_content":"because"}')::jsonb
                 END,
                 now(),
-                -- cumulative_tokens: running SUM of a per-row delta.
-                (SUM($5) OVER (ORDER BY g))::bigint,
+                -- cumulative_tokens: running SUM of a per-row delta. The
+                -- per-row delta is cast to ``bigint`` because asyncpg binds
+                -- ``$5`` as an untyped parameter and ``SUM(unknown)`` is
+                -- ambiguous in Postgres (AmbiguousFunctionError); the explicit
+                -- cast pins the SUM to the ``bigint`` overload.
+                (SUM($5::bigint) OVER (ORDER BY g))::bigint,
                 -- cumulative_messages: running COUNT of user/assistant rows
                 -- (roles 0,1,2,4 are user/assistant; role 3 is tool).
                 (SUM(CASE WHEN (g % 5) = 3 THEN 0 ELSE 1 END) OVER (ORDER BY g))::bigint,
                 -- per-class running masses: each row's whole delta goes to its
                 -- dominant class, matching _message_content_class.
-                (SUM(CASE WHEN (g % 5) IN (0, 1) THEN $5 ELSE 0 END) OVER (ORDER BY g))::bigint,
-                (SUM(CASE WHEN (g % 5) = 3 THEN $5 ELSE 0 END) OVER (ORDER BY g))::bigint,
-                (SUM(CASE WHEN (g % 5) = 4 THEN $5 ELSE 0 END) OVER (ORDER BY g))::bigint,
-                (SUM(CASE WHEN (g % 5) = 2 THEN $5 ELSE 0 END) OVER (ORDER BY g))::bigint,
+                (SUM(CASE WHEN (g % 5) IN (0, 1) THEN $5::bigint ELSE 0 END) OVER (ORDER BY g))::bigint,
+                (SUM(CASE WHEN (g % 5) = 3 THEN $5::bigint ELSE 0 END) OVER (ORDER BY g))::bigint,
+                (SUM(CASE WHEN (g % 5) = 4 THEN $5::bigint ELSE 0 END) OVER (ORDER BY g))::bigint,
+                (SUM(CASE WHEN (g % 5) = 2 THEN $5::bigint ELSE 0 END) OVER (ORDER BY g))::bigint,
                 CASE (g % 5)
                     WHEN 0 THEN 'user'
                     WHEN 3 THEN 'tool'
