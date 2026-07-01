@@ -628,9 +628,7 @@ def _plan_node_shape(plan_node: dict[str, Any]) -> list[tuple[str, str, str]]:
     ]
 
 
-async def _seed_fast_path_session(
-    pool: asyncpg.Pool[Any], session_id: str, n_events: int
-) -> None:
+async def _seed_fast_path_session(pool: asyncpg.Pool[Any], session_id: str, n_events: int) -> None:
     """Seed one session at ``n_events`` user/assistant message events, then
     reconcile the migration-0066 scalar columns (the fast-path reads only these,
     never ``events``). Used by the plan-shape guard at N=10 and N=10 000 to prove
@@ -736,8 +734,7 @@ class TestFastPathPlanShapeAsymptotic:
                 seq_scans_events = [
                     n2
                     for n2 in nodes
-                    if n2.get("Node Type") == "Seq Scan"
-                    and n2.get("Relation Name") == "events"
+                    if n2.get("Node Type") == "Seq Scan" and n2.get("Relation Name") == "events"
                 ]
                 assert not seq_scans_events, (
                     f"session_has_pending_work has a Seq Scan on ``events`` at N={n}."

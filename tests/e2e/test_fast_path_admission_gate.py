@@ -83,9 +83,7 @@ async def _append_assistant_reacting_to_tail(pool: asyncpg.Pool[Any], sid: str) 
     """Append an assistant message reacting to the current tail, driving the
     session idle (``last_reacted_seq`` catches up to ``last_stimulus_seq``)."""
     async with pool.acquire() as conn:
-        tail = await conn.fetchval(
-            "SELECT last_event_seq FROM sessions WHERE id = $1", sid
-        )
+        tail = await conn.fetchval("SELECT last_event_seq FROM sessions WHERE id = $1", sid)
     await sessions_service.append_event(
         pool,
         sid,
@@ -101,9 +99,7 @@ async def _fast_path(pool: asyncpg.Pool[Any], sid: str) -> bool:
 
 
 async def _full_sweep_has_work(pool: asyncpg.Pool[Any], sid: str) -> bool:
-    result = await find_sessions_needing_inference(
-        pool, InflightToolRegistry(), session_id=sid
-    )
+    result = await find_sessions_needing_inference(pool, InflightToolRegistry(), session_id=sid)
     return sid in result
 
 
@@ -190,9 +186,7 @@ async def _state_errored(pool: asyncpg.Pool[Any]) -> str:
 async def _state_archived(pool: asyncpg.Pool[Any]) -> str:
     sid = await _state_pending_user(pool)
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE sessions SET archived_at = now() WHERE id = $1", sid
-        )
+        await conn.execute("UPDATE sessions SET archived_at = now() WHERE id = $1", sid)
     return sid
 
 
@@ -279,9 +273,7 @@ class TestFastPathOverApproximation:
         )
 
     @pytest.mark.parametrize("state", sorted(_NO_WORK_STATES))
-    async def test_no_work_states_early_out(
-        self, db_pool: asyncpg.Pool[Any], state: str
-    ) -> None:
+    async def test_no_work_states_early_out(self, db_pool: asyncpg.Pool[Any], state: str) -> None:
         """On genuinely-quiescent states the gate early-outs (False) — the whole
         point of the fast path (skip the multi-CTE sweep on wasted wakes)."""
         sid = await _STATE_BUILDERS[state](db_pool)

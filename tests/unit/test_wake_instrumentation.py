@@ -791,9 +791,7 @@ async def _harness_with_guard(
     with (
         patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
         patch("aios.harness.loop.runtime.require_inflight_tool_registry", return_value=MagicMock()),
-        patch(
-            "aios.harness.loop.session_has_pending_work", AsyncMock(return_value=True)
-        ),
+        patch("aios.harness.loop.session_has_pending_work", AsyncMock(return_value=True)),
         patch(
             "aios.harness.loop.find_sessions_needing_inference", AsyncMock(return_value={"sess_x"})
         ),

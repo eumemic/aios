@@ -193,9 +193,7 @@ class TestEntrySweepSpan:
         # Only the guard's own spans (``sweep_*`` outer pair + ``sweep.*`` child
         # pairs); other step spans (``step_start`` etc.) are filtered out.
         events = [
-            e["event"]
-            for e in _span_events(append_event)
-            if str(e["event"]).startswith("sweep")
+            e["event"] for e in _span_events(append_event) if str(e["event"]).startswith("sweep")
         ]
         # The child spans appear, bracketed by the outer sweep pair, in order.
         assert events == [
