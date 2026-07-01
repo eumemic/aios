@@ -565,30 +565,109 @@ async def _run_session_step_body(
     # raw provider model resolves to itself, so the common case is unchanged.
     capability_model = await _resolve_capability_model(pool, agent.model, account_id=account_id)
 
+    # Span the prelude + windowed-read work individually (issue #1658).
+    #
+    # This pair of reads runs in the window between ``step_start`` and
+    # ``context_build_start`` and used to be UNSPANNED — the ``context_build_*``
+    # pair only brackets ``compose_step_context`` (which measures ~0.00s), so a
+    # multi-second pre-inference read cost was blind-spotted by every profiling
+    # angle that keyed on ``context_build_*``. Bracketing each read individually
+    # turns "where did the pre-inference seconds go?" into a query instead of a
+    # manual full-window (``step_start`` → ``context_build_start``)
+    # decomposition. On failure we still emit the end with ``is_error: True``
+    # and re-raise, matching the ``context_build_*`` / ``model_request_*``
+    # symmetry (no orphan starts).
+
     # Build the events-independent prelude (system prompt + tools)
     # before windowing so its overhead can be subtracted from the
     # window budget — otherwise the sent prompt can exceed window_max
     # by exactly that overhead.
-    prelude = await compute_step_prelude(
+    compute_prelude_start = await sessions_service.append_event(
         pool,
         session_id,
+        "span",
+        {"event": "compute_prelude_start"},
         account_id=account_id,
-        session=session,
-        agent=agent,
-        channels=channels,
-        memory_store_echoes=memory_echoes,
     )
+    try:
+        prelude = await compute_step_prelude(
+            pool,
+            session_id,
+            account_id=account_id,
+            session=session,
+            agent=agent,
+            channels=channels,
+            memory_store_echoes=memory_echoes,
+        )
+    except Exception:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {
+                "event": "compute_prelude_end",
+                "compute_prelude_start_id": compute_prelude_start.id,
+                "is_error": True,
+            },
+            account_id=account_id,
+        )
+        raise
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "compute_prelude_end",
+            "compute_prelude_start_id": compute_prelude_start.id,
+            "is_error": False,
+        },
+        account_id=account_id,
+    )
+
     # Read windowed message events for this session.
-    windowed = await sessions_service.read_windowed_events(
+    read_window_start = await sessions_service.append_event(
         pool,
         session_id,
-        window_min=agent.window_min,
-        window_max=agent.window_max,
-        model=capability_model,
-        overhead_local=prelude_overhead_local(prelude),
+        "span",
+        {"event": "read_window_start"},
         account_id=account_id,
     )
+    try:
+        windowed = await sessions_service.read_windowed_events(
+            pool,
+            session_id,
+            window_min=agent.window_min,
+            window_max=agent.window_max,
+            model=capability_model,
+            overhead_local=prelude_overhead_local(prelude),
+            account_id=account_id,
+        )
+    except Exception:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {
+                "event": "read_window_end",
+                "read_window_start_id": read_window_start.id,
+                "is_error": True,
+            },
+            account_id=account_id,
+        )
+        raise
     events = windowed.events
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": "read_window_end",
+            "read_window_start_id": read_window_start.id,
+            "is_error": False,
+            "event_count_read": len(events),
+        },
+        account_id=account_id,
+    )
 
     # Check for confirmed-but-undispatched tool calls (always_ask → allow).
     # The sweep's case (c) ensures we passed the guard above.

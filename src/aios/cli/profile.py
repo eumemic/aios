@@ -287,7 +287,17 @@ def compute_profile(
             inside_durations[phase].append(pair.duration_s)
 
     inside_stats: list[PhaseStats] = []
-    for phase in ("sweep", "context_build", "model_request"):
+    # ``compute_prelude`` + ``read_window`` are the previously-unspanned
+    # pre-inference read cost (issue #1658): they run between ``step_start`` and
+    # ``context_build_start``. Listed before ``context_build`` to match their
+    # temporal order in the step.
+    for phase in (
+        "sweep",
+        "compute_prelude",
+        "read_window",
+        "context_build",
+        "model_request",
+    ):
         durations = inside_durations.get(phase, [])
         if not durations:
             continue
