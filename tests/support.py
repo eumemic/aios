@@ -104,3 +104,83 @@ def find_unbounded_events_aggregates(plan_node: dict[str, Any]) -> list[dict[str
 
     walk(plan_node)
     return found
+
+
+def find_unbounded_events_scan_over_seq(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every aggregate node (WindowAgg / Aggregate / GroupAggregate)
+    whose input subtree scans the ``events`` relation *without* a
+    ``cumulative_tokens`` range bound and *without* a ``seq`` lower bound.
+
+    This is the PRIMARY plan-shape oracle for the read-path complexity harness
+    (issue #1661), foreclosing the whole O(session-size) hot-path class — not
+    just the single #1657 shape. The pathology it names is precisely what
+    detonated Ultron: an unbounded ``LAG(cumulative_tokens) OVER (ORDER BY
+    seq)`` WindowAgg (``_retained_class_mass``, born in #1611) that consumes
+    *every* message row in the session slate before the fits-in-window
+    short-circuit even runs. The fix stores per-class running sums at append
+    time, so the aggregate node ceases to exist and the read collapses to an
+    O(1) index seek.
+
+    The verdict is asymptotic SHAPE, present-vs-absent — no wall-clock, no
+    row-count threshold, no ``EXPLAIN ANALYZE``. It fires only when BOTH hold
+    for an aggregate node: (a) its type is in ``_AGGREGATE_NODE_TYPES``, and
+    (b) some ``events`` scan beneath it carries neither a ``cumulative_tokens``
+    ``>``/``>=`` range bound nor a ``seq`` ``>``/``>=`` lower bound (i.e. it is
+    keyed on ``session_id`` alone, which is O(session-size)). A windowed
+    aggregate that IS bounded (a legitimate trailing-window range scan) does
+    not trip it.
+
+    Kept beside :func:`find_subplans_over_events` and
+    :func:`find_unbounded_events_aggregates`, mirroring their shape-only,
+    row-count-free discipline. It shares the ``events``-lower-bound predicate
+    (``cumulative_tokens``/``seq`` ``>``/``>=``) with the latter; the two are
+    intentionally near-synonyms — this one is the harness's named entry point,
+    the other predates it as the #1657-specific guard, and keeping both makes
+    the harness's registry read as a self-describing catalogue.
+    """
+    found: list[dict[str, Any]] = []
+
+    def walk(node: dict[str, Any]) -> None:
+        if node.get("Node Type") in _AGGREGATE_NODE_TYPES:
+            scans = _collect_scan_relations(node)
+            events_scans = [s for s in scans if s.get("Relation Name") == "events"]
+            if events_scans and not any(_scan_has_events_lower_bound(s) for s in events_scans):
+                found.append(node)
+        for child in node.get("Plans", []):
+            walk(child)
+
+    walk(plan_node)
+    return found
+
+
+def has_external_disk_sort(plan_node: dict[str, Any]) -> bool:
+    """True if any ``Sort`` node in the plan spilled to disk via an
+    external merge.
+
+    This is the SECONDARY structural fingerprint of the O(session-size)
+    read-tax (issue #1661): Ultron's detonation surfaced not only as a
+    multi-second WindowAgg but as a ``Sort Method: external merge  Disk:
+    45,736kB`` — the sort of the whole slate could not fit ``work_mem`` and
+    spilled. A trailing-window read never sorts enough rows to spill; a
+    full-slate aggregate over 90k rows does.
+
+    ``EXPLAIN`` *without* ``ANALYZE`` reports the planner's *estimated* sort
+    method in ``Sort Method`` only when it can foresee the spill; the runtime
+    ``Actual Rows`` / measured spill size live under ``ANALYZE`` and are
+    deliberately NOT consulted here (no row-count, no wall-clock in any gating
+    path). This helper is therefore an *advisory* backstop signal — used to
+    enrich diagnostics, never as a standalone gate — and reads only the
+    ``Sort Method`` string Postgres already emits in the plan tree.
+    """
+
+    def walk(node: dict[str, Any]) -> bool:
+        method = str(node.get("Sort Method", ""))
+        if "external" in method.lower() and "disk" in method.lower():
+            return True
+        # Also honor the bare ``external merge`` / ``external sort`` phrasing,
+        # which some Postgres versions emit without the literal word "disk".
+        if "external merge" in method.lower() or "external sort" in method.lower():
+            return True
+        return any(walk(child) for child in node.get("Plans", []))
+
+    return walk(plan_node)
