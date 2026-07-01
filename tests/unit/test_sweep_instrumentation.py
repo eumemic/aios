@@ -119,10 +119,18 @@ class TestTailSweepSpan:
 # ─── entry site (loop._run_session_step_body guard) ──────────────────────────
 
 
+def _acm_pool() -> MagicMock:
+    """A pool mock whose ``acquire()`` is an async context manager (MagicMock
+    auto-provides ``__aenter__``/``__aexit__`` as AsyncMocks), so the fast-path
+    guard's ``async with pool.acquire() as conn`` works under mock — the guard
+    never touches the yielded conn (``session_has_pending_work`` is patched)."""
+    return MagicMock()
+
+
 @pytest.fixture
 def mock_runtime() -> Iterator[None]:
     with (
-        patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
+        patch("aios.harness.loop.runtime.require_pool", return_value=_acm_pool()),
         patch(
             "aios.harness.loop.runtime.require_inflight_tool_registry",
             return_value=MagicMock(),
@@ -133,17 +141,21 @@ def mock_runtime() -> Iterator[None]:
 
 class TestEntrySweepSpan:
     async def test_wasted_wake_marks_woken_sessions_zero(self, mock_runtime: None) -> None:
-        """Guard early-out: find_sessions_needing_inference returns empty set.
-        ``sweep_end`` stamps ``woken_sessions=0`` — the profiler's wasted-wake signal.
+        """Guard early-out: the fast-path ``session_has_pending_work`` returns
+        ``False`` (provably no work), so the full ``find_sessions_needing_inference``
+        is never called and ``sweep_end`` stamps ``woken_sessions=0`` — the
+        profiler's wasted-wake signal.
         """
         from aios.harness.loop import run_session_step
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
+        full_sweep = AsyncMock(return_value=set())
         with (
             patch(
-                "aios.harness.loop.find_sessions_needing_inference",
-                AsyncMock(return_value=set()),
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=False),
             ),
+            patch("aios.harness.loop.find_sessions_needing_inference", full_sweep),
             patch("aios.harness.loop.sessions_service.append_event", append_event),
         ):
             await run_session_step("sess_x", cause="message")
@@ -156,7 +168,44 @@ class TestEntrySweepSpan:
             "sweep_start_id": "ev_sweep",
             "repaired_ghosts": 0,
             "woken_sessions": 0,
+            "fast_path": True,
         }
+        # (A): a provable "no work" from the fast path never touches the full sweep.
+        full_sweep.assert_not_awaited()
+
+    async def test_fast_path_pool_and_query_spans_emitted(self, mock_runtime: None) -> None:
+        """(C) observability: the guard emits the ``sweep.pool_acquire`` and
+        ``sweep.query_exec`` child span pairs (nested inside the outer
+        ``sweep_start``/``sweep_end``) so the pool-wait vs event-loop-time-share
+        split is *measured*, not inferred."""
+        from aios.harness.loop import run_session_step
+
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
+        with (
+            patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=False),
+            ),
+            patch("aios.harness.loop.sessions_service.append_event", append_event),
+        ):
+            await run_session_step("sess_x", cause="message")
+
+        # Only the guard's own spans (``sweep_*`` outer pair + ``sweep.*`` child
+        # pairs); other step spans (``step_start`` etc.) are filtered out.
+        events = [
+            e["event"]
+            for e in _span_events(append_event)
+            if str(e["event"]).startswith("sweep")
+        ]
+        # The child spans appear, bracketed by the outer sweep pair, in order.
+        assert events == [
+            "sweep_start",
+            "sweep.pool_acquire_start",
+            "sweep.pool_acquire_end",
+            "sweep.query_exec_start",
+            "sweep.query_exec_end",
+            "sweep_end",
+        ]
 
     async def test_happy_path_marks_woken_sessions_one(self) -> None:
         """Guard passes: session is in the needs set. ``woken_sessions=1``
@@ -186,10 +235,14 @@ class TestEntrySweepSpan:
         start_event = SimpleNamespace(id="ev_sweep")
 
         with (
-            patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
+            patch("aios.harness.loop.runtime.require_pool", return_value=_acm_pool()),
             patch(
                 "aios.harness.loop.runtime.require_inflight_tool_registry",
                 return_value=MagicMock(),
+            ),
+            patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=True),
             ),
             patch(
                 "aios.harness.loop.find_sessions_needing_inference",
@@ -263,23 +316,20 @@ class TestEntrySweepSpan:
             "sweep_start_id": "ev_sweep",
             "repaired_ghosts": 0,
             "woken_sessions": 1,
+            "fast_path": True,
         }
 
-    async def test_sweep_end_fires_when_find_raises(self, mock_runtime: None) -> None:
-        """If ``find_sessions_needing_inference`` raises, the outer try/finally
-        in ``run_session_step`` still emits ``step_end``, and the body's own
-        try/finally still emits ``sweep_end`` (with ``woken_sessions=0``).
-
-        The exception propagates out of ``run_session_step`` because the
-        harness-error handler exhausts the retry budget (``_apply_retry_or_failure``
-        returns ``None``) and re-raises.
+    async def test_sweep_end_fires_when_fast_path_raises(self, mock_runtime: None) -> None:
+        """If the fast-path ``session_has_pending_work`` raises, the guard's own
+        try/finally still emits ``sweep_end`` (with ``woken_sessions=0``), and the
+        exception propagates out (budget exhausted → re-raise).
         """
         from aios.harness.loop import run_session_step
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
         with (
             patch(
-                "aios.harness.loop.find_sessions_needing_inference",
+                "aios.harness.loop.session_has_pending_work",
                 AsyncMock(side_effect=RuntimeError("db down")),
             ),
             patch("aios.harness.loop.sessions_service.append_event", append_event),
@@ -292,6 +342,36 @@ class TestEntrySweepSpan:
         sweep_events = _sweep_events(append_event)
         assert [e["event"] for e in sweep_events] == ["sweep_start", "sweep_end"]
         assert sweep_events[1]["woken_sessions"] == 0
+        assert sweep_events[1]["repaired_ghosts"] == 0
+
+    async def test_sweep_end_fires_when_full_sweep_raises(self, mock_runtime: None) -> None:
+        """When the fast path says "maybe work" (``True``) the guard falls through
+        to the full ``find_sessions_needing_inference``. If THAT raises, the guard's
+        try/finally still emits ``sweep_end`` and the exception propagates.
+        """
+        from aios.harness.loop import run_session_step
+
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
+        with (
+            patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "aios.harness.loop.find_sessions_needing_inference",
+                AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+            patch("aios.harness.loop.sessions_service.append_event", append_event),
+            patch("aios.harness.loop._apply_retry_or_failure", AsyncMock(return_value=None)),
+            pytest.raises(RuntimeError, match="db down"),
+        ):
+            await run_session_step("sess_x", cause="message")
+
+        sweep_events = _sweep_events(append_event)
+        assert [e["event"] for e in sweep_events] == ["sweep_start", "sweep_end"]
+        # The guard early-marked woken_sessions from the fast path (True → 1) —
+        # the sweep_end still closes even though the downstream full sweep raised.
+        assert sweep_events[1]["woken_sessions"] == 1
         assert sweep_events[1]["repaired_ghosts"] == 0
 
 

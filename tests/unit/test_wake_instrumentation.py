@@ -172,9 +172,15 @@ class TestStepStartEndSpans:
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_step"))
         with (
+            # Fast path says "no work" → early-out (the wasted-wake path). The
+            # full sweep must NOT be reached; patch it to explode if it is.
+            patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=False),
+            ),
             patch(
                 "aios.harness.loop.find_sessions_needing_inference",
-                AsyncMock(return_value=set()),
+                AsyncMock(side_effect=AssertionError("full sweep must not run on early-out")),
             ),
             patch(
                 "aios.harness.loop.sessions_service.append_event",
@@ -183,11 +189,16 @@ class TestStepStartEndSpans:
         ):
             await run_session_step("sess_x", cause="message")
 
-        # Entry-site sweep spans wrap the guard check even on the
-        # wasted-wake path, so the profiler can see the SQL cost.
+        # Entry-site sweep spans wrap the guard check even on the wasted-wake
+        # path, so the profiler can see the (fast-path) cost — including the
+        # pool-acquire and query-exec child spans of the fast-path gate.
         assert _span_event_names(append_event) == [
             "step_start",
             "sweep_start",
+            "sweep.pool_acquire_start",
+            "sweep.pool_acquire_end",
+            "sweep.query_exec_start",
+            "sweep.query_exec_end",
             "sweep_end",
             "step_end",
         ]
@@ -240,6 +251,10 @@ class TestStepStartEndSpans:
             patch(
                 "aios.harness.loop.runtime.require_inflight_tool_registry",
                 return_value=MagicMock(),
+            ),
+            patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=True),
             ),
             patch(
                 "aios.harness.loop.find_sessions_needing_inference",
@@ -345,6 +360,10 @@ class TestStepStartEndSpans:
                 return_value=MagicMock(),
             ),
             patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=True),
+            ),
+            patch(
                 "aios.harness.loop.find_sessions_needing_inference",
                 AsyncMock(return_value={"sess_x"}),
             ),
@@ -411,6 +430,10 @@ class TestStepStartEndSpans:
         assert _span_event_names(append_event) == [
             "step_start",
             "sweep_start",
+            "sweep.pool_acquire_start",
+            "sweep.pool_acquire_end",
+            "sweep.query_exec_start",
+            "sweep.query_exec_end",
             "sweep_end",
             "compute_prelude_start",
             "compute_prelude_end",
@@ -462,6 +485,10 @@ class TestStepStartEndSpans:
             patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
             patch(
                 "aios.harness.loop.runtime.require_inflight_tool_registry", return_value=MagicMock()
+            ),
+            patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=True),
             ),
             patch(
                 "aios.harness.loop.find_sessions_needing_inference",
@@ -564,6 +591,10 @@ class TestStepStartEndSpans:
                 "aios.harness.loop.runtime.require_inflight_tool_registry", return_value=MagicMock()
             ),
             patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=True),
+            ),
+            patch(
                 "aios.harness.loop.find_sessions_needing_inference",
                 AsyncMock(return_value={"sess_x"}),
             ),
@@ -657,6 +688,10 @@ class TestStepStartEndSpans:
             patch(
                 "aios.harness.loop.runtime.require_inflight_tool_registry",
                 return_value=MagicMock(),
+            ),
+            patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=True),
             ),
             patch(
                 "aios.harness.loop.find_sessions_needing_inference",
@@ -756,6 +791,9 @@ async def _harness_with_guard(
     with (
         patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
         patch("aios.harness.loop.runtime.require_inflight_tool_registry", return_value=MagicMock()),
+        patch(
+            "aios.harness.loop.session_has_pending_work", AsyncMock(return_value=True)
+        ),
         patch(
             "aios.harness.loop.find_sessions_needing_inference", AsyncMock(return_value={"sess_x"})
         ),
