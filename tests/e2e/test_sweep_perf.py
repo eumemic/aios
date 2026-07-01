@@ -697,8 +697,12 @@ class TestFastPathPlanShapeAsymptotic:
     Seed the SAME session at N=10 and N=10 000 events, ``EXPLAIN (FORMAT JSON)``
     the ``FAST_PATH_PENDING_WORK_SQL`` at both, and assert:
 
-    - it is served by an **Index Scan on ``sessions_pkey``** (the PK lookup);
-    - there is **no Seq Scan on ``events``** (nor any ``events`` scan at all);
+    - there is **no Seq Scan on ``events``** (nor any ``events`` scan at all) —
+      the load-bearing #1659 regression guard;
+    - the ``sessions`` row is reached (the fast path is a single-row PK-scoped
+      lookup) — WITHOUT pinning a specific access method, since at tiny N the
+      planner legitimately picks a Seq Scan over ``sessions_pkey`` and that
+      choice varies with table size (not a stable signal);
     - the plan **node shape is identical across N** — so the plan does not grow
       with event history.
 
@@ -739,17 +743,18 @@ class TestFastPathPlanShapeAsymptotic:
                 assert not seq_scans_events, (
                     f"session_has_pending_work has a Seq Scan on ``events`` at N={n}."
                 )
-                # The ``sessions`` row is reached by its PK index.
-                pk_scans = [
-                    n2
-                    for n2 in nodes
-                    if n2.get("Relation Name") == "sessions"
-                    and n2.get("Index Name") == "sessions_pkey"
-                ]
-                assert pk_scans, (
-                    f"session_has_pending_work does not reach ``sessions`` via "
-                    f"``sessions_pkey`` at N={n}; nodes over sessions: "
-                    f"{[(x.get('Node Type'), x.get('Index Name')) for x in nodes if x.get('Relation Name') == 'sessions']}"
+                # The ``sessions`` row is reached (the fast path is a single-row
+                # PK-scoped lookup, ``WHERE id = $1``). We deliberately do NOT
+                # assert a specific access method here: at tiny N the planner
+                # legitimately prefers a Seq Scan over ``sessions_pkey`` because a
+                # seq scan is cheaper for a handful of rows, and that choice varies
+                # with table size — it is not a stable, load-bearing signal. The
+                # durable #1659 invariant is "no ``events`` scan + O(1) in event
+                # count" (asserted above and by the shape-identity check below).
+                sessions_nodes = [n2 for n2 in nodes if n2.get("Relation Name") == "sessions"]
+                assert sessions_nodes, (
+                    f"session_has_pending_work does not touch ``sessions`` at N={n}; "
+                    f"nodes: {[(x.get('Node Type'), x.get('Relation Name')) for x in nodes]}"
                 )
                 shapes[n] = _plan_node_shape(plan)
 
