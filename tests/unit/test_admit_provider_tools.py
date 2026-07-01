@@ -10,7 +10,7 @@ the ToolProvider seam can no longer re-grant authority a workflow run dropped.
 
 from __future__ import annotations
 
-from aios.models.agents import PermissionPolicy, ToolSpec, ToolTransport
+from aios.models.agents import McpServerSpec, PermissionPolicy, ToolSpec, ToolTransport
 from aios.models.attenuation import (
     Surface,
     _canon_builtin,
@@ -112,3 +112,41 @@ def test_admit_provider_tools_subset_filter() -> None:
         provider, effective, default_mcp_permission=DMP, builtin_transports=BT
     )
     assert [t.name for t in got] == ["A", "C"]
+
+
+def _toolset(server: str) -> ToolSpec:
+    return ToolSpec(type="mcp_toolset", name=server, mcp_server_name=server)
+
+
+def test_admit_provider_tools_denies_non_builtin_provider_entry() -> None:
+    """Defense-in-depth (#1651): a provider entry that is NOT a builtin/custom tool
+    (here an ``mcp_toolset``, whose ToolSpec-level ``transport`` is ``None``) must
+    degrade to a **safe deny**, never a crash.
+
+    ``admit_provider_tools`` dispatches on ``t.type`` — only builtin/custom entries are
+    routed through ``_meet_builtin`` (which requires a concrete transport). Were the
+    born-clamped-no-binding invariant to erode so a connector/toolset entry reached this
+    seam, the old code path (``_meet_builtin`` on a ``transport=None`` match) would raise
+    ``AssertionError`` and crash the session. The clamp now drops it, fail-closed.
+    """
+    srv = McpServerSpec(name="srv", url="http://example")
+    # The toolset survives ``canonicalize`` (its server is present), so the effective
+    # side carries an ``mcp_toolset`` match with ``transport=None`` — exactly the latent
+    # ``_meet_builtin`` assertion trip described in #1651.
+    effective = Surface([_toolset("srv")], [srv], [])
+    got = admit_provider_tools(
+        [_toolset("srv")], effective, default_mcp_permission=DMP, builtin_transports=BT
+    )
+    assert got == []  # safe deny, no AssertionError
+
+
+def test_admit_provider_tools_custom_still_admitted_alongside_denied_toolset() -> None:
+    """A legitimate custom provider tool is still admitted even when the batch also
+    contains an eroded-invariant toolset entry that must be denied."""
+    srv = McpServerSpec(name="srv", url="http://example")
+    provider = [_toolset("srv"), _custom("X")]
+    effective = Surface([_toolset("srv"), _custom("X")], [srv], [])
+    got = admit_provider_tools(
+        provider, effective, default_mcp_permission=DMP, builtin_transports=BT
+    )
+    assert [t.name for t in got] == ["X"]  # toolset denied, custom survives
