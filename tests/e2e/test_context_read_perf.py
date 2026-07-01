@@ -116,12 +116,13 @@ async def _seed_large_session(pool: asyncpg.Pool[Any]) -> None:
                 CASE (g % 5)
                     WHEN 0 THEN '{"role":"user","content":"u"}'::jsonb
                     WHEN 1 THEN '{"role":"assistant","content":"a"}'::jsonb
-                    WHEN 2 THEN '{"role":"assistant","content":null,'
-                               || '"tool_calls":[{"id":"tc","type":"function",'
-                               || '"function":{"name":"bash","arguments":"{}"}}]}'::jsonb
-                    WHEN 3 THEN '{"role":"tool","tool_call_id":"tc","content":"ok"}'::jsonb
-                    ELSE '{"role":"assistant","content":"t",'
-                         || '"reasoning_content":"because"}'::jsonb
+                    WHEN 2 THEN ('{"role":"assistant","content":null,'
+                               || '"tool_calls":[{"id":"tc_' || g || '","type":"function",'
+                               || '"function":{"name":"bash","arguments":"{}"}}]}')::jsonb
+                    WHEN 3 THEN ('{"role":"tool","tool_call_id":"tc_'
+                               || g || '","content":"ok"}')::jsonb
+                    ELSE ('{"role":"assistant","content":"t",'
+                         || '"reasoning_content":"because"}')::jsonb
                 END,
                 now(),
                 -- cumulative_tokens: running SUM of a per-row delta (delta=10).

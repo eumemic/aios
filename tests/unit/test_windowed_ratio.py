@@ -25,6 +25,20 @@ _BEGAN_AT = datetime(2026, 2, 19, 9, 0, 0, tzinfo=UTC)
 _FALLBACK_SENTINEL: list[Any] = ["_fallback_sentinel"]
 
 
+class _Unset:
+    """Sentinel distinguishing "arg omitted" from an explicit ``None``.
+
+    ``omission_row`` uses ``None`` to mean "no boundary row" (the drop
+    excluded nothing), so a plain ``None`` default couldn't tell "caller
+    wants the no-boundary case" apart from "caller didn't specify one and
+    wants the present-row default". This sentinel makes that distinction
+    explicit.
+    """
+
+
+_UNSET = _Unset()
+
+
 class _FakeConn:
     """Minimal asyncpg.Connection stand-in.
 
@@ -50,7 +64,7 @@ class _FakeConn:
         total_local: int | None,
         ratio_n: int,
         ratio_mean: float,
-        omission_row: dict[str, Any] | None = None,
+        omission_row: dict[str, Any] | None | _Unset = _UNSET,
         ratio_rows: list[Any] | None = None,
         mass_row: dict[str, Any] | None = None,
     ) -> None:
@@ -60,10 +74,14 @@ class _FakeConn:
         self.ratio_row = {"n": ratio_n, "mean_ratio": ratio_mean}
         # The omission boundary row: a non-None ``cumulative_messages`` means
         # the drop excluded that many user/assistant messages; a None row means
-        # the boundary excluded nothing. Default: 7 omitted, boundary present.
-        if omission_row is None:
-            omission_row = {"cumulative_messages": 7, "created_at": _BEGAN_AT}
-        self.omission_row = omission_row
+        # the boundary excluded nothing. Omitting the arg entirely defaults to
+        # a present row (7 omitted); passing ``omission_row=None`` explicitly
+        # selects the no-boundary case.
+        self.omission_row: dict[str, Any] | None = (
+            {"cumulative_messages": 7, "created_at": _BEGAN_AT}
+            if isinstance(omission_row, _Unset)
+            else omission_row
+        )
         self.ratio_rows = ratio_rows or []
         # The latest-message per-class cumulative mass row (all-None => no
         # composition signal, blend folds to the coefficient mean = 1.0 under
@@ -277,14 +295,14 @@ async def test_empty_complement_reports_no_omission() -> None:
     drop`` — the O(1) seek returns nothing, so there is no omission.
     """
     account_id = "acc_test_stub"
+    # ``omission_row=None`` explicitly selects the no-boundary case (omitting
+    # the arg would default to a present row).
     conn = _FakeConn(
         total_local=3_000,
         ratio_n=4,
         ratio_mean=0.0,
         omission_row=None,
     )
-    # Force the "no boundary row" case explicitly (default seeds a present one).
-    conn.omission_row = None
     result = await queries.read_windowed_events(
         conn,
         "sess_x",
