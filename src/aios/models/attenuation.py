@@ -300,9 +300,19 @@ def _meet_builtin(declared: ToolSpec, launcher: ToolSpec) -> ToolSpec | None:
 
     Emits the declared entry's definition (name/description/input_schema) with the
     meet of permission and transport.
+
+    Both operands are expected to be *canonical* builtin/custom tools, so their
+    ``transport``/``permission`` sentinels are already resolved to concrete values. The
+    ``None`` cases are unreachable on the live paths (``attenuate`` dispatches on
+    ``t.type`` before calling here, routing toolsets to ``_meet_toolset``), but rather
+    than assert — which crashes the session (#1651) if that invariant ever erodes — we
+    fail closed: a missing concrete transport/permission means we cannot prove the meet
+    is safe, so drop the entry (``None``) instead.
     """
-    assert declared.transport is not None and launcher.transport is not None
-    assert declared.permission is not None and launcher.permission is not None
+    if declared.transport is None or launcher.transport is None:
+        return None
+    if declared.permission is None or launcher.permission is None:
+        return None
     transport = _transport_glb(declared.transport, launcher.transport)
     if transport is None:
         return None
@@ -519,6 +529,16 @@ def admit_provider_tools(
     grants it) — silent re-grant via the provider seam is exactly the bug. Reuses the
     exact meet-loop body of :func:`attenuate` (the ``_tool_key`` join + ``_meet_builtin``);
     it adds no new primitive.
+
+    Defense-in-depth (#1651): the loop **dispatches on ``t.type``** so only builtin/custom
+    entries — the only shapes a ``ToolProvider`` legitimately injects — are routed through
+    ``_meet_builtin`` (which requires a concrete transport). A non-builtin/custom entry
+    (e.g. an ``mcp_toolset``, whose ToolSpec-level ``transport`` is ``None``) reaching this
+    seam would mean the born-clamped-no-binding invariant has eroded; rather than trip
+    ``_meet_builtin``'s transport assertion and crash the session, we **fail closed** and
+    drop it. Today this branch is unreachable (a born-clamped child can hold no connection
+    binding, so a connector/toolset never reaches the provider seam) — it degrades an
+    eroded invariant to a safe deny, not a latent ``AssertionError``.
     """
     canon = canonicalize(
         effective,
@@ -528,8 +548,15 @@ def admit_provider_tools(
     eff = {_tool_key(t): t for t in canon.tools}
     out: list[ToolSpec] = []
     for t in provider:
+        # Only builtin/custom tools have the concrete transport/permission shape
+        # ``_meet_builtin`` requires. Anything else (a toolset) has no place in a
+        # provider batch — fail closed rather than route it through the builtin meet.
+        if t.type == "mcp_toolset":
+            continue
         match = eff.get(_tool_key(t))
-        if match is None:
+        if match is None or match.type == "mcp_toolset":
+            # No key match, or the effective side is a toolset (transport ``None``): a
+            # toolset match can never be the meet of a builtin/custom provider tool.
             continue
         met = _meet_builtin(_canon_builtin(t, transport_default="both"), match)
         if met is not None:
