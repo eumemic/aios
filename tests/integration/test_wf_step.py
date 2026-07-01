@@ -323,19 +323,13 @@ async def test_gate_call_started_persists_structured_spec(
         "reason": "master_red",
         "sha": "14ea747dcafe0000000000000000000000000000",
     }
-    script = (
-        "async def main(input):\n"
-        f"    r = await gate({spec!r})\n"
-        "    return {'answer': r}\n"
-    )
+    script = f"async def main(input):\n    r = await gate({spec!r})\n    return {{'answer': r}}\n"
     run_id = await _make_run(pool, script)
 
     await run_workflow_step(run_id)
     async with pool.acquire() as conn:
         gate_event = next(
-            e
-            for e in await wf_queries.list_run_events(conn, run_id)
-            if e.type == "call_started"
+            e for e in await wf_queries.list_run_events(conn, run_id) if e.type == "call_started"
         )
     # Existing readers are unaffected: nonce + capability tag are still present.
     assert gate_event.payload["capability"] == "gate"
