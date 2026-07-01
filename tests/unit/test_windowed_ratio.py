@@ -354,8 +354,11 @@ async def test_ceil_div_never_overshoots_window(
     eff = ratio * 1.3  # calibrated safety margin
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=total_local)
-    # No message satisfies the boundary here (oversized first event) -> no
-    # omission; the boundary-row seek returns None.
+
+    # ``read_windowed_events`` issues two distinct fetchrow seeks: the
+    # ``_retained_class_mass`` per-class mass row and the omission boundary
+    # row. Both return None here — no per-class composition signal (blend
+    # folds to the neutral mean) and no omission (oversized first event).
     conn.fetchrow = AsyncMock(return_value=None)
 
     captured: dict[str, int] = {}
@@ -433,11 +436,17 @@ async def test_overhead_clamp_never_drops_entire_window(
     )
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=total_local)
-    # Omission boundary row present here (matches every row); its
-    # ``cumulative_messages`` seek returns a count.
-    conn.fetchrow = AsyncMock(
-        return_value={"cumulative_messages": 7, "created_at": _BEGAN_AT}
-    )
+
+    # Two distinct fetchrow seeks: the ``_retained_class_mass`` per-class mass
+    # row (no composition signal here -> None, blend folds to the neutral
+    # mean) and the omission boundary row present here (matches every row);
+    # its ``cumulative_messages`` seek returns a count.
+    async def _fetchrow(sql: str, *args: Any) -> dict[str, Any] | None:
+        if "cumulative_text_mass" in sql:
+            return None
+        return {"cumulative_messages": 7, "created_at": _BEGAN_AT}
+
+    conn.fetchrow = _fetchrow
     captured: dict[str, int] = {}
 
     async def _fetch(sql: str, *args: Any) -> list[Any]:

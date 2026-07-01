@@ -51,8 +51,7 @@ def _scan_has_events_lower_bound(node: dict[str, Any]) -> bool:
     if node.get("Relation Name") != "events":
         return False
     cond_text = " ".join(
-        str(node.get(key, ""))
-        for key in ("Index Cond", "Recheck Cond", "Filter", "Index Name")
+        str(node.get(key, "")) for key in ("Index Cond", "Recheck Cond", "Filter", "Index Name")
     )
     # A ``>``/``>=`` bound on either ordinal column. ``events_session_cumtokens_idx``
     # range scans surface as ``(cumulative_tokens > $2)``; a seq window as
@@ -98,9 +97,7 @@ def find_unbounded_events_aggregates(plan_node: dict[str, Any]) -> list[dict[str
         if node.get("Node Type") in _AGGREGATE_NODE_TYPES:
             scans = _collect_scan_relations(node)
             events_scans = [s for s in scans if s.get("Relation Name") == "events"]
-            if events_scans and not any(
-                _scan_has_events_lower_bound(s) for s in events_scans
-            ):
+            if events_scans and not any(_scan_has_events_lower_bound(s) for s in events_scans):
                 found.append(node)
         for child in node.get("Plans", []):
             walk(child)

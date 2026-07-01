@@ -257,9 +257,7 @@ class TestNoUnboundedEventsAggregateOnRead:
         """PRIMARY term. ``_retained_class_mass`` now reads the latest message
         row's four per-class cumulative masses (one index seek), so its plan
         must carry NO unbounded WindowAgg/Aggregate over ``events``."""
-        plan = await _explain(
-            seeded_pool, _FIXED_RETAINED_MASS_SQL, _SESSION_ID, _ACCOUNT_ID
-        )
+        plan = await _explain(seeded_pool, _FIXED_RETAINED_MASS_SQL, _SESSION_ID, _ACCOUNT_ID)
         found = find_unbounded_events_aggregates(plan)
         assert not found, (
             f"read-tax regression in _retained_class_mass: {len(found)} unbounded "
@@ -281,9 +279,7 @@ class TestNoUnboundedEventsAggregateOnRead:
             f"cumulative_messages counter (O(1)), not count(*) the prefix (#1657)."
         )
 
-    async def test_latest_cumulative_seek_is_o1(
-        self, seeded_pool: asyncpg.Pool[Any]
-    ) -> None:
+    async def test_latest_cumulative_seek_is_o1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
         """The ``total`` seek (``_latest_cumulative_tokens``) was already O(1);
         pin it here so the whole per-turn read is covered by one guard."""
         plan = await _explain(seeded_pool, _LATEST_CUMULATIVE_SQL, _SESSION_ID)
@@ -302,9 +298,7 @@ class TestGuardIsNotVacuous:
     silently return AND pass the GREEN assertions above."""
 
     async def test_prefix_query_is_red(self, seeded_pool: asyncpg.Pool[Any]) -> None:
-        plan = await _explain(
-            seeded_pool, _PREFIX_RETAINED_MASS_SQL, _SESSION_ID, _ACCOUNT_ID
-        )
+        plan = await _explain(seeded_pool, _PREFIX_RETAINED_MASS_SQL, _SESSION_ID, _ACCOUNT_ID)
         found = find_unbounded_events_aggregates(plan)
         assert found, (
             "the pre-fix _retained_class_mass LAG() OVER (ORDER BY seq) WindowAgg "
