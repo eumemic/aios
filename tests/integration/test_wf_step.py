@@ -310,6 +310,43 @@ async def test_gate_suspend_resume_replay_roundtrip(wf_runtime: asyncpg.Pool[Any
     ]
 
 
+async def test_gate_call_started_persists_structured_spec(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A dev_pipeline gate emits a rich structured spec (kind/tier/reason/sha); the
+    ``call_started`` event must carry that spec verbatim (alongside the nonce) so a
+    journal reader can re-derive the gate's premise. Regression guard for aios#1660."""
+    pool = wf_runtime
+    spec = {
+        "kind": "decision",
+        "tier": "master",
+        "reason": "master_red",
+        "sha": "14ea747dcafe0000000000000000000000000000",
+    }
+    script = (
+        "async def main(input):\n"
+        f"    r = await gate({spec!r})\n"
+        "    return {'answer': r}\n"
+    )
+    run_id = await _make_run(pool, script)
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        gate_event = next(
+            e
+            for e in await wf_queries.list_run_events(conn, run_id)
+            if e.type == "call_started"
+        )
+    # Existing readers are unaffected: nonce + capability tag are still present.
+    assert gate_event.payload["capability"] == "gate"
+    assert isinstance(gate_event.payload["gate_nonce"], str)
+    # New: the structured spec is journaled intact.
+    assert gate_event.payload["spec"] == spec
+    # C1 premise-read: reason + sha are parseable straight from the journal.
+    assert gate_event.payload["spec"]["reason"] == "master_red"
+    assert gate_event.payload["spec"]["sha"] == spec["sha"]
+
+
 async def test_launcher_receives_gate_opened_and_resume_gate_happy_path(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:

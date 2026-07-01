@@ -694,13 +694,20 @@ async def _run_workflow_step_body(
                 continue  # already resolved, or already open (an idempotent re-emit)
             if cap.capability_id == "gate":
                 nonce = secrets.token_urlsafe(32)
+                # Persist the gate's structured spec (e.g. the dev_pipeline's
+                # kind/tier/reason/sha) into the journal alongside the nonce, mirroring
+                # the agent arm's persistence of its structured annotations. This is
+                # append-only enrichment: the nonce and existing resume path are
+                # untouched, and journal readers (e.g. the ops-agent gate-PREMISE
+                # auditor) can re-derive a gate's premise from its recorded spec instead
+                # of being blind to it. (aios#1660)
                 await wf_queries.append_run_event(
                     conn,
                     account_id=account_id,
                     run_id=run_id,
                     type="call_started",
                     call_key=cap.call_key,
-                    payload={"capability": "gate", "gate_nonce": nonce},
+                    payload={"capability": "gate", "gate_nonce": nonce, "spec": cap.spec},
                 )
                 if run.launcher_session_id is not None:
                     await write_gate_opened(
