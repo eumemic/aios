@@ -56,6 +56,7 @@ __all__ = [
     "confirmed_unresolved_predicate",
     "session_active_predicate",
     "session_errored_predicate",
+    "session_has_pending_work",
     "wake_sessions_needing_inference",
 ]
 
@@ -281,6 +282,81 @@ ERRORED_SESSIONS_SQL = f"""
        AND {session_errored_predicate("s")}
        {{scope_clause}}
 """
+
+# ─── fast-path admission gate (#1659) ────────────────────────────────────────
+#
+# ``FAST_PATH_PENDING_WORK_SQL`` is the per-turn admission guard's cheap
+# necessary-condition gate. It is a SINGLE PK-scoped lookup on ``sessions``
+# (``id = $1``, served by ``sessions_pkey``) plus a lateral EXISTS over the tiny
+# ``session_cancel_markers`` table — no CTEs, no cross-session materialization,
+# no correlated ``NOT EXISTS`` over ``events``, and asymptotically O(1) in event
+# count (the plan does not touch ``events`` at all).
+#
+# SAFETY (the wedge-class constraint, issue #1659 comment): this predicate is a
+# proven **over-approximation** of ``find_sessions_needing_inference`` — it is
+# TRUE whenever the full sweep could return this session, so a ``False`` result
+# means there is *provably* no pending work. The caller may therefore ONLY
+# early-out on ``False``; on ``True`` ("maybe work") it MUST fall through to the
+# full ``find_sessions_needing_inference``. A wrong predicate is then bounded to
+# an occasional *extra* full sweep (cheap), NEVER a missed wake (a wedged
+# session).
+#
+# WHY IT IS AN OVER-APPROXIMATION — the full sweep returns a session iff:
+#   (a/b) it is ``session_active_predicate``-true AND survives the incomplete-
+#         batch filter (``_filter_incomplete_batches`` can only REMOVE, never
+#         add — so ``active`` is a superset of the (a/b) contribution);
+#   (c)   it has a confirmed-but-unresolved tool call. Such a call is an
+#         assistant tool_call with no result → it contributes to
+#         ``open_tool_call_count > 0`` and the session is non-errored (confirmed
+#         is subtracted by ``errored``) → it is ALREADY covered by
+#         ``session_active_predicate``; confirmed ⊆ active.
+#   (cancel) it carries an unharvested cancel-marker — UNIONed BELOW the errored
+#         subtraction, so it can fire on an idle/errored-parked session. This is
+#         the ONE return path ``session_active_predicate`` does not subsume, so
+#         it is OR-ed in explicitly via the marker EXISTS.
+# Hence ``active OR has-unharvested-cancel-marker`` is TRUE on every session the
+# full sweep could return: a proven over-approximation. The ``archived_at IS
+# NULL`` fence matches both the sweep's candidate WHERE and the marker join.
+FAST_PATH_PENDING_WORK_SQL = f"""
+    SELECT
+        s.archived_at IS NULL
+        AND (
+            {session_active_predicate("s")}
+            OR EXISTS (
+                SELECT 1 FROM session_cancel_markers m
+                 WHERE m.session_id = s.id
+                   AND m.harvested_at IS NULL
+            )
+        ) AS has_pending_work
+      FROM sessions s
+     WHERE s.id = $1
+"""
+
+
+async def session_has_pending_work(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+) -> bool:
+    """Cheap necessary-condition gate for the per-turn admission guard (#1659).
+
+    Returns ``True`` when the session *may* need inference and ``False`` only
+    when there is **provably** no pending work. A proven over-approximation of
+    :func:`find_sessions_needing_inference` (see ``FAST_PATH_PENDING_WORK_SQL``):
+    the caller may early-out on ``False`` but MUST fall through to the full sweep
+    on ``True`` — so a wrong predicate costs at most an extra full sweep, never a
+    missed wake.
+
+    A single PK-scoped lookup on ``sessions`` (no CTEs, no ``events`` scan), so
+    it does not grow with event history — the whole point of the fast path
+    versus the multi-CTE ``find_sessions_needing_inference``.
+
+    A missing session (``id`` not found) returns ``False``: no row → no work.
+    """
+    row = await conn.fetchrow(FAST_PATH_PENDING_WORK_SQL, session_id)
+    if row is None:
+        return False
+    return bool(row["has_pending_work"])
+
 
 # ─── ghost repair ────────────────────────────────────────────────────────────
 

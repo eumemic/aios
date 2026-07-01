@@ -32,6 +32,7 @@ from aios.db.queries import _SESSION_STATUS_EXPR
 from aios.harness.sweep import (
     CANDIDATE_ROWS_SQL,
     ERRORED_SESSIONS_SQL,
+    FAST_PATH_PENDING_WORK_SQL,
     GHOST_ASST_SQL,
     GHOST_SPAN_START_SQL,
     UNREACTED_ROWS_SQL,
@@ -599,3 +600,236 @@ def _total_buffer_hits(plan_node: dict[str, Any]) -> int:
     for child in plan_node.get("Plans", []):
         total += _total_buffer_hits(child)
     return total
+
+
+# ─── fast-path admission gate (#1659) ────────────────────────────────────────
+
+
+def _collect_nodes(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten the plan tree into a list of nodes (pre-order)."""
+    out = [plan_node]
+    for child in plan_node.get("Plans", []):
+        out.extend(_collect_nodes(child))
+    return out
+
+
+def _plan_node_shape(plan_node: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """A structural fingerprint of the plan: the ordered ``(Node Type, Relation
+    Name, Index Name)`` triples across the tree. Deliberately excludes any
+    cost/row *estimates* — the invariant is that the SHAPE is identical across
+    N, not that the numbers match."""
+    return [
+        (
+            str(n.get("Node Type", "")),
+            str(n.get("Relation Name", "")),
+            str(n.get("Index Name", "")),
+        )
+        for n in _collect_nodes(plan_node)
+    ]
+
+
+async def _seed_fast_path_session(pool: asyncpg.Pool[Any], session_id: str, n_events: int) -> None:
+    """Seed one session at ``n_events`` user/assistant message events, then
+    reconcile the migration-0066 scalar columns (the fast-path reads only these,
+    never ``events``). Used by the plan-shape guard at N=10 and N=10 000 to prove
+    the ``session_has_pending_work`` plan does not grow with event history."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agents (id, name, model, account_id) "
+            "VALUES ('agt_perf', 'perf', 'openrouter/x', 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        await conn.execute(
+            "INSERT INTO environments (id, name, account_id) "
+            "VALUES ('env_perf', 'env_perf', 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, workspace_volume_path, account_id) "
+            "VALUES ($1, 'agt_perf', 'env_perf', '/tmp/ws_' || $1, 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING",
+            session_id,
+        )
+        rows: list[tuple[Any, ...]] = []
+        for i in range(n_events):
+            role = "user" if i % 2 == 0 else "assistant"
+            data: dict[str, Any] = {"role": role, "content": f"m{i}"}
+            if role == "assistant":
+                data["reacting_to"] = i
+            rows.append(
+                (f"ev_{session_id}_{i}", session_id, i + 1, "message", json.dumps(data), role)
+            )
+        await conn.executemany(
+            "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING",
+            rows,
+        )
+        # Reconcile the maintained scalar columns (mirrors migration 0066).
+        await conn.execute(
+            """
+            UPDATE sessions s
+               SET last_event_seq = COALESCE(
+                       (SELECT MAX(e.seq) FROM events e WHERE e.session_id = s.id), 0),
+                   last_user_seq = COALESCE(
+                       (SELECT MAX(e.seq) FROM events e WHERE e.session_id = s.id
+                          AND e.kind = 'message' AND e.role = 'user'), 0),
+                   last_stimulus_seq = COALESCE(
+                       (SELECT MAX(e.seq) FROM events e WHERE e.session_id = s.id
+                          AND e.kind = 'message' AND e.role <> 'assistant'), 0),
+                   last_reacted_seq = COALESCE(
+                       (SELECT MAX(COALESCE((e.data->>'reacting_to')::bigint, e.seq))
+                          FROM events e WHERE e.session_id = s.id
+                          AND e.kind = 'message' AND e.role = 'assistant'), 0)
+             WHERE s.id = $1
+            """,
+            session_id,
+        )
+        await conn.execute("ANALYZE events")
+        await conn.execute("ANALYZE sessions")
+
+
+@needs_docker
+class TestFastPathPlanShapeAsymptotic:
+    """Guard 1 (issue #1659): the per-turn fast-path ``session_has_pending_work``
+    is asymptotically O(1) in event count.
+
+    Seed the SAME session at N=10 and N=10 000 events, ``EXPLAIN (FORMAT JSON)``
+    the ``FAST_PATH_PENDING_WORK_SQL`` at both, and assert:
+
+    - there is **no Seq Scan on ``events``** (nor any ``events`` scan at all) —
+      the load-bearing #1659 regression guard;
+    - the ``sessions`` row is reached (the fast path is a single-row PK-scoped
+      lookup) — WITHOUT pinning a specific access method, since at tiny N the
+      planner legitimately picks a Seq Scan over ``sessions_pkey`` and that
+      choice varies with table size (not a stable signal);
+    - the plan **node shape is identical across N** — so the plan does not grow
+      with event history.
+
+    This is a plan-SHAPE assertion (present-vs-absent + shape identity), never a
+    wall-clock threshold — the 3.1↔4.7↔5.2s spread in the profile proves a
+    wall-clock gate would flake.
+    """
+
+    async def test_pk_indexed_no_events_scan_and_shape_stable_across_n(
+        self, aios_env: dict[str, str]
+    ) -> None:
+        from aios.db.pool import create_pool
+
+        pool = await create_pool(aios_env["AIOS_DB_URL"], min_size=1, max_size=2)
+        try:
+            shapes: dict[int, list[tuple[str, str, str]]] = {}
+            for n in (10, 10_000):
+                sid = f"sess_fastpath_n{n}"
+                await _seed_fast_path_session(pool, sid, n)
+                plan = await _explain(pool, FAST_PATH_PENDING_WORK_SQL, sid)
+                nodes = _collect_nodes(plan)
+
+                # No scan of ``events`` at any node — the fast path reads only the
+                # maintained scalar columns on ``sessions`` (+ the tiny cancel-marker
+                # table), never the event log.
+                events_scans = [n2 for n2 in nodes if n2.get("Relation Name") == "events"]
+                assert not events_scans, (
+                    f"session_has_pending_work scans ``events`` at N={n} "
+                    f"({[s.get('Node Type') for s in events_scans]}) — the fast path "
+                    f"must be O(1) in event count, reading only sessions scalar columns."
+                )
+                # No Seq Scan on events specifically (the explicit #1659 assertion).
+                seq_scans_events = [
+                    n2
+                    for n2 in nodes
+                    if n2.get("Node Type") == "Seq Scan" and n2.get("Relation Name") == "events"
+                ]
+                assert not seq_scans_events, (
+                    f"session_has_pending_work has a Seq Scan on ``events`` at N={n}."
+                )
+                # The ``sessions`` row is reached (the fast path is a single-row
+                # PK-scoped lookup, ``WHERE id = $1``). We deliberately do NOT
+                # assert a specific access method here: at tiny N the planner
+                # legitimately prefers a Seq Scan over ``sessions_pkey`` because a
+                # seq scan is cheaper for a handful of rows, and that choice varies
+                # with table size — it is not a stable, load-bearing signal. The
+                # durable #1659 invariant is "no ``events`` scan + O(1) in event
+                # count" (asserted above and by the shape-identity check below).
+                sessions_nodes = [n2 for n2 in nodes if n2.get("Relation Name") == "sessions"]
+                assert sessions_nodes, (
+                    f"session_has_pending_work does not touch ``sessions`` at N={n}; "
+                    f"nodes: {[(x.get('Node Type'), x.get('Relation Name')) for x in nodes]}"
+                )
+                shapes[n] = _plan_node_shape(plan)
+
+            assert shapes[10] == shapes[10_000], (
+                "session_has_pending_work plan SHAPE changed between N=10 and "
+                f"N=10 000 — it must not grow with event history.\n"
+                f"N=10:    {shapes[10]}\nN=10000: {shapes[10_000]}"
+            )
+        finally:
+            await pool.close()
+
+
+class TestFastPathSpanCompositionInvariant:
+    """Guard 2 (issue #1659): the per-turn entry guard calls the CHEAP fast-path
+    ``session_has_pending_work`` (single PK lookup), NOT the heavy multi-CTE
+    ``find_sessions_needing_inference`` — the full sweep is only reached on
+    fall-through.
+
+    This makes "the entry guard silently regains the heavy sweep" a RED test
+    (caught here), not a latency mystery found months later. It is a pure
+    call-graph assertion on ``_run_session_step_body`` — no DB, no docker.
+    """
+
+    async def test_entry_guard_uses_fast_path_then_falls_through(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from aios.harness.loop import run_session_step
+
+        fast_path = AsyncMock(return_value=False)
+        full_sweep = AsyncMock(return_value=set())
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
+
+        with (
+            patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
+            patch(
+                "aios.harness.loop.runtime.require_inflight_tool_registry",
+                return_value=MagicMock(),
+            ),
+            patch("aios.harness.loop.session_has_pending_work", fast_path),
+            patch("aios.harness.loop.find_sessions_needing_inference", full_sweep),
+            patch("aios.harness.loop.sessions_service.append_event", append_event),
+        ):
+            await run_session_step("sess_x", cause="message")
+
+        # The cheap fast path IS on the hot path.
+        fast_path.assert_awaited_once()
+        # And when it early-outs (False), the heavy multi-CTE sweep is NOT run —
+        # the entry guard has not silently regained the full sweep.
+        full_sweep.assert_not_awaited()
+
+    async def test_full_sweep_reached_only_on_fall_through(self) -> None:
+        """The complementary half: when the fast path says "maybe work" (True),
+        the entry guard DOES fall through to ``find_sessions_needing_inference``
+        (so a wrong fast-path predicate can never miss a wake)."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from aios.harness.loop import run_session_step
+
+        fast_path = AsyncMock(return_value=True)
+        full_sweep = AsyncMock(return_value=set())
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
+
+        with (
+            patch("aios.harness.loop.runtime.require_pool", return_value=MagicMock()),
+            patch(
+                "aios.harness.loop.runtime.require_inflight_tool_registry",
+                return_value=MagicMock(),
+            ),
+            patch("aios.harness.loop.session_has_pending_work", fast_path),
+            patch("aios.harness.loop.find_sessions_needing_inference", full_sweep),
+            patch("aios.harness.loop.sessions_service.append_event", append_event),
+        ):
+            await run_session_step("sess_x", cause="message")
+
+        fast_path.assert_awaited_once()
+        full_sweep.assert_awaited_once()

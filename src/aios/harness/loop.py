@@ -56,7 +56,7 @@ from aios.harness.step_context import (
     compute_step_prelude,
     prelude_overhead_local,
 )
-from aios.harness.sweep import find_sessions_needing_inference
+from aios.harness.sweep import find_sessions_needing_inference, session_has_pending_work
 from aios.harness.tokens import approx_tokens, approx_tokens_by_class
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.harness.tool_disposition import classify_tool_call
@@ -496,10 +496,28 @@ async def _run_session_step_body(
     # Prevents wasted DB/model calls from stale or duplicate wakes.
     #
     # Bracket with a ``sweep_start``/``sweep_end`` span pair (site="entry").
-    # Only ``find_sessions_needing_inference`` runs here — no ghost repair,
-    # no ``defer_wake`` — so ``repaired_ghosts`` is always 0. ``woken_sessions``
+    # Only the wake-detection query runs here — no ghost repair, no
+    # ``defer_wake`` — so ``repaired_ghosts`` is always 0. ``woken_sessions``
     # at ``site="entry"`` is 0 or 1: it records whether the guard determined
     # this specific session had work. 0 indicates a wasted wake.
+    #
+    # (A) Fast-path early-out (#1659). The full multi-CTE
+    # ``find_sessions_needing_inference`` measured a worker-wide 3.8-5.2s median
+    # on the per-turn entry path (worker-pool / event-loop contention, not query
+    # cost). Replace it here with ``session_has_pending_work`` — a single
+    # PK-scoped boolean that is a PROVEN OVER-APPROXIMATION of the full sweep
+    # (TRUE whenever the full sweep could return this session). Safety by
+    # construction (the wedge-class constraint): early-out ONLY on a provable
+    # ``False`` ("no work"); on ``True`` ("maybe work") FALL THROUGH to the full
+    # ``find_sessions_needing_inference``. A wrong predicate then costs at most an
+    # extra full sweep, never a missed wake → never a wedged session.
+    #
+    # (C) Observability spans (#1659). Bracket the two guard sub-costs so the
+    # currently-inferred split is measured: ``sweep.pool_acquire`` around the
+    # connection acquire and ``sweep.query_exec`` around the SQL. Then
+    # ``(sweep_end - sweep_start) - query_exec - pool_acquire ~= event-loop
+    # time-share`` -- which gates whether (B) pool/concurrency tuning is the
+    # load-bearing follow-up.
     sweep_start = await sessions_service.append_event(
         pool,
         session_id,
@@ -507,11 +525,46 @@ async def _run_session_step_body(
         {"event": "sweep_start", "site": "entry"},
         account_id=account_id,
     )
-    needs: set[str] = set()
+    has_work = False
     try:
-        needs = await find_sessions_needing_inference(
-            pool, inflight_tool_registry, session_id=session_id
+        pool_acquire_start = await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {"event": "sweep.pool_acquire_start"},
+            account_id=account_id,
         )
+        async with pool.acquire() as fast_conn:
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {
+                    "event": "sweep.pool_acquire_end",
+                    "start_id": pool_acquire_start.id,
+                },
+                account_id=account_id,
+            )
+            query_exec_start = await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {"event": "sweep.query_exec_start"},
+                account_id=account_id,
+            )
+            try:
+                has_work = await session_has_pending_work(fast_conn, session_id)
+            finally:
+                await sessions_service.append_event(
+                    pool,
+                    session_id,
+                    "span",
+                    {
+                        "event": "sweep.query_exec_end",
+                        "start_id": query_exec_start.id,
+                    },
+                    account_id=account_id,
+                )
     finally:
         await sessions_service.append_event(
             pool,
@@ -521,12 +574,26 @@ async def _run_session_step_body(
                 "event": "sweep_end",
                 "sweep_start_id": sweep_start.id,
                 "repaired_ghosts": 0,
-                "woken_sessions": 1 if session_id in needs else 0,
+                "woken_sessions": 1 if has_work else 0,
+                "fast_path": True,
             },
             account_id=account_id,
         )
-    if session_id not in needs:
+    if not has_work:
+        # Provably no work — the fast path is a proven over-approximation, so a
+        # ``False`` here is authoritative. Skip the full sweep entirely.
         log.debug("step.early_out", session_id=session_id, cause=cause)
+        return _StepResult()
+
+    # Fast path said "maybe work" — fall through to the authoritative full sweep.
+    # It can still find no work (e.g. an incomplete tool batch the scalar gate
+    # can't see), in which case we early-out here; the cost of a wrong fast-path
+    # predicate is bounded to this occasional extra full sweep, never a wedge.
+    needs = await find_sessions_needing_inference(
+        pool, inflight_tool_registry, session_id=session_id
+    )
+    if session_id not in needs:
+        log.debug("step.early_out", session_id=session_id, cause=cause, via="full_sweep")
         return _StepResult()
 
     # Cancel leaf (cancel-design §4/§6): a session carrying an unharvested cancel-marker
