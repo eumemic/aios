@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 fusion_results.json
 coding_results.json
+selection_results.json
+# Paid per-item checkpoints (pool transcripts, judge outputs). Durable on disk by
+# design (the killed-run lesson) but too large/raw for git — keep the corpus + code.
+selection_state/
