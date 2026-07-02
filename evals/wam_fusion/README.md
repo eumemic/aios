@@ -328,3 +328,77 @@ worth pre-declaring when the full run is unblocked.
 - `run_coding.py` — the coding measuring harness (same matched-fan-in design as Phase A).
 - `tasks/coding_aios.json` — 14 provenance-tagged real-PR coding items (9 single-file).
 - `coding_results.json` — last run's record (git-ignored).
+
+---
+
+# Execution-verified parallel selection (P0+P1) — shared pool, four arms
+
+Design of record: eumemic-company `architecture/execution-verified-selection-eval.md`
+(D-Q20 settled 2026-07-02: fusion-for-quality retired; the one live direction is
+CodeMonkeys-style execution-verified selection). This phase builds the harness (P0)
+and the corpus (P1); the paid pilot (P2, n=12) is NOT run here.
+
+## The four arms (all derived from ONE shared pool — matched compute by construction)
+
+Per item: N=4 independent candidates from the pre-registered incumbent
+(`anthropic/claude-opus-4-8`, R0-shaped passthrough binding, **provider-default
+sampling** — opus-4-8 rejects the `temperature` param; recorded in the payload).
+
+| arm | derivation |
+|---|---|
+| a_index0 | candidate 0 (pre-registered production status quo) |
+| b_random | seeded-uniform pick (seed 20260702, per-item stream; the compute control) |
+| c_exec   | hidden suite per candidate; keep a passer; tie-break fewest changed lines |
+| d_judge  | one Opus judge sees issue + diffs, NEVER the tests; `WINNER: k` parse |
+
+Pre-registered stats (§4): primary = exact ONE-SIDED sign test on c-vs-b discordants at
+full α=.05 (needs ≥5 c-only discordants); secondaries (c-vs-a, d-vs-b, c-vs-d)
+Holm-corrected among themselves; win = CI-lower > 0 AND Δ ≥ MDE(+15pp); null → TOST ±10pp.
+
+## Integrity machinery
+
+- **Leak canary (FATAL-class):** every candidate transcript is grepped for hidden-test
+  file paths + test identifiers (def test_* / class Test* / vitest it()/describe()
+  titles), minus tokens visible in the model's INPUT; any hit fails the item.
+- **Oracle soundness pre-flight (per item, cached):** golden patch passes the hidden
+  suite 2× (a flip = flake), and the EMPTY patch (base source unchanged) must NOT pass.
+  Post-preflight, a candidate-caused collection error scores FAIL, not env-skip.
+- **Checkpointing (the killed-run lesson):** every paid artifact (pool candidate,
+  judge turn) is flushed to `selection_state/` the moment it exists; re-running the
+  same command replays at $0 new spend (proven: smoke re-run = $0.000 new).
+- **Cost meter + hard budget stop:** per-item µUSD from `call_llm_cost_microusd`;
+  the run refuses the next paid call once `--budget-usd` is reached.
+
+## P1 corpus: `tasks/coding_selection.json` — 46 sound single-file items
+
+Mined from merged `eumemic/aios` PRs (same recipe as Phase B: task = linked issue
+title+body verbatim; oracle = the golden PR's tests/unit files at merge, held out;
+base_parent_sha = merge^). Admission = the soundness gate above, run independently for
+EVERY item (including the 10 re-admitted Phase B seed items). Achieved intake strata:
+**39 standard / 4 multi-attempt / 3 thin-spec** (method recorded in the corpus header);
+2 candidates rejected on soundness (golden-fail env: PRs #1137, #571). Post-write
+independent check: `coding_scorer.py tasks/coding_selection.json` → **46/46 golden pass**.
+
+## Run it (P2 pilot — the seat fires this; ~$15-16 at ~$0.26/item smoke-measured)
+
+```bash
+export AIOS_URL=https://api.aios.eumemic.ai
+export AIOS_API_KEY=<isolated-test-account-key>    # operator over its own account
+export AIOS_VENV_PYTHON=~/code/aios/.venv/bin/python
+python3 run_selection.py --n 12 --sample-seed 20260702 --budget-usd 16
+# resume after any interruption: SAME command (checkpoints replay at $0)
+```
+
+Smoke result (2026-07-02, prod, isolated test account): full path proven on c05 with
+N=2 + judge — 3 paid calls, $0.256, distinct run_ids, extraction + hidden-suite
+verdicts genuine, judge parseable, leak canary clean, resume at $0.
+
+## Files (this phase)
+
+- `selection_arms.py` — pure arm derivation + leak canary + one-sided sign test.
+- `run_selection.py` — the P0 entrypoint (preflight → pool → canary → exec → judge → stats).
+- `mine_corpus.py` — the P1 miner (gh-driven, soundness-gated, strata-tagged).
+- `test_selection.py` — unit tests over the pure logic (no spend).
+- `tasks/coding_selection.json` — the 46-item corpus (+ `..._mining_report.json`).
+- `selection_state/` — paid per-item checkpoints (git-ignored; durable on disk).
+- `selection_results.json` — per-run results payload (git-ignored).
