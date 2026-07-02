@@ -158,3 +158,35 @@ def test_health_still_200_and_pool_untouched() -> None:
     body = resp.json()
     assert body["status"] == "ok"
     assert "version" in body
+
+
+def test_health_reports_source_commit_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``/health`` echoes the container's build-time ``SOURCE_COMMIT`` env so the
+    deployed SHA is verifiable over pure HTTPS (issue #1669).
+
+    ``fleet --drift`` only sees Coolify's deploy-queue commit (build *intent*),
+    which can diverge from what the container is actually running; the truthful
+    running SHA otherwise needs SSH. Surfacing it on ``/health`` closes that gap.
+    """
+    monkeypatch.setenv("SOURCE_COMMIT", "abc1234deadbeef")
+    client = TestClient(_app_with_pool(_FakePool(lambda _q: None)))
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["source_commit"] == "abc1234deadbeef"
+
+
+def test_health_source_commit_unknown_when_env_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outside a built container ``SOURCE_COMMIT`` is unset; ``/health`` reports
+    ``"unknown"`` rather than omitting the field, so the key is always present
+    for HTTP audits to key off of."""
+    monkeypatch.delenv("SOURCE_COMMIT", raising=False)
+    client = TestClient(_app_with_pool(_FakePool(lambda _q: None)))
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["source_commit"] == "unknown"

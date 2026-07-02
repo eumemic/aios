@@ -65,6 +65,18 @@ RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Build-time source SHA, baked into the image env so it travels with the
+# running container. Coolify passes the deployed commit as this build-arg; we
+# promote it to a persistent ENV (declared in `base` so BOTH the api and worker
+# stages inherit it) that `GET /health` echoes back. This makes the truthful
+# running SHA verifiable over pure HTTPS — `fleet --drift` only sees Coolify's
+# deploy-queue commit (build INTENT), which can silently diverge from a
+# zombie/failed-deploy container, and reading the real SHA otherwise needs SSH
+# (often blocked). Empty when built without the arg (e.g. local `docker build`);
+# `/health` then reports "unknown". See issue #1669.
+ARG SOURCE_COMMIT=""
+ENV SOURCE_COMMIT="${SOURCE_COMMIT}"
+
 # ── Stage 2: api ────────────────────────────────────────────────────────
 # Stateless HTTP frontend. Doesn't talk to Docker; smallest surface area.
 FROM base AS api
