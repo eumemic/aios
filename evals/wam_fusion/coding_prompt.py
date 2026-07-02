@@ -22,13 +22,36 @@ CODING_SYSTEM = (
 )
 
 
-def build_prompt(task: str, base_sources: dict[str, str]) -> str:
-    parts = [f"TASK:\n{task}\n", "CURRENT SOURCE FILE(S):"]
-    for path, content in base_sources.items():
-        parts.append(f"\n----- FILE: {path} -----\n```\n{content}\n```")
+def build_prompt(
+    task: str, base_sources: dict[str, str], expected_paths: list[str] | None = None
+) -> str:
+    """Build the generation prompt.
+
+    ``base_sources`` may be EMPTY for a new-file-creation task (the golden PR
+    created the source file, so the pre-PR snapshot legitimately has nothing to
+    show) — ``expected_paths`` then names the file(s) to create, mirroring how an
+    existing file's path is shown alongside its content. Passing neither is a
+    caller bug (was a StopIteration crash on `next(iter(base_sources))`)."""
+    paths = list(base_sources)
+    for p in expected_paths or []:
+        if p not in paths:
+            paths.append(p)
+    if not paths:
+        raise ValueError("build_prompt: no base sources and no expected paths")
+    parts = [f"TASK:\n{task}\n"]
+    if base_sources:
+        parts.append("CURRENT SOURCE FILE(S):")
+        for path, content in base_sources.items():
+            parts.append(f"\n----- FILE: {path} -----\n```\n{content}\n```")
+    to_create = [p for p in paths if p not in base_sources]
+    if to_create:
+        parts.append(
+            "FILE(S) TO CREATE (they do not exist yet — write the complete new file):\n"
+            + "\n".join(f"- {p}" for p in to_create)
+        )
     parts.append(
         "\nReturn the complete corrected content of each file you change, each in a fenced "
-        "block whose info string is the exact file path (e.g. ```" + next(iter(base_sources)) + ")."
+        "block whose info string is the exact file path (e.g. ```" + paths[0] + ")."
     )
     return "\n".join(parts)
 

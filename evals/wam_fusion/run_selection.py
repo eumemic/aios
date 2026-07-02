@@ -220,7 +220,10 @@ def generate_pool(
     for r in pool.values():
         meter.replay(r.get("cost_uusd"))
     base_src = source_at_base(repo, item["base_parent_sha"], item["src_files"])
-    prompt = build_prompt(item["task"], base_src)
+    # expected_paths keeps the prompt well-posed for new-file-creation items
+    # (empty pre-PR snapshot): the model is told WHICH file(s) to create, mirroring
+    # how an existing file's path is shown alongside its content.
+    prompt = build_prompt(item["task"], base_src, expected_paths=item["src_files"])
     for idx in range(n):
         if idx in pool:
             continue

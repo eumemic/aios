@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 
+from coding_prompt import build_prompt
 from selection_arms import (
     build_judge_prompt,
     canary_tokens,
@@ -19,6 +20,40 @@ from selection_arms import (
     pick_seeded_random,
     unified_diff_text,
 )
+
+
+def test_build_prompt_new_file_item():
+    """A new-file-creation item has an EMPTY pre-PR snapshot (the s01/gate_reaper
+    confirmatory-run crash): build_prompt must name the file(s) to create instead
+    of raising StopIteration on next(iter({}))."""
+    p = build_prompt("create the gate reaper", {}, expected_paths=["src/aios/workflows/gate_reaper.py"])
+    assert "FILE(S) TO CREATE" in p
+    assert "src/aios/workflows/gate_reaper.py" in p
+    assert "CURRENT SOURCE FILE(S)" not in p
+    assert "```src/aios/workflows/gate_reaper.py" in p  # the example info-string line
+    # existing-file behavior unchanged
+    p2 = build_prompt("fix it", {"src/x.py": "a\n"})
+    assert "CURRENT SOURCE FILE(S)" in p2 and "FILE(S) TO CREATE" not in p2
+    assert "```src/x.py" in p2
+    # mixed: shown files + a to-create file
+    p3 = build_prompt("t", {"src/x.py": "a\n"}, expected_paths=["src/x.py", "src/y.py"])
+    assert "FILE(S) TO CREATE" in p3 and "- src/y.py" in p3
+    # caller bug is loud
+    try:
+        build_prompt("t", {})
+        raise AssertionError("expected ValueError on empty base + no expected paths")
+    except ValueError:
+        pass
+
+
+def test_changed_lines_and_diff_for_new_file_candidate():
+    """Empty base: diff is vs the empty file, so the tie-break stays meaningful
+    and the judge sees an all-added diff (not 'no usable patch')."""
+    cand = {"src/new.py": "a\nb\nc\n"}
+    assert changed_lines({}, cand) == 3
+    assert changed_lines({}, {}) >= 10**9  # no-output candidate keeps the sentinel
+    d = unified_diff_text({}, cand)
+    assert "b/src/new.py" in d and "+a" in d and "+c" in d
 
 
 def test_index0():

@@ -58,11 +58,16 @@ def changed_lines(base_sources: dict[str, str], cand_sources: dict[str, str]) ->
 
     A candidate missing any required file gets a sentinel so it never wins the
     tie-break. This is the pre-registered tie-break metric (smallest diff = the
-    most conservative passer)."""
+    most conservative passer).
+
+    New-file tasks: ``base_sources`` may be empty (or lack a path the candidate
+    creates) — the diff is then taken against the empty file, so every added line
+    counts and the tie-break stays meaningful (smallest new file wins)."""
     if not cand_sources or any(not (cand_sources.get(f) or "").strip() for f in base_sources):
         return _NO_SOURCE_CHANGED_LINES
     total = 0
-    for path, base in base_sources.items():
+    for path in sorted(set(base_sources) | set(cand_sources)):
+        base = base_sources.get(path) or ""
         cand = cand_sources.get(path) or ""
         for line in difflib.unified_diff(
             base.splitlines(), cand.splitlines(), lineterm="", n=0
@@ -115,9 +120,14 @@ def build_judge_prompt(task: str, diffs: list[str]) -> str:
 
 
 def unified_diff_text(base_sources: dict[str, str], cand_sources: dict[str, str]) -> str:
-    """The candidate's diff vs base (what the judge sees — src files only)."""
+    """The candidate's diff vs base (what the judge sees — src files only).
+
+    Iterates the UNION of paths so a new-file candidate (empty base) shows as an
+    all-added diff rather than an empty patch — otherwise every candidate of a
+    new-file item would look unusable and the judge would be silently skipped."""
     chunks = []
-    for path, base in base_sources.items():
+    for path in sorted(set(base_sources) | set(cand_sources)):
+        base = base_sources.get(path) or ""
         cand = cand_sources.get(path) or ""
         diff = "\n".join(
             difflib.unified_diff(
