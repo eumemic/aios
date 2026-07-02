@@ -53,10 +53,22 @@ def sync_detailed(
      Liveness probe. Unauthenticated; returns the running aios version.
 
     Suitable for load balancer health checks and monitoring probes. Always
-    returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up. Deliberately does NOT touch the DB pool — a post-startup
-    Postgres outage must not flip liveness (that's ``/ready``'s job), or an
-    orchestrator would kill an otherwise-healthy process during a DB blip.
+    returns 200 with ``{\"status\": \"ok\", \"version\": <version>,
+    \"source_commit\": <sha>}`` if the process is up. Deliberately does NOT
+    touch the DB pool — a post-startup Postgres outage must not flip liveness
+    (that's ``/ready``'s job), or an orchestrator would kill an otherwise-
+    healthy process during a DB blip.
+
+    ``source_commit`` echoes the container's build-time ``SOURCE_COMMIT`` env
+    (baked into the image at ``docker build`` from Coolify's commit build-arg).
+    It makes the *truthful running SHA* verifiable over pure HTTPS: ``fleet
+    --drift`` only sees Coolify's deploy-queue commit (build INTENT), which can
+    silently diverge from what a zombie/failed-deploy container is actually
+    running — and reading the real SHA otherwise needs SSH, which is often
+    blocked. Surfacing it here lets seat + ops audits confirm a promote landed
+    and that api/worker are in lockstep over plain HTTP (issue #1669). Falls
+    back to ``\"unknown\"`` outside a built container (local dev), so the key is
+    always present for automated audits to key off of.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -84,10 +96,22 @@ def sync(
      Liveness probe. Unauthenticated; returns the running aios version.
 
     Suitable for load balancer health checks and monitoring probes. Always
-    returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up. Deliberately does NOT touch the DB pool — a post-startup
-    Postgres outage must not flip liveness (that's ``/ready``'s job), or an
-    orchestrator would kill an otherwise-healthy process during a DB blip.
+    returns 200 with ``{\"status\": \"ok\", \"version\": <version>,
+    \"source_commit\": <sha>}`` if the process is up. Deliberately does NOT
+    touch the DB pool — a post-startup Postgres outage must not flip liveness
+    (that's ``/ready``'s job), or an orchestrator would kill an otherwise-
+    healthy process during a DB blip.
+
+    ``source_commit`` echoes the container's build-time ``SOURCE_COMMIT`` env
+    (baked into the image at ``docker build`` from Coolify's commit build-arg).
+    It makes the *truthful running SHA* verifiable over pure HTTPS: ``fleet
+    --drift`` only sees Coolify's deploy-queue commit (build INTENT), which can
+    silently diverge from what a zombie/failed-deploy container is actually
+    running — and reading the real SHA otherwise needs SSH, which is often
+    blocked. Surfacing it here lets seat + ops audits confirm a promote landed
+    and that api/worker are in lockstep over plain HTTP (issue #1669). Falls
+    back to ``\"unknown\"`` outside a built container (local dev), so the key is
+    always present for automated audits to key off of.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -111,10 +135,22 @@ async def asyncio_detailed(
      Liveness probe. Unauthenticated; returns the running aios version.
 
     Suitable for load balancer health checks and monitoring probes. Always
-    returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up. Deliberately does NOT touch the DB pool — a post-startup
-    Postgres outage must not flip liveness (that's ``/ready``'s job), or an
-    orchestrator would kill an otherwise-healthy process during a DB blip.
+    returns 200 with ``{\"status\": \"ok\", \"version\": <version>,
+    \"source_commit\": <sha>}`` if the process is up. Deliberately does NOT
+    touch the DB pool — a post-startup Postgres outage must not flip liveness
+    (that's ``/ready``'s job), or an orchestrator would kill an otherwise-
+    healthy process during a DB blip.
+
+    ``source_commit`` echoes the container's build-time ``SOURCE_COMMIT`` env
+    (baked into the image at ``docker build`` from Coolify's commit build-arg).
+    It makes the *truthful running SHA* verifiable over pure HTTPS: ``fleet
+    --drift`` only sees Coolify's deploy-queue commit (build INTENT), which can
+    silently diverge from what a zombie/failed-deploy container is actually
+    running — and reading the real SHA otherwise needs SSH, which is often
+    blocked. Surfacing it here lets seat + ops audits confirm a promote landed
+    and that api/worker are in lockstep over plain HTTP (issue #1669). Falls
+    back to ``\"unknown\"`` outside a built container (local dev), so the key is
+    always present for automated audits to key off of.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -140,10 +176,22 @@ async def asyncio(
      Liveness probe. Unauthenticated; returns the running aios version.
 
     Suitable for load balancer health checks and monitoring probes. Always
-    returns 200 with ``{\"status\": \"ok\", \"version\": <version>}`` if the
-    process is up. Deliberately does NOT touch the DB pool — a post-startup
-    Postgres outage must not flip liveness (that's ``/ready``'s job), or an
-    orchestrator would kill an otherwise-healthy process during a DB blip.
+    returns 200 with ``{\"status\": \"ok\", \"version\": <version>,
+    \"source_commit\": <sha>}`` if the process is up. Deliberately does NOT
+    touch the DB pool — a post-startup Postgres outage must not flip liveness
+    (that's ``/ready``'s job), or an orchestrator would kill an otherwise-
+    healthy process during a DB blip.
+
+    ``source_commit`` echoes the container's build-time ``SOURCE_COMMIT`` env
+    (baked into the image at ``docker build`` from Coolify's commit build-arg).
+    It makes the *truthful running SHA* verifiable over pure HTTPS: ``fleet
+    --drift`` only sees Coolify's deploy-queue commit (build INTENT), which can
+    silently diverge from what a zombie/failed-deploy container is actually
+    running — and reading the real SHA otherwise needs SSH, which is often
+    blocked. Surfacing it here lets seat + ops audits confirm a promote landed
+    and that api/worker are in lockstep over plain HTTP (issue #1669). Falls
+    back to ``\"unknown\"`` outside a built container (local dev), so the key is
+    always present for automated audits to key off of.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
