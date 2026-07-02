@@ -78,9 +78,12 @@ async def main(input):
     approach = thinker.get("content") or ""
 
     # ── Worker(B): produce the answer, guided by the approach ───────────────
+    # Reinforce the ORIGINAL task's output format (the outer prompt already states it),
+    # rather than inviting a re-explanation — critical for coding, where the answer must
+    # be the full file in a fenced block, not prose about the fix.
     worker_msgs = msgs + [{
         "role": "user",
-        "content": "Here is a suggested approach:\\n" + approach + "\\n\\nNow solve the problem and give the final answer.",
+        "content": "A peer suggested this approach:\\n" + approach + "\\n\\nNow produce the final answer to the original task, in EXACTLY the output format the task requires (e.g. if it asks for full file contents in fenced blocks, output those and nothing else). Do not explain.",
     }]
     worker = await call_llm({"model": B_MODEL, "messages": worker_msgs, "params": B_PARAMS})
     if "error" in worker:
@@ -110,7 +113,7 @@ async def main(input):
         critique = verdict
         worker_msgs = worker_msgs + [
             {"role": "assistant", "content": answer},
-            {"role": "user", "content": "A verifier on a different model rejected that answer:\\n" + critique + "\\n\\nReconsider carefully and give a corrected final answer."},
+            {"role": "user", "content": "A verifier on a different model rejected that answer:\\n" + critique + "\\n\\nReconsider carefully and give a corrected final answer, in EXACTLY the output format the original task requires. Do not explain."},
         ]
         worker = await call_llm({"model": B_MODEL, "messages": worker_msgs, "params": B_PARAMS})
         if "error" in worker:
@@ -134,11 +137,12 @@ async def main(input):
 
 
 # OpenRouter rejects a request whose max_tokens exceeds the key's REMAINING credit
-# affordance (HTTP 402: "requires more credits, or fewer max_tokens"). gpt-5.5's default
-# max_tokens (65536) blows that on a low-credit key, erroring every coding call (which
-# would silently zero out a condition's accuracy). Cap it to a value that (a) fits the
-# affordance and (b) is large enough to regenerate the biggest corpus source file
-# (loop.py ~ 18.5k tokens) with headroom. Anthropic (ant-proxy) has no such cap need.
+# affordance (HTTP 402: "requires more credits, or fewer max_tokens"). A model's default
+# max_tokens (e.g. gpt-5.5's 65536) can blow that, erroring every call (which would
+# silently zero a condition's accuracy). Cap it to a value that fits the (topped-up)
+# affordance AND is large enough to regenerate the biggest corpus source file (loop.py
+# ~18.5k tokens) with headroom. Probed live 2026-06-30 post-topup: gpt-5.5 affords >=32k.
+# Anthropic (ant-proxy, subsidized) has no such cap need.
 _OPENROUTER_MAX_TOKENS = 24000
 
 
@@ -146,9 +150,9 @@ def _params_for(model: str) -> dict:
     """Per-model params: handle the opus-4-8 'temperature deprecated' gotcha AND the
     OpenRouter max_tokens affordance cap (see ``_OPENROUTER_MAX_TOKENS``).
 
-    Opus-4-8 rejects ``temperature`` entirely (provider BadRequest); every other
-    reachable pool model accepts ``temperature=0``. OpenRouter-routed models also need
-    a bounded ``max_tokens`` so a low-credit key can afford the request.
+    Opus-4-8 rejects ``temperature`` entirely (provider BadRequest); every other reachable
+    pool model accepts ``temperature=0``. OpenRouter-routed models also get a bounded
+    ``max_tokens`` so the credit-limited key can afford the request.
     """
     params: dict = {} if "opus-4-8" in model else {"temperature": 0}
     if model.startswith("openrouter/"):

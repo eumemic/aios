@@ -49,16 +49,21 @@ HERE = Path(__file__).parent
 # ── pool (reachable on prod, verified 2026-06-30) ────────────────────────────
 # substrate label is what makes the verifier "different substrate than worker" checkable.
 POOL = {
-    "opus": {"model": "anthropic/claude-opus-4-8", "substrate": "anthropic"},
-    "gpt": {"model": "openrouter/openai/gpt-5.5", "substrate": "openai"},
+    "opus": {"model": "anthropic/claude-opus-4-8", "substrate": "anthropic"},  # ant-proxy (subsidized)
+    "sonnet": {"model": "anthropic/claude-sonnet-4-5", "substrate": "anthropic"},  # ant-proxy (subsidized)
+    "gpt": {"model": "openrouter/openai/gpt-5.5", "substrate": "openai"},  # topped-up; formats cleanly
     "kimi": {"model": "openrouter/moonshotai/kimi-k2.6", "substrate": "moonshot"},
     "glm": {"model": "openrouter/z-ai/glm-5.2", "substrate": "zai"},  # panel-only, NEVER verdict
 }
 GLM_VERDICT_BANNED = "glm"  # GLM may be a panel member but never the Verifier (recipe constraint)
 
-# Heterogeneous R1 role assignment (Thinker A, Worker B, Verifier C).
-# Verifier substrate != Worker substrate is asserted at provision time.
-R1_ROLES = {"A": "opus", "B": "gpt", "C": "kimi"}  # anthropic→openai→moonshot (3 substrates)
+# Heterogeneous R1 role assignment (Thinker A, Worker B, Verifier C). The two RELIABLE,
+# clean-formatting, subsidized substrates: Worker = GPT-5.5 (openai, topped-up OpenRouter)
+# and Verifier = Opus (anthropic, ant-proxy) — the load-bearing substrate-different pair.
+# Verifier substrate (anthropic) != Worker substrate (openai) is asserted at provision.
+# Thinker = Sonnet (anthropic, ant-proxy) — a fast/cheap approach-sketch; its substrate
+# equals the Verifier's but that's fine (the invariant is Verifier != Worker).
+R1_ROLES = {"A": "sonnet", "B": "gpt", "C": "opus"}  # thinker=anthropic, worker=openai, verifier=anthropic
 
 MDE_PP = 8.0
 ALPHA = 0.05

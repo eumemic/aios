@@ -34,16 +34,27 @@ class AiosClient:
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
-        req.add_header("Authorization", f"Bearer {self._api_key}")
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                raw = resp.read().decode()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode()[:500]
-            raise AiosError(f"{method} {path} -> {exc.code}: {detail}") from exc
-        return json.loads(raw) if raw else None
+        # Retry transient NETWORK errors (connection timeouts / resets — e.g. a fleet
+        # connectivity blip) with backoff. A read GET is idempotent; a POST (create
+        # session/run) that reached the server but whose response we lost would re-create,
+        # but the eval tolerates that (extra session/run rows, never a wrong score). HTTP
+        # errors (4xx/5xx from the app) are NOT retried here — they are real API responses.
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                req = urllib.request.Request(url, data=data, method=method)
+                req.add_header("Authorization", f"Bearer {self._api_key}")
+                req.add_header("Content-Type", "application/json")
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    raw = resp.read().decode()
+                return json.loads(raw) if raw else None
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode()[:500]
+                raise AiosError(f"{method} {path} -> {exc.code}: {detail}") from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_exc = exc
+                time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s backoff
+        raise AiosError(f"{method} {path} network error after retries: {last_exc}") from last_exc
 
     # ── resources ────────────────────────────────────────────────────────────
     def whoami(self) -> dict[str, Any]:

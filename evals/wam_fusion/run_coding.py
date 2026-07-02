@@ -41,6 +41,39 @@ MDE_PP = 8.0
 ALPHA = 0.05
 
 
+class Checkpoint:
+    """Append-only JSON-lines checkpoint of per-(condition,item) results.
+
+    Makes the whole measurement RESUMABLE: each scored cell is flushed to disk
+    immediately, and a re-invocation loads what's done and skips it. This is what
+    lets a run that exceeds one foreground window (or hits a mid-run blip) be driven
+    to completion by re-running the SAME command — it continues, never restarts.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._cells: dict[tuple[str, str], dict] = {}
+        if path.exists():
+            for line in path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                self._cells[(r["cond"], r["item"])] = r
+        print(f"# checkpoint {path.name}: {len(self._cells)} cells already done")
+
+    def get(self, cond: str, item: str) -> dict | None:
+        return self._cells.get((cond, item))
+
+    def put(self, cond, item, passed, skipped, cost, detail, run_id, rebill) -> None:
+        rec = {
+            "cond": cond, "item": item, "passed": passed, "skipped": skipped,
+            "cost": cost, "detail": detail, "run_id": run_id, "rebill": rebill,
+        }
+        self._cells[(cond, item)] = rec
+        with self.path.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+
 @dataclass
 class CodingCond:
     name: str
@@ -88,32 +121,60 @@ def _run_and_score(
     test_timeout_s: int,
     throttle_s: float,
     label: str,
+    ckpt: "Checkpoint | None" = None,
 ) -> None:
     for i, item in enumerate(items, 1):
+        # RESUME: if this (condition,item) cell is already checkpointed, replay it
+        # (no model call) so a re-invocation continues where the last one stopped —
+        # the run survives the shell's per-call time cap AND any mid-run crash/blip.
+        cached = ckpt.get(cond.name, item["id"]) if ckpt else None
+        if cached is not None:
+            cond.correct.append(cached["passed"])
+            cond.skipped.append(cached["skipped"])
+            cond.cost_uusd.append(cached["cost"])
+            cond.detail.append(cached["detail"])
+            cond.run_ids.append(cached["run_id"])
+            cond.session_rebill.append(cached["rebill"])
+            m = "PASS" if cached["passed"] else ("SKIP" if cached["skipped"] else "fail")
+            print(f"  [{label} {i:>2}/{len(items)}] {m} {item['id']} (cached)")
+            continue
         passed = skipped = False
         cost = run_id = rebill = None
         detail = ""
         try:
             base_src = source_at_base(repo, item["base_parent_sha"], item["src_files"])
             prompt = build_prompt(item["task"], base_src)
-            sess = client.create_session(agent_id, env_id, prompt)
-            sid = sess["id"]
-            asst = client.wait_for_assistant(sid, timeout_s=timeout_s)
-            text = asst.get("content") if asst else None
-            run_id = client.park_run_id(sid)
-            if run_id:
-                cost = client.get_run(run_id).get("call_llm_cost_microusd")
+            # One reasonable retry on a TRANSIENT inference error (empty text with
+            # cost==0 == the provider call errored/500'd, e.g. an AnthropicException
+            # blip — NOT a wrong answer). A blip must not score as a model failure and
+            # bias the condition down; after one retry it becomes an honest env-skip.
+            text = cost = run_id = None
+            for _attempt in range(2):
+                sess = client.create_session(agent_id, env_id, prompt)
+                sid = sess["id"]
+                asst = client.wait_for_assistant(sid, timeout_s=timeout_s)
+                text = asst.get("content") if asst else None
+                run_id = client.park_run_id(sid)
+                cost = client.get_run(run_id).get("call_llm_cost_microusd") if run_id else None
+                transient = (not text) and (not cost)  # empty answer AND nothing charged
+                if not transient:
+                    break
+                detail = "transient inference error (empty+cost0)"
             su = client.session_usage(sid)
             rebill = su.get("output_tokens") if isinstance(su, dict) else None
-            cand = extract_sources(text, item["src_files"])
-            out = score_candidate(
-                item,
-                repo,
-                cand,
-                venv_python=os.environ.get("AIOS_VENV_PYTHON"),
-                timeout_s=test_timeout_s,
-            )
-            passed, skipped, detail = out.passed, out.skipped, out.detail
+            if (not text) and (not cost):
+                # Still a transient error after the retry -> env-skip (exclude, log).
+                skipped, detail = True, "SKIP: transient inference error (empty+cost0 x2)"
+            else:
+                cand = extract_sources(text, item["src_files"])
+                out = score_candidate(
+                    item,
+                    repo,
+                    cand,
+                    venv_python=os.environ.get("AIOS_VENV_PYTHON"),
+                    timeout_s=test_timeout_s,
+                )
+                passed, skipped, detail = out.passed, out.skipped, out.detail
         except Exception as exc:  # an item infra hiccup => SKIP, never wedge the run
             skipped, detail = True, f"harness:{type(exc).__name__}:{exc}"[:90]
         cond.correct.append(passed)
@@ -122,6 +183,8 @@ def _run_and_score(
         cond.detail.append(detail)
         cond.run_ids.append(run_id)
         cond.session_rebill.append(rebill)
+        if ckpt is not None:
+            ckpt.put(cond.name, item["id"], passed, skipped, cost, detail, run_id, rebill)
         mark = "PASS" if passed else ("SKIP" if skipped else "fail")
         print(
             f"  [{label} {i:>2}/{len(items)}] {mark} {item['id']} ({item['headroom']}) cost_uusd={cost} | {detail[:46]}"
@@ -129,23 +192,19 @@ def _run_and_score(
         time.sleep(throttle_s)
 
 
-def _calibrate(client, env_id, repo, items, timeout_s, test_timeout_s, throttle_s, tag) -> str:
-    print("# CALIBRATION: best single model over the pool (coding pass@1) ...")
+def _calibrate(client, env_id, repo, items, timeout_s, test_timeout_s, throttle_s, tag, cal_keys=None, ckpt=None) -> str:
+    keys = cal_keys or list(POOL)
+    print(f"# CALIBRATION: best single model over {keys} (coding pass@1) ...")
     scores = {}
-    for key, spec in POOL.items():
-        agent, _ = _provision(client, f"cal-{key}", build_best_single_script(spec["model"]), tag)
+    for key in keys:
+        spec = POOL[key]
+        # Deterministic agent name (no time tag) so a resumed run reuses the same
+        # workflow/agent rather than creating a duplicate each restart.
+        agent, _ = _provision(client, f"cal-{key}", build_best_single_script(spec["model"]), "fixed")
         cond = CodingCond(f"cal-{key}", "")
         _run_and_score(
-            client,
-            cond,
-            agent,
-            env_id,
-            repo,
-            items,
-            timeout_s,
-            test_timeout_s,
-            throttle_s,
-            f"cal-{key}",
+            client, cond, agent, env_id, repo, items,
+            timeout_s, test_timeout_s, throttle_s, f"cal-{key}", ckpt=ckpt,
         )
         scores[key] = cond.accuracy()
         print(f"#   {key} ({spec['model']}): pass@1={scores[key]:.3f}")
@@ -169,7 +228,9 @@ def main() -> int:
     ap.add_argument("--env-id", default=None)
     ap.add_argument("--best-single", default=None)
     ap.add_argument("--skip-calibration", action="store_true")
+    ap.add_argument("--cal-pool", default=None, help="comma-separated POOL keys to calibrate over (default: all)")
     ap.add_argument("--out", default=str(HERE / "coding_results.json"))
+    ap.add_argument("--checkpoint", default=str(HERE / "coding_checkpoint.jsonl"), help="resumable per-cell checkpoint")
     args = ap.parse_args()
 
     with contextlib.suppress(AttributeError, ValueError):
@@ -189,24 +250,17 @@ def main() -> int:
         f"# {len(items)} coding items from {args.tasks} (single-file-only={args.single_file_only}); MDE={MDE_PP}pp"
     )
     env_id = args.env_id or client.ensure_environment("wam-eval-env")["id"]
-    tag = time.strftime("%H%M%S")
+    # Fixed tag so a resumed run reuses the same agents/workflows (no dupes per restart).
+    tag = "fixed"
+    ckpt = Checkpoint(Path(args.checkpoint))
 
-    if args.best_single:
-        best_key = args.best_single
-        if not args.skip_calibration:
-            best_key = _calibrate(
-                client,
-                env_id,
-                repo,
-                items,
-                args.timeout_s,
-                args.test_timeout_s,
-                args.throttle_s,
-                tag,
-            )
+    cal_keys = args.cal_pool.split(",") if args.cal_pool else None
+    if args.best_single and args.skip_calibration:
+        best_key = args.best_single  # pinned, no calibration
     else:
         best_key = _calibrate(
-            client, env_id, repo, items, args.timeout_s, args.test_timeout_s, args.throttle_s, tag
+            client, env_id, repo, items, args.timeout_s, args.test_timeout_s,
+            args.throttle_s, tag, cal_keys=cal_keys, ckpt=ckpt,
         )
     best_model = POOL[best_key]["model"]
 
@@ -236,44 +290,14 @@ def main() -> int:
     het_r1 = CodingCond("heterogeneous-R1", het_bind)
 
     print("\n# RUN best-single ...")
-    _run_and_score(
-        client,
-        best_single,
-        bs_agent,
-        env_id,
-        repo,
-        items,
-        args.timeout_s,
-        args.test_timeout_s,
-        args.throttle_s,
-        "best",
-    )
+    _run_and_score(client, best_single, bs_agent, env_id, repo, items,
+                   args.timeout_s, args.test_timeout_s, args.throttle_s, "best", ckpt=ckpt)
     print("\n# RUN self-fusion (matched-fan-in baseline) ...")
-    _run_and_score(
-        client,
-        self_fusion,
-        sf_agent,
-        env_id,
-        repo,
-        items,
-        args.timeout_s,
-        args.test_timeout_s,
-        args.throttle_s,
-        "self",
-    )
+    _run_and_score(client, self_fusion, sf_agent, env_id, repo, items,
+                   args.timeout_s, args.test_timeout_s, args.throttle_s, "self", ckpt=ckpt)
     print("\n# RUN heterogeneous-R1 ...")
-    _run_and_score(
-        client,
-        het_r1,
-        het_agent,
-        env_id,
-        repo,
-        items,
-        args.timeout_s,
-        args.test_timeout_s,
-        args.throttle_s,
-        "hetR1",
-    )
+    _run_and_score(client, het_r1, het_agent, env_id, repo, items,
+                   args.timeout_s, args.test_timeout_s, args.throttle_s, "hetR1", ckpt=ckpt)
 
     _report(items, best_key, best_model, best_single, self_fusion, het_r1, args.out)
     return 0
