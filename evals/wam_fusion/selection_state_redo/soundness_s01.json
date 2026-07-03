@@ -1,0 +1,10 @@
+{
+ "item": "s01",
+ "golden1_passed": true,
+ "golden2_passed": true,
+ "flake": false,
+ "base_passed": false,
+ "base_detail": "candidate omitted ['src/aios/workflows/gate_reaper.py']",
+ "ok": true,
+ "detail": "golden=True/True base=False (candidate omitted ['src/aios/workflows/gate_reaper.py'])"
+}

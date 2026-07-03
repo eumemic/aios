@@ -1,0 +1,10 @@
+{
+ "item": "s04",
+ "golden1_passed": true,
+ "golden2_passed": true,
+ "flake": false,
+ "base_passed": false,
+ "base_detail": "FAIL (12 errors in 0.10s)",
+ "ok": true,
+ "detail": "golden=True/True base=False (FAIL (12 errors in 0.10s))"
+}

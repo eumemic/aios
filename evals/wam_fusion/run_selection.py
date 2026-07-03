@@ -27,6 +27,16 @@ anthropic/claude-opus-4-8 — the provider REJECTS the `temperature` param ("tem
 is deprecated for this model"), so the param is omitted and sampling runs at the
 provider default. Recorded in the results payload; run-to-run variance at this default
 is nonzero on this corpus (the c07/c08 flips), which is the raw material of selection.
+
+REDO (2026-07-03, §10 of the design doc): the 07-02 confirmatory was an INVALID
+TREATMENT ADMINISTRATION (pool_disagreement 0.125; opus-4-8 removed temperature from
+its API surface, so provider-default pools were near-clones). The redo administers a
+VERIFIED-diverse pool via per-candidate archetype system prompts
+(selection_archetypes.py; candidate idx -> archetype is pre-registered), gated by a
+Stage-0 bake-off (proceed only if pool_disagreement >= 0.3 on the bake-off items).
+Stage-1 fix folded in: the ~19%% "extraction failures" were a HARVEST bug (assistant
+text present on the session but past the first events page) — aios_client now
+paginates, and paid_turn keeps polling the SAME session instead of re-paying.
 """
 
 from __future__ import annotations
@@ -40,7 +50,8 @@ import time
 from pathlib import Path
 
 from aios_client import AiosClient, AiosError
-from coding_prompt import CODING_SYSTEM, build_prompt, extract_sources
+from coding_prompt import build_prompt, extract_sources
+from selection_archetypes import ARCHETYPE_NAMES, ARCHETYPES
 from coding_scorer import file_at, score_candidate, self_check, source_at_base
 from recipes import build_best_single_script
 from selection_arms import (
@@ -69,9 +80,11 @@ MDE_PP = 15.0  # §1: pre-declared minimum detectable effect
 TOST_MARGIN = 0.10  # §1: equivalence bound if null
 ALPHA = 0.05
 SAMPLING_NOTE = (
-    "provider-default sampling: opus-4-8 rejects the temperature param "
-    "(harness existing default = omit temperature)"
+    "provider-default sampling (opus-4-8 removed temperature/top_p/top_k from its API "
+    "surface — 400 on every provider); candidate diversity = per-candidate archetype "
+    "system prompts: " + "/".join(ARCHETYPE_NAMES)
 )
+DISAGREEMENT_GATE = 0.30  # §10 Stage-0 hard gate on pool_disagreement_rate
 
 ARM_NAMES = ("a_index0", "b_random", "c_exec", "d_judge")
 
@@ -116,11 +129,12 @@ def ensure_agent(client: AiosClient, name: str, model: str, system: str) -> str:
         raise
 
 
-def provision(client: AiosClient) -> tuple[str, str, dict]:
+def provision(client: AiosClient) -> tuple[list[str], str, dict]:
     """Register the generation + judge passthrough workflows (version-pinned) and
-    their bound agents. Both are R0-shaped all-Opus passthroughs; only the agent
-    system prompt differs (CODING_SYSTEM vs JUDGE_SYSTEM)."""
-    binds = {}
+    their bound agents. All are R0-shaped all-Opus passthroughs; only the agent
+    system prompts differ. The REDO provisions FOUR generation agents — one per
+    archetype (selection_archetypes.py) — so pool candidate idx i is produced by
+    archetype i's worker. The judge is unchanged (never sees the tests)."""
     script = build_best_single_script(BEST_MODEL)
     gen_wf = client.ensure_workflow("selgen-opus", script, "EVS shared-pool generation (passthrough)")
     gen_wf = gen_wf.get("data", gen_wf) if isinstance(gen_wf, dict) else gen_wf
@@ -128,19 +142,30 @@ def provision(client: AiosClient) -> tuple[str, str, dict]:
     judge_wf = client.ensure_workflow("seljudge-opus", script, "EVS arm-d judge (passthrough)")
     judge_wf = judge_wf.get("data", judge_wf) if isinstance(judge_wf, dict) else judge_wf
     judge_bind = f"workflow:{judge_wf['id']}@{judge_wf['version']}" if judge_wf.get("version") else f"workflow:{judge_wf['id']}"
-    gen_agent = ensure_agent(client, "selgen-opus-fixed", gen_bind, CODING_SYSTEM)
+    gen_agents = [
+        ensure_agent(client, f"selgen-opus-arch{i}-{name}", gen_bind, system)
+        for i, (name, system) in enumerate(ARCHETYPES)
+    ]
     judge_agent = ensure_agent(client, "seljudge-opus-fixed", judge_bind, JUDGE_SYSTEM)
-    binds = {"generation": gen_bind, "judge": judge_bind}
-    return gen_agent, judge_agent, binds
+    binds = {"generation": gen_bind, "judge": judge_bind, "archetypes": ARCHETYPE_NAMES}
+    return gen_agents, judge_agent, binds
 
 
 # ── paid call with the run_coding transient-retry contract ───────────────────
 def paid_turn(
-    client: AiosClient, agent_id: str, env_id: str, prompt: str, timeout_s: float
+    client: AiosClient, agent_id: str, env_id: str, prompt: str, timeout_s: float,
+    harvest_extra_s: float = 600.0,
 ) -> dict:
     """One session turn through a bound agent. Returns {text, cost_uusd, run_id,
     session_id}. One retry on a TRANSIENT inference error (empty text AND zero cost
-    == the provider call errored — not a wrong answer; must not bias an arm)."""
+    == the provider call errored — not a wrong answer; must not bias an arm).
+
+    2026-07-03 hardening (§10 Stage 1): if the timeout elapses with no text but the
+    session shows a park (inference dispatched) or the run shows cost (inference
+    PAID), keep polling the SAME session for up to ``harvest_extra_s`` more — a
+    long full-file generation outlives short timeouts, and re-creating the session
+    would pay twice for a turn that is still (or already) materializing. Never
+    re-pay when cost has been charged."""
     text = cost = run_id = sid = None
     for _attempt in range(2):
         sess = client.create_session(agent_id, env_id, prompt)
@@ -149,6 +174,12 @@ def paid_turn(
         text = asst.get("content") if asst else None
         run_id = client.park_run_id(sid)
         cost = client.get_run(run_id).get("call_llm_cost_microusd") if run_id else None
+        if not text and (run_id or cost):
+            # Inference in flight or already paid: extend the harvest window.
+            asst = client.wait_for_assistant(sid, timeout_s=harvest_extra_s, poll_s=5.0)
+            text = asst.get("content") if asst else None
+            run_id = run_id or client.park_run_id(sid)
+            cost = client.get_run(run_id).get("call_llm_cost_microusd") if run_id else cost
         if text or cost:
             break
     return {"text": text, "cost_uusd": cost, "run_id": run_id, "session_id": sid}
@@ -209,12 +240,13 @@ def soundness_preflight(item: dict, repo: str, test_timeout_s: int, state: Path)
 
 
 def generate_pool(
-    client: AiosClient, agent_id: str, env_id: str, item: dict, repo: str,
+    client: AiosClient, gen_agents: list[str], env_id: str, item: dict, repo: str,
     n: int, timeout_s: float, throttle_s: float, meter: Meter, state: Path,
 ) -> list[dict]:
-    """The shared candidate pool: n independent sessions, SAME prompt, provider-default
-    sampling. Each candidate is flushed to disk the moment it exists — a mid-run crash
-    must not lose paid results."""
+    """The shared candidate pool: n independent sessions, SAME user prompt, one
+    archetype worker per candidate index (the pre-registered diversity mechanism).
+    Each candidate is flushed to disk the moment it exists — a mid-run crash must
+    not lose paid results."""
     path = state / f"pool_{item['id']}.jsonl"
     pool = {r["idx"]: r for r in _jsonl_load(path)}
     for r in pool.values():
@@ -228,13 +260,14 @@ def generate_pool(
         if idx in pool:
             continue
         meter.gate(f"pool candidate {idx} of {item['id']}")
+        agent_id = gen_agents[idx % len(gen_agents)]
         r = paid_turn(client, agent_id, env_id, prompt, timeout_s)
-        rec = {"idx": idx, **r}
+        rec = {"idx": idx, "archetype": ARCHETYPE_NAMES[idx % len(ARCHETYPE_NAMES)], **r}
         _jsonl_append(path, rec)
         pool[idx] = rec
         meter.charge(r["cost_uusd"])
         print(
-            f"    pool[{idx}] cost_uusd={r['cost_uusd']} run={r['run_id']} "
+            f"    pool[{idx}:{rec['archetype']}] cost_uusd={r['cost_uusd']} run={r['run_id']} "
             f"text={'yes' if r['text'] else 'NONE'}"
         )
         time.sleep(throttle_s)
@@ -320,8 +353,9 @@ def judge_pick(
 
 # ── the per-item pipeline ────────────────────────────────────────────────────
 def process_item(
-    client, gen_agent, judge_agent, env_id, item, default_repo,
+    client, gen_agents, judge_agent, env_id, item, default_repo,
     n_cands, timeout_s, test_timeout_s, throttle_s, meter, state,
+    pool_only: bool = False,
 ) -> dict:
     iid = item["id"]
     repo = item_repo(item, default_repo)
@@ -334,8 +368,9 @@ def process_item(
         print(f"  [{iid}] REJECT (soundness): {snd['detail']}")
         return rec
 
-    pool = generate_pool(client, gen_agent, env_id, item, repo, n_cands,
+    pool = generate_pool(client, gen_agents, env_id, item, repo, n_cands,
                          timeout_s, throttle_s, meter, state)
+    rec["no_text_candidates"] = sum(1 for c in pool if not c.get("text"))
     rec["pool_cost_uusd"] = sum(c.get("cost_uusd") or 0 for c in pool)
     rec["pool_run_ids"] = [c.get("run_id") for c in pool]
 
@@ -357,6 +392,28 @@ def process_item(
         rec["status"] = "SKIP_INFRA"
         rec["exec"] = scored
         print(f"  [{iid}] SKIP (scorer infra)")
+        return rec
+
+    if pool_only:
+        # Stage-0 bake-off: measure the diversity mechanism, spend nothing on the
+        # judge. The pool/exec checkpoints are shared with Stage 2 (same state
+        # dir), so this spend is replayed — not duplicated — by the full run.
+        passed = [s["passed"] for s in scored]
+        rec["exec"] = [
+            {k: s[k] for k in ("idx", "passed", "changed_lines", "extraction_failed", "detail")}
+            for s in scored
+        ]
+        rec["pool_disagreement"] = len(set(passed)) > 1
+        texts = [c["text"] for c in pool]
+        rec["duplicate_texts"] = len(texts) - len(set(t for t in texts if t)) if any(texts) else 0
+        rec["pool_pass_rate"] = sum(passed) / len(passed) if passed else None
+        rec["status"] = "BAKEOFF"
+        marks = "".join("P" if p else "f" for p in passed)
+        print(
+            f"  [{iid}] BAKEOFF pool={marks} disagree={rec['pool_disagreement']} "
+            f"dup={rec['duplicate_texts']} no_text={rec['no_text_candidates']} "
+            f"${sum(c.get('cost_uusd') or 0 for c in pool) / 1e6:.3f}"
+        )
         return rec
 
     judge = judge_pick(client, judge_agent, env_id, item, repo, pool,
@@ -392,6 +449,49 @@ def process_item(
         + f"  ${(rec['pool_cost_uusd'] + rec['judge_cost_uusd']) / 1e6:.3f}"
     )
     return rec
+
+
+# ── Stage-0 bake-off report (§10: the diversity-mechanism HARD GATE) ─────────
+def bakeoff_report(records: list[dict], meter: Meter, out_path: str, binds: dict) -> None:
+    done = [r for r in records if r.get("status") == "BAKEOFF"]
+    n = len(done)
+    dis = sum(1 for r in done if r.get("pool_disagreement"))
+    rate = dis / n if n else 0.0
+    mean_pass = sum(r.get("pool_pass_rate") or 0.0 for r in done) / n if n else 0.0
+    n_cand = sum(len(r.get("exec") or []) for r in done)
+    extr = sum(1 for r in done for s in (r.get("exec") or []) if s.get("extraction_failed"))
+    no_text = sum(r.get("no_text_candidates", 0) for r in done)
+    dup = sum(r.get("duplicate_texts", 0) for r in done)
+    gate = rate >= DISAGREEMENT_GATE
+    print("\n" + "=" * 80)
+    print("STAGE-0 BAKE-OFF — mechanism: per-candidate archetype system prompts")
+    print("=" * 80)
+    print(f"  items measured:            {n} ({[r['item'] for r in done]})")
+    print(f"  pool_disagreement_rate:    {rate:.3f}  ({dis}/{n})   GATE >= {DISAGREEMENT_GATE}: "
+          f"{'PASS' if gate else 'FAIL'}")
+    print(f"  mean pool pass-rate:       {mean_pass:.3f} (quality sanity)")
+    print(f"  extraction failures:       {extr}/{n_cand} candidates ({extr / n_cand:.1%})" if n_cand else "")
+    print(f"  no-text (harvest) fails:   {no_text}/{n_cand}")
+    print(f"  duplicate candidate texts: {dup}")
+    print(f"  spend: new ${meter.new_uusd / 1e6:.3f} (+ ${meter.replayed_uusd / 1e6:.3f} replayed)")
+    payload = {
+        "stage": "bakeoff",
+        "mechanism": "archetype-prompt-jitter",
+        "archetypes": ARCHETYPE_NAMES,
+        "binds": binds,
+        "gate_threshold": DISAGREEMENT_GATE,
+        "pool_disagreement_rate": rate,
+        "gate_pass": gate,
+        "mean_pool_pass_rate": mean_pass,
+        "extraction_failures": extr,
+        "no_text_candidates": no_text,
+        "n_candidates_measured": n_cand,
+        "duplicate_candidate_texts": dup,
+        "items": records,
+        "spend": {"new_usd": meter.new_uusd / 1e6, "replayed_usd": meter.replayed_uusd / 1e6},
+    }
+    Path(out_path).write_text(json.dumps(payload, indent=2))
+    print(f"\nwrote {out_path}")
 
 
 # ── stats + report (§4) ──────────────────────────────────────────────────────
@@ -503,6 +603,10 @@ def report(records: list[dict], meter: Meter, out_path: str, n_cands: int, binds
             1 for r in scored if r["arm_passed"]["b_random"] and not r["arm_passed"]["c_exec"]
         ),
         "extraction_failures_of_picked_candidate_per_arm": extraction_by_arm,
+        "extraction_failures_any_candidate": sum(
+            1 for r in scored for s in r["exec"] if s.get("extraction_failed")
+        ),
+        "no_text_candidates_total": sum(r.get("no_text_candidates", 0) for r in scored),
         "pool_disagreement_rate": (
             sum(1 for r in scored if r.get("pool_disagreement")) / n if n else None
         ),
@@ -517,6 +621,12 @@ def report(records: list[dict], meter: Meter, out_path: str, n_cands: int, binds
     print("\n--- INTEGRITY ---")
     for k, v in integrity.items():
         print(f"  {k}: {v}")
+    pdr = integrity["pool_disagreement_rate"]
+    if pdr is not None and pdr < DISAGREEMENT_GATE:
+        print(
+            f"  !! TREATMENT-ADMINISTRATION WARNING: full-run pool_disagreement_rate "
+            f"{pdr:.3f} < {DISAGREEMENT_GATE} (the Stage-0 gate) — flag prominently."
+        )
     print(
         f"\n--- SPEND: new ${meter.new_uusd / 1e6:.3f} this invocation "
         f"(+ ${meter.replayed_uusd / 1e6:.3f} replayed from checkpoints; budget ${meter.budget_usd:.2f}) ---"
@@ -537,13 +647,19 @@ def main() -> int:
     )
     ap.add_argument("--n-candidates", type=int, default=N_CANDIDATES)
     ap.add_argument("--budget-usd", type=float, default=16.0, help="hard stop on NEW paid spend")
-    ap.add_argument("--timeout-s", type=float, default=300.0)
+    ap.add_argument("--timeout-s", type=float, default=900.0)
     ap.add_argument("--test-timeout-s", type=int, default=120)
     ap.add_argument("--throttle-s", type=float, default=1.0)
     ap.add_argument("--env-id", default=None)
     ap.add_argument("--state-dir", default=str(STATE_DIR))
     ap.add_argument("--out", default=str(HERE / "selection_results.json"))
     ap.add_argument("--single-file-only", action="store_true", default=True)
+    ap.add_argument(
+        "--stage", choices=("bakeoff", "full"), default="full",
+        help="bakeoff = Stage-0 diversity-mechanism measurement (pool + exec only, "
+        "no judge, no arms); full = the confirmatory run (§10). Same state dir => "
+        "bake-off pools are replayed by the full run at $0.",
+    )
     args = ap.parse_args()
 
     with contextlib.suppress(AttributeError, ValueError):
@@ -568,9 +684,9 @@ def main() -> int:
     acct = client.whoami()
     print(f"# account {acct['id']} spend_limit_usd={acct.get('config', {}).get('spend_limit_usd')}")
     env_id = args.env_id or client.ensure_environment("wam-eval-env")["id"]
-    gen_agent, judge_agent, binds = provision(client)
-    print(f"# generation bind {binds['generation']} | judge bind {binds['judge']}")
-    print(f"# {len(items)} items; N={args.n_candidates}; budget ${args.budget_usd}; {SAMPLING_NOTE}")
+    gen_agents, judge_agent, binds = provision(client)
+    print(f"# generation bind {binds['generation']} x{len(gen_agents)} archetypes | judge bind {binds['judge']}")
+    print(f"# stage={args.stage}; {len(items)} items; N={args.n_candidates}; budget ${args.budget_usd}; {SAMPLING_NOTE}")
 
     state = Path(args.state_dir)
     meter = Meter(args.budget_usd)
@@ -579,14 +695,18 @@ def main() -> int:
         for it in items:
             records.append(
                 process_item(
-                    client, gen_agent, judge_agent, env_id, it, default_repo,
+                    client, gen_agents, judge_agent, env_id, it, default_repo,
                     args.n_candidates, args.timeout_s, args.test_timeout_s,
                     args.throttle_s, meter, state,
+                    pool_only=(args.stage == "bakeoff"),
                 )
             )
     except BudgetStop as stop:
         print(f"\n!! BUDGET STOP: {stop}")
-    report(records, meter, args.out, args.n_candidates, binds, sample_seed=args.sample_seed)
+    if args.stage == "bakeoff":
+        bakeoff_report(records, meter, args.out, binds)
+    else:
+        report(records, meter, args.out, args.n_candidates, binds, sample_seed=args.sample_seed)
     return 0
 
 

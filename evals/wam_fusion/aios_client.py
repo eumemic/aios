@@ -136,9 +136,32 @@ class AiosClient:
     def get_session(self, session_id: str) -> dict[str, Any]:
         return self._request("GET", f"/v1/sessions/{session_id}")
 
-    def session_events(self, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
-        resp = self._request("GET", f"/v1/sessions/{session_id}/events?limit={limit}")
-        return resp.get("data", resp) if isinstance(resp, dict) else resp
+    def session_events(self, session_id: str, limit: int = 500) -> list[dict[str, Any]]:
+        """ALL events for the session, paginated.
+
+        The 2026-07-02 confirmatory-run lesson: a single page (then limit=100)
+        returns the FIRST events, and a long-generation session accumulates
+        wake/sweep span events that push the assistant message past the page —
+        the harness recorded text=None for candidates that were fully paid and
+        fully generated (the entire ~19%% "extraction failure" class). Never
+        read a prefix page when looking for the assistant turn.
+        """
+        out: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            # First page: ?limit=. Subsequent pages: ?cursor= ONLY (the token
+            # carries direction/filters/page-size; no other params accepted).
+            if cursor:
+                path = f"/v1/sessions/{session_id}/events?cursor={cursor}"
+            else:
+                path = f"/v1/sessions/{session_id}/events?limit={min(limit, 500)}"
+            resp = self._request("GET", path)
+            items = resp.get("data", resp) if isinstance(resp, dict) else resp
+            out.extend(items or [])
+            if isinstance(resp, dict) and resp.get("has_more") and resp.get("next_cursor"):
+                cursor = resp["next_cursor"]
+            else:
+                return out
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         return self._request("GET", f"/v1/runs/{run_id}")
@@ -156,7 +179,7 @@ class AiosClient:
 
     def latest_assistant(self, session_id: str) -> dict[str, Any] | None:
         """Return the most recent assistant message event's {content, ...}, or None."""
-        events = self.session_events(session_id, limit=100)
+        events = self.session_events(session_id)
         for ev in reversed(events):
             d = self._event_data(ev)
             kind = ev.get("type") or ev.get("kind")
@@ -168,7 +191,7 @@ class AiosClient:
 
     def park_run_id(self, session_id: str) -> str | None:
         """For a workflow-bound session, the inner run id sealed by model_workflow_park."""
-        for ev in self.session_events(session_id, limit=100):
+        for ev in self.session_events(session_id):
             d = self._event_data(ev)
             if d.get("event") == "model_workflow_park":
                 return d.get("run_id")
@@ -177,7 +200,7 @@ class AiosClient:
     def harvest_markers(self, session_id: str) -> list[str]:
         """The ordered model_workflow_* span event names in a session."""
         out = []
-        for ev in self.session_events(session_id, limit=100):
+        for ev in self.session_events(session_id):
             d = self._event_data(ev)
             evt = d.get("event")
             if isinstance(evt, str) and evt.startswith("model_workflow"):

@@ -1,0 +1,10 @@
+{
+ "item": "s05",
+ "golden1_passed": true,
+ "golden2_passed": true,
+ "flake": false,
+ "base_passed": false,
+ "base_detail": "ENV-SKIP (1 error in 0.09s)",
+ "ok": true,
+ "detail": "golden=True/True base=False (ENV-SKIP (1 error in 0.09s))"
+}
