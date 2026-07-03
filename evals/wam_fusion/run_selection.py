@@ -136,14 +136,23 @@ def provision(client: AiosClient) -> tuple[list[str], str, dict]:
     archetype (selection_archetypes.py) — so pool candidate idx i is produced by
     archetype i's worker. The judge is unchanged (never sees the tests)."""
     script = build_best_single_script(BEST_MODEL)
-    gen_wf = client.ensure_workflow("selgen-opus", script, "EVS shared-pool generation (passthrough)")
+    # §10 Stage-1 (2026-07-03): the litellm wrapper's default per-request timeout is
+    # 300s; the biggest-file items (s31 = db/queries.py) need longer than that to
+    # emit a full-file answer under the "never elide" contract - every attempt died
+    # with `litellm.Timeout: Timeout passed=300.0` (completed run, $0, no text).
+    # ``request.params`` spreads AFTER the wrapper default, so a per-call override
+    # wins; 870s stays under the harness's 900s model_call_deadline_s outer bound.
+    # Uniform across all archetypes/candidates - an infra knob, not a treatment knob.
+    gen_script = script.replace('"params": {}', '"params": {"timeout": 870}')
+    assert gen_script != script, "timeout override failed to apply to the gen script"
+    gen_wf = client.ensure_workflow("selgen-opus", gen_script, "EVS shared-pool generation (passthrough)")
     gen_wf = gen_wf.get("data", gen_wf) if isinstance(gen_wf, dict) else gen_wf
     gen_bind = f"workflow:{gen_wf['id']}@{gen_wf['version']}" if gen_wf.get("version") else f"workflow:{gen_wf['id']}"
     judge_wf = client.ensure_workflow("seljudge-opus", script, "EVS arm-d judge (passthrough)")
     judge_wf = judge_wf.get("data", judge_wf) if isinstance(judge_wf, dict) else judge_wf
     judge_bind = f"workflow:{judge_wf['id']}@{judge_wf['version']}" if judge_wf.get("version") else f"workflow:{judge_wf['id']}"
     gen_agents = [
-        ensure_agent(client, f"selgen-opus-arch{i}-{name}", gen_bind, system)
+        ensure_agent(client, f"selgen-opus-arch{i}-{name}-t870", gen_bind, system)
         for i, (name, system) in enumerate(ARCHETYPES)
     ]
     judge_agent = ensure_agent(client, "seljudge-opus-fixed", judge_bind, JUDGE_SYSTEM)

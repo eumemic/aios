@@ -1,0 +1,4 @@
+{"idx": 0, "passed": false, "infra_skip": false, "applied": true, "extraction_failed": false, "changed_lines": 140, "detail": "reclassified FAIL (env-skip post-preflight): ENV-SKIP (1 error in 1.95s)"}
+{"idx": 1, "passed": false, "infra_skip": false, "applied": true, "extraction_failed": false, "changed_lines": 76, "detail": "reclassified FAIL (env-skip post-preflight): ENV-SKIP (1 error in 1.46s)"}
+{"idx": 2, "passed": false, "infra_skip": false, "applied": true, "extraction_failed": false, "changed_lines": 164, "detail": "reclassified FAIL (env-skip post-preflight): ENV-SKIP (1 error in 1.47s)"}
+{"idx": 3, "passed": false, "infra_skip": false, "applied": true, "extraction_failed": false, "changed_lines": 64, "detail": "reclassified FAIL (env-skip post-preflight): ENV-SKIP (1 error in 1.46s)"}
