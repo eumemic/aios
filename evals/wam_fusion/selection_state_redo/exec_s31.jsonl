@@ -1,0 +1,4 @@
+{"idx": 0, "passed": false, "infra_skip": false, "applied": true, "extraction_failed": false, "changed_lines": 64, "detail": "FAIL (8 failed, 6 passed in 1.34s)"}
+{"idx": 1, "passed": false, "infra_skip": false, "applied": true, "extraction_failed": false, "changed_lines": 34, "detail": "FAIL (8 failed, 6 passed in 0.91s)"}
+{"idx": 2, "passed": false, "infra_skip": false, "applied": true, "extraction_failed": false, "changed_lines": 83, "detail": "FAIL (9 failed, 5 passed in 0.91s)"}
+{"idx": 3, "passed": false, "infra_skip": false, "applied": true, "extraction_failed": false, "changed_lines": 26, "detail": "FAIL (8 failed, 6 passed in 0.93s)"}

@@ -1,0 +1,498 @@
+{
+  "stage": "bakeoff",
+  "mechanism": "archetype-prompt-jitter",
+  "archetypes": [
+    "security-skeptic",
+    "minimalist",
+    "defensive-programmer",
+    "spec-literalist"
+  ],
+  "binds": {
+    "generation": "workflow:wf_01KWGMYDGX611FM2V82A94STH6@2",
+    "judge": "workflow:wf_01KWGMYDM8G67FZSXMQMJAMB6T@1",
+    "archetypes": [
+      "security-skeptic",
+      "minimalist",
+      "defensive-programmer",
+      "spec-literalist"
+    ]
+  },
+  "gate_threshold": 0.3,
+  "pool_disagreement_rate": 0.125,
+  "gate_pass": false,
+  "mean_pool_pass_rate": 0.3125,
+  "extraction_failures": 0,
+  "no_text_candidates": 0,
+  "n_candidates_measured": 32,
+  "duplicate_candidate_texts": 0,
+  "items": [
+    {
+      "item": "c01",
+      "pr": 1487,
+      "stratum": "thin-spec",
+      "soundness": {
+        "item": "c01",
+        "golden1_passed": true,
+        "golden2_passed": true,
+        "flake": false,
+        "base_passed": false,
+        "base_detail": "FAIL (3 failed, 100 passed in 0.59s)",
+        "ok": true,
+        "detail": "golden=True/True base=False (FAIL (3 failed, 100 passed in 0.59s))"
+      },
+      "no_text_candidates": 0,
+      "pool_cost_uusd": 1344709,
+      "pool_run_ids": [
+        "wfr_01KWMJSXKQQCTMZPSEE637YQA6",
+        "wfr_01KWMJX75PV2F27A3HB0TRZEYG",
+        "wfr_01KWMK0D5VAD54ZN7CBHY2ZVZW",
+        "wfr_01KWMK3PNB6KDXFK1PYTWXWMH2"
+      ],
+      "leak_hits": {},
+      "exec": [
+        {
+          "idx": 0,
+          "passed": true,
+          "changed_lines": 65,
+          "extraction_failed": false,
+          "detail": "PASS (103 passed in 0.76s)"
+        },
+        {
+          "idx": 1,
+          "passed": true,
+          "changed_lines": 38,
+          "extraction_failed": false,
+          "detail": "PASS (103 passed in 0.57s)"
+        },
+        {
+          "idx": 2,
+          "passed": true,
+          "changed_lines": 51,
+          "extraction_failed": false,
+          "detail": "PASS (103 passed in 0.56s)"
+        },
+        {
+          "idx": 3,
+          "passed": true,
+          "changed_lines": 44,
+          "extraction_failed": false,
+          "detail": "PASS (103 passed in 0.59s)"
+        }
+      ],
+      "pool_disagreement": false,
+      "duplicate_texts": 0,
+      "pool_pass_rate": 1.0,
+      "status": "BAKEOFF"
+    },
+    {
+      "item": "c05",
+      "pr": 1332,
+      "stratum": "standard",
+      "soundness": {
+        "item": "c05",
+        "golden1_passed": true,
+        "golden2_passed": true,
+        "flake": false,
+        "base_passed": false,
+        "base_detail": "FAIL (6 failed, 11 passed in 0.58s)",
+        "ok": true,
+        "detail": "golden=True/True base=False (FAIL (6 failed, 11 passed in 0.58s))"
+      },
+      "no_text_candidates": 0,
+      "pool_cost_uusd": 427258,
+      "pool_run_ids": [
+        "wfr_01KWMK7253G5QJSFWTEZ89D89E",
+        "wfr_01KWMK8JD2KAVBW9E5G9EV4CSG",
+        "wfr_01KWMK9N4KTWFGMAE7TQC6V1XT",
+        "wfr_01KWMKAYKN3AP2JH3WAV9KRS5J"
+      ],
+      "leak_hits": {},
+      "exec": [
+        {
+          "idx": 0,
+          "passed": false,
+          "changed_lines": 38,
+          "extraction_failed": false,
+          "detail": "FAIL (6 failed, 11 passed in 0.53s)"
+        },
+        {
+          "idx": 1,
+          "passed": false,
+          "changed_lines": 18,
+          "extraction_failed": false,
+          "detail": "FAIL (6 failed, 11 passed in 0.55s)"
+        },
+        {
+          "idx": 2,
+          "passed": false,
+          "changed_lines": 48,
+          "extraction_failed": false,
+          "detail": "FAIL (6 failed, 11 passed in 0.54s)"
+        },
+        {
+          "idx": 3,
+          "passed": false,
+          "changed_lines": 29,
+          "extraction_failed": false,
+          "detail": "FAIL (6 failed, 11 passed in 0.53s)"
+        }
+      ],
+      "pool_disagreement": false,
+      "duplicate_texts": 0,
+      "pool_pass_rate": 0.0,
+      "status": "BAKEOFF"
+    },
+    {
+      "item": "c06",
+      "pr": 1479,
+      "stratum": "standard",
+      "soundness": {
+        "item": "c06",
+        "golden1_passed": true,
+        "golden2_passed": true,
+        "flake": false,
+        "base_passed": false,
+        "base_detail": "ENV-SKIP (1 error in 1.15s)",
+        "ok": true,
+        "detail": "golden=True/True base=False (ENV-SKIP (1 error in 1.15s))"
+      },
+      "no_text_candidates": 0,
+      "pool_cost_uusd": 2823485,
+      "pool_run_ids": [
+        "wfr_01KWMKCA2YR7VZ0R9QPSQFHNSD",
+        "wfr_01KWMKKD9QC1N8CDH7HNTBPBBR",
+        "wfr_01KWMKSX6PRNH1A64ZGS0VJ5PB",
+        "wfr_01KWMM0XWHNWAHM9FBYDTW3RCM"
+      ],
+      "leak_hits": {},
+      "exec": [
+        {
+          "idx": 0,
+          "passed": false,
+          "changed_lines": 140,
+          "extraction_failed": false,
+          "detail": "reclassified FAIL (env-skip post-preflight): ENV-SKIP (1 error in 1.95s)"
+        },
+        {
+          "idx": 1,
+          "passed": false,
+          "changed_lines": 76,
+          "extraction_failed": false,
+          "detail": "reclassified FAIL (env-skip post-preflight): ENV-SKIP (1 error in 1.46s)"
+        },
+        {
+          "idx": 2,
+          "passed": false,
+          "changed_lines": 164,
+          "extraction_failed": false,
+          "detail": "reclassified FAIL (env-skip post-preflight): ENV-SKIP (1 error in 1.47s)"
+        },
+        {
+          "idx": 3,
+          "passed": false,
+          "changed_lines": 64,
+          "extraction_failed": false,
+          "detail": "reclassified FAIL (env-skip post-preflight): ENV-SKIP (1 error in 1.46s)"
+        }
+      ],
+      "pool_disagreement": false,
+      "duplicate_texts": 0,
+      "pool_pass_rate": 0.0,
+      "status": "BAKEOFF"
+    },
+    {
+      "item": "c08",
+      "pr": 1571,
+      "stratum": "standard",
+      "soundness": {
+        "item": "c08",
+        "golden1_passed": true,
+        "golden2_passed": true,
+        "flake": false,
+        "base_passed": false,
+        "base_detail": "FAIL (2 failed, 19 passed in 0.57s)",
+        "ok": true,
+        "detail": "golden=True/True base=False (FAIL (2 failed, 19 passed in 0.57s))"
+      },
+      "no_text_candidates": 0,
+      "pool_cost_uusd": 697284,
+      "pool_run_ids": [
+        "wfr_01KWMM7NYM48KXCZKE6TFFGFJY",
+        "wfr_01KWMM9MH7N2P1ZCZXKJKPCPP7",
+        "wfr_01KWMMBBPRXQXSYZKTXVQAXYPN",
+        "wfr_01KWMMD7EH4Y9DHN1BKTBGFA07"
+      ],
+      "leak_hits": {},
+      "exec": [
+        {
+          "idx": 0,
+          "passed": true,
+          "changed_lines": 103,
+          "extraction_failed": false,
+          "detail": "PASS (21 passed in 0.78s)"
+        },
+        {
+          "idx": 1,
+          "passed": false,
+          "changed_lines": 20,
+          "extraction_failed": false,
+          "detail": "FAIL (1 failed, 20 passed in 0.66s)"
+        },
+        {
+          "idx": 2,
+          "passed": true,
+          "changed_lines": 53,
+          "extraction_failed": false,
+          "detail": "PASS (21 passed in 0.63s)"
+        },
+        {
+          "idx": 3,
+          "passed": false,
+          "changed_lines": 41,
+          "extraction_failed": false,
+          "detail": "FAIL (1 failed, 20 passed in 0.67s)"
+        }
+      ],
+      "pool_disagreement": true,
+      "duplicate_texts": 0,
+      "pool_pass_rate": 0.5,
+      "status": "BAKEOFF"
+    },
+    {
+      "item": "s04",
+      "pr": 1186,
+      "stratum": "standard",
+      "soundness": {
+        "item": "s04",
+        "golden1_passed": true,
+        "golden2_passed": true,
+        "flake": false,
+        "base_passed": false,
+        "base_detail": "FAIL (12 errors in 0.10s)",
+        "ok": true,
+        "detail": "golden=True/True base=False (FAIL (12 errors in 0.10s))"
+      },
+      "no_text_candidates": 0,
+      "pool_cost_uusd": 2956835,
+      "pool_run_ids": [
+        "wfr_01KWMMF23F7GNM5FYD5RYGQ3GB",
+        "wfr_01KWMMPNX7SJZC38FKD963A36Z",
+        "wfr_01KWMMXGXMWYN2NWZ5WHETB59K",
+        "wfr_01KWMN4RVTC8SDHY50DY834P4S"
+      ],
+      "leak_hits": {},
+      "exec": [
+        {
+          "idx": 0,
+          "passed": false,
+          "changed_lines": 159,
+          "extraction_failed": false,
+          "detail": "FAIL (12 errors in 0.13s)"
+        },
+        {
+          "idx": 1,
+          "passed": false,
+          "changed_lines": 66,
+          "extraction_failed": false,
+          "detail": "FAIL (1 passed, 11 errors in 0.65s)"
+        },
+        {
+          "idx": 2,
+          "passed": false,
+          "changed_lines": 138,
+          "extraction_failed": false,
+          "detail": "FAIL (12 errors in 0.10s)"
+        },
+        {
+          "idx": 3,
+          "passed": false,
+          "changed_lines": 71,
+          "extraction_failed": false,
+          "detail": "FAIL (12 errors in 0.10s)"
+        }
+      ],
+      "pool_disagreement": false,
+      "duplicate_texts": 0,
+      "pool_pass_rate": 0.0,
+      "status": "BAKEOFF"
+    },
+    {
+      "item": "s12",
+      "pr": 975,
+      "stratum": "standard",
+      "soundness": {
+        "item": "s12",
+        "golden1_passed": true,
+        "golden2_passed": true,
+        "flake": false,
+        "base_passed": false,
+        "base_detail": "FAIL (3 failed, 5 passed in 1.33s)",
+        "ok": true,
+        "detail": "golden=True/True base=False (FAIL (3 failed, 5 passed in 1.33s))"
+      },
+      "no_text_candidates": 0,
+      "pool_cost_uusd": 1446535,
+      "pool_run_ids": [
+        "wfr_01KWMNBPZG5CE8XS0ZJ2K25CK5",
+        "wfr_01KWMNF7P4SZCCQG4NFHSX3A8R",
+        "wfr_01KWMNJHXWZ6EG2XAJDVJEEDWF",
+        "wfr_01KWMNP2WR7CQY6B5X7R3BSFBK"
+      ],
+      "leak_hits": {},
+      "exec": [
+        {
+          "idx": 0,
+          "passed": true,
+          "changed_lines": 75,
+          "extraction_failed": false,
+          "detail": "PASS (8 passed in 1.69s)"
+        },
+        {
+          "idx": 1,
+          "passed": true,
+          "changed_lines": 54,
+          "extraction_failed": false,
+          "detail": "PASS (8 passed in 1.40s)"
+        },
+        {
+          "idx": 2,
+          "passed": true,
+          "changed_lines": 70,
+          "extraction_failed": false,
+          "detail": "PASS (8 passed in 1.38s)"
+        },
+        {
+          "idx": 3,
+          "passed": true,
+          "changed_lines": 55,
+          "extraction_failed": false,
+          "detail": "PASS (8 passed in 1.38s)"
+        }
+      ],
+      "pool_disagreement": false,
+      "duplicate_texts": 0,
+      "pool_pass_rate": 1.0,
+      "status": "BAKEOFF"
+    },
+    {
+      "item": "s31",
+      "pr": 172,
+      "stratum": "standard",
+      "soundness": {
+        "item": "s31",
+        "golden1_passed": true,
+        "golden2_passed": true,
+        "flake": false,
+        "base_passed": false,
+        "base_detail": "FAIL (8 failed, 6 passed in 0.86s)",
+        "ok": true,
+        "detail": "golden=True/True base=False (FAIL (8 failed, 6 passed in 0.86s))"
+      },
+      "no_text_candidates": 0,
+      "pool_cost_uusd": 4629084,
+      "pool_run_ids": [
+        "wfr_01KWMXVN4G8S9GD9DM93K8SYWX",
+        "wfr_01KWMY5J82JNJ29JDTQHJ1A92S",
+        "wfr_01KWMYF6KXCK536BF3BX0BDB7D",
+        "wfr_01KWMYRZV1GGE182YV6DRH69VG"
+      ],
+      "leak_hits": {},
+      "exec": [
+        {
+          "idx": 0,
+          "passed": false,
+          "changed_lines": 64,
+          "extraction_failed": false,
+          "detail": "FAIL (8 failed, 6 passed in 1.34s)"
+        },
+        {
+          "idx": 1,
+          "passed": false,
+          "changed_lines": 34,
+          "extraction_failed": false,
+          "detail": "FAIL (8 failed, 6 passed in 0.91s)"
+        },
+        {
+          "idx": 2,
+          "passed": false,
+          "changed_lines": 83,
+          "extraction_failed": false,
+          "detail": "FAIL (9 failed, 5 passed in 0.91s)"
+        },
+        {
+          "idx": 3,
+          "passed": false,
+          "changed_lines": 26,
+          "extraction_failed": false,
+          "detail": "FAIL (8 failed, 6 passed in 0.93s)"
+        }
+      ],
+      "pool_disagreement": false,
+      "duplicate_texts": 0,
+      "pool_pass_rate": 0.0,
+      "status": "BAKEOFF"
+    },
+    {
+      "item": "s38",
+      "pr": 27,
+      "stratum": "multi-attempt",
+      "soundness": {
+        "item": "s38",
+        "golden1_passed": true,
+        "golden2_passed": true,
+        "flake": false,
+        "base_passed": false,
+        "base_detail": "FAIL (6 failed, 36 passed in 0.09s)",
+        "ok": true,
+        "detail": "golden=True/True base=False (FAIL (6 failed, 36 passed in 0.09s))"
+      },
+      "no_text_candidates": 0,
+      "pool_cost_uusd": 683760,
+      "pool_run_ids": [
+        "wfr_01KWMZ2RE2APDWNGMQ3C5B41PB",
+        "wfr_01KWMZ4PBFAAE4TV625MKJC6TH",
+        "wfr_01KWMZ67B8K0HBJ2DTDAZ3K9ZB",
+        "wfr_01KWMZ8269D51E4X2T9Q0ND2NZ"
+      ],
+      "leak_hits": {},
+      "exec": [
+        {
+          "idx": 0,
+          "passed": false,
+          "changed_lines": 67,
+          "extraction_failed": false,
+          "detail": "FAIL (6 failed, 36 passed in 0.09s)"
+        },
+        {
+          "idx": 1,
+          "passed": false,
+          "changed_lines": 8,
+          "extraction_failed": false,
+          "detail": "FAIL (6 failed, 36 passed in 0.10s)"
+        },
+        {
+          "idx": 2,
+          "passed": false,
+          "changed_lines": 49,
+          "extraction_failed": false,
+          "detail": "FAIL (6 failed, 36 passed in 0.09s)"
+        },
+        {
+          "idx": 3,
+          "passed": false,
+          "changed_lines": 19,
+          "extraction_failed": false,
+          "detail": "FAIL (6 failed, 36 passed in 0.09s)"
+        }
+      ],
+      "pool_disagreement": false,
+      "duplicate_texts": 0,
+      "pool_pass_rate": 0.0,
+      "status": "BAKEOFF"
+    }
+  ],
+  "spend": {
+    "new_usd": 5.312844,
+    "replayed_usd": 9.696106
+  }
+}
