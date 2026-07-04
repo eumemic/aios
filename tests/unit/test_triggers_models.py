@@ -122,6 +122,95 @@ class TestCronSource:
             _spec(source={"kind": "cron", "schedule": "0 0 30 2 *"})
 
 
+class TestCronSourceTimezone:
+    """IANA-timezone-aware cron schedules (CronSource.timezone, #1378)."""
+
+    def test_create_accepts_valid_timezone(self) -> None:
+        spec = _spec(
+            source={
+                "kind": "cron",
+                "schedule": "0 9 * * *",
+                "timezone": "America/New_York",
+            }
+        )
+        assert isinstance(spec.source, CronSource)
+        assert spec.source.timezone == "America/New_York"
+
+    def test_create_rejects_unknown_timezone(self) -> None:
+        with pytest.raises(ValidationError, match="unknown IANA timezone: 'Not/AZone'"):
+            _spec(
+                source={
+                    "kind": "cron",
+                    "schedule": "0 9 * * *",
+                    "timezone": "Not/AZone",
+                }
+            )
+
+    def test_create_omitting_timezone_defaults_none(self) -> None:
+        spec = _spec(source={"kind": "cron", "schedule": "0 9 * * *"})
+        assert isinstance(spec.source, CronSource)
+        assert spec.source.timezone is None
+
+    def test_update_accepts_valid_timezone(self) -> None:
+        upd = TriggerUpdate.model_validate(
+            {
+                "source": {
+                    "kind": "cron",
+                    "schedule": "0 9 * * *",
+                    "timezone": "America/New_York",
+                }
+            }
+        )
+        assert isinstance(upd.source, CronSource)
+        assert upd.source.timezone == "America/New_York"
+
+    def test_update_rejects_unknown_timezone(self) -> None:
+        with pytest.raises(ValidationError, match="unknown IANA timezone: 'Not/AZone'"):
+            TriggerUpdate.model_validate(
+                {
+                    "source": {
+                        "kind": "cron",
+                        "schedule": "0 9 * * *",
+                        "timezone": "Not/AZone",
+                    }
+                }
+            )
+
+    def test_update_omitting_timezone_defaults_none(self) -> None:
+        upd = TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "0 9 * * *"}})
+        assert isinstance(upd.source, CronSource)
+        assert upd.source.timezone is None
+
+    def test_horizon_check_runs_in_localized_frame(self) -> None:
+        # A quadrennial leap-day cron validated with a non-UTC timezone still
+        # accepts — the occurrence horizon runs in the localized frame (EDIT 2),
+        # not UTC, so localized write-time accept matches the runtime fire path.
+        spec = _spec(
+            source={
+                "kind": "cron",
+                "schedule": "0 0 29 2 *",
+                "timezone": "America/Los_Angeles",
+            }
+        )
+        assert isinstance(spec.source, CronSource)
+        assert spec.source.timezone == "America/Los_Angeles"
+
+    def test_serialization_round_trip(self) -> None:
+        src = CronSource(schedule="0 9 * * *", timezone="America/New_York")
+        dump = src.model_dump(mode="json", exclude={"kind"})
+        assert dump == {"schedule": "0 9 * * *", "timezone": "America/New_York"}
+        rebuilt = TRIGGER_SOURCE_ADAPTER.validate_python({"kind": "cron", **dump})
+        assert isinstance(rebuilt, CronSource)
+        assert rebuilt.timezone == "America/New_York"
+
+    def test_serialization_round_trip_tzless(self) -> None:
+        # Old tz-less rows reconstruct with timezone=None.
+        dump = {"schedule": "0 9 * * *"}
+        rebuilt = TRIGGER_SOURCE_ADAPTER.validate_python({"kind": "cron", **dump})
+        assert isinstance(rebuilt, CronSource)
+        assert rebuilt.timezone is None
+
+
 class TestOneShotSource:
     def test_accepts_tz_aware(self) -> None:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -387,11 +476,65 @@ class TestComputeNextFire:
         assert nxt > base
 
 
+class TestComputeNextFireTimezone:
+    """Timezone-aware fire-time computation (#1378)."""
+
+    def test_daily_9am_eastern_converts_to_utc(self) -> None:
+        # 9am EDT (summer) == 13:00Z — verified live in the design review.
+        nxt = compute_next_fire(
+            "0 9 * * *",
+            datetime(2026, 6, 17, 0, 0, tzinfo=UTC),
+            "America/New_York",
+        )
+        assert nxt == datetime(2026, 6, 17, 13, 0, tzinfo=UTC)
+
+    def test_none_timezone_is_byte_identical_to_today(self) -> None:
+        # Regression: the trailing astimezone(UTC) is inert for tz=None.
+        nxt = compute_next_fire("0 9 * * *", datetime(2026, 6, 17, 0, 0, tzinfo=UTC))
+        assert nxt == datetime(2026, 6, 17, 9, 0, tzinfo=UTC)
+
+    def test_result_is_utc_aware(self) -> None:
+        nxt = compute_next_fire(
+            "0 9 * * *",
+            datetime(2026, 6, 17, 0, 0, tzinfo=UTC),
+            "America/New_York",
+        )
+        assert nxt.tzinfo == UTC
+
+    def test_dst_spring_forward(self) -> None:
+        # 2026-03-08 is the US spring-forward date; 2:30 local rolls to 3:00
+        # local = 07:00Z. Verified live.
+        nxt = compute_next_fire(
+            "30 2 * * *",
+            datetime(2026, 3, 8, 0, 0, tzinfo=UTC),
+            "America/New_York",
+        )
+        assert nxt == datetime(2026, 3, 8, 7, 0, tzinfo=UTC)
+
+    def test_dst_fall_back_fires_once(self) -> None:
+        # 2026-11-01 is the US fall-back date; a cron at the repeated local hour
+        # fires once with a deterministic converted-UTC value.
+        nxt = compute_next_fire(
+            "30 1 * * *",
+            datetime(2026, 11, 1, 0, 0, tzinfo=UTC),
+            "America/New_York",
+        )
+        assert nxt.tzinfo == UTC
+        assert nxt == datetime(2026, 11, 1, 5, 30, tzinfo=UTC)
+
+
 class TestComputeInitialNextFire:
     def test_cron_returns_next_slot(self) -> None:
         base = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)
         nxt = compute_initial_next_fire(CronSource(schedule="*/5 * * * *"), base)
         assert nxt == datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+
+    def test_cron_with_timezone_localizes(self) -> None:
+        base = datetime(2026, 6, 17, 0, 0, tzinfo=UTC)
+        nxt = compute_initial_next_fire(
+            CronSource(schedule="0 9 * * *", timezone="America/New_York"), base
+        )
+        assert nxt == datetime(2026, 6, 17, 13, 0, tzinfo=UTC)
 
     def test_one_shot_returns_fire_at_verbatim_even_if_past(self) -> None:
         past = datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC)

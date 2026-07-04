@@ -97,6 +97,31 @@ def test_upgrade_and_clean_downgrade_round_trip(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
+def test_cron_row_with_timezone_key_accepted_under_check(postgres: object) -> None:
+    """Zero-migration proof for CronSource.timezone (#1378): a cron row carrying
+    a ``timezone`` key in ``source_spec`` satisfies ``triggers_source_spec_shape``
+    with NO DDL — the cron arm only asserts ``schedule`` is a string and
+    ``fire_at`` is absent, and the COALESCE wrapper tolerates additive keys."""
+    db_url = _alembic_url(postgres)
+    up = _run_alembic(["upgrade", "0108"], db_url)
+    assert up.returncode == 0, f"upgrade to 0108 failed:\n{up.stderr}\n{up.stdout}"
+    asyncio.run(_execute(db_url, _CHAIN_SQL))
+
+    tz_cron = (
+        "INSERT INTO triggers "
+        "(id, owner_session_id, account_id, name, source, source_spec, action, "
+        "enabled, next_fire) VALUES "
+        "('trig_tzcron', 'ses_mig', 'acc_mig', 'tz-cron', 'cron', "
+        '\'{"schedule": "0 9 * * *", "timezone": "America/New_York"}\'::jsonb, '
+        '\'{"kind": "wake_owner", "content": "hi"}\'::jsonb, '
+        "TRUE, now())"
+    )
+    # Succeeds (no exception) — the additive timezone key passes the CHECK.
+    asyncio.run(_execute(db_url, tz_cron))
+
+
+@needs_docker
+@pytest.mark.integration
 def test_external_event_row_accepted_under_new_check_rejected_under_old(postgres: object) -> None:
     """An external_event row INSERTs at head (0108) and is rejected at the prior
     revision (0107) — the shape CHECK swap is what makes the kind representable."""

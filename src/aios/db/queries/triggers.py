@@ -489,6 +489,7 @@ async def fetch_and_claim_due_triggers(
         """
         SELECT t.id, t.owner_session_id, t.account_id, t.name, t.source,
                t.source_spec, t.source_spec ->> 'schedule' AS schedule,
+               t.source_spec ->> 'timezone' AS cron_timezone,
                t.action, t.enabled, t.next_fire, t.running_since,
                t.last_fire_at, t.last_fire_status, t.consecutive_failures,
                t.environment_id, t.ingest_token_hash,
@@ -515,7 +516,7 @@ async def fetch_and_claim_due_triggers(
             # Cron row — advance next_fire so subsequent ticks skip until the
             # next scheduled slot. ``schedule`` is the text projection of
             # ``source_spec ->> 'schedule'`` (NULL for one-shot rows).
-            new_next_fire = compute_next_fire(r["schedule"], now_utc)
+            new_next_fire = compute_next_fire(r["schedule"], now_utc, r["cron_timezone"])
             await conn.execute(
                 """
                 UPDATE triggers

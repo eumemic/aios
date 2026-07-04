@@ -12144,6 +12144,18 @@
             "maxLength": 128,
             "minLength": 1,
             "title": "Schedule"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone",
+            "description": "IANA timezone name (e.g. 'America/Los_Angeles') the cron wall-clock is interpreted in. Unset = UTC. '0 9 * * *' with timezone 'America/New_York' fires at 9am Eastern, DST-aware."
           }
         },
         "additionalProperties": false,
@@ -12152,7 +12164,7 @@
           "schedule"
         ],
         "title": "CronSource",
-        "description": "Recurring source: a standard 5-field cron expression in UTC.\n\nStructure-only here \u2014 grammar/occurrence checks live on the write\nmodels (``TriggerCreate`` / ``TriggerUpdate``) so the read path accepts\nevery row the write path ever accepted (see module docstring + \u00a72.2 of\nthe design contract). A future additive ``timezone`` field (IANA name;\nabsent = UTC) lands without touching this model or the DB CHECK."
+        "description": "Recurring source: a standard 5-field cron expression.\n\nStructure-only here \u2014 grammar/occurrence checks live on the write\nmodels (``TriggerCreate`` / ``TriggerUpdate``) so the read path accepts\nevery row the write path ever accepted (see module docstring + \u00a72.2 of\nthe design contract). The additive ``timezone`` field (IANA name)\ninterprets the cron wall-clock; absent = UTC."
       },
       "DenyAll": {
         "properties": {
