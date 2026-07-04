@@ -478,9 +478,9 @@ async def test_tell_existing_session_appends_message_no_edge_channel_less(
     async def _fake_defer_wake(_pool: Any, sid: str, *, cause: str, account_id: str) -> None:
         deferred.append((sid, cause))
 
-    import aios.services.wake as wake_module
+    import aios.services.sessions as sessions_module
 
-    monkeypatch.setattr(wake_module, "defer_wake", _fake_defer_wake)
+    monkeypatch.setattr(sessions_module, "defer_wake", _fake_defer_wake)
     ok = await service.stimulate(
         pool,
         service.TellExistingSession(session_id=session.id, content="go look", cause="message"),

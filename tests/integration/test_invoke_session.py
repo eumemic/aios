@@ -75,6 +75,7 @@ async def pool_env(
         )
         with (
             mock.patch("aios.services.sessions.defer_wake", new=AsyncMock()),
+            mock.patch("aios.jobs.app.defer_wake", new=AsyncMock()),
             mock.patch("aios.services.workflows.defer_run_wake", new=AsyncMock()),
         ):
             yield pool, _ACCOUNT, agent.id, env.id, session.id
