@@ -36,11 +36,13 @@ from aios.harness import runtime
 from aios.logging import get_logger
 from aios.mcp.client import resolve_auth_for_target_url_run
 from aios.models.workflows import WfRun
+from aios.services import triggers as triggers_service
 from aios.services import workflows as wf_service
 from aios.services.wake import defer_run_wake
 from aios.tools.http_request import _do_http_request, _find_server, _match_route, _split_query
 from aios.tools.invoke import validate_arguments
 from aios.tools.registry import registry
+from aios.tools.trigger_account_list import _ListAccountTriggersArgs
 from aios.tools.web_fetch import web_fetch_handler
 from aios.tools.web_search import web_search_handler
 from aios.tools.workflow_management import (
@@ -90,7 +92,15 @@ def _substitute_idempotency_sentinel(
 # (read/write/edit/glob/grep) and authed-MCP / search_events stay out of scope (later
 # slices), so a ``tool('read')`` is a recoverable not-callable value at the run frontier.
 RUN_TOOLS: frozenset[str] = frozenset(
-    {"web_search", "web_fetch", "http_request", "bash", "list_runs", "get_run"}
+    {
+        "web_search",
+        "web_fetch",
+        "http_request",
+        "bash",
+        "list_runs",
+        "get_run",
+        "list_account_triggers",
+    }
 )
 
 # Per-worker in-flight tool tasks, keyed (run_id, call_key). Gates *launching* (so a
@@ -241,6 +251,35 @@ async def _read_run_journal(
         return {"error": str(exc)}
 
 
+async def _read_account_triggers(*, account_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    """The account-wide trigger read — ``list_account_triggers`` from inside a run (#1673).
+
+    Dispatches to the triggers service ACCOUNT-SCOPED to the calling run's account, never
+    session-scoped, never cross-account (mirroring :func:`_read_run_journal`): the run sees
+    EVERY trigger in its OWN account and only those, because ``account_id=account_id`` is the
+    run's own account (``run.account_id``, threaded by :func:`invoke_run_tool`) — the same
+    isolation boundary the http-credential resolver and the run-journal reads enforce.
+
+    This is the substrate the ops-agent O7 trigger-liveness auditor reads: it enumerates every
+    enabled trigger across the account (each sentinel on its own session) and checks each
+    ``next_fire`` for the #925 zombie class. The returned shape MATCHES the session tool
+    (``{"triggers": [...]}`` of :class:`~aios.models.triggers.AccountTriggerEcho` dicts), so a
+    workflow's reader code is identical whether the tool is called from a session or a run.
+    """
+    pool = runtime.require_pool()
+    try:
+        parsed = _ListAccountTriggersArgs.model_validate(args)
+        echoes = await triggers_service.list_account_triggers(
+            pool, account_id=account_id, enabled_only=parsed.enabled_only
+        )
+        return {"triggers": [e.model_dump(mode="json") for e in echoes]}
+    except AiosError as exc:
+        # Recoverable value the script branches on — never a run-terminal raise (the
+        # agent()/http_request "errors resolve" contract). The read is account-scoped, so a
+        # run can never read another account's triggers.
+        return {"error": str(exc)}
+
+
 async def invoke_run_tool(
     *, run: WfRun, call_key: str, account_id: str, tool_name: str, tool_input: Any
 ) -> dict[str, Any]:
@@ -260,6 +299,8 @@ async def invoke_run_tool(
 
     if tool_name in ("list_runs", "get_run"):
         return await _read_run_journal(account_id=account_id, tool_name=tool_name, args=args)
+    if tool_name == "list_account_triggers":
+        return await _read_account_triggers(account_id=account_id, args=args)
     if tool_name == "http_request":
         # A route an operator marked ``always_ask`` requires per-call human confirmation —
         # which a run has no channel for. Deny rather than execute unconfirmed, so a run is

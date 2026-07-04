@@ -19,6 +19,7 @@ class ToolSpecTypeType0(str, Enum):
     GLOB = "glob"
     GREP = "grep"
     HTTP_REQUEST = "http_request"
+    LIST_ACCOUNT_TRIGGERS = "list_account_triggers"
     LIST_AGENTS = "list_agents"
     LIST_GOALS = "list_goals"
     LIST_OBLIGATIONS = "list_obligations"

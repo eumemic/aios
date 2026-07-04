@@ -462,6 +462,34 @@ class TriggerCreated(TriggerEcho):
     ingest_token: str | None = None
 
 
+class AccountTriggerEcho(BaseModel):
+    """Account-wide read view of a trigger — the liveness-audit projection.
+
+    Backs the account-scoped ``list_account_triggers`` read tool (#1673), the
+    filed blocking precondition for the ops-agent O7 trigger-liveness auditor.
+    Unlike :class:`TriggerEcho` (session-scoped, echoed on ``Session.triggers``)
+    this carries the ``owner_session_id`` — the account-wide sweep needs to name
+    *which* session owns each trigger, and correlate a zombie
+    (``enabled=true, next_fire=NULL``) back to its cron.
+
+    ``source_kind`` is the discriminator text only (``cron`` / ``one_shot`` /
+    ``run_completion`` / ``external_event``) — the auditor branches on it to
+    classify a trigger as schedulable (``cron`` → ``next_fire`` MUST be non-null)
+    vs reactive/one-shot (``run_completion`` / ``external_event`` → exempt from
+    the non-null invariant). The full source spec is deliberately not projected:
+    the liveness predicate needs the kind, not the schedule payload.
+    """
+
+    id: str
+    name: str
+    owner_session_id: str
+    source_kind: str
+    enabled: bool
+    next_fire: datetime | None
+    last_fire_status: TriggerFireStatus | None
+    consecutive_failures: int
+
+
 class TriggerRunEcho(BaseModel):
     """Read view of one ``trigger_runs`` row — a single fire of a trigger.
 

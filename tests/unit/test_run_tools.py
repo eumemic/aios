@@ -464,3 +464,118 @@ def test_standing_dead_men_worker_tools_are_run_callable() -> None:
             f"{tool_type!r} is declared by a standing dead-man but is NOT run-callable "
             "(not in RUN_TOOLS) — it would be silently inert in a live run"
         )
+
+
+# ─── the account-wide trigger read (list_account_triggers from inside a run, #1673) ──
+
+
+def test_account_trigger_read_is_in_run_tools() -> None:
+    # The account-wide trigger read is run-callable — the substrate the ops-agent O7
+    # trigger-liveness auditor (a workflow run) reads. Without this it would be a
+    # recoverable "not callable from a workflow run" value and the auditor would stay a
+    # NAMED cannot-determine residue forever.
+    assert "list_account_triggers" in run_tools.RUN_TOOLS
+
+
+async def test_list_account_triggers_is_account_scoped() -> None:
+    """A run's list_account_triggers dispatches to the triggers service with the RUN's own
+    account and NO session filter — the isolation boundary. It sees every trigger in its
+    account (each sentinel on its own session) and only its account's."""
+    run = _run(tools=[ToolSpec(type="list_account_triggers")])
+    fake_echo = SimpleNamespace(
+        model_dump=lambda **_: {
+            "id": "trg_1",
+            "name": "nightly",
+            "owner_session_id": "ses_reaper",
+            "source_kind": "cron",
+            "enabled": True,
+            "next_fire": None,
+            "last_fire_status": None,
+            "consecutive_failures": 0,
+        }
+    )
+    svc = AsyncMock(return_value=[fake_echo])
+    with (
+        patch("aios.harness.runtime.require_pool", return_value="POOL"),
+        patch("aios.workflows.run_tools.triggers_service.list_account_triggers", new=svc),
+    ):
+        out = await invoke_run_tool(
+            run=run,
+            call_key="sha:k#0",
+            account_id="acc_t",
+            tool_name="list_account_triggers",
+            tool_input={},
+        )
+    assert out == {
+        "triggers": [
+            {
+                "id": "trg_1",
+                "name": "nightly",
+                "owner_session_id": "ses_reaper",
+                "source_kind": "cron",
+                "enabled": True,
+                "next_fire": None,  # the #925 zombie signature is preserved to the script
+                "last_fire_status": None,
+                "consecutive_failures": 0,
+            }
+        ]
+    }
+    assert svc.await_args is not None  # the service was actually dispatched to
+    kwargs = svc.await_args.kwargs
+    assert kwargs["account_id"] == "acc_t"  # the RUN's own account — the isolation boundary
+    assert kwargs["enabled_only"] is True  # default: the population the invariant is about
+
+
+async def test_list_account_triggers_enabled_only_arg_flows_through() -> None:
+    run = _run(tools=[ToolSpec(type="list_account_triggers")])
+    svc = AsyncMock(return_value=[])
+    with (
+        patch("aios.harness.runtime.require_pool", return_value="POOL"),
+        patch("aios.workflows.run_tools.triggers_service.list_account_triggers", new=svc),
+    ):
+        await invoke_run_tool(
+            run=run,
+            call_key="sha:k#0",
+            account_id="acc_t",
+            tool_name="list_account_triggers",
+            tool_input={"enabled_only": False},
+        )
+    assert svc.await_args is not None
+    assert svc.await_args.kwargs["enabled_only"] is False
+
+
+async def test_account_trigger_read_error_is_recoverable_not_a_raise() -> None:
+    """A service-layer AiosError surfaces as a recoverable {"error": ...} value the script
+    branches on — never a run-terminal raise (the agent()/http_request errors-resolve
+    contract)."""
+    from aios.errors import ValidationError
+
+    run = _run(tools=[ToolSpec(type="list_account_triggers")])
+    with (
+        patch("aios.harness.runtime.require_pool", return_value="POOL"),
+        patch(
+            "aios.workflows.run_tools.triggers_service.list_account_triggers",
+            new=AsyncMock(side_effect=ValidationError("boom")),
+        ),
+    ):
+        out = await invoke_run_tool(
+            run=run,
+            call_key="sha:k#0",
+            account_id="acc_t",
+            tool_name="list_account_triggers",
+            tool_input={},
+        )
+    assert "error" in out and "boom" in out["error"]
+
+
+async def test_undeclared_account_trigger_read_is_recoverable_error() -> None:
+    # Run-callable, but a workflow that didn't DECLARE it still can't call it.
+    run = _run(tools=[])
+    out = await invoke_run_tool(
+        run=run,
+        call_key="sha:k#0",
+        account_id="acc_t",
+        tool_name="list_account_triggers",
+        tool_input={},
+    )
+    assert "error" in out and "declared" in out["error"]
