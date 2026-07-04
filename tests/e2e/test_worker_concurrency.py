@@ -51,6 +51,7 @@ class TestWorkerConcurrencyE2E:
         self, real_wake_setup: asyncpg.Pool[Any], aios_env: dict[str, str]
     ) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
+        import aios.harness.tasks  # noqa: F401  — register @app.task handlers on the shared app
         from aios.jobs.app import app as procrastinate_app
         from aios.jobs.app import defer_wake
 
