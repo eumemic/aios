@@ -40,6 +40,7 @@ BuiltinToolType = Literal[
     "trigger_remove",
     "trigger_update",
     "trigger_list",
+    "list_account_triggers",
     "create_workflow",
     "update_workflow",
     "archive_workflow",

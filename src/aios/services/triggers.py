@@ -49,6 +49,7 @@ from aios.errors import ConflictError, RateLimitedError, ValidationError
 from aios.models.sessions import Session
 from aios.models.triggers import (
     MAX_TRIGGERS_PER_SESSION,
+    AccountTriggerEcho,
     CronSource,
     ExternalEventSource,
     OneShotSource,
@@ -423,6 +424,28 @@ async def list_triggers(
 ) -> list[TriggerEcho]:
     async with pool.acquire() as conn:
         return await queries.list_triggers(conn, session_id, account_id=account_id)
+
+
+async def list_account_triggers(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    enabled_only: bool = True,
+) -> list[AccountTriggerEcho]:
+    """List every trigger in ``account_id`` (across all its sessions) — the
+    account-wide read backing the ops-agent O7 trigger-liveness sweep (#1673).
+
+    The account-wide analog of :func:`list_triggers` (session-scoped): a caller
+    that legitimately holds the whole account (a workflow run, dispatched
+    account-scoped to ``run.account_id``) enumerates every enabled trigger and
+    reads each ``next_fire`` to catch the #925 zombie class. A thin
+    pool-acquiring wrapper — no ``next_fire`` heal here (this is a READ; the heal
+    lives on the write path in ``update_trigger``).
+    """
+    async with pool.acquire() as conn:
+        return await queries.list_account_triggers(
+            conn, account_id=account_id, enabled_only=enabled_only
+        )
 
 
 async def list_trigger_runs(

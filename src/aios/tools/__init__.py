@@ -36,6 +36,7 @@ from aios.tools import search_events as _search_events  # noqa: F401
 from aios.tools import skill_management as _skill_management  # noqa: F401
 from aios.tools import switch_channel as _switch_channel  # noqa: F401
 from aios.tools import tasks as _tasks  # noqa: F401
+from aios.tools import trigger_account_list as _trigger_account_list  # noqa: F401
 from aios.tools import trigger_create as _trigger_create  # noqa: F401
 from aios.tools import trigger_list as _trigger_list  # noqa: F401
 from aios.tools import trigger_remove as _trigger_remove  # noqa: F401

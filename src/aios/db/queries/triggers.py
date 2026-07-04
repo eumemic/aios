@@ -26,6 +26,7 @@ from aios.ids import (
 from aios.models.triggers import (
     TRIGGER_ACTION_ADAPTER,
     TRIGGER_SOURCE_ADAPTER,
+    AccountTriggerEcho,
     TriggerAction,
     TriggerEcho,
     TriggerFireStatus,
@@ -225,6 +226,65 @@ async def list_triggers(
         account_id,
     )
     return [_row_to_trigger_echo(r) for r in rows]
+
+
+async def list_account_triggers(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    enabled_only: bool = True,
+) -> list[AccountTriggerEcho]:
+    """List every trigger in an account (across all its sessions) as the
+    liveness-audit projection (#1673).
+
+    The account-wide analog of :func:`list_triggers` (which is session-scoped):
+    the ops-agent O7 trigger-liveness auditor sweeps EVERY enabled trigger in
+    its account — dev-pipeline cron, reconciler cron, reaper, telemetry-observer,
+    future sentinels, each on its own session — and reads each one's
+    ``next_fire`` to catch the #925 zombie class (``enabled=true,
+    next_fire=NULL`` cron rows the scheduler filters out and never fires).
+
+    JOINs ``sessions`` and filters ``s.archived_at IS NULL`` for the same reason
+    the scheduler's claim/MIN queries do: a trigger on an archived session can
+    never fire regardless of its own ``enabled`` flag, so it isn't part of the
+    live-liveness population. Defaults to ``enabled_only=True`` (the population
+    the auditor's non-null-``next_fire`` invariant is about); pass
+    ``enabled_only=False`` for an operator-visible total.
+
+    Projects the discriminator text (``t.source AS source_kind``) rather than
+    the full source union — the auditor branches on the kind (``cron`` →
+    schedulable → ``next_fire`` must be non-null; ``run_completion`` /
+    ``external_event`` → reactive → exempt), not the schedule payload. Ordered
+    ``owner_session_id, name`` for a stable account-wide listing.
+    """
+    where_enabled = "AND t.enabled" if enabled_only else ""
+    rows = await conn.fetch(
+        f"""
+        SELECT t.id, t.name, t.owner_session_id, t.source AS source_kind,
+               t.enabled, t.next_fire, t.last_fire_status,
+               t.consecutive_failures
+        FROM triggers AS t
+        JOIN sessions AS s ON s.id = t.owner_session_id
+        WHERE t.account_id = $1
+          AND s.archived_at IS NULL
+          {where_enabled}
+        ORDER BY t.owner_session_id, t.name
+        """,
+        account_id,
+    )
+    return [
+        AccountTriggerEcho(
+            id=r["id"],
+            name=r["name"],
+            owner_session_id=r["owner_session_id"],
+            source_kind=r["source_kind"],
+            enabled=r["enabled"],
+            next_fire=r["next_fire"],
+            last_fire_status=r["last_fire_status"],
+            consecutive_failures=r["consecutive_failures"],
+        )
+        for r in rows
+    ]
 
 
 async def batch_list_session_triggers(
