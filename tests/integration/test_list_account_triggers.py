@@ -43,7 +43,7 @@ OTHER = "acc_lat_child"
 _CRON_BODY = {
     "name": "nightly",
     "source": {"kind": "cron", "schedule": "0 3 * * *"},
-    "action": {"kind": "wake_owner"},
+    "action": {"kind": "wake_owner", "content": "audit"},
     "enabled": True,
 }
 
@@ -172,7 +172,7 @@ async def test_run_completion_source_kind_projected(pool: asyncpg.Pool[Any]) -> 
         account_id=ACC,
         name="on-complete",
         source={"kind": "run_completion", "workflow_id": wf.id, "statuses": ["completed"]},
-        action={"kind": "wake_owner"},
+        action={"kind": "wake_owner", "content": "audit"},
     )
 
     async with pool.acquire() as conn:
