@@ -44,13 +44,13 @@ import asyncpg
 from aios.config import get_settings
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
+from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
 from aios.models.workflows import WfRun
 from aios.sandbox.env_keys import (
     AIOS_IDEMPOTENCY_KEY_ENV_KEY,
     AIOS_RUN_ID_ENV_KEY,
 )
-from aios.services.wake import defer_run_wake
 from aios.workflows import run_tools
 from aios.workflows.idempotency_key import idempotency_key
 

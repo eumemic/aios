@@ -6,7 +6,7 @@ process exits can all leave zero trace in the structured log stream —
 exactly the failure shape that made the silent-exit incident
 undiagnosable. Lives in its own module (separate from
 :mod:`aios.harness.worker`) so unit tests can exercise it without
-pulling in :mod:`aios.harness.procrastinate_app`'s module-level
+pulling in :mod:`aios.jobs.app`'s module-level
 ``Settings()`` validation.
 """
 

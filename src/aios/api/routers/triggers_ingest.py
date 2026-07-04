@@ -39,9 +39,9 @@ from fastapi import APIRouter, Request, status
 from aios.api.deps import PoolDep
 from aios.db import queries
 from aios.errors import NotFoundError, PayloadTooLargeError, ValidationError
+from aios.jobs.app import defer_trigger_fire
 from aios.logging import get_logger
 from aios.models.triggers import MAX_INGEST_EVENT_BYTES
-from aios.services.wake import defer_trigger_fire
 
 log = get_logger("aios.api.triggers_ingest")
 

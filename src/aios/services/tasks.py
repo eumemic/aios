@@ -39,6 +39,7 @@ from aios.db.listen import open_listen_for_events, open_listen_for_run_events
 from aios.db.queries import trace as trace_q
 from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError, ValidationError
+from aios.jobs.app import defer_wake
 from aios.models.sessions import Err, Outcome
 from aios.models.tasks import AwaitResponse, OpenTask
 from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun
@@ -234,7 +235,6 @@ async def cancel_task(
         await queries.insert_session_cancel_marker(
             conn, session_id=servicer_id, request_id=request_id, account_id=account_id
         )
-    from aios.services.wake import defer_wake
 
     await defer_wake(pool, servicer_id, cause="cancel", account_id=account_id)
 

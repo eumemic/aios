@@ -267,7 +267,7 @@ async def _park_and_signal(
     harvest append is dedup-guarded on the run id).
     """
     from aios.config import get_settings
-    from aios.services.wake import defer_wake
+    from aios.jobs.app import defer_wake
 
     db_url = get_settings().db_url
     try:

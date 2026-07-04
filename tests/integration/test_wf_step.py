@@ -4256,8 +4256,7 @@ async def test_defer_wake_priority_reflects_real_origin(
     (the unit tests mock the lookup); the in-memory connector captures the priority."""
     from procrastinate.testing import InMemoryConnector
 
-    from aios.harness.procrastinate_app import app
-    from aios.services.wake import _BACKGROUND_PRIORITY, _FOREGROUND_PRIORITY, defer_wake
+    from aios.jobs.app import _BACKGROUND_PRIORITY, _FOREGROUND_PRIORITY, app, defer_wake
 
     pool = wf_runtime
     fg = await sessions_service.create_session(

@@ -91,7 +91,7 @@ async def in_memory_app() -> AsyncIterator[App]:
     Tests can read ``app.connector.jobs`` directly to inspect deferred
     job rows (lock, queueing_lock, schedule, args).
     """
-    from aios.harness.procrastinate_app import app
+    from aios.jobs.app import app
 
     with app.replace_connector(InMemoryConnector()) as patched:
         yield patched

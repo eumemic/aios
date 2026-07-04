@@ -51,8 +51,8 @@ class TestWorkerConcurrencyE2E:
         self, real_wake_setup: asyncpg.Pool[Any], aios_env: dict[str, str]
     ) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.harness.procrastinate_app import app as procrastinate_app
-        from aios.services.wake import defer_wake
+        from aios.jobs.app import app as procrastinate_app
+        from aios.jobs.app import defer_wake
 
         pool = real_wake_setup
         n_sessions = 8

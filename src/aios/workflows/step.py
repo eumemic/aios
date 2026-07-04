@@ -45,6 +45,7 @@ from aios.db import queries as db_queries
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.harness import runtime
+from aios.jobs.app import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of, surface_of
 from aios.models.sessions import Err, Outcome
@@ -57,7 +58,6 @@ from aios.services.sessions import (
     fail_open_child_requests_conn,
     write_gate_opened,
 )
-from aios.services.wake import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.tools.registry import tool_executes_class
 from aios.workflows import run_llm, run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id

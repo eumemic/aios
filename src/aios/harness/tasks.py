@@ -35,7 +35,7 @@
 
 from __future__ import annotations
 
-from aios.harness.procrastinate_app import app
+from aios.jobs.app import app
 
 
 @app.task(

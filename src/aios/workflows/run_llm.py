@@ -53,11 +53,11 @@ from aios.harness.completion import (
     call_litellm,
     estimate_cost_usd,
 )
+from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of
 from aios.models.workflows import WfRun
 from aios.services import attenuation as attenuation_service
-from aios.services.wake import defer_run_wake
 
 log = get_logger("aios.workflows.run_llm")
 

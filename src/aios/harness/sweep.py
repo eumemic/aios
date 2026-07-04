@@ -38,9 +38,9 @@ from aios.db.queries import (
     session_errored_predicate,
 )
 from aios.harness.inflight_tool_registry import InflightToolRegistry
+from aios.jobs.app import defer_wake
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
-from aios.services.wake import defer_wake
 
 log = get_logger("aios.harness.sweep")
 
@@ -1009,7 +1009,7 @@ async def reap_stalled_jobs(job_manager: Any) -> int:
 
     Takes a ``job_manager`` rather than an ``App`` so tests can build
     a fresh manager pointed at the testcontainer DB without depending
-    on the module-level ``procrastinate_app`` singleton (which fixes
+    on the module-level ``aios.jobs.app`` singleton (which fixes
     its connector at import time).
 
     Returns the number of jobs reaped.  Non-zero is a real signal

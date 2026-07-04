@@ -20,6 +20,7 @@ import asyncpg
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from aios.ids import REQUEST, make_id
+from aios.jobs.app import defer_run_wake
 from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,
@@ -39,7 +40,6 @@ from aios.models.workflows import (
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
 from aios.services import sessions as sessions_service
-from aios.services.wake import defer_run_wake
 from aios.workflows.script_validation import (
     declared_tool_names,
     extract_required_agent_ids,

@@ -299,8 +299,8 @@ async def open_procrastinate_app(aios_env: dict[str, str]) -> AsyncIterator[None
     """
     from procrastinate import PsycopgConnector
 
-    from aios.harness.procrastinate_app import _sync_dsn
-    from aios.harness.procrastinate_app import app as procrastinate_app
+    from aios.jobs.app import _sync_dsn
+    from aios.jobs.app import app as procrastinate_app
 
     connector = PsycopgConnector(conninfo=_sync_dsn(aios_env["AIOS_DB_URL"]))
     await connector.open_async()

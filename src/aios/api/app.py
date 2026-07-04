@@ -41,7 +41,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db.pool import create_pool
 from aios.errors import install_exception_handlers
 from aios.harness import runtime
-from aios.harness.procrastinate_app import app as procrastinate_app
+from aios.jobs.app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
 from aios.retirements.boot_gate import (
     RetirementsNotAdmissible,

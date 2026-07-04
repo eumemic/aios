@@ -37,7 +37,7 @@ from procrastinate import exceptions as procrastinate_exceptions
 
 from aios.db import queries
 from aios.db.listen import listen_for_triggers_due
-from aios.harness.procrastinate_app import app
+from aios.jobs.app import app
 from aios.logging import get_logger
 
 log = get_logger("aios.harness.scheduler")

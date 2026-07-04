@@ -60,6 +60,7 @@ from aios.harness.sweep import find_sessions_needing_inference, session_has_pend
 from aios.harness.tokens import approx_tokens, approx_tokens_by_class
 from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
 from aios.harness.tool_disposition import classify_tool_call
+from aios.jobs.app import defer_run_wake, defer_wake
 from aios.logging import get_logger
 from aios.models.agents import (
     Agent,
@@ -75,7 +76,6 @@ from aios.models.events import (
 from aios.services import accounts as accounts_service
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
-from aios.services.wake import defer_run_wake, defer_wake
 from aios.tools.workflow_completion import fail_all_open_requests
 
 if TYPE_CHECKING:

@@ -22,6 +22,7 @@ from aios.errors import (
     RateLimitedError,
     ValidationError,
 )
+from aios.jobs.app import defer_run_wake
 from aios.models.agents import (
     HttpServerRef,
     McpServerSpec,
@@ -32,7 +33,6 @@ from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import WfRun
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
-from aios.services.wake import defer_run_wake
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from aios.workflows.script_validation import validate_workflow_script
 

@@ -10,7 +10,7 @@ import pytest
 from procrastinate import App
 from procrastinate.testing import InMemoryConnector
 
-from aios.services.wake import defer_run_wake, defer_wake
+from aios.jobs.app import defer_run_wake, defer_wake
 
 
 @pytest.fixture(autouse=True)
@@ -18,7 +18,7 @@ def mock_append_event() -> Generator[AsyncMock]:
     """Patch ``sessions_service.append_event`` so ``wake_deferred`` span
     emission doesn't require a real DB connection (issue #131)."""
     mock = AsyncMock()
-    with patch("aios.services.wake.sessions_service.append_event", mock):
+    with patch("aios.jobs.app.queries.append_event", mock):
         yield mock
 
 
@@ -80,11 +80,11 @@ class TestDeferRescheduleWake:
         await defer_wake(pool, "sess_x", cause="reschedule", delay_seconds=5, account_id=account_id)
 
         mock_append_event.assert_awaited_once_with(
-            pool,
-            "sess_x",
-            "span",
-            {"event": "wake_deferred", "cause": "reschedule", "delay_seconds": 5},
+            ANY,  # conn acquired from the pool
             account_id=ANY,
+            session_id="sess_x",
+            kind="span",
+            data={"event": "wake_deferred", "cause": "reschedule", "delay_seconds": 5},
         )
 
 

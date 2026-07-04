@@ -37,14 +37,15 @@ _ACCOUNT = "acc_cancel_leaf"
 @pytest.fixture(autouse=True)
 def _mock_prompt_wakes() -> Iterator[None]:
     """The cancel leaf + ``cancel_task``'s session arm fire prompt procrastinate wakes
-    (no open App here), all via late imports of ``aios.services.wake`` — so patching the source
-    catches them. The durable seed (marker / signal + tombstone) and the C2 sweep, not these
-    best-effort prompts, are what drive the cancel. (``create_run`` / ``cancel_run`` bind
-    ``defer_run_wake`` at module load — the run-arm test mocks those where the modules are
-    loaded.)"""
+    (no open App here). Since #1476 the deferral primitives live in ``aios.jobs.app`` and are
+    bound at module load into the caller namespaces (``services.sessions`` for the cancel leaf,
+    ``services.tasks`` for the session arm), so patch them where they are looked up. The durable
+    seed (marker / signal + tombstone) and the C2 sweep, not these best-effort prompts, are what
+    drive the cancel."""
     with (
-        patch("aios.services.wake.defer_wake", new=AsyncMock()),
-        patch("aios.services.wake.defer_run_wake", new=AsyncMock()),
+        patch("aios.services.sessions.defer_wake", new=AsyncMock()),
+        patch("aios.services.sessions.defer_run_wake", new=AsyncMock()),
+        patch("aios.services.tasks.defer_wake", new=AsyncMock()),
     ):
         yield
 

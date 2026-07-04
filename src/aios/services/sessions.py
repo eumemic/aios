@@ -32,6 +32,7 @@ from aios.errors import (
 from aios.harness.chat_type import ChatType
 from aios.harness.window import WindowedEvents
 from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, REQUEST, make_id, split_id
+from aios.jobs.app import defer_run_wake, defer_wake
 from aios.models.agents import (
     Agent,
     AgentVersion,
@@ -67,20 +68,6 @@ from aios.services import memory_stores as memory_service
 from aios.services import triggers as triggers_service
 from aios.services.await_completion import await_completion
 from aios.services.vaults import env_var_credential_containment_error
-
-
-async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:
-    """Module-level wrapper over :func:`aios.services.wake.defer_run_wake`.
-
-    ``wake`` imports this module at top level, so a top-level
-    ``from aios.services.wake import defer_run_wake`` here would be a circular
-    import. This thin wrapper imports it lazily at call time, and — being a real
-    attribute of this module — stays the single patch point for tests that stub the
-    archive/delete run-wake (``aios.services.sessions.defer_run_wake``).
-    """
-    from aios.services.wake import defer_run_wake as _defer_run_wake
-
-    await _defer_run_wake(run_id, batch=batch)
 
 
 async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
@@ -680,7 +667,6 @@ async def _stimulate_existing_ask(
     Channel-less (no ``orig_channel``) so the injected request never surfaces to a
     connector. Then a deferred wake so the target steps and answers it.
     """
-    from aios.services.wake import defer_wake
 
     session = stim.session
     content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
@@ -756,7 +742,6 @@ async def tell_existing_session(
     a projection: it shares this writer's atomic append+defer shape but legitimately
     owns its own depth/rate caps + the non-forgeable ``wake_lineage`` span, so it stays
     a distinct writer rather than folding through here."""
-    from aios.services.wake import defer_wake
 
     event = await append_user_message(pool, session_id, content, account_id=account_id)
     await defer_wake(pool, session_id, cause=cause, account_id=account_id)
@@ -1541,7 +1526,6 @@ async def harvest_session_cancel_markers(
     request's in-flight tool tasks run to completion and the session lingers idle-but-answered.
     The caller has already learned ``cancelled`` and the subtree is marked.
     """
-    from aios.services.wake import defer_wake
 
     wakes: list[RequestResponseWrite] = []
     propagated: list[queries.ChildNode] = []

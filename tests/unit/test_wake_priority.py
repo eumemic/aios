@@ -17,7 +17,7 @@ import pytest
 from procrastinate import App
 from procrastinate.testing import InMemoryConnector
 
-from aios.services.wake import (
+from aios.jobs.app import (
     _BACKGROUND_PRIORITY,
     _FOREGROUND_PRIORITY,
     defer_run_wake,
@@ -59,9 +59,9 @@ async def test_defer_wake_priority_from_edge_uplink(
     session — or a vanished one — stays default."""
     pool = MagicMock()
     with (
-        patch("aios.services.wake.sessions_service.append_event", AsyncMock()),
+        patch("aios.jobs.app.queries.append_event", AsyncMock()),
         patch(
-            "aios.services.wake.queries.get_wake_priority_context",
+            "aios.jobs.app.queries.get_wake_priority_context",
             AsyncMock(return_value=ctx_return),
         ),
     ):
@@ -73,9 +73,9 @@ async def test_delayed_background_wake_is_also_demoted(in_memory_app: App) -> No
     """The reschedule-backoff path (``delay_seconds``) carries the priority too."""
     pool = MagicMock()
     with (
-        patch("aios.services.wake.sessions_service.append_event", AsyncMock()),
+        patch("aios.jobs.app.queries.append_event", AsyncMock()),
         patch(
-            "aios.services.wake.queries.get_wake_priority_context",
+            "aios.jobs.app.queries.get_wake_priority_context",
             AsyncMock(return_value=_ctx(True)),
         ),
     ):
@@ -92,14 +92,14 @@ async def test_reused_servicer_priority_is_per_stimulus(in_memory_app: App) -> N
     distinction itself) is covered by
     ``tests/integration/test_wake_priority_context.py`` (``test_latest_open_edge_*``)."""
     pool = MagicMock()
-    with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
+    with patch("aios.jobs.app.queries.append_event", AsyncMock()):
         with patch(
-            "aios.services.wake.queries.get_wake_priority_context",
+            "aios.jobs.app.queries.get_wake_priority_context",
             AsyncMock(return_value=_ctx(True)),  # bg-edge stimulus
         ):
             await defer_wake(pool, "router_bg", cause="message", account_id="acc")
         with patch(
-            "aios.services.wake.queries.get_wake_priority_context",
+            "aios.jobs.app.queries.get_wake_priority_context",
             AsyncMock(return_value=_ctx(False)),  # fg-user stimulus
         ):
             await defer_wake(pool, "router_fg", cause="message", account_id="acc")
@@ -121,14 +121,14 @@ async def test_run_wake_is_background(in_memory_app: App) -> None:
 async def test_foreground_outranks_background(in_memory_app: App) -> None:
     """The end goal: a foreground wake is fetched before a queued background wake."""
     pool = MagicMock()
-    with patch("aios.services.wake.sessions_service.append_event", AsyncMock()):
+    with patch("aios.jobs.app.queries.append_event", AsyncMock()):
         with patch(
-            "aios.services.wake.queries.get_wake_priority_context",
+            "aios.jobs.app.queries.get_wake_priority_context",
             AsyncMock(return_value=_ctx(True)),
         ):
             await defer_wake(pool, "sess_bg", cause="message", account_id="acc")  # enqueued first
         with patch(
-            "aios.services.wake.queries.get_wake_priority_context",
+            "aios.jobs.app.queries.get_wake_priority_context",
             AsyncMock(return_value=_ctx(False)),
         ):
             await defer_wake(pool, "sess_fg", cause="message", account_id="acc")  # enqueued later

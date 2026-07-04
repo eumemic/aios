@@ -29,8 +29,8 @@ class TestWakeLockReleaseLatencyE2E:
         """When a lock-blocked wake becomes eligible, the worker must pick
         it up within a single LISTEN/NOTIFY round-trip (<200ms)."""
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.harness.procrastinate_app import app as procrastinate_app
-        from aios.services.wake import defer_wake
+        from aios.jobs.app import app as procrastinate_app
+        from aios.jobs.app import defer_wake
 
         pool = real_wake_setup
 

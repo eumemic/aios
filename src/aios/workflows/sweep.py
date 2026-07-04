@@ -21,8 +21,8 @@ import asyncpg
 
 from aios.config import get_settings
 from aios.db.queries import workflows as wf_queries
+from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
-from aios.services.wake import defer_run_wake
 
 log = get_logger("aios.workflows.sweep")
 
