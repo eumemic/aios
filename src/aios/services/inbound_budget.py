@@ -83,9 +83,16 @@ async def _count_recent_inbounds(
     """Count admitted ``role=user`` inbound events on ``orig_channel`` in the
     last ``window_seconds`` — the rolling-window aggregate the budget reads.
 
-    Reuses the ``count_recent_wakes_from`` shape: a single ``SELECT count(*)``
-    over the ``events`` log, ``account_id``-scoped, no new table. Reads only
-    already-persisted state (no write on the allow path).
+    A single ``SELECT count(*)`` over the ``events`` log, ``account_id``-scoped,
+    no new table. Reads only already-persisted state (no write on the allow
+    path). Backed by the dedicated partial index ``events_inbound_budget_idx``
+    (``migrations/versions/0128_events_inbound_budget_index.py``), keyed
+    ``(account_id, orig_channel, created_at)`` partial on the inference-bearing
+    rows this count filters (admitted inbound user messages and wake-bearing
+    lifecycles), so the ``(account_id, orig_channel)`` equality prefix seeks the
+    index and the rolling-window ``created_at`` range is served within it —
+    rather than the full-``events`` sequential scan the predicate had no index
+    to satisfy before.
     """
     async with pool.acquire() as conn:
         count = await conn.fetchval(
