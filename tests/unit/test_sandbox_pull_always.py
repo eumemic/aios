@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
-from aios.sandbox.backends.base import Mount, SandboxSpec, Unrestricted
+from aios.models.environments import UnrestrictedNetworking
+from aios.sandbox.backends.base import Mount, SandboxSpec
 from aios.sandbox.backends.docker import DockerBackend
 
 
@@ -28,7 +29,7 @@ def _spec(**overrides: object) -> SandboxSpec:
         "extra_mounts": (),
         "environment": {},
         "labels": {},
-        "network_policy": Unrestricted(),
+        "network_policy": UnrestrictedNetworking(),
         "host_gateway_alias": None,
         "image": "ghcr.io/eumemic/aios-sandbox:test",
     }

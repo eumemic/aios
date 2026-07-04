@@ -13,7 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
-from aios.sandbox.backends.base import Mount, SandboxSpec, Unrestricted
+from aios.models.environments import LimitedNetworking, UnrestrictedNetworking
+from aios.sandbox.backends.base import Mount, SandboxSpec
 from aios.sandbox.backends.docker import DockerBackend
 
 
@@ -30,7 +31,7 @@ def _spec(**overrides: object) -> SandboxSpec:
         "extra_mounts": (),
         "environment": {},
         "labels": {},
-        "network_policy": Unrestricted(),
+        "network_policy": UnrestrictedNetworking(),
         "host_gateway_alias": None,
         "image": "aios-sandbox:test",
     }
@@ -143,9 +144,10 @@ class TestResourceCapFlags:
         """Durable session sandboxes strip ``--cap-add NET_ADMIN`` from the
         sandbox (§5.8) — even a Limited-networking spec; the lockdown is
         applied from an ephemeral operator-image sidecar instead."""
-        from aios.sandbox.backends.base import Limited
 
-        argv = await _capture_argv(_spec(network_policy=Limited(allowed_hosts=frozenset({"x"}))))
+        argv = await _capture_argv(
+            _spec(network_policy=LimitedNetworking(type="limited", allowed_hosts=["x"]))
+        )
         assert "NET_ADMIN" not in argv
 
     @pytest.mark.asyncio
