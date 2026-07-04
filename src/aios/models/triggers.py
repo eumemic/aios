@@ -541,9 +541,7 @@ class TriggerRunEcho(BaseModel):
     finished_at: datetime | None
 
 
-def compute_next_fire(
-    schedule: str, from_time: datetime, timezone: str | None = None
-) -> datetime:
+def compute_next_fire(schedule: str, from_time: datetime, timezone: str | None = None) -> datetime:
     """Compute the next cron-fire time strictly after ``from_time``.
 
     ``from_time`` should be UTC-aware. When ``timezone`` is set, the cron

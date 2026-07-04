@@ -516,9 +516,7 @@ async def fetch_and_claim_due_triggers(
             # Cron row — advance next_fire so subsequent ticks skip until the
             # next scheduled slot. ``schedule`` is the text projection of
             # ``source_spec ->> 'schedule'`` (NULL for one-shot rows).
-            new_next_fire = compute_next_fire(
-                r["schedule"], now_utc, r["cron_timezone"]
-            )
+            new_next_fire = compute_next_fire(r["schedule"], now_utc, r["cron_timezone"])
             await conn.execute(
                 """
                 UPDATE triggers

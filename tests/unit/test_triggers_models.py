@@ -177,9 +177,7 @@ class TestCronSourceTimezone:
             )
 
     def test_update_omitting_timezone_defaults_none(self) -> None:
-        upd = TriggerUpdate.model_validate(
-            {"source": {"kind": "cron", "schedule": "0 9 * * *"}}
-        )
+        upd = TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "0 9 * * *"}})
         assert isinstance(upd.source, CronSource)
         assert upd.source.timezone is None
 
@@ -492,9 +490,7 @@ class TestComputeNextFireTimezone:
 
     def test_none_timezone_is_byte_identical_to_today(self) -> None:
         # Regression: the trailing astimezone(UTC) is inert for tz=None.
-        nxt = compute_next_fire(
-            "0 9 * * *", datetime(2026, 6, 17, 0, 0, tzinfo=UTC)
-        )
+        nxt = compute_next_fire("0 9 * * *", datetime(2026, 6, 17, 0, 0, tzinfo=UTC))
         assert nxt == datetime(2026, 6, 17, 9, 0, tzinfo=UTC)
 
     def test_result_is_utc_aware(self) -> None:
