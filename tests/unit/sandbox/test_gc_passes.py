@@ -19,6 +19,7 @@ import pytest
 
 from aios.config import get_settings
 from aios.harness import runtime
+from aios.ids import make_id
 from aios.sandbox.backends.base import ManagedImage, ManagedSandboxRef
 from aios.sandbox.registry import GcImageVerdict, SandboxRegistry, SessionSnapshotState
 from aios.sandbox.spec import snapshot_tag
@@ -141,6 +142,31 @@ async def test_corpse_pass_drops_deleted_session(
 
     assert not any(c[0] == "snapshot" for c in backend.calls)
     assert any(c[0] == "force_remove" for c in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_corpse_pass_run_owner_dropped_without_db_lookup_or_snapshot(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workflow-run (wfr_) corpse is bare-destroyed by owner kind — never
+    routed through the session retain path (no gc_snapshot_session_states
+    query, no snapshot)."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    fresh = AsyncMock(return_value=[])
+    monkeypatch.setattr("aios.sandbox.registry.queries.gc_snapshot_session_states", fresh)
+    run_id = make_id("wfr")  # a valid wfr_ ULID-shaped owner id
+    container = ManagedSandboxRef(sandbox_id="cid", session_id=run_id, running=False)
+
+    await registry._gc_corpse_pass(
+        [container], {}, _NOW, get_settings(), get_settings().instance_id
+    )
+
+    assert any(c[0] == "force_remove" for c in backend.calls)
+    assert not any(c[0] == "snapshot" for c in backend.calls)
+    # The run branch must NOT consult the sessions table at all — on master
+    # the coincidence-path issues this guaranteed-empty query.
+    fresh.assert_not_awaited()
 
 
 @pytest.mark.asyncio
