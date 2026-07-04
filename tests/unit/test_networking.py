@@ -764,7 +764,9 @@ class TestDockerBackendArgs:
         ],
         ids=["limited", "unrestricted"],
     )
-    async def test_security_opt_no_new_privileges(self, policy: LimitedNetworking | UnrestrictedNetworking) -> None:
+    async def test_security_opt_no_new_privileges(
+        self, policy: LimitedNetworking | UnrestrictedNetworking
+    ) -> None:
         argv = await _capture_docker_argv(_make_spec(policy))
         assert "--security-opt" in argv
         i = argv.index("--security-opt")

@@ -145,7 +145,9 @@ class TestResourceCapFlags:
         sandbox (§5.8) — even a Limited-networking spec; the lockdown is
         applied from an ephemeral operator-image sidecar instead."""
 
-        argv = await _capture_argv(_spec(network_policy=LimitedNetworking(type="limited", allowed_hosts=["x"])))
+        argv = await _capture_argv(
+            _spec(network_policy=LimitedNetworking(type="limited", allowed_hosts=["x"]))
+        )
         assert "NET_ADMIN" not in argv
 
     @pytest.mark.asyncio
