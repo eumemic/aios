@@ -61,7 +61,8 @@ async def env(
                 _ACCOUNT,
             )
         with (
-            mock.patch("aios.services.wake.defer_wake", new=AsyncMock()),
+            mock.patch("aios.services.sessions.defer_wake", new=AsyncMock()),
+            mock.patch("aios.services.tasks.defer_wake", new=AsyncMock()),
             mock.patch("aios.services.workflows.defer_run_wake", new=AsyncMock()),
         ):
             yield pool, _ACCOUNT

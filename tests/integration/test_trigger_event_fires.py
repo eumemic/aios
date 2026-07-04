@@ -78,10 +78,12 @@ async def trig_runtime(
             mock.patch("aios.workflows.run_tools.defer_run_wake", new=AsyncMock()),
             mock.patch("aios.workflows.step.defer_trigger_fire", new=AsyncMock()),
             # Both `_surface_failure` (via tell_existing_session) and `wake_owner`
-            # (the stimulate spine, #1197) resolve defer_wake from its source module,
-            # so one patch on the source covers both paths — neither hits the
-            # (unopened) procrastinate app.
-            mock.patch("aios.services.wake.defer_wake", new=AsyncMock()),
+            # (the stimulate spine, #1197) resolve defer_wake from its call-site
+            # module. Since #1476 that primitive lives in ``aios.jobs.app`` and is
+            # bound at module load into ``aios.services.sessions`` (where
+            # ``tell_existing_session`` looks it up), so patch it there — the old
+            # ``aios.services.wake`` re-export is no longer the lookup site.
+            mock.patch("aios.services.sessions.defer_wake", new=AsyncMock()),
         ):
             yield pool
     finally:

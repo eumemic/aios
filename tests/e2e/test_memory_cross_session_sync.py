@@ -154,7 +154,14 @@ async def shared_docker_harness(
         with (
             mock.patch("aios.harness.completion.litellm.acompletion", _fake_acompletion),
             mock.patch("aios.harness.completion.litellm.stream_chunk_builder", _fake_chunk_builder),
-            mock.patch("aios.services.wake.defer_wake", _noop_defer_wake),
+            # Since #1476 the deferral primitives live in ``aios.jobs.app`` and are
+            # bound at module load into each caller's namespace, so a mock must be
+            # installed where the name is *looked up*, not at the (now-defunct)
+            # ``aios.services.wake`` re-export. The harness drives steps directly, so
+            # the wakes this must neutralise originate in ``aios.harness.loop`` and
+            # ``aios.services.sessions``; patch them where they are looked up.
+            mock.patch("aios.harness.loop.defer_wake", _noop_defer_wake),
+            mock.patch("aios.services.sessions.defer_wake", _noop_defer_wake),
         ):
             yield h
 
