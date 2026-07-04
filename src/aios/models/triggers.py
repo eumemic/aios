@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, get_args
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import CroniterBadDateError, croniter
 from pydantic import (
@@ -63,7 +64,7 @@ CRON_OCCURRENCE_HORIZON_YEARS = 8
 TriggerFireStatus = Literal["ok", "error", "timeout", "skipped"]  # was ScheduledTaskStatus
 
 
-def _validate_cron_expression(value: str) -> str:
+def _validate_cron_expression(value: str, timezone: str | None = None) -> str:
     """WRITE-PATH ONLY (``TriggerCreate`` / ``TriggerUpdate``) — never on read models.
 
     Grammar-validates the expression, then requires at least one real
@@ -72,13 +73,25 @@ def _validate_cron_expression(value: str) -> str:
     rejected at create/update instead of sitting silently dead — croniter
     raises ``CroniterBadDateError`` when no match exists within
     ``max_years_between_matches``.
+
+    When ``timezone`` is set, it must be a valid IANA name and the
+    occurrence-horizon check runs in that localized frame (the same frame the
+    real fire path uses) so write-time accept/reject never diverges from
+    runtime fire times near a horizon edge. ``timezone=None`` keeps the
+    existing ``datetime.now(UTC)`` base, so its behavior is byte-identical.
     """
     if not croniter.is_valid(value):
         raise ValueError(f"invalid cron expression: {value!r}")
+    base = datetime.now(UTC)
+    if timezone is not None:
+        try:
+            base = base.astimezone(ZoneInfo(timezone))
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown IANA timezone: {timezone!r}") from exc
     try:
         croniter(
             value,
-            datetime.now(UTC),
+            base,
             max_years_between_matches=CRON_OCCURRENCE_HORIZON_YEARS,
         ).get_next(datetime)
     except CroniterBadDateError:
@@ -93,18 +106,26 @@ def _validate_cron_expression(value: str) -> str:
 
 
 class CronSource(BaseModel):
-    """Recurring source: a standard 5-field cron expression in UTC.
+    """Recurring source: a standard 5-field cron expression.
 
     Structure-only here — grammar/occurrence checks live on the write
     models (``TriggerCreate`` / ``TriggerUpdate``) so the read path accepts
     every row the write path ever accepted (see module docstring + §2.2 of
-    the design contract). A future additive ``timezone`` field (IANA name;
-    absent = UTC) lands without touching this model or the DB CHECK.
+    the design contract). The additive ``timezone`` field (IANA name)
+    interprets the cron wall-clock; absent = UTC.
     """
 
     model_config = ConfigDict(extra="forbid")
     kind: Literal["cron"] = "cron"
     schedule: str = Field(min_length=1, max_length=MAX_SCHEDULE_CHARS)
+    timezone: str | None = Field(
+        default=None,
+        description=(
+            "IANA timezone name (e.g. 'America/Los_Angeles') the cron wall-clock "
+            "is interpreted in. Unset = UTC. '0 9 * * *' with timezone "
+            "'America/New_York' fires at 9am Eastern, DST-aware."
+        ),
+    )
 
 
 class OneShotSource(BaseModel):
@@ -394,7 +415,7 @@ class TriggerCreate(BaseModel):
     @model_validator(mode="after")
     def _validate_write_path(self) -> TriggerCreate:
         if isinstance(self.source, CronSource):
-            _validate_cron_expression(self.source.schedule)
+            _validate_cron_expression(self.source.schedule, self.source.timezone)
         _validate_input_template_bound(self.action)
         return self
 
@@ -418,7 +439,7 @@ class TriggerUpdate(BaseModel):
     @model_validator(mode="after")
     def _validate_write_path(self) -> TriggerUpdate:
         if isinstance(self.source, CronSource):
-            _validate_cron_expression(self.source.schedule)
+            _validate_cron_expression(self.source.schedule, self.source.timezone)
         _validate_input_template_bound(self.action)
         return self
 
@@ -520,18 +541,22 @@ class TriggerRunEcho(BaseModel):
     finished_at: datetime | None
 
 
-def compute_next_fire(schedule: str, from_time: datetime) -> datetime:
+def compute_next_fire(
+    schedule: str, from_time: datetime, timezone: str | None = None
+) -> datetime:
     """Compute the next cron-fire time strictly after ``from_time``.
 
-    ``from_time`` should be timezone-aware (UTC); the returned datetime is
-    in the same timezone. Uses croniter's default occurrence horizon — NOT
-    the 1-year write-time horizon (steady-state advance must never fail on
-    a legally-persisted rare cron).
+    ``from_time`` should be UTC-aware. When ``timezone`` is set, the cron
+    wall-clock is interpreted in that IANA zone (DST-aware) and the result is
+    converted back to UTC. The returned datetime is always UTC-aware. Uses
+    croniter's default occurrence horizon — NOT the 1-year write-time horizon
+    (steady-state advance must never fail on a legally-persisted rare cron).
     """
-    it = croniter(schedule, from_time)
+    base = from_time if timezone is None else from_time.astimezone(ZoneInfo(timezone))
+    it = croniter(schedule, base)
     next_time = it.get_next(datetime)
     assert isinstance(next_time, datetime)
-    return next_time
+    return next_time.astimezone(UTC)
 
 
 def compute_initial_next_fire(source: TriggerSource, now: datetime) -> datetime | None:
@@ -549,7 +574,7 @@ def compute_initial_next_fire(source: TriggerSource, now: datetime) -> datetime 
         return None
     if isinstance(source, OneShotSource):
         return source.fire_at
-    return compute_next_fire(source.schedule, now)
+    return compute_next_fire(source.schedule, now, source.timezone)
 
 
 def validate_triggers(triggers: list[TriggerCreate]) -> None:
