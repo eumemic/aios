@@ -53,8 +53,6 @@ class LimitedNetworking(BaseModel):
     type: Literal["limited"]
     allowed_hosts: list[str] = Field(default_factory=list)
     allow_package_managers: bool = False
-    # TODO: resolve MCP server hosts when MCP config is available
-    allow_mcp_servers: bool = False
 
     @field_validator("allowed_hosts", mode="after")
     @classmethod

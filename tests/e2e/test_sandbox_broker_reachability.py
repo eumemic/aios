@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import (
     INSTANCE_LABEL_KEY,
     MANAGED_LABEL_KEY,
@@ -24,7 +25,6 @@ from aios.sandbox.backends.base import (
     SESSION_LABEL_KEY,
     Mount,
     SandboxSpec,
-    Unrestricted,
 )
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.network import (
@@ -125,7 +125,7 @@ async def test_sandbox_resolves_worker_alias_via_docker_dns(
             INSTANCE_LABEL_KEY: instance_id,
             SESSION_LABEL_KEY: session_id,
         },
-        network_policy=Unrestricted(),
+        network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image=IMAGE,
     )

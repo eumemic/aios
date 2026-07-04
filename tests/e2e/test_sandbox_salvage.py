@@ -21,6 +21,7 @@ import pytest
 
 from aios.config import get_settings
 from aios.harness import runtime
+from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
     ENV_KEYS_LABEL_KEY,
@@ -30,7 +31,6 @@ from aios.sandbox.backends.base import (
     SESSION_LABEL_KEY,
     Mount,
     SandboxSpec,
-    Unrestricted,
 )
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.network import ensure_sandbox_network
@@ -87,7 +87,7 @@ def _spec(session_id: str, workspace: Path) -> SandboxSpec:
             ENV_KEYS_LABEL_KEY: ",".join(sorted(environment)),
             BASE_IMAGE_LABEL_KEY: IMAGE,
         },
-        network_policy=Unrestricted(),
+        network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image=IMAGE,
         seccomp_profile=SECCOMP_PROFILE,

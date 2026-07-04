@@ -503,7 +503,7 @@ class SandboxRegistry:
             container_id=handle.sandbox_id[:12],
             workspace_path=str(handle.workspace_path),
             backend=self._backend.name,
-            networking=type(plan.spec.network_policy).__name__,
+            networking=(plan.spec.network_policy.type if plan.spec.network_policy else "unrestricted"),
             # Whether this was a snapshot resume or a cold start — so
             # "why did this session cold-start" is answerable after the fact
             # (consecutive provisions flipping snapshot→base expose even
@@ -603,7 +603,7 @@ class SandboxRegistry:
             container_id=handle.sandbox_id[:12],
             workspace_path=str(handle.workspace_path),
             backend=self._backend.name,
-            networking=type(plan.spec.network_policy).__name__,
+            networking=(plan.spec.network_policy.type if plan.spec.network_policy else "unrestricted"),
         )
         return handle
 

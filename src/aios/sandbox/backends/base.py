@@ -15,9 +15,11 @@ the only verbs the rest of the system needs:
 The data types here are deliberately backend-agnostic. ``SandboxSpec``
 expresses *what* the sandbox should be (workspace, mounts, env, network
 policy) in semantic terms; each backend translates to its own primitives.
-A Docker backend turns ``Limited`` into ``--cap-add NET_ADMIN`` plus an
-iptables script; a host-subprocess backend would either implement that
-via host firewall rules or warn-and-noop.
+The network policy is carried as the already-discriminated
+``NetworkingConfig`` pydantic union straight off the environment config —
+the same canonical form the shared iptables lockdown
+(:func:`aios.sandbox.setup.apply_network_lockdown`) enforces, so the spec
+is a faithful description of what the sandbox restricts.
 
 ``SandboxHandle`` is a frozen dataclass — no methods, no behavior. All
 command execution flows through ``backend.exec(handle, ...)`` so the handle
@@ -29,6 +31,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
+
+from aios.models.environments import NetworkingConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,32 +47,6 @@ class Mount:
     host_path: Path
     sandbox_path: str
     read_only: bool = False
-
-
-class NetworkPolicy:
-    """Tagged-union base for network policies. See subclasses."""
-
-
-@dataclass(frozen=True, slots=True)
-class Unrestricted(NetworkPolicy):
-    """No network restrictions; sandbox can reach anything the host can."""
-
-
-@dataclass(frozen=True, slots=True)
-class Limited(NetworkPolicy):
-    """Allow outbound only to ``allowed_hosts`` (resolved at apply time).
-
-    The sandbox itself is granted NO ``NET_ADMIN`` (durable session
-    sandboxes, §5.8). The iptables lockdown is applied + read-back verified
-    separately via :func:`aios.sandbox.setup.apply_network_lockdown` after
-    create returns, from an ephemeral operator-image sidecar that joins the
-    sandbox's netns — so a tenant can neither poison the binaries that apply
-    the lockdown nor flush it from inside. The application path is shared
-    logic, not a backend concern, so backends that can't enforce it surface
-    failures the same way as backends that can.
-    """
-
-    allowed_hosts: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +76,7 @@ class SandboxSpec:
     extra_mounts: tuple[Mount, ...]
     environment: dict[str, str]
     labels: dict[str, str]
-    network_policy: NetworkPolicy
+    network_policy: NetworkingConfig | None
     host_gateway_alias: str | None
     image: str
     # Resume source (durable session sandboxes): the locally-resolved

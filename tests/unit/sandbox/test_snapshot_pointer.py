@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from aios.harness import runtime
+from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import SandboxHandle, SnapshotOutcome
 from aios.sandbox.registry import SandboxRegistry
 from tests.helpers.sandbox import FakeBackend, FakePool, make_handle
@@ -171,7 +172,7 @@ async def test_resolve_base_drift_removes_and_resets(
     """Base-image drift (§5.3): the snapshot's recorded base != the current env
     image → discard (store.remove + pointer clear + event), cold start."""
     registry, backend, timeline = harness
-    from aios.sandbox.backends.base import Mount, SandboxSpec, Unrestricted
+    from aios.sandbox.backends.base import Mount, SandboxSpec
 
     ref = "aios-sbx-default-sess_x:latest"
     backend.image_labels_by_ref[ref] = {"aios.base_image": "OLD-IMAGE"}
@@ -182,7 +183,7 @@ async def test_resolve_base_drift_removes_and_resets(
         extra_mounts=(),
         environment={},
         labels={},
-        network_policy=Unrestricted(),
+        network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image="NEW-IMAGE",  # differs from the snapshot's base_image
         snapshot_image=ref,
@@ -202,7 +203,7 @@ async def test_resolve_snapshot_missing_resets(
 ) -> None:
     """Pointer set + store verified-not-found → snapshot_missing reset + cold start."""
     registry, _backend, timeline = harness
-    from aios.sandbox.backends.base import Mount, SandboxSpec, Unrestricted
+    from aios.sandbox.backends.base import Mount, SandboxSpec
 
     ref = "aios-sbx-default-sess_x:latest"  # not in image_labels_by_ref ⇒ absent
     spec = SandboxSpec(
@@ -212,7 +213,7 @@ async def test_resolve_snapshot_missing_resets(
         extra_mounts=(),
         environment={},
         labels={},
-        network_policy=Unrestricted(),
+        network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image="NEW-IMAGE",
         snapshot_image=ref,

@@ -27,13 +27,11 @@ class LimitedNetworking:
             type_ (Literal['limited']):
             allowed_hosts (list[str] | Unset):
             allow_package_managers (bool | Unset):  Default: False.
-            allow_mcp_servers (bool | Unset):  Default: False.
     """
 
     type_: Literal["limited"]
     allowed_hosts: list[str] | Unset = UNSET
     allow_package_managers: bool | Unset = False
-    allow_mcp_servers: bool | Unset = False
 
     def to_dict(self) -> dict[str, Any]:
         type_ = self.type_
@@ -43,8 +41,6 @@ class LimitedNetworking:
             allowed_hosts = self.allowed_hosts
 
         allow_package_managers = self.allow_package_managers
-
-        allow_mcp_servers = self.allow_mcp_servers
 
         field_dict: dict[str, Any] = {}
 
@@ -57,8 +53,6 @@ class LimitedNetworking:
             field_dict["allowed_hosts"] = allowed_hosts
         if allow_package_managers is not UNSET:
             field_dict["allow_package_managers"] = allow_package_managers
-        if allow_mcp_servers is not UNSET:
-            field_dict["allow_mcp_servers"] = allow_mcp_servers
 
         return field_dict
 
@@ -73,13 +67,10 @@ class LimitedNetworking:
 
         allow_package_managers = d.pop("allow_package_managers", UNSET)
 
-        allow_mcp_servers = d.pop("allow_mcp_servers", UNSET)
-
         limited_networking = cls(
             type_=type_,
             allowed_hosts=allowed_hosts,
             allow_package_managers=allow_package_managers,
-            allow_mcp_servers=allow_mcp_servers,
         )
 
         return limited_networking

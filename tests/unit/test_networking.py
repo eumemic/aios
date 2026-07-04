@@ -20,11 +20,9 @@ from aios.models.environments import (
 )
 from aios.sandbox.backends.base import (
     CommandResult,
-    Limited,
     Mount,
     SandboxBackendError,
     SandboxSpec,
-    Unrestricted,
 )
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.setup import (
@@ -56,18 +54,15 @@ class TestLimitedNetworking:
             type="limited",
             allowed_hosts=["api.example.com", "cdn.example.com"],
             allow_package_managers=True,
-            allow_mcp_servers=False,
         )
         assert n.type == "limited"
         assert n.allowed_hosts == ["api.example.com", "cdn.example.com"]
         assert n.allow_package_managers is True
-        assert n.allow_mcp_servers is False
 
     def test_defaults(self) -> None:
         n = LimitedNetworking(type="limited")
         assert n.allowed_hosts == []
         assert n.allow_package_managers is False
-        assert n.allow_mcp_servers is False
 
     def test_rejects_empty_hostname(self) -> None:
         with pytest.raises(ValueError, match="must not be empty"):
@@ -713,7 +708,7 @@ class TestBuildLockdownVerifyScript:
 # ── docker backend translates network policy to docker run argv ────────────────
 
 
-def _make_spec(network_policy: Limited | Unrestricted) -> SandboxSpec:
+def _make_spec(network_policy: LimitedNetworking | UnrestrictedNetworking) -> SandboxSpec:
     return SandboxSpec(
         session_id="sess_01TEST",
         instance_id="inst_TEST",
@@ -751,25 +746,25 @@ class TestDockerBackendArgs:
         ephemeral operator-image sidecar joined to the netns, so root-in-sandbox
         can neither poison nor flush its own lockdown."""
         argv = await _capture_docker_argv(
-            _make_spec(Limited(allowed_hosts=frozenset({"example.com"})))
+            _make_spec(LimitedNetworking(type="limited", allowed_hosts=["example.com"]))
         )
         assert "NET_ADMIN" not in argv
 
     @pytest.mark.asyncio
     async def test_unrestricted_no_cap_net_admin(self) -> None:
-        argv = await _capture_docker_argv(_make_spec(Unrestricted()))
+        argv = await _capture_docker_argv(_make_spec(UnrestrictedNetworking()))
         assert "--cap-add" not in argv
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "policy",
         [
-            Limited(allowed_hosts=frozenset({"example.com"})),
-            Unrestricted(),
+            LimitedNetworking(type="limited", allowed_hosts=["example.com"]),
+            UnrestrictedNetworking(),
         ],
         ids=["limited", "unrestricted"],
     )
-    async def test_security_opt_no_new_privileges(self, policy: Limited | Unrestricted) -> None:
+    async def test_security_opt_no_new_privileges(self, policy: LimitedNetworking | UnrestrictedNetworking) -> None:
         argv = await _capture_docker_argv(_make_spec(policy))
         assert "--security-opt" in argv
         i = argv.index("--security-opt")
@@ -779,12 +774,12 @@ class TestDockerBackendArgs:
     @pytest.mark.parametrize(
         "policy",
         [
-            Limited(allowed_hosts=frozenset({"example.com"})),
-            Unrestricted(),
+            LimitedNetworking(type="limited", allowed_hosts=["example.com"]),
+            UnrestrictedNetworking(),
         ],
         ids=["limited", "unrestricted"],
     )
-    async def test_ipc_private(self, policy: Limited | Unrestricted) -> None:
+    async def test_ipc_private(self, policy: LimitedNetworking | UnrestrictedNetworking) -> None:
         argv = await _capture_docker_argv(_make_spec(policy))
         assert "--ipc" in argv
         i = argv.index("--ipc")

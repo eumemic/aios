@@ -775,8 +775,8 @@ def env_var_credential_containment_error(
       DROP under Unrestricted, so every host is reachable anyway and the
       subset check guards no real escalation hole — its rationale
       evaporates. (``env_config=None`` and ``env_config.networking=None``
-      both resolve to ``Unrestricted()`` at runtime via
-      ``_network_policy_from_config``, so this is one runtime case.)
+      are both treated as unrestricted at runtime, so this is one runtime
+      case.)
 
     The two sides parse asymmetrically. ``LimitedNetworking`` validates
     its ``allowed_hosts`` against ``HOSTNAME_RE``, which accepts IP

@@ -27,13 +27,13 @@ import pytest
 from aios.db.queries import EnvVarCredentialEcho
 from aios.harness import runtime
 from aios.ids import VAULT_CREDENTIAL
+from aios.models.environments import UnrestrictedNetworking
 from aios.models.memory_stores import Access, MemoryStoreResourceEcho
 from aios.sandbox.backends.base import (
     CommandResult,
     Mount,
     SandboxHandle,
     SandboxSpec,
-    Unrestricted,
 )
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.spec import ProvisioningPlan
@@ -184,7 +184,7 @@ class TestReleaseIfMountsChanged:
                 extra_mounts=(),
                 environment={},
                 labels={},
-                network_policy=Unrestricted(),
+                network_policy=UnrestrictedNetworking(),
                 host_gateway_alias=None,
                 image="aios-sandbox:test",
                 mount_snapshot=new_snapshot,
@@ -384,7 +384,7 @@ def _provisioning_plan(session_id: str) -> ProvisioningPlan:
         extra_mounts=(),
         environment={},
         labels={},
-        network_policy=Unrestricted(),
+        network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image="aios-sandbox:test",
     )
@@ -403,7 +403,6 @@ def _provisioning_plan_limited(session_id: str) -> ProvisioningPlan:
     policy, so the registry's cold path actually runs
     ``apply_network_lockdown`` (the security gate under test)."""
     from aios.models.environments import EnvironmentConfig, LimitedNetworking
-    from aios.sandbox.backends.base import Limited
 
     spec = SandboxSpec(
         session_id=session_id,
@@ -412,7 +411,7 @@ def _provisioning_plan_limited(session_id: str) -> ProvisioningPlan:
         extra_mounts=(),
         environment={},
         labels={},
-        network_policy=Limited(allowed_hosts=frozenset({"api.example.com"})),
+        network_policy=LimitedNetworking(type="limited", allowed_hosts=["api.example.com"]),
         host_gateway_alias=None,
         image="aios-sandbox:test",
     )
