@@ -1585,16 +1585,13 @@ class SandboxRegistry:
         then removed. Best-effort — a snapshot failure leaves the corpse for
         the next tick (the GC never raises). Each corpse is handled under the
         per-session lock with the cached-handle re-check.
+
+        Routes on owner kind up front (mirroring :meth:`_release_owner`): a
+        workflow-run (``wfr_``) corpse is the corpse-collection analog of
+        :meth:`release_run` — ephemeral scratch, never salvageable, never in
+        ``sessions`` — so it is bare-destroyed by kind, without any session
+        retain logic.
         """
-        # NOTE (#995): this pass is NOT run-aware. ``ref.session_id`` carries the
-        # owner label, which for a workflow-run sandbox is a ``wfr_…`` id (#988) —
-        # never present in the ``sessions`` table, so its ``states`` lookup below is
-        # always ``None`` ⇒ ``keep_fs`` False ⇒ ``force_remove`` with NO snapshot.
-        # That is correct-by-coincidence today because a run sandbox is ephemeral
-        # scratch with no durable rootfs to salvage, but it is a latent footgun: if
-        # M2 ever gives run sandboxes a durable rootfs, a ``wfr_`` corpse would be
-        # dropped here without a commit. Make this owner-kind aware
-        # (:func:`aios.ids.is_run_owner_id`) before that lands.
         for ref in containers:
             sid = ref.session_id
             if sid is None:
@@ -1605,6 +1602,14 @@ class SandboxRegistry:
                 cached = self._handles.get(sid)
                 if cached is not None and cached.sandbox_id == ref.sandbox_id:
                     continue  # the live, in-use container — never touch it
+                if is_run_owner_id(sid):
+                    # A workflow-run sandbox is ephemeral scratch with no durable
+                    # rootfs, no pointer, no proxies — the corpse-collection analog
+                    # of release_run. Never salvageable; never in `sessions`. Bare
+                    # destroy, no DB lookup.
+                    await self._backend.force_remove(ref.sandbox_id)
+                    continue
+                # ── session corpse: retain rule + under-lock dormancy re-verify ──
                 ttl = settings.sandbox_snapshot_ttl_seconds
                 state = states.get(sid)
                 keep_fs = state is not None and not _is_session_dormant(state, now, ttl)
