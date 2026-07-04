@@ -53,6 +53,7 @@ from aios.db import queries
 from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError
 from aios.harness import runtime
+from aios.jobs.app import defer_trigger_fire
 from aios.logging import get_logger
 from aios.models.triggers import (
     SandboxCommandAction,
@@ -69,7 +70,6 @@ from aios.services.wake import (
     WakeSessionPermissionError,
     WakeSessionRateLimitedError,
     WakeSessionTargetUnavailableError,
-    defer_trigger_fire,
     deliver_cross_session_wake,
 )
 

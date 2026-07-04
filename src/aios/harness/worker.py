@@ -32,6 +32,7 @@ from typing import Any, TypedDict
 
 import asyncpg
 
+import aios.harness.tasks
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
@@ -42,7 +43,6 @@ from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
 from aios.harness.inflight_tool_registry import InflightToolRegistry
-from aios.harness.procrastinate_app import app as procrastinate_app
 from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
 from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
 from aios.harness.sweep import (
@@ -51,6 +51,7 @@ from aios.harness.sweep import (
 )
 from aios.harness.trigger_runner import sweep_trigger_fires
 from aios.harness.workspace_reaper import sweep_archived_workspaces
+from aios.jobs.app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.retirements.boot_gate import (
@@ -88,6 +89,21 @@ _HEARTBEAT_INTERVAL_SECONDS = 15
 # How long the worker startup loops between boot-admission proof attempts while
 # the DB is behind / unreachable. Matches the api gate's cadence.
 _BOOT_GATE_RETRY_SECONDS = 2.0
+
+# The harness ``@app.task`` handlers that MUST be registered before this worker
+# consumes jobs (#1476). Registration is a side effect of ``import
+# aios.harness.tasks`` at the top of this module; the worker-boot backstop below
+# names each one so a dropped import fails loud. A bare truthiness check on
+# ``app.tasks`` is VACUOUS: procrastinate's ``App.__init__`` unconditionally
+# registers its own builtin ``remove_old_jobs`` task, so ``app.tasks`` is never
+# empty even when the harness import is missing — the exact degraded state this
+# guard exists to catch. Keep in sync with the ``@app.task(name=...)`` decls in
+# ``aios.harness.tasks``.
+_REQUIRED_HARNESS_TASKS = {
+    "harness.wake_session",
+    "harness.wake_workflow",
+    "harness.run_trigger",
+}
 
 
 async def _await_retirements_admissible(
@@ -309,6 +325,20 @@ async def worker_main() -> None:
         # restores, and is never cached.
         await _await_retirements_admissible(pool, log, supervised_latch)
         log.info("worker.boot_gate.admitted")
+
+        # Registration backstop (#1476): tasks are registered as a side effect
+        # of ``import aios.harness.tasks`` at the top of this module. If that
+        # import is ever dropped, the worker would boot with an empty task
+        # registry and every job would fail silently at job-lookup time. The
+        # test-substrate assertion (test_wf_sweep.py) imports the tasks module
+        # itself, so it can't catch a worker entrypoint missing the import —
+        # this boot assert is the only check on the production path, converting
+        # that silent failure into a loud one at startup.
+        missing = _REQUIRED_HARNESS_TASKS - set(procrastinate_app.tasks)
+        assert not missing, (
+            f"harness tasks not registered: {missing} — the worker must "
+            "`import aios.harness.tasks` before consuming jobs"
+        )
 
         await procrastinate_app.open_async()
         procrastinate_opened = True

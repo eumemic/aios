@@ -33,12 +33,12 @@ import asyncpg
 from aios.db.queries import workflows as wf_queries
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
 from aios.mcp.client import resolve_auth_for_target_url_run
 from aios.models.workflows import WfRun
 from aios.services import triggers as triggers_service
 from aios.services import workflows as wf_service
-from aios.services.wake import defer_run_wake
 from aios.tools.http_request import _do_http_request, _find_server, _match_route, _split_query
 from aios.tools.invoke import validate_arguments
 from aios.tools.registry import registry

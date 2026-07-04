@@ -38,9 +38,9 @@ import jsonschema
 
 from aios.db import queries
 from aios.harness import runtime
+from aios.jobs.app import defer_run_wake
 from aios.models.sessions import Err, Ok, Outcome
 from aios.services import sessions as sessions_service
-from aios.services.wake import defer_run_wake
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
 
 RETURN_TOOL_NAME = "return"
@@ -134,7 +134,7 @@ async def respond_to_request(
         # Wake the caller session so its parked invoke() tool task harvests the answer
         # (its await_session is also self-subscribed to this channel — wake or NOTIFY,
         # whichever lands first, drives the harvest).
-        from aios.services.wake import defer_wake
+        from aios.jobs.app import defer_wake
 
         await defer_wake(
             pool, write.wake_session_id, cause="invoke_response", account_id=write.account_id

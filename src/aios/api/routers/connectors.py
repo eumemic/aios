@@ -58,6 +58,7 @@ from aios.errors import (
     RateLimitedError,
     ValidationError,
 )
+from aios.jobs.app import defer_wake
 from aios.logging import get_logger
 from aios.models.connections import ConnectorSecrets
 from aios.models.connectors import ConnectorCapabilities
@@ -72,7 +73,6 @@ from aios.services.inbound_budget import (
     check_inbound_budget_session,
     inbound_orig_channel,
 )
-from aios.services.wake import defer_wake
 
 log = get_logger("aios.api.routers.connectors")
 

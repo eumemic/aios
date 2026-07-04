@@ -51,7 +51,7 @@ async def sweep_pool(
 
 def test_wake_workflow_task_registered_on_workflows_queue() -> None:
     import aios.harness.tasks  # noqa: F401  — importing registers the @app.task
-    from aios.harness.procrastinate_app import app
+    from aios.jobs.app import app
 
     assert app.tasks["harness.wake_workflow"].queue == "workflows"
 

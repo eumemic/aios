@@ -22,6 +22,7 @@ import asyncpg
 from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
+from aios.jobs.app import defer_wake
 from aios.models.inbound_policy import AllowAll, AllowList, DenyAll, InboundPolicy
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services.attachment_staging import (
@@ -30,7 +31,6 @@ from aios.services.attachment_staging import (
     stage_inbound_attachments,
 )
 from aios.services.inbound_budget import check_inbound_budget
-from aios.services.wake import defer_wake
 
 # Metadata keys the trusted server-side path writes from request / state.
 # Stripped from connector-supplied ``metadata`` before the merge so a

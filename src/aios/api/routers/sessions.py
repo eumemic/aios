@@ -35,6 +35,7 @@ from aios.db.listen import (
 from aios.errors import ValidationError
 from aios.harness.chat_type import ChatType
 from aios.ids import GITHUB_REPOSITORY, split_id
+from aios.jobs.app import defer_wake
 from aios.logging import get_logger
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
@@ -83,7 +84,6 @@ from aios.services import github_repositories as github_repo_service
 from aios.services import sessions as service
 from aios.services import trace as trace_service
 from aios.services import triggers as triggers_service
-from aios.services.wake import defer_wake
 
 log = get_logger("aios.api.routers.sessions")
 

@@ -200,7 +200,7 @@ async def pool_invoke_gate(
         agent, _env, _session = await seed_agent_env_session(
             pool, account_id=_CALLER, prefix="invoke-gate"
         )
-        with mock.patch("aios.services.wake.defer_wake", new=AsyncMock()):
+        with mock.patch("aios.services.sessions.defer_wake", new=AsyncMock()):
             yield pool, agent.id, _CALLER
     finally:
         runtime.pool = prev

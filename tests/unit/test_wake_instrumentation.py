@@ -51,7 +51,7 @@ class TestE2EConftestMockSignatures:
     def test_noop_defer_wake_matches_real_defer_wake(self) -> None:
         import inspect
 
-        from aios.services.wake import defer_wake
+        from aios.jobs.app import defer_wake
         from tests.e2e.conftest import _noop_defer_wake
 
         real_params = list(inspect.signature(defer_wake).parameters.keys())
@@ -62,15 +62,19 @@ class TestE2EConftestMockSignatures:
 class TestWakeDeferredEvent:
     async def test_defer_wake_emits_span_with_cause(self, in_memory_app: App) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.services.wake import defer_wake
+        from aios.jobs.app import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
-        with patch("aios.services.wake.sessions_service.append_event", mock_append):
+        with patch("aios.jobs.app.queries.append_event", mock_append):
             await defer_wake(pool, "sess_x", cause="message", account_id=account_id)
 
         mock_append.assert_awaited_once_with(
-            pool, "sess_x", "span", {"event": "wake_deferred", "cause": "message"}, account_id=ANY
+            ANY,  # conn acquired from the pool
+            account_id=ANY,
+            session_id="sess_x",
+            kind="span",
+            data={"event": "wake_deferred", "cause": "message"},
         )
 
     async def test_defer_wake_span_carries_delay_when_delayed(self, in_memory_app: App) -> None:
@@ -78,11 +82,11 @@ class TestWakeDeferredEvent:
         retry-backoff path), the span event records the delay so the
         profiler can observe queue latency on the retry path."""
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.services.wake import defer_wake
+        from aios.jobs.app import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
-        with patch("aios.services.wake.sessions_service.append_event", mock_append):
+        with patch("aios.jobs.app.queries.append_event", mock_append):
             await defer_wake(
                 pool,
                 "sess_x",
@@ -92,28 +96,28 @@ class TestWakeDeferredEvent:
             )
 
         mock_append.assert_awaited_once_with(
-            pool,
-            "sess_x",
-            "span",
-            {"event": "wake_deferred", "cause": "reschedule", "delay_seconds": 30},
+            ANY,  # conn acquired from the pool
             account_id=ANY,
+            session_id="sess_x",
+            kind="span",
+            data={"event": "wake_deferred", "cause": "reschedule", "delay_seconds": 30},
         )
 
     async def test_defer_wake_emits_span_even_when_coalesced(self, in_memory_app: App) -> None:
         """N deferrals must all emit ``wake_deferred``, even if procrastinate
         coalesces them — the profiler observes coalescing as N deferred → 1 step."""
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.services.wake import defer_wake
+        from aios.jobs.app import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
-        with patch("aios.services.wake.sessions_service.append_event", mock_append):
+        with patch("aios.jobs.app.queries.append_event", mock_append):
             await defer_wake(pool, "sess_x", cause="message", account_id=account_id)
             await defer_wake(pool, "sess_x", cause="sweep", account_id=account_id)
             await defer_wake(pool, "sess_x", cause="tool_confirmation", account_id=account_id)
 
         assert mock_append.await_count == 3
-        causes = [call.args[3]["cause"] for call in mock_append.await_args_list]
+        causes = [call.kwargs["data"]["cause"] for call in mock_append.await_args_list]
         assert causes == ["message", "sweep", "tool_confirmation"]
         # Procrastinate coalesced 2/3 but the third cause still wrote its span.
         assert isinstance(in_memory_app.connector, InMemoryConnector)
@@ -123,21 +127,21 @@ class TestWakeDeferredEvent:
         self, in_memory_app: App
     ) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
-        from aios.services.wake import defer_wake
+        from aios.jobs.app import defer_wake
 
         mock_append = AsyncMock()
         pool = MagicMock()
-        with patch("aios.services.wake.sessions_service.append_event", mock_append):
+        with patch("aios.jobs.app.queries.append_event", mock_append):
             await defer_wake(
                 pool, "sess_x", cause="reschedule", delay_seconds=2, account_id=account_id
             )
 
         mock_append.assert_awaited_once_with(
-            pool,
-            "sess_x",
-            "span",
-            {"event": "wake_deferred", "cause": "reschedule", "delay_seconds": 2},
+            ANY,  # conn acquired from the pool
             account_id=ANY,
+            session_id="sess_x",
+            kind="span",
+            data={"event": "wake_deferred", "cause": "reschedule", "delay_seconds": 2},
         )
 
 
