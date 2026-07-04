@@ -8,7 +8,7 @@ real uvicorn process is booted — fastapi-mcp's StreamableHTTP session
 manager has lazy-startup timing that's brittle under FastAPI's TestClient.
 
 The ``aios.api.app`` import is deferred to the test bodies because
-``aios.harness.procrastinate_app`` runs ``get_settings()`` at module-import
+``aios.jobs.app`` runs ``get_settings()`` at module-import
 time and the conftest env-var fixture only fires after collection.
 """
 
@@ -25,7 +25,7 @@ def app() -> Any:
 
     ``create_app()`` is idempotent and costs ~470 ms — paying for it once
     instead of five times saves ~2s on the unit suite.  Import is inside
-    the fixture body because ``aios.harness.procrastinate_app`` runs
+    the fixture body because ``aios.jobs.app`` runs
     ``get_settings()`` at module-import time and the conftest env-var
     fixture only fires after collection.
     """

@@ -1,7 +1,7 @@
 """Drift check: ``openapi.json`` must match what ``create_app().openapi()`` produces.
 
 The ``aios.api.app`` import is deferred to the test body because
-``aios.harness.procrastinate_app`` runs ``get_settings()`` at module-import
+``aios.jobs.app`` runs ``get_settings()`` at module-import
 time and the conftest env-var fixture only fires after collection.
 """
 

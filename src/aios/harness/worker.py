@@ -90,6 +90,21 @@ _HEARTBEAT_INTERVAL_SECONDS = 15
 # the DB is behind / unreachable. Matches the api gate's cadence.
 _BOOT_GATE_RETRY_SECONDS = 2.0
 
+# The harness ``@app.task`` handlers that MUST be registered before this worker
+# consumes jobs (#1476). Registration is a side effect of ``import
+# aios.harness.tasks`` at the top of this module; the worker-boot backstop below
+# names each one so a dropped import fails loud. A bare truthiness check on
+# ``app.tasks`` is VACUOUS: procrastinate's ``App.__init__`` unconditionally
+# registers its own builtin ``remove_old_jobs`` task, so ``app.tasks`` is never
+# empty even when the harness import is missing — the exact degraded state this
+# guard exists to catch. Keep in sync with the ``@app.task(name=...)`` decls in
+# ``aios.harness.tasks``.
+_REQUIRED_HARNESS_TASKS = {
+    "harness.wake_session",
+    "harness.wake_workflow",
+    "harness.run_trigger",
+}
+
 
 async def _await_retirements_admissible(
     pool: asyncpg.Pool[Any],
@@ -319,8 +334,9 @@ async def worker_main() -> None:
         # itself, so it can't catch a worker entrypoint missing the import —
         # this boot assert is the only check on the production path, converting
         # that silent failure into a loud one at startup.
-        assert procrastinate_app.tasks, (
-            "no procrastinate tasks registered — the worker must "
+        missing = _REQUIRED_HARNESS_TASKS - set(procrastinate_app.tasks)
+        assert not missing, (
+            f"harness tasks not registered: {missing} — the worker must "
             "`import aios.harness.tasks` before consuming jobs"
         )
 
