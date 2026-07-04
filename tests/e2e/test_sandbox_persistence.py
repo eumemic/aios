@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
     ENV_KEYS_LABEL_KEY,
@@ -33,7 +34,6 @@ from aios.sandbox.backends.base import (
     Mount,
     SandboxHandle,
     SandboxSpec,
-    Unrestricted,
 )
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.spec import snapshot_tag
@@ -69,7 +69,7 @@ def _spec(
             ENV_KEYS_LABEL_KEY: ",".join(sorted(environment)),
             BASE_IMAGE_LABEL_KEY: IMAGE,
         },
-        network_policy=Unrestricted(),
+        network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image=IMAGE,
         snapshot_image=snapshot_image,

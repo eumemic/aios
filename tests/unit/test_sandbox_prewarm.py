@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aios.cli.commands.sandbox import bake_prewarm_image
-from aios.models.environments import EnvironmentConfig
+from aios.models.environments import EnvironmentConfig, UnrestrictedNetworking
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
     INSTANCE_LABEL_KEY,
@@ -31,7 +31,6 @@ from aios.sandbox.backends.base import (
     SESSION_LABEL_KEY,
     Mount,
     SandboxSpec,
-    Unrestricted,
 )
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.spec import ProvisioningPlan
@@ -48,7 +47,7 @@ def _make_spec(*, snapshot_image: str | None = None, image: str = BASE) -> Sandb
         extra_mounts=(),
         environment={},
         labels={},
-        network_policy=Unrestricted(),
+        network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image=image,
         snapshot_image=snapshot_image,

@@ -12989,11 +12989,6 @@
             "type": "boolean",
             "title": "Allow Package Managers",
             "default": false
-          },
-          "allow_mcp_servers": {
-            "type": "boolean",
-            "title": "Allow Mcp Servers",
-            "default": false
           }
         },
         "additionalProperties": false,

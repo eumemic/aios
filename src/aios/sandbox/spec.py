@@ -48,11 +48,8 @@ from aios.sandbox.backends.base import (
     MANAGED_LABEL_KEY,
     MANAGED_LABEL_VALUE,
     SESSION_LABEL_KEY,
-    Limited,
     Mount,
-    NetworkPolicy,
     SandboxSpec,
-    Unrestricted,
 )
 from aios.sandbox.egress_ca import TRUST_STORE_ENV
 from aios.sandbox.env_keys import (
@@ -500,15 +497,6 @@ async def _materialize_github_clones(
                 error=str(cleanup_err),
             )
         raise
-
-
-def _network_policy_from_config(env_config: EnvironmentConfig | None) -> NetworkPolicy:
-    """Translate the environment config's networking field to a
-    backend-agnostic :class:`NetworkPolicy`."""
-    networking = env_config.networking if env_config else None
-    if isinstance(networking, LimitedNetworking):
-        return Limited(allowed_hosts=frozenset(networking.allowed_hosts))
-    return Unrestricted()
 
 
 def _warn_if_creds_under_open_egress(
@@ -1021,7 +1009,7 @@ def _assemble_plan(
         extra_mounts=tuple(extra_mounts),
         environment=merged_env,
         labels=labels,
-        network_policy=_network_policy_from_config(env_config),
+        network_policy=env_config.networking if env_config else None,
         host_gateway_alias=None if is_running_in_container() else WORKER_NETWORK_ALIAS,
         image=image,
         # Resume source (durable session sandboxes): the raw DB snapshot

@@ -4706,7 +4706,6 @@ from aios.sandbox.backends.base import (  # noqa: E402
     Mount,
     SandboxBackendError,
     SandboxSpec,
-    Unrestricted,
 )
 from aios.sandbox.registry import SandboxRegistry  # noqa: E402
 from aios.sandbox.spec import ProvisioningPlan  # noqa: E402
@@ -4725,7 +4724,7 @@ def _fake_run_plan(run_id: str) -> ProvisioningPlan:
     """
     from pathlib import Path
 
-    from aios.models.environments import EnvironmentConfig
+    from aios.models.environments import EnvironmentConfig, UnrestrictedNetworking
 
     spec = SandboxSpec(
         session_id=run_id,
@@ -4734,7 +4733,7 @@ def _fake_run_plan(run_id: str) -> ProvisioningPlan:
         extra_mounts=(),
         environment={},
         labels={},
-        network_policy=Unrestricted(),
+        network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image="img:test",
     )

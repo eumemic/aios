@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import (
     Mount,
     SandboxSpec,
-    Unrestricted,
 )
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.spec import ProvisioningPlan
@@ -26,7 +26,7 @@ def _make_plan() -> ProvisioningPlan:
         extra_mounts=(),
         environment={},
         labels={},
-        network_policy=Unrestricted(),
+        network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image="aios-sandbox:test",
     )
