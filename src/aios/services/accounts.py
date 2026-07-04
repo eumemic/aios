@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from typing import Any, cast
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
@@ -312,13 +312,6 @@ async def get_account_spend_state(
     async with pool.acquire() as conn:
         spent = await queries.get_account_spent_microusd(conn, account_id)
         limit = await resolve_effective_spend_limit_usd_on(conn, account_id)
-    if not isinstance(cast(Any, spent), int) or not isinstance(
-        cast(Any, limit), int | float | None
-    ):
-        # Unit tests often use bare MagicMock pools and leave this collaborator
-        # unpatched. Treat untyped mock values as ungated; production queries
-        # return the annotated scalar types.
-        return 0, None
     return spent, limit
 
 
@@ -340,13 +333,6 @@ async def get_account_subtree_spend_state(
     async with pool.acquire() as conn:
         spent = await queries.get_account_subtree_spent_microusd(conn, account_id)
         limit = await resolve_effective_spend_limit_usd_on(conn, account_id)
-    if not isinstance(cast(Any, spent), int) or not isinstance(
-        cast(Any, limit), int | float | None
-    ):
-        # Unit tests often use bare MagicMock pools and leave this collaborator
-        # unpatched. Treat untyped mock values as ungated; production queries
-        # return the annotated scalar types.
-        return 0, None
     return spent, limit
 
 

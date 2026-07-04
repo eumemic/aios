@@ -143,3 +143,31 @@ def _unit_no_session_cancel_harvest() -> Iterator[None]:
         return_value=False,
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _unit_spend_state_ungated() -> Iterator[None]:
+    """Auto-mock the pre-inference spend-admission collaborators.
+
+    ``_run_session_step_body`` reads the rolled-up subtree spend envelope before
+    context-build. Unit tests drive ``run_session_step`` over a MagicMock pool
+    whose ``acquire().__aenter__().fetchval()`` returns a MagicMock, which the
+    real ``get_account_subtree_spend_state`` would compare against the limit
+    (``>=``) and raise ``TypeError``. Default both spend-state reads to the
+    ungated ``(0, None)`` — exactly as the sibling ``load_session_account_id``
+    stub above. The gate's real behavior is covered by ``test_loop_spend_gate``,
+    which patches these at the ``aios.harness.loop.accounts_service`` call site.
+    """
+    with (
+        mock.patch(
+            "aios.services.accounts.get_account_subtree_spend_state",
+            new_callable=AsyncMock,
+            return_value=(0, None),
+        ),
+        mock.patch(
+            "aios.services.accounts.get_account_spend_state",
+            new_callable=AsyncMock,
+            return_value=(0, None),
+        ),
+    ):
+        yield
