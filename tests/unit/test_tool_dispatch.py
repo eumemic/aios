@@ -120,7 +120,12 @@ class TestClassifyToolError:
                 "no match",
                 {"path": "/p", "matches": 3},
             ),
-            (BashArgumentError("command must be non-empty"), False, "command must be non-empty", {}),
+            (
+                BashArgumentError("command must be non-empty"),
+                False,
+                "command must be non-empty",
+                {},
+            ),
             (ForbiddenError("denied", detail={"x": 1}), False, 'denied ({"x": 1})', {}),
             (NotFoundError("no such workflow"), False, "no such workflow", {}),
             (ConflictError("stale version"), False, "stale version", {}),

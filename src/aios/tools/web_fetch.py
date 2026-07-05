@@ -109,9 +109,7 @@ async def web_fetch_handler(session_id: str, arguments: dict[str, Any]) -> dict[
         # A non-2xx from Tavily/upstream is an EXPECTED failure the model reads and
         # retries — raise ToolBail (a benign refusal), NOT the raw httpx error, which
         # _classify_tool_error would treat as an internal failure and evict the sandbox.
-        raise ToolBail(
-            f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-        ) from exc
+        raise ToolBail(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
     except httpx.TimeoutException as exc:
         raise ToolBail("Request timed out fetching URL") from exc
     except (KeyError, IndexError) as exc:

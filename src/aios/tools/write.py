@@ -156,8 +156,7 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
             # verbatim through the typed channel rather than letting _classify_tool_error's
             # ``to_message()`` render the terse store-level message (#1680).
             raise ToolBail(
-                f"the file at {path} changed since your last read; "
-                "re-read it and retry the write",
+                f"the file at {path} changed since your last read; re-read it and retry the write",
                 detail={"path": path, "detail": exc.detail},
             ) from exc
         except MemoryStoreArchivedError as exc:

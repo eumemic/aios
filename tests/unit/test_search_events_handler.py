@@ -275,9 +275,7 @@ class TestSearchEventsHandler:
         # channel) rather than returning a bare ``{"error": ...}`` dict.
         with _mock_execute() as mock_exec:
             with pytest.raises(ToolBail) as excinfo:
-                await search_events_handler(
-                    "sess_01TEST", {"query": "INSERT INTO foo VALUES (1)"}
-                )
+                await search_events_handler("sess_01TEST", {"query": "INSERT INTO foo VALUES (1)"})
             mock_exec.assert_not_called()
         assert "SELECT" in excinfo.value.message
 

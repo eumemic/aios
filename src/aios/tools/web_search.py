@@ -87,9 +87,7 @@ async def web_search_handler(session_id: str, arguments: dict[str, Any]) -> dict
     except httpx.HTTPStatusError as exc:
         # An EXPECTED non-2xx — raise ToolBail (benign refusal), NOT the raw httpx
         # error, which _classify_tool_error would treat as internal + evict the sandbox.
-        raise ToolBail(
-            f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-        ) from exc
+        raise ToolBail(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
     except httpx.TimeoutException as exc:
         raise ToolBail("Search request timed out") from exc
     except (KeyError, IndexError) as exc:

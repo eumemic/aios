@@ -344,9 +344,7 @@ async def invoke_run_tool(
         args = _substitute_idempotency_sentinel(args, run.id, call_key)
 
         return await _values(
-            _do_http_request(
-                servers=run.http_servers, arguments=args, resolve_auth=resolve_auth
-            )
+            _do_http_request(servers=run.http_servers, arguments=args, resolve_auth=resolve_auth)
         )
     if tool_name == "web_search":
         return await _values(web_search_handler("", args))
