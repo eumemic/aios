@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from aios.models.agents import HttpPermissionPolicy, HttpRouteSpec, HttpServerSpec, ToolSpec
+from aios.tools.invoke import ToolBail
 from aios.workflows import run_tools
 from aios.workflows.run_tools import invoke_run_tool
 from aios.workflows.wf_script_host import tool
@@ -126,6 +127,62 @@ async def test_http_request_routed_to_the_run_resolver() -> None:
     assert captured["servers"] == run.http_servers  # the run's snapshot
     assert captured["auth"] == ("vlt", {"Authorization": "Bearer t"})
     run_resolver.assert_awaited_once()  # the run-scoped resolver, not the session one
+
+
+async def test_http_toolbail_is_translated_to_an_error_value() -> None:
+    """#1680: the shared http core now signals an expected failure by *raising*
+    ``ToolBail`` (one typed channel on the session path). The workflow-run contract is
+    the opposite — ``invoke_run_tool`` never raises, it journals failures as
+    replay-deterministic ``{"error": ...}`` values. The ``_values`` seam bridges the two:
+    a raised ``ToolBail`` must come back out as the same ``{"error": msg}`` dict the core
+    used to return, with the ``detail`` merged in."""
+    run = _run(
+        tools=[ToolSpec(type="http_request")],
+        http_servers=[HttpServerSpec(name="api", base_url="https://x")],
+    )
+
+    async def _raise_do(*, servers: Any, arguments: Any, resolve_auth: Any) -> dict[str, Any]:
+        raise ToolBail("does not match any enabled route")
+
+    with (
+        patch.object(run_tools, "_do_http_request", new=_raise_do),
+        patch("aios.harness.runtime.require_pool", return_value=object()),
+        patch("aios.harness.runtime.require_crypto_box", return_value=object()),
+        patch.object(
+            run_tools,
+            "resolve_auth_for_target_url_run",
+            new=AsyncMock(return_value=(None, {})),
+        ),
+    ):
+        out = await invoke_run_tool(
+            run=run,
+            call_key="sha:k#0",
+            account_id="acc_t",
+            tool_name="http_request",
+            tool_input={"server_ref": "api", "path": "/nope", "method": "GET"},
+        )
+
+    assert out == {"error": "does not match any enabled route"}
+
+
+async def test_web_search_toolbail_is_translated_to_an_error_value() -> None:
+    """Same seam for the ``web_search`` branch: a raised ``ToolBail`` becomes an
+    ``{"error": ...}`` value, never an exception escaping ``invoke_run_tool``."""
+    run = _run(tools=[ToolSpec(type="web_search")])
+
+    async def _raise_search(session_id: str, arguments: Any) -> dict[str, Any]:
+        raise ToolBail("No results returned for query")
+
+    with patch.object(run_tools, "web_search_handler", new=_raise_search):
+        out = await invoke_run_tool(
+            run=run,
+            call_key="sha:k#0",
+            account_id="acc_t",
+            tool_name="web_search",
+            tool_input={"query": "x"},
+        )
+
+    assert out == {"error": "No results returned for query"}
 
 
 async def test_disabled_tool_is_treated_as_undeclared() -> None:

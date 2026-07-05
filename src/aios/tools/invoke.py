@@ -45,11 +45,27 @@ class ToolBail(Exception):
     """Clean model-visible bail from a tool call.
 
     Raised for failures the model can read and self-correct from: bad
-    JSON arguments, unknown tool name, schema validation mismatch.
-    Distinct from a handler ``Exception`` (which signals an internal
-    failure inside the tool body and triggers sandbox eviction on the
-    model path).
+    JSON arguments, unknown tool name, schema validation mismatch, and
+    (post-#1680) every *expected* failure a built-in handler used to
+    encode as a bare ``{"error": ...}`` dict — a web_fetch non-2xx, an
+    http_request policy denial, an edit/write memory precondition, a
+    query timeout, and so on.  Distinct from a handler ``Exception``
+    (which signals an internal failure inside the tool body and triggers
+    sandbox eviction on the model path).
+
+    ``detail`` carries the extra structured keys some handlers attach
+    alongside the message — ``edit``/``write`` keep their ``{path, detail,
+    matches}`` context this way.  The single event writer
+    (``_tool_lifecycle`` → ``_append_tool_result``) merges these keys into
+    the tool-result event's ``{"error": msg}`` content, so the
+    prompt-surface content shape is preserved across the migration from
+    the old dict returns (which json-encoded those same keys).
     """
+
+    def __init__(self, message: str, *, detail: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.detail = detail or {}
 
 
 def parse_arguments(raw_args: Any) -> dict[str, Any] | None:

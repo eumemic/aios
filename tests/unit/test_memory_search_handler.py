@@ -10,6 +10,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
+from aios.tools.invoke import ToolBail
 from aios.tools.memory_search import (
     _PREVIEW_CHARS,
     MAX_ROWS,
@@ -66,14 +69,16 @@ class TestFormatResults:
 
 class TestHandlerGuards:
     async def test_rejects_empty_query(self) -> None:
-        result = await memory_search_handler("sess_x", {"query": "   "})
-        assert "error" in result
-        assert "query" in result["error"]
+        # Post-#1680: an expected guard failure raises ``ToolBail`` (one typed
+        # failure channel) rather than returning a bare ``{"error": ...}`` dict.
+        with pytest.raises(ToolBail) as excinfo:
+            await memory_search_handler("sess_x", {"query": "   "})
+        assert "query" in excinfo.value.message
 
     async def test_rejects_missing_query(self) -> None:
-        result = await memory_search_handler("sess_x", {})
-        assert "error" in result
+        with pytest.raises(ToolBail):
+            await memory_search_handler("sess_x", {})
 
     async def test_rejects_non_string_query(self) -> None:
-        result = await memory_search_handler("sess_x", {"query": 123})
-        assert "error" in result
+        with pytest.raises(ToolBail):
+            await memory_search_handler("sess_x", {"query": 123})

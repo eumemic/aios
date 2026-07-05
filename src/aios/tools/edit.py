@@ -19,7 +19,11 @@ Return shape on success::
 
     {"path": "/workspace/foo.py", "diff": "--- ...\\n+++ ...\\n..."}
 
-On failure, returns ``{"error": "...", "path": path}``.
+On an expected failure, raises :class:`~aios.tools.invoke.ToolBail`
+(one typed failure channel — #1680) whose ``detail`` carries the
+``{path[, detail, matches]}`` context; the single event writer stamps
+``is_error`` and merges the detail into the tool-result ``{"error": ...}``
+content.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ from aios.models.memory_stores import MAX_CONTENT_BYTES
 from aios.sandbox.spec import resolve_bash_timeout_ceiling
 from aios.services import memory_stores as memory_service
 from aios.services import sessions as sessions_service
+from aios.tools.invoke import ToolBail
 from aios.tools.memory_intercept import resolve_memory_target
 from aios.tools.registry import registry
 
@@ -115,17 +120,17 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     replace_all = bool(arguments.get("replace_all", False))
 
     if old_string == new_string:
-        return {
-            "error": "old_string and new_string are identical; nothing to change",
-            "path": path,
-        }
+        raise ToolBail(
+            "old_string and new_string are identical; nothing to change",
+            detail={"path": path},
+        )
 
     target = resolve_memory_target(session_id, path)
     if target is not None and target.access == "read_only":
-        return {
-            "error": (f"memory store {target.store_name!r} is mounted read_only; cannot edit"),
-            "path": path,
-        }
+        raise ToolBail(
+            f"memory store {target.store_name!r} is mounted read_only; cannot edit",
+            detail={"path": path},
+        )
 
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
@@ -148,10 +153,10 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             pool, target.store_id, target.store_path, include_content=True, account_id=account_id
         )
         if existing is None:
-            return {
-                "error": (f"no memory at {path}; use the write tool to create it"),
-                "path": path,
-            }
+            raise ToolBail(
+                f"no memory at {path}; use the write tool to create it",
+                detail={"path": path},
+            )
         original = existing.content or ""
         precondition_sha: str | None = existing.content_sha256
         memory_id = existing.id
@@ -163,10 +168,10 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             max_output_bytes=settings.bash_max_output_bytes,
         )
         if read_result.exit_code != 0:
-            return {
-                "error": read_result.stderr.strip() or f"could not read {path}",
-                "path": path,
-            }
+            raise ToolBail(
+                read_result.stderr.strip() or f"could not read {path}",
+                detail={"path": path},
+            )
         # ``cat -- path`` stdout is capped at ``bash_max_output_bytes`` and the
         # backend appends a literal ``[output truncated]`` marker. Treating the
         # truncated bytes as the full file would (a) match ``old_string`` only
@@ -176,14 +181,12 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         # operation so the model picks a different tool (e.g. ``read`` with
         # explicit ranges to locate and apply the edit out-of-band).
         if read_result.truncated:
-            return {
-                "error": (
-                    f"file at {path} exceeds the {settings.bash_max_output_bytes}-byte "
-                    f"tool-output cap; edit cannot safely operate on the truncated read. "
-                    f"Use the read tool with explicit ranges to locate and apply your edit."
-                ),
-                "path": path,
-            }
+            raise ToolBail(
+                f"file at {path} exceeds the {settings.bash_max_output_bytes}-byte "
+                f"tool-output cap; edit cannot safely operate on the truncated read. "
+                f"Use the read tool with explicit ranges to locate and apply your edit.",
+                detail={"path": path},
+            )
         original = read_result.stdout
         precondition_sha = None
         memory_id = ""
@@ -191,24 +194,19 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     match_count = original.count(old_string)
 
     if match_count == 0:
-        return {
-            "error": (
-                f"old_string not found in {path}. Use the read tool to see "
-                "the exact file content, then retry edit with text that "
-                "matches byte-for-byte."
-            ),
-            "path": path,
-        }
+        raise ToolBail(
+            f"old_string not found in {path}. Use the read tool to see "
+            "the exact file content, then retry edit with text that "
+            "matches byte-for-byte.",
+            detail={"path": path},
+        )
     if match_count > 1 and not replace_all:
-        return {
-            "error": (
-                f"old_string matches {match_count} locations in {path}. "
-                "Add surrounding context to make it unique, or set "
-                "replace_all=true to replace every occurrence."
-            ),
-            "path": path,
-            "matches": match_count,
-        }
+        raise ToolBail(
+            f"old_string matches {match_count} locations in {path}. "
+            "Add surrounding context to make it unique, or set "
+            "replace_all=true to replace every occurrence.",
+            detail={"path": path, "matches": match_count},
+        )
 
     if replace_all:
         modified = original.replace(old_string, new_string)
@@ -216,13 +214,11 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         modified = original.replace(old_string, new_string, 1)
 
     if target is not None and len(modified.encode("utf-8")) > MAX_CONTENT_BYTES:
-        return {
-            "error": (
-                f"edited content exceeds memory store cap of {MAX_CONTENT_BYTES} "
-                f"bytes (got {len(modified.encode('utf-8'))})"
-            ),
-            "path": path,
-        }
+        raise ToolBail(
+            f"edited content exceeds memory store cap of {MAX_CONTENT_BYTES} "
+            f"bytes (got {len(modified.encode('utf-8'))})",
+            detail={"path": path},
+        )
 
     # Step 2a: durable write for memory targets. Precondition gates against
     # a concurrent in-session edit racing past us.
@@ -238,11 +234,11 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
                 account_id=account_id,
             )
         except MemoryPreconditionFailedError as exc:
-            return {"error": exc.message, "path": path}
+            raise ToolBail(exc.message, detail={"path": path}) from exc
         except MemoryPathConflictError as exc:
-            return {"error": exc.message, "path": path, "detail": exc.detail}
+            raise ToolBail(exc.message, detail={"path": path, "detail": exc.detail}) from exc
         except MemoryStoreArchivedError as exc:
-            return {"error": exc.message, "path": path}
+            raise ToolBail(exc.message, detail={"path": path}) from exc
         # Refresh the read-sha cache so a subsequent write tool call against
         # this same path doesn't fail its precondition with the now-stale
         # pre-edit sha.
@@ -267,22 +263,18 @@ async def edit_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     )
     if write_result.exit_code != 0:
         if target is not None:
-            return {
-                "error": (
-                    "durable edit succeeded but the in-container mirror "
-                    f"failed: {write_result.stderr.strip() or f'exit {write_result.exit_code}'}. "
-                    "Subsequent reads in this session may return stale "
-                    "content until the session restarts."
-                ),
-                "path": path,
-            }
-        return {
-            "error": (
-                write_result.stderr.strip()
-                or f"write-back failed with exit code {write_result.exit_code}"
-            ),
-            "path": path,
-        }
+            raise ToolBail(
+                "durable edit succeeded but the in-container mirror "
+                f"failed: {write_result.stderr.strip() or f'exit {write_result.exit_code}'}. "
+                "Subsequent reads in this session may return stale "
+                "content until the session restarts.",
+                detail={"path": path},
+            )
+        raise ToolBail(
+            write_result.stderr.strip()
+            or f"write-back failed with exit code {write_result.exit_code}",
+            detail={"path": path},
+        )
 
     # Step 3: compute the diff in-process. splitlines(keepends=True)
     # preserves trailing newlines so difflib produces a clean unified diff.

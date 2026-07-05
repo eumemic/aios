@@ -105,30 +105,42 @@ class _InternalAiosError(AiosError):
 
 class TestClassifyToolError:
     @pytest.mark.parametrize(
-        ("err", "evict", "message"),
+        ("err", "evict", "message", "detail"),
         [
             # Expected, model-visible refusals — never evict the sandbox. The headline
             # fix: a 400 *ArgumentError (BashArgumentError) is a clean refusal now,
             # where it used to evict the container along with every other AiosError.
-            (ToolBail("bad args"), False, "bad args"),
-            (BashArgumentError("command must be non-empty"), False, "command must be non-empty"),
-            (ForbiddenError("denied", detail={"x": 1}), False, 'denied ({"x": 1})'),
-            (NotFoundError("no such workflow"), False, "no such workflow"),
-            (ConflictError("stale version"), False, "stale version"),
-            (RateLimitedError("slow down"), False, "slow down"),
-            (ValidationError("bad field"), False, "bad field"),
+            (ToolBail("bad args"), False, "bad args", {}),
+            # #1680: a ToolBail's structured detail rides the third tuple slot so the
+            # single writer can merge it into the {"error": msg} content (edit/write's
+            # {path, matches} context).
+            (
+                ToolBail("no match", detail={"path": "/p", "matches": 3}),
+                False,
+                "no match",
+                {"path": "/p", "matches": 3},
+            ),
+            (BashArgumentError("command must be non-empty"), False, "command must be non-empty", {}),
+            (ForbiddenError("denied", detail={"x": 1}), False, 'denied ({"x": 1})', {}),
+            (NotFoundError("no such workflow"), False, "no such workflow", {}),
+            (ConflictError("stale version"), False, "stale version", {}),
+            (RateLimitedError("slow down"), False, "slow down", {}),
+            (ValidationError("bad field"), False, "bad field", {}),
             # Genuine failures — also evict the sandbox.
-            (_InternalAiosError("internal boom"), True, "internal boom"),
+            (_InternalAiosError("internal boom"), True, "internal boom", {}),
             # A 5xx WITH detail still gets the json-suffixed message (the detail-format
-            # branch is independent of the evict decision).
-            (_InternalAiosError("boom", detail={"k": 2}), True, 'boom ({"k": 2})'),
-            (CryptoDecryptError("decrypt failed"), True, "decrypt failed"),
-            (ValueError("oops"), True, "ValueError: oops"),
-            (RuntimeError("kaboom"), True, "RuntimeError: kaboom"),
+            # branch is independent of the evict decision). An AiosError folds its own
+            # detail into the message, so the third slot stays empty.
+            (_InternalAiosError("boom", detail={"k": 2}), True, 'boom ({"k": 2})', {}),
+            (CryptoDecryptError("decrypt failed"), True, "decrypt failed", {}),
+            (ValueError("oops"), True, "ValueError: oops", {}),
+            (RuntimeError("kaboom"), True, "RuntimeError: kaboom", {}),
         ],
     )
-    def test_classification(self, err: BaseException, evict: bool, message: str) -> None:
-        assert _classify_tool_error(err) == (evict, message)
+    def test_classification(
+        self, err: BaseException, evict: bool, message: str, detail: dict[str, Any]
+    ) -> None:
+        assert _classify_tool_error(err) == (evict, message, detail)
 
 
 class TestToolLifecycleEviction:
@@ -173,6 +185,17 @@ class TestToolLifecycleEviction:
         evicted, append_result = await self._drive(monkeypatch, ToolBail("bad json"))
         assert evicted == []
         assert append_result.await_args.kwargs["error"] == "bad json"
+
+    async def test_toolbail_detail_flows_to_the_single_writer(self, monkeypatch: Any) -> None:
+        # #1680: a migrated handler's structured context (edit/write's {path, matches})
+        # rides ToolBail.detail through the lifecycle into _append_tool_result, which
+        # merges it into the {"error": msg} event content.
+        evicted, append_result = await self._drive(
+            monkeypatch, ToolBail("no match", detail={"path": "/p", "matches": 3})
+        )
+        assert evicted == []
+        assert append_result.await_args.kwargs["error"] == "no match"
+        assert append_result.await_args.kwargs["detail"] == {"path": "/p", "matches": 3}
 
     async def test_server_error_evicts(self, monkeypatch: Any) -> None:
         evicted, append_result = await self._drive(monkeypatch, CryptoDecryptError("boom"))

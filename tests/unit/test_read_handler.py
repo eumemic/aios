@@ -14,6 +14,7 @@ import pytest
 
 from aios.harness import runtime
 from aios.sandbox.backends.base import CommandResult, SandboxHandle
+from aios.tools.invoke import ToolBail
 from aios.tools.read import ReadArgumentError, read_handler
 
 
@@ -158,11 +159,13 @@ class TestErrorPath:
                 truncated=False,
             )
         )
-        result = await read_handler("sess_01TEST", {"path": "/nope"})
-        assert isinstance(result, dict)
-        assert "error" in result
-        assert "No such file" in result["error"]
-        assert result["path"] == "/nope"
+        # Post-#1680: an expected read failure raises ``ToolBail`` (one typed
+        # failure channel) rather than returning a bare ``{"error": ...}`` dict;
+        # the curated message + ``path`` context ride the exception's ``detail``.
+        with pytest.raises(ToolBail) as excinfo:
+            await read_handler("sess_01TEST", {"path": "/nope"})
+        assert "No such file" in excinfo.value.message
+        assert excinfo.value.detail["path"] == "/nope"
 
     async def test_cmd_uses_pipefail_so_cat_failure_propagates(
         self, stub_registry: Any, stub_handle: SandboxHandle

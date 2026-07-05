@@ -23,7 +23,11 @@ Return shape::
 
     {"path": "/workspace/foo.py", "bytes_written": 42}
 
-On failure, returns ``{"error": "...", "path": path}``.
+On an expected failure, raises :class:`~aios.tools.invoke.ToolBail`
+(one typed failure channel — #1680) whose ``detail`` carries the
+``{path[, detail, matches]}`` context; the single event writer stamps
+``is_error`` and merges the detail into the tool-result ``{"error": ...}``
+content.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from aios.models.memory_stores import MAX_CONTENT_BYTES
 from aios.sandbox.spec import resolve_bash_timeout_ceiling
 from aios.services import memory_stores as memory_service
 from aios.services import sessions as sessions_service
+from aios.tools.invoke import ToolBail
 from aios.tools.memory_intercept import resolve_memory_target
 from aios.tools.registry import registry
 
@@ -96,18 +101,16 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
     target = resolve_memory_target(session_id, path)
     if target is not None:
         if target.access == "read_only":
-            return {
-                "error": (f"memory store {target.store_name!r} is mounted read_only; cannot write"),
-                "path": path,
-            }
+            raise ToolBail(
+                f"memory store {target.store_name!r} is mounted read_only; cannot write",
+                detail={"path": path},
+            )
         if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
-            return {
-                "error": (
-                    f"content exceeds memory store cap of {MAX_CONTENT_BYTES} "
-                    f"bytes (got {len(content.encode('utf-8'))})"
-                ),
-                "path": path,
-            }
+            raise ToolBail(
+                f"content exceeds memory store cap of {MAX_CONTENT_BYTES} "
+                f"bytes (got {len(content.encode('utf-8'))})",
+                detail={"path": path},
+            )
 
     settings = get_settings()
     sandbox = runtime.require_sandbox_registry()
@@ -147,18 +150,18 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
                     account_id=account_id,
                 )
         except MemoryPathConflictError as exc:
-            return {"error": exc.message, "path": path, "detail": exc.detail}
+            raise ToolBail(exc.message, detail={"path": path, "detail": exc.detail}) from exc
         except MemoryPreconditionFailedError as exc:
-            return {
-                "error": (
-                    f"the file at {path} changed since your last read; "
-                    "re-read it and retry the write"
-                ),
-                "path": path,
-                "detail": exc.detail,
-            }
+            # Curated retry guidance the raw ``exc.message`` does not carry — keep it
+            # verbatim through the typed channel rather than letting _classify_tool_error's
+            # ``to_message()`` render the terse store-level message (#1680).
+            raise ToolBail(
+                f"the file at {path} changed since your last read; "
+                "re-read it and retry the write",
+                detail={"path": path, "detail": exc.detail},
+            ) from exc
         except MemoryStoreArchivedError as exc:
-            return {"error": exc.message, "path": path}
+            raise ToolBail(exc.message, detail={"path": path}) from exc
 
         # Refresh the read-sha cache so a subsequent write tool call against
         # this same path doesn't fail its precondition with the now-stale
@@ -197,19 +200,17 @@ async def write_handler(session_id: str, arguments: dict[str, Any]) -> dict[str,
         # model exactly that — the bytes are persisted, but the in-container
         # view of the file won't reflect them until the session restarts.
         if target is not None:
-            return {
-                "error": (
-                    "durable write succeeded but the in-container mirror "
-                    f"failed: {result.stderr.strip() or f'exit {result.exit_code}'}. "
-                    "Subsequent reads in this session may return stale "
-                    "content until the session restarts."
-                ),
-                "path": path,
-            }
-        return {
-            "error": result.stderr.strip() or f"write failed with exit code {result.exit_code}",
-            "path": path,
-        }
+            raise ToolBail(
+                "durable write succeeded but the in-container mirror "
+                f"failed: {result.stderr.strip() or f'exit {result.exit_code}'}. "
+                "Subsequent reads in this session may return stale "
+                "content until the session restarts.",
+                detail={"path": path},
+            )
+        raise ToolBail(
+            result.stderr.strip() or f"write failed with exit code {result.exit_code}",
+            detail={"path": path},
+        )
 
     return {"path": path, "bytes_written": len(content_bytes)}
 

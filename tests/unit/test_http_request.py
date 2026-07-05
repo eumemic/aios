@@ -24,6 +24,7 @@ from aios.tools.http_request import (
     _do_http_request,
     http_request_handler,
 )
+from aios.tools.invoke import ToolBail
 
 # Capture the real httpx.AsyncClient before any patch in this file replaces it.
 # A stub that calls ``httpx.AsyncClient(...)`` after a patch would otherwise
@@ -335,23 +336,23 @@ def _make_stub_client(
 class TestHttpRequestHandler:
     async def test_unknown_server_returns_error(self, _stub_runtime: Any) -> None:
         agent = _agent(http_servers=[_server(name="hue", routes=[_route("/lights/*")])])
-        with _patch_load_agent(agent):
-            result = await http_request_handler(
+        # Post-#1680: an expected http_request failure raises ``ToolBail`` (one typed
+        # failure channel) rather than returning a bare ``{"error": ...}`` dict.
+        with _patch_load_agent(agent), pytest.raises(ToolBail) as excinfo:
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "missing", "path": "/lights/1", "method": "GET"},
             )
-        assert "error" in result
-        assert "unknown server_ref" in result["error"]
+        assert "unknown server_ref" in excinfo.value.message
 
     async def test_no_route_match_returns_error(self, _stub_runtime: Any) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
-        with _patch_load_agent(agent):
-            result = await http_request_handler(
+        with _patch_load_agent(agent), pytest.raises(ToolBail) as excinfo:
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/sensors/1", "method": "GET"},
             )
-        assert "error" in result
-        assert "does not match any enabled route" in result["error"]
+        assert "does not match any enabled route" in excinfo.value.message
 
     async def test_ssrf_blocked_url_returns_error(self, _stub_runtime: Any) -> None:
         """The SSRF pre-flight blocks a private/internal target after the route
@@ -365,12 +366,13 @@ class TestHttpRequestHandler:
             _patch_load_agent(agent),
             _patch_safe_url(False),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            pytest.raises(ToolBail) as excinfo,
         ):
-            result = await http_request_handler(
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
             )
-        assert "private/internal" in result["error"]
+        assert "private/internal" in excinfo.value.message
         assert "url" not in captured  # blocked before any upstream dispatch
 
     async def test_method_not_allowed_returns_error(self, _stub_runtime: Any) -> None:
@@ -383,14 +385,14 @@ class TestHttpRequestHandler:
             _patch_resolve_auth(),
             _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            pytest.raises(ToolBail) as excinfo,
         ):
-            result = await http_request_handler(
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/lights/1", "method": "POST"},
             )
-        assert "error" in result
-        assert "POST" in result["error"]
-        assert "does not match any enabled route" in result["error"]
+        assert "POST" in excinfo.value.message
+        assert "does not match any enabled route" in excinfo.value.message
         assert "url" not in captured  # not dispatched upstream
 
     async def test_method_scoped_route_allows_matching_method(self, _stub_runtime: Any) -> None:
@@ -434,8 +436,9 @@ class TestHttpRequestHandler:
             _patch_resolve_auth(),
             _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            pytest.raises(ToolBail),
         ):
-            result = await http_request_handler(
+            await http_request_handler(
                 "sess_x",
                 {
                     "server_ref": "hue",
@@ -443,12 +446,6 @@ class TestHttpRequestHandler:
                     "method": "GET",
                 },
             )
-        assert "error" in result, (
-            f"path with query string must be rejected at the route gate; "
-            f"got success {result!r}. Pre-fix symptom: the upstream URL "
-            f"carried ?action=delete past an allowlist intended for "
-            f"read-only operations."
-        )
         # And the request must not have been dispatched.
         assert "url" not in captured, (
             f"upstream request was dispatched despite path containing a "
@@ -461,12 +458,11 @@ class TestHttpRequestHandler:
         it, leaving an inconsistency between what the route gate checks and
         what the upstream sees. Reject for consistency with ``?``."""
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
-        with _patch_load_agent(agent):
-            result = await http_request_handler(
+        with _patch_load_agent(agent), pytest.raises(ToolBail):
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/lights/1#frag", "method": "GET"},
             )
-        assert "error" in result
 
     async def test_query_string_allowed_when_route_opts_in(self, _stub_runtime: Any) -> None:
         """#1156: a route with ``allow_query=True`` permits a query string and
@@ -508,12 +504,12 @@ class TestHttpRequestHandler:
             _patch_resolve_auth(),
             _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            pytest.raises(ToolBail),
         ):
-            result = await http_request_handler(
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/lights/1?action=delete", "method": "GET"},
             )
-        assert "error" in result, result
         assert "url" not in captured, captured
 
     async def test_query_does_not_let_unmatched_path_through(self, _stub_runtime: Any) -> None:
@@ -521,24 +517,22 @@ class TestHttpRequestHandler:
         so a path the route pattern does not cover is still refused (the query never
         widens the path-dimension grant)."""
         agent = _agent(http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])])
-        with _patch_load_agent(agent):
-            result = await http_request_handler(
+        with _patch_load_agent(agent), pytest.raises(ToolBail) as excinfo:
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/orgs/o/members?per_page=100", "method": "GET"},
             )
-        assert "error" in result
-        assert "does not match any enabled route" in result["error"]
+        assert "does not match any enabled route" in excinfo.value.message
 
     async def test_fragment_rejected_even_when_query_allowed(self, _stub_runtime: Any) -> None:
         """``allow_query`` opts into a query string only — a ``#fragment`` is still
         rejected (httpx strips it with no route equivalent)."""
         agent = _agent(http_servers=[_server(routes=[_route("/repos/**", allow_query=True)])])
-        with _patch_load_agent(agent):
-            result = await http_request_handler(
+        with _patch_load_agent(agent), pytest.raises(ToolBail):
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/repos/o/r/issues/5#frag", "method": "GET"},
             )
-        assert "error" in result
 
     async def test_successful_get(self, _stub_runtime: Any) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
@@ -731,13 +725,13 @@ class TestHttpRequestHandler:
             _patch_resolve_auth(),
             _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            pytest.raises(ToolBail) as excinfo,
         ):
-            result = await http_request_handler(
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
             )
-        assert "error" in result
-        assert "timed out" in result["error"].lower()
+        assert "timed out" in excinfo.value.message.lower()
 
     async def test_path_with_dot_dot_segment_rejected(self, _stub_runtime: Any) -> None:
         """Path-traversal bypass of the route allowlist via ``..`` segments.
@@ -767,19 +761,12 @@ class TestHttpRequestHandler:
             _patch_resolve_auth(),
             _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            pytest.raises(ToolBail),
         ):
-            result = await http_request_handler(
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/lights/..", "method": "GET"},
             )
-        assert "error" in result, (
-            f"path with '..' segment must be rejected at the route gate; "
-            f"got success {result!r}. Pre-fix symptom: glob '/lights/*' "
-            f"matches 'lights/..' (the '*' eats the '..' segment), httpx "
-            f"normalizes 'base_url/lights/..' to 'base_url/', and the "
-            f"upstream receives a root-path request the allowlist never "
-            f"approved."
-        )
         # And the request must not have been dispatched.
         assert "url" not in captured, (
             f"upstream request was dispatched despite path containing '..' "
@@ -811,18 +798,12 @@ class TestHttpRequestHandler:
             _patch_resolve_auth(),
             _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            pytest.raises(ToolBail),
         ):
-            result = await http_request_handler(
+            await http_request_handler(
                 "sess_x",
                 {"server_ref": "hue", "path": "/lights/./state", "method": "GET"},
             )
-        assert "error" in result, (
-            f"path with single '.' segment must be rejected at the route "
-            f"gate; got success {result!r}. Pre-fix symptom: glob "
-            f"'/lights/*/state' matches 'lights/./state', httpx normalizes "
-            f"to 'base_url/lights/state', and the upstream receives a path "
-            f"the allowlist's *-segment scoping did not cover."
-        )
         assert "url" not in captured, (
             f"upstream request was dispatched despite '.' segment; captured={captured!r}"
         )
@@ -850,8 +831,9 @@ class TestHttpRequestHandler:
             _patch_resolve_auth(),
             _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            pytest.raises(ToolBail),
         ):
-            result = await http_request_handler(
+            await http_request_handler(
                 "sess_x",
                 {
                     "server_ref": "hue",
@@ -859,13 +841,6 @@ class TestHttpRequestHandler:
                     "method": "GET",
                 },
             )
-        assert "error" in result, (
-            f"path with embedded '..' must be rejected at the route gate; "
-            f"got success {result!r}. Pre-fix symptom: glob '/lights/**' "
-            f"matches 'lights/../admin/delete', httpx normalizes the URL "
-            f"to 'base_url/admin/delete', and the upstream receives an "
-            f"admin-path request the allowlist never approved."
-        )
         assert "url" not in captured, (
             f"upstream request was dispatched despite embedded '..' "
             f"traversal; captured={captured!r}"
@@ -904,16 +879,21 @@ class TestDoHttpRequest:
         assert out["status"] == 200
         assert capture["kwargs"]["headers"]["Authorization"] == "Bearer RUNTOKEN"
 
-    async def test_unknown_server_ref_is_an_error_value(self) -> None:
+    async def test_unknown_server_ref_raises_toolbail(self) -> None:
+        # Post-#1680: the shared core signals an expected failure by raising
+        # ``ToolBail``. The session path lets it propagate (single writer stamps
+        # ``is_error``); the workflow-run path re-materializes it as an
+        # ``{"error": ...}`` value at the ``invoke_run_tool`` seam (``_values``).
         async def resolve_auth(base_url: str) -> tuple[str | None, dict[str, str]]:
             return (None, {})
 
-        out = await _do_http_request(
-            servers=[],
-            arguments={"server_ref": "missing", "path": "/x", "method": "GET"},
-            resolve_auth=resolve_auth,
-        )
-        assert "error" in out and "unknown server_ref" in out["error"]
+        with pytest.raises(ToolBail) as excinfo:
+            await _do_http_request(
+                servers=[],
+                arguments={"server_ref": "missing", "path": "/x", "method": "GET"},
+                resolve_auth=resolve_auth,
+            )
+        assert "unknown server_ref" in excinfo.value.message
 
 
 # ── outbound suppression (#710) ─────────────────────────────────────────────

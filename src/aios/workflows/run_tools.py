@@ -26,6 +26,7 @@ deferred follow-up.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from typing import Any
 
 import asyncpg
@@ -40,7 +41,7 @@ from aios.models.workflows import WfRun
 from aios.services import triggers as triggers_service
 from aios.services import workflows as wf_service
 from aios.tools.http_request import _do_http_request, _find_server, _match_route, _split_query
-from aios.tools.invoke import validate_arguments
+from aios.tools.invoke import ToolBail, validate_arguments
 from aios.tools.registry import registry
 from aios.tools.trigger_account_list import _ListAccountTriggersArgs
 from aios.tools.web_fetch import web_fetch_handler
@@ -342,9 +343,37 @@ async def invoke_run_tool(
         # shallow copy keeps the script-visible / journaled ``tool_input`` verbatim.
         args = _substitute_idempotency_sentinel(args, run.id, call_key)
 
-        return await _do_http_request(
-            servers=run.http_servers, arguments=args, resolve_auth=resolve_auth
+        return await _values(
+            _do_http_request(
+                servers=run.http_servers, arguments=args, resolve_auth=resolve_auth
+            )
         )
     if tool_name == "web_search":
-        return await web_search_handler("", args)
-    return await web_fetch_handler("", args)
+        return await _values(web_search_handler("", args))
+    return await _values(web_fetch_handler("", args))
+
+
+async def _values(coro: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+    """Translate a shared handler's typed failure back into a value for the run path.
+
+    The shared network handlers (``_do_http_request`` / ``web_search`` / ``web_fetch``)
+    now signal expected failure by raising a client-class :class:`AiosError` or
+    :class:`~aios.tools.invoke.ToolBail` (#1680: one typed failure channel on the session
+    path). The workflow-run contract is the opposite — ``invoke_run_tool`` "always returns a
+    dict (success or ``{"error": …}``); never raises" — because a run journals failures as
+    replay-deterministic values, not exceptions. This is the one seam that bridges the two:
+    it re-materializes those two typed arms as ``{"error": msg}``, exactly the dict shape the
+    handlers used to return. A server-class (``>= 500``) ``AiosError`` or any other exception
+    is a genuine fault, left to propagate to the ``invoke_run_tool`` caller's backstop
+    (:func:`run_declared_tool`), which already turns a raise into an ``{"error": …}`` value —
+    so the "never raises" contract holds either way. Mirrors ``wf_script_host``'s existing
+    value↔exception translation for ``agent()``.
+    """
+    try:
+        return await coro
+    except ToolBail as bail:
+        return {"error": bail.message, **bail.detail}
+    except AiosError as exc:
+        if exc.status_code >= 500:
+            raise
+        return {"error": exc.to_message()}
