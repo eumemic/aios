@@ -7,7 +7,9 @@ asyncpg, same conventions as the rest of the package.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 from types import EllipsisType
 from typing import Any
 
@@ -20,6 +22,14 @@ from aios.db.queries import (
     _get_scoped,
     _list_scoped,
     open_request_anti_join,
+)
+from aios.db.queries.clone_policy import (
+    EVENTS_POLICY,
+    SESSION_GITHUB_REPOSITORIES_POLICY,
+    SESSION_MEMORY_STORES_POLICY,
+    SESSIONS_POLICY,
+    TRIGGERS_POLICY,
+    build_projection,
 )
 from aios.errors import (
     ConflictError,
@@ -1490,6 +1500,21 @@ async def delete_session(
         )
 
 
+def _mint_clone_ingest_token_hash() -> str:
+    """A fresh SHA-256 ingest-token hash for an external_event trigger clone.
+
+    The clone can't carry the parent's hash (the ``triggers_ingest_token_hash``
+    UNIQUE index) so each external_event trigger gets a fresh one.  The
+    plaintext is dropped — the owner rotates via ``update_trigger`` to obtain a
+    usable secret, exactly as the session-create attach path's
+    ``mint_ingest_token_hash`` does.  Kept db-layer-local to avoid a cycle back
+    through ``services.triggers``; the format is opaque (only the hash is
+    stored) so matching the service's plaintext scheme byte-for-byte isn't
+    required — just that it's a unique 64-hex sha256.
+    """
+    return hashlib.sha256(secrets.token_bytes(32)).hexdigest()
+
+
 async def clone_session(
     conn: asyncpg.Connection[Any],
     parent_session_id: str,
@@ -1499,23 +1524,38 @@ async def clone_session(
 ) -> Session:
     """Clone a session into a new one with the same prefix of events.
 
-    The clone inherits ``agent_id``, ``environment_id``, ``agent_version``,
-    ``title``, ``metadata``, ``env``, vault bindings, memory-store
-    attachments, github-repository attachments, ``last_event_seq``,
-    ``stop_reason``, ``focal_channel``, and ``focal_locked``
-    so its next forward step sees a context byte-identical to the
-    parent's at clone time.  (``status`` is derived from the event log, so
-    the clone's status follows from its copied events — idle, like the
-    parent it was required to be.)  ``focal_locked`` MUST follow ``focal_channel``
-    on the clone path: a per_chat parent (``focal_locked=True``) cloned
-    without its lock would inherit the bound channel but bypass the
-    ``is_session_focal_locked`` gate on ``switch_channel``, letting the
-    clone escape per_chat isolation.  github-repository ``id`` is a
-    global PK so each clone's row is minted fresh; everything else
-    on the attachment rows propagates verbatim.
+    Which columns are copied, reset, or minted fresh is no longer enumerated
+    inline — the four session-copy INSERTs are GENERATED from the per-column
+    clone policies in ``clone_policy.py`` (see ``build_projection``), so a
+    migration that adds a column MUST classify it or CI's completeness gate
+    (``test_clone_policy_completeness.py``) fails.  This closes the #1676 class
+    of bug where a new column was silently dropped on every clone — most
+    consequentially the 0127 ``cumulative_*`` class-mass counters, whose loss
+    ran the #1609 R_eff context-window blend composition-blind on clones.
 
-    Cumulative ``input_tokens`` / ``output_tokens`` start at 0 — those were
-    paid on the parent and shouldn't be double-counted.
+    The salient policy decisions the generator encodes:
+
+    * the clone inherits the parent's surface (``tools`` / ``mcp_servers`` /
+      ``http_servers`` / ``surface_frozen``), authority pins (``model`` /
+      ``litellm_extra``), ``env``, vault bindings, memory-store and
+      github-repository attachments, event prefix (with all ``cumulative_*``
+      counters), ``focal_channel`` and ``focal_locked`` — so its next forward
+      step sees a context byte-identical to the parent's.  ``focal_locked``
+      MUST follow ``focal_channel``: a per_chat parent cloned without its lock
+      would inherit the bound channel but bypass the
+      ``is_session_focal_locked`` gate on ``switch_channel``, escaping per_chat
+      isolation.  (``status`` derives from the event log, so the clone is idle
+      like the parent it was required to be.)
+    * ``parent_run_id`` / ``origin`` RESET: a clone must NOT join a live run's
+      sweep/cancel cascade nor masquerade as that run's child.
+    * cumulative ``input_tokens`` / ``output_tokens`` / ``cost_microusd`` and
+      ``snapshot_ref`` RESET: usage was paid on the parent, and the snapshot
+      pointer belongs to the parent's workspace.
+    * global-PK attachment ids (github-repository) are minted fresh; an
+      external_event trigger's ``ingest_token_hash`` is minted fresh (the
+      UNIQUE index forbids copying) while a non-external trigger's stays NULL
+      (the iff CHECK), and per-trigger runtime state (``running_since``,
+      ``consecutive_failures``, last-fire fields) RESETs.
 
     Workspace volume defaults to a fresh ``workspace_root / new_id`` path so
     clones don't fight over the same files.  Pass ``workspace_path`` to
@@ -1565,22 +1605,25 @@ async def clone_session(
                 detail={"id": parent_session_id, "status": state},
             )
 
+        # The four session-copy INSERTs below are GENERATED from the
+        # per-column clone policies in ``clone_policy.py`` — the column
+        # projection is no longer hand-enumerated, so a migration that adds a
+        # column without classifying it fails the completeness gate in CI
+        # (tests/integration/test_clone_policy_completeness.py) rather than
+        # silently dropping the column on every clone (#1676).  The parent row
+        # is aliased ``s``; ``$1`` is the fresh session id, ``$2`` the
+        # workspace path, ``$3`` the parent id.
+        sessions_proj = build_projection(
+            SESSIONS_POLICY,
+            source_alias="",  # single-row copy: bare column names, no alias
+            new_id_expr="$1",
+            session_id_param="$1",  # sessions has no REMAP_SESSION column
+            new_value_exprs={"workspace_volume_path": "$2"},
+        )
         new_row = await conn.fetchrow(
-            """
-            INSERT INTO sessions (
-                id, agent_id, environment_id, agent_version, title, metadata,
-                stop_reason, workspace_volume_path, env, last_event_seq,
-                focal_channel, focal_locked,
-                last_reacted_seq, open_tool_call_count,
-                last_error_seq, last_user_seq, last_stimulus_seq,
-                account_id
-            )
-            SELECT $1, agent_id, environment_id, agent_version, title, metadata,
-                   stop_reason, $2, env, last_event_seq, focal_channel,
-                   focal_locked,
-                   last_reacted_seq, open_tool_call_count,
-                   last_error_seq, last_user_seq, last_stimulus_seq,
-                   account_id
+            f"""
+            INSERT INTO sessions ({sessions_proj.insert_columns_sql})
+            SELECT {sessions_proj.select_list_sql}
               FROM sessions WHERE id = $3
             RETURNING *
             """,
@@ -1606,14 +1649,16 @@ async def clone_session(
         # — by design: a clone snapshots the parent's attachment
         # state at clone time, including references to stores
         # archived after the parent attached them.
+        mem_proj = build_projection(
+            SESSION_MEMORY_STORES_POLICY,
+            source_alias="",
+            new_id_expr="$1",  # no MINT_ID column on this composite-PK relation
+            session_id_param="$1",
+        )
         await conn.execute(
-            """
-            INSERT INTO session_memory_stores (
-                session_id, memory_store_id, rank, access, instructions,
-                name_at_attach, description_at_attach, account_id
-            )
-            SELECT $1, memory_store_id, rank, access, instructions,
-                   name_at_attach, description_at_attach, account_id
+            f"""
+            INSERT INTO session_memory_stores ({mem_proj.insert_columns_sql})
+            SELECT {mem_proj.select_list_sql}
               FROM session_memory_stores WHERE session_id = $2
             """,
             new_id,
@@ -1624,16 +1669,16 @@ async def clone_session(
             parent_session_id,
         )
         new_gh_ids = [make_id(GITHUB_REPOSITORY) for _ in range(gh_count)]
+        gh_proj = build_projection(
+            SESSION_GITHUB_REPOSITORIES_POLICY,
+            source_alias="s",
+            new_id_expr="i.id",
+            session_id_param="$2",
+        )
         await conn.execute(
-            """
-            INSERT INTO session_github_repositories (
-                id, session_id, rank, repo_url, mount_path,
-                ciphertext, nonce, created_at, updated_at,
-                git_user_name, git_user_email, account_id
-            )
-            SELECT i.id, $2, s.rank, s.repo_url, s.mount_path,
-                   s.ciphertext, s.nonce, s.created_at, s.updated_at,
-                   s.git_user_name, s.git_user_email, s.account_id
+            f"""
+            INSERT INTO session_github_repositories ({gh_proj.insert_columns_sql})
+            SELECT {gh_proj.select_list_sql}
               FROM (
                 SELECT *, row_number() OVER (ORDER BY rank) AS rn
                   FROM session_github_repositories WHERE session_id = $1
@@ -1659,23 +1704,42 @@ async def clone_session(
             parent_session_id,
         )
         new_trigger_ids = [make_id(TRIGGER) for _ in range(trigger_count)]
+        # A fresh ingest-token hash per trigger row, used ONLY by the
+        # source-conditional MINT_INGEST_TOKEN arm: an external_event trigger
+        # can't carry the parent's hash (the triggers_ingest_token_hash UNIQUE
+        # index), and a non-external row must have NULL (the
+        # triggers_ingest_token_iff_external_event CHECK).  Non-external rows
+        # discard their generated hash.  The plaintext is dropped — the owner
+        # rotates via update_trigger to obtain a usable secret (same posture as
+        # the session-create attach path's mint_ingest_token_hash).
+        new_ingest_hashes = [_mint_clone_ingest_token_hash() for _ in range(trigger_count)]
+        trig_proj = build_projection(
+            TRIGGERS_POLICY,
+            source_alias="s",
+            new_id_expr="i.id",
+            session_id_param="$2",
+            new_value_exprs={
+                "ingest_token_hash": (
+                    "CASE WHEN s.source = 'external_event' "
+                    "THEN i.ingest_token_hash ELSE NULL END"
+                )
+            },
+        )
         await conn.execute(
-            """
-            INSERT INTO triggers (
-                id, owner_session_id, account_id, name, source, source_spec,
-                action, enabled, next_fire, environment_id, metadata
-            )
-            SELECT i.id, $2, s.account_id, s.name, s.source, s.source_spec,
-                   s.action, s.enabled, s.next_fire, s.environment_id, s.metadata
+            f"""
+            INSERT INTO triggers ({trig_proj.insert_columns_sql})
+            SELECT {trig_proj.select_list_sql}
               FROM (
                 SELECT *, row_number() OVER (ORDER BY created_at) AS rn
                   FROM triggers WHERE owner_session_id = $1
               ) s
-              JOIN unnest($3::text[]) WITH ORDINALITY AS i(id, rn) USING (rn)
+              JOIN unnest($3::text[], $4::text[]) WITH ORDINALITY
+                     AS i(id, ingest_token_hash, rn) USING (rn)
             """,
             parent_session_id,
             new_id,
             new_trigger_ids,
+            new_ingest_hashes,
         )
 
         # Events are gapless 1..last_event_seq per session, so we pre-generate
@@ -1683,18 +1747,16 @@ async def clone_session(
         # PRIMARY KEY so they must change; everything else is preserved
         # verbatim — context builder semantics depend on it.
         new_event_ids = [make_id(EVENT) for _ in range(new_row["last_event_seq"])]
+        events_proj = build_projection(
+            EVENTS_POLICY,
+            source_alias="s",
+            new_id_expr="i.id",
+            session_id_param="$2",
+        )
         await conn.execute(
-            """
-            INSERT INTO events (
-                id, session_id, seq, kind, data, created_at, cumulative_tokens,
-                channel, orig_channel, focal_channel_at_arrival,
-                role, tool_name, is_error, sender_name, account_id
-            )
-            SELECT i.id, $2, s.seq, s.kind, s.data, s.created_at,
-                   s.cumulative_tokens,
-                   s.channel, s.orig_channel, s.focal_channel_at_arrival,
-                   s.role, s.tool_name, s.is_error, s.sender_name,
-                   s.account_id
+            f"""
+            INSERT INTO events ({events_proj.insert_columns_sql})
+            SELECT {events_proj.select_list_sql}
               FROM (
                 SELECT *, row_number() OVER (ORDER BY seq) AS rn
                   FROM events WHERE session_id = $1
