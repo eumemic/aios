@@ -140,9 +140,7 @@ def build_projection(
         elif arm is Arm.NEW_VALUE:
             expr = new_value_exprs.get(col)
             if expr is None:
-                raise KeyError(
-                    f"NEW_VALUE column {col!r} has no expression in new_value_exprs"
-                )
+                raise KeyError(f"NEW_VALUE column {col!r} has no expression in new_value_exprs")
             exprs.append(expr)
         elif arm is Arm.MINT_INGEST_TOKEN:
             # Source-conditional: a fresh hash for external_event rows (bound

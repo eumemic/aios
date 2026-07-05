@@ -19,8 +19,6 @@ drift.  A future fifth session-attachment table is still an un-gated edit site
 
 from __future__ import annotations
 
-from typing import Any
-
 import asyncpg
 import pytest
 

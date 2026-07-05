@@ -27,9 +27,7 @@ def test_reset_default_columns_are_omitted() -> None:
         "keep": Arm.COPY,
         "gone": Arm.RESET_DEFAULT,
     }
-    proj = build_projection(
-        policy, source_alias="s", new_id_expr="i.id", session_id_param="$2"
-    )
+    proj = build_projection(policy, source_alias="s", new_id_expr="i.id", session_id_param="$2")
     assert proj.columns == ("id", "keep")
     assert proj.select_exprs == ("i.id", "s.keep")
     assert "gone" not in proj.insert_columns_sql
@@ -37,12 +35,8 @@ def test_reset_default_columns_are_omitted() -> None:
 
 def test_copy_uses_alias_when_present_else_bare() -> None:
     policy = {"c": Arm.COPY}
-    aliased = build_projection(
-        policy, source_alias="s", new_id_expr="i.id", session_id_param="$2"
-    )
-    bare = build_projection(
-        policy, source_alias="", new_id_expr="$1", session_id_param="$1"
-    )
+    aliased = build_projection(policy, source_alias="s", new_id_expr="i.id", session_id_param="$2")
+    bare = build_projection(policy, source_alias="", new_id_expr="$1", session_id_param="$1")
     assert aliased.select_exprs == ("s.c",)
     assert bare.select_exprs == ("c",)
 
@@ -61,8 +55,7 @@ def test_remap_session_and_new_value_and_mint_ingest() -> None:
         session_id_param="$2",
         new_value_exprs={
             "workspace_volume_path": "$3",
-            "ingest_token_hash": "CASE WHEN s.source='external_event' "
-            "THEN i.h ELSE NULL END",
+            "ingest_token_hash": "CASE WHEN s.source='external_event' THEN i.h ELSE NULL END",
         },
     )
     assert proj.select_exprs == (
@@ -85,9 +78,7 @@ def test_new_value_without_expression_raises() -> None:
 
 def test_column_order_follows_policy_insertion_order() -> None:
     policy = {"b": Arm.COPY, "a": Arm.COPY, "c": Arm.COPY}
-    proj = build_projection(
-        policy, source_alias="s", new_id_expr="i.id", session_id_param="$2"
-    )
+    proj = build_projection(policy, source_alias="s", new_id_expr="i.id", session_id_param="$2")
     assert proj.columns == ("b", "a", "c")
 
 
@@ -112,8 +103,7 @@ def test_events_policy_copies_the_0127_class_mass_columns() -> None:
 
 def test_sessions_authority_arms() -> None:
     """The reviewed authority decisions: surface/model COPY, run-lineage RESET."""
-    for col in ("tools", "mcp_servers", "http_servers", "surface_frozen", "model",
-                "litellm_extra"):
+    for col in ("tools", "mcp_servers", "http_servers", "surface_frozen", "model", "litellm_extra"):
         assert SESSIONS_POLICY[col] is Arm.COPY, col
     for col in ("parent_run_id", "origin"):
         assert SESSIONS_POLICY[col] is Arm.RESET_DEFAULT, col
@@ -121,6 +111,5 @@ def test_sessions_authority_arms() -> None:
 
 def test_triggers_ingest_token_is_source_conditional() -> None:
     assert TRIGGERS_POLICY["ingest_token_hash"] is Arm.MINT_INGEST_TOKEN
-    for col in ("running_since", "last_fire_at", "last_fire_status",
-                "consecutive_failures"):
+    for col in ("running_since", "last_fire_at", "last_fire_status", "consecutive_failures"):
         assert TRIGGERS_POLICY[col] is Arm.RESET_DEFAULT, col

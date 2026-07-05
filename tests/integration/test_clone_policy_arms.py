@@ -36,9 +36,7 @@ ACCOUNT = "acc_clone_arms"
 
 
 @pytest.fixture
-async def pool(
-    migrated_db_url: str, _reset_db_state: None
-) -> AsyncIterator[asyncpg.Pool[Any]]:
+async def pool(migrated_db_url: str, _reset_db_state: None) -> AsyncIterator[asyncpg.Pool[Any]]:
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
     try:
         async with pool.acquire() as conn:
@@ -123,9 +121,7 @@ async def test_clone_copies_authority_and_class_mass_and_resets_run_child(
                 seq * 6,
             )
 
-        clone = await clone_session(
-            conn, parent, account_id=ACCOUNT, workspace_path="/w/clone"
-        )
+        clone = await clone_session(conn, parent, account_id=ACCOUNT, workspace_path="/w/clone")
         srow = await conn.fetchrow("SELECT * FROM sessions WHERE id = $1", clone.id)
         assert srow is not None
 
@@ -205,9 +201,7 @@ async def test_clone_triggers_ingest_token_arm(pool: asyncpg.Pool[Any]) -> None:
             ACCOUNT,
         )
 
-        clone = await clone_session(
-            conn, parent, account_id=ACCOUNT, workspace_path="/w/clone"
-        )
+        clone = await clone_session(conn, parent, account_id=ACCOUNT, workspace_path="/w/clone")
         trows = await conn.fetch(
             "SELECT * FROM triggers WHERE owner_session_id = $1 ORDER BY name", clone.id
         )
@@ -256,9 +250,7 @@ async def test_clone_mints_fresh_github_repo_id(pool: asyncpg.Pool[Any]) -> None
             ACCOUNT,
         )
 
-        clone = await clone_session(
-            conn, parent, account_id=ACCOUNT, workspace_path="/w/clone"
-        )
+        clone = await clone_session(conn, parent, account_id=ACCOUNT, workspace_path="/w/clone")
         grows = await conn.fetch(
             "SELECT * FROM session_github_repositories WHERE session_id = $1", clone.id
         )

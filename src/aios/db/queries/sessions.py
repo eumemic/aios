@@ -1720,8 +1720,7 @@ async def clone_session(
             session_id_param="$2",
             new_value_exprs={
                 "ingest_token_hash": (
-                    "CASE WHEN s.source = 'external_event' "
-                    "THEN i.ingest_token_hash ELSE NULL END"
+                    "CASE WHEN s.source = 'external_event' THEN i.ingest_token_hash ELSE NULL END"
                 )
             },
         )
