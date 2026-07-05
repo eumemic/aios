@@ -222,15 +222,18 @@ async def test_trigger_insert_does_not_bump_spec_version(
 
     async with pool.acquire() as conn:
         await conn.execute(
+            # An enabled cron row must carry a non-NULL next_fire (the
+            # triggers_schedulable_enabled_armed arm, migration 0130); the exact
+            # instant is irrelevant to this spec-version probe.
             """
             INSERT INTO triggers
                 (id, owner_session_id, account_id, name, source, source_spec,
-                 action, enabled, metadata)
+                 action, enabled, metadata, next_fire)
             VALUES ('trig_spec_version_01', $1, $2, 'noop', 'cron',
                     '{"schedule": "* * * * *"}'::jsonb,
                     '{"kind": "sandbox_command", "command": "echo hi", '
                     '"timeout_seconds": 60, "max_output_bytes": 65536}'::jsonb,
-                    TRUE, '{}'::jsonb)
+                    TRUE, '{}'::jsonb, now() + interval '1 hour')
             """,
             session_id,
             _ACCOUNT_ID,

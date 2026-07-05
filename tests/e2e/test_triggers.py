@@ -869,6 +869,11 @@ class TestWakeOwnerAction:
 # ─── DB CHECK probes (§2.1) ────────────────────────────────────────────────
 
 
+# Sentinel: "derive next_fire from the source" (distinct from an explicit NULL,
+# which probes the schedulable arm directly).
+_DERIVE_NEXT_FIRE = object()
+
+
 async def _insert_raw(
     pool: Any,
     sid: str,
@@ -877,18 +882,33 @@ async def _insert_raw(
     source_spec: str,
     action: str,
     environment_id: str | None = None,
+    next_fire: Any = _DERIVE_NEXT_FIRE,
 ) -> None:
     """Insert a raw trigger row, bypassing the Pydantic write models — the
-    probe vehicle for the live shape CHECKs."""
+    probe vehicle for the live shape CHECKs.
+
+    Rows are inserted ``enabled=true``, so a schedulable (cron / one_shot)
+    source must carry a non-NULL ``next_fire`` to satisfy the
+    ``triggers_schedulable_enabled_armed`` arm (migration 0130) — otherwise the
+    row would trip that CHECK before the shape CHECK under probe. The default
+    (``_DERIVE_NEXT_FIRE``) supplies a valid future ``next_fire`` for cron /
+    one_shot and NULL for the reactive sources (run_completion / external_event
+    stay NULL by the 0108 reactive arm); pass an explicit value to probe the
+    arm itself."""
     from aios.ids import TRIGGER, make_id
+
+    if next_fire is _DERIVE_NEXT_FIRE:
+        next_fire = (
+            datetime.now(UTC) + timedelta(hours=1) if source in ("cron", "one_shot") else None
+        )
 
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO triggers
                 (id, owner_session_id, account_id, name, source, source_spec,
-                 action, enabled, environment_id, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, true, $8, '{}'::jsonb)
+                 action, enabled, environment_id, metadata, next_fire)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, true, $8, '{}'::jsonb, $9)
             """,
             make_id(TRIGGER),
             sid,
@@ -898,6 +918,7 @@ async def _insert_raw(
             source_spec,
             action,
             environment_id,
+            next_fire,
         )
 
 
