@@ -2021,17 +2021,19 @@ class TestNotifyTrigger:
 
 class TestReEnableNextFireInvariant:
     """The invariant "an enabled schedulable trigger has non-NULL next_fire"
-    across re-enable. Groups two cohesive cases:
+    across re-enable, now enforced by the DB (the
+    ``triggers_schedulable_enabled_armed`` CHECK, migration 0130) rather than
+    the deleted #957 runtime heal. Groups two cohesive cases:
 
-    - The clean-path re-enable baseline (ground truth, green PRE-fix): the
-      service auto-disable→re-enable (false→true) path already re-arms
-      next_fire and NOTIFYs — pre-existing behavior, not the #957 fix.
-    - The #957 heal cases: cron rows that reach enabled+next_fire=NULL out of
-      band (the #925 incident-recovery anti-pattern's manual
-      `UPDATE … SET enabled=true`) are re-armed on ANY update whose final state
-      is enabled, and the NULL→non-NULL re-arm NOTIFYs so the scheduler
-      relearns its sleep — while run_completion and one-shot rows are left
-      NULL by design.
+    - The clean-path re-enable baseline (ground truth, green PRE-fix and
+      unchanged by #1678): the service auto-disable→re-enable (false→true) path
+      re-arms next_fire and NOTIFYs.
+    - The #925 zombie state (a schedulable row contaminated to
+      enabled=true + next_fire=NULL by a raw ``UPDATE``) is now rejected at
+      write time by the CHECK — the contaminating UPDATE raises
+      CheckViolationError, so there is no zombie to heal. run_completion /
+      external_event rows stay NULL by design (the 0108 reactive arm),
+      untouched by the schedulable arm.
     """
 
     async def test_reenable_after_service_auto_disable_rearms_next_fire(
@@ -2103,52 +2105,60 @@ class TestReEnableNextFireInvariant:
             except TimeoutError:
                 pytest.fail("re-enable did not produce a NOTIFY within 2s")
 
-    async def test_reenable_already_enabled_null_next_fire_heals(
+    async def test_contaminating_null_next_fire_on_enabled_cron_is_rejected(
         self, pool: Any, env_and_agent: tuple[str, str]
     ) -> None:
-        """Contaminated path (#957 RED before fix): a row that is ALREADY
-        enabled but has next_fire NULL is healed on a no-source enabled update —
-        next_fire is recomputed and the NULL→non-NULL re-arm NOTIFYs."""
-        import asyncio as _asyncio
-
-        from aios.config import get_settings
-        from aios.db.listen import listen_for_triggers_due
-
+        """#1678: the #925 zombie state (enabled cron + next_fire=NULL) is now
+        unrepresentable — the raw `UPDATE triggers SET next_fire = NULL` that the
+        #925 incident-recovery anti-pattern's manual edit leaves behind is
+        rejected at write time by the triggers_schedulable_enabled_armed CHECK,
+        so there is no zombie for a heal to correct."""
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         account_id = "acc_test_stub"
 
         echo = await trig_service.add_trigger(pool, sid, _spec("ultron"), account_id=account_id)
-        # Reproduces the #957/#925 incident state: the manual `UPDATE … enabled=
-        # true` left next_fire NULL and suppressed the false→true transition the
-        # service keys recompute on.
+        # The manual `UPDATE … SET enabled=true` leaving next_fire NULL now fails
+        # loudly at the offending write (fail-hard) instead of silently parking a
+        # dead-but-alive-looking row. The honest recovery recipe is
+        # `SET enabled=true, next_fire=now()`.
         async with pool.acquire() as conn:
-            await conn.execute("UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id)
+            with pytest.raises(asyncpg.CheckViolationError, match="schedulable_enabled_armed"):
+                await conn.execute(
+                    "UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id
+                )
 
-        async with listen_for_triggers_due(get_settings().db_url) as event:
-            event.clear()
-            healed = await trig_service.update_trigger(
-                pool,
-                sid,
-                "ultron",
-                TriggerUpdate.model_validate({"enabled": True}),
-                account_id=account_id,
-            )
-            assert healed.enabled is True
-            assert healed.next_fire is not None  # heal recomputed next_fire
-            try:
-                await _asyncio.wait_for(event.wait(), timeout=2.0)
-            except TimeoutError:
-                pytest.fail("heal (NULL→non-NULL next_fire) did not produce a NOTIFY within 2s")
-
-    async def test_heal_leaves_run_completion_next_fire_null(
+    async def test_contaminating_null_next_fire_on_enabled_one_shot_is_rejected(
         self, pool: Any, env_and_agent: tuple[str, str]
     ) -> None:
-        """Invariant guard: healing a run_completion-source row (correctly at
-        enabled=true, next_fire=NULL) must keep next_fire NULL —
-        compute_initial_next_fire returns None for RunCompletionSource, so the
-        heal is a no-op and the triggers_run_completion_no_next_fire DB guard is
-        never violated."""
+        """#1678, settled fork 1: the schedulable arm covers one_shot too (not
+        cron-only). A zombied one-shot had NO #957 heal and is exempt from
+        #1673's liveness predicate — the CHECK is its only guard, so the
+        contaminating raw UPDATE must be rejected here as well."""
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+
+        # An enabled one-shot armed to a future fire_at (satisfies the CHECK).
+        future_fire = datetime.now(UTC) + timedelta(days=1)
+        echo = await trig_service.add_trigger(
+            pool, sid, _one_shot_spec("oneshot", future_fire), account_id=account_id
+        )
+        assert echo.next_fire is not None
+
+        async with pool.acquire() as conn:
+            with pytest.raises(asyncpg.CheckViolationError, match="schedulable_enabled_armed"):
+                await conn.execute(
+                    "UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id
+                )
+
+    async def test_enabled_run_completion_null_next_fire_still_allowed(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """The schedulable arm does NOT touch reactive rows: an enabled
+        run_completion trigger correctly holds next_fire=NULL (the 0108 reactive
+        arm requires it), and the new schedulable CHECK excludes it (its source
+        is not in ('cron','one_shot')). No heal, no rejection — NULL by design."""
         env_id, agent_id = env_and_agent
         sid = await _create_session(pool, env_id, agent_id)
         account_id = "acc_test_stub"
@@ -2159,59 +2169,17 @@ class TestReEnableNextFireInvariant:
         )
         assert echo.next_fire is None  # reactive row: NULL by design
 
-        healed = await trig_service.update_trigger(
+        # A no-source enabled=true PATCH leaves next_fire NULL (no heal), and the
+        # DB accepts it (the schedulable arm excludes reactive sources).
+        updated = await trig_service.update_trigger(
             pool,
             sid,
             "watcher",
             TriggerUpdate.model_validate({"enabled": True}),
             account_id=account_id,
         )
-        assert healed.enabled is True
-        assert healed.next_fire is None  # heal is a no-op for run_completion
-
-        # The DB guard held (the row would not have UPDATEd otherwise).
-        async with pool.acquire() as conn:
-            col = await conn.fetchval("SELECT next_fire FROM triggers WHERE id = $1", echo.id)
-        assert col is None
-
-    async def test_heal_skips_one_shot_source(
-        self, pool: Any, env_and_agent: tuple[str, str]
-    ) -> None:
-        """#957 regression: the heal is scoped to CRON sources, so an enabled
-        one-shot row contaminated to next_fire=NULL is NOT healed on a no-source
-        enabled=true PATCH — and (the actual bug) the recompute branch is never
-        entered, so the one-shot past-fire_at guard does NOT raise a spurious 422.
-        One-shots are fire-and-delete; their re-arm contract is owned by an
-        explicit source replacement, not the heal."""
-        env_id, agent_id = env_and_agent
-        sid = await _create_session(pool, env_id, agent_id)
-        account_id = "acc_test_stub"
-
-        # Enabled one-shot with a fire_at in the PAST relative to the heal call:
-        # add_trigger accepts any fire_at, so seed it in the past directly. The
-        # 422 bug needed a past fire_at to trip the one-shot guard once the broad
-        # heal wrongly entered the recompute branch.
-        past_fire = datetime.now(UTC) - timedelta(days=1)
-        echo = await trig_service.add_trigger(
-            pool, sid, _one_shot_spec("stale_oneshot", past_fire), account_id=account_id
-        )
-        assert echo.next_fire is not None  # enabled one-shot armed to fire_at
-        # Reproduce the contaminated state (enabled=true, next_fire=NULL) the #925
-        # manual edit left, but on a one-shot row this time.
-        async with pool.acquire() as conn:
-            await conn.execute("UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id)
-
-        # No raise (the pre-fix broad heal would have hit the one-shot past-fire_at
-        # guard and 422'd here), and next_fire stays NULL — only crons are healed.
-        healed = await trig_service.update_trigger(
-            pool,
-            sid,
-            "stale_oneshot",
-            TriggerUpdate.model_validate({"enabled": True}),
-            account_id=account_id,
-        )
-        assert healed.enabled is True
-        assert healed.next_fire is None  # one-shot is not healed
+        assert updated.enabled is True
+        assert updated.next_fire is None
 
         async with pool.acquire() as conn:
             col = await conn.fetchval("SELECT next_fire FROM triggers WHERE id = $1", echo.id)
