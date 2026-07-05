@@ -235,9 +235,7 @@ def test_upgrade_auto_disables_preexisting_violators(postgres: object) -> None:
 
     # The zombies are disabled (behavioral no-op), not deleted.
     for zid in ("trig_zombie", "trig_zombie_os"):
-        enabled = asyncio.run(
-            _fetchval(db_url, f"SELECT enabled FROM triggers WHERE id = '{zid}'")
-        )
+        enabled = asyncio.run(_fetchval(db_url, f"SELECT enabled FROM triggers WHERE id = '{zid}'"))
         assert enabled is False, f"{zid} should have been auto-disabled"
     # The armed row is untouched.
     armed = asyncio.run(_fetchval(db_url, "SELECT enabled FROM triggers WHERE id = 'trig_armed'"))

@@ -2124,9 +2124,7 @@ class TestReEnableNextFireInvariant:
         # `SET enabled=true, next_fire=now()`.
         async with pool.acquire() as conn:
             with pytest.raises(asyncpg.CheckViolationError, match="schedulable_enabled_armed"):
-                await conn.execute(
-                    "UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id
-                )
+                await conn.execute("UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id)
 
     async def test_contaminating_null_next_fire_on_enabled_one_shot_is_rejected(
         self, pool: Any, env_and_agent: tuple[str, str]
@@ -2148,9 +2146,7 @@ class TestReEnableNextFireInvariant:
 
         async with pool.acquire() as conn:
             with pytest.raises(asyncpg.CheckViolationError, match="schedulable_enabled_armed"):
-                await conn.execute(
-                    "UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id
-                )
+                await conn.execute("UPDATE triggers SET next_fire = NULL WHERE id = $1", echo.id)
 
     async def test_enabled_run_completion_null_next_fire_still_allowed(
         self, pool: Any, env_and_agent: tuple[str, str]
