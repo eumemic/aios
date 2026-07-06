@@ -65,9 +65,8 @@ from aios.errors import AiosError
 from aios.logging import get_logger
 from aios.mcp.client import call_mcp_tool, discover_mcp_tools
 from aios.models.agents import (
-    Agent,
-    AgentVersion,
     McpServerSpec,
+    StepSurface,
     ToolSpec,
     resolve_mcp_enabled,
 )
@@ -381,7 +380,7 @@ class ToolBroker:
             return _err(403, "forbidden: unknown or expired secret")
         return session_id
 
-    async def _load_agent(self, session_id: str) -> Agent | AgentVersion:
+    async def _load_agent(self, session_id: str) -> StepSurface:
         """Fetch the agent (or agent_version) attached to ``session_id``.
 
         Mirrors the loading dance in
@@ -537,7 +536,7 @@ class ToolBroker:
 
     async def _resolve_mcp(
         self, request: Request, *, require_tool: bool
-    ) -> tuple[str, McpServerSpec, ToolSpec, str | None, Agent | AgentVersion] | Response:
+    ) -> tuple[str, McpServerSpec, ToolSpec, str | None, StepSurface] | Response:
         """Resolve session, server, toolset, and (optionally) tool for an
         MCP route.
 
@@ -600,7 +599,7 @@ class ToolBroker:
                 headers,
                 server.name,
                 spec_headers=server.headers,
-                binding_id=agents_service.tool_cache_binding_id(agent, session_id),
+                binding_id=agents_service.tool_cache_binding_id(agent),
             )
         except Exception as exc:
             log.warning(
@@ -647,7 +646,7 @@ class ToolBroker:
                 headers,
                 server.name,
                 spec_headers=server.headers,
-                binding_id=agents_service.tool_cache_binding_id(agent, session_id),
+                binding_id=agents_service.tool_cache_binding_id(agent),
             )
         except Exception as exc:
             log.warning(

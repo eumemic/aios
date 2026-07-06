@@ -11,11 +11,11 @@ import httpx
 import pytest
 
 from aios.models.agents import (
-    Agent,
-    AgentVersion,
+    GenericChildBinding,
     HttpPermissionPolicy,
     HttpRouteSpec,
     HttpServerSpec,
+    StepSurface,
     ToolSpec,
 )
 from aios.tools.http_request import (
@@ -33,8 +33,21 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 def _agent(
     *, http_servers: list[HttpServerSpec], tools: list[ToolSpec] | None = None
-) -> Agent | AgentVersion:
-    return cast(Agent | AgentVersion, SimpleNamespace(http_servers=http_servers, tools=tools or []))
+) -> StepSurface:
+    """A minimal ``StepSurface`` for the http_request path (which reads only
+    ``http_servers``/``tools``). The binding kind is irrelevant here."""
+    return StepSurface(
+        model="test/dummy",
+        system="",
+        tools=tools or [],
+        skills=[],
+        mcp_servers=[],
+        http_servers=http_servers,
+        litellm_extra={},
+        window_min=1000,
+        window_max=100000,
+        binding=GenericChildBinding(session_id="ses_test"),
+    )
 
 
 def _server(
@@ -168,7 +181,7 @@ class TestClassifyToolCallArguments:
     ``function.arguments`` (providers differ on which shape they emit)."""
 
     @staticmethod
-    def _make_agent() -> Agent | AgentVersion:
+    def _make_agent() -> StepSurface:
         return _agent(
             http_servers=[_server(routes=[_route("/lights/*", policy="always_allow")])],
             tools=[ToolSpec(type="http_request")],
@@ -277,7 +290,7 @@ def _stub_runtime() -> Iterator[SimpleNamespace]:
         yield SimpleNamespace(pool=pool, crypto_box=crypto_box)
 
 
-def _patch_load_agent(agent: Agent | AgentVersion, outbound_suppression: str = "off") -> Any:
+def _patch_load_agent(agent: StepSurface, outbound_suppression: str = "off") -> Any:
     return patch(
         "aios.tools.http_request._load_session_agent",
         AsyncMock(return_value=(agent, "acc_test_stub", outbound_suppression)),
