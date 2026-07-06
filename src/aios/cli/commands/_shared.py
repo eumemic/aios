@@ -2,31 +2,17 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Sequence
 from typing import Any
 
 import typer
-from pydantic import ValidationError
 
-from aios.cli.client import AiosApiError, AiosClient
 from aios.cli.output import OutputFormat, print_json, print_note, print_table
 from aios.cli.runtime import CliState, get_state
-from aios.models.common import ErrorResponse
 from aios.models.pagination import MAX_PAGE_LIMIT
+from aios_sdk import Client, raw_request
 from aios_sdk._generated.types import Response, Unset
-
-
-def with_client(ctx: typer.Context) -> tuple[CliState, AiosClient]:
-    """Return (state, client) for a command body. Use when ``output_format`` or
-    ``verbose`` is needed alongside the client."""
-    state = get_state(ctx)
-    return state, state.client()
-
-
-def just_client(ctx: typer.Context) -> AiosClient:
-    """Return only the client. Use for commands that never render a list."""
-    return get_state(ctx).client()
+from aios_sdk.errors import error_from_response
 
 
 def render_single(obj: Any) -> None:
@@ -51,6 +37,25 @@ def call_single(
     with get_state(ctx).sdk_client() as client:
         obj = unwrap(fn(client=client, **kwargs))
     render_single(obj.to_dict())
+
+
+def raw_single(
+    ctx: typer.Context,
+    method: str,
+    path: str,
+    *,
+    json_body: dict[str, Any] | None = None,
+) -> None:
+    """Send a raw-dict request over the SDK client and render the result.
+
+    The thin-wire counterpart to :func:`call_single`: bodies pass through
+    untyped (:func:`aios_sdk.raw_request`) so the server stays the sole
+    validator of schema-fluid payloads. A 204/empty body prints nothing.
+    """
+    with get_state(ctx).sdk_client() as client:
+        obj = raw_request(client, method, path, json_body=json_body)
+    if obj is not None:
+        render_single(obj)
 
 
 def render_list(
@@ -79,19 +84,34 @@ def render_list(
         print_note("… more results — pass --all to fetch every page")
 
 
-def fetch_all(
-    client: AiosClient,
+def unwrap(response: Response[Any]) -> Any:
+    """2xx → parsed body (``None`` for 204); non-2xx → :class:`AiosApiError`.
+
+    Delegates envelope decoding to the SDK's single decoder
+    (:func:`aios_sdk.error_from_response`) so the wire-error contract has
+    exactly one implementation.
+    """
+    status = int(response.status_code)
+    if 200 <= status < 300:
+        return response.parsed
+    raise error_from_response(status, response.content)
+
+
+def raw_paginate(
+    client: Client,
     path: str,
     *,
     params: dict[str, Any] | None = None,
     page_size: int = MAX_PAGE_LIMIT,
 ) -> dict[str, Any]:
-    """Walk every page of a list endpoint and return one envelope.
+    """Walk every page of a raw list endpoint and fold into one envelope.
 
-    The first request carries the filters + ``limit``; every later request sends
-    only the opaque ``?cursor=`` from the previous page's ``next_cursor``.
-    Folded into a single ``{"data": [...], "has_more": false, "next_cursor": null}``
-    envelope so downstream renderers don't care that pagination happened.
+    The thin-wire arm of the *single* page walker (:func:`render_paginated`
+    is the typed arm). The first request carries the filters + ``limit``;
+    every later request sends only the opaque ``?cursor=`` from the previous
+    page's ``next_cursor`` — the server 422s if filters are re-sent
+    alongside a cursor. Terminates on ``has_more`` false OR a missing
+    cursor.
     """
     accumulated: list[Any] = []
     cursor: str | None = None
@@ -100,7 +120,7 @@ def fetch_all(
             page_params: dict[str, Any] = {"cursor": cursor}
         else:
             page_params = {**(params or {}), "limit": page_size}
-        page = client.request("GET", path, params=page_params)
+        page = raw_request(client, "GET", path, params=page_params)
         assert isinstance(page, dict)
         page_data = page.get("data", [])
         assert isinstance(page_data, list)
@@ -109,35 +129,6 @@ def fetch_all(
         if not page.get("has_more") or cursor is None:
             break
     return {"data": accumulated, "has_more": False, "next_cursor": None}
-
-
-def unwrap(response: Response[Any]) -> Any:
-    """2xx → parsed body (``None`` for 204); non-2xx → :class:`AiosApiError`."""
-    status = int(response.status_code)
-    if 200 <= status < 300:
-        return response.parsed
-    try:
-        body = json.loads(response.content) if response.content else None
-    except (ValueError, json.JSONDecodeError):
-        body = None
-    if body is None:
-        raise AiosApiError(
-            status_code=status,
-            error_type="http_error",
-            message=response.content.decode(errors="replace") or f"HTTP {status}",
-        )
-    try:
-        envelope = ErrorResponse.model_validate(body)
-    except ValidationError:
-        raise AiosApiError(
-            status_code=status, error_type="http_error", message=json.dumps(body)
-        ) from None
-    raise AiosApiError(
-        status_code=status,
-        error_type=envelope.error.type,
-        message=envelope.error.message,
-        detail=envelope.error.detail,
-    )
 
 
 def render_paginated(
@@ -193,8 +184,8 @@ def render_paginated(
     render_list(state.output_format, envelope, columns=columns, max_widths=max_widths)
 
 
-def fetch_all_events(
-    client: AiosClient,
+def raw_paginate_events(
+    client: Client,
     session_id: str,
     *,
     kind: str | None = None,
@@ -203,10 +194,12 @@ def fetch_all_events(
 ) -> list[dict[str, Any]]:
     """Walk every page of ``/v1/sessions/:id/events`` and return the raw list.
 
-    The first request carries ``dir``/``kind``/``limit``; every later request
-    sends only the opaque ``?cursor=`` from the previous page's ``next_cursor``.
-    Returns just the event list; callers can wrap it in an envelope for
-    ``render_list`` or consume it directly.
+    A variant of :func:`raw_paginate` that preserves the events endpoint's
+    distinct semantics: it breaks on an *empty page* (not just ``has_more``
+    false), and the first request carries ``dir``/``kind``/``limit`` while
+    later requests send only the opaque ``?cursor=``. Returns just the event
+    list; callers wrap it in an envelope for ``render_list`` or consume it
+    directly (the profiler).
     """
     accumulated: list[dict[str, Any]] = []
     cursor: str | None = None
@@ -215,7 +208,7 @@ def fetch_all_events(
             params: dict[str, Any] = {"cursor": cursor}
         else:
             params = {"dir": direction, "kind": kind, "limit": page_size}
-        page = client.request("GET", f"/v1/sessions/{session_id}/events", params=params)
+        page = raw_request(client, "GET", f"/v1/sessions/{session_id}/events", params=params)
         assert isinstance(page, dict)
         page_data = page.get("data", [])
         if not page_data:
@@ -225,3 +218,13 @@ def fetch_all_events(
         if not page.get("has_more") or cursor is None:
             break
     return accumulated
+
+
+def get_state_and_client(ctx: typer.Context) -> tuple[CliState, Client]:
+    """Return (state, sdk_client) for a raw list/events command body.
+
+    The single accessor for commands that need ``output_format``/``verbose``
+    alongside a raw-arm client. Caller owns the client's ``with`` block.
+    """
+    state = get_state(ctx)
+    return state, state.sdk_client()
