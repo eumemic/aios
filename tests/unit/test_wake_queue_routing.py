@@ -108,7 +108,17 @@ class TestRoutingMatchesRegistration:
     """
 
     async def test_explicit_queue_equals_registered_queue(self, in_memory_app: App) -> None:
-        import aios.harness.tasks  # noqa: F401 — registers the tasks on the app
+        import importlib
+
+        import aios.harness.tasks
+
+        # The ``in_memory_app`` fixture resets ``app.tasks`` to the pristine,
+        # task-free state the api process has (so the ``_assert_no_registered_tasks``
+        # guard above is order-independent under ``pytest -n``). ``@app.task``
+        # decorators only bind on first import, so a plain ``import`` here would
+        # NOT re-register after that reset — reload to re-run the decorators and
+        # actually populate ``app.tasks`` for this registration-side test.
+        importlib.reload(aios.harness.tasks)
         from aios.jobs.app import defer_run_wake, defer_trigger_fire, defer_wake
 
         # Now the tasks ARE registered; read their decorator-level queues.

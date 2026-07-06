@@ -90,11 +90,30 @@ async def in_memory_app() -> AsyncIterator[App]:
 
     Tests can read ``app.connector.jobs`` directly to inspect deferred
     job rows (lock, queueing_lock, schedule, args).
+
+    The ``app`` is a module-level singleton, so task registration performed by
+    one test (importing ``aios.harness.tasks``) leaks into every later test in
+    the same process. Under ``pytest -n`` that ordering is non-deterministic and
+    silently defeats the ``_assert_no_registered_tasks`` guard in the wake
+    routing tests (issue #1699): a test that imported the harness graph earlier
+    in the same worker leaves ``harness.*`` registered, so the guard trips even
+    though the code under test is correct.
+
+    Snapshot ``app.tasks`` and reset it to the pristine, task-free state the api
+    process actually has on entry; restore the snapshot on exit. Each test that
+    needs the registration (``TestRoutingMatchesRegistration``) re-imports
+    ``aios.harness.tasks`` inside its body, which re-registers on demand.
     """
     from aios.jobs.app import app
 
-    with app.replace_connector(InMemoryConnector()) as patched:
-        yield patched
+    saved_tasks = dict(app.tasks)
+    app.tasks.clear()
+    try:
+        with app.replace_connector(InMemoryConnector()) as patched:
+            yield patched
+    finally:
+        app.tasks.clear()
+        app.tasks.update(saved_tasks)
 
 
 def fake_pool_yielding_conn(conn: Any, **kwargs: Any) -> Any:
