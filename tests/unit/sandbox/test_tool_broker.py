@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import patch
 
@@ -22,11 +21,12 @@ import pytest
 
 from aios.errors import CryptoDecryptError, ForbiddenError
 from aios.models.agents import (
-    AgentVersion,
+    AgentBinding,
     McpPermissionPolicy,
     McpServerSpec,
     McpToolConfig,
     McpToolsetConfig,
+    StepSurface,
     ToolSpec,
 )
 from aios.sandbox.tool_broker import ToolBroker
@@ -39,10 +39,8 @@ def _agent(
     *,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
-) -> AgentVersion:
-    return AgentVersion(
-        agent_id="agt_1",
-        version=3,
+) -> StepSurface:
+    return StepSurface(
         model="test/dummy",
         system="sys",
         tools=tools or [],
@@ -52,7 +50,7 @@ def _agent(
         litellm_extra={},
         window_min=1000,
         window_max=100000,
-        created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        binding=AgentBinding(agent_id="agt_1", version=3),
     )
 
 

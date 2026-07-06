@@ -16,6 +16,7 @@ import pytest
 from aios.harness import runtime
 from aios.sandbox.backends.base import CommandResult, SandboxHandle
 from aios.tools.edit import EditArgumentError, edit_handler
+from aios.tools.invoke import ToolBail
 
 
 class _StubRegistry:
@@ -94,12 +95,14 @@ class TestIdenticalStrings:
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         stub_registry.exec = _script_responses()
-        result = await edit_handler(
-            "sess_01TEST",
-            {"path": "/workspace/a.txt", "old_string": "a", "new_string": "a"},
-        )
-        assert "error" in result
-        assert "identical" in result["error"]
+        # Post-#1680: an expected edit failure raises ``ToolBail`` (one typed
+        # failure channel) rather than returning a bare ``{"error": ...}`` dict.
+        with pytest.raises(ToolBail) as excinfo:
+            await edit_handler(
+                "sess_01TEST",
+                {"path": "/workspace/a.txt", "old_string": "a", "new_string": "a"},
+            )
+        assert "identical" in excinfo.value.message
         # Container was never touched — guard short-circuits before cat.
         stub_registry.exec.assert_not_awaited()
 
@@ -109,17 +112,17 @@ class TestStrictMatching:
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         stub_registry.exec = _script_responses(_ok("actual file content\n"))
-        result = await edit_handler(
-            "sess_01TEST",
-            {
-                "path": "/workspace/a.txt",
-                "old_string": "missing",
-                "new_string": "replacement",
-            },
-        )
-        assert "error" in result
-        assert "not found" in result["error"]
-        assert "read tool" in result["error"]
+        with pytest.raises(ToolBail) as excinfo:
+            await edit_handler(
+                "sess_01TEST",
+                {
+                    "path": "/workspace/a.txt",
+                    "old_string": "missing",
+                    "new_string": "replacement",
+                },
+            )
+        assert "not found" in excinfo.value.message
+        assert "read tool" in excinfo.value.message
         # Only the read happened; no write-back because we errored out.
         assert stub_registry.exec.await_count == 1
 
@@ -127,16 +130,16 @@ class TestStrictMatching:
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         stub_registry.exec = _script_responses(_ok("foo\nbar\nfoo\nfoo\n"))
-        result = await edit_handler(
-            "sess_01TEST",
-            {
-                "path": "/workspace/a.txt",
-                "old_string": "foo",
-                "new_string": "baz",
-            },
-        )
-        assert "error" in result
-        assert result["matches"] == 3
+        with pytest.raises(ToolBail) as excinfo:
+            await edit_handler(
+                "sess_01TEST",
+                {
+                    "path": "/workspace/a.txt",
+                    "old_string": "foo",
+                    "new_string": "baz",
+                },
+            )
+        assert excinfo.value.detail["matches"] == 3
         assert stub_registry.exec.await_count == 1
 
     async def test_unique_match_replaces_and_writes_back(
@@ -237,16 +240,16 @@ class TestErrorPaths:
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
         stub_registry.exec = _script_responses(_err(1, "cat: /nope: No such file or directory\n"))
-        result = await edit_handler(
-            "sess_01TEST",
-            {
-                "path": "/nope",
-                "old_string": "hi",
-                "new_string": "bye",
-            },
-        )
-        assert "error" in result
-        assert "No such file" in result["error"]
+        with pytest.raises(ToolBail) as excinfo:
+            await edit_handler(
+                "sess_01TEST",
+                {
+                    "path": "/nope",
+                    "old_string": "hi",
+                    "new_string": "bye",
+                },
+            )
+        assert "No such file" in excinfo.value.message
 
     async def test_write_back_failure_returns_error_dict(
         self, stub_registry: Any, stub_handle: SandboxHandle
@@ -255,16 +258,16 @@ class TestErrorPaths:
             _ok("hello\n"),
             _err(1, "bash: /ro/a.txt: Permission denied\n"),
         )
-        result = await edit_handler(
-            "sess_01TEST",
-            {
-                "path": "/ro/a.txt",
-                "old_string": "hello",
-                "new_string": "goodbye",
-            },
-        )
-        assert "error" in result
-        assert "Permission denied" in result["error"]
+        with pytest.raises(ToolBail) as excinfo:
+            await edit_handler(
+                "sess_01TEST",
+                {
+                    "path": "/ro/a.txt",
+                    "old_string": "hello",
+                    "new_string": "goodbye",
+                },
+            )
+        assert "Permission denied" in excinfo.value.message
 
     async def test_truncated_cat_aborts_write_back(
         self, stub_registry: Any, stub_handle: SandboxHandle
@@ -291,23 +294,19 @@ class TestErrorPaths:
             truncated=True,
         )
         stub_registry.exec = _script_responses(truncated_result, _ok(""))
-        result = await edit_handler(
-            "sess_01TEST",
-            {
-                "path": "/workspace/big.txt",
-                "old_string": "TARGET",
-                "new_string": "REPLACED",
-            },
-        )
-        assert "error" in result, (
-            f"edit must refuse to write back when the read was truncated "
-            f"(otherwise the bytes past the truncation point are silently "
-            f"lost on write); got success {result!r}."
-        )
-        assert "truncat" in result["error"].lower(), (
+        with pytest.raises(ToolBail) as excinfo:
+            await edit_handler(
+                "sess_01TEST",
+                {
+                    "path": "/workspace/big.txt",
+                    "old_string": "TARGET",
+                    "new_string": "REPLACED",
+                },
+            )
+        assert "truncat" in excinfo.value.message.lower(), (
             f"error must reference truncation so the model can use a "
             f"different tool (e.g., read with explicit ranges); got "
-            f"{result['error']!r}."
+            f"{excinfo.value.message!r}."
         )
         # Critically, no write-back was attempted.
         assert stub_registry.exec.await_count == 1

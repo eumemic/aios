@@ -31,7 +31,9 @@ Safety:
 - Results are capped at MAX_ROWS rows, ordered by ts_rank DESC.
 
 Return shape: {"result": "<formatted text table>"}
-On error: {"error": "..."}
+On an expected failure (empty query, timeout, query error) raises
+:class:`~aios.tools.invoke.ToolBail` (one typed failure channel — #1680); the single
+event writer stamps ``is_error``.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ import asyncpg
 
 from aios.harness import runtime
 from aios.logging import get_logger
+from aios.tools.invoke import ToolBail
 from aios.tools.registry import registry
 
 log = get_logger(__name__)
@@ -169,17 +172,19 @@ async def memory_search_handler(session_id: str, arguments: dict[str, Any]) -> d
     """Handler for the memory_search tool."""
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
-        return {"error": "memory_search requires a non-empty 'query' string"}
+        raise ToolBail("memory_search requires a non-empty 'query' string")
 
     pool = runtime.require_pool()
 
     try:
         rows, truncated = await _execute_query(pool, session_id, query)
-    except asyncpg.exceptions.QueryCanceledError:
-        return {"error": f"Query timed out after {QUERY_TIMEOUT_MS}ms"}
+    except asyncpg.exceptions.QueryCanceledError as exc:
+        # Expected refusals (#1680): raise ToolBail so the single writer stamps
+        # ``is_error`` — never let the raw asyncpg error escape and evict the sandbox.
+        raise ToolBail(f"Query timed out after {QUERY_TIMEOUT_MS}ms") from exc
     except Exception as exc:
         log.warning("memory_search.query_failed", error=str(exc))
-        return {"error": f"Query failed: {exc}"}
+        raise ToolBail(f"Query failed: {exc}") from exc
 
     text = _format_results(rows, truncated)
     return {"result": text}

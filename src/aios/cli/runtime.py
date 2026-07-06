@@ -14,14 +14,20 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import httpx
 import typer
 
-from aios.cli.client import AiosApiError, AiosClient
 from aios.cli.files import PayloadError
 from aios.cli.output import OutputFormat, print_error
+from aios_sdk import AiosApiError
 
 if TYPE_CHECKING:
     from aios_sdk import Client
+
+# The generated SDK client defaults to httpx's 5s total timeout, which would
+# flake long CLI operations (large list walks, slow creates). The hand-written
+# client this collapsed onto used 60s, so keep that as the single knob.
+_CLI_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -33,17 +39,18 @@ class CliState:
     output_format: OutputFormat
     verbose: bool
 
-    def client(self) -> AiosClient:
-        return AiosClient(base_url=self.base_url, api_key=self.api_key)
-
     def sdk_client(self) -> Client:
-        """Build a typed SDK ``Client`` from the resolved base_url + api_key.
+        """Build the single typed SDK ``Client`` every command rides.
 
-        Used by the porcelain modules that have migrated off the
-        hand-written ``AiosClient`` (``status``, ``tail``, the streaming
-        subcommands of ``sessions``). The hand-written client stays for
-        the remaining commands (CRUD modules, ``chat``, sessions
-        ``events``) until they migrate too.
+        The one transport factory for the whole CLI: generated ops
+        (``call_single``/``render_paginated``), the raw-body arm
+        (:func:`aios_sdk.raw_request`), and SSE streaming
+        (:func:`aios_sdk.stream_session`) all share this client, so error
+        decoding, connection-error mapping, and pagination each have
+        exactly one home by construction.
+
+        The explicit 60s timeout overrides the generated client's httpx
+        default (5s total) so long list walks / slow creates don't flake.
 
         Unlike :func:`aios_sdk.client_from_env`, this accepts a missing
         ``api_key`` and constructs a Client with an empty Bearer token —
@@ -53,7 +60,11 @@ class CliState:
         """
         from aios_sdk import Client
 
-        return Client(base_url=self.base_url, token=self.api_key or "")
+        return Client(
+            base_url=self.base_url,
+            token=self.api_key or "",
+            timeout=httpx.Timeout(_CLI_TIMEOUT_SECONDS),
+        )
 
 
 def get_state(ctx: typer.Context) -> CliState:
@@ -81,6 +92,16 @@ def run_or_die(fn: Callable[[], int | None]) -> None:
             print_error(f"detail: {exc.detail}")
         exit_code = 2 if exc.status_code == 401 else 1
         raise typer.Exit(exit_code) from exc
+    except httpx.ConnectError as exc:
+        # Generated SDK ops raise raw httpx errors on a down/unreachable
+        # server. Translate here so every command renders the same clean
+        # envelope the raw client used to (fixes the traceback-vs-envelope
+        # divergence — issue #1682).
+        print_error(f"connection_error: could not connect: {exc}")
+        raise typer.Exit(1) from exc
+    except httpx.TimeoutException as exc:
+        print_error(f"timeout: request timed out: {exc}")
+        raise typer.Exit(1) from exc
     except PayloadError as exc:
         print_error(str(exc))
         raise typer.Exit(64) from exc

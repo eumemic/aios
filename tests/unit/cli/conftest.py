@@ -12,7 +12,6 @@ from typing import Any
 import httpx
 import pytest
 
-from aios.cli.client import AiosClient
 from aios.cli.runtime import CliState
 from aios_sdk import Client as SdkClient
 
@@ -53,7 +52,7 @@ class MockedCli:
 
 @pytest.fixture
 def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
-    """Monkey-patch ``CliState.client`` to return an AiosClient with a MockTransport.
+    """Monkey-patch ``CliState.sdk_client`` to return an SDK ``Client`` with a MockTransport.
 
     Tests call ``handle.queue_response(httpx.Response(...))`` before invoking
     a command; each request pops the next queued response (or returns 500
@@ -81,13 +80,6 @@ def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
             return httpx.Response(500, json={"error": "no response queued"})
         return responses.pop(0)
 
-    def _client(self: CliState) -> AiosClient:
-        return AiosClient(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            transport=httpx.MockTransport(handler),
-        )
-
     def _sdk_client(self: CliState) -> SdkClient:
         client = SdkClient(base_url=self.base_url, token=self.api_key or "")
         client.set_httpx_client(
@@ -95,7 +87,6 @@ def mocked_cli(monkeypatch: pytest.MonkeyPatch) -> MockedCli:
         )
         return client
 
-    monkeypatch.setattr(CliState, "client", _client)
     monkeypatch.setattr(CliState, "sdk_client", _sdk_client)
     monkeypatch.setenv("AIOS_API_KEY", "test-key")
     monkeypatch.setenv("AIOS_URL", "http://test.invalid")

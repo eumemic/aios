@@ -34,8 +34,7 @@ from aios.harness.window import WindowedEvents
 from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, REQUEST, make_id, split_id
 from aios.jobs.app import defer_run_wake, defer_wake
 from aios.models.agents import (
-    Agent,
-    AgentVersion,
+    StepSurface,
     is_mcp_tool_name,
 )
 from aios.models.attenuation import Surface, surface_of
@@ -900,7 +899,7 @@ async def _inject_api_request(
 
 def _classify_awaiting(
     tc: dict[str, Any],
-    agent: Agent | AgentVersion,
+    agent: StepSurface,
 ) -> AwaitingToolCall | None:
     """Classify an unresolved tool_call into an ``AwaitingToolCall``, or
     ``None`` if the session is not blocked on external action for it
@@ -968,7 +967,7 @@ async def compute_awaiting(
     # run-attenuated surface (#794), so two children of the same agent/version under
     # different runs would collide on the old key and misclassify authority — they key
     # per-session instead.
-    agent_cache: dict[str | tuple[str | None, int | None], Agent | AgentVersion] = {}
+    agent_cache: dict[str | tuple[str | None, int | None], StepSurface] = {}
     out: dict[str, list[AwaitingToolCall]] = {}
     for session in sessions:
         unresolved = unresolved_by_sid.get(session.id)

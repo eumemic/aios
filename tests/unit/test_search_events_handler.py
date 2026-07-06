@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
+from aios.tools.invoke import ToolBail
 from aios.tools.search_events import (
     MAX_ROWS,
     _format_results,
@@ -268,30 +271,31 @@ class TestSearchEventsHandler:
         assert "Hello" in result["result"]
 
     async def test_sql_validation_error(self) -> None:
+        # Post-#1680: an expected failure raises ``ToolBail`` (one typed failure
+        # channel) rather than returning a bare ``{"error": ...}`` dict.
         with _mock_execute() as mock_exec:
-            result = await search_events_handler(
-                "sess_01TEST", {"query": "INSERT INTO foo VALUES (1)"}
-            )
+            with pytest.raises(ToolBail) as excinfo:
+                await search_events_handler("sess_01TEST", {"query": "INSERT INTO foo VALUES (1)"})
             mock_exec.assert_not_called()
-        assert "error" in result
-        assert "SELECT" in result["error"]
+        assert "SELECT" in excinfo.value.message
 
     async def test_missing_query(self) -> None:
-        result = await search_events_handler("sess_01TEST", {})
-        assert "error" in result
-        assert "query" in result["error"].lower()
+        with pytest.raises(ToolBail) as excinfo:
+            await search_events_handler("sess_01TEST", {})
+        assert "query" in excinfo.value.message.lower()
 
     async def test_empty_query(self) -> None:
-        result = await search_events_handler("sess_01TEST", {"query": ""})
-        assert "error" in result
+        with pytest.raises(ToolBail):
+            await search_events_handler("sess_01TEST", {"query": ""})
 
     async def test_db_error_returns_error(self) -> None:
-        with _mock_execute(side_effect=Exception("connection refused")), _mock_pool():
-            result = await search_events_handler(
-                "sess_01TEST", {"query": "SELECT * FROM events_search"}
-            )
-        assert "error" in result
-        assert "failed" in result["error"].lower()
+        with (
+            _mock_execute(side_effect=Exception("connection refused")),
+            _mock_pool(),
+            pytest.raises(ToolBail) as excinfo,
+        ):
+            await search_events_handler("sess_01TEST", {"query": "SELECT * FROM events_search"})
+        assert "failed" in excinfo.value.message.lower()
 
     async def test_timeout_returns_error(self) -> None:
         import asyncpg.exceptions
@@ -299,12 +303,10 @@ class TestSearchEventsHandler:
         with (
             _mock_execute(side_effect=asyncpg.exceptions.QueryCanceledError()),
             _mock_pool(),
+            pytest.raises(ToolBail) as excinfo,
         ):
-            result = await search_events_handler(
-                "sess_01TEST", {"query": "SELECT * FROM events_search"}
-            )
-        assert "error" in result
-        assert "timed out" in result["error"].lower()
+            await search_events_handler("sess_01TEST", {"query": "SELECT * FROM events_search"})
+        assert "timed out" in excinfo.value.message.lower()
 
     async def test_row_limit_exact_max_no_truncation(self) -> None:
         rows = [_FakeRecord({"id": f"evt_{i}"}) for i in range(MAX_ROWS)]

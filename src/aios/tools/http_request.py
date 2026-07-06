@@ -11,7 +11,11 @@ Return shape: ``{"status": int, "headers": [[name, value], ...], "body": "..."}`
 duplicate header names, and HTTP *requires* some (notably ``Set-Cookie``) be
 multi-valued — so a response setting two cookies would silently lose one. The
 pair-list preserves every occurrence in wire order.
-On error: ``{"error": "..."}``.
+On an expected failure (policy denial, SSRF block, transport fault) raises
+:class:`~aios.tools.invoke.ToolBail` (#1680). An upstream 4xx/5xx is NOT an error:
+it's a legitimate ``status`` value on the success-shaped result. On the workflow-run
+path the raise is translated back to a value-shaped ``{"error": ...}`` dict at the
+``invoke_run_tool`` seam, preserving the run's errors-as-values contract.
 """
 
 from __future__ import annotations
@@ -26,17 +30,17 @@ import httpx
 from aios.harness import runtime
 from aios.mcp.client import resolve_auth_for_target_url
 from aios.models.agents import (
-    Agent,
-    AgentVersion,
     HttpRouteSpec,
     HttpServerSpec,
     PermissionPolicy,
+    StepSurface,
     http_route_suppressed,
 )
 from aios.services import agents as agents_service
 from aios.services import outbound_suppression as outbound_suppression_service
 from aios.services import sessions as sessions_service
 from aios.tools._glob_match import match_glob
+from aios.tools.invoke import ToolBail
 from aios.tools.registry import registry
 from aios.tools.url_safety import is_safe_url
 
@@ -228,9 +232,7 @@ def _query_rejected_reason(route: HttpRouteSpec, path: str, query: str) -> str |
     return None
 
 
-def _classify_permission(
-    args: dict[str, Any], agent: Agent | AgentVersion
-) -> PermissionPolicy | None:
+def _classify_permission(args: dict[str, Any], agent: StepSurface) -> PermissionPolicy | None:
     """Per-route permission lookup for the dispatch gate.
 
     Returns the matched route's ``permission_policy`` so the harness can
@@ -262,7 +264,7 @@ def _classify_permission(
     return route.permission_policy.type
 
 
-async def _load_session_agent(session_id: str) -> tuple[Agent | AgentVersion, str, str]:
+async def _load_session_agent(session_id: str) -> tuple[StepSurface, str, str]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
@@ -321,6 +323,14 @@ async def _do_http_request(
     synthesized success (and records the audit event) for a write, or ``None``
     to let the call proceed normally for a read. The workflow-run dispatcher
     leaves it ``None`` — suppression is a per-session property.
+
+    Expected failures (policy denial, SSRF block, transport fault) raise
+    :class:`~aios.tools.invoke.ToolBail` (#1680) — a benign refusal the single
+    event writer stamps ``is_error`` for on the session path. An upstream 4xx/5xx
+    is NOT a failure here: this core never calls ``raise_for_status``, so a non-2xx
+    is a legitimate ``status`` value on a success-shaped dict. The workflow-run
+    path translates these raises back to value-shaped ``{"error": ...}`` dicts at
+    the ``invoke_run_tool`` seam, preserving its errors-as-values contract.
     """
     server_ref = arguments["server_ref"]
     path = arguments["path"]
@@ -338,23 +348,21 @@ async def _do_http_request(
     path_only, query = _split_query(path)
     reason = _path_rejected_reason(path_only)
     if reason is not None:
-        return {"error": reason}
+        raise ToolBail(reason)
 
     server = _find_server(servers, server_ref)
     if server is None:
-        return {"error": (f"unknown server_ref {server_ref!r}; not declared on http_servers")}
+        raise ToolBail(f"unknown server_ref {server_ref!r}; not declared on http_servers")
     route = _match_route(server, path_only, method)
     if route is None:
-        return {
-            "error": (
-                f"{method} {path!r} does not match any enabled route on "
-                f"http_server {server_ref!r} — the path may be unlisted, or the "
-                f"route's allowed methods may not include this verb"
-            )
-        }
+        raise ToolBail(
+            f"{method} {path!r} does not match any enabled route on "
+            f"http_server {server_ref!r} — the path may be unlisted, or the "
+            f"route's allowed methods may not include this verb"
+        )
     reason = _query_rejected_reason(route, path, query)
     if reason is not None:
-        return {"error": reason}
+        raise ToolBail(reason)
 
     # Outbound suppression (#710): a session in suppression mode short-circuits a
     # write here — synthesized success, no upstream dispatch — AFTER the gates so
@@ -369,7 +377,7 @@ async def _do_http_request(
     # is_safe_url does a blocking getaddrinfo; offload it so the SSRF pre-flight
     # never stalls the event loop (matches services/vault_oauth._guard_url).
     if not await asyncio.to_thread(is_safe_url, full_url):
-        return {"error": f"Blocked: URL targets a private/internal address: {full_url}"}
+        raise ToolBail(f"Blocked: URL targets a private/internal address: {full_url}")
 
     _vault_id, auth_headers = await resolve_auth(server.base_url)
 
@@ -390,10 +398,16 @@ async def _do_http_request(
             if body:
                 kwargs["content"] = body
             response = await client.request(method, full_url, **kwargs)
-    except httpx.TimeoutException:
-        return {"error": f"Request timed out: {method} {full_url}"}
+    except httpx.TimeoutException as exc:
+        # EXPECTED transport failures: raise ToolBail (benign refusal the model reads),
+        # NOT the raw httpx error, which _classify_tool_error would treat as internal +
+        # evict the sandbox. Note an upstream non-2xx is NOT raised here — this handler
+        # never calls raise_for_status; a 4xx/5xx is a legitimate ``status`` value the
+        # caller inspects (success by definition), so only genuine transport faults reach
+        # these arms.
+        raise ToolBail(f"Request timed out: {method} {full_url}") from exc
     except httpx.HTTPError as exc:
-        return {"error": f"HTTP transport error: {type(exc).__name__}: {exc}"}
+        raise ToolBail(f"HTTP transport error: {type(exc).__name__}: {exc}") from exc
 
     body_text, truncated = _decode_body(response)
     result: dict[str, Any] = {

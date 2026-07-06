@@ -11,7 +11,10 @@ Safety:
 - Results are capped at 200 rows.
 
 Return shape: {"result": "<formatted text table>"}
-On error: {"error": "..."}
+On an expected failure (empty query, SQL validation, timeout, query error) raises
+:class:`~aios.tools.invoke.ToolBail` (one typed failure channel — #1680); the single
+event writer stamps ``is_error``, which is what the ``WHERE is_error`` example queries
+below actually filter on.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import asyncpg
 
 from aios.harness import runtime
 from aios.logging import get_logger
+from aios.tools.invoke import ToolBail
 from aios.tools.registry import registry
 
 log = get_logger(__name__)
@@ -236,7 +240,9 @@ SEARCH_EVENTS_DESCRIPTION = (
     "  canonical ordering, tighter than created_at.\n"
     "- Use substr(content_text, 1, N) in SELECT to keep output compact.\n"
     "- Filter by is_error (not `is_error = TRUE`) — it's a boolean; the NULL\n"
-    "  case is implicitly excluded.\n"
+    "  case is implicitly excluded. is_error is stamped for every expected\n"
+    "  tool failure going forward; some tool-result events recorded before\n"
+    "  that stamp was made uniform may carry NULL and won't match this filter.\n"
     "- Prefer promoted columns (channel, tool_name, is_error, sender_name)\n"
     "  over ILIKE on content_text when they apply — they're indexed and\n"
     "  faster, and they match what you'd mentally ask."
@@ -273,21 +279,23 @@ async def search_events_handler(session_id: str, arguments: dict[str, Any]) -> d
     """Handler for the search_events tool."""
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
-        return {"error": "search_events requires a non-empty 'query' string"}
+        raise ToolBail("search_events requires a non-empty 'query' string")
 
     err = _validate_sql(query)
     if err:
-        return {"error": f"SQL validation: {err}"}
+        raise ToolBail(f"SQL validation: {err}")
 
     pool = runtime.require_pool()
 
     try:
         rows, truncated = await _execute_query(pool, session_id, query)
-    except asyncpg.exceptions.QueryCanceledError:
-        return {"error": f"Query timed out after {QUERY_TIMEOUT_MS}ms"}
+    except asyncpg.exceptions.QueryCanceledError as exc:
+        # Expected refusals (#1680): raise ToolBail so the single writer stamps
+        # ``is_error`` — never let the raw asyncpg error escape and evict the sandbox.
+        raise ToolBail(f"Query timed out after {QUERY_TIMEOUT_MS}ms") from exc
     except Exception as exc:
         log.warning("search_events.query_failed", error=str(exc))
-        return {"error": f"Query failed: {exc}"}
+        raise ToolBail(f"Query failed: {exc}") from exc
 
     text = _format_results(rows, truncated)
     return {"result": text}

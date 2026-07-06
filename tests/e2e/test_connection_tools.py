@@ -111,7 +111,11 @@ class TestConnectionToolsInPrelude:
             session_id=session.id,
             account_id=account_id,
             session=await sess_svc.get_session(harness._pool, session.id, account_id=account_id),
-            agent=agent,
+            agent=await agents_service.load_for_session(
+                harness._pool,
+                await sess_svc.get_session(harness._pool, session.id, account_id=account_id),
+                account_id=account_id,
+            ),
             channels=[],
             memory_store_echoes=[],
         )
@@ -221,7 +225,11 @@ class TestConnectionToolsInPrelude:
             session_id=session.id,
             account_id=account_id,
             session=await sess_svc.get_session(harness._pool, session.id, account_id=account_id),
-            agent=agent,
+            agent=await agents_service.load_for_session(
+                harness._pool,
+                await sess_svc.get_session(harness._pool, session.id, account_id=account_id),
+                account_id=account_id,
+            ),
             channels=[],
             memory_store_echoes=[],
         )

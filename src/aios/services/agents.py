@@ -15,10 +15,14 @@ from aios.db import queries
 from aios.errors import ForbiddenError
 from aios.models.agents import (
     Agent,
+    AgentBinding,
+    AgentCreate,
     AgentVersion,
+    GenericChildBinding,
     HttpServerSpec,
     McpServerSpec,
     PermissionPolicy,
+    StepSurface,
     ToolSpec,
     resolve_mcp_permission,
 )
@@ -285,9 +289,31 @@ async def validate_pinned_agent_version(
     await queries.get_agent_version(conn, agent_id, agent_version, account_id=account_id)
 
 
+def _surface_from_agent(agent: Agent | AgentVersion, binding: AgentBinding) -> StepSurface:
+    """Project a wire read-model (``Agent``/``AgentVersion``) onto the nominal
+    :class:`StepSurface`, carrying exactly the nine harness-consumed fields.
+
+    A missing field here is a compile-loud ``StepSurface`` construction error,
+    not a silent structural-overlap drift — the projection's drift surface is
+    mypy, not runtime.
+    """
+    return StepSurface(
+        tools=agent.tools,
+        mcp_servers=agent.mcp_servers,
+        http_servers=agent.http_servers,
+        model=agent.model,
+        system=agent.system,
+        skills=agent.skills,
+        litellm_extra=agent.litellm_extra,
+        window_min=agent.window_min,
+        window_max=agent.window_max,
+        binding=binding,
+    )
+
+
 async def _load_for_session_conn(
     conn: asyncpg.Connection[Any], session: Any, *, account_id: str
-) -> Agent | AgentVersion:
+) -> StepSurface:
     """Resolve a session's effective surface on a caller-supplied ``conn``.
 
     The body of :func:`load_for_session` — see that function's docstring for the
@@ -303,9 +329,13 @@ async def _load_for_session_conn(
                 "(parent_run_id set but surface_frozen is false)"
             )
         if session.agent_id is None:
-            return AgentVersion(
-                agent_id="",
-                version=0,
+            # Generic workflow child: no agent at all. Build the surface from
+            # ``AgentCreate``'s field defaults (window_min/window_max) so the
+            # old duplicated 50k/150k literals can't silently diverge, and give
+            # it an explicit ``generic_child`` binding keyed on its own session
+            # — no ``agent_id=""``/``version=0`` sentinel.
+            defaults = AgentCreate.model_fields
+            return StepSurface(
                 model=session.model,
                 system=GENERIC_CHILD_SYSTEM.format(model=session.model),
                 tools=frozen.tools,
@@ -313,9 +343,9 @@ async def _load_for_session_conn(
                 mcp_servers=frozen.mcp_servers,
                 http_servers=frozen.http_servers,
                 litellm_extra={},
-                window_min=50_000,
-                window_max=150_000,
-                created_at=session.created_at,
+                window_min=defaults["window_min"].default,
+                window_max=defaults["window_max"].default,
+                binding=GenericChildBinding(session_id=session.id),
             )
         version = await queries.get_agent_version(
             conn, session.agent_id, session.agent_version, account_id=account_id
@@ -335,29 +365,38 @@ async def _load_for_session_conn(
         }
         if session.model is not None:
             updates["model"] = session.model
-        return version.model_copy(update=updates)
+        # An **agented** workflow child keeps an ``agent`` binding on
+        # ``(agent_id, version)`` so sibling runs still share the #1391 raw
+        # discovery cache (trap 1: two arms, not three).
+        overlaid = version.model_copy(update=updates)
+        return _surface_from_agent(
+            overlaid, AgentBinding(agent_id=overlaid.agent_id, version=overlaid.version)
+        )
     if session.agent_version is not None:
-        return await queries.get_agent_version(
+        pinned = await queries.get_agent_version(
             conn, session.agent_id, session.agent_version, account_id=account_id
         )
-    return await queries.get_agent(conn, session.agent_id, account_id=account_id)
+        return _surface_from_agent(
+            pinned, AgentBinding(agent_id=pinned.agent_id, version=pinned.version)
+        )
+    latest = await queries.get_agent(conn, session.agent_id, account_id=account_id)
+    return _surface_from_agent(latest, AgentBinding(agent_id=latest.id, version=latest.version))
 
 
-def tool_cache_binding_id(agent: Agent | AgentVersion, session_id: str) -> str:
+def tool_cache_binding_id(surface: StepSurface) -> str:
     """Stable identity for the #1391 MCP tool-list cache key.
 
     The cached tool set is static for a given *binding identity* — the
     precondition that lets sibling sessions of the same agent/version share
-    one discovery. A real agent's identity is agent-level so siblings share;
-    a generic workflow child (no agent_id) has only its own attenuated
-    per-run surface, so it must key on its own session (no cross-session
-    sharing — surfaces differ).
+    one discovery. A total match on the discriminated ``binding.kind``: an
+    ``agent`` binding is agent-level so siblings (latest/pinned/agented child)
+    share; a ``generic_child`` has only its own attenuated per-run surface, so
+    it keys on its own session (no cross-session sharing — surfaces differ).
     """
-    if isinstance(agent, Agent):
-        return f"{agent.id}:{agent.version}"
-    if agent.agent_id:
-        return f"{agent.agent_id}:{agent.version}"
-    return f"child:{session_id}"
+    binding = surface.binding
+    if binding.kind == "agent":
+        return f"{binding.agent_id}:{binding.version}"
+    return f"child:{binding.session_id}"
 
 
 async def load_for_session(
@@ -366,8 +405,8 @@ async def load_for_session(
     *,
     account_id: str,
     conn: asyncpg.Connection[Any] | None = None,
-) -> Agent | AgentVersion:
-    """Load the Agent / AgentVersion the harness sees for ``session`` at step time.
+) -> StepSurface:
+    """Load the :class:`StepSurface` the harness sees for ``session`` at step time.
 
     A **workflow child** (``parent_run_id`` set) reads the surface **frozen at spawn**
     (#794: the ``attenuate(agent, run)`` clamp) over its pinned ``AgentVersion`` —

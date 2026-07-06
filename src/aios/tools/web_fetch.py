@@ -10,7 +10,12 @@ to /search), so reading a ``title`` key returned ``""`` on every real call.
 When the content is cut at the char cap the result also carries ``"truncated":
 True`` (present only when truncated, mirroring ``http_request``) so the model
 never mistakes a cut page for a complete one.
-On error: {"error": "..."}
+On an expected failure (SSRF block, non-2xx, timeout, empty response) raises
+:class:`~aios.tools.invoke.ToolBail`; a TAVILY-config failure raises the client-class
+:class:`~aios.tools.tavily.WebToolError`. The single event writer stamps ``is_error``
+(session path) — #1680. On the workflow-run path these raises are translated back to
+value-shaped ``{"error": ...}`` dicts at the ``invoke_run_tool`` seam, preserving the
+runs errors-as-values contract.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from typing import Any
 import httpx
 
 from aios.errors import AiosError
+from aios.tools.invoke import ToolBail
 from aios.tools.registry import registry
 from aios.tools.tavily import WebToolError, tavily_request
 from aios.tools.url_safety import is_safe_url
@@ -74,7 +80,7 @@ async def web_fetch_handler(session_id: str, arguments: dict[str, Any]) -> dict[
     # is_safe_url does a blocking getaddrinfo; offload it so the SSRF pre-flight
     # never stalls the event loop (matches services/vault_oauth._guard_url).
     if not await asyncio.to_thread(is_safe_url, url):
-        return {"error": "Blocked: URL targets a private/internal address"}
+        raise ToolBail("Blocked: URL targets a private/internal address")
 
     try:
         response = await tavily_request("extract", {"urls": [url]})
@@ -96,13 +102,18 @@ async def web_fetch_handler(session_id: str, arguments: dict[str, Any]) -> dict[
             out["truncated"] = True
         return out
     except WebToolError:
+        # Already a client-class AiosError (status 400): re-raise so the single
+        # writer classifies it as a clean refusal, not a sandbox-evicting failure.
         raise
     except httpx.HTTPStatusError as exc:
-        return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"}
-    except httpx.TimeoutException:
-        return {"error": "Request timed out fetching URL"}
-    except (KeyError, IndexError):
-        return {"error": "No content returned for URL"}
+        # A non-2xx from Tavily/upstream is an EXPECTED failure the model reads and
+        # retries — raise ToolBail (a benign refusal), NOT the raw httpx error, which
+        # _classify_tool_error would treat as an internal failure and evict the sandbox.
+        raise ToolBail(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
+    except httpx.TimeoutException as exc:
+        raise ToolBail("Request timed out fetching URL") from exc
+    except (KeyError, IndexError) as exc:
+        raise ToolBail("No content returned for URL") from exc
 
 
 def _register() -> None:

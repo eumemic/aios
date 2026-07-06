@@ -35,6 +35,7 @@ from aios.sandbox.backends.base import SandboxHandle
 from aios.sandbox.spec import resolve_bash_timeout_ceiling
 from aios.sandbox.volumes import resolve_to_host_path
 from aios.services import sessions as sessions_service
+from aios.tools.invoke import ToolBail
 from aios.tools.memory_intercept import resolve_memory_target
 from aios.tools.registry import ToolResult, registry
 from aios_connector_http.mime import sniff_image_mime
@@ -177,10 +178,10 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     )
 
     if result.exit_code != 0:
-        return {
-            "error": result.stderr.strip() or f"read failed with exit code {result.exit_code}",
-            "path": path,
-        }
+        raise ToolBail(
+            result.stderr.strip() or f"read failed with exit code {result.exit_code}",
+            detail={"path": path},
+        )
 
     if target is None:
         return {"path": path, "content": result.stdout}

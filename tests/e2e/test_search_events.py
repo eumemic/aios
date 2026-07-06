@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from aios.harness import runtime
+from aios.tools.invoke import ToolBail
 from aios.tools.search_events import search_events_handler
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant
@@ -152,19 +153,19 @@ class TestSearchEvents:
         await harness.run_until_idle(session_b.id)
 
         # Session A tries to read session B's events via the raw table.
-        result = await search_events_handler(
-            session_id_a,
-            {
-                "query": (
-                    f"SELECT data FROM events WHERE session_id = '{session_b.id}' "
-                    f"AND data->>'role' = 'user'"
-                ),
-            },
-        )
-        assert "error" in result, (
-            f"validator must reject direct events-table access; got: {result!r}"
-        )
-        assert "events_search" in result["error"]
+        # Expected failures now raise ToolBail (one typed failure channel — #1680);
+        # the single event writer stamps is_error from the raise.
+        with pytest.raises(ToolBail) as excinfo:
+            await search_events_handler(
+                session_id_a,
+                {
+                    "query": (
+                        f"SELECT data FROM events WHERE session_id = '{session_b.id}' "
+                        f"AND data->>'role' = 'user'"
+                    ),
+                },
+            )
+        assert "events_search" in excinfo.value.message
 
     async def test_read_only_enforcement(self, harness: Harness) -> None:
         """The READ ONLY transaction used by _execute_query blocks writes.

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from datetime import datetime
-from typing import Any, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -678,6 +678,77 @@ class AgentVersion(BaseModel):
     window_min: int
     window_max: int
     created_at: datetime
+
+
+# ── Step surface (harness read-model) ────────────────────────────────────────
+
+
+class AgentBinding(BaseModel):
+    """The step surface's identity when it is backed by an agent.
+
+    Covers *all three* agented cases the harness resolves to an agent
+    identity: a "latest" ``Agent``, a version-pinned ``AgentVersion``, and an
+    **agented** workflow child (``parent_run_id`` set, ``agent_id`` present).
+    Sibling runs of the same ``(agent_id, version)`` share this identity so the
+    #1391 MCP raw-discovery cache keeps sharing across them.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["agent"] = "agent"
+    agent_id: str
+    version: int
+
+
+class GenericChildBinding(BaseModel):
+    """The step surface's identity for a generic workflow child (no agent).
+
+    A generic child (``parent_run_id`` set, ``agent_id`` is ``None``) carries
+    only its own per-run-attenuated surface. It keys the #1391 cache on its own
+    ``session_id`` — never on an agent identity — so distinct children never
+    share a discovery slot. Replaces the ``agent_id=""``/``version=0`` sentinel.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["generic_child"] = "generic_child"
+    session_id: str
+
+
+StepBinding = Annotated[
+    AgentBinding | GenericChildBinding,
+    Field(discriminator="kind"),
+]
+
+
+class StepSurface(BaseModel):
+    """What a session runs as at step time — the harness's single read-model.
+
+    Nominal replacement for the ``Agent | AgentVersion`` structural union (the
+    two wire read-models) plus the ``agent_id=""``/``version=0`` sentinel that
+    encoded "no agent at all". Carries **exactly** the nine config fields the
+    harness consumes off the loaded surface (verified by grep over every
+    caller — nothing reads ``name``/``metadata``/``description``/``created_at``
+    off it) plus a discriminated :data:`StepBinding` identity.
+
+    ``binding`` is a total, two-arm discriminated kind — no ``.id``/``.agent_id``
+    spelling divergence to duck-type across and no sentinel to forget, so a
+    d3695683-class identity misclassification (the #1554 cache poisoning) is a
+    mypy error at every consumer instead of a latent runtime bug.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tools: list[ToolSpec]
+    mcp_servers: list[McpServerSpec]
+    http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    model: str
+    system: str
+    skills: list[AgentSkillRef] = Field(default_factory=list)
+    litellm_extra: dict[str, Any] = Field(default_factory=dict)
+    window_min: int
+    window_max: int
+    binding: StepBinding
 
 
 # ── Tool-name + permission helpers ───────────────────────────────────────────

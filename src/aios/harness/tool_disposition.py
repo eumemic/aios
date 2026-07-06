@@ -41,7 +41,7 @@ from aios.models.agents import is_mcp_tool_name, resolve_permission
 from aios.services.agents import effective_mcp_permission
 
 if TYPE_CHECKING:
-    from aios.models.agents import Agent, AgentVersion
+    from aios.models.agents import StepSurface
 
 
 class ToolDisposition(Enum):
@@ -73,7 +73,7 @@ class ToolDisposition(Enum):
 def classify_tool_call(
     name: str,
     arguments: Any,
-    agent: Agent | AgentVersion,
+    agent: StepSurface,
     *,
     confirmation_resolved: bool,
     mcp_server_map: dict[str, Any] | None = None,

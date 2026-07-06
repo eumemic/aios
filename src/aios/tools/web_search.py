@@ -4,7 +4,11 @@ Uses Tavily's /search endpoint. Returns a list of results with
 title, URL, and description.
 
 Return shape: {"results": [{"title": "...", "url": "...", "description": "..."}]}
-On error: {"error": "..."}
+On an expected failure (non-2xx, timeout, empty response) raises
+:class:`~aios.tools.invoke.ToolBail`; a TAVILY-config failure raises the client-class
+:class:`~aios.tools.tavily.WebToolError` (#1680). On the workflow-run path these raises
+are translated back to value-shaped ``{"error": ...}`` dicts at the ``invoke_run_tool``
+seam, preserving the runs errors-as-values contract.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from typing import Any
 import httpx
 
 from aios.errors import AiosError
+from aios.tools.invoke import ToolBail
 from aios.tools.registry import registry
 from aios.tools.tavily import WebToolError, tavily_request
 
@@ -76,15 +81,19 @@ async def web_search_handler(session_id: str, arguments: dict[str, Any]) -> dict
         ]
         return {"results": normalized}
     except WebToolError:
+        # Already a client-class AiosError (status 400): re-raise so the single
+        # writer classifies it as a clean refusal, not a sandbox-evicting failure.
         raise
     except httpx.HTTPStatusError as exc:
-        return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"}
-    except httpx.TimeoutException:
-        return {"error": "Search request timed out"}
-    except (KeyError, IndexError):
+        # An EXPECTED non-2xx — raise ToolBail (benign refusal), NOT the raw httpx
+        # error, which _classify_tool_error would treat as internal + evict the sandbox.
+        raise ToolBail(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
+    except httpx.TimeoutException as exc:
+        raise ToolBail("Search request timed out") from exc
+    except (KeyError, IndexError) as exc:
         # A 200 response missing the 'results' key — surface a legible tool
         # error instead of letting the KeyError escape and evict the sandbox.
-        return {"error": "No results returned for query"}
+        raise ToolBail("No results returned for query") from exc
 
 
 def _register() -> None:
