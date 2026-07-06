@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import httpx
 
 from aios_sdk._generated import AuthenticatedClient
+from aios_sdk.errors import raise_for_response
 
 # Connector discovery / calls / management streams sit idle for long
 # stretches (a connector with zero connections sees zero events for
@@ -83,7 +84,13 @@ def stream_session(
         headers={"Accept": "text/event-stream"},
         timeout=httpx.Timeout(60.0, read=None),
     ) as response:
-        response.raise_for_status()
+        if response.status_code >= 400:
+            # Drain the streamed body so the error envelope is available,
+            # then decode it the same way every JSON op does — a bare
+            # ``raise_for_status`` would leak an ``httpx.HTTPStatusError``
+            # that the CLI's ``run_or_die`` does not translate.
+            response.read()
+            raise_for_response(response)
         yield parse_sse_lines(response.iter_lines())
 
 

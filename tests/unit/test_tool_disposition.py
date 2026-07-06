@@ -16,16 +16,16 @@ lacked.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from aios.harness.tool_disposition import ToolDisposition, classify_tool_call
 from aios.models.agents import (
-    Agent,
+    AgentBinding,
     HttpPermissionPolicy,
     HttpRouteSpec,
     HttpServerSpec,
     McpServerSpec,
+    StepSurface,
     ToolSpec,
 )
 
@@ -50,27 +50,22 @@ def _agent(
     tools: list[ToolSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
-) -> Agent:
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    return Agent(
-        id="agt_test",
-        version=1,
-        name="test-agent",
+) -> StepSurface:
+    return StepSurface(
         model="gpt-test",
         system="be helpful",
         tools=tools or [],
+        skills=[],
         mcp_servers=mcp_servers or [],
         http_servers=http_servers or [],
-        description=None,
-        metadata={},
+        litellm_extra={},
         window_min=1,
         window_max=10,
-        created_at=now,
-        updated_at=now,
+        binding=AgentBinding(agent_id="agt_test", version=1),
     )
 
 
-def _http_agent(policy: str) -> Agent:
+def _http_agent(policy: str) -> StepSurface:
     route = HttpRouteSpec(
         path_pattern="/lights/*",
         enabled=True,

@@ -44,10 +44,9 @@ if TYPE_CHECKING:
     import asyncpg
 
     from aios.models.agents import (
-        Agent,
-        AgentVersion,
         HttpServerSpec,
         McpServerSpec,
+        StepSurface,
         ToolSpec,
     )
     from aios.models.events import Event
@@ -211,7 +210,7 @@ async def compute_step_prelude(
     *,
     account_id: str,
     session: Session,
-    agent: Agent | AgentVersion,
+    agent: StepSurface,
     channels: list[str],
     memory_store_echoes: list[MemoryStoreResourceEcho],
 ) -> StepPrelude:
@@ -429,7 +428,7 @@ async def compose_step_context(
     pool: asyncpg.Pool[Any],
     session: Session,
     account_id: str,
-    agent: Agent | AgentVersion,
+    agent: StepSurface,
     channels: list[str],
     prelude: StepPrelude,
     events: list[Event],

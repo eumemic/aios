@@ -15,11 +15,13 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.commands._shared import with_client
+from aios.cli.commands._shared import unwrap
 from aios.cli.coverage import covers
 from aios.cli.output import dim, print_json
-from aios.cli.runtime import run_or_die
+from aios.cli.runtime import get_state, run_or_die
 from aios.ids import servicer_kind
+from aios_sdk._generated.api.runs import get_run_trace
+from aios_sdk._generated.api.sessions import get_session_trace
 
 _STATE_GLYPH = {
     "ok": "✓",
@@ -54,24 +56,27 @@ def register(app: typer.Typer) -> None:
         ] = False,
     ) -> None:
         def _run() -> None:
-            state, client = with_client(ctx)
-            path = _trace_path(resource_id)
-            with client:
-                resp = client.request("GET", path, params={"verbose": verbose})
+            state = get_state(ctx)
+            try:
+                kind = servicer_kind(resource_id)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            with state.sdk_client() as client:
+                if kind == "run":
+                    obj = unwrap(
+                        get_run_trace.sync_detailed(resource_id, client=client, verbose=verbose)
+                    )
+                else:
+                    obj = unwrap(
+                        get_session_trace.sync_detailed(resource_id, client=client, verbose=verbose)
+                    )
+            resp = obj.to_dict()
             if state.output_format == "json":
                 print_json(resp)
                 return
             _render_tree(resp, chronological=chronological)
 
         run_or_die(_run)
-
-
-def _trace_path(resource_id: str) -> str:
-    try:
-        kind = servicer_kind(resource_id)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    return f"/v1/runs/{resource_id}/trace" if kind == "run" else f"/v1/sessions/{resource_id}/trace"
 
 
 def _render_tree(resp: dict[str, Any], *, chronological: bool) -> None:

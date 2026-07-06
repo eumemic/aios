@@ -17,29 +17,25 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from aios.models.agents import Agent, ToolSpec
+from aios.models.agents import AgentBinding, StepSurface, ToolSpec
 from aios.models.sessions import AwaitingToolCall
 from aios.services.sessions import _classify_awaiting
 
 PENDING_SINCE = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
 
 
-def _make_agent(tools: list[ToolSpec]) -> Agent:
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    return Agent(
-        id="agt_test",
-        version=1,
-        name="test-agent",
+def _make_agent(tools: list[ToolSpec]) -> StepSurface:
+    return StepSurface(
         model="gpt-test",
         system="be helpful",
         tools=tools,
+        skills=[],
         mcp_servers=[],
-        description=None,
-        metadata={},
+        http_servers=[],
+        litellm_extra={},
         window_min=1,
         window_max=10,
-        created_at=now,
-        updated_at=now,
+        binding=AgentBinding(agent_id="agt_test", version=1),
     )
 
 

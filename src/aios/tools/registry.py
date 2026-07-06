@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aios.errors import AiosError
-from aios.models.agents import PermissionPolicy, ToolTransport
+from aios.models.agents import PermissionPolicy, StepSurface, ToolTransport
 from aios.models.agents import ToolSpec as AgentToolSpec
 
 
@@ -83,12 +83,12 @@ class ToolResult:
 ToolHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | ToolResult]]
 
 # Arg-aware permission classifier. Lets a tool declare a permission policy
-# that depends on the parsed arguments and the agent config — used by
-# ``http_request`` to gate on per-route policy in ``agent.http_servers``
-# rather than a single tool-level policy. ``agent`` is left untyped here
-# to avoid a circular import; consumers pass an
-# :class:`aios.models.agents.Agent` or :class:`AgentVersion`.
-ClassifyPermission = Callable[[dict[str, Any], Any], PermissionPolicy | None]
+# that depends on the parsed arguments and the loaded step surface — used by
+# ``http_request`` to gate on per-route policy in ``surface.http_servers``
+# rather than a single tool-level policy. The surface is the
+# :class:`aios.models.agents.StepSurface` the harness resolves at step time
+# (``models.agents`` is already imported at module level — no cycle).
+ClassifyPermission = Callable[[dict[str, Any], StepSurface], PermissionPolicy | None]
 
 
 @dataclass(slots=True, frozen=True)
