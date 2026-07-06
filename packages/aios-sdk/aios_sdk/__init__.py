@@ -19,6 +19,12 @@ from aios_sdk.authoring import (
     define_tool_custom,
     define_tool_mcp,
 )
+from aios_sdk.errors import (
+    AiosApiError,
+    error_from_response,
+    raise_for_response,
+    raw_request,
+)
 from aios_sdk.factory import client_from_env
 from aios_sdk.streaming import (
     SseMessage,
@@ -32,6 +38,7 @@ from aios_sdk.streaming import (
 
 __all__ = [
     "AgentBuilder",
+    "AiosApiError",
     "Client",
     "SseMessage",
     "UnexpectedStatus",
@@ -40,7 +47,10 @@ __all__ = [
     "define_tool_builtin",
     "define_tool_custom",
     "define_tool_mcp",
+    "error_from_response",
     "parse_sse_lines",
+    "raise_for_response",
+    "raw_request",
     "stream_connection_discovery",
     "stream_connector_calls",
     "stream_management_calls",

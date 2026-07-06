@@ -23,9 +23,9 @@ from typing import Annotated, Any
 
 import typer
 
-from aios.cli.client import AiosApiError, AiosClient
 from aios.cli.output import bold, cyan, dim, green, print_error, yellow
 from aios.cli.runtime import get_state, run_or_die
+from aios_sdk import AiosApiError, Client, raw_request, stream_session
 
 
 def register(app: typer.Typer) -> None:
@@ -72,8 +72,7 @@ def register(app: typer.Typer) -> None:
                 print_error("pass only one of --agent or --session")
                 return 64
             state = get_state(ctx)
-            client = state.client()
-            try:
+            with state.sdk_client() as client:
                 session_id, last_seq = _resolve_session(
                     client,
                     agent=agent,
@@ -82,15 +81,13 @@ def register(app: typer.Typer) -> None:
                     title=title,
                 )
                 _run_repl(client, session_id, last_seq, initial=initial, verbose=state.verbose)
-            finally:
-                client.close()
             return None
 
         run_or_die(_run)
 
 
 def _resolve_session(
-    client: AiosClient,
+    client: Client,
     *,
     agent: str | None,
     environment_id: str | None,
@@ -107,7 +104,7 @@ def _resolve_session(
     events — backfill is small, no UX impact.
     """
     if session is not None:
-        obj = client.request("GET", f"/v1/sessions/{session}")
+        obj = raw_request(client, "GET", f"/v1/sessions/{session}")
         sys.stdout.write(
             f"joined session {cyan(obj['id'])} (agent={obj['agent_id']}, status={obj['status']})\n"
         )
@@ -123,7 +120,7 @@ def _resolve_session(
     body: dict[str, Any] = {"agent_id": agent, "environment_id": environment_id}
     if title is not None:
         body["title"] = title
-    obj = client.request("POST", "/v1/sessions", json_body=body)
+    obj = raw_request(client, "POST", "/v1/sessions", json_body=body)
     sys.stdout.write(
         f"created session {cyan(obj['id'])} (agent={obj['agent_id']}, "
         f"version={obj.get('agent_version')})\n"
@@ -132,7 +129,7 @@ def _resolve_session(
 
 
 def _run_repl(
-    client: AiosClient,
+    client: Client,
     session_id: str,
     last_seq: int,
     *,
@@ -178,7 +175,7 @@ def _run_repl(
             continue
         if stripped == "/interrupt":
             with suppress(AiosApiError):
-                client.request("POST", f"/v1/sessions/{session_id}/interrupt", json_body={})
+                raw_request(client, "POST", f"/v1/sessions/{session_id}/interrupt", json_body={})
             sys.stdout.write(yellow("  [interrupted]\n"))
             continue
 
@@ -186,8 +183,9 @@ def _run_repl(
         last_seq = _stream_until_idle(client, session_id, last_seq, verbose=verbose)
 
 
-def _post_message(client: AiosClient, session_id: str, content: str) -> None:
-    client.request(
+def _post_message(client: Client, session_id: str, content: str) -> None:
+    raw_request(
+        client,
         "POST",
         f"/v1/sessions/{session_id}/messages",
         json_body={"content": content},
@@ -195,7 +193,7 @@ def _post_message(client: AiosClient, session_id: str, content: str) -> None:
 
 
 def _stream_until_idle(
-    client: AiosClient,
+    client: Client,
     session_id: str,
     last_seq: int,
     *,
@@ -207,7 +205,7 @@ def _stream_until_idle(
         # Typer re-raises KeyboardInterrupt via the default handler; we only
         # want to post an interrupt and let the stream close naturally.
         with suppress(AiosApiError):
-            client.request("POST", f"/v1/sessions/{session_id}/interrupt", json_body={})
+            raw_request(client, "POST", f"/v1/sessions/{session_id}/interrupt", json_body={})
         sys.stderr.write(yellow("\n  [ctrl-c: interrupt requested]\n", stream=sys.stderr))
 
     # Track whether any content delta arrived during the current assistant
@@ -218,7 +216,7 @@ def _stream_until_idle(
 
     previous_handler = signal.signal(signal.SIGINT, _handle_sigint)
     try:
-        with client.stream_session(session_id, after_seq=last_seq) as messages:
+        with stream_session(client, session_id, after_seq=last_seq) as messages:
             for msg in messages:
                 if msg.event == "delta":
                     if _write_delta(msg.data):

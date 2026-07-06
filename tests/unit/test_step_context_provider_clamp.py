@@ -14,7 +14,6 @@ tool, and an in-memory ``Agent``. The two cases nail the new branch:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
@@ -23,7 +22,7 @@ import pytest
 
 from aios.harness import runtime
 from aios.harness.step_context import compute_step_prelude
-from aios.models.agents import Agent, ToolSpec
+from aios.models.agents import AgentBinding, StepSurface, ToolSpec
 
 pytestmark = pytest.mark.asyncio
 
@@ -39,23 +38,18 @@ _PROVIDER_TOOL = {
 }
 
 
-def _agent(tools: list[ToolSpec]) -> Agent:
-    now = datetime.now(UTC)
-    return Agent(
-        id="agt_1627",
-        version=1,
-        name="a",
+def _agent(tools: list[ToolSpec]) -> StepSurface:
+    return StepSurface(
         model="gpt-test",
         system="you are a test agent",
         tools=tools,
+        skills=[],
         mcp_servers=[],
         http_servers=[],
-        description=None,
-        metadata={},
+        litellm_extra={},
         window_min=1,
         window_max=10,
-        created_at=now,
-        updated_at=now,
+        binding=AgentBinding(agent_id="agt_1627", version=1),
     )
 
 
@@ -85,7 +79,7 @@ def _stub_tool_provider() -> Any:
     return tp
 
 
-async def _prelude_tool_names(agent: Agent, session: Any) -> list[str]:
+async def _prelude_tool_names(agent: StepSurface, session: Any) -> list[str]:
     prev = runtime.tool_provider
     runtime.tool_provider = _stub_tool_provider()
     try:

@@ -63,9 +63,8 @@ from aios.harness.tool_disposition import classify_tool_call
 from aios.jobs.app import defer_run_wake, defer_wake
 from aios.logging import get_logger
 from aios.models.agents import (
-    Agent,
-    AgentVersion,
     McpServerSpec,
+    StepSurface,
     is_mcp_tool_name,
 )
 from aios.models.events import (
@@ -1449,7 +1448,7 @@ def _classify_tool_call(
 async def discover_session_mcp_tools(
     pool: Any,
     session_id: str,
-    agent: Agent | AgentVersion,
+    agent: StepSurface,
     *,
     account_id: str,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -1481,7 +1480,7 @@ async def discover_session_mcp_tools(
     # pays no per-step ``list_tools()`` RPC. Frozen-surface / version-pinned
     # sessions keep one (id, version) for the session lifetime, so they serve
     # from cache for the whole session with no rediscovery.
-    binding_id = agents_service.tool_cache_binding_id(agent, session_id)
+    binding_id = agents_service.tool_cache_binding_id(agent)
 
     # Circuit breaker (#1391): skip a server whose discovery recently timed out /
     # failed so one unresponsive server can't re-stall the prelude every step —

@@ -10,12 +10,12 @@ from typing import Annotated, Any
 import typer
 
 from aios.cli.commands._shared import (
-    fetch_all,
-    fetch_all_events,
-    just_client,
+    get_state_and_client,
+    raw_paginate,
+    raw_paginate_events,
+    raw_single,
     render_list,
     render_single,
-    with_client,
 )
 from aios.cli.coverage import covers
 from aios.cli.files import load_json_object, load_payload
@@ -23,7 +23,7 @@ from aios.cli.output import cyan, dim, print_error, print_json, print_success
 from aios.cli.profile import compute_profile, profile_to_dict, render_profile
 from aios.cli.runtime import get_state, run_or_die
 from aios.cli.tail_format import iter_formatted_events
-from aios_sdk import stream_session
+from aios_sdk import raw_request, stream_session
 
 app = typer.Typer(name="sessions", help="Manage sessions.", no_args_is_help=True)
 
@@ -44,13 +44,14 @@ def list_(
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        state, client = get_state_and_client(ctx)
         params: dict[str, Any] = {"agent_id": agent_id, "status": status_filter}
         with client:
             if all_:
-                envelope = fetch_all(client, "/v1/sessions", params=params)
+                envelope = raw_paginate(client, "/v1/sessions", params=params)
             else:
-                envelope = client.request(
+                envelope = raw_request(
+                    client,
                     "GET",
                     "/v1/sessions",
                     params={**params, "limit": limit},
@@ -64,10 +65,7 @@ def list_(
 @covers("get_session")
 def get(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("GET", f"/v1/sessions/{session_id}")
-        render_single(obj)
+        raw_single(ctx, "GET", f"/v1/sessions/{session_id}")
 
     run_or_die(_run)
 
@@ -101,10 +99,7 @@ def create(
                 payload["title"] = title
             if message is not None:
                 payload["initial_message"] = message
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", "/v1/sessions", json_body=payload)
-        render_single(obj)
+        raw_single(ctx, "POST", "/v1/sessions", json_body=payload)
         return None
 
     run_or_die(_run)
@@ -121,10 +116,7 @@ def update(
 ) -> None:
     def _run() -> int | None:
         payload = load_payload(file, stdin, data)
-        client = just_client(ctx)
-        with client:
-            obj = client.request("PUT", f"/v1/sessions/{session_id}", json_body=payload)
-        render_single(obj)
+        raw_single(ctx, "PUT", f"/v1/sessions/{session_id}", json_body=payload)
         return None
 
     run_or_die(_run)
@@ -134,10 +126,7 @@ def update(
 @covers("archive_session")
 def archive(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", f"/v1/sessions/{session_id}/archive")
-        render_single(obj)
+        raw_single(ctx, "POST", f"/v1/sessions/{session_id}/archive")
 
     run_or_die(_run)
 
@@ -170,11 +159,12 @@ def clone(
         body: dict[str, Any] = {}
         if workspace_path is not None:
             body["workspace_path"] = workspace_path
-        client = just_client(ctx)
         results: list[dict[str, Any]] = []
-        with client:
+        with get_state(ctx).sdk_client() as client:
             for _ in range(count):
-                obj = client.request("POST", f"/v1/sessions/{session_id}/clone", json_body=body)
+                obj = raw_request(
+                    client, "POST", f"/v1/sessions/{session_id}/clone", json_body=body
+                )
                 results.append(obj)
         if count == 1:
             render_single(results[0])
@@ -197,10 +187,7 @@ def clone(
 @covers("delete_session")
 def delete(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            obj = client.request("DELETE", f"/v1/sessions/{session_id}")
-        render_single(obj)
+        raw_single(ctx, "DELETE", f"/v1/sessions/{session_id}")
 
     run_or_die(_run)
 
@@ -226,9 +213,8 @@ def purge(
                 "(or use `aios sessions delete` for a reversible soft-archive)"
             )
             return 2
-        client = just_client(ctx)
-        with client:
-            client.request("POST", f"/v1/sessions/{session_id}/purge")
+        with get_state(ctx).sdk_client() as client:
+            raw_request(client, "POST", f"/v1/sessions/{session_id}/purge")
         print_success("purged", session_id)
         return None
 
@@ -249,10 +235,7 @@ def send(
         body: dict[str, Any] = {"content": message}
         if metadata is not None:
             body["metadata"] = load_json_object(metadata, "--metadata")
-        client = just_client(ctx)
-        with client:
-            event = client.request("POST", f"/v1/sessions/{session_id}/messages", json_body=body)
-        render_single(event)
+        raw_single(ctx, "POST", f"/v1/sessions/{session_id}/messages", json_body=body)
         return None
 
     run_or_die(_run)
@@ -266,13 +249,10 @@ def interrupt(
     reason: Annotated[str | None, typer.Option("--reason")] = None,
 ) -> None:
     def _run() -> None:
-        client = just_client(ctx)
         body: dict[str, Any] = {}
         if reason is not None:
             body["reason"] = reason
-        with client:
-            obj = client.request("POST", f"/v1/sessions/{session_id}/interrupt", json_body=body)
-        render_single(obj)
+        raw_single(ctx, "POST", f"/v1/sessions/{session_id}/interrupt", json_body=body)
 
     run_or_die(_run)
 
@@ -294,17 +274,18 @@ def events(
     all_: Annotated[bool, typer.Option("--all")] = False,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        state, client = get_state_and_client(ctx)
         with client:
             if all_:
-                data = fetch_all_events(client, session_id, kind=kind, direction=direction)
+                data = raw_paginate_events(client, session_id, kind=kind, direction=direction)
                 envelope: dict[str, Any] = {
                     "data": data,
                     "has_more": False,
                     "next_cursor": None,
                 }
             else:
-                envelope = client.request(
+                envelope = raw_request(
+                    client,
                     "GET",
                     f"/v1/sessions/{session_id}/events",
                     params={"dir": direction, "kind": kind, "limit": limit},
@@ -335,9 +316,9 @@ def profile(
     ] = None,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        state, client = get_state_and_client(ctx)
         with client:
-            events_data = fetch_all_events(client, session_id, kind="span")
+            events_data = raw_paginate_events(client, session_id, kind="span")
 
         result = compute_profile(events_data, turns=turns)
         if state.output_format == "json":
@@ -497,13 +478,8 @@ def tool_result(
     error: Annotated[bool, typer.Option("--error", help="Mark the result as a failure.")] = False,
 ) -> None:
     def _run() -> None:
-        client = just_client(ctx)
         body = {"tool_call_id": call_id, "content": content, "is_error": error}
-        with client:
-            event = client.request(
-                "POST", f"/v1/sessions/{session_id}/tool-results", json_body=body
-            )
-        render_single(event)
+        raw_single(ctx, "POST", f"/v1/sessions/{session_id}/tool-results", json_body=body)
 
     run_or_die(_run)
 
@@ -522,18 +498,13 @@ def tool_confirm(
         if allow == deny:
             print_error("exactly one of --allow or --deny must be provided")
             return 64
-        client = just_client(ctx)
         body: dict[str, Any] = {
             "tool_call_id": call_id,
             "result": "allow" if allow else "deny",
         }
         if message is not None:
             body["deny_message"] = message
-        with client:
-            event = client.request(
-                "POST", f"/v1/sessions/{session_id}/tool-confirmations", json_body=body
-            )
-        render_single(event)
+        raw_single(ctx, "POST", f"/v1/sessions/{session_id}/tool-confirmations", json_body=body)
         return None
 
     run_or_die(_run)
@@ -626,9 +597,9 @@ def _build_action(command: str | None, wake_content: str | None) -> dict[str, An
 @covers("list_triggers")
 def triggers_list(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        state, client = get_state_and_client(ctx)
         with client:
-            envelope = client.request("GET", f"/v1/sessions/{session_id}/triggers")
+            envelope = raw_request(client, "GET", f"/v1/sessions/{session_id}/triggers")
         # Annotate each row with the synthesized source/action cells before
         # the renderer reads its columns. JSON output keeps the raw shape.
         if state.output_format != "json":
@@ -683,10 +654,7 @@ def triggers_add(
                 )
                 return 64
             payload = {"name": name, "source": source, "action": action, "enabled": enabled}
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", f"/v1/sessions/{session_id}/triggers", json_body=payload)
-        render_single(obj)
+        raw_single(ctx, "POST", f"/v1/sessions/{session_id}/triggers", json_body=payload)
         return None
 
     run_or_die(_run)
@@ -696,9 +664,8 @@ def triggers_add(
 @covers("delete_trigger")
 def triggers_remove(ctx: typer.Context, session_id: str, name: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            client.request("DELETE", f"/v1/sessions/{session_id}/triggers/{name}")
+        with get_state(ctx).sdk_client() as client:
+            raw_request(client, "DELETE", f"/v1/sessions/{session_id}/triggers/{name}")
         print_success("removed", name)
 
     run_or_die(_run)
@@ -731,14 +698,7 @@ def triggers_update(
                     "wholesale — fetch current values via `triggers list`)."
                 )
                 return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request(
-                "PUT",
-                f"/v1/sessions/{session_id}/triggers/{name}",
-                json_body=payload,
-            )
-        render_single(obj)
+        raw_single(ctx, "PUT", f"/v1/sessions/{session_id}/triggers/{name}", json_body=payload)
         return None
 
     run_or_die(_run)
@@ -765,9 +725,10 @@ def triggers_runs(
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
 ) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        state, client = get_state_and_client(ctx)
         with client:
-            envelope = client.request(
+            envelope = raw_request(
+                client,
                 "GET",
                 f"/v1/sessions/{session_id}/triggers/{name}/runs",
                 params={"limit": limit},
@@ -794,9 +755,9 @@ _RESOURCE_COLS = ("type", "memory_store_id", "id", "name", "url", "mount_path")
 @covers("list_session_resources")
 def resources_list(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
-        state, client = with_client(ctx)
+        state, client = get_state_and_client(ctx)
         with client:
-            envelope = client.request("GET", f"/v1/sessions/{session_id}/resources")
+            envelope = raw_request(client, "GET", f"/v1/sessions/{session_id}/resources")
         render_list(state.output_format, envelope, columns=_RESOURCE_COLS)
 
     run_or_die(_run)
@@ -863,10 +824,7 @@ def resources_add(
                 "(github repository), or a full payload via --file/--stdin/--data."
             )
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request("POST", f"/v1/sessions/{session_id}/resources", json_body=payload)
-        render_single(obj)
+        raw_single(ctx, "POST", f"/v1/sessions/{session_id}/resources", json_body=payload)
         return None
 
     run_or_die(_run)
@@ -876,9 +834,8 @@ def resources_add(
 @covers("remove_session_resource")
 def resources_remove(ctx: typer.Context, session_id: str, resource_id: str) -> None:
     def _run() -> None:
-        client = just_client(ctx)
-        with client:
-            client.request("DELETE", f"/v1/sessions/{session_id}/resources/{resource_id}")
+        with get_state(ctx).sdk_client() as client:
+            raw_request(client, "DELETE", f"/v1/sessions/{session_id}/resources/{resource_id}")
         print_success("removed", resource_id)
 
     run_or_die(_run)
@@ -914,14 +871,12 @@ def resources_rotate(
                 "or a full payload via --file/--stdin/--data."
             )
             return 64
-        client = just_client(ctx)
-        with client:
-            obj = client.request(
-                "PUT",
-                f"/v1/sessions/{session_id}/resources/{resource_id}",
-                json_body=payload,
-            )
-        render_single(obj)
+        raw_single(
+            ctx,
+            "PUT",
+            f"/v1/sessions/{session_id}/resources/{resource_id}",
+            json_body=payload,
+        )
         return None
 
     run_or_die(_run)

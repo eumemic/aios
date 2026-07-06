@@ -9,13 +9,12 @@ test here.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from aios.models.agents import AgentVersion, McpServerSpec, ToolSpec
+from aios.models.agents import AgentBinding, McpServerSpec, StepSurface, ToolSpec
 
 
 @pytest.fixture(autouse=True)
@@ -31,10 +30,8 @@ def _mock_crypto_box() -> Any:
 def _agent(
     mcp_servers: list[McpServerSpec] | None = None,
     tools: list[ToolSpec] | None = None,
-) -> AgentVersion:
-    return AgentVersion(
-        agent_id="agt_1",
-        version=3,
+) -> StepSurface:
+    return StepSurface(
         model="test/dummy",
         system="sys",
         tools=tools or [],
@@ -44,7 +41,7 @@ def _agent(
         litellm_extra={},
         window_min=1000,
         window_max=100000,
-        created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        binding=AgentBinding(agent_id="agt_1", version=3),
     )
 
 

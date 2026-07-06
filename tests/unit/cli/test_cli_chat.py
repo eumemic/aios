@@ -8,7 +8,7 @@ newline). The ``turn_state`` dict threads that flag through the loop.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -82,20 +82,24 @@ def test_resolve_session_join_returns_last_event_seq(
     ``_resolve_session``. Same after-seq footgun class as the standing
     ``aios sessions stream`` lesson."""
     client: Any = MagicMock()
-    client.request.return_value = {
-        "id": "sess_X",
-        "agent_id": "agt_A",
-        "status": "idle",
-        "last_event_seq": 1234,
-    }
 
-    result = _resolve_session(
-        client,
-        agent=None,
-        environment_id=None,
-        session="sess_X",
-        title=None,
-    )
+    def _fake_raw_request(_client: Any, method: str, path: str, **_kw: Any) -> Any:
+        assert (method, path) == ("GET", "/v1/sessions/sess_X")
+        return {
+            "id": "sess_X",
+            "agent_id": "agt_A",
+            "status": "idle",
+            "last_event_seq": 1234,
+        }
+
+    with patch("aios.cli.commands.chat.raw_request", _fake_raw_request):
+        result = _resolve_session(
+            client,
+            agent=None,
+            environment_id=None,
+            session="sess_X",
+            title=None,
+        )
 
     # Post-fix the function returns (session_id, last_event_seq) so the
     # REPL initialises its SSE cursor from the joined session's tail
