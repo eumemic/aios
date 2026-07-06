@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from aios.tools.invoke import ToolBail
 from aios.tools.tavily import WebToolError
 from aios.tools.web_search import WebSearchArgumentError, web_search_handler
 
@@ -84,6 +85,8 @@ class TestWebSearchHandler:
         """A 200 response missing the 'results' key surfaces as a legible tool
         error (mirroring web_fetch), not a KeyError that escapes and evicts the
         sandbox."""
+        # Post-#1680: raises ``ToolBail`` (one typed failure channel) rather than
+        # returning a bare ``{"error": ...}`` dict — still no KeyError escapes.
         mock_tavily.return_value = {}
-        result = await web_search_handler("sess_01TEST", {"query": "x"})
-        assert "error" in result
+        with pytest.raises(ToolBail):
+            await web_search_handler("sess_01TEST", {"query": "x"})

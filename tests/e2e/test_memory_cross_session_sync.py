@@ -25,6 +25,7 @@ from aios.models.memory_stores import MemoryStoreResource
 from aios.services import memory_stores as memory_service
 from aios.services import sessions as sessions_service
 from aios.tools.edit import edit_handler
+from aios.tools.invoke import ToolBail
 from aios.tools.read import read_handler
 from aios.tools.write import write_handler
 from tests.conftest import needs_docker
@@ -342,13 +343,14 @@ class TestCrossSessionSync:
         )
         assert "error" not in a_write, a_write
 
-        # B writes with stale cached sha → precondition failure.
-        b_write = await write_handler(
-            b.id,
-            {"path": "/mnt/memory/xsync-race/seed.md", "content": "from-B\n"},
-        )
-        assert "error" in b_write
-        assert "changed since your last read" in b_write["error"]
+        # B writes with stale cached sha → precondition failure. Expected
+        # failures now raise ToolBail (one typed failure channel — #1680).
+        with pytest.raises(ToolBail) as excinfo:
+            await write_handler(
+                b.id,
+                {"path": "/mnt/memory/xsync-race/seed.md", "content": "from-B\n"},
+            )
+        assert "changed since your last read" in excinfo.value.message
 
         # B re-reads (refreshes cached sha to current DB sha) and retries.
         await read_handler(b.id, {"path": "/mnt/memory/xsync-race/seed.md"})

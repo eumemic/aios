@@ -16,6 +16,7 @@ import pytest
 
 from aios.harness import runtime
 from aios.sandbox.backends.base import CommandResult, SandboxHandle
+from aios.tools.invoke import ToolBail
 from aios.tools.write import WriteArgumentError, write_handler
 
 
@@ -158,9 +159,13 @@ class TestPerEnvTimeoutCeiling:
 
 
 class TestErrorPath:
-    async def test_nonzero_exit_returns_error_dict(
+    async def test_nonzero_exit_raises_toolbail(
         self, stub_registry: Any, stub_handle: SandboxHandle
     ) -> None:
+        # Post-#1680: an expected write failure raises ``ToolBail`` (one typed
+        # failure channel) rather than returning a bare ``{"error": ...}`` dict;
+        # the curated message + ``path`` context ride the exception's ``detail``,
+        # which the single event writer merges into the tool-result content.
         stub_registry.exec = AsyncMock(
             return_value=CommandResult(
                 exit_code=1,
@@ -170,10 +175,10 @@ class TestErrorPath:
                 truncated=False,
             )
         )
-        result = await write_handler("sess_01TEST", {"path": "/readonly/a.txt", "content": "hi"})
-        assert "error" in result
-        assert "Permission denied" in result["error"]
-        assert result["path"] == "/readonly/a.txt"
+        with pytest.raises(ToolBail) as excinfo:
+            await write_handler("sess_01TEST", {"path": "/readonly/a.txt", "content": "hi"})
+        assert "Permission denied" in excinfo.value.message
+        assert excinfo.value.detail["path"] == "/readonly/a.txt"
 
 
 class TestMemoryReadShaCacheRefresh:

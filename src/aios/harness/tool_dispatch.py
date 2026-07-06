@@ -87,24 +87,31 @@ class _ToolCall:
     is_error: bool = False
 
 
-def _classify_tool_error(err: BaseException) -> tuple[bool, str]:
-    """Decide how a tool handler exception is reported: ``(should_evict, message)``.
+def _classify_tool_error(err: BaseException) -> tuple[bool, str, dict[str, Any]]:
+    """Decide how a tool handler exception is reported: ``(should_evict, message, detail)``.
 
     Expected, model-visible refusals do NOT evict the sandbox — the model reads the
     error and self-corrects:
-      * a :class:`ToolBail` (bad args, unknown tool, schema mismatch), and
+      * a :class:`ToolBail` (bad args, unknown tool, schema mismatch, and every migrated
+        expected handler failure — #1680), and
       * a client-class (``status_code < 500``) :class:`AiosError` — a permission denial,
         not-found, conflict, rate-limit, or any tool ``*ArgumentError``.
     A server-class (``>= 500``) ``AiosError`` or any other exception is a genuine failure
     that also evicts the sandbox, which may have been left in a bad state. (The eviction
     itself is still gated on the caller's ``on_exception`` — the MCP path passes none.)
+
+    ``detail`` is the extra structured keys merged into the event's ``{"error": msg}``
+    content by the single writer (:func:`_append_tool_result`). A :class:`ToolBail` carries
+    it explicitly (``edit``/``write`` keep their ``{path, detail, matches}`` context this
+    way). An :class:`AiosError` folds its own ``detail`` into ``to_message()`` already, so
+    it returns none here — keeping the message string identical to the broker envelope.
     """
     if isinstance(err, ToolBail):
-        return False, str(err)
+        return False, err.message, dict(err.detail)
     if isinstance(err, AiosError):
         # ``to_message`` is total even here in the except clause (see AiosError.to_message).
-        return err.status_code >= 500, err.to_message()
-    return True, f"{type(err).__name__}: {err}"
+        return err.status_code >= 500, err.to_message(), {}
+    return True, f"{type(err).__name__}: {err}", {}
 
 
 @asynccontextmanager
@@ -190,7 +197,7 @@ async def _tool_lifecycle(
         )
     except Exception as err:
         tc.is_error = True
-        evict, message = _classify_tool_error(err)
+        evict, message, detail = _classify_tool_error(err)
         if evict:
             bound_log.exception(f"{log_prefix}.handler_failed")
             if on_exception is not None:
@@ -198,7 +205,7 @@ async def _tool_lifecycle(
         else:
             bound_log.info(f"{log_prefix}.refused", error=message)
         await _append_tool_result(
-            pool, session_id, call_id, name, account_id=account_id, error=message
+            pool, session_id, call_id, name, account_id=account_id, error=message, detail=detail
         )
     finally:
         if span_start is not None:
@@ -559,10 +566,18 @@ async def _append_tool_result(
     *,
     account_id: str,
     error: str,
+    detail: dict[str, Any] | None = None,
 ) -> None:
     """Append a tool-role error event (dedup-guarded — see
-    :func:`_append_tool_result_event`)."""
-    content = json.dumps({"error": error}, ensure_ascii=False)
+    :func:`_append_tool_result_event`).
+
+    ``detail`` (from a :class:`ToolBail`'s structured keys — #1680) is merged
+    into the ``{"error": msg}`` content so migrated handlers keep the extra
+    keys they used to json-encode (``edit``/``write``'s ``path``/``detail``/
+    ``matches``). ``error`` always wins the ``"error"`` slot.
+    """
+    payload: dict[str, Any] = {**(detail or {}), "error": error}
+    content = json.dumps(payload, ensure_ascii=False)
     await _append_tool_result_event(
         pool,
         session_id,

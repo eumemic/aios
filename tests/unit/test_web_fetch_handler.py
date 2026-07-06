@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from aios.tools.invoke import ToolBail
 from aios.tools.tavily import WebToolError
 from aios.tools.web_fetch import WebFetchArgumentError, web_fetch_handler
 
@@ -62,10 +63,12 @@ class TestWebFetchHandler:
     async def test_ssrf_blocked_url_returns_error(
         self, mock_tavily: AsyncMock, mock_safe_url: Any
     ) -> None:
+        # Post-#1680: an expected fetch failure raises ``ToolBail`` (one typed
+        # failure channel) rather than returning a bare ``{"error": ...}`` dict.
         mock_safe_url.return_value = False
-        result = await web_fetch_handler("sess_01TEST", {"url": "http://169.254.169.254/metadata"})
-        assert "error" in result
-        assert "private/internal" in result["error"]
+        with pytest.raises(ToolBail) as excinfo:
+            await web_fetch_handler("sess_01TEST", {"url": "http://169.254.169.254/metadata"})
+        assert "private/internal" in excinfo.value.message
         mock_tavily.assert_not_awaited()
 
     async def test_missing_url_raises(self):
