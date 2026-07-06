@@ -161,8 +161,6 @@ class TestDiscoveryResultCache:
 # ── binding-identity accessor (#1554) ───────────────────────────────────────
 
 
-
-
 def _agent_surface(*, agent_id: str, version: int, tools: list[ToolSpec]) -> StepSurface:
     """A ``StepSurface`` with an ``agent`` binding — the latest/pinned/agented-child
     identity that keys the #1391 cache on ``(agent_id, version)``."""

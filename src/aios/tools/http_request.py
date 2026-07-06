@@ -227,9 +227,7 @@ def _query_rejected_reason(route: HttpRouteSpec, path: str, query: str) -> str |
     return None
 
 
-def _classify_permission(
-    args: dict[str, Any], agent: StepSurface
-) -> PermissionPolicy | None:
+def _classify_permission(args: dict[str, Any], agent: StepSurface) -> PermissionPolicy | None:
     """Per-route permission lookup for the dispatch gate.
 
     Returns the matched route's ``permission_policy`` so the harness can
