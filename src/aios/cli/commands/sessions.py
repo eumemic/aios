@@ -698,9 +698,7 @@ def triggers_update(
                     "wholesale — fetch current values via `triggers list`)."
                 )
                 return 64
-        raw_single(
-            ctx, "PUT", f"/v1/sessions/{session_id}/triggers/{name}", json_body=payload
-        )
+        raw_single(ctx, "PUT", f"/v1/sessions/{session_id}/triggers/{name}", json_body=payload)
         return None
 
     run_or_die(_run)

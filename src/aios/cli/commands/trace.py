@@ -64,15 +64,11 @@ def register(app: typer.Typer) -> None:
             with state.sdk_client() as client:
                 if kind == "run":
                     obj = unwrap(
-                        get_run_trace.sync_detailed(
-                            resource_id, client=client, verbose=verbose
-                        )
+                        get_run_trace.sync_detailed(resource_id, client=client, verbose=verbose)
                     )
                 else:
                     obj = unwrap(
-                        get_session_trace.sync_detailed(
-                            resource_id, client=client, verbose=verbose
-                        )
+                        get_session_trace.sync_detailed(resource_id, client=client, verbose=verbose)
                     )
             resp = obj.to_dict()
             if state.output_format == "json":
