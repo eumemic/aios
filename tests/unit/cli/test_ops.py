@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from typer.testing import CliRunner
 
@@ -60,3 +61,40 @@ def test_worker_command_aborts_before_worker_main_on_shared_worktree(monkeypatch
 
     mock_worker_main.assert_not_called()
     assert result.exit_code == 1
+
+
+def test_migrate_configures_logging_before_running_migrations(monkeypatch):
+    """`migrate` must call configure_logging BEFORE upgrade_to_head so that
+    migration-emitted audit records (e.g. the 0130 auto-disable WARNING) are
+    visible on the prod path. Without this, `import alembic`'s NullHandler on
+    the 'alembic' parent logger satisfies the handler-search and shadows
+    logging.lastResort, silently swallowing every migration warning (#1678 F1).
+    Assert both that configure_logging is called and that it precedes the
+    migration run (order matters — a migration warning emitted before logging
+    is configured would still be lost)."""
+    monkeypatch.setenv("AIOS_API_KEY", "test")
+    monkeypatch.setenv("AIOS_DB_URL", "postgresql://localhost/test")
+
+    # Attach every collaborator to one parent so mock_calls records global order.
+    parent = Mock()
+    parent.get_settings.return_value = SimpleNamespace(
+        db_url="postgresql://localhost/test", log_level="INFO"
+    )
+    parent.apply_procrastinate_schema = AsyncMock()
+
+    with (
+        patch("aios.config.get_settings", parent.get_settings),
+        patch("aios.logging.configure_logging", parent.configure_logging),
+        patch("aios.db.migrations.upgrade_to_head", parent.upgrade_to_head),
+        patch("aios.db.migrations.apply_procrastinate_schema", parent.apply_procrastinate_schema),
+    ):
+        result = runner.invoke(app, ["migrate"])
+
+    assert result.exit_code == 0, result.output
+    parent.configure_logging.assert_called_once_with("INFO")
+    parent.upgrade_to_head.assert_called_once_with("postgresql://localhost/test")
+    # configure_logging must run before the migration.
+    called = [c[0] for c in parent.mock_calls]
+    assert called.index("configure_logging") < called.index("upgrade_to_head"), (
+        "configure_logging must be called before upgrade_to_head"
+    )

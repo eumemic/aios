@@ -159,8 +159,18 @@ def _run_rekey() -> int:
 def _run_migrate() -> int:
     from aios.config import get_settings
     from aios.db.migrations import apply_procrastinate_schema, upgrade_to_head
+    from aios.logging import configure_logging
 
-    db_url = get_settings().db_url
+    settings = get_settings()
+    # Configure logging before running migrations so migration-emitted audit
+    # records are visible. Without this, `import alembic` has attached a
+    # NullHandler to the 'alembic' parent logger, which satisfies the
+    # handler-search and thus shadows logging.lastResort — so a migration's
+    # logger.warning() (e.g. 0130's auto-disable audit) is swallowed silently
+    # on the prod `aios migrate` path. logging.py's own docstring prescribes
+    # calling configure_logging at the migrate command's start.
+    configure_logging(settings.log_level)
+    db_url = settings.db_url
     upgrade_to_head(db_url)
     asyncio.run(apply_procrastinate_schema(db_url, verbose=True))
     return 0
