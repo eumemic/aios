@@ -51,7 +51,7 @@ from aios.harness.sweep import (
 )
 from aios.harness.trigger_runner import sweep_trigger_fires
 from aios.harness.workspace_reaper import sweep_archived_workspaces
-from aios.jobs.app import WORKER_POLLED_QUEUES
+from aios.jobs.app import WORKER_POLLED_QUEUES as WORKER_POLLED_QUEUES
 from aios.jobs.app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
