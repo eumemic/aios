@@ -40,6 +40,44 @@ if TYPE_CHECKING:
 log = get_logger("aios.jobs.app")
 
 
+# ── Queue routing (single source of truth) ─────────────────────────────
+# Registered-task queues live in ``aios.harness.tasks`` (``@app.task(queue=...)``),
+# but those decorators only bind in the *worker* process. The api process defers
+# by name string with ``allow_unknown=True`` and NEVER imports the harness graph,
+# so ``configure_task`` cannot read the registered ``queue=`` and silently falls
+# back to procrastinate's ``"default"`` queue -- which the worker never polls
+# (regression, ae0c0064; issue #1699). Routing therefore must NOT depend on
+# task-registration being present in the calling process: every API-side
+# ``configure_task`` passes an EXPLICIT ``queue=`` drawn from these constants,
+# and :func:`_polled_queue` asserts the resolved queue is one the worker fetches.
+QUEUE_SESSIONS = "sessions"
+QUEUE_WORKFLOWS = "workflows"
+
+# The exact set the worker polls (``run_worker_async(queues=...)`` in
+# :mod:`aios.harness.worker`). A ``harness.*`` job deferred onto any queue
+# outside this set sits ``todo`` forever -- the wedge #1699 describes. Kept here,
+# beside the deferral primitives, as the one authority both the worker and the
+# defer-time guard read.
+WORKER_POLLED_QUEUES: frozenset[str] = frozenset({QUEUE_SESSIONS, QUEUE_WORKFLOWS})
+
+
+def _polled_queue(queue: str) -> str:
+    """Return *queue* iff the worker polls it; raise loud otherwise.
+
+    Belt-and-suspenders for #1699 acceptance #3: no ``harness.*`` job may be
+    created on a queue the worker does not fetch. Called at defer time so a
+    routing regression fails at enqueue -- a caught, logged, obvious error --
+    rather than silently wedging a live connector session for hours.
+    """
+    if queue not in WORKER_POLLED_QUEUES:
+        raise ValueError(
+            f"refusing to defer onto queue {queue!r}: not in the worker's polled "
+            f"set {sorted(WORKER_POLLED_QUEUES)!r} -- the job would sit todo forever "
+            "(issue #1699). Route to an explicit worker-polled queue."
+        )
+    return queue
+
+
 def _sync_dsn(db_url: str) -> str:
     """Strip any +async driver suffix from a Postgres DSN.
 
@@ -137,6 +175,11 @@ async def defer_wake(
     # configure_task accepts schedule_in=None (treated as "no schedule").
     deferrer = app.configure_task(
         "harness.wake_session",
+        # Explicit ``queue=`` — the api process registers no tasks, so
+        # ``configure_task`` cannot read the ``@app.task(queue="sessions")``
+        # registration and would fall back to the unpolled ``default`` queue
+        # (issue #1699). Guarded so a bad queue fails at enqueue, never silently.
+        queue=_polled_queue(QUEUE_SESSIONS),
         lock=session_id,
         queueing_lock=session_id,
         priority=priority,
@@ -175,6 +218,10 @@ async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:
     window = get_settings().workflow_wake_batch_seconds if batch else 0.0
     deferrer = app.configure_task(
         "harness.wake_workflow",
+        # Explicit ``queue=`` for the same reason as ``defer_wake`` (#1699):
+        # a defer from a process without the harness registration must still
+        # route to the worker-polled ``workflows`` queue, not ``default``.
+        queue=_polled_queue(QUEUE_WORKFLOWS),
         lock=run_id,
         queueing_lock=run_id,
         priority=_BACKGROUND_PRIORITY,  # workflow run steps yield to foreground too
@@ -201,6 +248,11 @@ async def defer_trigger_fire(trigger_id: str, trigger_run_id: str) -> None:
     try:
         await app.configure_task(
             "harness.run_trigger",
+            # ``harness.run_trigger`` is registered on ``sessions`` too; the
+            # scheduler that fires it may run in a process without the harness
+            # registration, so route explicitly to avoid the ``default`` wedge
+            # (issue #1699).
+            queue=_polled_queue(QUEUE_SESSIONS),
             queueing_lock=f"trigger_run:{trigger_run_id}",
         ).defer_async(trigger_id=trigger_id, trigger_run_id=trigger_run_id)
     except procrastinate_exceptions.AlreadyEnqueued:

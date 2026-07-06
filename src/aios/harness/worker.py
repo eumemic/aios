@@ -51,6 +51,7 @@ from aios.harness.sweep import (
 )
 from aios.harness.trigger_runner import sweep_trigger_fires
 from aios.harness.workspace_reaper import sweep_archived_workspaces
+from aios.jobs.app import WORKER_POLLED_QUEUES
 from aios.jobs.app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
@@ -489,7 +490,11 @@ async def worker_main() -> None:
 
         worker_task = asyncio.create_task(
             procrastinate_app.run_worker_async(
-                queues=["sessions", "workflows"],
+                # Sorted for a deterministic startup log; the set is the single
+                # source of truth shared with the defer-time routing guard so a
+                # queue can never be polled here yet unroutable there, or vice
+                # versa (issue #1699).
+                queues=sorted(WORKER_POLLED_QUEUES),
                 concurrency=settings.worker_concurrency,
                 wait=True,
                 install_signal_handlers=True,
