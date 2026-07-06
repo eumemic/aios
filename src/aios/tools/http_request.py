@@ -26,11 +26,10 @@ import httpx
 from aios.harness import runtime
 from aios.mcp.client import resolve_auth_for_target_url
 from aios.models.agents import (
-    Agent,
-    AgentVersion,
     HttpRouteSpec,
     HttpServerSpec,
     PermissionPolicy,
+    StepSurface,
     http_route_suppressed,
 )
 from aios.services import agents as agents_service
@@ -228,9 +227,7 @@ def _query_rejected_reason(route: HttpRouteSpec, path: str, query: str) -> str |
     return None
 
 
-def _classify_permission(
-    args: dict[str, Any], agent: Agent | AgentVersion
-) -> PermissionPolicy | None:
+def _classify_permission(args: dict[str, Any], agent: StepSurface) -> PermissionPolicy | None:
     """Per-route permission lookup for the dispatch gate.
 
     Returns the matched route's ``permission_policy`` so the harness can
@@ -262,7 +259,7 @@ def _classify_permission(
     return route.permission_policy.type
 
 
-async def _load_session_agent(session_id: str) -> tuple[Agent | AgentVersion, str, str]:
+async def _load_session_agent(session_id: str) -> tuple[StepSurface, str, str]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)

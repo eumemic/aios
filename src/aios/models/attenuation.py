@@ -63,11 +63,19 @@ class Surface(NamedTuple):
 
 
 class HasSurface(Protocol):
-    """Anything carrying the surface triple — ``Agent``/``AgentVersion``/``Workflow``/``WfRun``."""
+    """Anything carrying the surface triple — ``Agent``/``AgentVersion``/``Workflow``/``WfRun``/``StepSurface``.
 
-    tools: list[ToolSpec]
-    mcp_servers: list[McpServerSpec]
-    http_servers: list[HttpServerSpec]
+    The members are declared read-only (properties) so both the mutable wire
+    models and the *frozen* :class:`aios.models.agents.StepSurface` satisfy the
+    protocol — ``surface_of`` only ever reads them.
+    """
+
+    @property
+    def tools(self) -> list[ToolSpec]: ...
+    @property
+    def mcp_servers(self) -> list[McpServerSpec]: ...
+    @property
+    def http_servers(self) -> list[HttpServerSpec]: ...
 
 
 def surface_of(principal: HasSurface) -> Surface:
