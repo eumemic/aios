@@ -2,25 +2,20 @@
 
 Thin pool-acquiring wrappers around the queries in
 :mod:`aios.db.queries`. Owns the business logic around when to recompute
-``next_fire`` — on add, on source change, on re-enable, and (#957) as a
-defense-in-depth heal whenever an already-enabled row is found with
-``next_fire`` NULL — and exposes granular add/remove/update/list operations
-to the API + tool layers.
+``next_fire`` — on add, on source change, and on re-enable — and exposes
+granular add/remove/update/list operations to the API + tool layers.
 
-Healing invariant (#957): an enabled schedulable (cron) trigger always has a
-non-NULL ``next_fire``. ``update_trigger`` re-arms a NULL on ANY update whose
-final state is enabled — closing the gap the #925 incident's manual
-``UPDATE … SET enabled=true`` opened. This heal is the SOLE recovery path for
-an incident-state row (``enabled=true, next_fire=NULL``): nothing re-arms such
-a row on its own. The scheduler's claim/MIN queries both filter
-``next_fire IS NOT NULL`` (see ``fetch_and_claim_due_triggers`` /
-``fetch_next_trigger_event`` in :mod:`aios.db.queries`), so a NULL row is
-invisible to the scheduler and never fires. #940 / PR #950 is NOT a reconcile:
-it only broadened ``notify_scheduled_tasks_due()`` to NOTIFY on any
-``next_fire`` change and lowered the scheduler heartbeat, which is what makes
-the scheduler REACT promptly to the re-armed schedule this heal produces.
-Removing this heal would therefore leave incident-state rows with no recovery
-at all. run_completion rows stay NULL by design.
+Arming invariant: an enabled schedulable (cron / one_shot) trigger always has
+a non-NULL ``next_fire``. This is enforced by the schema, not the service: the
+``triggers_schedulable_enabled_armed`` CHECK (migration 0130) — the
+schedulable complement of 0108's reactive ``triggers_reactive_no_next_fire``
+— makes the #925 incident state (``enabled=true, next_fire=NULL``, produced by
+a manual ``UPDATE … SET enabled=true``) unrepresentable for every writer alike,
+including manual psql. So the #957 runtime heal that used to re-arm such rows is
+gone: the offending out-of-band write now fails loudly at write time (fail-hard),
+and the honest recovery recipe is ``SET enabled=true, next_fire=now()`` (the
+claim path recomputes the proper cron slot on the next tick). run_completion /
+external_event rows stay ``next_fire`` NULL by design (the 0108 reactive arm).
 
 Deliberately no whole-list-replace primitive; per #270, the only mutation
 surface is granular ops.
@@ -262,9 +257,8 @@ async def update_trigger(
     surfaces the plaintext once on the returned :class:`TriggerCreated`
     (re-minting an already-external_event source = rotation); replacing AWAY
     from ``external_event`` NULLs the stored hash. A non-source-touching update
-    leaves the hash alone and returns ``ingest_token=None``. external_event
-    stays ``next_fire`` NULL throughout — same heal-path carve-out as
-    run_completion.
+    leaves the hash alone and returns ``ingest_token=None``. external_event and
+    run_completion stay ``next_fire`` NULL throughout (the 0108 reactive arm).
 
     ``source`` / ``action`` are replaced WHOLESALE when provided (a
     cron↔one-shot or sandbox↔wake conversion is just a different object —
@@ -279,15 +273,14 @@ async def update_trigger(
     - Source replaced on a row whose final state is enabled: recomputes
       ``next_fire`` (no cap re-check — an already-enabled row holds its
       slot), with the same past-``fire_at`` rejection.
-    - Healing (#957): an already-enabled row found with ``next_fire`` NULL has
-      ``next_fire`` recomputed from the merged source on ANY update whose final
-      state is enabled — no cap re-check, no failure-counter reset;
-      run_completion rows stay NULL by design. This recompute is the SOLE
-      producer of a non-NULL ``next_fire`` for such a row; #940 / PR #950 only
-      broadened the NOTIFY gate and lowered the heartbeat so the scheduler
-      REACTS to the re-armed schedule. Invariant: an enabled schedulable
-      trigger always has non-NULL ``next_fire``.
     - action / metadata / no-op: ``next_fire`` untouched.
+
+    The invariant "an enabled schedulable (cron / one_shot) trigger always has
+    non-NULL ``next_fire``" is enforced by the ``triggers_schedulable_enabled_armed``
+    CHECK (migration 0130), not by a runtime heal — the #925 incident state
+    (manual ``UPDATE … SET enabled=true`` leaving ``next_fire`` NULL) is
+    unrepresentable, so it fails at the offending write rather than being
+    silently corrected later.
 
     ``updated_at`` always bumps (handled in the query layer) so a no-op
     PATCH is still visible to ``updated_at > since`` pollers.
@@ -323,36 +316,19 @@ async def update_trigger(
 
         next_fire: datetime | None | EllipsisType = ...  # ... = leave alone
         reenabled = new_enabled and not current.enabled
-        # Healing (#957): re-arm next_fire when the post-update state is enabled
-        # but next_fire is NULL — the state a manual `UPDATE … SET enabled=true`
-        # (the #925 incident anti-pattern) leaves a cron row in. heal_next_fire
-        # means "this is a cron row whose next_fire is NULL and therefore needs
-        # re-arming"; the enabled requirement is applied at the use site (the
-        # `elif new_enabled and (...)` gate below), so this flag is True for BOTH
-        # a genuine re-enable (a disabled row has next_fire=NULL) and a pure heal
-        # of an already-enabled row — it does not by itself distinguish them. The
-        # per-account cap re-check and the consecutive-failures reset are gated
-        # SEPARATELY on `not current.enabled` / `reenabled` below, so they apply
-        # only to a genuine false->true re-enable, never to a pure heal.
-        #
-        # Scoped to CRON sources only: the invariant is "an enabled CRON trigger
-        # always has non-NULL next_fire". One-shot rows (fire-and-delete; the
-        # existing past-fire_at guard owns their re-arm contract) and run_completion
-        # rows (NULL by design) are intentionally NOT healed — re-arming them
-        # requires an explicit source. This keeps a metadata-only or enabled=true
-        # PATCH on a stale one-shot from raising a spurious 422. (When a source IS
-        # provided, the source_provided branch below handles every source type
-        # unchanged.) This recompute is the SOLE producer of a non-NULL next_fire
-        # for an incident-state row (enabled=true, next_fire=NULL): the scheduler's
-        # claim/MIN queries both filter `next_fire IS NOT NULL`, so such a row never
-        # fires and nothing else re-arms it. #940 / PR #950 is not a reconcile — it
-        # only broadened the NOTIFY gate and lowered the heartbeat so the scheduler
-        # REACTS to the re-armed next_fire this heal writes.
-        heal_next_fire = current.next_fire is None and isinstance(current.source, CronSource)
+        # The arming invariant ("an enabled schedulable trigger always has
+        # non-NULL next_fire") is enforced by the triggers_schedulable_enabled_armed
+        # CHECK (migration 0130), so there is no heal disjunct here: the only
+        # producers of a NULL-next_fire-on-enabled row (the #925 manual
+        # `UPDATE … SET enabled=true`) are now rejected at write time. We recompute
+        # next_fire only on a genuine re-enable (false->true) or a source replace
+        # on an already-enabled row; the per-account cap re-check and the
+        # consecutive-failures reset are gated on `not current.enabled` / `reenabled`
+        # below, so they apply only to a genuine re-enable.
         if not new_enabled and current.enabled:
             # Disabling: clear next_fire.
             next_fire = None
-        elif new_enabled and (source_provided or not current.enabled or heal_next_fire):
+        elif new_enabled and (source_provided or not current.enabled):
             # Re-enabling, or replacing the source on a row whose final
             # state is enabled: recompute next_fire from the merged source.
             if not current.enabled:
@@ -439,8 +415,10 @@ async def list_account_triggers(
     that legitimately holds the whole account (a workflow run, dispatched
     account-scoped to ``run.account_id``) enumerates every enabled trigger and
     reads each ``next_fire`` to catch the #925 zombie class. A thin
-    pool-acquiring wrapper — no ``next_fire`` heal here (this is a READ; the heal
-    lives on the write path in ``update_trigger``).
+    pool-acquiring wrapper — a READ only; the #925 zombie state is now
+    unrepresentable at write time (the ``triggers_schedulable_enabled_armed``
+    CHECK, migration 0130), so this sweep is a defense-in-depth liveness read,
+    not a corrective.
     """
     async with pool.acquire() as conn:
         return await queries.list_account_triggers(

@@ -4,14 +4,16 @@ a real Postgres.
 This is the filed blocking precondition for the ops-agent O7 trigger-liveness
 auditor: a workflow run in an account must be able to enumerate EVERY enabled
 trigger across that account (each sentinel on its own session) and read each
-one's ``next_fire`` — the read path that lets it catch the #925 zombie class
-(``enabled=true, next_fire=NULL`` cron rows the scheduler filters out and never
-fires).
+one's ``next_fire`` — a defense-in-depth liveness read. (#1678 made the #925
+zombie class ``enabled=true, next_fire=NULL`` cron rows unrepresentable at write
+time via the ``triggers_schedulable_enabled_armed`` CHECK, so the read is now a
+liveness backstop, not the sole corrective.)
 
 Owns the account-scope obligations:
 - account-wide: triggers from *different* sessions in the account are all seen.
-- the #925 zombie is visible: an ``enabled=true, next_fire=NULL`` cron row is
-  returned (with ``next_fire=None``) — the whole point of the read.
+- the #925 zombie is now unrepresentable: the raw ``UPDATE`` that forced an
+  enabled cron row to ``next_fire=NULL`` is rejected by the schedulable arm
+  (#1678) — there is no zombie for the read to surface.
 - archived-session rows are filtered (they can never fire, same as the
   scheduler's claim/MIN queries).
 - ``enabled_only`` (default True) excludes disabled rows; False includes them.
@@ -94,22 +96,28 @@ async def test_account_wide_across_sessions(pool: asyncpg.Pool[Any]) -> None:
     assert names == {"t1", "t2"}
 
 
-async def test_zombie_next_fire_null_is_visible(pool: asyncpg.Pool[Any]) -> None:
-    """The #925 zombie the whole feature exists to surface: an enabled cron row
-    forced to ``next_fire=NULL`` is returned (invisible to the scheduler, but the
-    auditor MUST see it to alarm)."""
+async def test_zombie_next_fire_null_is_unrepresentable(pool: asyncpg.Pool[Any]) -> None:
+    """The #925 zombie the feature originally surfaced is now unrepresentable
+    (#1678): the raw ``UPDATE triggers SET next_fire = NULL`` that forced an
+    enabled cron row into the incident state is rejected at write time by the
+    ``triggers_schedulable_enabled_armed`` CHECK — so there is no zombie for the
+    auditor read to surface. The read remains a defense-in-depth liveness
+    backstop; the enumeration itself is exercised by the tests above."""
     _, _, s = await seed_agent_env_session(pool, account_id=ACC, prefix="z")
     tid = await _add(pool, s.id, account_id=ACC, name="zombie")
-    # Simulate the #925 incident state directly: enabled=true but next_fire NULL,
-    # the state nothing re-arms on its own and the scheduler filters out.
+    # The #925 incident-recovery anti-pattern (enabled cron + next_fire NULL) now
+    # fails loudly at the offending write instead of parking a dead-but-alive row.
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE triggers SET next_fire = NULL WHERE id = $1", tid)
-        echoes = await queries.list_account_triggers(conn, account_id=ACC)
+        with pytest.raises(asyncpg.CheckViolationError, match="schedulable_enabled_armed"):
+            await conn.execute("UPDATE triggers SET next_fire = NULL WHERE id = $1", tid)
 
-    zombie = next(e for e in echoes if e.name == "zombie")
-    assert zombie.enabled is True
-    assert zombie.next_fire is None  # the zombie signature, surfaced to the auditor
-    assert zombie.source_kind == "cron"  # schedulable → next_fire non-null invariant applies
+    # The row is untouched — still armed, still enabled, still enumerable.
+    async with pool.acquire() as conn:
+        echoes = await queries.list_account_triggers(conn, account_id=ACC)
+    row = next(e for e in echoes if e.name == "zombie")
+    assert row.enabled is True
+    assert row.next_fire is not None  # the arm held: no zombie was written
+    assert row.source_kind == "cron"
 
 
 async def test_archived_session_rows_are_filtered(pool: asyncpg.Pool[Any]) -> None:
