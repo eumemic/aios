@@ -11,3 +11,4 @@ selection_state/
 # Cost-map raw state (full transcripts, per-cell checkpoints) — local only; the
 # committed deliverables are results/cost_routing_map_2026-07.md + the matrix JSON.
 results/cost_map_state/
+results/cost_map_state_snap/
