@@ -373,6 +373,26 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
             """
         )
 
+        # A single unharvested ``model_workflow_park`` span (#1707). This makes
+        # the migration-0131 park partial index non-empty on the seeded fixture,
+        # so the cross-session crash-recovery scan
+        # (``find_unharvested_model_dispatch_parks``) has a highly-selective index
+        # to seek into. With the index empty, a cost-based planner can (version-
+        # dependently, e.g. PG16) still pick a ``Seq Scan on events`` because the
+        # empty partial index and a full scan cost ~the same; one real matching
+        # row makes the partial index unambiguously cheaper than scanning the
+        # whole event log, on every supported Postgres version. Deliberately left
+        # unharvested (no ``model_workflow_harvest``/``harvest_end`` span for its
+        # ``run_id``) so it survives both ``NOT EXISTS`` anti-joins and the scan
+        # returns it — exercising the exact production plan the test EXPLAINs.
+        await conn.execute(
+            "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
+            "VALUES ('ev_park_sess_perf_000', 'sess_perf_000', 100000, 'span', "
+            "$1::jsonb, NULL, 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING",
+            json.dumps({"event": "model_workflow_park", "run_id": "run_park_perf_000"}),
+        )
+
         # ANALYZE so the planner has fresh stats matching the fixture.
         await conn.execute("ANALYZE events")
         await conn.execute("ANALYZE sessions")
