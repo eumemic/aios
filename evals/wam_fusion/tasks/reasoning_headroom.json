@@ -1,0 +1,706 @@
+{
+  "_comment": "Phase A REASONING-HEADROOM tier — 140 checkable-answer items engineered to BREAK the ceiling effect that nulled prior trick-riddle corpora (which hit 100% single-model accuracy). These are genuinely hard multi-step problems drawn from six categories that reliably trip frontier LLMs: (1) multi-step arithmetic word problems with large numbers / compound rates / multi-stage percentages, (2) combinatorics & careful case-counting (permutations-with-restrictions, inclusion-exclusion, lattice paths, derangements, make-change, constrained seating), (3) number theory (modular exponentiation, last-k-digits, divisor counts, CRT, Legendre valuations, base conversion, digit sums), (4) multi-constraint logic / age / calendar-date arithmetic with a unique numeric answer, (5) sequences / recurrences / finite & infinite series, (6) probability with EXACT reduced-fraction answers. EVERY canonical answer was produced AND independently re-verified by from-scratch Python computation (brute-force / exact formula) — 140/140 verified, 0 mismatches. Answers are single integers (107), reduced fractions (25), short decimals (5), or a single weekday/month word (3), chosen for robust programmatic scoring (ANSWER: <value>; the scorer bridges fraction<->decimal, strips $/,/% and units, and normalizes word case). Calibrated to leave real headroom: a strong single frontier model is expected to miss a meaningful fraction, so fusion has room to help.",
+  "answer_format_instruction": "Solve the problem carefully, step by step. Give exact answers: integers as integers, fractions in lowest terms (like 5/18), decimals rounded as the problem asks. Then end your reply with a final line of EXACTLY the form:  ANSWER: <value>   (just the value — no units, no words, no extra text).",
+  "items": [
+    {
+      "id": "r001",
+      "prompt": "In how many ways can 8 letters, each addressed to a different one of 8 people, be placed into 8 addressed envelopes so that NO letter goes into its correct envelope?",
+      "answer": "14833"
+    },
+    {
+      "id": "r002",
+      "prompt": "In how many ways can 6 distinct people be arranged in a row so that two specific people (call them A and B) are never seated next to each other?",
+      "answer": "480"
+    },
+    {
+      "id": "r003",
+      "prompt": "A grid path goes from (0,0) to (6,5), moving only one unit right (+1 in x) or one unit up (+1 in y) at each step. How many such paths do NOT pass through the point (3,2)?",
+      "answer": "262"
+    },
+    {
+      "id": "r004",
+      "prompt": "How many ways are there to make 63 cents using any number of pennies (1c), nickels (5c), dimes (10c), and quarters (25c)?",
+      "answer": "73"
+    },
+    {
+      "id": "r005",
+      "prompt": "How many strings of length 5 can be formed from the letters A, B, C (repetition allowed) such that no two adjacent letters are the same?",
+      "answer": "48"
+    },
+    {
+      "id": "r006",
+      "prompt": "A committee of 4 people is chosen from 7 men and 5 women. How many committees contain at least 2 women?",
+      "answer": "285"
+    },
+    {
+      "id": "r007",
+      "prompt": "How many distinct arrangements are there of all the letters of the word MISSISSIPPI?",
+      "answer": "34650"
+    },
+    {
+      "id": "r008",
+      "prompt": "How many subsets of the set {1, 2, 3, ..., 12} (including the empty set) have a sum of elements that is divisible by 4?",
+      "answer": "1024"
+    },
+    {
+      "id": "r009",
+      "prompt": "In how many ways can 8 distinct people be seated around a circular table (arrangements that differ only by rotation are considered the same) if two specific people must sit next to each other?",
+      "answer": "1440"
+    },
+    {
+      "id": "r010",
+      "prompt": "In how many ways can 10 identical balls be distributed into 4 distinct boxes so that each box contains at least one ball?",
+      "answer": "84"
+    },
+    {
+      "id": "r011",
+      "prompt": "How many 4-digit positive integers have their digits strictly increasing from left to right (e.g., 1258 qualifies, 1225 does not)?",
+      "answer": "126"
+    },
+    {
+      "id": "r012",
+      "prompt": "A path goes from (0,0) to (4,4) using only unit steps right (R) or up (U). How many such paths never rise above the line y = x (i.e., after every step, y <= x)?",
+      "answer": "14"
+    },
+    {
+      "id": "r013",
+      "prompt": "In how many ways can 3 numbers be chosen from {1, 2, ..., 20} such that no two of the chosen numbers are consecutive integers?",
+      "answer": "816"
+    },
+    {
+      "id": "r014",
+      "prompt": "How many binary strings of length 10 contain no occurrence of three consecutive 1s?",
+      "answer": "504"
+    },
+    {
+      "id": "r015",
+      "prompt": "How many functions from a set of 5 elements onto a set of 3 elements are surjective (i.e., every element of the 3-element codomain is hit)?",
+      "answer": "150"
+    },
+    {
+      "id": "r016",
+      "prompt": "What are the last two digits of 7^2023? (Give the two-digit number, e.g. 07 would be written as 7.)",
+      "answer": "43"
+    },
+    {
+      "id": "r017",
+      "prompt": "What is the remainder when 3^1000 is divided by 1000?",
+      "answer": "1"
+    },
+    {
+      "id": "r018",
+      "prompt": "How many positive divisors does 720 have?",
+      "answer": "30"
+    },
+    {
+      "id": "r019",
+      "prompt": "Find the smallest positive integer x such that x leaves remainder 2 when divided by 3, remainder 3 when divided by 5, and remainder 2 when divided by 7.",
+      "answer": "23"
+    },
+    {
+      "id": "r020",
+      "prompt": "What is the sum of all positive divisors of 360 (including 1 and 360 itself)?",
+      "answer": "1170"
+    },
+    {
+      "id": "r021",
+      "prompt": "What is the greatest common divisor (GCD) of 1274 and 1029?",
+      "answer": "49"
+    },
+    {
+      "id": "r022",
+      "prompt": "What is the least common multiple (LCM) of 12, 18, 30, and 45?",
+      "answer": "180"
+    },
+    {
+      "id": "r023",
+      "prompt": "What is the units (last) digit of 2^100 + 3^100?",
+      "answer": "7"
+    },
+    {
+      "id": "r024",
+      "prompt": "What is the sum of the digits of 2^50?",
+      "answer": "76"
+    },
+    {
+      "id": "r025",
+      "prompt": "How many integers from 1 to 1000 inclusive are divisible by neither 6 nor 10?",
+      "answer": "767"
+    },
+    {
+      "id": "r026",
+      "prompt": "Convert the decimal number 1729 to base 7. Give the answer as the resulting digit string (a number in base 7).",
+      "answer": "5020"
+    },
+    {
+      "id": "r027",
+      "prompt": "How many trailing zeros does 100! (100 factorial) have?",
+      "answer": "24"
+    },
+    {
+      "id": "r028",
+      "prompt": "What is the remainder when 15^15 is divided by 13?",
+      "answer": "8"
+    },
+    {
+      "id": "r029",
+      "prompt": "How many positive integers from 1 to 100 inclusive are relatively prime to 100 (share no common factor greater than 1 with 100)?",
+      "answer": "40"
+    },
+    {
+      "id": "r030",
+      "prompt": "What is the largest integer k such that 3^k divides 50! (50 factorial) exactly?",
+      "answer": "22"
+    },
+    {
+      "id": "r031",
+      "prompt": "What is the smallest positive integer that is divisible by every integer from 1 to 10 inclusive?",
+      "answer": "2520"
+    },
+    {
+      "id": "r032",
+      "prompt": "What are the last two digits of 13^99? (Give the two-digit result as a number.)",
+      "answer": "77"
+    },
+    {
+      "id": "r033",
+      "prompt": "Among the integers from 1 to 200 inclusive, how many are a perfect square, a perfect cube, or both?",
+      "answer": "17"
+    },
+    {
+      "id": "r034",
+      "prompt": "Find the smallest 3-digit number the product of whose digits is 24 and the sum of whose digits is 11.",
+      "answer": "146"
+    },
+    {
+      "id": "r035",
+      "prompt": "What is the units digit of 7^(7^7) (that is, 7 raised to the power 7^7)?",
+      "answer": "3"
+    },
+    {
+      "id": "r036",
+      "prompt": "Pipe A alone fills a tank in 12 hours, pipe B alone fills it in 18 hours, and a drain C alone empties a full tank in 24 hours. If the empty tank has all three opened at once, how many hours does it take to fill the tank? Give your answer as a reduced fraction.",
+      "answer": "72/7"
+    },
+    {
+      "id": "r037",
+      "prompt": "An item originally priced at $650 has its price increased by 20%, then the new price is discounted by 15%, and finally an 8% sales tax is added to that. What is the final price in dollars? Round to the nearest cent.",
+      "answer": "716.04"
+    },
+    {
+      "id": "r038",
+      "prompt": "A container has 40 liters of a solution that is 30% acid. How many liters of PURE acid must be added so that the resulting mixture is 50% acid?",
+      "answer": "16"
+    },
+    {
+      "id": "r039",
+      "prompt": "A factory makes 1,375 widgets per day, operating 6 days a week for 48 weeks. Exactly 12% of all widgets produced are defective and scrapped with no revenue. Each non-defective widget sells for $23. What is the total revenue in dollars?",
+      "answer": "8015040"
+    },
+    {
+      "id": "r040",
+      "prompt": "A school has 1200 students. 55% of them are girls. Of the girls, 40% play a sport. Of the girls who play a sport, 25% play soccer. How many girls play soccer?",
+      "answer": "66"
+    },
+    {
+      "id": "r041",
+      "prompt": "A train travels 342 km at a constant 76 km/h, then stops for 35 minutes, then travels a further 285 km at a constant 95 km/h. What is the total elapsed time for the journey in minutes?",
+      "answer": "485"
+    },
+    {
+      "id": "r042",
+      "prompt": "$8000 is invested at 6% interest compounded annually. What is the value of the investment in dollars after 3 years? Round to the nearest cent.",
+      "answer": "9528.13"
+    },
+    {
+      "id": "r043",
+      "prompt": "A merchant buys 240 items at $18 each. She sells 60% of them at $30 each and the remaining items at $22 each. What is her total profit in dollars?",
+      "answer": "2112"
+    },
+    {
+      "id": "r044",
+      "prompt": "The average of 15 numbers is 42. If the number 30 is removed from the set, what is the average of the remaining 14 numbers? Give your answer as a reduced fraction.",
+      "answer": "300/7"
+    },
+    {
+      "id": "r045",
+      "prompt": "Two cars start 480 km apart and drive directly toward each other. One travels at 65 km/h and the other at 55 km/h. After how many hours do they meet?",
+      "answer": "4"
+    },
+    {
+      "id": "r046",
+      "prompt": "A car gets 32 miles per gallon. Gas costs $3.85 per gallon. What is the total cost of gas, in dollars, for a 1,472-mile trip? Round to the nearest cent.",
+      "answer": "177.1"
+    },
+    {
+      "id": "r047",
+      "prompt": "Compute the exact product 6789 × 4321.",
+      "answer": "29335269"
+    },
+    {
+      "id": "r048",
+      "prompt": "350 tickets are sold: 200 adult tickets at $45 each and 150 child tickets at $28 each. A 12% group discount is then applied to the combined total. How much money is collected in dollars? Round to the nearest cent.",
+      "answer": "11616"
+    },
+    {
+      "id": "r049",
+      "prompt": "A tank holds 6,300 liters. It leaks at 45 liters per hour for the first 8 hours, after which the leak is reduced to 18 liters per hour. How many liters remain in the tank after 20 total hours (assuming it doesn't run empty)?",
+      "answer": "5724"
+    },
+    {
+      "id": "r050",
+      "prompt": "After receiving a 25% raise, an employee's salary is $52,500. What was the original salary in dollars?",
+      "answer": "42000"
+    },
+    {
+      "id": "r051",
+      "prompt": "12 workers can build a wall in 15 days working 8 hours per day. Working at the same rate, how many days will it take 9 workers working 10 hours per day to build an identical wall?",
+      "answer": "16"
+    },
+    {
+      "id": "r052",
+      "prompt": "A stadium has 40 rows of seats. The first row has 22 seats, and each subsequent row has 4 more seats than the row before it. What is the total number of seats in the stadium?",
+      "answer": "4000"
+    },
+    {
+      "id": "r053",
+      "prompt": "1000 apples are packed into boxes holding 24 apples each. Any apples that don't fill a complete box are then packed into bags of 5. Any apples remaining after that are eaten. How many apples are eaten?",
+      "answer": "1"
+    },
+    {
+      "id": "r054",
+      "prompt": "A stock price rises 10%, then falls 20%, then rises 25%, in that order. What is the net percentage change in the stock price over the three moves? Give the answer as a percentage (a number; positive for a gain).",
+      "answer": "10"
+    },
+    {
+      "id": "r055",
+      "prompt": "A charity raises $284,760 and divides it equally among 8 shelters. Each shelter then spends 35% of its share on food. How much does a single shelter spend on food, in dollars? Round to the nearest cent.",
+      "answer": "12458.25"
+    },
+    {
+      "id": "r056",
+      "prompt": "Two fair six-sided dice are rolled. What is the probability that the sum of the two dice is 7 or 11? Give your answer as a reduced fraction.",
+      "answer": "2/9"
+    },
+    {
+      "id": "r057",
+      "prompt": "Two cards are drawn without replacement from a standard 52-card deck. What is the probability that both cards are hearts? Give your answer as a reduced fraction.",
+      "answer": "1/17"
+    },
+    {
+      "id": "r058",
+      "prompt": "A fair coin is flipped 5 times. What is the probability of getting exactly 3 heads? Give your answer as a reduced fraction.",
+      "answer": "5/16"
+    },
+    {
+      "id": "r059",
+      "prompt": "An urn contains 4 red and 6 blue balls. Three balls are drawn without replacement. What is the probability that exactly 2 of them are red? Give your answer as a reduced fraction.",
+      "answer": "3/10"
+    },
+    {
+      "id": "r060",
+      "prompt": "Three people each independently pick a random day of the week (each of the 7 days equally likely). What is the probability that all three pick different days? Give your answer as a reduced fraction.",
+      "answer": "30/49"
+    },
+    {
+      "id": "r061",
+      "prompt": "A fair six-sided die is rolled repeatedly until a 6 appears. What is the probability that the first 6 appears on exactly the third roll? Give your answer as a reduced fraction.",
+      "answer": "25/216"
+    },
+    {
+      "id": "r062",
+      "prompt": "Two fair six-sided dice are rolled. What is the probability that the product of the two numbers is even? Give your answer as a reduced fraction.",
+      "answer": "3/4"
+    },
+    {
+      "id": "r063",
+      "prompt": "Three distinct numbers are chosen at random from {1, 2, ..., 10}. What is the probability that their sum is even? Give your answer as a reduced fraction.",
+      "answer": "1/2"
+    },
+    {
+      "id": "r064",
+      "prompt": "A family has two children. Given that at least one of them is a boy, what is the probability that both children are boys? (Assume each child is independently a boy or girl with equal probability.) Give your answer as a reduced fraction.",
+      "answer": "1/3"
+    },
+    {
+      "id": "r065",
+      "prompt": "Two cards are drawn without replacement from a standard 52-card deck (which has 4 aces). What is the probability that at least one of the two cards is an ace? Give your answer as a reduced fraction.",
+      "answer": "33/221"
+    },
+    {
+      "id": "r066",
+      "prompt": "A fair coin is flipped 4 times. What is the probability that no two consecutive flips are both heads? Give your answer as a reduced fraction.",
+      "answer": "1/2"
+    },
+    {
+      "id": "r067",
+      "prompt": "A spinner has 4 equal sections numbered 1 to 4. It is spun twice. What is the probability that the first spin shows a smaller number than the second? Give your answer as a reduced fraction.",
+      "answer": "3/8"
+    },
+    {
+      "id": "r068",
+      "prompt": "Three fair six-sided dice are rolled. What is the probability that all three dice show different values? Give your answer as a reduced fraction.",
+      "answer": "5/9"
+    },
+    {
+      "id": "r069",
+      "prompt": "A bag contains 5 white and 3 black marbles. Two marbles are drawn at random without replacement. What is the probability that both marbles are the same color? Give your answer as a reduced fraction.",
+      "answer": "13/28"
+    },
+    {
+      "id": "r070",
+      "prompt": "5 people are seated in a random order in a row of 5 chairs. What is the probability that two specific people end up sitting next to each other? Give your answer as a reduced fraction.",
+      "answer": "2/5"
+    },
+    {
+      "id": "r071",
+      "prompt": "A father is currently 4 times as old as his son. In 20 years, the father will be twice as old as his son. How old is the son now?",
+      "answer": "10"
+    },
+    {
+      "id": "r072",
+      "prompt": "A two-digit number is 18 greater than the number formed by reversing its digits, and its digits sum to 12. What is the two-digit number?",
+      "answer": "75"
+    },
+    {
+      "id": "r073",
+      "prompt": "On an island, knights always tell the truth and knaves always lie. You meet three inhabitants A, B, and C. A says: 'Exactly one of us three is a knave.' B says: 'Exactly two of us three are knaves.' C says: 'All three of us are knaves.' How many of the three are knaves?",
+      "answer": "2"
+    },
+    {
+      "id": "r074",
+      "prompt": "January 1, 2025 falls on a Wednesday. What day of the week is March 15, 2025? Give the full name of the day.",
+      "answer": "Saturday"
+    },
+    {
+      "id": "r075",
+      "prompt": "How many days are there strictly between February 10, 2024 and May 3, 2024 (counting neither endpoint)? Note that 2024 is a leap year.",
+      "answer": "82"
+    },
+    {
+      "id": "r076",
+      "prompt": "Three numbers have a sum of 60. The second number is twice the first, and the third is three times the first. What is the value of the largest of the three numbers?",
+      "answer": "30"
+    },
+    {
+      "id": "r077",
+      "prompt": "A piggy bank contains only dimes (10 cents) and quarters (25 cents). There are 32 coins in all, worth a total of $5.15. How many quarters are in the bank?",
+      "answer": "13"
+    },
+    {
+      "id": "r078",
+      "prompt": "If today is Monday, what day of the week will it be 100 days from now? Give the full name of the day.",
+      "answer": "Wednesday"
+    },
+    {
+      "id": "r079",
+      "prompt": "Alice is 3 years older than Bob. In 5 years, the sum of their ages will be 45. How old is Alice now?",
+      "answer": "19"
+    },
+    {
+      "id": "r080",
+      "prompt": "Four runners A, B, C, D finish a race in distinct positions (1st through 4th). A finished before B. C finished last. D finished before A. B did not finish 2nd. In which position (1, 2, 3, or 4) did A finish?",
+      "answer": "2"
+    },
+    {
+      "id": "r081",
+      "prompt": "2024 is a leap year. What is the ordinal day number of December 31, 2024 within that year (January 1 = day 1)?",
+      "answer": "366"
+    },
+    {
+      "id": "r082",
+      "prompt": "The sum of 5 consecutive integers is 155. What is the largest of these 5 integers?",
+      "answer": "33"
+    },
+    {
+      "id": "r083",
+      "prompt": "What is the measure, in degrees, of the smaller angle between the hour hand and the minute hand of a clock at exactly 3:40?",
+      "answer": "130"
+    },
+    {
+      "id": "r084",
+      "prompt": "A two-digit number has digits that sum to 11. When its digits are reversed, the resulting number is 45 greater than the original. What is the original two-digit number?",
+      "answer": "38"
+    },
+    {
+      "id": "r085",
+      "prompt": "Counting January as month 1, February as month 2, and so on (wrapping around after December back to January), which month is the 30th month? Give the month name.",
+      "answer": "June"
+    },
+    {
+      "id": "r086",
+      "prompt": "A sequence is defined by a(1) = 2 and a(n) = 3*a(n-1) - 1 for n > 1. What is a(6)?",
+      "answer": "365"
+    },
+    {
+      "id": "r087",
+      "prompt": "A sequence is defined by b(1) = 3, b(2) = 5, and b(n) = b(n-1) + b(n-2) for n > 2. What is b(10)?",
+      "answer": "233"
+    },
+    {
+      "id": "r088",
+      "prompt": "Compute the exact sum 1/(1·2) + 1/(2·3) + 1/(3·4) + ... + 1/(49·50). Give your answer as a reduced fraction.",
+      "answer": "49/50"
+    },
+    {
+      "id": "r089",
+      "prompt": "What is the sum of the first 30 positive odd numbers (1 + 3 + 5 + ... )?",
+      "answer": "900"
+    },
+    {
+      "id": "r090",
+      "prompt": "Compute the sum of the first 12 terms of the geometric series 3 + 6 + 12 + 24 + ... (each term is double the previous).",
+      "answer": "12285"
+    },
+    {
+      "id": "r091",
+      "prompt": "A sequence is defined by c(1) = 1 and c(n) = c(n-1) + (2n - 1) for n > 1. What is c(15)?",
+      "answer": "225"
+    },
+    {
+      "id": "r092",
+      "prompt": "In an arithmetic sequence, the first term is 7 and the common difference is 4. What is the 25th term?",
+      "answer": "103"
+    },
+    {
+      "id": "r093",
+      "prompt": "Compute the value of the alternating sum 1 - 2 + 3 - 4 + 5 - 6 + ... + 99 - 100.",
+      "answer": "-50"
+    },
+    {
+      "id": "r094",
+      "prompt": "What is the sum of the squares of the integers from 1 to 20 (that is, 1² + 2² + ... + 20²)?",
+      "answer": "2870"
+    },
+    {
+      "id": "r095",
+      "prompt": "Let d(n) denote the number of positive divisors of n. Compute d(1) + d(2) + d(3) + ... + d(12).",
+      "answer": "35"
+    },
+    {
+      "id": "r096",
+      "prompt": "A sequence is defined by t(1) = 5 and t(n) = (7*t(n-1) + 3) mod 100 for n > 1. What is t(5)?",
+      "answer": "5"
+    },
+    {
+      "id": "r097",
+      "prompt": "What is the sum of all positive multiples of 7 that are less than or equal to 500?",
+      "answer": "17892"
+    },
+    {
+      "id": "r098",
+      "prompt": "The nth triangular number is 1 + 2 + ... + n. What is the 20th triangular number?",
+      "answer": "210"
+    },
+    {
+      "id": "r099",
+      "prompt": "A sequence is defined by a(1) = 1, a(2) = 1, and a(n) = 2*a(n-1) + a(n-2) for n > 2. What is a(8)?",
+      "answer": "239"
+    },
+    {
+      "id": "r100",
+      "prompt": "Compute the sum 1 + 2 + 4 + 8 + 16 + ... + 512 (all powers of 2 from 2^0 through 2^9).",
+      "answer": "1023"
+    },
+    {
+      "id": "r101",
+      "prompt": "How many distinct arrangements of all the letters of the word BOOKKEEPER have no two E's adjacent to each other?",
+      "answer": "70560"
+    },
+    {
+      "id": "r102",
+      "prompt": "In how many ways can 10 distinct people be split into two teams of 5, where the two teams are not labeled (i.e., swapping the two teams gives the same division)?",
+      "answer": "126"
+    },
+    {
+      "id": "r103",
+      "prompt": "Consider all 720 arrangements of the digits 1,2,3,4,5,6 into a 6-digit number (each digit used once). In how many of them is NO digit in its natural position — that is, the digit in position 1 is not 1, the digit in position 2 is not 2, and so on?",
+      "answer": "265"
+    },
+    {
+      "id": "r104",
+      "prompt": "A monotonic lattice path goes from (0,0) to (5,5), each step moving one unit right or one unit up. How many such paths avoid BOTH of the points (2,2) and (3,1)?",
+      "answer": "72"
+    },
+    {
+      "id": "r105",
+      "prompt": "How many solutions in non-negative integers does x1 + x2 + x3 + x4 = 20 have, subject to the constraint that each xi is at most 8?",
+      "answer": "375"
+    },
+    {
+      "id": "r106",
+      "prompt": "Three married couples (6 people total) sit in a row of 6 seats. In how many arrangements does every couple sit together (each pair of spouses occupies adjacent seats)?",
+      "answer": "48"
+    },
+    {
+      "id": "r107",
+      "prompt": "In how many ways can a 2×10 rectangular board be completely tiled by 1×2 dominoes (each domino covers two adjacent squares, placed either horizontally or vertically)?",
+      "answer": "89"
+    },
+    {
+      "id": "r108",
+      "prompt": "What are the last three digits of 7^999? Give the three-digit result as a number.",
+      "answer": "143"
+    },
+    {
+      "id": "r109",
+      "prompt": "What is the sum of the decimal digits of 100! (100 factorial)?",
+      "answer": "648"
+    },
+    {
+      "id": "r110",
+      "prompt": "How many integers from 1 to 10000 inclusive are divisible by 3 or by 5 (or both), but are NOT divisible by 7?",
+      "answer": "4001"
+    },
+    {
+      "id": "r111",
+      "prompt": "What is the remainder when 2^1000 is divided by 1000?",
+      "answer": "376"
+    },
+    {
+      "id": "r112",
+      "prompt": "What is the smallest positive integer n such that n! (n factorial) is divisible by 1,000,000?",
+      "answer": "25"
+    },
+    {
+      "id": "r113",
+      "prompt": "How many trailing zeros does 50! (50 factorial) have when written in base 12?",
+      "answer": "22"
+    },
+    {
+      "id": "r114",
+      "prompt": "Find the smallest positive integer x satisfying all three: x ≡ 1 (mod 4), x ≡ 2 (mod 9), and x ≡ 3 (mod 25).",
+      "answer": "353"
+    },
+    {
+      "id": "r115",
+      "prompt": "What is the sum of all the positive divisors of 10,000 that are perfect squares?",
+      "answer": "13671"
+    },
+    {
+      "id": "r116",
+      "prompt": "Three fair six-sided dice are rolled. What is the probability that their sum is exactly 10? Give your answer as a reduced fraction.",
+      "answer": "1/8"
+    },
+    {
+      "id": "r117",
+      "prompt": "A 5-card hand is dealt from a standard 52-card deck. What is the probability that all 5 cards are of the same suit? Give your answer as a reduced fraction.",
+      "answer": "33/16660"
+    },
+    {
+      "id": "r118",
+      "prompt": "A bag contains 3 gold and 5 silver coins. Three coins are drawn at random without replacement. What is the probability that at least one gold coin is drawn? Give your answer as a reduced fraction.",
+      "answer": "23/28"
+    },
+    {
+      "id": "r119",
+      "prompt": "Box A contains 2 red and 3 blue balls; Box B contains 4 red and 1 blue ball. A box is chosen at random (each equally likely) and one ball is drawn from it. Given that the drawn ball is red, what is the probability it came from Box B? Give your answer as a reduced fraction.",
+      "answer": "2/3"
+    },
+    {
+      "id": "r120",
+      "prompt": "Four fair six-sided dice are rolled. What is the probability that at least two of them show the same value? Give your answer as a reduced fraction.",
+      "answer": "13/18"
+    },
+    {
+      "id": "r121",
+      "prompt": "A worker earns $18/hour for the first 40 hours in a week, 1.5 times that rate for the next 8 hours, and 2 times the base rate for any hours beyond 48. She works 52 hours. Then 22% of her gross pay is withheld. What is her take-home pay in dollars? Round to the nearest cent.",
+      "answer": "842.4"
+    },
+    {
+      "id": "r122",
+      "prompt": "A recipe for 6 servings requires 450 grams of flour. A baker wants to make 15 servings and buys 20% extra flour to allow for spillage. How many grams of flour does the baker need in total?",
+      "answer": "1350"
+    },
+    {
+      "id": "r123",
+      "prompt": "A town's population is 25,000 and grows by 8% each year. What is the population after 4 years? Round to the nearest whole person.",
+      "answer": "34012"
+    },
+    {
+      "id": "r124",
+      "prompt": "A 9,000-liter tank is filled at 250 liters per minute for the first 12 minutes, after which the rate drops to 150 liters per minute. How many total minutes does it take to completely fill the tank?",
+      "answer": "52"
+    },
+    {
+      "id": "r125",
+      "prompt": "A car travels at a constant 90 kilometers per hour. What is its speed in meters per second?",
+      "answer": "25"
+    },
+    {
+      "id": "r126",
+      "prompt": "A sequence is defined by a(1)=1, a(2)=2, a(3)=3, and a(n) = a(n-1) + a(n-2) - a(n-3) for n > 3. What is a(20)?",
+      "answer": "20"
+    },
+    {
+      "id": "r127",
+      "prompt": "Start with the number 27. Repeatedly apply the rule: if the number is even, divide it by 2; if it is odd, multiply by 3 and add 1. How many steps does it take to first reach 1?",
+      "answer": "111"
+    },
+    {
+      "id": "r128",
+      "prompt": "A 3-digit number is called an Armstrong number if it equals the sum of the cubes of its digits (for example, 153 = 1³ + 5³ + 3³). What is the sum of ALL 3-digit Armstrong numbers?",
+      "answer": "1301"
+    },
+    {
+      "id": "r129",
+      "prompt": "Convert the binary number 11011010 to decimal (base 10).",
+      "answer": "218"
+    },
+    {
+      "id": "r130",
+      "prompt": "What is the units (last) digit of the sum 1! + 2! + 3! + ... + 100! ?",
+      "answer": "3"
+    },
+    {
+      "id": "r131",
+      "prompt": "How many integers from 1 to 1000 inclusive have a digit sum (sum of their decimal digits) equal to 10?",
+      "answer": "63"
+    },
+    {
+      "id": "r132",
+      "prompt": "A fair coin is flipped 6 times. What is the probability of getting strictly more heads than tails? Give your answer as a reduced fraction.",
+      "answer": "11/32"
+    },
+    {
+      "id": "r133",
+      "prompt": "Alice can complete a job in 6 hours, Bob in 8 hours, and Carol in 12 hours. Working together at their individual rates, how many hours does it take them to complete the job? Give your answer as a reduced fraction.",
+      "answer": "8/3"
+    },
+    {
+      "id": "r134",
+      "prompt": "Alloy 1 is 40% copper and Alloy 2 is 70% copper. They are mixed to produce 30 kg of an alloy that is 50% copper. How many kilograms of Alloy 1 are used?",
+      "answer": "20"
+    },
+    {
+      "id": "r135",
+      "prompt": "What is the 100th prime number (with 2 being the 1st prime)?",
+      "answer": "541"
+    },
+    {
+      "id": "r136",
+      "prompt": "How many 4-digit codes (each position a digit 0-9) have all four digits distinct and arranged in strictly increasing order from left to right (e.g., 0247)?",
+      "answer": "210"
+    },
+    {
+      "id": "r137",
+      "prompt": "What is the sum of the infinite geometric series 8 + 8/3 + 8/9 + 8/27 + ... ? Give your answer as a reduced fraction.",
+      "answer": "12"
+    },
+    {
+      "id": "r138",
+      "prompt": "A shirt's price is first marked up by 60% from its original cost, and then a 60% discount is applied to the marked-up price. The final price is what percent of the original cost? Give the answer as a number (percent).",
+      "answer": "64"
+    },
+    {
+      "id": "r139",
+      "prompt": "Two distinguishable dice (a red one and a blue one) are rolled. In how many of the 36 equally likely outcomes is the red die's value strictly greater than the blue die's value?",
+      "answer": "15"
+    },
+    {
+      "id": "r140",
+      "prompt": "A store buys 500 units at $12 each. It sells 70% of them at a 45% markup on cost, and clears the remaining 30% at a 20% loss on cost. What is the store's total profit in dollars? Round to the nearest cent.",
+      "answer": "1530"
+    }
+  ]
+}

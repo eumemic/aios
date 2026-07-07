@@ -8,3 +8,6 @@ selection_results.json
 # Paid per-item checkpoints (pool transcripts, judge outputs). Durable on disk by
 # design (the killed-run lesson) but too large/raw for git — keep the corpus + code.
 selection_state/
+# Cost-map raw state (full transcripts, per-cell checkpoints) — local only; the
+# committed deliverables are results/cost_routing_map_2026-07.md + the matrix JSON.
+results/cost_map_state/
