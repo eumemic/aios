@@ -69,6 +69,7 @@ from aios.models.vaults import (
     VaultCredentialCreate,
     VaultCredentialUpdate,
 )
+from aios.pinned_transport import PinnedTransport
 from aios.services.vaults import (
     build_token_endpoint_post,
     create_vault_credential,
@@ -259,9 +260,13 @@ async def start_oauth_flow(
     # follow_redirects is OFF: is_safe_url validates the literal host, but a 3xx
     # to an internal host would bypass it (the redirect target is never guarded).
     # RFC 9728/8414 discovery hits well-known paths directly, so no redirect is
-    # needed for a spec-compliant provider.
+    # needed for a spec-compliant provider. PinnedTransport pins each request's
+    # connect IP at resolve time, closing the DNS-rebinding TOCTOU that the
+    # _guard_url pre-flights alone cannot.
     async with httpx.AsyncClient(
-        timeout=_OAUTH_HTTP_TIMEOUT_SECONDS, follow_redirects=False
+        timeout=_OAUTH_HTTP_TIMEOUT_SECONDS,
+        follow_redirects=False,
+        transport=PinnedTransport(allow_hosts=allow_insecure),
     ) as client:
         prm = await _discover_protected_resource(client, body.target_url)
         auth_server_url = (
@@ -466,8 +471,12 @@ async def _exchange_code(
     # follow_redirects OFF: the token_endpoint was SSRF-guarded at start and is
     # stored encrypted, but a token-exchange POST should never be redirected
     # anyway — a 3xx here can only point somewhere we didn't validate.
+    # PinnedTransport re-validates and pins the connect IP at request time, so a
+    # rebind of the stored endpoint's host cannot reach an internal address.
     async with httpx.AsyncClient(
-        timeout=_OAUTH_HTTP_TIMEOUT_SECONDS, follow_redirects=False
+        timeout=_OAUTH_HTTP_TIMEOUT_SECONDS,
+        follow_redirects=False,
+        transport=PinnedTransport(allow_hosts=get_settings().oauth_allow_insecure_host_set),
     ) as client:
         try:
             resp = await client.post(token_endpoint, **post_kwargs)

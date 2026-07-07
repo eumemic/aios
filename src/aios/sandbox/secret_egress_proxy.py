@@ -62,12 +62,10 @@ import contextlib
 import os
 import re
 import secrets
-import socket
 import ssl
 import tempfile
 import weakref
 from collections.abc import Iterable
-from typing import Any
 
 import h11
 import httpx
@@ -76,15 +74,9 @@ from cryptography.hazmat.primitives import serialization
 from aios.config import get_settings
 from aios.logging import get_logger
 from aios.models.vaults import parse_allowed_host_entry
+from aios.pinned_transport import resolve_pinned_ip
 from aios.sandbox.egress_ca import EgressCA, get_egress_ca, mint_server_leaf
 from aios.services.vaults import ResolvedEnvVarCredential
-
-# NOTE: ``aios.tools.url_safety`` is imported lazily inside ``_resolve_pinned_ip``
-# (the only user) — not here. A module-level ``from aios.tools import ...`` makes
-# the ``aios.tools`` package (whose ``__init__`` imports ``bash`` → ``sandbox.spec``,
-# which binds ``SecretEgressProxy`` back from this module) part of this module's
-# import graph, so a standalone ``import aios.sandbox.secret_egress_proxy`` cycles
-# and ImportErrors. Deferring to call time keeps the import graph acyclic.
 
 log = get_logger("aios.sandbox.secret_egress_proxy")
 
@@ -247,36 +239,11 @@ def _decode_basic_credential(value: str) -> str | None:
         return None
 
 
-async def _resolve_addrinfos(host: str, port: int) -> list[tuple[Any, ...]]:
-    """Async DNS resolution seam (monkeypatched in tests)."""
-    loop = asyncio.get_running_loop()
-    return list(await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM))
-
-
-async def _resolve_pinned_ip(host: str, port: int) -> str | None:
-    """Re-resolve ``host`` at connect time and return ONE safe IP to pin the
-    upstream connection to, or ``None`` if it must not be reached.
-
-    Fail-closed: a known-internal name, a resolution failure, an empty
-    result, or ANY resolved IP in a blocked range (loopback / link-local /
-    RFC-1918 / ULA / reserved / multicast / unspecified / CGNAT / metadata)
-    returns ``None``. This is the runtime, rebinding-resistant complement to
-    #872's create-time IP-literal rejection. Prefers an IPv4 address (the
-    worker is IPv4-only; a first-returned global IPv6 with no route would
-    502 a reachable host otherwise).
-    """
-    from aios.tools import url_safety  # deferred — see the import-graph note at module top
-
-    if url_safety.is_blocked_hostname(host):
-        return None
-    try:
-        infos = await _resolve_addrinfos(host, port)
-    except OSError:
-        return None
-    ips = [str(info[4][0]) for info in infos]
-    if not ips or any(url_safety.is_blocked_ip(ip) for ip in ips):
-        return None
-    return next((ip for ip in ips if ":" not in ip), ips[0])
+# Promoted to :mod:`aios.pinned_transport` (now shared with ``PinnedTransport``);
+# the egress proxy remains the security-critical consumer of its fail-closed /
+# IPv4-preferred semantics. The module-scope alias is load-bearing: the connect
+# path below and the tests' ``sep._resolve_pinned_ip`` monkeypatch resolve it here.
+_resolve_pinned_ip = resolve_pinned_ip
 
 
 def _h11_send(conn: h11.Connection, event: h11.Event) -> bytes:
