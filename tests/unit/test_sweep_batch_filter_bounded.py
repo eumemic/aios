@@ -92,7 +92,10 @@ async def test_filter_never_issues_unbounded_lifetime_scans() -> None:
     assert "e.data->>'tool_call_id' = ANY" in joined
     # None of the fetches is the removed unbounded lifetime scan (session set
     # only, no tcid/containment bound).
-    assert "e.session_id = ANY($1::text[])\n       AND e.kind = 'message'\n       AND e.role = 'tool'\n\"" not in joined
+    assert (
+        "e.session_id = ANY($1::text[])\n       AND e.kind = 'message'\n       AND e.role = 'tool'\n\""
+        not in joined
+    )
 
 
 async def test_no_unreacted_events_touches_no_history() -> None:

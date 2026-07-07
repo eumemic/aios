@@ -634,9 +634,7 @@ class TestBatchFilterBounded:
         # Payload-stripped: the row carries the id array, not the full ``data``.
         assert "data" not in dict(rows[0])
 
-    async def test_batch_result_scoped_to_batch_ids(
-        self, seeded_pool: asyncpg.Pool[Any]
-    ) -> None:
+    async def test_batch_result_scoped_to_batch_ids(self, seeded_pool: asyncpg.Pool[Any]) -> None:
         # Results are fetched ONLY for the specific batch ids, not every
         # ``role='tool'`` row the deep session ever produced (2000 of them).
         batch_ids = [f"tc_sess_tc_deep_250_{k}" for k in range(_N_TC_PER_ASST)]

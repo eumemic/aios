@@ -985,9 +985,7 @@ async def find_sessions_needing_inference(
             account_id=account_id,
         )
         try:
-            filtered = await _filter_incomplete_batches(
-                pool, inflight_tool_registry, to_filter
-            )
+            filtered = await _filter_incomplete_batches(pool, inflight_tool_registry, to_filter)
         finally:
             await sessions_service.append_event(
                 pool,
@@ -1073,9 +1071,7 @@ async def _filter_incomplete_batches(
 
             # Bounded fetch (#1729): only the tool results for THESE batches'
             # ids, not the session's entire ``role='tool'`` history.
-            result_rows = await conn.fetch(
-                BATCH_RESULT_ROWS_SQL, sid, list(all_batch_ids)
-            )
+            result_rows = await conn.fetch(BATCH_RESULT_ROWS_SQL, sid, list(all_batch_ids))
             result_ids = {r["tool_call_id"] for r in result_rows if r["tool_call_id"]}
 
             for batch_ids in referenced_batches:
