@@ -45,7 +45,9 @@ def _echo(repo_id: str, mount_path: str) -> GithubRepositoryResourceEcho:
 
 
 async def _build_snapshot(
-    *, materialized: list[GithubRepositoryResourceEcho], attempted: list[GithubRepositoryResourceEcho]
+    *,
+    materialized: list[GithubRepositoryResourceEcho],
+    attempted: list[GithubRepositoryResourceEcho],
 ) -> frozenset[tuple[str, ...]]:
     clones = AsyncMock(return_value=(materialized, attempted, None))
     with contextlib.ExitStack() as stack:
