@@ -45,6 +45,7 @@ from typing import Any, assert_never, cast
 import asyncpg
 import httpx
 
+from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import MCP_EVICT_VAULT_CHANNEL
@@ -61,6 +62,7 @@ from aios.models.vaults import (
     VaultCredentialUpdate,
     parse_allowed_host_entry,
 )
+from aios.pinned_transport import PinnedTransport
 
 MAX_CREDENTIALS_PER_VAULT = 20
 
@@ -269,7 +271,14 @@ async def refresh_credential(
         )
 
         try:
-            async with httpx.AsyncClient(timeout=_REFRESH_HTTP_TIMEOUT_SECONDS) as client:
+            # The stored token_endpoint was SSRF-guarded once at flow start,
+            # possibly long ago; PinnedTransport re-validates and pins its
+            # connect IP now, so a since-rebound host can't pull the refresh
+            # credential onto an internal address.
+            async with httpx.AsyncClient(
+                timeout=_REFRESH_HTTP_TIMEOUT_SECONDS,
+                transport=PinnedTransport(allow_hosts=get_settings().oauth_allow_insecure_host_set),
+            ) as client:
                 resp = await client.post(token_endpoint, **post_kwargs)
                 resp.raise_for_status()
                 token_data = resp.json()

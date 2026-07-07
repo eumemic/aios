@@ -20,7 +20,6 @@ path the raise is translated back to a value-shaped ``{"error": ...}`` dict at t
 
 from __future__ import annotations
 
-import asyncio
 import os
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -36,13 +35,13 @@ from aios.models.agents import (
     StepSurface,
     http_route_suppressed,
 )
+from aios.pinned_transport import PinnedTransport
 from aios.services import agents as agents_service
 from aios.services import outbound_suppression as outbound_suppression_service
 from aios.services import sessions as sessions_service
 from aios.tools._glob_match import match_glob
 from aios.tools.invoke import ToolBail
 from aios.tools.registry import registry
-from aios.tools.url_safety import is_safe_url
 
 # The response-body character cap. Bodies longer than this are truncated — but
 # NEVER silently: the result dict carries ``"truncated": True`` so the caller can
@@ -374,10 +373,6 @@ async def _do_http_request(
             return synthesized
 
     full_url = server.base_url.rstrip("/") + "/" + path.lstrip("/")
-    # is_safe_url does a blocking getaddrinfo; offload it so the SSRF pre-flight
-    # never stalls the event loop (matches services/vault_oauth._guard_url).
-    if not await asyncio.to_thread(is_safe_url, full_url):
-        raise ToolBail(f"Blocked: URL targets a private/internal address: {full_url}")
 
     _vault_id, auth_headers = await resolve_auth(server.base_url)
 
@@ -393,7 +388,11 @@ async def _do_http_request(
     request_headers.update(auth_headers)
 
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        # PinnedTransport resolves-validates-pins the connect IP per request (every
+        # redirect hop included), closing the DNS-rebinding TOCTOU a hostname-level
+        # pre-flight can't. A blocked host surfaces as httpx.ConnectError → the
+        # HTTPError arm below → ToolBail.
+        async with httpx.AsyncClient(timeout=_TIMEOUT, transport=PinnedTransport()) as client:
             kwargs: dict[str, Any] = {"headers": request_headers}
             if body:
                 kwargs["content"] = body

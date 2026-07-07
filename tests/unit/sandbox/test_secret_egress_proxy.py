@@ -25,15 +25,16 @@ import httpx
 import pytest
 from structlog.testing import capture_logs
 
+from aios import pinned_transport
 from aios.crypto.vault import CryptoBox
 from aios.harness import runtime
+from aios.pinned_transport import resolve_pinned_ip
 from aios.sandbox import secret_egress_proxy as sep
 from aios.sandbox.egress_ca import get_egress_ca
 from aios.sandbox.secret_egress_proxy import (
     SecretEgressProxy,
     _path_within_prefix,
     _request_path,
-    _resolve_pinned_ip,
 )
 from aios.services.vaults import SECRET_PLACEHOLDER_PREFIX, ResolvedEnvVarCredential
 
@@ -495,20 +496,24 @@ class TestResolvePinnedIp:
         return _resolve
 
     async def test_public_ip_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(sep, "_resolve_addrinfos", self._addrinfos("93.184.216.34"))
-        assert await _resolve_pinned_ip("api.example.com", 443) == "93.184.216.34"
+        monkeypatch.setattr(
+            pinned_transport, "_resolve_addrinfos", self._addrinfos("93.184.216.34")
+        )
+        assert await resolve_pinned_ip("api.example.com", 443) == "93.184.216.34"
 
     @pytest.mark.parametrize(
         "ip", ["127.0.0.1", "169.254.169.254", "10.0.0.1", "192.168.1.1", "fd00::1", "100.64.0.1"]
     )
     async def test_blocked_ip_returns_none(self, ip: str, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(sep, "_resolve_addrinfos", self._addrinfos(ip))
-        assert await _resolve_pinned_ip("api.example.com", 443) is None
+        monkeypatch.setattr(pinned_transport, "_resolve_addrinfos", self._addrinfos(ip))
+        assert await resolve_pinned_ip("api.example.com", 443) is None
 
     async def test_any_blocked_ip_in_set_blocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A good public IP alongside an internal one still fails closed.
-        monkeypatch.setattr(sep, "_resolve_addrinfos", self._addrinfos("93.184.216.34", "10.0.0.1"))
-        assert await _resolve_pinned_ip("api.example.com", 443) is None
+        monkeypatch.setattr(
+            pinned_transport, "_resolve_addrinfos", self._addrinfos("93.184.216.34", "10.0.0.1")
+        )
+        assert await resolve_pinned_ip("api.example.com", 443) is None
 
     async def test_blocked_hostname_returns_none_without_resolving(
         self, monkeypatch: pytest.MonkeyPatch
@@ -516,15 +521,17 @@ class TestResolvePinnedIp:
         def _boom(host: str, port: int) -> object:
             raise AssertionError("must not resolve a blocked hostname")
 
-        monkeypatch.setattr(sep, "_resolve_addrinfos", _boom)
-        assert await _resolve_pinned_ip("metadata.google.internal", 443) is None
+        monkeypatch.setattr(pinned_transport, "_resolve_addrinfos", _boom)
+        assert await resolve_pinned_ip("metadata.google.internal", 443) is None
 
     async def test_prefers_ipv4(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # F11: AAAA first, A second → pin the reachable IPv4 (worker is v4-only).
         monkeypatch.setattr(
-            sep, "_resolve_addrinfos", self._addrinfos("2606:2800:220::1", "93.184.216.34")
+            pinned_transport,
+            "_resolve_addrinfos",
+            self._addrinfos("2606:2800:220::1", "93.184.216.34"),
         )
-        assert await _resolve_pinned_ip("api.example.com", 443) == "93.184.216.34"
+        assert await resolve_pinned_ip("api.example.com", 443) == "93.184.216.34"
 
     @pytest.mark.parametrize("exc", [socket.gaierror("nope"), OSError("EAI_SYSTEM")])
     async def test_resolution_failure_returns_none(
@@ -534,8 +541,8 @@ class TestResolvePinnedIp:
         async def _raise(host: str, port: int) -> list[tuple[object, ...]]:
             raise exc
 
-        monkeypatch.setattr(sep, "_resolve_addrinfos", _raise)
-        assert await _resolve_pinned_ip("api.example.com", 443) is None
+        monkeypatch.setattr(pinned_transport, "_resolve_addrinfos", _raise)
+        assert await resolve_pinned_ip("api.example.com", 443) is None
 
 
 class TestLifecycle:

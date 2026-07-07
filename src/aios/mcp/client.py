@@ -28,6 +28,7 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import InitializeResult
 
+from aios.config import get_settings
 from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.db import queries
 from aios.logging import get_logger
@@ -35,6 +36,7 @@ from aios.mcp._constants import _MCP_HTTPX_TIMEOUT as _MCP_HTTPX_TIMEOUT_SHARED
 from aios.mcp.pool import HttpErrorSink
 from aios.mcp.schema import make_function_tool
 from aios.models.vaults import AuthType
+from aios.pinned_transport import PinnedTransport
 from aios.services.vaults import is_expiring, refresh_credential
 
 log = get_logger("aios.mcp.client")
@@ -135,8 +137,16 @@ async def _open_session(
     Returns the session along with the ``InitializeResult`` so callers can
     read server-supplied metadata (notably ``instructions``).
     """
+    # PinnedTransport resolves-validates-pins the connect IP per request: a
+    # tenant-supplied MCP URL (or a later DNS rebind of it) that resolves to a
+    # private/internal address is refused at the transport. The operator dev
+    # bypass set is the same one the OAuth connect flow honors.
     http_client = await stack.enter_async_context(
-        httpx.AsyncClient(headers=headers, timeout=_MCP_HTTPX_TIMEOUT)
+        httpx.AsyncClient(
+            headers=headers,
+            timeout=_MCP_HTTPX_TIMEOUT,
+            transport=PinnedTransport(allow_hosts=get_settings().oauth_allow_insecure_host_set),
+        )
     )
     read_stream, write_stream, _ = await stack.enter_async_context(
         streamable_http_client(url, http_client=http_client)
