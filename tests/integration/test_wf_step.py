@@ -4672,7 +4672,6 @@ async def test_tool_http_request_credential_e2e(wf_runtime: asyncpg.Pool[Any]) -
         captured: dict[str, Any] = {}
         with (
             mock.patch("aios.tools.http_request.httpx.AsyncClient", _capturing_client(captured)),
-            mock.patch("aios.tools.http_request.is_safe_url", return_value=True),
         ):
             await run_workflow_step(run_id)  # park at the tool
             await (
