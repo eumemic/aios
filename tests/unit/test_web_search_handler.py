@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from aios.tools.invoke import ToolBail
@@ -90,3 +91,37 @@ class TestWebSearchHandler:
         mock_tavily.return_value = {}
         with pytest.raises(ToolBail):
             await web_search_handler("sess_01TEST", {"query": "x"})
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httpx.ConnectError("connection refused"),
+            httpx.ReadError("read failed"),
+            httpx.RemoteProtocolError("protocol error"),
+            httpx.PoolTimeout("pool exhausted"),
+            httpx.TimeoutException("timed out"),
+        ],
+    )
+    async def test_transport_faults_raise_toolbail_not_raw_httpx(
+        self, mock_tavily: AsyncMock, exc: httpx.HTTPError
+    ) -> None:
+        """A benign upstream transport blip (ConnectError/ReadError/… — the whole
+        ``httpx.TransportError`` family, plus timeouts) must convert to ``ToolBail``,
+        NOT propagate raw. A raw httpx error reaches ``_classify_tool_error`` →
+        ``evict=True`` → the sandbox is torn down on a transient network failure
+        (aios#1697). Mirrors ``http_request``'s broad ``httpx.HTTPError`` catch."""
+        mock_tavily.side_effect = exc
+        with pytest.raises(ToolBail):
+            await web_search_handler("sess_01TEST", {"query": "x"})
+
+    async def test_http_status_error_raises_toolbail(self, mock_tavily: AsyncMock) -> None:
+        """A non-2xx from Tavily/upstream is an expected failure → ``ToolBail``
+        carrying the status, never the raw httpx error (which would evict)."""
+        request = httpx.Request("GET", "https://example.com")
+        response = httpx.Response(503, text="upstream down", request=request)
+        mock_tavily.side_effect = httpx.HTTPStatusError(
+            "server error", request=request, response=response
+        )
+        with pytest.raises(ToolBail) as excinfo:
+            await web_search_handler("sess_01TEST", {"query": "x"})
+        assert "503" in excinfo.value.message
