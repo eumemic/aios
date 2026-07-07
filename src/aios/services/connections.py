@@ -434,8 +434,7 @@ async def configure_per_chat(
         # later, as a DETACH from a different actor at inbound resolution.
         if template.archived_at is not None:
             raise ConflictError(
-                f"session template {session_template_id} is archived; "
-                "cannot configure per_chat",
+                f"session template {session_template_id} is archived; cannot configure per_chat",
                 detail={"id": connection_id, "session_template_id": session_template_id},
             )
         await queries.insert_binding(

@@ -36,9 +36,7 @@ from aios.services import session_templates as session_templates_service
 pytestmark = pytest.mark.integration
 
 
-async def _make_template(
-    pool: asyncpg.Pool[Any], *, account_id: str, name: str
-) -> Any:
+async def _make_template(pool: asyncpg.Pool[Any], *, account_id: str, name: str) -> Any:
     agent = await agents_service.create_agent(
         pool,
         account_id=account_id,
@@ -119,8 +117,7 @@ async def test_foreign_template_raises_not_found(
     # No binding row landed.
     async with pool.acquire() as conn:
         active = await conn.fetchval(
-            "SELECT COUNT(*) FROM bindings "
-            "WHERE connection_id = $1 AND archived_at IS NULL",
+            "SELECT COUNT(*) FROM bindings WHERE connection_id = $1 AND archived_at IS NULL",
             connection_id,
         )
     assert active == 0
@@ -134,9 +131,7 @@ async def test_archived_own_template_raises_conflict(
     """
     pool, connection_id = pool_two_tenants
     template = await _make_template(pool, account_id="acc_a", name="archived")
-    await session_templates_service.archive_session_template(
-        pool, template.id, account_id="acc_a"
-    )
+    await session_templates_service.archive_session_template(pool, template.id, account_id="acc_a")
 
     with pytest.raises(ConflictError):
         await connections_service.configure_per_chat(
@@ -148,8 +143,7 @@ async def test_archived_own_template_raises_conflict(
 
     async with pool.acquire() as conn:
         active = await conn.fetchval(
-            "SELECT COUNT(*) FROM bindings "
-            "WHERE connection_id = $1 AND archived_at IS NULL",
+            "SELECT COUNT(*) FROM bindings WHERE connection_id = $1 AND archived_at IS NULL",
             connection_id,
         )
     assert active == 0
