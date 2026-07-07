@@ -1552,20 +1552,22 @@ async def discover_session_mcp_tools(
     # session running degraded.
     _pool = runtime.mcp_session_pool
     if _pool is not None:
-        url_to_name = {s.url: s.name for s in agent.mcp_servers}
-        for down_url in _pool.drain_degraded_events():
-            await sessions_service.append_event(
-                pool,
-                session_id,
-                "span",
-                {
-                    "event": "mcp_server_unavailable",
-                    "server": url_to_name.get(down_url, down_url),
-                    "url": down_url,
-                    "is_error": False,
-                },
-                account_id=account_id,
-            )
+        down_urls = _pool.drain_degraded_events()
+        if down_urls:
+            url_to_name = {s.url: s.name for s in agent.mcp_servers}
+            for down_url in down_urls:
+                await sessions_service.append_event(
+                    pool,
+                    session_id,
+                    "span",
+                    {
+                        "event": "mcp_server_unavailable",
+                        "server": url_to_name.get(down_url, down_url),
+                        "url": down_url,
+                        "is_error": False,
+                    },
+                    account_id=account_id,
+                )
     return tools, instructions_by_server
 
 
