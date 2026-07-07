@@ -778,3 +778,212 @@ class TestCallMcpToolWithPool:
 
         assert result.get("code") == "transport_error"
         assert s_a.call_tool.await_count == 1
+
+
+# ── #1698: MCP fault isolation / bulkhead the pool boundary ─────────────────
+
+
+def _failing_session_ctx(exc: BaseException) -> MagicMock:
+    """A ClientSession whose ``initialize()`` raises ``exc`` on ``__aenter__``.
+
+    Models the connect/init failure surface: the streamable-http task group
+    unwinds ``initialize()`` and can raise a bare ``BaseExceptionGroup``.
+    """
+    session = AsyncMock()
+    session.initialize = AsyncMock(side_effect=exc)
+    cls = MagicMock()
+    cls.return_value.__aenter__ = AsyncMock(return_value=session)
+    cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    return cls
+
+
+def _incident_group() -> BaseExceptionGroup:
+    """The exact leaf shape from the incident: a group whose non-Exception leaf
+    (``CancelledError``) makes the group itself NOT an ``Exception``."""
+    grp = BaseExceptionGroup(
+        "unhandled errors in a TaskGroup",
+        [httpx.HTTPError("401 Unauthorized"), asyncio.CancelledError()],
+    )
+    # Guard the premise of the whole fix: this group is not an Exception, so it
+    # slips past every ``except Exception`` — which is why acquire must convert.
+    assert not isinstance(grp, Exception)
+    return grp
+
+
+class TestPoolBulkhead:
+    async def test_acquire_converts_base_exception_group_to_mcp_unavailable(self) -> None:
+        """AC #3: a bare ``BaseExceptionGroup`` from the transport is converted
+        to ``MCPUnavailable`` (an ``Exception``) — it NEVER escapes the pool."""
+        from aios.mcp.pool import MCPUnavailable
+
+        grp = _incident_group()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _failing_session_ctx(grp)),
+        ):
+            pool = McpSessionPool()
+            with pytest.raises(MCPUnavailable) as exc:
+                await pool.acquire(URL, "v", EMPTY_KEY, {})
+
+        assert isinstance(exc.value, Exception)  # the crux of the fix
+        assert exc.value.url == URL
+        # the original group is chained as the cause for diagnosis
+        assert exc.value.__cause__ is grp or isinstance(exc.value.__cause__, BaseExceptionGroup)
+
+    async def test_acquire_converts_plain_exception_to_mcp_unavailable(self) -> None:
+        """A plain connect exception is also normalized to ``MCPUnavailable``."""
+        from aios.mcp.pool import MCPUnavailable
+
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch(
+                "aios.mcp.pool.ClientSession",
+                _failing_session_ctx(httpx.ConnectError("boom")),
+            ),
+        ):
+            pool = McpSessionPool()
+            with pytest.raises(MCPUnavailable) as exc:
+                await pool.acquire(URL, "v", EMPTY_KEY, {})
+        assert exc.value.url == URL
+
+    async def test_breaker_opens_after_k_consecutive_failures(self) -> None:
+        """AC #4: the circuit opens after K=3 consecutive connect failures;
+        the failing URL then surfaces in ``degraded_servers()``."""
+        from aios.mcp.pool import _BREAKER_FAILURE_THRESHOLD, MCPUnavailable
+
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _failing_session_ctx(_incident_group())),
+        ):
+            pool = McpSessionPool()
+            assert _BREAKER_FAILURE_THRESHOLD == 3
+            for _ in range(_BREAKER_FAILURE_THRESHOLD - 1):
+                with pytest.raises(MCPUnavailable):
+                    await pool.acquire(URL, "v", EMPTY_KEY, {})
+                assert not pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must stay closed pre-K"
+                assert pool.degraded_servers() == []
+            # The K-th failure opens the breaker.
+            with pytest.raises(MCPUnavailable):
+                await pool.acquire(URL, "v", EMPTY_KEY, {})
+            assert pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must be open after K failures"
+            assert pool.degraded_servers() == [URL]
+
+    async def test_breaker_emits_exactly_one_down_event_on_edge(self) -> None:
+        """AC #5: exactly one DOWN-transition edge is queued for the event,
+        deduped across further failures while the breaker stays open."""
+        from aios.mcp.pool import _BREAKER_FAILURE_THRESHOLD, MCPUnavailable
+
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _failing_session_ctx(_incident_group())),
+        ):
+            pool = McpSessionPool()
+            for _ in range(_BREAKER_FAILURE_THRESHOLD + 2):
+                with pytest.raises(MCPUnavailable):
+                    await pool.acquire(URL, "v", EMPTY_KEY, {})
+            drained = pool.drain_degraded_events()
+            assert drained == [URL], "exactly one DOWN edge despite repeated failures"
+            # A second drain is empty (deduped).
+            assert pool.drain_degraded_events() == []
+
+    async def test_breaker_reprobes_after_cooldown_and_recloses_on_success(self) -> None:
+        """AC #4: after the cooldown the key re-probes; a successful acquire
+        re-closes the breaker and drops it from ``degraded_servers()``."""
+        from aios.mcp.pool import _BREAKER_FAILURE_THRESHOLD, MCPUnavailable
+
+        good = _make_mock_session()
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _failing_session_ctx(_incident_group())),
+        ):
+            pool = McpSessionPool()
+            for _ in range(_BREAKER_FAILURE_THRESHOLD):
+                with pytest.raises(MCPUnavailable):
+                    await pool.acquire(URL, "v", EMPTY_KEY, {})
+            assert pool.is_unhealthy(URL, "v", EMPTY_KEY)
+
+        # Cooldown elapsed → is_unhealthy clears the window (auto-re-probe).
+        far_future = time.monotonic() + 10_000
+        assert not pool.is_unhealthy(URL, "v", EMPTY_KEY, now=far_future)
+
+        # A successful acquire re-closes the breaker: counter reset + not degraded.
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(good)),
+        ):
+            entry = await pool.acquire(URL, "v", EMPTY_KEY, {})
+            pool.mark_healthy(URL, "v", EMPTY_KEY)
+        assert entry.session is good
+        assert pool.degraded_servers() == []
+        assert not pool.is_unhealthy(URL, "v", EMPTY_KEY)
+
+    async def test_successful_acquire_between_failures_resets_counter(self) -> None:
+        """F1 / AC #4 (consecutive): a successful ``acquire`` at the pool boundary
+        resets the consecutive-failure counter WITHOUT a manual ``mark_healthy``.
+
+        FAIL → acquire-SUCCESS → FAIL → FAIL must NOT open the breaker: the
+        success breaks the streak (the count is consecutive, not cumulative), so
+        the two trailing failures only bring the counter back to 2 (< K). Without
+        the pool-boundary reset the pre-success failure would persist and the
+        third failure overall would trip the breaker (the hair-trigger F1 flags).
+        """
+        from aios.mcp.pool import _BREAKER_FAILURE_THRESHOLD, MCPUnavailable
+
+        assert _BREAKER_FAILURE_THRESHOLD == 3
+        key = (URL, "v", EMPTY_KEY)
+        pool = McpSessionPool()
+        good = _make_mock_session()
+
+        async def _fail_once() -> None:
+            with (
+                patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+                patch("aios.mcp.pool.ClientSession", _failing_session_ctx(_incident_group())),
+                pytest.raises(MCPUnavailable),
+            ):
+                await pool.acquire(URL, "v", EMPTY_KEY, {})
+
+        # 1st failure: counter 0 → 1, breaker still closed.
+        await _fail_once()
+        assert pool._failure_count.get(key) == 1
+        assert not pool.is_unhealthy(URL, "v", EMPTY_KEY)
+
+        # Interleaved SUCCESS — no manual ``mark_healthy`` — resets the counter to
+        # 0 at the fresh-open success path. Left checked out (not released) so the
+        # next acquire opens a fresh (failing) session rather than reusing an idle
+        # one.
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(good)),
+        ):
+            entry = await pool.acquire(URL, "v", EMPTY_KEY, {})
+        assert entry.session is good
+        assert pool._failure_count.get(key, 0) == 0, "success must reset the counter to 0"
+
+        # Two more failures: because the streak was broken, the counter climbs
+        # 0 → 1 → 2 and the breaker stays CLOSED (2 < K).
+        await _fail_once()
+        await _fail_once()
+        assert pool._failure_count.get(key) == 2
+        assert not pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must stay closed after reset"
+        assert pool.degraded_servers() == []
+
+    async def test_evict_by_vault_clears_breaker_state(self) -> None:
+        """AC #6 / composes with #1030: ``evict_by_vault`` clears breaker state
+        so a fresh credential re-probes immediately."""
+        from aios.mcp.pool import _BREAKER_FAILURE_THRESHOLD, MCPUnavailable
+
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _failing_session_ctx(_incident_group())),
+        ):
+            pool = McpSessionPool()
+            for _ in range(_BREAKER_FAILURE_THRESHOLD):
+                with pytest.raises(MCPUnavailable):
+                    await pool.acquire(URL, "vault_x", EMPTY_KEY, {})
+            assert pool.is_unhealthy(URL, "vault_x", EMPTY_KEY)
+            assert pool.degraded_servers() == [URL]
+
+        await pool.evict_by_vault("vault_x")
+        assert not pool.is_unhealthy(URL, "vault_x", EMPTY_KEY), "breaker cleared on eviction"
+        assert pool.degraded_servers() == []
+        assert pool._failure_count == {}

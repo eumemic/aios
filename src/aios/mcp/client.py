@@ -397,16 +397,35 @@ async def discover_mcp_tools(
         # Pool path: check out a session; on a transport/protocol error discard
         # it and retry once with a fresh one. Always release-or-discard so the
         # per-key cap slot is freed.
+        #
+        # The first ``acquire`` (immediately below) PRECEDES the ``try``: a
+        # connect/init failure there arms the breaker inside ``acquire`` (via
+        # ``_record_connect_failure``) and raises ``MCPUnavailable`` (an
+        # Exception), which propagates to the caller — the connect leg is handled
+        # by ``acquire`` itself, not here. The ``try`` covers only the
+        # ``list_tools()`` RPC leg, which ``acquire`` never sees: on failure it
+        # discards and retries once with a fresh session, and its first-attempt
+        # handler is ``(Exception, BaseExceptionGroup)`` so a group-shaped failure
+        # (the bare ``BaseExceptionGroup("unhandled errors in a TaskGroup", [...])``
+        # anyio can raise) is caught for the retry rather than escaping through
+        # the no-breaker ``except BaseException`` below. A second RPC failure then
+        # feeds the shared per-key breaker counter (``note_discovery_failure``) and
+        # forces the backoff window open (#1698 (b)/(d)).
         entry = await _pool.acquire(url, vault_id, hkey, merged)
         try:
             result = await _list_tools_timed(entry.session)
-        except Exception:
+        except (Exception, BaseExceptionGroup):
             await asyncio.shield(_pool.discard(url, vault_id, hkey, entry))
             entry = await _pool.acquire(url, vault_id, hkey, merged)
             try:
                 result = await _list_tools_timed(entry.session)
             except BaseException:
                 await asyncio.shield(_pool.discard(url, vault_id, hkey, entry))
+                # Feed the shared per-key breaker counter (#1698 (d)); it opens
+                # after K consecutive failures. Also force the backoff window
+                # open now so this prelude doesn't re-stall on the very next
+                # step even before the counter reaches K.
+                _pool.note_discovery_failure(url, vault_id, hkey)
                 _pool.mark_unhealthy(url, vault_id, hkey, backoff_s=_DISCOVERY_UNHEALTHY_BACKOFF_S)
                 raise
             else:
@@ -508,6 +527,21 @@ async def call_mcp_tool(
         hkey = _headers_key(spec_headers)
 
         if _pool is not None:
+            # Circuit breaker (#1698 (d)): if this transport key is in a backoff
+            # window (K consecutive connect/discovery failures), fast-return the
+            # degraded error dict instead of re-stalling on another dead connect.
+            # The model sees a typed, retriable ``transport_error`` (via #1680's
+            # is_error channel) rather than the call hanging or the session
+            # muting. The window auto-expires, so a later call re-probes.
+            if _pool.is_unhealthy(url, vault_id, hkey):
+                log.info("mcp.call_skipped_unhealthy", url=url, tool_name=tool_name)
+                return {
+                    "error": (
+                        f"MCP server temporarily unavailable (circuit open): {url}. "
+                        "The server failed repeatedly; it will be re-probed shortly."
+                    ),
+                    "code": "transport_error",
+                }
             entry = await _pool.acquire(url, vault_id, hkey, merged)
             try:
                 result = await _call_tool_fast(
@@ -557,7 +591,16 @@ async def call_mcp_tool(
             "error": f"MCP server returned HTTP {err.status}: {detail}",
             "code": "transport_error",
         }
-    except Exception as err:
+    except (Exception, BaseExceptionGroup) as err:
+        # Broadened to catch a residual ``BaseExceptionGroup`` (#1698 (c)): a
+        # group whose non-Exception leaf makes it slip past ``except Exception``
+        # would otherwise escape ``call_mcp_tool`` unhandled and mute the
+        # session. ``acquire`` already converts connect failures to
+        # ``MCPUnavailable`` (an Exception), but this collapses any residual
+        # group at the call/RPC leg into the typed ``transport_error`` envelope
+        # — flowing through #1680's is_error channel as a model-visible tool
+        # result, never a raise. A genuine ``CancelledError`` (a bare
+        # ``BaseException``, not an ``ExceptionGroup``) still propagates.
         log.warning(
             "mcp.call_failed",
             url=url,
