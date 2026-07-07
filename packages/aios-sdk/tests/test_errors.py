@@ -96,9 +96,7 @@ def test_raw_request_prunes_none_params() -> None:
         return httpx.Response(200, json={"data": []})
 
     with _mock_client(handler) as client:
-        raw_request(
-            client, "GET", "/v1/agents", params={"limit": 5, "after": None, "kind": None}
-        )
+        raw_request(client, "GET", "/v1/agents", params={"limit": 5, "after": None, "kind": None})
     assert "limit=5" in seen["qs"]
     assert "after" not in seen["qs"]
     assert "kind" not in seen["qs"]

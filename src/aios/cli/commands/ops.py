@@ -34,6 +34,13 @@ def _run_api() -> int:
         host=settings.api_host,
         port=settings.api_port,
         log_config=None,  # we configure structlog ourselves
+        # uvicorn's access log is redundant with our own RequestLoggingMiddleware
+        # (one api.request line per request) AND, with log_config=None, its
+        # `uvicorn.access` logger propagates to the root %(message)s handler and
+        # would log the raw request line — leaking the per-trigger ingest bearer
+        # token in `POST /v1/triggers/ingest/<token>` that the middleware/error
+        # log sites redact. Disable it so the redaction is not defeated.
+        access_log=False,
         proxy_headers=True,
         forwarded_allow_ips="*",
     )

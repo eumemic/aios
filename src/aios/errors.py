@@ -18,6 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from aios.api._log_redaction import redact_sensitive_path
 from aios.logging import get_logger
 
 log = get_logger(__name__)
@@ -239,7 +240,7 @@ def _log_handler_error(event: str, request: Request, status: int, **fields: obje
     line carries it and an unauthenticated one simply omits the key.
     """
     log_fn = log.exception if status >= 500 else log.warning
-    log_fn(event, path=request.url.path, status=status, **fields)
+    log_fn(event, path=redact_sensitive_path(request.url.path), status=status, **fields)
 
 
 async def aios_error_handler(request: Request, exc: Exception) -> JSONResponse:
