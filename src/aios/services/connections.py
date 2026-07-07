@@ -416,6 +416,28 @@ async def configure_per_chat(
                 f"connection {connection_id} is archived; cannot configure",
                 detail={"id": connection_id},
             )
+        # Validate the template account-scoped *inside the tx*, mirroring
+        # ``attach_connection``'s ``get_session_bare`` check. Without this,
+        # a caller-supplied ``session_template_id`` goes straight into
+        # ``insert_binding`` and the single-column FK (migration 0033,
+        # deliberately non-tenant-composite per 0110) only enforces global
+        # existence — leaking a cross-tenant existence oracle (200 when the
+        # id lives in *any* account vs 404 when nowhere) and silently
+        # mis-binding a foreign template. ``get_session_template`` raises
+        # ``NotFoundError`` unless the row exists in *this* account.
+        template = await queries.get_session_template(
+            conn, session_template_id, account_id=account_id
+        )
+        # Refuse an archived template at bind time (see ``attach_connection``):
+        # the FK accepts archived rows, so without this ``insert_binding``
+        # would 200 on an archived recipe and the mis-bind would only surface
+        # later, as a DETACH from a different actor at inbound resolution.
+        if template.archived_at is not None:
+            raise ConflictError(
+                f"session template {session_template_id} is archived; "
+                "cannot configure per_chat",
+                detail={"id": connection_id, "session_template_id": session_template_id},
+            )
         await queries.insert_binding(
             conn,
             connection_id=connection_id,
