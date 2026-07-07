@@ -112,6 +112,13 @@ class _SweepAgentSurface:
     http_servers: list[HttpServerSpec]
 
 
+# The zero-tool, zero-server surface used as the fallback for a candidate whose
+# agent config could not be loaded (a race where the session/agent row is gone).
+# A call classified against it is never dispatched — consistent with leaving an
+# unresolvable call alone rather than fabricating work.
+_EMPTY_SURFACE = _SweepAgentSurface(tools=[], http_servers=[])
+
+
 # ─── query constants ─────────────────────────────────────────────────────────
 #
 # Sweep SQL lives here as module constants so tests/e2e/test_sweep_perf.py
@@ -159,6 +166,24 @@ GHOST_LIFECYCLE_SQL = """
        AND e.kind = 'lifecycle'
        AND e.data->>'event' = 'tool_confirmed'
        AND e.data->>'result' = 'allow'
+"""
+
+# Per-session agent surface (tools + http_servers) for the disposition
+# classifier. LEFT JOIN agent_versions to respect version pinning;
+# ``http_servers`` is fetched alongside ``tools`` so the classifier can apply
+# the arg-aware route refinement for ``http_request`` (#1076) — the same
+# refinement the dispatch and read paths apply. Shared by ghost repair
+# (:func:`find_and_repair_ghosts`) and the inference batch filter
+# (:func:`_filter_incomplete_batches`) via :func:`_load_surfaces`.
+AGENT_SURFACE_SQL = """
+    SELECT s.id AS session_id,
+           COALESCE(av.tools, a.tools) AS tools,
+           COALESCE(av.http_servers, a.http_servers) AS http_servers
+      FROM sessions s
+      JOIN agents a ON a.id = s.agent_id
+      LEFT JOIN agent_versions av
+        ON av.agent_id = s.agent_id AND av.version = s.agent_version
+     WHERE s.id = ANY($1::text[])
 """
 
 # Dispatch-marker spans: pre-invoke ``tool_execute_start`` events keyed by
@@ -304,14 +329,35 @@ BATCH_RESULT_ROWS_SQL = """
 # Retained for GHOST REPAIR (``find_and_repair_ghosts``), where the session set
 # is already bounded upstream by ``GHOST_ASST_SQL``'s ``open_tool_call_count > 0``
 # gate (migration 0066) — a fully-resolved session contributes zero rows. The
-# batch filter (#1729) no longer uses this: it fetches results per session and
-# bounded to specific batch ids via ``BATCH_RESULT_ROWS_SQL``.
+# batch filter (#1729) no longer uses this for the has-unreacted path: it
+# fetches results per session and bounded to specific batch ids via
+# ``BATCH_RESULT_ROWS_SQL``. It IS reused by the dispatch-narrowing branch
+# (#1710, ``OPEN_CANDIDATES_ASST_SQL`` below) for the same reason ghost repair
+# reuses it: that branch's session set is already bounded to the handful of
+# sids with no unreacted events and no in-flight task.
 ALL_RESULT_ROWS_SQL = """
     SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
      WHERE e.session_id = ANY($1::text[])
        AND e.kind = 'message'
        AND e.role = 'tool'
+"""
+
+# ``OPEN_CANDIDATES_ASST_SQL`` — assistant-with-tool_calls events for the
+# dispatch-narrowing branch of ``_filter_incomplete_batches`` (#1710). Scoped
+# to the caller-supplied session set (already narrowed to sids with an empty
+# unreacted set and no in-flight task — typically a handful per sweep) and
+# further bounded by ``open_tool_call_count > 0``, mirroring ``GHOST_ASST_SQL``:
+# a fully-resolved session contributes zero rows.
+OPEN_CANDIDATES_ASST_SQL = """
+    SELECT e.session_id, e.data
+      FROM events e
+      JOIN sessions s ON s.id = e.session_id
+     WHERE e.session_id = ANY($1::text[])
+       AND s.open_tool_call_count > 0
+       AND e.kind = 'message'
+       AND e.role = 'assistant'
+       AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
 """
 
 # Sessions currently in the terminal "errored" state, derived from the
@@ -405,6 +451,53 @@ async def session_has_pending_work(
     if row is None:
         return False
     return bool(row["has_pending_work"])
+
+
+# ─── shared surface loading ──────────────────────────────────────────────────
+
+
+def _build_surfaces(agent_rows: list[Any]) -> dict[str, _SweepAgentSurface]:
+    """Materialize ``AGENT_SURFACE_SQL`` rows into ``_SweepAgentSurface`` per
+    session — the thin duck-typed ``Agent`` the disposition classifier reads.
+    """
+    from aios.models.agents import HttpServerSpec, load_tool_specs
+
+    surface_by_session: dict[str, _SweepAgentSurface] = {}
+    for r in agent_rows:
+        tools_list = r["tools"]
+        http_list = r["http_servers"]
+        surface_by_session[r["session_id"]] = _SweepAgentSurface(
+            tools=load_tool_specs(tools_list or []),
+            http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
+        )
+    return surface_by_session
+
+
+async def _load_surfaces(
+    conn: asyncpg.Connection[Any], session_ids: list[str]
+) -> tuple[dict[str, _SweepAgentSurface], dict[str, set[str]]]:
+    """Load the per-session agent surface and confirmed-``allow`` tool_call ids
+    for ``session_ids``.
+
+    Two batched queries (no N+1): ``AGENT_SURFACE_SQL`` (tools + http_servers,
+    version-pinned) and ``GHOST_LIFECYCLE_SQL`` (``tool_confirmed``/``allow``
+    events). Returns ``(surface_by_sid, confirmed_by_sid)``. The confirmed set
+    is exactly the one :func:`_was_dispatched` consumes as ``confirmed_ids``, so
+    both ghost repair and the inference filter resolve the identical
+    confirmation-satisfied bit.
+    """
+    if not session_ids:
+        return {}, {}
+
+    agent_rows = await conn.fetch(AGENT_SURFACE_SQL, session_ids)
+    surface_by_sid = _build_surfaces(agent_rows)
+
+    lifecycle_rows = await conn.fetch(GHOST_LIFECYCLE_SQL, session_ids)
+    confirmed_by_sid: dict[str, set[str]] = {}
+    for r in lifecycle_rows:
+        confirmed_by_sid.setdefault(r["session_id"], set()).add(r["tool_call_id"])
+
+    return surface_by_sid, confirmed_by_sid
 
 
 # ─── ghost repair ────────────────────────────────────────────────────────────
@@ -514,33 +607,14 @@ async def find_and_repair_ghosts(
     # bound). All other candidates are left alone (legitimately waiting).
     candidate_sids = list({c.session_id for c in candidates})
     async with pool.acquire() as conn:
-        # LEFT JOIN agent_versions to respect version pinning. ``http_servers``
-        # is fetched alongside ``tools`` so the classifier can apply the
-        # arg-aware route refinement for ``http_request`` (#1076) — the same
-        # refinement the dispatch and read paths apply.
-        agent_rows = await conn.fetch(
-            """
-            SELECT s.id AS session_id,
-                   COALESCE(av.tools, a.tools) AS tools,
-                   COALESCE(av.http_servers, a.http_servers) AS http_servers
-              FROM sessions s
-              JOIN agents a ON a.id = s.agent_id
-              LEFT JOIN agent_versions av
-                ON av.agent_id = s.agent_id AND av.version = s.agent_version
-             WHERE s.id = ANY($1::text[])
-            """,
-            candidate_sids,
-        )
-    from aios.models.agents import HttpServerSpec, load_tool_specs
+        # ``AGENT_SURFACE_SQL`` LEFT JOINs agent_versions to respect version
+        # pinning and fetches ``http_servers`` alongside ``tools`` so the
+        # classifier can apply the arg-aware route refinement for
+        # ``http_request`` (#1076) — the same refinement the dispatch and read
+        # paths apply.
+        agent_rows = await conn.fetch(AGENT_SURFACE_SQL, candidate_sids)
 
-    agent_surface_by_session: dict[str, _SweepAgentSurface] = {}
-    for r in agent_rows:
-        tools_list = r["tools"]
-        http_list = r["http_servers"]
-        agent_surface_by_session[r["session_id"]] = _SweepAgentSurface(
-            tools=load_tool_specs(tools_list or []),
-            http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
-        )
+    agent_surface_by_session = _build_surfaces(agent_rows)
 
     # Abandoned-client-call bound (#752): a client-result-pending call whose
     # assistant turn is older than this is treated as abandoned. The cutoff is
@@ -549,12 +623,11 @@ async def find_and_repair_ghosts(
     client_max_age = get_settings().client_tool_call_max_age_seconds
     abandoned_cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=client_max_age)
 
-    empty_surface = _SweepAgentSurface(tools=[], http_servers=[])
     ghosts: list[_Candidate] = []
     abandoned: list[_Candidate] = []
     for c in candidates:
         confirmed = confirmed_by_session.get(c.session_id, set())
-        surface = agent_surface_by_session.get(c.session_id, empty_surface)
+        surface = agent_surface_by_session.get(c.session_id, _EMPTY_SURFACE)
         if _was_dispatched(c, confirmed, surface):
             ghosts.append(c)
         elif (
@@ -1024,7 +1097,36 @@ async def _filter_incomplete_batches(
     plus every assistant ``tool_calls`` payload — 126 MB observed — and decoded
     it on the event loop on every full sweep). See the query docstrings above.
     Sessions with no unreacted events (or whose unreacted set contains a user
-    message) are decided without touching ``events`` at all.
+    message) are decided without touching ``events`` at all — EXCEPT the
+    dispatch-narrowing fetch below.
+
+    Empty-unreacted / no-in-flight sessions are narrowed further: a session is
+    woken from that branch ONLY if at least one of its open tool calls (no
+    result, no in-flight task) was actually **dispatched** by the harness. A
+    session parked purely on externally-executed work — a client ``custom`` call
+    awaiting the client's result POST, or an ``always_ask`` call awaiting
+    operator confirmation — is NOT dispatched, so it is left alone rather than
+    re-fired on every sweep (a full paid model step with only a
+    ``_PENDING_EXTERNAL`` placeholder as new context, #1710). This narrowing's
+    supporting fetch (``OPEN_CANDIDATES_ASST_SQL``) is scoped to ONLY the sids
+    that reach the empty-unreacted branch (typically a handful) and further
+    bounded by ``open_tool_call_count > 0`` — it does not resurrect the
+    pre-#1729 unbounded lifetime scan for the common (has-unreacted) path.
+
+    **Wedge-safety invariant (fail toward waking too much, never too little):**
+    a missed wake permanently wedges a months-long session; an extra wake costs
+    one step. This narrowing is safe because :func:`find_and_repair_ghosts` runs
+    BEFORE this filter (see the composed sweep): a genuinely-dispatched-but-
+    taskless call (a crashed-worker ghost) is error-repaired first, so its
+    synthesized result becomes an *unreacted* event and the session no longer
+    reaches this empty-unreacted branch; confirmed-``allow`` calls are woken via
+    the separate ``confirmed_sessions`` union that bypasses this filter. So by
+    the time a session lands here with an open, result-less, taskless call, that
+    call is either an unconfirmed ``always_ask`` or a client ``custom`` — both
+    ``not _was_dispatched`` — and a crashed built-in ghost classifies as
+    dispatched, so the narrowing never holds one back.
+
+    Uses batched queries across all candidates (no N+1).
     """
     session_list = list(candidates)
 
@@ -1033,13 +1135,18 @@ async def _filter_incomplete_batches(
         unreacted_by_sid = _group_unreacted_rows(unreacted_rows)
 
         result: set[str] = set()
+        # Sids whose unreacted set is empty and have no in-flight task —
+        # deferred to a single batched dispatch-narrowing pass below (#1710)
+        # rather than queried one-by-one inside this loop.
+        empty_no_inflight: list[str] = []
+
         for sid in candidates:
             in_flight = inflight_tool_registry.in_flight_tool_call_ids(sid)
             unreacted = unreacted_by_sid.get(sid, [])
 
             if not unreacted:
                 if not in_flight:
-                    result.add(sid)
+                    empty_no_inflight.append(sid)
                 continue
 
             if any(role == "user" for role, _ in unreacted):
@@ -1081,7 +1188,76 @@ async def _filter_incomplete_batches(
                     result.add(sid)
                     break
 
+        # Dispatch-narrowing pass (#1710): batched across ONLY the sids that
+        # landed in the empty-unreacted/no-in-flight branch — not the whole
+        # candidate set — so the common (has-unreacted) path never pays for
+        # it. ``OPEN_CANDIDATES_ASST_SQL`` mirrors ``GHOST_ASST_SQL``'s
+        # ``open_tool_call_count > 0`` bound.
+        if empty_no_inflight:
+            asst_rows = await conn.fetch(OPEN_CANDIDATES_ASST_SQL, empty_no_inflight)
+            asst_by_sid = _group_event_data(asst_rows)
+
+            all_result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, empty_no_inflight)
+            results_by_sid: dict[str, set[str]] = {}
+            for r in all_result_rows:
+                results_by_sid.setdefault(r["session_id"], set()).add(r["tool_call_id"])
+
+            # Agent surface + confirmed-``allow`` ids for the dispatch
+            # classifier. The classifier reads only ``.tools``/``.http_servers``
+            # and the confirmed set matches the confirmed-dispatch path by
+            # construction.
+            surface_by_sid, confirmed_by_sid = await _load_surfaces(conn, empty_no_inflight)
+
+            for sid in empty_no_inflight:
+                in_flight = inflight_tool_registry.in_flight_tool_call_ids(sid)
+                # Wake only if at least one open call was dispatched (#1710).
+                # An empty ``open_calls`` (a stale counter — the maintained
+                # ``open_tool_call_count > 0`` with no actual open assistant
+                # tool_call) yields ``any(...) is False`` → not woken, which is
+                # correct: there is no open call to react to, and a real
+                # stimulus wakes the session via the normal unreacted path.
+                open_calls = _open_candidates_for(sid, asst_by_sid, results_by_sid, in_flight)
+                confirmed = confirmed_by_sid.get(sid, set())
+                surface = surface_by_sid.get(sid, _EMPTY_SURFACE)
+                if any(_was_dispatched(c, confirmed, surface) for c in open_calls):
+                    result.add(sid)
+
     return result
+
+
+def _open_candidates_for(
+    sid: str,
+    asst_by_sid: dict[str, list[dict[str, Any]]],
+    results_by_sid: dict[str, set[str]],
+    in_flight: set[str],
+) -> list[_Candidate]:
+    """Build the OPEN tool_calls for ``sid`` — assistant tool_calls with no
+    tool-result and no in-flight task — as ``_Candidate`` objects the dispatch
+    classifier (#1710) can inspect.
+
+    Mirrors the ghost-candidate construction in :func:`find_and_repair_ghosts`.
+    ``created_at`` is not carried on the batch-filter's assistant rows and the
+    disposition classifier does not read it, so a placeholder is used. Only
+    ``tool_name``/``arguments``/``tool_call_id`` drive ``_was_dispatched``.
+    """
+    result_ids = results_by_sid.get(sid, set())
+    open_calls: list[_Candidate] = []
+    for asst_data in asst_by_sid.get(sid, []):
+        for tc in asst_data.get("tool_calls") or []:
+            tcid = tc.get("id")
+            if not tcid or tcid in result_ids or tcid in in_flight:
+                continue
+            function = tc.get("function") or {}
+            open_calls.append(
+                _Candidate(
+                    session_id=sid,
+                    tool_call_id=tcid,
+                    tool_name=function.get("name", ""),
+                    created_at=dt.datetime.now(dt.UTC),
+                    arguments=function.get("arguments"),
+                )
+            )
+    return open_calls
 
 
 def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
