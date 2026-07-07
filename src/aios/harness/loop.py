@@ -1541,6 +1541,31 @@ async def discover_session_mcp_tools(
             tools.append(td)
         if instructions:
             instructions_by_server[name] = instructions
+
+    # Observability (#1698 (e)): emit exactly one durable ``mcp_server_unavailable``
+    # session event per breaker DOWN transition. The breaker arms in the pool
+    # (``acquire``/discovery) which has no session context, so it records the
+    # edge and we drain + stamp it here where session_id is in scope. Deduped on
+    # the breaker edge (drain empties the queue), ``is_error:false`` keeps it out
+    # of error-filtered views but queryable — mirrors the ``step_timeout``
+    # telemetry precedent. Gives the ops-agent an external artifact to detect a
+    # session running degraded.
+    _pool = runtime.mcp_session_pool
+    if _pool is not None:
+        url_to_name = {s.url: s.name for s in agent.mcp_servers}
+        for down_url in _pool.drain_degraded_events():
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {
+                    "event": "mcp_server_unavailable",
+                    "server": url_to_name.get(down_url, down_url),
+                    "url": down_url,
+                    "is_error": False,
+                },
+                account_id=account_id,
+            )
     return tools, instructions_by_server
 
 

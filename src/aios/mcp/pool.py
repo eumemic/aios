@@ -60,6 +60,45 @@ from aios.mcp._constants import _MCP_HTTPX_TIMEOUT as _MCP_HTTPX_TIMEOUT_SHARED
 
 log = get_logger("aios.mcp.pool")
 
+# Consecutive acquire/discovery failures per ``_PoolKey`` before the circuit
+# breaker opens (#1698). Bulkheads a dead/401'ing MCP server: after K straight
+# failures the key is marked unhealthy and the next prelude/call skips connect
+# fast (degraded, not muted) until the ``_DISCOVERY_UNHEALTHY_BACKOFF_S``
+# cooldown auto-re-probes. A single healthy acquire resets the counter.
+_BREAKER_FAILURE_THRESHOLD = 3
+
+# Cooldown applied when the breaker opens (#1698). Matches the discovery backoff
+# (``client._DISCOVERY_UNHEALTHY_BACKOFF_S`` = 60s) so discovery and call-time
+# share one window; kept here to avoid a client→pool import cycle.
+_BREAKER_UNHEALTHY_BACKOFF_S = 60.0
+
+
+class MCPUnavailable(Exception):
+    """A pooled MCP transport failed to connect/initialize (#1698).
+
+    Raised by :meth:`McpSessionPool.acquire` (and the discovery/call paths that
+    build on it) as the *single* typed failure the pool ever surfaces on a
+    connect/init error. It carries the server ``url`` and chains the original
+    cause via ``__cause__`` / ``__context__``.
+
+    Motivation: anyio's ``streamable_http_client`` task group, cancelling its
+    SSE-reader sibling while unwinding a failed ``initialize()``, can raise a
+    bare ``BaseExceptionGroup("unhandled errors in a TaskGroup", [HTTPError,
+    CancelledError])``. A ``BaseExceptionGroup`` whose leaves include a
+    non-``Exception`` (``CancelledError``) is itself **not** an ``Exception``
+    (``isinstance(grp, Exception) is False``), so it slips past every
+    ``except Exception`` on the call path and propagates unhandled — muting the
+    whole session. Converting it to this ``Exception`` subclass at the pool
+    boundary means every existing upstream ``except Exception`` catches it: a
+    failing server degrades *capability* (its tools vanish), never
+    *availability* (the agent goes mute).
+    """
+
+    def __init__(self, url: str) -> None:
+        super().__init__(f"MCP server unavailable: {url}")
+        self.url = url
+
+
 # httpx client bounds for MCP transport — single definition in
 # :mod:`aios.mcp._constants`, shared with the per-call client transport
 # (re-exported here so existing ``pool._MCP_HTTPX_TIMEOUT`` references and their
@@ -220,6 +259,23 @@ class McpSessionPool:
         # re-stalling for the per-server timeout every step. A successful
         # discovery clears the entry.
         self._unhealthy_until: dict[_PoolKey, float] = {}
+        # Per-_PoolKey consecutive-failure counter feeding the breaker (#1698).
+        # Every ``acquire``/discovery connect-or-init failure bumps the count;
+        # the breaker opens once it reaches ``_BREAKER_FAILURE_THRESHOLD`` (K).
+        # ``mark_healthy`` (a successful discovery/acquire) resets it to 0.
+        self._failure_count: dict[_PoolKey, int] = {}
+        # URLs whose breaker is currently OPEN, keyed by url. Backs
+        # :meth:`degraded_servers` and dedupes the ``mcp_server_unavailable``
+        # observability event to the DOWN transition (the breaker's open edge),
+        # not every failure while it stays open (#1698).
+        self._degraded_urls: set[str] = set()
+        # DOWN-transition edges (URLs) recorded since the last drain. The
+        # breaker arms in ``acquire``/discovery — code with no session context —
+        # so it records the edge here; a caller WITH session context
+        # (``discover_session_mcp_tools``) drains this via
+        # :meth:`drain_degraded_events` and emits exactly one durable
+        # ``mcp_server_unavailable`` session event per edge (#1698 (e)).
+        self._pending_degraded_events: list[str] = []
 
     def _condition_for(self, key: _PoolKey) -> asyncio.Condition:
         cond = self._conditions.get(key)
@@ -327,11 +383,28 @@ class McpSessionPool:
         task = asyncio.create_task(_own(), name=f"mcp-pool:{url}")
         await ready.wait()
         if "error" in result:
-            # The task already raised; await it to surface the original
-            # exception cleanly (and clear the unhandled-exception slot).
-            await task
-            # Defensive — unreachable in practice.
-            raise RuntimeError("mcp pool owner task signalled ready but produced no session")
+            # The task already raised; await it to clear the unhandled-exception
+            # slot on the owner task. We do NOT let that await re-raise the raw
+            # failure here: anyio's ``streamable_http_client`` task group can
+            # unwind a failed ``initialize()`` as a bare ``BaseExceptionGroup``
+            # (leaves ``[HTTPError, CancelledError]``), which is not an
+            # ``Exception`` and would escape every ``except Exception`` upstream
+            # (the #1698 session-mute bug). Swallow the await's propagation and
+            # raise the captured cause as :class:`MCPUnavailable` (an
+            # ``Exception``) instead — ``acquire`` re-wraps into the same type,
+            # so the pool NEVER re-raises a bare group. ``CancelledError`` is a
+            # ``BaseException`` (not caught here), so a genuine cancellation of
+            # the acquiring task still propagates for prompt teardown.
+            with contextlib.suppress(BaseException):
+                await task
+            captured = result["error"]
+            if isinstance(captured, asyncio.CancelledError):
+                # A genuine cancellation of the owner task (shutdown/drain) is a
+                # BaseException, not a transport failure — propagate it as-is so
+                # cancellation semantics are preserved rather than laundered into
+                # a retriable MCPUnavailable.
+                raise captured
+            raise MCPUnavailable(url) from captured
         return _Entry(result["session"], result["init"], shutdown, task, time.monotonic(), sink)
 
     async def acquire(
@@ -355,6 +428,14 @@ class McpSessionPool:
         the cap is strict (no thundering-herd over-open). An ``_open_entry``
         failure propagates out, releasing the Condition; no slot is consumed and
         no waiter is notified — the next waiter to wake simply retries.
+
+        **Fault isolation (#1698).** A fresh-open failure is converted at this
+        boundary into :class:`MCPUnavailable` — an ``Exception`` subclass — so a
+        bare ``BaseExceptionGroup`` from anyio's transport task group can NEVER
+        escape the pool. Every upstream ``except Exception`` therefore catches
+        it, and the failing server degrades *capability* (its tools vanish), not
+        *availability* (the agent goes mute). The conversion also arms the
+        per-key circuit breaker (K consecutive failures → open).
         """
         if self._closed:
             raise RuntimeError("McpSessionPool is closed")
@@ -371,7 +452,25 @@ class McpSessionPool:
                     return entry
                 if len(self._in_use.get(key, set())) < MAX_SESSIONS_PER_KEY:
                     log.info("mcp_pool.connecting", url=url)
-                    entry = await self._open_entry(url, headers, key)
+                    try:
+                        entry = await self._open_entry(url, headers, key)
+                    except MCPUnavailable:
+                        # Already the typed boundary error (from _open_entry's
+                        # own group-guard). Record the failure for the breaker
+                        # and re-raise unchanged — no double-wrapping.
+                        self._record_connect_failure(key, url)
+                        raise
+                    except (Exception, BaseExceptionGroup) as exc:
+                        # Any residual connect/init failure — including a bare
+                        # ``BaseExceptionGroup`` whose non-Exception leaf makes
+                        # it slip past ``except Exception`` — is converted here
+                        # so the pool's ONLY connect-failure surface is
+                        # ``MCPUnavailable`` (an Exception). ``BaseException``
+                        # (e.g. a genuine ``CancelledError`` cancelling this
+                        # acquire) is deliberately NOT caught: it propagates for
+                        # prompt teardown.
+                        self._record_connect_failure(key, url)
+                        raise MCPUnavailable(url) from exc
                     self._in_use.setdefault(key, set()).add(entry)
                     log.info("mcp_pool.connected", url=url)
                     return entry
@@ -482,6 +581,12 @@ class McpSessionPool:
         # Drop any cached tool lists discovered under the rotated identity so a
         # re-auth re-discovers rather than serving the stale-identity set (#1391).
         self.invalidate_tools_by_vault(vault_id)
+        # Clear breaker state for every key bound to this vault so a fresh
+        # credential re-probes immediately rather than sitting out the cooldown
+        # from failures under the OLD (e.g. expired) secret (#1698 composes with
+        # #1030). A stale-token 401 that opened the breaker must not keep the
+        # newly-rotated secret's server dark.
+        self._clear_breaker_by_vault(vault_id)
         if idle_closed or flagged:
             log.info(
                 "mcp_pool.evict_by_vault",
@@ -542,16 +647,20 @@ class McpSessionPool:
         for ck in stale:
             del self._tool_cache[ck]
 
-    # ── per-key discovery circuit breaker (#1391) ─────────────────────────
+    # ── per-key discovery/connect circuit breaker (#1391 + #1698) ─────────
 
     def is_unhealthy(
         self, url: str, vault_id: str | None, headers_key: str, *, now: float | None = None
     ) -> bool:
-        """True if this transport key is in a discovery backoff window.
+        """True if this transport key is in a discovery/connect backoff window.
 
-        The prelude consults this BEFORE attempting ``list_tools()`` so a server
-        that just timed out is skipped fast (agent runs degraded on the other
-        servers' tools) instead of re-stalling the turn prelude every step.
+        The prelude AND ``call_mcp_tool`` consult this BEFORE attempting a
+        connect (``list_tools()`` / ``acquire``) so a server that just failed is
+        skipped fast (agent runs degraded on the other servers' tools) instead
+        of re-stalling every step. On expiry the window is cleared here so the
+        next probe re-attempts the connect (auto-re-probe); the DOWN marker in
+        ``_degraded_urls`` is retained until an explicit heal/failure edge so a
+        cooldown lapse alone doesn't spuriously fire an UP event.
         """
         key: _PoolKey = (url, vault_id, headers_key)
         until = self._unhealthy_until.get(key)
@@ -562,6 +671,61 @@ class McpSessionPool:
             return False
         return True
 
+    def _record_connect_failure(self, key: _PoolKey, url: str) -> bool:
+        """Count one consecutive connect/init failure; open the breaker at K.
+
+        Returns ``True`` on the DOWN transition (the breaker's open edge) — the
+        failure that first opens the circuit — so a caller with session context
+        can emit exactly one ``mcp_server_unavailable`` event (#1698 (e)).
+        Failures while already open return ``False`` (deduped on the edge).
+
+        Shared by ``acquire``'s new failure path and (via
+        :meth:`note_discovery_failure`) the discovery caller, so discovery and
+        call-time arm ONE breaker per key.
+        """
+        count = self._failure_count.get(key, 0) + 1
+        self._failure_count[key] = count
+        if count < _BREAKER_FAILURE_THRESHOLD:
+            return False
+        # At/over threshold: (re)open the circuit for the cooldown window.
+        self._unhealthy_until[key] = time.monotonic() + _BREAKER_UNHEALTHY_BACKOFF_S
+        transitioned_down = url not in self._degraded_urls
+        self._degraded_urls.add(url)
+        if transitioned_down:
+            # Record the edge for a session-context caller to emit exactly one
+            # durable ``mcp_server_unavailable`` event (#1698 (e)).
+            self._pending_degraded_events.append(url)
+            log.warning(
+                "mcp_pool.breaker_opened",
+                url=url,
+                failures=count,
+                backoff_s=_BREAKER_UNHEALTHY_BACKOFF_S,
+            )
+        return transitioned_down
+
+    def drain_degraded_events(self) -> list[str]:
+        """Pop and return the DOWN-transition URLs recorded since the last drain.
+
+        A session-context caller (the per-turn discovery prelude) calls this and
+        emits one durable ``mcp_server_unavailable`` session event per URL, so
+        each breaker DOWN edge surfaces exactly once regardless of which path
+        (connect vs discovery) armed it (#1698 (e)).
+        """
+        drained = self._pending_degraded_events
+        self._pending_degraded_events = []
+        return drained
+
+    def note_discovery_failure(self, url: str, vault_id: str | None, headers_key: str) -> bool:
+        """Record a discovery-path failure against the shared breaker (#1698).
+
+        The discovery caller (``discover_mcp_tools``) sees ``list_tools()``
+        failures that ``acquire`` itself can't (the connect succeeded but the RPC
+        failed), so it feeds them into the SAME per-key counter. Returns the
+        DOWN-transition flag like :meth:`_record_connect_failure`.
+        """
+        key: _PoolKey = (url, vault_id, headers_key)
+        return self._record_connect_failure(key, url)
+
     def mark_unhealthy(
         self,
         url: str,
@@ -571,15 +735,59 @@ class McpSessionPool:
         backoff_s: float,
         now: float | None = None,
     ) -> None:
-        """Open the circuit for this transport key for ``backoff_s`` seconds."""
+        """Open the circuit for this transport key for ``backoff_s`` seconds.
+
+        Retained for the discovery retry path that forces the window open
+        directly. Also marks the URL degraded so it surfaces in
+        :meth:`degraded_servers`; the DOWN-transition event is emitted off the
+        counter path (:meth:`note_discovery_failure`), so this returns nothing.
+        """
         key: _PoolKey = (url, vault_id, headers_key)
         self._unhealthy_until[key] = (now if now is not None else time.monotonic()) + backoff_s
+        self._degraded_urls.add(url)
         log.warning("mcp_pool.marked_unhealthy", url=url, backoff_s=backoff_s)
 
     def mark_healthy(self, url: str, vault_id: str | None, headers_key: str) -> None:
-        """Clear any backoff for this transport key (a successful discovery)."""
+        """Clear backoff + failure counter for this key (a successful connect).
+
+        Resets the consecutive-failure counter so the breaker re-arms from zero,
+        clears any open window, and drops the URL from ``_degraded_urls`` unless
+        another key on the same URL is still open — a successful re-probe
+        re-closes the circuit (AC #4).
+        """
         key: _PoolKey = (url, vault_id, headers_key)
         self._unhealthy_until.pop(key, None)
+        self._failure_count.pop(key, None)
+        if not self._url_has_open_breaker(url):
+            self._degraded_urls.discard(url)
+
+    def _url_has_open_breaker(self, url: str) -> bool:
+        """True if any key on ``url`` still has an unexpired backoff window."""
+        now = time.monotonic()
+        return any(k[0] == url and until > now for k, until in self._unhealthy_until.items())
+
+    def _clear_breaker_by_vault(self, vault_id: str) -> None:
+        """Drop breaker state (window + counter) for every key on ``vault_id``.
+
+        Called from :meth:`evict_by_vault` so a rotated credential re-probes
+        immediately instead of serving out a cooldown opened under the old
+        secret (#1698 composes with #1030).
+        """
+        for key in [k for k in self._unhealthy_until if k[1] == vault_id]:
+            del self._unhealthy_until[key]
+        for key in [k for k in self._failure_count if k[1] == vault_id]:
+            del self._failure_count[key]
+        # A URL with no remaining open key on any vault leaves the degraded set.
+        self._degraded_urls = {u for u in self._degraded_urls if self._url_has_open_breaker(u)}
+
+    def degraded_servers(self) -> list[str]:
+        """Return the URLs whose breaker is currently OPEN (#1698 (e)).
+
+        Gives the ops-agent an external artifact to detect a session running
+        degraded — the MCP servers whose tools are currently absent because
+        their transport keeps failing.
+        """
+        return sorted(self._degraded_urls)
 
     async def _reap_idle_once(self, *, idle_timeout: float, now: float) -> None:
         """Close idle entries unused longer than ``idle_timeout`` seconds.

@@ -9,6 +9,7 @@ test here.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -343,3 +344,109 @@ class TestDiscoverSessionMcpTools:
         # The slow server was short-circuited (never discovered); only 'ok' ran.
         assert discovered == ["ok"]
         assert {t["name"] for t in tools} == {"mcp__ok__t"}
+
+    async def test_group_raising_server_omitted_healthy_returned(self) -> None:
+        """#1698 (b): a server whose discovery raises a bare
+        ``BaseExceptionGroup`` (non-Exception leaf) is omitted from the returned
+        tools/instructions; the healthy servers' tools are still returned. The
+        group must not abort the whole prelude."""
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="gh", url="https://mcp.github"),
+                McpServerSpec(name="grp", url="https://mcp.grp"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="gh"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="grp"),
+            ],
+        )
+
+        async def _discover(
+            _url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            if name == "grp":
+                raise BaseExceptionGroup(
+                    "unhandled errors in a TaskGroup",
+                    [ConnectionError("401"), asyncio.CancelledError()],
+                )
+            return [{"name": f"mcp__{name}__t"}], f"{name}-instructions"
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = (None, {})
+            tools, instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                account_id="acc_test_stub",
+            )
+
+        assert {t["name"] for t in tools} == {"mcp__gh__t"}, (
+            "group-raising server omitted; healthy server's tools returned"
+        )
+        assert set(instructions) == {"gh"}
+
+    async def test_down_transition_emits_one_mcp_server_unavailable_event(self) -> None:
+        """#1698 (e): a breaker DOWN transition (drained from the pool) emits
+        exactly one durable ``mcp_server_unavailable`` span event, keyed by
+        server name + url, with ``is_error: false``."""
+        from unittest.mock import MagicMock
+
+        from aios.harness import runtime
+        from aios.harness.loop import discover_session_mcp_tools
+        from aios.mcp.pool import McpSessionPool
+
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="ultron", url="https://mcp.down")],
+            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="ultron")],
+        )
+
+        pool = McpSessionPool()
+        # Simulate the breaker having recorded a DOWN edge for this url.
+        pool._pending_degraded_events.append("https://mcp.down")
+
+        async def _discover(*_a: Any, **_k: Any) -> tuple[list[dict[str, Any]], str | None]:
+            return [], None
+
+        emitted: list[dict[str, Any]] = []
+
+        async def _append_event(_pool: Any, _sid: str, _kind: str, data: Any, **_k: Any) -> Any:
+            emitted.append(data)
+            return MagicMock()
+
+        prior = runtime.mcp_session_pool
+        runtime.mcp_session_pool = pool
+        try:
+            with (
+                patch(
+                    "aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock
+                ) as resolve,
+                patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+                patch("aios.harness.loop.sessions_service.append_event", side_effect=_append_event),
+            ):
+                resolve.return_value = (None, {})
+                await discover_session_mcp_tools(
+                    pool=AsyncMock(),
+                    session_id="sess_x",
+                    agent=agent,
+                    account_id="acc_test_stub",
+                )
+        finally:
+            runtime.mcp_session_pool = prior
+
+        unavailable = [e for e in emitted if e.get("event") == "mcp_server_unavailable"]
+        assert len(unavailable) == 1
+        ev = unavailable[0]
+        assert ev["server"] == "ultron"
+        assert ev["url"] == "https://mcp.down"
+        assert ev["is_error"] is False
+        # Deduped: the edge queue is drained, so a re-run emits nothing.
+        assert pool.drain_degraded_events() == []

@@ -195,7 +195,17 @@ async def _tool_lifecycle(
         await _append_tool_result(
             pool, session_id, call_id, name, account_id=account_id, error="cancelled"
         )
-    except Exception as err:
+    except (Exception, BaseExceptionGroup) as err:
+        # Broadened to include ``BaseExceptionGroup`` (#1698 final backstop): a
+        # group whose non-Exception leaf (e.g. anyio's ``[HTTPError,
+        # CancelledError]``) makes it not an ``Exception`` would otherwise slip
+        # past this handler, the tool task would die with NO ``tool_result``
+        # appended, and the model's tool call would be left unresolved — the
+        # exact leg that muted the session. Catching the group here guarantees a
+        # tool call can NEVER be left unresolved: it always yields a
+        # ``tool_result`` with ``is_error=True``. A bare ``CancelledError`` (a
+        # ``BaseException`` that is NOT an ``ExceptionGroup``) is still handled
+        # by the ``except asyncio.CancelledError`` clause above.
         tc.is_error = True
         evict, message, detail = _classify_tool_error(err)
         if evict:
