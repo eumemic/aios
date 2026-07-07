@@ -100,12 +100,22 @@ def score_candidate(
     *,
     timeout_s: int = 120,
     venv_python: str | None = None,
+    oracle_verified: bool = False,
 ) -> ScoreOutcome:
     """Run the held-out test against the candidate's produced source. pass@1 = green.
 
     ``candidate_sources`` maps each ``src_file`` path -> the candidate's full file
     content. A missing/empty file for any required src_file => not applied => fail
     (the candidate didn't produce a usable patch).
+
+    ``oracle_verified``: pass True when a golden self-check has ALREADY proven (on
+    this machine, with the true merged sources) that this item's oracle test stands
+    up. Under that guarantee, a collection/import error on a candidate run cannot be
+    the environment's fault — it is the candidate breaking the module interface the
+    oracle imports (e.g. omitting a helper/constant the test imports by name) — so
+    it is classified FAIL, not ENV-SKIP. Without the guarantee (default), the old
+    conservative ENV-SKIP behavior is kept. (Found 2026-07-07: ENV-SKIP was
+    laundering real interface failures into holes, differentially by model.)
     """
     iid = item["id"]
     src_files = item["src_files"]
@@ -173,6 +183,12 @@ def score_candidate(
             and "assert" not in out.lower()
         )
         if env_broke:
+            if oracle_verified:
+                # golden proved the oracle stands up with true sources => the
+                # candidate broke the interface the test imports. A real failure.
+                return ScoreOutcome(
+                    iid, False, False, f"INTERFACE-FAIL ({tail[:80]})", applied=True
+                )
             return ScoreOutcome(iid, False, True, f"ENV-SKIP ({tail[:80]})", applied=True)
         return ScoreOutcome(iid, False, False, f"FAIL ({tail[:80]})", applied=True)
     except Exception as exc:  # any infra hiccup on this item => SKIP, never wedge

@@ -96,8 +96,11 @@ def main() -> int:
         m, r = job
         item = items[r["item"]]
         sources = extract_sources(r.get("text"), item["src_files"])
+        # items reaching here passed the golden self-check (bad_items excluded), so
+        # the oracle is proven to stand up => collection errors are candidate faults.
         out = score_candidate(item, repo, sources, venv_python=venv,
-                              timeout_s=args.test_timeout_s)
+                              timeout_s=args.test_timeout_s,
+                              oracle_verified=golden.get(r["item"], {}).get("passed", False))
         rec = {
             "item": r["item"], "k": r["k"], "model": m,
             "passed": bool(out.passed),

@@ -410,10 +410,20 @@ def main() -> int:
       f"(chairman-approved pre-work for the parked cost-routing option, D-Q24 pivot)._")
     W("")
     W("**Design**: 266 items (46 hidden-test coding + 140 reasoning-headroom + 80 "
-      "reasoning-extrahard) × 7 models × k=3 provider-default-decoded samples, all via "
-      "the company's subsidized gateways (ant-proxy / oai-proxy; $0 cash, zero OpenRouter "
-      "calls). Coding is scored by local execution of each item's held-out golden tests; "
-      "reasoning by exact-match with a numeric normalizer.")
+      "reasoning-extrahard) × 6 core models + 1 deferred reference column × k=3 "
+      "provider-default-decoded samples, all via the company's subsidized gateways "
+      "(ant-proxy / oai-proxy; $0 cash, zero OpenRouter calls). Coding is scored by local "
+      "execution of each item's held-out golden tests; reasoning by exact-match with a "
+      "numeric normalizer.")
+    W("")
+    W(f"**Column status**: the 6 core columns (opus-4-8, sonnet-5, haiku-4-5, gpt-5.5, "
+      f"gpt-5.4-mini, gpt-5.4) are the mandated map. `claude-fable-5` (the most-premium "
+      f"frontier model, shared with production) was DEFERRED per the run's capacity "
+      f"guidance: its weekly pool window was exhausted when this run began. It carries "
+      f"{pending_per_model['fable-5']} PENDING-WINDOW cells (never dispatched) — the "
+      f"reasoning corpora were collected opportunistically before the deferral and are "
+      f"reported as a partial reference; its coding column is entirely PENDING-WINDOW and "
+      f"fills on a later run once the window resets. Read fable-5 rows as reference-only.")
     W("")
     W("**Column substitution**: `gpt-5.3-codex` was requested but the codex backend "
       "rejects it for ChatGPT accounts (probed 2026-07-06, both API shapes); `gpt-5.4` "
@@ -564,6 +574,15 @@ def main() -> int:
       "≈ single-draw accuracy.")
     W("- **Reasoning corpora are own-authored** (140+80 items, verified answers); they proxy "
       "'careful multi-step reasoning', not any production lane directly.")
+    W("- **Coding oracle tests are white-box**: several held-out tests import private "
+      "helpers/constants from the rewritten module by exact name, so a candidate must "
+      "reproduce the merged PR's internal interface, not just its behavior "
+      "(drop-in-replacement fidelity). Collection errors on candidate runs are scored "
+      "INTERFACE-FAIL (a real failure, not a hole) because a same-day golden self-check "
+      "proved every item's oracle stands up with the true sources on this machine.")
+    W("- **Truncation-holed cells were re-administered once at a doubled max_tokens cap** "
+      "(--retry-truncations; the cap is administration, not construct). Any cell still "
+      "truncating at the raised cap remains a HOLE.")
     W("")
 
     W("## 6. Administration-ledger appendix (Stage 0 + matrix-wide)")

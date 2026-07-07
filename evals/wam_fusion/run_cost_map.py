@@ -514,8 +514,28 @@ def matrix(store: Store, corpora: dict, args) -> int:
         return 1
     corpus_names = tuple(args.corpora.split(",")) if args.corpora else CORPORA
     models = args.models.split(",") if args.models else None
-    cells = pending_cells(store, "matrix", corpora, K_SAMPLES,
-                          corpus_names=corpus_names, models=models)
+    if args.retry_truncations:
+        # Re-administer cells whose LAST record is a truncation HOLE, at a scaled
+        # cap. The cap is administration, not construct (generous-by-design;
+        # truncation = an administration failure, never a model verdict) — leaving
+        # systematic holes on a verbose model's longest items would bias its column.
+        # Store appends are last-record-wins on reload, so a fresh ok record
+        # supersedes the HOLE in analysis.
+        for key in list(MAX_TOKENS):
+            MAX_TOKENS[key] = int(MAX_TOKENS[key] * args.cap_scale)
+        cells = []
+        for cname in corpus_names:
+            items_by_id = {it["id"]: it for it in corpora[cname]["items"]}
+            for mname in (models or list(MODELS)):
+                done = store.load_done("matrix", cname, mname)
+                for (iid, k), r in sorted(done.items()):
+                    if r["status"] == "HOLE" and r.get("hole_kind") == "truncation":
+                        cells.append((cname, items_by_id[iid], mname, k))
+        print(f"# retry-truncations: {len(cells)} truncation-HOLE cells at "
+              f"cap x{args.cap_scale} => {MAX_TOKENS}", flush=True)
+    else:
+        cells = pending_cells(store, "matrix", corpora, K_SAMPLES,
+                              corpus_names=corpus_names, models=models)
     runner = Runner(store, "matrix")
     t0 = time.time()
     runner.run_cells(cells, corpora)
@@ -534,6 +554,10 @@ def main() -> int:
     ap.add_argument("--state-dir", default=str(STATE_DIR))
     ap.add_argument("--models", default=None, help="comma-separated column subset")
     ap.add_argument("--corpora", default=None, help="comma-separated corpus subset")
+    ap.add_argument("--retry-truncations", action="store_true",
+                    help="re-run truncation-HOLE cells at a scaled max_tokens cap")
+    ap.add_argument("--cap-scale", type=float, default=2.0,
+                    help="max_tokens multiplier for --retry-truncations (default 2x)")
     args = ap.parse_args()
 
     with contextlib.suppress(AttributeError, ValueError):

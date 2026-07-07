@@ -109,6 +109,10 @@ def identity_matches(requested: str, served: str | None) -> bool:
 
 def _sse_data_lines(resp: requests.Response):
     """Yield parsed JSON payloads of ``data:`` SSE lines; ignore keepalives/[DONE]."""
+    # SSE is UTF-8 by spec; without a charset in the content-type header requests
+    # falls back to latin-1 and mojibakes every non-ASCII char (observed on
+    # oai-proxy: "→" -> "â\\x86\\x92"). Force it.
+    resp.encoding = "utf-8"
     for raw in resp.iter_lines(decode_unicode=True):
         if not raw or not raw.startswith("data:"):
             continue
@@ -266,11 +270,17 @@ def oai_call(
         final = None
         n_events = 0
         failed_detail = None
+        delta_parts: list[str] = []
         try:
             for ev in _sse_data_lines(resp):
                 n_events += 1
                 t = ev.get("type", "")
-                if t in ("response.completed", "response.incomplete"):
+                if t == "response.output_text.delta":
+                    # The codex backend's terminal event sometimes carries an EMPTY
+                    # ``output`` array (observed 2026-07-06, non-deterministically) —
+                    # the deltas are the reliable text channel.
+                    delta_parts.append(ev.get("delta") or "")
+                elif t in ("response.completed", "response.incomplete"):
                     final = ev.get("response", {})
                 elif t in ("response.failed", "error"):
                     failed_detail = json.dumps(ev)[:300]
@@ -286,8 +296,10 @@ def oai_call(
     for item in final.get("output", []):
         if item.get("type") == "message":
             for c in item.get("content", []):
-                if c.get("type") == "output_text":
+                if c.get("type") in ("output_text", "text"):
                     text_parts.append(c.get("text", ""))
+    if not text_parts and delta_parts:
+        text_parts = delta_parts
     usage = final.get("usage") or {}
     out_details = usage.get("output_tokens_details") or {}
     if status == "incomplete":
