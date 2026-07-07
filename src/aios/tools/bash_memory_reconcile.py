@@ -20,6 +20,7 @@ Design constraints:
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from pathlib import Path
 
 from aios.harness import runtime
@@ -118,20 +119,29 @@ def _walk_store_files(host_dir: Path) -> list[tuple[Path, str]]:
 
 def _snapshot_with_bytes(
     session_id: str,
-) -> _BytesMap:
-    """Return raw bytes for all eligible writable materialized mounts.
+) -> tuple[_BytesMap, set[str]]:
+    """Return raw bytes and the set of successfully-scanned stores.
 
     Called internally by both ``snapshot_memory_mounts`` (which only needs
     sha digests) and ``reconcile_memory_mounts`` (which needs bytes to avoid
     a second scan).
 
-    Returns ``bytes_map``: ``(store_id, store_path) -> raw_bytes``.  A file that
-    is enumerated but whose ``read_bytes()`` raises ``OSError`` is recorded
-    under the ``UNREADABLE`` sentinel instead of being dropped, so the path
-    stays present in the snapshot and is never mistaken for a deletion.
+    Returns ``(bytes_map, scanned_store_ids)``:
+
+    - ``bytes_map``: ``(store_id, store_path) -> raw_bytes``.  A file that is
+      enumerated but whose ``read_bytes()`` raises ``OSError`` is recorded under
+      the ``UNREADABLE`` sentinel instead of being dropped, so the path stays
+      present in the snapshot and is never mistaken for a deletion.
+    - ``scanned_store_ids``: every writable store that passed the echo-cache +
+      ``host_dir.exists()`` + ``.materialized`` marker gates, INCLUDING stores
+      that scanned to zero files.  This is the store-level analog of the
+      ``UNREADABLE`` file sentinel: a store that is NOT in this set was not
+      actually observed in the after-pass, so its ``before`` paths are UNKNOWN
+      (not deleted) and must never be reconciled as deletions (#1705).
     """
     echoes = runtime.get_session_memory_mounts(session_id)
     bytes_map: _BytesMap = {}
+    scanned_store_ids: set[str] = set()
 
     for echo in echoes:
         if echo.access == "read_only":
@@ -144,6 +154,12 @@ def _snapshot_with_bytes(
         if not marker.exists():
             continue
 
+        # Store passed every gate — record it as scanned even if it has zero
+        # files, so the deleted-files diff can tell "scanned, now empty"
+        # (a genuine delete-all) apart from "dropped out of the scan"
+        # (an untrustworthy view that must suppress deletes).
+        scanned_store_ids.add(store_id)
+
         for fpath, store_path in _walk_store_files(host_dir):
             try:
                 raw: bytes | _Unreadable = fpath.read_bytes()
@@ -154,7 +170,7 @@ def _snapshot_with_bytes(
                 raw = UNREADABLE
             bytes_map[(store_id, store_path)] = raw
 
-    return bytes_map
+    return bytes_map, scanned_store_ids
 
 
 def snapshot_memory_mounts(session_id: str) -> _Snapshot:
@@ -170,7 +186,7 @@ def snapshot_memory_mounts(session_id: str) -> _Snapshot:
     - Stores whose host directory does not exist yet.
     - Stores that have not been materialized (marker file absent).
     """
-    by_bytes = _snapshot_with_bytes(session_id)
+    by_bytes, _scanned = _snapshot_with_bytes(session_id)
     return _bytes_map_to_sha_map(by_bytes)
 
 
@@ -240,6 +256,37 @@ def _warn_unreadable(
     )
 
 
+def _warn_store_unscannable(
+    store_id: str,
+    suppressed_deletes: int,
+    warnings: list[str],
+    session_id: str,
+) -> None:
+    """Surface a store that dropped out of the after-scan; suppress its deletes.
+
+    The store-level twin of :func:`_warn_unreadable` (#1705).  A store present
+    in ``before`` but absent from the after-pass ``scanned_store_ids`` was not
+    actually observed after ``sandbox.exec`` — its mount echo-cache was cleared
+    mid-bash (``SandboxRegistry.release``/``evict``/idle-reaper), or its host dir
+    or ``.materialized`` marker vanished.  Its ``before`` paths therefore read as
+    "deleted" only because the after-view is UNKNOWN, not because the files were
+    removed (they are still on disk and in the DB).  Deleting on that view is the
+    mass-delete data-loss path, so every delete for the store is suppressed and
+    the store is surfaced instead — emitted once per store, not once per file.
+    """
+    warnings.append(
+        f"store {store_id}: not scannable after exec (mount cache cleared or "
+        f"host dir/marker absent); suppressed {suppressed_deletes} deletion(s) "
+        f"to avoid data loss"
+    )
+    log.warning(
+        "memory_reconcile.store_unscannable",
+        session_id=session_id,
+        store_id=store_id,
+        suppressed_deletes=suppressed_deletes,
+    )
+
+
 async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[str]:
     """Diff memory mount state against ``before``; write DB changes.
 
@@ -257,7 +304,10 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
     account_id = await sessions_service.load_session_account_id(runtime.require_pool(), session_id)
     # Build after snapshot as (store_id, store_path) -> bytes in one pass.
     # Using bytes avoids re-reading files during the create/modify loops.
-    after_bytes = _snapshot_with_bytes(session_id)
+    # ``after_scanned_stores`` is the set of stores actually observed in this
+    # after-pass; a ``before`` store missing from it is UNKNOWN, not empty, and
+    # its deletes must be suppressed (#1705).
+    after_bytes, after_scanned_stores = _snapshot_with_bytes(session_id)
     pool = runtime.require_pool()
     actor = SessionActor(session_id=session_id)
     warnings: list[str] = []
@@ -367,9 +417,26 @@ async def reconcile_memory_mounts(session_id: str, before: _Snapshot) -> list[st
         )
 
     # ── Deleted files ────────────────────────────────────────────────────────
+    # Count before-paths per store so an unscannable store can report how many
+    # deletions it suppressed (the #1705 incident wrote 159 durable deletes in
+    # 1.79s from a read-only bash while the mount cache was cleared under it).
+    before_path_counts = Counter(store_id for store_id, _store_path in before)
+    unscannable_warned: set[str] = set()
     for store_id, store_path in before:
         if (store_id, store_path) in after:
             continue  # still exists
+        if store_id not in after_scanned_stores:
+            # The store was NOT observed in the after-pass (mount echo-cache
+            # cleared mid-bash, host dir/marker vanished, or materialization
+            # incomplete). Its before paths are UNKNOWN, not deleted — never
+            # delete on an untrustworthy view. Store-level twin of the
+            # per-file UNREADABLE sentinel (#1571 → #1705). Warn once per store.
+            if store_id not in unscannable_warned:
+                unscannable_warned.add(store_id)
+                _warn_store_unscannable(
+                    store_id, before_path_counts[store_id], warnings, session_id
+                )
+            continue
         existing = await memory_service.get_memory_by_path(
             pool, store_id, store_path, include_content=False, account_id=account_id
         )
