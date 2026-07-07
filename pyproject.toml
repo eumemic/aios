@@ -39,16 +39,21 @@ dependencies = [
     "cryptography>=46",         # egress-CA x509 cert + EC key (sandbox/egress_ca.py)
     "python-ulid>=3.0",
     # LLM client
-    "litellm>=1.55",
-    # MCP client + server reflection
-    "mcp>=1.20",
+    # >=1.83.7 clears CVE-2026-42208 (LiteLLM Proxy pre-auth SQLi). aios uses
+    # litellm as a client library (harness/completion.py), not the Proxy, so the
+    # vulnerable path is unreachable — floor raised for SCA hygiene.
+    "litellm>=1.83.7",
+    # MCP client + server reflection.
+    # Cap <2: SDK v2 is a breaking rearchitecture (maintainers advise pinning <2).
+    "mcp>=1.20,<2",
     "fastapi-mcp>=0.4",
     # Web tools
     "httpx>=0.27",
     # HTTP/1.1 framing for the TLS-terminating secret-egress proxy
     # (sandbox/secret_egress_proxy.py). Already transitive via httpcore;
     # pinned direct because we use it as a sans-IO server parser.
-    "h11>=0.14",
+    # >=0.16 excludes the request-smuggling-vulnerable parser (CVE-2025-43859).
+    "h11>=0.16",
     # CLI
     "typer>=0.12",
     # Observability
