@@ -10,8 +10,12 @@ to /search), so reading a ``title`` key returned ``""`` on every real call.
 When the content is cut at the char cap the result also carries ``"truncated":
 True`` (present only when truncated, mirroring ``http_request``) so the model
 never mistakes a cut page for a complete one.
-On an expected failure (SSRF block, non-2xx, timeout, empty response) raises
-:class:`~aios.tools.invoke.ToolBail`; a TAVILY-config failure raises the client-class
+On an expected failure (SSRF block, non-2xx, timeout, any httpx transport fault —
+ConnectError / ReadError / RemoteProtocolError / PoolTimeout — or empty response) raises
+:class:`~aios.tools.invoke.ToolBail`; the raw httpx error is never propagated (it would
+reach ``_classify_tool_error`` → ``evict=True`` → tear down the sandbox on a benign
+network blip, aios#1697). The transport-fault catch is as broad as ``http_request``'s
+``httpx.HTTPError`` (aios#1697). A TAVILY-config failure raises the client-class
 :class:`~aios.tools.tavily.WebToolError`. The single event writer stamps ``is_error``
 (session path) — #1680. On the workflow-run path these raises are translated back to
 value-shaped ``{"error": ...}`` dicts at the ``invoke_run_tool`` seam, preserving the
@@ -112,6 +116,15 @@ async def web_fetch_handler(session_id: str, arguments: dict[str, Any]) -> dict[
         raise ToolBail(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
     except httpx.TimeoutException as exc:
         raise ToolBail("Request timed out fetching URL") from exc
+    except httpx.HTTPError as exc:
+        # The broader transport-error family — ConnectError / ReadError /
+        # RemoteProtocolError / PoolTimeout — is an EXPECTED benign network blip,
+        # not an internal fault. Catch it as broadly as ``http_request`` does
+        # (``httpx.HTTPError`` is the base of every httpx transport/protocol error)
+        # so a transient Tavily/upstream connection fault becomes a ToolBail the
+        # model reads, NOT a raw httpx error that _classify_tool_error would treat
+        # as internal → evict the sandbox on a benign failure (aios#1697).
+        raise ToolBail(f"HTTP transport error fetching URL: {type(exc).__name__}: {exc}") from exc
     except (KeyError, IndexError) as exc:
         raise ToolBail("No content returned for URL") from exc
 
