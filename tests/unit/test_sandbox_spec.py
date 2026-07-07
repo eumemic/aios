@@ -106,11 +106,15 @@ async def test_session_clone_timeout_does_not_abort_sibling_clones() -> None:
             append_event_mock,
         ),
     ):
-        materialized, returned_proxy = await _materialize_github_clones(
+        materialized, attempted, returned_proxy = await _materialize_github_clones(
             "sess_x", account_id="acct_x"
         )
 
     assert [e.id for e in materialized] == [ok_echo.id]
+    # The failed clone is dropped from ``materialized`` (no bind mount) but
+    # STAYS in ``attempted`` — that's the set the drift key is stamped from,
+    # so a permanently-failing clone can't churn provision↔release (#1725).
+    assert {e.id for e in attempted} == {failed_echo.id, ok_echo.id}
     assert returned_proxy is mock_proxy
     append_event_mock.assert_awaited_once()
     call_args = append_event_mock.await_args
