@@ -11,7 +11,7 @@ uv sync --dev
 # Run checks (do all three before every commit)
 uv run mypy src tests
 uv run ruff check src tests && uv run ruff format --check src tests
-uv run pytest tests/unit -q                    # ~160 test files, fast, no Docker needed (CI runs -n 4)
+uv run pytest tests/unit -q                    # hundreds of test files, fast, no Docker needed (CI runs -n 4)
 
 # E2E tests (need Docker for testcontainer Postgres + sandbox)
 DOCKER_HOST=unix:///Users/tom/.docker/run/docker.sock uv run pytest tests/e2e -q
@@ -25,7 +25,7 @@ set -a && source .env && set +a
 uv run aios migrate
 
 # Start the system (two processes)
-uv run python -m aios api      # API server on :8090
+uv run python -m aios api      # API server on :8080 (AIOS_API_PORT)
 uv run python -m aios worker   # procrastinate worker
 ```
 
