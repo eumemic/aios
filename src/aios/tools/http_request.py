@@ -42,6 +42,7 @@ from aios.services import sessions as sessions_service
 from aios.tools._glob_match import match_glob
 from aios.tools.invoke import ToolBail
 from aios.tools.registry import registry
+from aios.tools.url_safety import is_cleartext_credential_target
 
 # The response-body character cap. Bodies longer than this are truncated — but
 # NEVER silently: the result dict carries ``"truncated": True`` so the caller can
@@ -375,6 +376,12 @@ async def _do_http_request(
     full_url = server.base_url.rstrip("/") + "/" + path.lstrip("/")
 
     _vault_id, auth_headers = await resolve_auth(server.base_url)
+
+    if auth_headers and is_cleartext_credential_target(full_url):
+        raise ToolBail(
+            f"refusing to attach a vault credential over plaintext http: {full_url} — "
+            "use https for this http_server's base_url"
+        )
 
     # Strip headers the worker manages on the caller's behalf. ``Authorization``
     # is rendered from the bound vault by ``resolve_auth``. ``Host`` is derived

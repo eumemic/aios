@@ -270,6 +270,21 @@ async def refresh_credential(
             body, client_id=client_id, endpoint_auth=payload.get("token_endpoint_auth")
         )
 
+        # Lazy import: a module-level ``from aios.tools...`` would run the
+        # ``aios.tools`` package __init__ mid-import and re-enter this
+        # partially-initialized module (``aios.tools`` → ``bash``/``http_request``
+        # → ``sandbox.spec``/``mcp.client`` → ``services.vaults``). Same acyclic
+        # precedent as ``pinned_transport``/``mcp.client``.
+        from aios.tools.url_safety import is_cleartext_credential_target
+
+        if is_cleartext_credential_target(
+            token_endpoint, allow_hosts=get_settings().oauth_allow_insecure_host_set
+        ):
+            raise OAuthRefreshError(
+                "refusing to send refresh credential over plaintext http",
+                detail={"token_endpoint": token_endpoint, "vault_id": vault_id},
+            )
+
         try:
             # The stored token_endpoint was SSRF-guarded once at flow start,
             # possibly long ago; PinnedTransport re-validates and pins its

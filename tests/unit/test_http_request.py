@@ -387,6 +387,70 @@ class TestHttpRequestHandler:
             )
         assert isinstance(captured["init_kwargs"]["transport"], PinnedTransport)
 
+    async def test_plaintext_http_with_credential_is_refused(self, _stub_runtime: Any) -> None:
+        """SECURITY-02: a vault credential must not travel cleartext. A server
+        whose base_url is plain http + an attached Authorization header is
+        refused before any dispatch."""
+        agent = _agent(
+            http_servers=[
+                _server(base_url="http://api.example.com/v1", routes=[_route("/lights/*")])
+            ]
+        )
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth({"Authorization": "Bearer x"}),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+            pytest.raises(ToolBail) as excinfo,
+        ):
+            await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert "plaintext" in excinfo.value.message
+        assert "url" not in captured  # refused before any upstream dispatch
+
+    async def test_https_with_credential_is_not_refused_by_scheme_rule(
+        self, _stub_runtime: Any
+    ) -> None:
+        """The same credentialed request over https is not refused by this rule
+        — it dispatches like any other happy path."""
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth({"Authorization": "Bearer x"}),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert result["status"] == 200
+
+    async def test_plaintext_http_without_credential_is_allowed(self, _stub_runtime: Any) -> None:
+        """A non-credentialed plaintext call is allowed — the rule gates on a
+        credential actually being attached, not on the scheme alone."""
+        agent = _agent(
+            http_servers=[
+                _server(base_url="http://api.example.com/v1", routes=[_route("/lights/*")])
+            ]
+        )
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),  # ("vlt_x", {}) — no auth header attached
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert result["status"] == 200
+
     async def test_method_not_allowed_returns_error(self, _stub_runtime: Any) -> None:
         # A route scoped to GET refuses a POST at the gate (no upstream dispatch).
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*", methods=["GET"])])])

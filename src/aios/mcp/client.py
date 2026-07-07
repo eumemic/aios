@@ -39,6 +39,14 @@ from aios.models.vaults import AuthType
 from aios.pinned_transport import PinnedTransport
 from aios.services.vaults import is_expiring, refresh_credential
 
+# NOTE: ``aios.tools.url_safety`` is imported lazily inside the two credential
+# guards below — NOT at module top. This module is imported by
+# ``aios.tools.http_request`` (via ``resolve_auth_for_target_url``), so a
+# module-level ``from aios.tools...`` forces the ``aios.tools`` package
+# ``__init__`` to run mid-import and re-enters this partially-initialized module
+# (circular import). Deferring to call time keeps the import graph acyclic —
+# the same precedent as ``pinned_transport``/``secret_egress_proxy``.
+
 log = get_logger("aios.mcp.client")
 
 
@@ -393,10 +401,19 @@ async def discover_mcp_tools(
     into a 502 response because the sandboxed model DID initiate the call.
     """
     from aios.harness import runtime
+    from aios.tools.url_safety import is_cleartext_credential_target  # lazy — see module note
 
     _pool = runtime.mcp_session_pool
     merged = _merge_headers(spec_headers, headers)
     hkey = _headers_key(spec_headers)
+
+    if vault_id is not None and is_cleartext_credential_target(
+        url, allow_hosts=get_settings().oauth_allow_insecure_host_set
+    ):
+        raise ValueError(
+            f"refusing to send MCP credential over plaintext http: {url} — "
+            "use https or add the host to AIOS_OAUTH_ALLOW_INSECURE_HOSTS"
+        )
 
     if _pool is not None and binding_id is not None:
         cached = _pool.get_cached_tools(url, vault_id, hkey, binding_id)
@@ -531,10 +548,22 @@ async def call_mcp_tool(
     """
     try:
         from aios.harness import runtime
+        from aios.tools.url_safety import is_cleartext_credential_target  # lazy — see module note
 
         _pool = runtime.mcp_session_pool
         merged = _merge_headers(spec_headers, headers)
         hkey = _headers_key(spec_headers)
+
+        if vault_id is not None and is_cleartext_credential_target(
+            url, allow_hosts=get_settings().oauth_allow_insecure_host_set
+        ):
+            return {
+                "error": (
+                    f"refusing to send MCP credential over plaintext http: {url} — "
+                    "use https or allow-list the host"
+                ),
+                "code": "transport_error",
+            }
 
         if _pool is not None:
             # Circuit breaker (#1698 (d)): if this transport key is in a backoff

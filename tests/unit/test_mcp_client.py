@@ -749,3 +749,46 @@ class TestSpecHeadersOutbound:
             )
 
         assert captured[0].get("X-MCP-Toolsets") == "issues"
+
+
+# ── SECURITY-02: refuse a vault credential over plaintext http ─────────────────
+
+
+class TestPlaintextCredentialGuard:
+    """A vault-bound MCP server (``vault_id is not None``) reached over plain
+    http must be refused before the transport is entered — the credential would
+    otherwise ride cleartext. A non-vault server (``vault_id is None``) or an
+    allow-listed host is not refused."""
+
+    async def test_discover_refuses_plaintext_credentialed(self) -> None:
+        with patch("aios.mcp.client.streamable_http_client") as transport:
+            with pytest.raises(ValueError, match="plaintext"):
+                await discover_mcp_tools("http://mcp.example.com/", "vlt_x", {}, "srv")
+            transport.assert_not_called()
+
+    async def test_call_refuses_plaintext_credentialed(self) -> None:
+        with patch("aios.mcp.client.streamable_http_client") as transport:
+            result = await call_mcp_tool("http://mcp.example.com/", "vlt_x", {}, "tool", {})
+            transport.assert_not_called()
+        assert result["code"] == "transport_error"
+        assert "plaintext" in result["error"]
+
+    async def test_discover_allowlisted_plaintext_proceeds(self) -> None:
+        from aios.config import Settings
+
+        settings = Settings(oauth_allow_insecure_hosts="mcp.internal:8080")
+        with (
+            patch("aios.mcp.client.get_settings", lambda: settings),
+            patch("aios.mcp.client.streamable_http_client", return_value=_transport()),
+            patch("aios.mcp.client.ClientSession", _session_ctx(_ok_session())),
+        ):
+            tools, _ = await discover_mcp_tools("http://mcp.internal:8080/", "vlt_x", {}, "srv")
+        assert tools == []  # proceeded past the guard into a (mocked) discovery
+
+    async def test_call_plaintext_without_vault_is_allowed(self) -> None:
+        with (
+            patch("aios.mcp.client.streamable_http_client", return_value=_transport()),
+            patch("aios.mcp.client.ClientSession", _session_ctx(_ok_session())),
+        ):
+            result = await call_mcp_tool("http://mcp.example.com/", None, {}, "tool", {})
+        assert result == {"content": "ok"}  # credential-gated: no vault_id, not refused
