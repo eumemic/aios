@@ -533,6 +533,81 @@ class TestReconcile:
         mock_update.assert_not_awaited()
         assert any("/notes.md" in w for w in warnings)
 
+    async def test_store_unscannable_after_not_deleted(self, tmp_path: Path) -> None:
+        """Whole store drops out of the after-scan (echo-cache cleared mid-bash):
+        every delete is suppressed and the store is warned — the direct #1705
+        regression guard and the store-level analog of
+        ``test_unreadable_after_file_not_deleted``.
+
+        Reproduces the production incident: a real ``before`` snapshot is taken
+        while the mount is materialized, then ``clear_session_memory_mounts``
+        (what ``SandboxRegistry.release``/``evict``/idle-reaper actually call)
+        fires before the reconcile. The files are STILL on disk and in the DB
+        (``get_memory_by_path`` returns a row), yet every ``before`` path reads
+        as "deleted". Pre-fix this issued one ``delete_memory`` per path (159 in
+        the incident); post-fix zero deletes and one per-store warning.
+        """
+        from aios.tools.bash_memory_reconcile import (
+            reconcile_memory_mounts,
+            snapshot_memory_mounts,
+        )
+
+        host_dir = self._make_host_dir(tmp_path)
+        (host_dir / "notes.md").write_text("notes content\n")
+        (host_dir / "log.md").write_text("log content\n")
+
+        runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
+
+        # before: a real snapshot while the mount is present + materialized.
+        with patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir):
+            before = snapshot_memory_mounts(SESSION_ID)
+        assert (STORE_A, "/notes.md") in before
+        assert (STORE_A, "/log.md") in before
+
+        # Simulate the mount echo-cache clearing between before and reconcile
+        # (SandboxRegistry.release/evict/idle-reaper). The store now drops out
+        # of the after-scan entirely even though its files remain on disk + DB.
+        runtime.clear_session_memory_mounts(SESSION_ID)
+
+        # get_memory_by_path returns a live row: the files are genuinely present
+        # in the DB, so the only thing standing between the incident and 159
+        # deletes is the store-unscannable guard (not the existing-is-None one).
+        fake_memory = MagicMock()
+        fake_memory.id = "mem_01FAKE0000000000000000004"
+
+        with (
+            patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir),
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.create_memory",
+                new_callable=AsyncMock,
+            ) as mock_create,
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.get_memory_by_path",
+                new_callable=AsyncMock,
+                return_value=fake_memory,
+            ) as mock_get,
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.update_memory",
+                new_callable=AsyncMock,
+            ) as mock_update,
+            patch(
+                "aios.tools.bash_memory_reconcile.memory_service.delete_memory",
+                new_callable=AsyncMock,
+            ) as mock_delete,
+        ):
+            warnings = await reconcile_memory_mounts(SESSION_ID, before=before)
+
+        mock_delete.assert_not_awaited()
+        mock_create.assert_not_awaited()
+        mock_update.assert_not_awaited()
+        # Guard short-circuits before the DB lookup — no read attempted either.
+        mock_get.assert_not_awaited()
+        # One warning for the store (not one per file), naming the store and the
+        # suppressed-delete count.
+        assert len(warnings) == 1
+        assert STORE_A in warnings[0]
+        assert "2" in warnings[0]
+
     async def test_unreadable_in_both_snapshots_is_unchanged(self, tmp_path: Path) -> None:
         """Path unreadable in both before and after: no DB call, no warning."""
         from aios.tools.bash_memory_reconcile import (
