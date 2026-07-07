@@ -36,13 +36,14 @@ OVERALL=0
 fail() { OVERALL=1; [[ $FAIL_FAST -eq 1 ]] && exit 1; }
 
 # Lint/type targets, kept in lock-step with code-validation.yml's lint job:
-# the harness (src/tests), the hand-written aios-sdk surface, the three
-# connector source trees (signal/telegram/whatsapp — echo-http has no src/),
-# and the connector-http package (which lives at the package root, not src/).
+# the harness (src/tests), the hand-written aios-sdk surface, the four
+# connector source trees (signal/slack/telegram/whatsapp — echo-http has no
+# src/), and the connector-http package (which lives at the package root, not
+# src/).
 LINT_TARGETS=(
     src tests
     packages/aios-sdk/aios_sdk
-    connectors/signal/src connectors/telegram/src connectors/whatsapp/src
+    connectors/signal/src connectors/slack/src connectors/telegram/src connectors/whatsapp/src
     packages/aios-connector-http/aios_connector_http
 )
 
@@ -91,9 +92,11 @@ if ! should_skip tests; then
     # Postgres/Docker/network.
     echo "── pytest (connectors) ──"
     uv run pytest connectors/signal/tests -q || fail
+    uv run pytest connectors/slack/tests -q || fail
     uv run pytest connectors/telegram/tests -q || fail
     uv run pytest connectors/whatsapp/tests -q || fail
     uv run pytest packages/aios-connector-http/tests -q || fail
+    uv run pytest packages/aios-sdk/tests -q || fail
 fi
 
 echo ""
