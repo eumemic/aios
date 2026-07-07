@@ -917,6 +917,56 @@ class TestPoolBulkhead:
         assert pool.degraded_servers() == []
         assert not pool.is_unhealthy(URL, "v", EMPTY_KEY)
 
+    async def test_successful_acquire_between_failures_resets_counter(self) -> None:
+        """F1 / AC #4 (consecutive): a successful ``acquire`` at the pool boundary
+        resets the consecutive-failure counter WITHOUT a manual ``mark_healthy``.
+
+        FAIL → acquire-SUCCESS → FAIL → FAIL must NOT open the breaker: the
+        success breaks the streak (the count is consecutive, not cumulative), so
+        the two trailing failures only bring the counter back to 2 (< K). Without
+        the pool-boundary reset the pre-success failure would persist and the
+        third failure overall would trip the breaker (the hair-trigger F1 flags).
+        """
+        from aios.mcp.pool import _BREAKER_FAILURE_THRESHOLD, MCPUnavailable
+
+        assert _BREAKER_FAILURE_THRESHOLD == 3
+        key = (URL, "v", EMPTY_KEY)
+        pool = McpSessionPool()
+        good = _make_mock_session()
+
+        async def _fail_once() -> None:
+            with (
+                patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+                patch("aios.mcp.pool.ClientSession", _failing_session_ctx(_incident_group())),
+                pytest.raises(MCPUnavailable),
+            ):
+                await pool.acquire(URL, "v", EMPTY_KEY, {})
+
+        # 1st failure: counter 0 → 1, breaker still closed.
+        await _fail_once()
+        assert pool._failure_count.get(key) == 1
+        assert not pool.is_unhealthy(URL, "v", EMPTY_KEY)
+
+        # Interleaved SUCCESS — no manual ``mark_healthy`` — resets the counter to
+        # 0 at the fresh-open success path. Left checked out (not released) so the
+        # next acquire opens a fresh (failing) session rather than reusing an idle
+        # one.
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(good)),
+        ):
+            entry = await pool.acquire(URL, "v", EMPTY_KEY, {})
+        assert entry.session is good
+        assert pool._failure_count.get(key, 0) == 0, "success must reset the counter to 0"
+
+        # Two more failures: because the streak was broken, the counter climbs
+        # 0 → 1 → 2 and the breaker stays CLOSED (2 < K).
+        await _fail_once()
+        await _fail_once()
+        assert pool._failure_count.get(key) == 2
+        assert not pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must stay closed after reset"
+        assert pool.degraded_servers() == []
+
     async def test_evict_by_vault_clears_breaker_state(self) -> None:
         """AC #6 / composes with #1030: ``evict_by_vault`` clears breaker state
         so a fresh credential re-probes immediately."""

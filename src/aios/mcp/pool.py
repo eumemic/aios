@@ -262,7 +262,12 @@ class McpSessionPool:
         # Per-_PoolKey consecutive-failure counter feeding the breaker (#1698).
         # Every ``acquire``/discovery connect-or-init failure bumps the count;
         # the breaker opens once it reaches ``_BREAKER_FAILURE_THRESHOLD`` (K).
-        # ``mark_healthy`` (a successful discovery/acquire) resets it to 0.
+        # A successful ``acquire`` resets it to 0 at the pool boundary (the
+        # fresh-open success path — call-time success is covered because every
+        # ``call_mcp_tool`` acquires before use); ``mark_healthy`` (the
+        # uncached-discovery success) and ``_clear_breaker_by_vault`` (credential
+        # rotation) also reset it. So the count is truly *consecutive*: any
+        # intervening success breaks the streak.
         self._failure_count: dict[_PoolKey, int] = {}
         # URLs whose breaker is currently OPEN, keyed by url. Backs
         # :meth:`degraded_servers` and dedupes the ``mcp_server_unavailable``
@@ -471,6 +476,16 @@ class McpSessionPool:
                         # prompt teardown.
                         self._record_connect_failure(key, url)
                         raise MCPUnavailable(url) from exc
+                    # This connect succeeded, so the consecutive-failure streak is
+                    # broken — reset the per-key breaker counter (F1 / #1698 AC4:
+                    # the count is *consecutive*, not cumulative). This is the
+                    # single call-time reset site at the pool boundary; every
+                    # ``call_mcp_tool`` acquires before use, so a successful call
+                    # resets it here too (no separate call-path reset needed). An
+                    # open breaker is skipped before ``acquire`` via
+                    # ``is_unhealthy``, so a reset only follows a genuinely healthy
+                    # connect.
+                    self._failure_count.pop(key, None)
                     self._in_use.setdefault(key, set()).add(entry)
                     log.info("mcp_pool.connected", url=url)
                     return entry
@@ -783,9 +798,11 @@ class McpSessionPool:
     def degraded_servers(self) -> list[str]:
         """Return the URLs whose breaker is currently OPEN (#1698 (e)).
 
-        Gives the ops-agent an external artifact to detect a session running
-        degraded — the MCP servers whose tools are currently absent because
-        their transport keeps failing.
+        This is an in-memory, per-worker accessor (reflecting only THIS worker's
+        breaker state, not persisted) for tests and in-process introspection; the
+        wired external artifact the ops-agent consumes is the durable
+        ``mcp_server_unavailable`` session event emitted on the breaker's DOWN
+        edge (see :meth:`drain_degraded_events`), not this accessor.
         """
         return sorted(self._degraded_urls)
 

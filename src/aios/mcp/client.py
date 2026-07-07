@@ -398,15 +398,19 @@ async def discover_mcp_tools(
         # it and retry once with a fresh one. Always release-or-discard so the
         # per-key cap slot is freed.
         #
-        # ``acquire`` is INSIDE the try so a connect/init failure takes the
-        # discard-retry-then-mark_unhealthy path — and the first-attempt handler
-        # is ``(Exception, BaseExceptionGroup)`` so a group-shaped failure (the
-        # bare ``BaseExceptionGroup("unhandled errors in a TaskGroup", [...])``
-        # anyio can raise) is caught here rather than escaping through the
-        # no-breaker ``except BaseException`` below and aborting the prelude
-        # (#1698 (b)). ``acquire`` already converts connect failures to
-        # ``MCPUnavailable`` (an Exception), so this is belt-and-suspenders for
-        # the ``list_tools()`` RPC leg, which ``acquire`` never sees.
+        # The first ``acquire`` (immediately below) PRECEDES the ``try``: a
+        # connect/init failure there arms the breaker inside ``acquire`` (via
+        # ``_record_connect_failure``) and raises ``MCPUnavailable`` (an
+        # Exception), which propagates to the caller — the connect leg is handled
+        # by ``acquire`` itself, not here. The ``try`` covers only the
+        # ``list_tools()`` RPC leg, which ``acquire`` never sees: on failure it
+        # discards and retries once with a fresh session, and its first-attempt
+        # handler is ``(Exception, BaseExceptionGroup)`` so a group-shaped failure
+        # (the bare ``BaseExceptionGroup("unhandled errors in a TaskGroup", [...])``
+        # anyio can raise) is caught for the retry rather than escaping through
+        # the no-breaker ``except BaseException`` below. A second RPC failure then
+        # feeds the shared per-key breaker counter (``note_discovery_failure``) and
+        # forces the backoff window open (#1698 (b)/(d)).
         entry = await _pool.acquire(url, vault_id, hkey, merged)
         try:
             result = await _list_tools_timed(entry.session)
