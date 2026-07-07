@@ -108,18 +108,33 @@ class TestRoutingMatchesRegistration:
     """
 
     async def test_explicit_queue_equals_registered_queue(self, in_memory_app: App) -> None:
-        import importlib
-
-        import aios.harness.tasks
+        import sys
 
         # The ``in_memory_app`` fixture resets ``app.tasks`` to the pristine,
         # task-free state the api process has (so the ``_assert_no_registered_tasks``
-        # guard above is order-independent under ``pytest -n``). ``@app.task``
-        # decorators only bind on first import, so a plain ``import`` here would
-        # NOT re-register after that reset — reload to re-run the decorators and
-        # actually populate ``app.tasks`` for this registration-side test.
-        importlib.reload(aios.harness.tasks)
-        from aios.jobs.app import defer_run_wake, defer_trigger_fire, defer_wake
+        # guard above is order-independent under ``pytest -n``). This test needs
+        # the harness tasks registered on that cleared app, so it must run the
+        # ``@app.task`` decorators in ``aios.harness.tasks`` exactly once.
+        #
+        # ``@app.task`` decorators only bind on *first* import. A plain ``import``
+        # re-registers only when the module is absent from ``sys.modules``; under
+        # ``pytest -n`` (xdist) whether a sibling test already imported the module
+        # on this worker is non-deterministic. Import+reload is fragile the same
+        # way (issue #1701): on a worker where ``harness.tasks`` was NOT already
+        # imported, the plain ``import`` is itself a first import that registers
+        # the tasks, and the following ``reload`` re-runs the decorators →
+        # ``TaskAlreadyRegistered``.
+        #
+        # Make registration deterministic regardless of import order: evict the
+        # module from ``sys.modules`` first, then import once. That guarantees a
+        # single fresh decorator run that populates ``app.tasks`` exactly once.
+        sys.modules.pop("aios.harness.tasks", None)
+        import aios.harness.tasks  # noqa: F401  (side-effect import: runs @app.task once)
+        from aios.jobs.app import (
+            defer_run_wake,
+            defer_trigger_fire,
+            defer_wake,
+        )
 
         # Now the tasks ARE registered; read their decorator-level queues.
         registered = {name: task.queue for name, task in in_memory_app.tasks.items()}
