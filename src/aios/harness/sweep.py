@@ -248,21 +248,70 @@ UNREACTED_ROWS_SQL = """
        AND e.seq > s.last_reacted_seq
 """
 
+# ─── batch filter: bounded, payload-stripped fetches (#1729) ─────────────────
+#
+# ``_filter_incomplete_batches`` decides, per candidate session, whether the
+# session's ONLY unreacted events are tool results from a batch whose sibling
+# tools are still in-flight (→ not yet ready). Its actual need is tiny: the
+# unreacted tool_call_ids (already fetched, seq-bounded by
+# ``UNREACTED_ROWS_SQL``) → their OWNING assistant batches → whether each such
+# batch's ids are fully covered by tool results.
+#
+# The pre-#1729 queries fetched the session's ENTIRE lifetime history — every
+# ``role='tool'`` message ever (``ALL_RESULT_ROWS_SQL``) and every assistant
+# message with tool_calls ever, WITH FULL ``data`` PAYLOAD (``ALL_ASST_ROWS_SQL``:
+# 126 MB of JSONB observed on the largest session). All of it was pulled over
+# the wire and JSON-decoded row-by-row on the worker event loop on EVERY full
+# sweep (~2/min), a 16.6s-median pre-model tax that grows linearly and forever
+# with session size. Neither query was seq-bounded or LIMITed.
+#
+# The two replacements below bound the scan to exactly what the filter inspects
+# and strip the payload to the only field it reads (``tool_calls[].id``):
+#
+# * ``REFERENCED_ASST_BATCH_SQL`` — assistant batches OWNING an unreacted tcid.
+#   The ``@>`` containment (``data->'tool_calls' @> $2``, one probe per unreacted
+#   tcid, built as ``[{"id": tcid}]``) restricts to the handful of assistant
+#   rows the unreacted results belong to — not the whole history. It projects
+#   ``jsonb_path_query_array(data->'tool_calls', '$[*].id')`` (the id array)
+#   rather than ``data``, so the 126 MB decode is gone even before bounding.
+#
+# * ``BATCH_RESULT_ROWS_SQL`` — tool results whose ``tool_call_id`` is one of the
+#   ids belonging to those referenced batches (``= ANY($2)``), not every
+#   ``role='tool'`` row the session has ever produced.
+#
+# Rows drop from ~65k (34k results + 30k assistants) to ~dozens, and the decoded
+# bytes from 126 MB to a few id strings.
+REFERENCED_ASST_BATCH_SQL = """
+    SELECT e.session_id,
+           jsonb_path_query_array(e.data->'tool_calls', '$[*].id') AS tool_call_ids
+      FROM events e
+     WHERE e.session_id = $1
+       AND e.kind = 'message'
+       AND e.role = 'assistant'
+       AND e.data->'tool_calls' @> ANY($2::jsonb[])
+"""
+
+BATCH_RESULT_ROWS_SQL = """
+    SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+      FROM events e
+     WHERE e.session_id = $1
+       AND e.kind = 'message'
+       AND e.role = 'tool'
+       AND e.data->>'tool_call_id' = ANY($2::text[])
+"""
+
+# ``ALL_RESULT_ROWS_SQL`` — every ``role='tool'`` result across a session set.
+# Retained for GHOST REPAIR (``find_and_repair_ghosts``), where the session set
+# is already bounded upstream by ``GHOST_ASST_SQL``'s ``open_tool_call_count > 0``
+# gate (migration 0066) — a fully-resolved session contributes zero rows. The
+# batch filter (#1729) no longer uses this: it fetches results per session and
+# bounded to specific batch ids via ``BATCH_RESULT_ROWS_SQL``.
 ALL_RESULT_ROWS_SQL = """
     SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
      WHERE e.session_id = ANY($1::text[])
        AND e.kind = 'message'
        AND e.role = 'tool'
-"""
-
-ALL_ASST_ROWS_SQL = """
-    SELECT e.session_id, e.data
-      FROM events e
-     WHERE e.session_id = ANY($1::text[])
-       AND e.kind = 'message'
-       AND e.role = 'assistant'
-       AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
 """
 
 # Sessions currently in the terminal "errored" state, derived from the
@@ -914,11 +963,45 @@ async def find_sessions_needing_inference(
     candidates -= errored
     confirmed_sessions -= errored
     to_filter = candidates - confirmed_sessions
-    filtered = (
-        await _filter_incomplete_batches(pool, inflight_tool_registry, to_filter)
-        if to_filter
-        else set()
-    )
+    if not to_filter:
+        return confirmed_sessions | cancel_marked
+
+    # Span the batch filter (#1729): ``sweep.batch_filter_start/end``. Before
+    # #1729 this region fetched the session's entire assistant/tool-result
+    # lifetime (126 MB observed) and decoded it on the event loop — a
+    # multi-second pre-model stall that was invisible to every existing span
+    # (``sweep.query_exec`` measured only the scalar-gate SQL, ~0.01s). Bracket
+    # it so the next residual on this path is a query, not an archaeology dig
+    # (same lesson as #1658/#1725). Only spanned on the per-step scoped path
+    # (``session_id`` set), where an ``account_id`` is resolvable; the
+    # cross-session sweep has no single session to stamp.
+    if session_id is not None:
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        bf_start = await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {"event": "sweep.batch_filter_start", "candidate_count": len(to_filter)},
+            account_id=account_id,
+        )
+        try:
+            filtered = await _filter_incomplete_batches(
+                pool, inflight_tool_registry, to_filter
+            )
+        finally:
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {
+                    "event": "sweep.batch_filter_end",
+                    "start_id": bf_start.id,
+                },
+                account_id=account_id,
+            )
+    else:
+        filtered = await _filter_incomplete_batches(pool, inflight_tool_registry, to_filter)
+
     return filtered | confirmed_sessions | cancel_marked
 
 
@@ -930,43 +1013,75 @@ async def _filter_incomplete_batches(
     """Remove sessions whose only unreacted events are tool results from
     in-progress batches (where sibling tools are still in-flight).
 
-    Uses three batched queries across all candidates (no N+1).
+    The unreacted set is fetched in ONE seq-bounded batched query
+    (``UNREACTED_ROWS_SQL``, gated by ``seq > last_reacted_seq``). The assistant
+    batches and their tool results are then fetched per session, but ONLY the
+    batches that OWN an unreacted tool_call_id and ONLY the tool results for
+    those batches' ids — via ``@>`` containment and ``= ANY`` rather than the
+    pre-#1729 unbounded lifetime scans (which pulled every ``role='tool'`` row
+    plus every assistant ``tool_calls`` payload — 126 MB observed — and decoded
+    it on the event loop on every full sweep). See the query docstrings above.
+    Sessions with no unreacted events (or whose unreacted set contains a user
+    message) are decided without touching ``events`` at all.
     """
     session_list = list(candidates)
 
     async with pool.acquire() as conn:
         unreacted_rows = await conn.fetch(UNREACTED_ROWS_SQL, session_list)
-        all_result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, session_list)
-        all_asst_rows = await conn.fetch(ALL_ASST_ROWS_SQL, session_list)
+        unreacted_by_sid = _group_event_data(unreacted_rows)
 
-    unreacted_by_sid = _group_event_data(unreacted_rows)
-    results_by_sid = _group_tool_call_ids(all_result_rows)
-    asst_by_sid = _group_event_data(all_asst_rows)
+        result: set[str] = set()
+        for sid in candidates:
+            in_flight = inflight_tool_registry.in_flight_tool_call_ids(sid)
+            unreacted = unreacted_by_sid.get(sid, [])
 
-    result: set[str] = set()
-    for sid in candidates:
-        in_flight = inflight_tool_registry.in_flight_tool_call_ids(sid)
-        unreacted = unreacted_by_sid.get(sid, [])
-
-        if not unreacted:
-            if not in_flight:
-                result.add(sid)
-            continue
-
-        if any(evt.get("role") == "user" for evt in unreacted):
-            result.add(sid)
-            continue
-
-        unreacted_tcids = {evt.get("tool_call_id") for evt in unreacted if evt.get("tool_call_id")}
-        all_result_ids = results_by_sid.get(sid, set())
-
-        for asst_data in asst_by_sid.get(sid, []):
-            batch_ids = {tc["id"] for tc in (asst_data.get("tool_calls") or []) if tc.get("id")}
-            if not (batch_ids & unreacted_tcids):
+            if not unreacted:
+                if not in_flight:
+                    result.add(sid)
                 continue
-            if batch_ids <= all_result_ids:
+
+            if any(evt.get("role") == "user" for evt in unreacted):
                 result.add(sid)
-                break
+                continue
+
+            unreacted_tcids = {
+                evt.get("tool_call_id") for evt in unreacted if evt.get("tool_call_id")
+            }
+            if not unreacted_tcids:
+                # Unreacted non-user events with no tool_call_id: pre-#1729 the
+                # assistant loop ran but no batch intersected the (empty)
+                # unreacted-tcid set, so the session was NOT admitted. Preserve
+                # that — skip the (now pointless) bounded fetch and drop it.
+                continue
+
+            # Bounded fetch (#1729): only the assistant batches that OWN one of
+            # this session's unreacted tool_call_ids, projected to their id
+            # arrays (no payload). One containment probe per unreacted tcid.
+            probes = [json.dumps([{"id": tcid}]) for tcid in unreacted_tcids]
+            asst_rows = await conn.fetch(REFERENCED_ASST_BATCH_SQL, sid, probes)
+
+            referenced_batches: list[set[str]] = []
+            all_batch_ids: set[str] = set()
+            for r in asst_rows:
+                batch_ids = {tcid for tcid in (r["tool_call_ids"] or []) if tcid}
+                if batch_ids & unreacted_tcids:
+                    referenced_batches.append(batch_ids)
+                    all_batch_ids |= batch_ids
+
+            if not referenced_batches:
+                continue
+
+            # Bounded fetch (#1729): only the tool results for THESE batches'
+            # ids, not the session's entire ``role='tool'`` history.
+            result_rows = await conn.fetch(
+                BATCH_RESULT_ROWS_SQL, sid, list(all_batch_ids)
+            )
+            result_ids = {r["tool_call_id"] for r in result_rows if r["tool_call_id"]}
+
+            for batch_ids in referenced_batches:
+                if batch_ids <= result_ids:
+                    result.add(sid)
+                    break
 
     return result
 
@@ -976,13 +1091,6 @@ def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
     for r in rows:
         data = r["data"]
         grouped.setdefault(r["session_id"], []).append(data)
-    return grouped
-
-
-def _group_tool_call_ids(rows: list[Any]) -> dict[str, set[str]]:
-    grouped: dict[str, set[str]] = {}
-    for r in rows:
-        grouped.setdefault(r["session_id"], set()).add(r["tool_call_id"])
     return grouped
 
 
