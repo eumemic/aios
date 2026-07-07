@@ -27,8 +27,7 @@ from unittest.mock import AsyncMock
 
 from aios.db.queries import EnvVarCredentialEcho
 from aios.models.github_repositories import GithubRepositoryResourceEcho
-from aios.sandbox.registry import mount_snapshot_from_echoes
-from aios.sandbox.spec import build_spec_from_session
+from aios.sandbox.spec import build_spec_from_session, mount_snapshot_from_echoes
 from tests.helpers.sandbox import patch_build_spec_deps
 
 _NOW = datetime(2026, 7, 7, tzinfo=UTC)
