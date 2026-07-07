@@ -19,10 +19,11 @@ below actually filter on.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import asyncpg
+import sqlglot
+from sqlglot import exp
 
 from aios.harness import runtime
 from aios.logging import get_logger
@@ -34,83 +35,133 @@ log = get_logger(__name__)
 MAX_ROWS = 200
 QUERY_TIMEOUT_MS = 10_000
 
-_FORBIDDEN_KEYWORDS = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|EXECUTE|COPY|GRANT|REVOKE|SET_CONFIG|CALL)\b",
-    re.IGNORECASE,
+# The ONLY relations search_events may read: the per-session scoped view whose
+# own WHERE clause enforces ``session_id = current_setting('app.session_id')``.
+# The query runs on the privileged application pool with only ``app.session_id``
+# set and no Postgres row-level-security backstop, so reading anything else
+# returns other accounts' rows up to the row cap.  This is an ALLOWLIST, not a
+# denylist: it is fail-closed by construction — a table added to the schema
+# later is inaccessible by default, not accidentally exposed the way a
+# hand-maintained denylist leaves it every time the schema grows.
+#
+# ``memories_search`` is deliberately NOT allowlisted: that per-session view is
+# owned by the separate ``memory_search`` tool through a fixed parameterised
+# query (no raw-SQL surface), so search_events has no business reading it.
+#
+# Kept honest by the drift guard in
+# ``tests/unit/test_search_events_allowlist_drift.py``: every allowlisted name
+# must be a migration-defined view scoped by ``app.session_id``.
+_ALLOWED_RELATIONS = frozenset({"events_search"})
+
+# Schemas a table reference may live in: unqualified, or explicitly ``public``
+# (the search path's default, where ``events_search`` lives).  Anything else —
+# ``pg_catalog``, ``information_schema`` — is a catalogue-introspection surface.
+_ALLOWED_SCHEMAS = frozenset({"", "public"})
+
+# Statement nodes that mean the query is not a pure read.  ``exp.Command`` is
+# sqlglot's fallback for syntax it doesn't model as a first-class node —
+# ``COPY``, ``CALL``, ``SET``, ``GRANT``, ``VACUUM`` and friends all land here —
+# so rejecting it closes the whole long tail of non-SELECT statements in one
+# check.
+_WRITE_STATEMENTS = (
+    exp.Insert,
+    exp.Update,
+    exp.Delete,
+    exp.Merge,
+    exp.Drop,
+    exp.Create,
+    exp.Alter,
+    exp.Command,
 )
-
-# Identifiers that, if referenced, mean the query is reaching outside the
-# per-session ``events_search`` view.  Stamping the events table directly
-# bypasses the view's ``session_id = current_setting('app.session_id', true)``
-# scoping; querying any other application table leaks rows that belong to
-# other sessions and other accounts (multi-tenancy).  ``pg_*`` /
-# ``information_schema`` are the schema-introspection surfaces that would
-# enumerate the rest of the catalogue.  The check runs on the *literal-stripped*
-# SQL so a substring inside an ILIKE pattern (e.g. ``'%events%'``) doesn't
-# false-positive.
-_FORBIDDEN_REFERENCES = re.compile(
-    r"\b("
-    r"events|sessions|accounts|account_keys|agents|agent_versions|environments|"
-    r"connections|connectors|vaults|vault_credentials|memory_stores|memories|"
-    r"memory_versions|session_vaults|session_resources|session_memory_stores|"
-    r"session_github_repositories|session_templates|github_repositories|"
-    r"pending_management_calls|attachments|files|skills|skill_versions|"
-    r"procrastinate_\w+|pg_\w+|information_schema|pg_catalog"
-    r")\b",
-    re.IGNORECASE,
-)
-
-# Strip SQL string literals (single-quote and dollar-quoted) and comments so
-# the identifier check above runs against the structural SQL only.  Double-
-# quoted identifiers are NOT stripped — ``"events"`` is the events table,
-# not a string — and the structural regex's ``\b`` boundaries still match
-# inside them.
-_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-_SINGLE_QUOTE_RE = re.compile(r"'(?:''|[^'])*'")
-_DOLLAR_QUOTE_RE = re.compile(r"\$(\w*)\$.*?\$\1\$", re.DOTALL)
-
-
-def _strip_string_literals(sql: str) -> str:
-    """Replace SQL string literals and comments with empty placeholders.
-
-    Double-quoted identifiers are intentionally preserved — they are how
-    Postgres references tables/columns with reserved-word or mixed-case
-    names, and ``\\b`` word boundaries still match identifiers inside
-    quotes.
-    """
-    sql = _LINE_COMMENT_RE.sub("", sql)
-    sql = _BLOCK_COMMENT_RE.sub("", sql)
-    sql = _SINGLE_QUOTE_RE.sub("''", sql)
-    sql = _DOLLAR_QUOTE_RE.sub("$$$$", sql)
-    return sql
 
 
 def _validate_sql(sql: str) -> str | None:
-    """Validate SQL is a safe SELECT query. Returns an error string or None.
+    """Validate SQL is a safe, read-only, single-relation SELECT.
 
-    The agent's SQL surface is exclusively the per-session ``events_search``
-    view.  Direct access to any other table — including the underlying
-    ``events`` table — bypasses the view's per-session scoping and leaks
-    rows belonging to other sessions and (post multi-tenancy v1) other
-    accounts.  The structural check runs on the literal-stripped SQL so
-    substring matches inside ``ILIKE`` patterns don't false-positive.
+    Returns an error string the model sees (and can act on), or ``None`` when
+    the query is safe to run.
+
+    A regex over SQL text is the wrong altitude for a tenant boundary: comma
+    cross-joins, ``UNION``, in-string comment tricks, ``TABLE``-primary forms
+    and ``pg_*`` functions in SELECT position all slip past a keyword/regex
+    scan.  Instead we parse the query into an AST with sqlglot and walk it:
+
+    * the root must be a read-only set-operation tree (SELECT / UNION /
+      INTERSECT / EXCEPT), and no write/DDL/command node may appear anywhere;
+    * **every** table reference (``exp.Table``) — in any join, subquery, CTE
+      body or set-operation arm — must resolve to an allowlisted relation in an
+      allowed schema.  CTE-defined names are legitimate local relations, so
+      they are added to the allowed set; a table-valued function in FROM parses
+      to a ``Table`` with an off name and is rejected (fail-closed);
+    * ``pg_*`` functions (``pg_read_file`` &c.) and ``set_config`` (which could
+      rewrite ``app.session_id`` even inside a read-only transaction) are
+      rejected wherever they appear.
+
+    The single per-session view remains the only real relation the model can
+    read — now enforced structurally rather than by pattern-matching text.
     """
     stripped = sql.strip()
-    if not stripped.upper().startswith("SELECT"):
-        return "Only SELECT queries are allowed"
+    if not stripped:
+        return "Empty query"
+    # A single statement only: a semicolon can only introduce a second one.
     if ";" in stripped:
         return "Multiple statements (semicolons) are not allowed"
-    kw_match = _FORBIDDEN_KEYWORDS.search(stripped)
-    if kw_match:
-        return f"Forbidden keyword '{kw_match.group()}' is not allowed in queries"
-    structural = _strip_string_literals(stripped)
-    ref_match = _FORBIDDEN_REFERENCES.search(structural)
-    if ref_match:
-        return (
-            f"Identifier {ref_match.group()!r} is not allowed; query the events_search view instead"
-        )
+
+    try:
+        tree = sqlglot.parse_one(stripped, read="postgres")
+    except Exception:
+        return "Query could not be parsed as a single read-only PostgreSQL SELECT"
+
+    # Read-only root: only set-operation trees over SELECT are allowed.
+    if not isinstance(tree, exp.Select | exp.Union | exp.Intersect | exp.Except):
+        return "Only SELECT queries are allowed"
+    # …and no write/DDL/command node anywhere inside it (e.g. a data-modifying
+    # CTE ``WITH x AS (DELETE ... RETURNING ...)``).
+    if any(isinstance(node, _WRITE_STATEMENTS) for node in tree.walk()):
+        return "Only SELECT queries are allowed"
+
+    # CTE names are local relations defined by the query itself — allow them
+    # (their bodies are still walked, so a CTE reading a forbidden table is
+    # caught on that table, not on the CTE name).
+    cte_names = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
+    allowed = {name.lower() for name in _ALLOWED_RELATIONS} | cte_names
+
+    for table in tree.find_all(exp.Table):
+        schema = (table.db or "").lower()
+        if schema not in _ALLOWED_SCHEMAS:
+            return (
+                f"Schema {schema!r} is not accessible; search_events may only read "
+                f"{', '.join(sorted(_ALLOWED_RELATIONS))}"
+            )
+        name = (table.name or "").lower()
+        if name not in allowed:
+            return (
+                f"Relation {name!r} is not allowed; search_events may only read "
+                f"{', '.join(sorted(_ALLOWED_RELATIONS))}"
+            )
+
+    for name in _function_names(tree):
+        if name.startswith("pg_") or name == "set_config":
+            return f"Function {name!r} is not allowed"
+
     return None
+
+
+def _function_names(tree: exp.Expression) -> set[str]:
+    """Lower-cased names of every function call in the AST.
+
+    Both branches matter: unknown functions parse to ``exp.Anonymous`` (name on
+    the node), while ones sqlglot models specially parse to an ``exp.Func``
+    subclass (name via ``sql_name()``).
+    """
+    names: set[str] = set()
+    for anon in tree.find_all(exp.Anonymous):
+        names.add((anon.name or "").lower())
+    for func in tree.find_all(exp.Func):
+        sql_name = func.sql_name()
+        if sql_name:
+            names.add(sql_name.lower())
+    return names
 
 
 def _format_results(rows: list[asyncpg.Record], truncated: bool) -> str:
