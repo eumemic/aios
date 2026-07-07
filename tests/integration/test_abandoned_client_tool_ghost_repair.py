@@ -44,9 +44,19 @@ The invariant this suite pins
   resolving ``open_tool_call_count`` and quiescing the session.
 - A RECENT client-result-pending call (within the bound) is NOT repaired.
 - A confirmation-pending ``always_ask`` call (any age) is NOT repaired.
-- ``CANDIDATE_ROWS_SQL`` / ``_SESSION_ACTIVE_EXPR`` are UNCHANGED — the fix is
-  purely on the resolution side; the existing predicate naturally stops waking
-  once the call resolves.
+- ``CANDIDATE_ROWS_SQL`` / ``_SESSION_ACTIVE_EXPR`` are UNCHANGED — the #752 fix
+  is purely on the resolution side; the existing predicate naturally stops
+  waking once the call resolves.
+
+Update (#1710)
+--------------
+The inference batch filter (``sweep._filter_incomplete_batches``) no longer
+wakes a session whose ONLY open call is a non-dispatched client-result-pending
+call, so ``find_sessions_needing_inference`` alone stops re-firing a paid no-op
+model step every sweep. The abandoned-call REPAIR path below is unchanged and
+still runs FIRST in the composed sweep (``wake_sessions_needing_inference``), so
+the session still makes real progress and quiesces; #1710 simply removes the
+wasted wakes in between.
 """
 
 from __future__ import annotations
@@ -304,14 +314,25 @@ class TestAbandonedClientCallRepaired:
         pool, account_id, session_id = session_with_abandoned_client_call
         registry = InflightToolRegistry()
 
-        # Precondition: the call holds open_tool_call_count > 0, so the session
-        # is a wake candidate. Pre-fix it has NO unreacted stimulus and nothing
-        # in-flight — the wake produces a no-op monologue and re-arms (the loop).
+        # Precondition: the call holds open_tool_call_count > 0. Historically
+        # (#752) this alone made the session a permanent wake candidate that
+        # re-fired a no-op monologue every sweep — the "loop". Since #1710 the
+        # inference filter no longer wakes a session whose ONLY open call is a
+        # non-dispatched client-result-pending call (nothing unreacted, nothing
+        # in-flight, the open call was never dispatched by the harness), so
+        # ``find_sessions_needing_inference`` alone no longer returns it: the
+        # paid no-op wake is suppressed at the source. The composed sweep still
+        # makes progress because ghost repair runs FIRST (see
+        # ``wake_sessions_needing_inference``) — verified below — and the
+        # synthetic error it appends is a genuine unreacted stimulus that DOES
+        # wake the session exactly once.
         assert await _open_tool_call_count(pool, session_id) == 1
         before = await find_sessions_needing_inference(pool, registry, session_id=session_id)
-        assert session_id in before, (
-            "precondition: an unresolved client call must make the session a "
-            "wake candidate (open_tool_call_count > 0) — this is the loop"
+        assert session_id not in before, (
+            "since #1710 a session parked purely on a non-dispatched "
+            "client-result-pending call is NOT woken by the inference filter — "
+            "the no-op paid wake loop is suppressed at the source; progress "
+            "comes from ghost repair (below), not from re-firing the model"
         )
 
         # Ghost repair MUST now resolve the abandoned call (RED on master).
