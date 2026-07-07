@@ -29,6 +29,7 @@ import asyncpg
 import pytest
 
 from aios.db.queries import _SESSION_STATUS_EXPR
+from aios.db.queries.events import UNHARVESTED_MODEL_DISPATCH_PARKS_SQL
 from aios.harness.sweep import (
     CANDIDATE_ROWS_SQL,
     ERRORED_SESSIONS_SQL,
@@ -38,7 +39,7 @@ from aios.harness.sweep import (
     UNREACTED_ROWS_SQL,
 )
 from tests.conftest import needs_docker
-from tests.support import find_subplans_over_events
+from tests.support import find_seq_scans_over_events, find_subplans_over_events
 
 pytestmark = pytest.mark.docker
 
@@ -476,6 +477,35 @@ class TestNoCorrelatedSubplanOverEvents:
             f"{len(found)} correlated subplan(s) over events. GHOST_ASST_SQL must "
             f"stay bounded by the maintained sessions.open_tool_call_count scalar "
             f"(migration 0066), not an event-log subquery. See #840."
+        )
+
+    async def test_unharvested_park_scan_uses_index_not_seq_scan(
+        self, seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        """``find_unharvested_model_dispatch_parks`` runs cross-session
+        (``scope_clause=""``) on every 30s periodic sweep. Before #1707 its
+        ``kind='span' AND data->>'event'='model_workflow_park'`` predicate had no
+        supporting index, so the outer scan and both ``NOT EXISTS`` anti-joins
+        fell to ``Seq Scan on events`` — cost proportional to the whole event log,
+        fleet-wide. Migration 0131 adds the park partial index plus the two
+        harvest companions; assert the planner picks index scans and no node in
+        the plan tree is a ``Seq Scan on events``.
+
+        ANALYZE the fixture first so the planner has stats: the partial indexes
+        are tiny (few or zero matching rows on the seeded fixture), so a
+        cost-based planner prefers them over a full seq scan once it knows the
+        table's true row count.
+        """
+        async with seeded_pool.acquire() as conn:
+            await conn.execute("ANALYZE events")
+        plan = await _explain(
+            seeded_pool, UNHARVESTED_MODEL_DISPATCH_PARKS_SQL.format(scope_clause="")
+        )
+        found = find_seq_scans_over_events(plan)
+        assert not found, (
+            f"find_unharvested_model_dispatch_parks seq-scans events: "
+            f"{len(found)} Seq Scan node(s) on events. The park/harvest partial "
+            f"indexes (migration 0131) must serve this cross-session sweep. See #1707."
         )
 
 
