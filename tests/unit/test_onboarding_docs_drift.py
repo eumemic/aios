@@ -41,7 +41,9 @@ def test_env_example_declares_required_egress_ca_key() -> None:
 def test_claude_md_has_no_stale_port_or_test_count() -> None:
     """CLAUDE.md must not carry the stale :8090 port or a hardcoded test count."""
     claude = _read("CLAUDE.md")
-    assert ":8090" not in claude, "CLAUDE.md still references the stale :8090 port; api_port default is 8080."
+    assert ":8090" not in claude, (
+        "CLAUDE.md still references the stale :8090 port; api_port default is 8080."
+    )
     assert "160 test" not in claude, (
         "CLAUDE.md hardcodes a test-file count that re-rots; use an "
         "order-of-magnitude phrase instead."
