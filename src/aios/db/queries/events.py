@@ -679,6 +679,18 @@ def _resolve_event_channel(
 
     Non-message events and message events with no identifiable role
     return NULL.
+
+    CROSS-REFERENCE (issue #1742): the ``channels`` SET clause in
+    :func:`append_event`'s seq-allocating UPDATE re-derives this SAME role
+    dispatch in SQL (user/tool arms via the ``chan_candidate`` param computed
+    just above that UPDATE; the assistant arm via ``is_assistant_message`` +
+    the row's own ``focal_channel``, which is exactly the ``focal_at_arrival``
+    value RETURNING hands this function's caller, since the UPDATE never
+    mutates ``focal_channel``). The two MUST stay identical — the integration
+    test matrix in ``tests/integration/test_tool_channel_stamp.py`` and the
+    sessions-channels invariant test enforce this by asserting
+    ``list_session_channels`` == ``recompute_session_channels`` after every
+    scripted append.
     """
     if kind != "message":
         return None
@@ -1194,6 +1206,20 @@ async def append_event(
     delta = precomputed.token_delta
     resolved_tool_channel = precomputed.resolved_tool_channel
 
+    # ``chan_candidate`` (issue #1742): the channel address, if any, this
+    # append might introduce to the session's maintained ``channels`` set —
+    # mirrors ``_resolve_event_channel``'s user/tool arms exactly (the
+    # assistant arm is handled inline in the SET clause below via the row's
+    # own ``focal_channel``, since that value isn't known until the
+    # RETURNING). Non-message / role-less events pass NULL, contributing
+    # nothing to the array.
+    chan_candidate: str | None = None
+    if kind == "message":
+        if role == "user":
+            chan_candidate = orig_channel
+        elif role == "tool":
+            chan_candidate = resolved_tool_channel
+
     async with conn.transaction():
         seq_row = await conn.fetchrow(
             "UPDATE sessions "
@@ -1207,7 +1233,23 @@ async def append_event(
             "    last_reacted_seq = CASE "
             "        WHEN $7 THEN GREATEST(last_reacted_seq, "
             "            CASE WHEN $6 > 0 THEN $6 ELSE last_event_seq + 1 END) "
-            "        ELSE last_reacted_seq END "
+            "        ELSE last_reacted_seq END, "
+            # ``channels`` (issue #1742): maintain the session's channel set
+            # on the SAME row-locked UPDATE that allocates the seq — zero
+            # extra round trips, race-free. Mirrors ``_resolve_event_channel``
+            # (see cross-reference there): user/tool arms via ``$9``
+            # (``chan_candidate``, computed above before the lock); the
+            # assistant arm via ``$7 is_assistant_message`` + the row's own
+            # ``focal_channel`` (identical to what RETURNING hands the Python
+            # stamp below, since this UPDATE never writes ``focal_channel``).
+            # ``@>`` membership check avoids appending a duplicate.
+            "    channels = CASE "
+            "        WHEN $9::text IS NOT NULL AND NOT (channels @> ARRAY[$9::text]) "
+            "            THEN channels || $9::text "
+            "        WHEN $7 AND focal_channel IS NOT NULL "
+            "            AND NOT (channels @> ARRAY[focal_channel]) "
+            "            THEN channels || focal_channel "
+            "        ELSE channels END "
             "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL "
             "RETURNING last_event_seq, focal_channel",
             session_id,
@@ -1218,6 +1260,7 @@ async def append_event(
             reacting_to_seq,
             is_assistant_message,
             is_stimulus,
+            chan_candidate,
         )
         if seq_row is None:
             # Treat archived as "session no longer exists for write purposes."
@@ -1933,10 +1976,42 @@ async def read_message_events(
 async def list_session_channels(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> list[str]:
-    """Distinct channel addresses the session has interacted with, sorted.
+    """Channel addresses the session has interacted with, sorted.
 
-    Derived from the event log's ``channel`` column (stamped at append
-    time per :func:`_resolve_event_channel`).
+    Issue #1742: this used to run ``SELECT DISTINCT channel FROM events``
+    (O(session-size)) on EVERY step inside the harness's pre-inference
+    gather. It now reads the ``channels`` array maintained on the
+    ``sessions`` row itself — a primary-key point read, no ``events``
+    scan — by :func:`append_event`'s seq-allocating UPDATE (mirrors
+    :func:`_resolve_event_channel`; see the cross-reference there).
+    Array ``||`` append order is insertion order, not sorted order, so
+    this sorts before returning — preserving the old ``ORDER BY channel``
+    contract byte-for-byte.
+    """
+    row = await conn.fetchrow(
+        "SELECT channels FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return sorted(row["channels"] or [])
+
+
+async def recompute_session_channels(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[str]:
+    """Recompute the channel set straight from the event log (fallback).
+
+    This is the OLD ``list_session_channels`` DISTINCT-scan query, kept
+    as the ground-truth recomputation for the repair path (issue #1742):
+    a rolling-deploy window where an old (pre-migration-code) container
+    appends a new channel after the ``channels`` column has already been
+    backfilled leaves the stored array stale relative to the event log.
+    Callers use this ONLY at cold hard-reject sites (``switch_channel``'s
+    membership check, the POST ``metadata.channel`` bound-check) — never
+    in the hot per-step loop path, which stays an O(1) ``sessions`` read
+    via :func:`list_session_channels`.
     """
     rows = await conn.fetch(
         """

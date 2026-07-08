@@ -1098,6 +1098,28 @@ async def set_session_focal_channel(
     )
 
 
+async def set_session_channels(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    channels: list[str],
+    *,
+    account_id: str,
+) -> None:
+    """Overwrite the session's maintained ``channels`` array (issue #1742).
+
+    Used ONLY by the repair-on-mismatch fallback (``switch_channel``'s
+    membership check, the POST ``metadata.channel`` bound-check) to fix a
+    stored set that's drifted from :func:`aios.db.queries.events.recompute_session_channels`'s
+    ground truth — never on the hot per-step loop path, which only reads.
+    """
+    await conn.execute(
+        "UPDATE sessions SET channels = $1 WHERE id = $2 AND account_id = $3",
+        channels,
+        session_id,
+        account_id,
+    )
+
+
 async def get_session_provisioning(
     conn: asyncpg.Connection[Any],
     session_id: str,
