@@ -233,6 +233,71 @@ class TestPerEnvTimeoutCeiling:
         assert kwargs["timeout_seconds"] == 600
 
 
+class TestMemoryReconcileFastPath:
+    """#1748 step 5: a session with no writable memory mounts skips the
+    snapshot's to_thread dispatch entirely, but reconcile is still invoked
+    (with an empty before + snapshot_ns=0) so its own fast path can run and
+    any warnings channel stays wired."""
+
+    async def test_no_writable_mounts_skips_snapshot_to_thread(
+        self, stub_registry: _StubRegistry
+    ) -> None:
+        with (
+            patch(
+                "aios.tools.bash.snapshot_memory_mounts",
+            ) as mock_snapshot,
+            patch(
+                "aios.tools.bash.reconcile_memory_mounts",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_reconcile,
+        ):
+            await bash_handler("sess_01TEST", {"command": "true"})
+
+        mock_snapshot.assert_not_called()
+        mock_reconcile.assert_awaited_once()
+        args = mock_reconcile.await_args.args
+        assert args[1] == {}
+        assert args[2] == 0
+
+    async def test_writable_mount_dispatches_snapshot_via_to_thread(
+        self, stub_registry: _StubRegistry
+    ) -> None:
+        from aios.harness import runtime
+        from aios.models.memory_stores import MemoryStoreResourceEcho
+
+        echo = MemoryStoreResourceEcho(
+            memory_store_id="memstore_01FAKE00000000000000000001",
+            access="read_write",
+            instructions="",
+            name="notes",
+            description="",
+            mount_path="/mnt/memory/notes",
+        )
+        runtime.set_session_memory_mounts("sess_01TEST", [echo])
+        try:
+            with (
+                patch(
+                    "aios.tools.bash.snapshot_memory_mounts",
+                    return_value=({}, 12345),
+                ) as mock_snapshot,
+                patch(
+                    "aios.tools.bash.reconcile_memory_mounts",
+                    new_callable=AsyncMock,
+                    return_value=[],
+                ) as mock_reconcile,
+            ):
+                await bash_handler("sess_01TEST", {"command": "true"})
+
+            mock_snapshot.assert_called_once_with("sess_01TEST")
+            mock_reconcile.assert_awaited_once()
+            args = mock_reconcile.await_args.args
+            assert args[1] == {}
+            assert args[2] == 12345
+        finally:
+            runtime.clear_session_memory_mounts("sess_01TEST")
+
+
 class TestExecRaisedReconcileSuppression:
     """When exec raises, reconcile exceptions are suppressed so the original propagates."""
 

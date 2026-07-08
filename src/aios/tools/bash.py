@@ -48,13 +48,18 @@ use absolute paths.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
 from aios.sandbox.spec import resolve_bash_timeout_ceiling
-from aios.tools.bash_memory_reconcile import reconcile_memory_mounts, snapshot_memory_mounts
+from aios.tools.bash_memory_reconcile import (
+    has_writable_memory_mount,
+    reconcile_memory_mounts,
+    snapshot_memory_mounts,
+)
 from aios.tools.registry import registry
 
 
@@ -138,7 +143,16 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     sandbox = runtime.require_sandbox_registry()
     handle = await sandbox.get_or_provision(session_id, pool=runtime.require_pool())
 
-    before = snapshot_memory_mounts(session_id)
+    # Fast path (#1748 step 5): a session with no writable memory mount skips
+    # both the before-snapshot and the reconcile's off-loop hops entirely —
+    # no to_thread dispatch, no stat walk, nothing. There is nothing for the
+    # hot-window to protect (no mount means no candidate can ever exist), so
+    # ``snapshot_ns`` is a dummy placeholder here, not a real pre-exec sample.
+    if not has_writable_memory_mount(session_id):
+        before: dict[tuple[str, str], Any] = {}
+        snapshot_ns = 0
+    else:
+        before, snapshot_ns = await asyncio.to_thread(snapshot_memory_mounts, session_id)
     reconcile_warnings: list[str] = []
     exec_raised = False
 
@@ -155,12 +169,12 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
     finally:
         # Reconcile unconditionally — even when exec raises (e.g. container death)
         # so that partial writes made before the crash are captured in the DB.
-        # reconcile_memory_mounts returns [] immediately when there are no mounts,
-        # so this is a cheap no-op in the common case.
+        # reconcile_memory_mounts's own fast path (#1748 step 5) makes this a
+        # cheap no-op when there is nothing to reconcile.
         # When exec succeeded, reconcile errors propagate; when exec already raised,
         # we suppress them so the original exception is not shadowed.
         try:
-            reconcile_warnings = await reconcile_memory_mounts(session_id, before)
+            reconcile_warnings = await reconcile_memory_mounts(session_id, before, snapshot_ns)
         except Exception:
             if not exec_raised:
                 raise  # fail hard when exec succeeded

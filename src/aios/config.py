@@ -416,6 +416,27 @@ class Settings(BaseSettings):
         "reaper sweep (an immediate first sweep runs at worker startup, then "
         "repeats at this cadence).",
     )
+    # ── uncorrelated memory-reconcile audit (#1748 §Uncorrelated detector) ────
+    memory_reconcile_audit_enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the low-rate out-of-band full-hash "
+        "memory-store audit (disk-vs-DB content_sha256 divergence check). "
+        "Ships armed: this is the uncorrelated backstop for the bash "
+        "memory-reconcile stat-prefilter (#1748) and MUST be live before the "
+        "prefilter is trusted as the steady state — disabling it removes the "
+        "only detector for a prefilter false-negative silently dropping "
+        "durable memory.",
+    )
+    memory_reconcile_audit_interval_seconds: float = Field(
+        default=21_600.0,
+        gt=0.0,
+        description="Interval for the periodic uncorrelated memory-reconcile "
+        "audit sweep (default 6h — deliberately low-rate: a full content hash "
+        "of every memory-store file is exactly the on-loop-hash cost #1733 "
+        "forbids per bash call; this runs occasionally, off the hot path, as "
+        "a correctness backstop, not a real-time gate).",
+    )
+
     tool_broker_socket_path: Path | None = Field(
         default=None,
         description="Host path for the tool broker's Unix-domain socket. "
