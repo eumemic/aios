@@ -20,6 +20,7 @@ from aios.models.agents import (
 )
 from aios.pinned_transport import PinnedTransport
 from aios.tools.http_request import (
+    HTTP_REQUEST_DESCRIPTION,
     _classify_permission,
     _decode_body,
     _do_http_request,
@@ -1113,3 +1114,16 @@ class TestOutboundSuppressionHttp:
             )
         assert captured["method"] == "POST"
         record.assert_not_awaited()
+
+
+class TestHttpRequestDescription:
+    """#1759: teach the model the DIY Idempotency-Key retry pattern in the
+    tool description itself, since ``_RESERVED_HEADERS`` only strips
+    Authorization/Host and lets an agent-set Idempotency-Key header pass
+    to the wire unmodified."""
+
+    def test_mentions_idempotency_key_header(self) -> None:
+        assert "Idempotency-Key" in HTTP_REQUEST_DESCRIPTION
+
+    def test_mentions_reuse_on_retry(self) -> None:
+        assert "same value" in HTTP_REQUEST_DESCRIPTION or "reuse" in HTTP_REQUEST_DESCRIPTION
