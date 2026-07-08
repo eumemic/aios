@@ -23,6 +23,7 @@ watermark and proceeds.
 from __future__ import annotations
 
 import asyncio
+import os as _os
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import litellm.exceptions as litellm_exceptions
@@ -517,66 +518,63 @@ async def _run_session_step_body(
     # ``(sweep_end - sweep_start) - query_exec - pool_acquire ~= event-loop
     # time-share`` -- which gates whether (B) pool/concurrency tuning is the
     # load-bearing follow-up.
-    sweep_start = await sessions_service.append_event(
-        pool,
-        session_id,
-        "span",
-        {"event": "sweep_start", "site": "entry"},
-        account_id=account_id,
-    )
+    #
+    # Gated behind ``AIOS_SWEEP_SPAN_DEBUG`` (#1749): these 6 spans are pure
+    # observability paid on every step (including wasted wakes) as a
+    # row-locked UPDATE+INSERT+NOTIFY apiece. The question they instrumented
+    # (#1658/#1659) is now answered, so they default OFF; a live env read
+    # (not ``get_settings()``, which is ``lru_cache``d) re-arms them for a
+    # single-session/short-window re-profile with no redeploy — same idiom as
+    # ``AIOS_DUMP_CONTEXT`` (see ``_dump_context_if_enabled`` below). Read
+    # ONCE at guard entry so every call this step sees the same value (the
+    # all-or-nothing bracket is automatic, not per-call). ``_span`` closes
+    # over ``pool``/``session_id``/``account_id``/``debug`` and is a pure
+    # no-op when the flag is off — flag-off, ``pool.acquire()`` and
+    # ``session_has_pending_work`` run byte-identically to today, just minus
+    # 6 no-op calls (not a second code path). ``_span`` is only ever awaited
+    # from ``finally``/plain call sites here, never wrapping the guard's own
+    # ``try`` in an ``except`` — it cannot swallow a fast-path exception.
+    debug = bool(_os.environ.get("AIOS_SWEEP_SPAN_DEBUG"))
+
+    async def _span(payload: dict[str, Any]) -> Any:
+        return (
+            await sessions_service.append_event(
+                pool, session_id, "span", payload, account_id=account_id
+            )
+            if debug
+            else None
+        )
+
+    sweep_start = await _span({"event": "sweep_start", "site": "entry"})
     has_work = False
     try:
-        pool_acquire_start = await sessions_service.append_event(
-            pool,
-            session_id,
-            "span",
-            {"event": "sweep.pool_acquire_start"},
-            account_id=account_id,
-        )
+        pool_acquire_start = await _span({"event": "sweep.pool_acquire_start"})
         async with pool.acquire() as fast_conn:
-            await sessions_service.append_event(
-                pool,
-                session_id,
-                "span",
+            await _span(
                 {
                     "event": "sweep.pool_acquire_end",
-                    "start_id": pool_acquire_start.id,
-                },
-                account_id=account_id,
+                    "start_id": pool_acquire_start.id if pool_acquire_start else None,
+                }
             )
-            query_exec_start = await sessions_service.append_event(
-                pool,
-                session_id,
-                "span",
-                {"event": "sweep.query_exec_start"},
-                account_id=account_id,
-            )
+            query_exec_start = await _span({"event": "sweep.query_exec_start"})
             try:
                 has_work = await session_has_pending_work(fast_conn, session_id)
             finally:
-                await sessions_service.append_event(
-                    pool,
-                    session_id,
-                    "span",
+                await _span(
                     {
                         "event": "sweep.query_exec_end",
-                        "start_id": query_exec_start.id,
-                    },
-                    account_id=account_id,
+                        "start_id": query_exec_start.id if query_exec_start else None,
+                    }
                 )
     finally:
-        await sessions_service.append_event(
-            pool,
-            session_id,
-            "span",
+        await _span(
             {
                 "event": "sweep_end",
-                "sweep_start_id": sweep_start.id,
+                "sweep_start_id": sweep_start.id if sweep_start else None,
                 "repaired_ghosts": 0,
                 "woken_sessions": 1 if has_work else 0,
                 "fast_path": True,
-            },
-            account_id=account_id,
+            }
         )
     if not has_work:
         # Provably no work — the fast path is a proven over-approximation, so a
@@ -1374,8 +1372,6 @@ async def _dump_context_if_enabled(
     Debug aid: inspect exactly what reaches LiteLLM (post header-inlining,
     post system-prompt augmentation, with the full tool list).
     """
-    import os as _os
-
     if not _os.environ.get("AIOS_DUMP_CONTEXT"):
         return
     import asyncio as _asyncio

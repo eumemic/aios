@@ -140,12 +140,19 @@ def mock_runtime() -> Iterator[None]:
 
 
 class TestEntrySweepSpan:
-    async def test_wasted_wake_marks_woken_sessions_zero(self, mock_runtime: None) -> None:
+    async def test_wasted_wake_marks_woken_sessions_zero(
+        self, mock_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Guard early-out: the fast-path ``session_has_pending_work`` returns
         ``False`` (provably no work), so the full ``find_sessions_needing_inference``
         is never called and ``sweep_end`` stamps ``woken_sessions=0`` — the
         profiler's wasted-wake signal.
+
+        Flag-on assertion (``AIOS_SWEEP_SPAN_DEBUG=1``): the entry-site sweep
+        spans are gated off by default (#1749); ``test_sweep_spans_suppressed_when_flag_off``
+        covers the (now-default) flag-off path on this exact wasted-wake route.
         """
+        monkeypatch.setenv("AIOS_SWEEP_SPAN_DEBUG", "1")
         from aios.harness.loop import run_session_step
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
@@ -173,11 +180,17 @@ class TestEntrySweepSpan:
         # (A): a provable "no work" from the fast path never touches the full sweep.
         full_sweep.assert_not_awaited()
 
-    async def test_fast_path_pool_and_query_spans_emitted(self, mock_runtime: None) -> None:
+    async def test_fast_path_pool_and_query_spans_emitted(
+        self, mock_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """(C) observability: the guard emits the ``sweep.pool_acquire`` and
         ``sweep.query_exec`` child span pairs (nested inside the outer
         ``sweep_start``/``sweep_end``) so the pool-wait vs event-loop-time-share
-        split is *measured*, not inferred."""
+        split is *measured*, not inferred.
+
+        Flag-on assertion (``AIOS_SWEEP_SPAN_DEBUG=1``) — these spans are
+        gated off by default (#1749)."""
+        monkeypatch.setenv("AIOS_SWEEP_SPAN_DEBUG", "1")
         from aios.harness.loop import run_session_step
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
@@ -205,9 +218,15 @@ class TestEntrySweepSpan:
             "sweep_end",
         ]
 
-    async def test_happy_path_marks_woken_sessions_one(self) -> None:
+    async def test_happy_path_marks_woken_sessions_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Guard passes: session is in the needs set. ``woken_sessions=1``
-        marks "keep going" for the profiler."""
+        marks "keep going" for the profiler.
+
+        Flag-on assertion (``AIOS_SWEEP_SPAN_DEBUG=1``) — these spans are
+        gated off by default (#1749)."""
+        monkeypatch.setenv("AIOS_SWEEP_SPAN_DEBUG", "1")
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
@@ -317,11 +336,18 @@ class TestEntrySweepSpan:
             "fast_path": True,
         }
 
-    async def test_sweep_end_fires_when_fast_path_raises(self, mock_runtime: None) -> None:
+    async def test_sweep_end_fires_when_fast_path_raises(
+        self, mock_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """If the fast-path ``session_has_pending_work`` raises, the guard's own
         try/finally still emits ``sweep_end`` (with ``woken_sessions=0``), and the
         exception propagates out (budget exhausted → re-raise).
+
+        Flag-on assertion (``AIOS_SWEEP_SPAN_DEBUG=1``) — these spans are
+        gated off by default (#1749); ``test_bare_guard_propagates_fast_path_error``
+        covers the flag-off raise path.
         """
+        monkeypatch.setenv("AIOS_SWEEP_SPAN_DEBUG", "1")
         from aios.harness.loop import run_session_step
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
@@ -342,11 +368,17 @@ class TestEntrySweepSpan:
         assert sweep_events[1]["woken_sessions"] == 0
         assert sweep_events[1]["repaired_ghosts"] == 0
 
-    async def test_sweep_end_fires_when_full_sweep_raises(self, mock_runtime: None) -> None:
+    async def test_sweep_end_fires_when_full_sweep_raises(
+        self, mock_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """When the fast path says "maybe work" (``True``) the guard falls through
         to the full ``find_sessions_needing_inference``. If THAT raises, the guard's
         try/finally still emits ``sweep_end`` and the exception propagates.
+
+        Flag-on assertion (``AIOS_SWEEP_SPAN_DEBUG=1``) — these spans are
+        gated off by default (#1749).
         """
+        monkeypatch.setenv("AIOS_SWEEP_SPAN_DEBUG", "1")
         from aios.harness.loop import run_session_step
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_sweep"))
@@ -371,6 +403,62 @@ class TestEntrySweepSpan:
         # the sweep_end still closes even though the downstream full sweep raised.
         assert sweep_events[1]["woken_sessions"] == 1
         assert sweep_events[1]["repaired_ghosts"] == 0
+
+    async def test_sweep_spans_suppressed_when_flag_off(self, mock_runtime: None) -> None:
+        """#1749: with ``AIOS_SWEEP_SPAN_DEBUG`` unset (the default), none of the
+        6 entry-site sweep spans are emitted on a wasted wake — only
+        ``step_start``/``step_end`` (2 span appends total), and the fast-path
+        early-out / full-sweep-skip behavior is unchanged."""
+        from aios.harness.loop import run_session_step
+
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev_step"))
+        full_sweep = AsyncMock(return_value=set())
+        with (
+            patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(return_value=False),
+            ),
+            patch("aios.harness.loop.find_sessions_needing_inference", full_sweep),
+            patch("aios.harness.loop.sessions_service.append_event", append_event),
+        ):
+            await run_session_step("sess_x", cause="message")
+
+        span_names = [e["event"] for e in _span_events(append_event)]
+        assert span_names == ["step_start", "step_end"]
+        assert not _sweep_events(append_event)
+        # Two span txns total: step_start, step_end.
+        assert append_event.await_count == 2
+        full_sweep.assert_not_awaited()
+
+    async def test_bare_guard_propagates_fast_path_error(self, mock_runtime: None) -> None:
+        """#1749: with the flag OFF, a ``pool.acquire()``/``session_has_pending_work``
+        exception must still propagate to ``run_session_step``'s outer handler
+        so ``_apply_retry_or_failure`` runs — the single-path ``_span`` helper
+        only ever wraps span emission in ``finally``, never ``except``, so it
+        cannot swallow the error even though it's a no-op flag-off."""
+        from aios.harness.loop import run_session_step
+
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev_step"))
+        with (
+            patch(
+                "aios.harness.loop.session_has_pending_work",
+                AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+            patch("aios.harness.loop.sessions_service.append_event", append_event),
+            patch("aios.harness.loop._apply_retry_or_failure", AsyncMock(return_value=None)),
+            pytest.raises(RuntimeError, match="db down"),
+        ):
+            await run_session_step("sess_x", cause="message")
+
+        span_names = [e["event"] for e in _span_events(append_event)]
+        # step_start fired before the guard; the exception is caught by
+        # run_session_step's outer ``except Exception`` (harness_error span +
+        # _apply_retry_or_failure), then re-raised since the budget is
+        # exhausted; step_end still fires from the outermost finally. No
+        # sweep spans at all (flag off) — the guard's plain try/finally
+        # never masks the RuntimeError with a stray except of its own.
+        assert span_names == ["step_start", "harness_error", "step_end"]
+        assert not _sweep_events(append_event)
 
 
 # ─── periodic sweep (regression fence on the "deferred entirely" decision) ───

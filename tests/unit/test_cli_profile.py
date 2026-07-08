@@ -320,6 +320,23 @@ class TestWastedWake:
         assert sweep_phase.n == 2  # one entry sweep per step, including the wasted one
 
 
+class TestFlagOffStepProfilesCleanly:
+    def test_step_with_only_start_end_has_no_sweep_phase_and_no_warnings(self) -> None:
+        """#1749: with ``AIOS_SWEEP_SPAN_DEBUG`` off, a step emits only
+        ``step_start``/``step_end`` (no sweep spans at all). The profiler must
+        tolerate their absence cleanly — no "sweep" phase in ``inside``, and no
+        new warnings from the missing pair."""
+        s = _Stream()
+        step_start = s.span("step_start", cause="message")
+        s.span("step_end", step_start_id=step_start["id"])
+
+        profile = compute_profile(s.events)
+
+        assert profile.n_steps == 1
+        assert not any(p.phase == "sweep" for p in profile.inside)
+        assert profile.warnings == []
+
+
 class TestRendering:
     def test_render_profile_contains_key_sections(self) -> None:
         s = _Stream()
