@@ -154,6 +154,25 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
             await queries.list_session_channels(conn, session_id, account_id=account_id)
         )
         if target not in valid_targets:
+            # Repair-on-mismatch (issue #1742): the maintained ``channels``
+            # array is the hot-path source, but a rolling-deploy window can
+            # leave it briefly stale (an old container appended a new
+            # channel after the migration's backfill ran, without
+            # maintaining the column). Before hard-rejecting, recompute the
+            # ground truth from the event log; if it disagrees with the
+            # stored set, repair the row and re-check. This is the ONLY
+            # place this recompute runs — never the hot loop path.
+            recomputed = set(
+                await queries.recompute_session_channels(
+                    conn, session_id, account_id=account_id
+                )
+            )
+            if recomputed != valid_targets:
+                await queries.set_session_channels(
+                    conn, session_id, sorted(recomputed), account_id=account_id
+                )
+                valid_targets = recomputed
+        if target not in valid_targets:
             return ToolResult(
                 content=(
                     f"Cannot switch to {target!r}: not a bound channel on this session. "

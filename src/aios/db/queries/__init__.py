@@ -458,6 +458,7 @@ from .events import (  # noqa: E402
     read_message_events,
     read_windowed_context_events,
     read_windowed_events,
+    recompute_session_channels,
 )
 from .files import (  # noqa: E402
     insert_file,
@@ -562,6 +563,7 @@ from .sessions import (  # noqa: E402
     reclaim_session_if_idle,
     session_active_predicate,
     session_errored_predicate,
+    set_session_channels,
     set_session_focal_channel,
     set_session_stop_reason,
     update_session,
@@ -909,6 +911,7 @@ __all__ = [
     "read_windowed_context_events",
     "read_windowed_events",
     "reclaim_session_if_idle",
+    "recompute_session_channels",
     "record_trigger_fire",
     "record_trigger_run",
     "redact_memory_version",
@@ -932,6 +935,7 @@ __all__ = [
     "session_errored_predicate",
     "set_connection_inbound_policy",
     "set_connection_secrets",
+    "set_session_channels",
     "set_session_focal_channel",
     "set_session_stop_reason",
     "set_session_vaults",

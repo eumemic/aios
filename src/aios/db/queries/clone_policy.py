@@ -214,6 +214,7 @@ SESSIONS_POLICY: dict[str, Arm] = {
     "env": Arm.COPY,
     "focal_channel": Arm.COPY,
     "focal_locked": Arm.COPY,
+    "channels": Arm.COPY,
     "account_id": Arm.COPY,
     "parent_run_id": Arm.RESET_DEFAULT,
     "origin": Arm.RESET_DEFAULT,
