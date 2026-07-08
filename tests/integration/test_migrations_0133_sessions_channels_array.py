@@ -74,18 +74,18 @@ async def _seed(db_url: str) -> None:
             """
             INSERT INTO sessions (
                 id, account_id, agent_id, environment_id, agent_version,
-                title, metadata, status, workspace_volume_path, env,
+                title, metadata, workspace_volume_path, env,
                 focal_channel, focal_locked, last_event_seq
             )
             VALUES
                 ('sess_multi', 'acc_root', 'agent_test', 'env_test', 1,
-                 NULL, '{}'::jsonb, 'idle', '/tmp/ws-multi', '{}'::jsonb,
+                 NULL, '{}'::jsonb, '/tmp/ws-multi', '{}'::jsonb,
                  NULL, FALSE, 4),
                 ('sess_none', 'acc_root', 'agent_test', 'env_test', 1,
-                 NULL, '{}'::jsonb, 'idle', '/tmp/ws-none', '{}'::jsonb,
+                 NULL, '{}'::jsonb, '/tmp/ws-none', '{}'::jsonb,
                  NULL, FALSE, 1),
                 ('sess_dup', 'acc_root', 'agent_test', 'env_test', 1,
-                 NULL, '{}'::jsonb, 'idle', '/tmp/ws-dup', '{}'::jsonb,
+                 NULL, '{}'::jsonb, '/tmp/ws-dup', '{}'::jsonb,
                  NULL, FALSE, 3)
             """
         )
