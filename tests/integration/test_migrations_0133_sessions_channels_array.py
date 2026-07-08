@@ -1,6 +1,6 @@
-"""Integration tests for migration 0132's ``sessions.channels`` backfill.
+"""Integration tests for migration 0133's ``sessions.channels`` backfill.
 
-Migration 0132 adds ``sessions.channels text[] NOT NULL DEFAULT '{}'`` and
+Migration 0133 adds ``sessions.channels text[] NOT NULL DEFAULT '{}'`` and
 backfills existing rows from the event log's DISTINCT channel set
 (issue #1742). These tests seed sessions + events directly via SQL (the
 pre-migration schema shape), run the real alembic CLI up to head, and
@@ -139,7 +139,7 @@ def test_backfill_matches_distinct_channel_sets(postgres: object) -> None:
 
     asyncio.run(_seed(db_url))
 
-    result = _run_alembic(["upgrade", "0132"], db_url)
+    result = _run_alembic(["upgrade", "0133"], db_url)
     assert result.returncode == 0, result.stderr
 
     channels = asyncio.run(_channels(db_url))

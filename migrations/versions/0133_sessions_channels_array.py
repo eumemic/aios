@@ -27,7 +27,7 @@ Sessions with no channelled messages get the column DEFAULT ``'{}'`` (the
 Downgrade drops the column — the array is fully derivable from ``events``
 if this migration needs to be rolled back.
 
-Revision ID: 0132
+Revision ID: 0133
 Revises: 0131
 """
 
@@ -37,7 +37,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0132"
+revision: str = "0133"
 down_revision: str = "0131"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
