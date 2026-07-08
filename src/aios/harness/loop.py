@@ -1115,8 +1115,18 @@ async def _run_session_step_body(
     # more than once and must NOT be used as the baseline (it would skew the
     # stored ``local_tokens`` away from ``cumulative_tokens`` and from what
     # callers recompute via ``approx_tokens``).
-    local_tokens = approx_tokens(messages, tools=tools)
-    by_class = approx_tokens_by_class(messages, tools=tools)
+    # Both counters re-tokenize the full slate every step; run the pair off
+    # the event loop (issue #1744) — ``Encoding.encode`` is a stateless,
+    # GIL-releasing call, and the per-message/per-payload memoization in
+    # ``tokens.py`` makes the steady-state cost O(new tail) rather than
+    # O(slate). Stamp order/content below is unchanged.
+    def _compute_token_counts() -> tuple[int, dict[str, int]]:
+        return (
+            approx_tokens(messages, tools=tools),
+            approx_tokens_by_class(messages, tools=tools),
+        )
+
+    local_tokens, by_class = await asyncio.to_thread(_compute_token_counts)
     cost_microusd = _resolve_cost_microusd(agent.model, usage, cost_usd, session_id=session_id)
     await sessions_service.append_event(
         pool,
