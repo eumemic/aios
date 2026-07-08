@@ -239,7 +239,7 @@ class TestApproxTokensCache:
 
         def _counting(*args: Any, **kwargs: Any) -> int:
             calls["n"] += 1
-            return real_token_counter(*args, **kwargs)
+            return int(real_token_counter(*args, **kwargs))
 
         monkeypatch.setattr(litellm, "token_counter", _counting)
 
@@ -285,7 +285,7 @@ class TestApproxTokensThreaded:
     def test_concurrent_calls_agree(self) -> None:
         from concurrent.futures import ThreadPoolExecutor
 
-        msgs = [
+        msgs: list[dict[str, Any]] = [
             {"role": "system", "content": "you are a helpful agent"},
             {"role": "user", "content": "what is the weather like today in paris"},
             {

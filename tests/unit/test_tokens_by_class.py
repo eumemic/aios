@@ -142,7 +142,9 @@ class TestApproxTokensByClass:
         assert approx_tokens(msgs) > 0
 
 
-def _reference_count(messages: list[dict], *, tools: object = None) -> int:
+def _reference_count(
+    messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None
+) -> int:
     """Inline reference copy of the pre-#1744 ``_count`` (unmemoized,
     calls ``litellm.token_counter`` directly every time) — the
     equivalence baseline for the memoized ``approx_tokens_by_class``.
@@ -154,12 +156,14 @@ def _reference_count(messages: list[dict], *, tools: object = None) -> int:
     return int(
         token_counter(
             messages=list(messages),
-            tools=list(tools) if tools else None,  # type: ignore[arg-type]
+            tools=list(tools) if tools else None,
         )
     )
 
 
-def _reference_split_assistant(msg: dict, by_class: dict[str, int], *, primary: str) -> None:
+def _reference_split_assistant(
+    msg: dict[str, Any], by_class: dict[str, int], *, primary: str
+) -> None:
     full = _reference_count([msg])
 
     text_content = msg.get("content")
@@ -180,7 +184,9 @@ def _reference_split_assistant(msg: dict, by_class: dict[str, int], *, primary: 
     by_class[primary] += residual
 
 
-def _reference_by_class(messages: list[dict], *, tools: list[dict] | None = None) -> dict[str, int]:
+def _reference_by_class(
+    messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None
+) -> dict[str, int]:
     """Inline reference copy of the pre-#1744 ``approx_tokens_by_class``
     (unmemoized): the equivalence-matrix ground truth.
     """
@@ -265,7 +271,7 @@ class TestApproxTokensByClassEquivalenceMatrix:
         "content": "result payload text",
     }
 
-    def _slates(self) -> list[list[dict]]:
+    def _slates(self) -> list[list[dict[str, Any]]]:
         return [
             [],
             [self._USER],
