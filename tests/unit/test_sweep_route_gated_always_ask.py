@@ -106,17 +106,15 @@ async def test_route_gated_always_ask_not_ghost_repaired(monkeypatch: Any) -> No
     ghost_rows = [
         {
             "session_id": "sess_a",
+            "seq": 10,
             "created_at": _NOW,
-            "data": {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "tc_a",
-                        "type": "function",
-                        "function": {"name": "http_request", "arguments": _HTTP_ARGS},
-                    }
-                ],
-            },
+            "tool_calls": [
+                {
+                    "id": "tc_a",
+                    "type": "function",
+                    "function": {"name": "http_request", "arguments": _HTTP_ARGS},
+                }
+            ],
         },
     ]
     # The route gates /lights/* to always_ask; the call is NOT confirmed.
@@ -134,10 +132,11 @@ async def test_route_gated_always_ask_not_ghost_repaired(monkeypatch: Any) -> No
             ],
         }
     ]
-    # Five fetches: GHOST_ASST_SQL, ALL_RESULT_ROWS_SQL,
+    # Five fetches: GHOST_ASST_SQL, GHOST_RESULT_ROWS_SQL,
     # GHOST_LIFECYCLE_SQL (no confirmation), agent_rows, GHOST_SPAN_START_SQL.
     conn = MagicMock()
     conn.fetch = AsyncMock(side_effect=[ghost_rows, [], [], agent_rows, []])
+    conn.execute = AsyncMock(return_value=None)
     pool = fake_pool_yielding_conn(conn)
 
     append_mock = AsyncMock()
@@ -163,17 +162,15 @@ async def test_route_gated_always_ask_confirmed_is_ghost_repaired(monkeypatch: A
     ghost_rows = [
         {
             "session_id": "sess_a",
+            "seq": 10,
             "created_at": _NOW,
-            "data": {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "tc_a",
-                        "type": "function",
-                        "function": {"name": "http_request", "arguments": _HTTP_ARGS},
-                    }
-                ],
-            },
+            "tool_calls": [
+                {
+                    "id": "tc_a",
+                    "type": "function",
+                    "function": {"name": "http_request", "arguments": _HTTP_ARGS},
+                }
+            ],
         },
     ]
     lifecycle_rows = [{"session_id": "sess_a", "tool_call_id": "tc_a"}]
@@ -193,6 +190,7 @@ async def test_route_gated_always_ask_confirmed_is_ghost_repaired(monkeypatch: A
     ]
     conn = MagicMock()
     conn.fetch = AsyncMock(side_effect=[ghost_rows, [], lifecycle_rows, agent_rows, []])
+    conn.execute = AsyncMock(return_value=None)
     pool = fake_pool_yielding_conn(conn)
 
     append_mock = AsyncMock()
