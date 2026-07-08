@@ -1949,6 +1949,32 @@ async def list_confirmed_unresolved_tool_calls(
         )
 
 
+async def find_latest_interrupt_seq(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> int | None:
+    """Seq of the most recent ``interrupt`` event, or ``None`` (#1756).
+
+    Thin pool wrapper over :func:`queries.find_latest_interrupt_seq` -- the
+    durable interrupt marker the ``/interrupt`` endpoint writes
+    (``routers/sessions.py``) before its fire-and-forget NOTIFY.
+    """
+    async with pool.acquire() as conn:
+        return await queries.find_latest_interrupt_seq(conn, session_id, account_id=account_id)
+
+
+async def find_tool_confirmed_seqs(
+    pool: asyncpg.Pool[Any], session_id: str, tool_call_ids: list[str], *, account_id: str
+) -> dict[str, int]:
+    """``{tool_call_id: confirm_event_seq}`` for the given ids (#1756).
+
+    Thin pool wrapper over :func:`queries.find_tool_confirmed_seqs`.
+    """
+    async with pool.acquire() as conn:
+        return await queries.find_tool_confirmed_seqs(
+            conn, session_id, tool_call_ids, account_id=account_id
+        )
+
+
 async def get_event(
     pool: asyncpg.Pool[Any], session_id: str, event_id: str, *, account_id: str
 ) -> Event:

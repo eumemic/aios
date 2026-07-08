@@ -450,7 +450,7 @@ async def worker_main() -> None:
         _supervise(sweep_task, latch=supervised_latch, fatal=supervised_failure)
 
         interrupt_task = asyncio.create_task(
-            _run_interrupt_listener(settings.db_url, inflight_tool_registry),
+            _run_interrupt_listener(settings.db_url, inflight_tool_registry, pool),
             name="interrupt_listener",
         )
         _supervise(interrupt_task, latch=supervised_latch, fatal=supervised_failure)
@@ -757,9 +757,77 @@ async def _reclaimable_prune_loop(pool: asyncpg.Pool[Any]) -> None:
             log.exception("reclaimable_prune.tick_failed")
 
 
+async def _redrive_interrupts_for_tracked_sessions(
+    pool: asyncpg.Pool[Any],
+    inflight_tool_registry: InflightToolRegistry,
+    *,
+    log: Any,
+) -> None:
+    """Re-check every session this worker still has step/tool work in memory
+    for against the durable interrupt marker, and cancel any that predates it.
+
+    Deliverable invariant for #1756 hole 1 (lost NOTIFY): an interrupt that
+    landed while the listener was disconnected/reconnecting writes its durable
+    ``interrupt`` event (``routers/sessions.py``) regardless — that write
+    always succeeds, only the fire-and-forget NOTIFY can be lost. This re-read
+    of the durable state, run on every LISTEN (re)connect, re-drives
+    cancellation for exactly the sessions this worker could still be running
+    stale work for.
+
+    Scope is ``inflight_tool_registry.tracked_session_ids()`` — the
+    in-process step/tool tasks THIS worker owns — not a cross-worker DB scan:
+    cheap (typically a handful of sessions), and the only scope that matters
+    since only THIS worker's own asyncio tasks are cancellable from here. A
+    session with no locally-tracked work has nothing to cancel regardless of
+    interrupt state; the ghost-repair sweep is the backstop for a worker that
+    crashed outright.
+
+    Seq-bounded, not time-bounded (the constraint from #1756): each
+    session's latest ``interrupt`` seq is compared against the ``start_seq``
+    already threaded through the registry (:meth:`InflightToolRegistry.register_step`
+    / the per-task ``dispatch_seq`` captured in :meth:`InflightToolRegistry.add`),
+    so a step or tool dispatch that began AT OR AFTER the interrupt — a
+    legitimate post-interrupt follow-up step (documented re-wake semantics,
+    ``routers/sessions.py:553-556``) — is never cancelled. Cancelling an
+    already-finished task is a no-op (idempotent), so running this on every
+    reconnect — not just once — is safe and self-healing.
+    """
+    from aios.services.sessions import find_latest_interrupt_seq, load_session_account_id
+
+    session_ids = inflight_tool_registry.tracked_session_ids()
+    for session_id in session_ids:
+        try:
+            account_id = await load_session_account_id(pool, session_id)
+            latest_interrupt_seq = await find_latest_interrupt_seq(
+                pool, session_id, account_id=account_id
+            )
+            if latest_interrupt_seq is None:
+                continue
+            step_cancelled = inflight_tool_registry.cancel_step(
+                session_id, min_start_seq=latest_interrupt_seq
+            )
+            tools_cancelled = inflight_tool_registry.cancel_session(
+                session_id, min_start_seq=latest_interrupt_seq
+            )
+            if step_cancelled or tools_cancelled:
+                log.info(
+                    "interrupt_listener.redrive_dispatch",
+                    session_id=session_id,
+                    latest_interrupt_seq=latest_interrupt_seq,
+                    step_cancelled=step_cancelled,
+                    tools_cancelled=tools_cancelled,
+                )
+        except Exception:
+            # Per-session isolation, matching the sweep's cross-session loops: one
+            # gone session (archived/deleted mid-scan) or a transient DB error must
+            # not abort the redrive for the rest of this worker's tracked sessions.
+            log.exception("interrupt_listener.redrive_failed", session_id=session_id)
+
+
 async def _run_interrupt_listener(
     db_url: str,
     inflight_tool_registry: InflightToolRegistry,
+    pool: asyncpg.Pool[Any],
 ) -> None:
     """Drain pg_notify on the session-interrupt channel and cancel matching steps.
 
@@ -767,11 +835,23 @@ async def _run_interrupt_listener(
     or termination escape to the outer reconnect loop, which mirrors the
     scheduler: log, wait one backoff, and re-enter LISTEN indefinitely.
     ``CancelledError`` propagates so worker shutdown remains clean.
+
+    #1756 (lost-NOTIFY hole): on every successful (re)connect — including the
+    very first — :func:`_redrive_interrupts_for_tracked_sessions` re-reads the
+    durable interrupt marker for every session this worker still has
+    step/tool work tracked for, so an interrupt that landed during the
+    reconnect backoff window (dropped NOTIFY, no live listener to receive it)
+    is enforced at most one backoff late instead of never. ``pool`` is passed
+    explicitly (not read off :mod:`aios.harness.runtime`) so this function
+    stays independently testable without a full worker boot.
     """
     log = get_logger("aios.worker.interrupt_listener")
     while True:
         try:
             async with listen_for_session_interrupts(db_url) as queue:
+                await _redrive_interrupts_for_tracked_sessions(
+                    pool, inflight_tool_registry, log=log
+                )
                 while True:
                     try:
                         session_id = await queue.get()

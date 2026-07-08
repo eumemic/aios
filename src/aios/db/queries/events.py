@@ -807,6 +807,36 @@ async def find_tool_confirmed_event(
     return _row_to_event(row) if row is not None else None
 
 
+async def find_latest_interrupt_seq(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> int | None:
+    """Return the ``seq`` of the most recent ``kind='interrupt'`` event for
+    ``session_id``, or ``None`` if the session has never been interrupted.
+
+    Consumed by the confirmed-tool cold-dispatch guard (#1756,
+    :func:`aios.harness.loop._dispatch_confirmed_tools`): a
+    ``tool_confirmed``/``allow`` whose event ``seq`` is LOWER than this value
+    was confirmed BEFORE the latest interrupt and must not be cold-dispatched
+    -- the durable interrupt marker the ``/interrupt`` endpoint writes
+    (``routers/sessions.py``) is otherwise never consulted at this dispatch
+    point. A FRESH confirmation issued AFTER the interrupt has a higher seq
+    and is unaffected (mirrors the #746 "fresh confirm of an old proposal is
+    fresh intent" rule, applied to the interrupt boundary instead of the age
+    bound).
+    """
+    seq: int | None = await conn.fetchval(
+        "SELECT seq FROM events "
+        "WHERE session_id = $1 AND account_id = $2 AND kind = 'interrupt' "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+        account_id,
+    )
+    return seq
+
+
 async def lookup_tool_name_by_call_id(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -983,6 +1013,51 @@ async def list_confirmed_unresolved_tool_calls(
                 seen.add(tool_call_id)
                 out.append(tc)
                 break
+    return out
+
+
+async def find_tool_confirmed_seqs(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_ids: list[str],
+    *,
+    account_id: str,
+) -> dict[str, int]:
+    """Return ``{tool_call_id: seq}`` for the ``tool_confirmed``/``allow``
+    lifecycle event of each id in *tool_call_ids*.
+
+    Companion lookup for :func:`list_confirmed_unresolved_tool_calls`'s
+    result set -- the resolver drops the confirm event's own ``seq`` when it
+    projects the ``tool_call`` dict, so the interrupt-vs-confirm ordering
+    check in :func:`aios.harness.loop._dispatch_confirmed_tools` (#1756)
+    re-fetches it here, scoped to only the ids already known dispatchable.
+    Empty *tool_call_ids* short-circuits to ``{}`` with no query. Reuses
+    ``events_tool_confirmed_allow_idx`` (migration 0065).
+    """
+    if not tool_call_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT data->>'tool_call_id' AS tool_call_id, seq
+          FROM events
+         WHERE session_id = $1
+           AND account_id = $2
+           AND kind = 'lifecycle'
+           AND data->>'event' = 'tool_confirmed'
+           AND data->>'result' = 'allow'
+           AND data->>'tool_call_id' = ANY($3::text[])
+         ORDER BY seq ASC
+        """,
+        session_id,
+        account_id,
+        tool_call_ids,
+    )
+    # ORDER BY seq ASC + dict overwrite keeps the LATEST confirm seq per id --
+    # the correct choice if a call was ever re-confirmed (dict insertion order
+    # means the last write for a given key wins).
+    out: dict[str, int] = {}
+    for row in rows:
+        out[row["tool_call_id"]] = row["seq"]
     return out
 
 
