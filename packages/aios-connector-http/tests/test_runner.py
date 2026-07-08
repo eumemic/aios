@@ -586,6 +586,137 @@ class TestFocalChannelInjection:
         assert c.focal_calls == [{"text": "hi"}]
 
 
+class TestChannelUnresolved:
+    """#1722: a required focal param (``chat_id``) that couldn't be filled
+    must fail loud with a typed ``channel_unresolved`` error BEFORE the tool
+    body runs — never silently vanish, and never let the body crash with an
+    opaque ``TypeError``/``KeyError`` instead."""
+
+    async def test_missing_focal_channel_is_typed_error_not_silent_drop(self) -> None:
+        c = _FocalConnector()
+        await c.dispatch_call(
+            {
+                "connection_id": "conn_1",
+                "tool_call_id": "call_u1",
+                "session_id": "s",
+                "name": "needs_chat",
+                "arguments": json.dumps({"text": "hi"}),
+                # Focal channel cleared mid-turn (or never set) — the sole
+                # source ``_inject_focal_kwargs`` has for ``chat_id``.
+                "focal_channel": None,
+            }
+        )
+        # The tool body must NEVER have run — no vanished send, no partial
+        # side effect against a bogus chat_id.
+        assert c.focal_calls == []
+        assert len(c.results) == 1
+        r = c.results[0]
+        assert r.kwargs["is_error"] is True
+        body = json.loads(r.kwargs["content"])
+        assert body["code"] == "channel_unresolved"
+        assert "chat_id" in body["error"]
+
+    async def test_missing_focal_channel_empty_string_also_detected(self) -> None:
+        """An empty-but-present ``focal_channel`` (malformed, too few
+        segments) must be treated identically to a missing one."""
+        c = _FocalConnector()
+        await c.dispatch_call(
+            {
+                "connection_id": "conn_1",
+                "tool_call_id": "call_u2",
+                "session_id": "s",
+                "name": "needs_both",
+                "arguments": json.dumps({"text": "hi"}),
+                "focal_channel": "",
+            }
+        )
+        assert c.focal_calls == []
+        r = c.results[0]
+        assert r.kwargs["is_error"] is True
+        body = json.loads(r.kwargs["content"])
+        assert body["code"] == "channel_unresolved"
+
+    async def test_explicit_model_supplied_chat_id_still_works(self) -> None:
+        """A model that explicitly passes ``chat_id`` in arguments bypasses
+        focal injection entirely — no false-positive unresolved error."""
+        c = _FocalConnector()
+        await c.dispatch_call(
+            {
+                "connection_id": "conn_1",
+                "tool_call_id": "call_u3",
+                "session_id": "s",
+                "name": "needs_chat",
+                "arguments": json.dumps({"text": "hi", "chat_id": "explicit-chat"}),
+                "focal_channel": None,
+            }
+        )
+        assert c.focal_calls == [{"text": "hi", "chat_id": "explicit-chat"}]
+        r = c.results[0]
+        assert r.kwargs["is_error"] is False
+
+    async def test_optional_focal_param_missing_is_not_an_error(
+        self, probe: _ProbeConnector
+    ) -> None:
+        """A tool with NO required focal params dispatches normally even
+        with no focal_channel — only REQUIRED focal params gate."""
+        await probe.dispatch_call(
+            {
+                "connection_id": "conn_1",
+                "tool_call_id": "call_u4",
+                "session_id": "s",
+                "name": "shout",
+                "arguments": json.dumps({"text": "hi"}),
+                "focal_channel": None,
+            }
+        )
+        r = probe.results[0]
+        assert r.kwargs["is_error"] is False
+
+
+class TestFireAndForgetDeliveryFailure:
+    """#1722: a fire-and-forget tool (send/react) whose body raises is a
+    connector-side delivery failure — typed ``delivery_failed``, and it
+    always wakes (no_reaction is never set on the error path)."""
+
+    async def test_fire_and_forget_exception_is_typed_delivery_failed(
+        self, probe: _ProbeConnector
+    ) -> None:
+        await probe.dispatch_call(
+            {
+                "connection_id": "conn_1",
+                "tool_call_id": "call_df1",
+                "session_id": "s",
+                "name": "deliver_boom",
+                "arguments": "{}",
+            }
+        )
+        r = probe.results[0]
+        assert r.kwargs["is_error"] is True
+        assert r.kwargs["no_reaction"] is False
+        body = json.loads(r.kwargs["content"])
+        assert body["code"] == "delivery_failed"
+        assert body["error"] == "delivery failed"
+
+    async def test_non_fire_and_forget_exception_is_not_delivery_failed(
+        self, probe: _ProbeConnector
+    ) -> None:
+        """A regular (non-send) tool's exception keeps the generic shape —
+        no false ``delivery_failed`` typing for tools that aren't sends."""
+        await probe.dispatch_call(
+            {
+                "connection_id": "conn_1",
+                "tool_call_id": "call_df2",
+                "session_id": "s",
+                "name": "boom",
+                "arguments": "{}",
+            }
+        )
+        r = probe.results[0]
+        assert r.kwargs["is_error"] is True
+        body = json.loads(r.kwargs["content"])
+        assert "code" not in body
+
+
 class TestLogging:
     """Structured log records at the SDK's two boundary points.
 
