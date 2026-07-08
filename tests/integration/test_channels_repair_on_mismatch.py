@@ -139,9 +139,7 @@ async def test_post_message_bound_check_repairs_corrupted_set(
     # tier — the logic under test is the query-layer repair sequence the
     # router calls, exercised end-to-end against Postgres).
     async with pool.acquire() as conn:
-        bound = set(
-            await queries.list_session_channels(conn, session_id, account_id=account_id)
-        )
+        bound = set(await queries.list_session_channels(conn, session_id, account_id=account_id))
         assert "real_chan_2" not in bound
         recomputed = set(
             await queries.recompute_session_channels(conn, session_id, account_id=account_id)

@@ -163,9 +163,7 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
             # stored set, repair the row and re-check. This is the ONLY
             # place this recompute runs — never the hot loop path.
             recomputed = set(
-                await queries.recompute_session_channels(
-                    conn, session_id, account_id=account_id
-                )
+                await queries.recompute_session_channels(conn, session_id, account_id=account_id)
             )
             if recomputed != valid_targets:
                 await queries.set_session_channels(
