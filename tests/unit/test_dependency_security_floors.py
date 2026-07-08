@@ -67,21 +67,21 @@ def test_manifest_floors_declared() -> None:
     reqs = _direct_requirements()
 
     litellm = reqs["litellm"]
-    assert not litellm.specifier.contains(
-        "1.83.6", prereleases=True
-    ), "litellm floor must exclude <1.83.7 (CVE-2026-42208)"
+    assert not litellm.specifier.contains("1.83.6", prereleases=True), (
+        "litellm floor must exclude <1.83.7 (CVE-2026-42208)"
+    )
     assert litellm.specifier.contains("1.83.7", prereleases=True)
 
     h11 = reqs["h11"]
-    assert not h11.specifier.contains(
-        "0.15", prereleases=True
-    ), "h11 floor must exclude <0.16 (CVE-2025-43859)"
+    assert not h11.specifier.contains("0.15", prereleases=True), (
+        "h11 floor must exclude <0.16 (CVE-2025-43859)"
+    )
     assert h11.specifier.contains("0.16", prereleases=True)
 
     mcp = reqs["mcp"]
-    assert not mcp.specifier.contains(
-        "2.0.0", prereleases=True
-    ), "mcp must be capped <2 (v2 is a breaking rearchitecture)"
+    assert not mcp.specifier.contains("2.0.0", prereleases=True), (
+        "mcp must be capped <2 (v2 is a breaking rearchitecture)"
+    )
     assert mcp.specifier.contains("1.20", prereleases=True)
 
 
@@ -91,14 +91,12 @@ def test_locked_versions_meet_floors() -> None:
 
     for name, floor in LOCKED_FLOORS.items():
         assert name in locked, f"{name} missing from uv.lock"
-        assert (
-            locked[name] >= floor
-        ), f"{name} locked at {locked[name]}, must be >= {floor}"
+        assert locked[name] >= floor, f"{name} locked at {locked[name]}, must be >= {floor}"
 
     assert "mcp" in locked, "mcp missing from uv.lock"
-    assert (
-        locked["mcp"] < MCP_MAX_EXCLUSIVE
-    ), f"mcp locked at {locked['mcp']}, must be < {MCP_MAX_EXCLUSIVE}"
+    assert locked["mcp"] < MCP_MAX_EXCLUSIVE, (
+        f"mcp locked at {locked['mcp']}, must be < {MCP_MAX_EXCLUSIVE}"
+    )
 
 
 def test_procrastinate_pin_untouched() -> None:
