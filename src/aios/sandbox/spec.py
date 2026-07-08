@@ -423,6 +423,17 @@ async def _materialize_github_clones(
     list. The proxy stays alive for sibling repos. Per-clone wall-clock
     is bounded by ``Settings.github_clone_session_timeout_seconds``
     (issue #697).
+
+    Circuit breaker (#1720): each repo's clone outcome feeds
+    ``runtime.github_clone_breaker`` (worker-process, in-memory, keyed on
+    resource id). A repo with an open breaker is skipped BEFORE any clone
+    subprocess runs — it still lands in ``failures``/``attempted`` (so
+    the drift key and the ``github_clone_failed`` event are unaffected)
+    but costs none of the actual clone latency. The K-th consecutive
+    failure that opens the breaker also appends exactly one
+    ``github_clone_degraded`` session event (the DOWN-edge signal a
+    caller/ops-agent can alert on instead of rediscovering the same dead
+    credential every turn).
     """
     from aios.sandbox.git_proxy import repo_key
     from aios.services import github_repositories as github_repo_service
@@ -458,10 +469,22 @@ async def _materialize_github_clones(
     # uvicorn server, httpx client, bound TCP port, and in-memory
     # token map leak for the worker's lifetime. Mirrors the cleanup
     # pattern at build_spec_from_session below.
+    breaker = runtime.github_clone_breaker
     try:
         materialized: list[GithubRepositoryResourceEcho] = []
         failures: list[tuple[GithubRepositoryResourceEcho, GithubCloneError]] = []
+        degraded_down_edges: list[GithubRepositoryResourceEcho] = []
         for echo, token in echo_tokens:
+            # Circuit breaker (#1720): a repo whose clone has failed
+            # ``_BREAKER_FAILURE_THRESHOLD`` times in a row is skipped
+            # fast — no clone attempt, no wall-clock tax on this step's
+            # prelude — until the cooldown window lapses and lets exactly
+            # one probe through. Without this, a dead/expired token
+            # retries on EVERY step forever (issue #1720's 2,100
+            # failures/24h production evidence).
+            if breaker is not None and breaker.is_open(echo.id):
+                failures.append((echo, GithubCloneError("clone breaker open; skipping attempt")))
+                continue
             try:
                 cache_dir = await ensure_cache_clone(echo.url, token)
                 await ensure_session_working_tree(
@@ -476,7 +499,13 @@ async def _materialize_github_clones(
                 )
             except GithubCloneError as err:
                 failures.append((echo, err))
+                if breaker is not None and breaker.record_failure(
+                    echo.id, echo.url, echo.mount_path
+                ):
+                    degraded_down_edges.append(echo)
                 continue
+            if breaker is not None:
+                breaker.record_success(echo.id)
             materialized.append(echo)
 
         # Log + append failure events outside the conn block so we don't
@@ -502,6 +531,23 @@ async def _materialize_github_clones(
                     },
                     account_id=account_id,
                 )
+        # Exactly one durable ``github_clone_degraded`` event per breaker
+        # DOWN transition (#1720) — dedup lives in the breaker (only the
+        # K-th consecutive failure returns True from ``record_failure``),
+        # this just stamps the session-visible artifact for it.
+        for degraded_echo in degraded_down_edges:
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {
+                    "event": "github_clone_degraded",
+                    "resource_id": degraded_echo.id,
+                    "repo_url": degraded_echo.url,
+                    "is_error": False,
+                },
+                account_id=account_id,
+            )
         # ``attempted`` is every attached echo regardless of clone outcome
         # — the drift key is stamped from THIS, not ``materialized``, so a
         # failed clone can't skew the provision-time snapshot below the

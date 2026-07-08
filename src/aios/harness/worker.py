@@ -36,7 +36,11 @@ import aios.harness.tasks
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
-from aios.db.listen import listen_for_mcp_evict_vault, listen_for_session_interrupts
+from aios.db.listen import (
+    listen_for_github_clone_breaker_clear,
+    listen_for_mcp_evict_vault,
+    listen_for_session_interrupts,
+)
 from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, create_pool, normalize_dsn
 from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
@@ -60,6 +64,7 @@ from aios.retirements.boot_gate import (
     assert_retirements_admissible,
 )
 from aios.sandbox.backends import select_sandbox_backend
+from aios.sandbox.github_clone_breaker import GithubCloneBreaker
 from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
 from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.tool_broker import ToolBroker
@@ -263,11 +268,13 @@ async def worker_main() -> None:
     sandbox_registry: SandboxRegistry | None = None
     inflight_tool_registry: InflightToolRegistry | None = None
     mcp_session_pool: McpSessionPool | None = None
+    github_clone_breaker: GithubCloneBreaker | None = None
     tool_broker: ToolBroker | None = None
     procrastinate_opened = False
     sweep_task: asyncio.Task[None] | None = None
     interrupt_task: asyncio.Task[None] | None = None
     mcp_evict_task: asyncio.Task[None] | None = None
+    github_clone_breaker_clear_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
     scheduler_task: asyncio.Task[None] | None = None
     supervised_latch = asyncio.Event()
@@ -285,6 +292,7 @@ async def worker_main() -> None:
         sandbox_registry = SandboxRegistry(backend=select_sandbox_backend(settings))
         inflight_tool_registry = InflightToolRegistry()
         mcp_session_pool = McpSessionPool()
+        github_clone_breaker = GithubCloneBreaker()
         await ensure_sandbox_network()
         tool_broker = ToolBroker(socket_path=settings.tool_broker_socket_path)
         await tool_broker.start()
@@ -305,6 +313,7 @@ async def worker_main() -> None:
         runtime.sandbox_registry = sandbox_registry
         runtime.inflight_tool_registry = inflight_tool_registry
         runtime.mcp_session_pool = mcp_session_pool
+        runtime.github_clone_breaker = github_clone_breaker
         runtime.tool_broker = tool_broker
         runtime.tool_provider = SubsystemToolProvider()
 
@@ -464,6 +473,17 @@ async def worker_main() -> None:
         )
         _supervise(mcp_evict_task, latch=supervised_latch, fatal=supervised_failure)
 
+        # Listen for github-repo token-rotation NOTIFYs and clear the
+        # rotated attachment's clone-breaker state so the fixed credential
+        # re-probes on the very next provision (#1720).
+        github_clone_breaker_clear_task = asyncio.create_task(
+            _run_github_clone_breaker_clear_listener(settings.db_url),
+            name="github_clone_breaker_clear_listener",
+        )
+        _supervise(
+            github_clone_breaker_clear_task, latch=supervised_latch, fatal=supervised_failure
+        )
+
         # Start event-driven scheduler. Sleeps until the next due
         # ``next_fire``, woken early by NOTIFY on
         # ``aios_scheduled_tasks_due`` (insert/delete or
@@ -541,6 +561,8 @@ async def worker_main() -> None:
             await _cancel_and_drain(interrupt_task)
         if mcp_evict_task is not None:
             await _cancel_and_drain(mcp_evict_task)
+        if github_clone_breaker_clear_task is not None:
+            await _cancel_and_drain(github_clone_breaker_clear_task)
         if scheduler_task is not None:
             await _cancel_and_drain(scheduler_task)
         if sandbox_registry is not None:
@@ -840,4 +862,55 @@ async def _run_mcp_evict_listener(db_url: str) -> None:
             raise
         except Exception:
             log.exception("mcp_evict_listener.listen_failed_will_retry")
+            await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_SECONDS)
+
+
+async def _run_github_clone_breaker_clear_listener(db_url: str) -> None:
+    """Drain pg_notify on the github-clone-breaker clear channel and clear
+    the rotated resource's breaker state (#1720).
+
+    :func:`aios.services.github_repositories.rotate_token` runs in the API
+    process and NOTIFYs ``aios_github_clone_breaker_clear`` with the
+    ``ghrepo_...`` resource id after a token/identity UPDATE commits. The
+    worker owns ``runtime.github_clone_breaker``, so it LISTENs here and
+    calls :meth:`GithubCloneBreaker.clear` — a fixed credential re-probes on
+    the very next provision instead of serving out a cooldown opened under
+    the old secret.
+
+    Mirrors :func:`_run_mcp_evict_listener`'s survivability contract: the
+    dispatch try/except is nested INSIDE ``while True`` so a transient clear
+    failure doesn't disable the listener for the worker's lifetime;
+    LISTEN-connection failures escape to the outer reconnect loop.
+    ``CancelledError`` propagates so worker shutdown stays clean.
+    """
+    log = get_logger("aios.worker.github_clone_breaker_clear_listener")
+    while True:
+        try:
+            async with listen_for_github_clone_breaker_clear(db_url) as queue:
+                while True:
+                    try:
+                        resource_id = await queue.get()
+                        if resource_id == "":
+                            raise ConnectionError(
+                                "github clone breaker clear LISTEN connection terminated"
+                            )
+                        breaker = runtime.github_clone_breaker
+                        if breaker is None:
+                            # Not yet initialized (startup race) or already
+                            # torn down — nothing to clear; the breaker's own
+                            # cooldown/half-open re-probe covers the gap.
+                            continue
+                        breaker.clear(resource_id)
+                        log.info(
+                            "github_clone_breaker_clear_listener.dispatch",
+                            resource_id=resource_id,
+                        )
+                    except ConnectionError:
+                        raise
+                    except Exception:
+                        log.exception("github_clone_breaker_clear_listener.dispatch_failed")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("github_clone_breaker_clear_listener.listen_failed_will_retry")
             await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_SECONDS)

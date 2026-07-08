@@ -127,6 +127,7 @@ async def test_real_gate_trips_when_subtree_over_finite_limit() -> None:
         patch("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)),
         patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         patch("aios.harness.loop.refresh_session_mount_state", AsyncMock(return_value=[])),
+        patch("aios.harness.loop._list_session_github_repo_echoes", AsyncMock(return_value=[])),
         patch("aios.harness.loop.compute_step_prelude", AsyncMock(return_value=SimpleNamespace())),
         patch("aios.harness.loop.prelude_overhead_local", return_value=0),
         patch(
