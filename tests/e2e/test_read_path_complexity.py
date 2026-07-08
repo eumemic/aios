@@ -1,4 +1,5 @@
-"""CI-gated per-turn read-path COMPLEXITY harness (issue #1661).
+"""CI-gated per-turn read-path COMPLEXITY harness (issue #1661, extended by
+#1750 to the append / tool-result phase).
 
 Why this file exists — the durable class-guard.
 ================================================
@@ -41,6 +42,29 @@ Complexity-ONLY: this file makes ZERO output/behavioral/token-value assertions
 (correctness lives in ``test_clone_window_regression.py`` + #1657's own tests).
 No wall-clock or estimated-row-count appears in any GATING assertion; the only
 timing is under the advisory ``perf`` mark.
+
+── append / tool-result phase (issue #1750) ──────────────────────────────────
+
+The read-phase registry above (``read_windowed_events`` +
+``compute_step_prelude``) does not reach the APPEND path — the reads that run
+on *every tool-result append*, not just every inference read. The #1 violation
+in the #1733 epic, ``find_tool_result_event`` (``db/queries/events.py``), lived
+there: a plain ``SELECT ... LIMIT 1`` filtering ``data->>'role' = 'tool'``
+against the partial index ``events_tool_result_idx`` (predicated on the
+BACKFILLED ``role`` COLUMN, migrations 0023/0097) — an index-predicate
+mismatch, not an unbounded aggregate, so the *existing* oracle
+(``find_unbounded_events_scan_over_seq``, which fires only under an
+``_AGGREGATE_NODE_TYPES`` node) never saw it. The read planned as a bare
+``Seq Scan on events``, keyed on ``session_id`` alone, on every tool-result
+append under the session row lock. #1734 fixed the exemplar by re-predicating
+onto the ``role`` column; this extension closes the class by (a) generalizing
+the plan-shape oracle with a sibling detector
+(``tests.support.find_predicate_mismatch_events_scan``), (b) registering the
+append-phase reads, and (c) extending the registry-completeness AST gate to
+the append/tool-result entry points (``services.append_tool_result`` and
+``sweep.find_and_repair_ghosts``) so a FUTURE unregistered append-path read
+turns the registry gate RED — the same anti-narrowing discipline #1661
+established for the read phase.
 """
 
 from __future__ import annotations
@@ -56,8 +80,17 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
+from aios.harness.sweep import (
+    ALL_RESULT_ROWS_SQL,
+    CONFIRMED_ROWS_SQL,
+    GHOST_ASST_SQL,
+    UNREACTED_ROWS_SQL,
+)
 from tests.conftest import needs_docker
-from tests.support import find_unbounded_events_scan_over_seq
+from tests.support import (
+    find_predicate_mismatch_events_scan,
+    find_unbounded_events_scan_over_seq,
+)
 
 pytestmark = pytest.mark.docker
 
@@ -210,6 +243,56 @@ async def seed_large_session(
     _WINDOW_STATE["window_tokens"] = window_tokens
 
 
+async def _seed_append_phase_state(pool: asyncpg.Pool[Any], session_id: str = _SESSION_ID) -> None:
+    """Populate the append/tool-result-phase scalar/lifecycle state on top of
+    :func:`seed_large_session` (issue #1750).
+
+    :func:`seed_large_session` seeds the message slate (including plenty of
+    ``role='tool'`` and ``role='assistant'``-with-``tool_calls`` rows so every
+    partial index the append-phase reads target is populated and selective —
+    see the module docstring's "no step is executed" rationale) but leaves
+    the maintained ``sessions`` scalars at their post-seed defaults
+    (``open_tool_call_count = 0``, ``last_reacted_seq = 0``). This gives the
+    append-phase HOT_PATH_READS entries a REAL, non-trivial plan to EXPLAIN
+    against — anti-vacuity for those reads (a plan against an empty/trivial
+    relation would be a vacuous "passes because there's nothing to scan"
+    verdict): a few open tool_calls (``open_tool_call_count > 0``, so
+    ``ghost_asst_scan`` seeks a genuinely selective slate rather than a
+    universally-false-filter empty scan), an unreacted tail (so
+    ``unreacted_rows_scan`` returns real rows), and one confirmed-but-
+    unresolved lifecycle event (so ``confirmed_rows_scan`` seeks a real row).
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET open_tool_call_count = 5, last_reacted_seq = $2 WHERE id = $1",
+            session_id,
+            # A handful of trailing seqs left unreacted — a genuinely small
+            # tail, not the whole slate (the ``unreacted_rows_scan`` shape
+            # this seeds is O(unreacted-tail), not O(session-size)).
+            _N_LARGE - 10,
+        )
+        await conn.execute(
+            "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
+            "VALUES ('ev_readpath_confirmed_lc', $1, $2, 'lifecycle', $3::jsonb, NULL, $4) "
+            "ON CONFLICT (id) DO NOTHING",
+            session_id,
+            _N_LARGE + 1,
+            json.dumps(
+                {
+                    "event": "tool_confirmed",
+                    "result": "allow",
+                    "tool_call_id": "tc_confirmed_unresolved",
+                }
+            ),
+            _ACCOUNT_ID,
+        )
+        await conn.execute(
+            "UPDATE sessions SET last_event_seq = $2 WHERE id = $1", session_id, _N_LARGE + 1
+        )
+        await conn.execute("ANALYZE events")
+        await conn.execute("ANALYZE sessions")
+
+
 # Small mutable box so the seed helper's ``window_tokens`` reaches the read
 # thunks without a global rebind (keeps the reads pure functions of the pool).
 _WINDOW_STATE: dict[str, int] = {"window_tokens": _N_LARGE * _DELTA // 2}
@@ -224,6 +307,8 @@ async def seeded_pool(aios_env: dict[str, str]) -> AsyncIterator[asyncpg.Pool[An
     # complement is a genuinely large omitted prefix — the shape the pre-fix
     # count(*) / LAG WindowAgg scanned linearly.
     await seed_large_session(pool, _ACCOUNT_ID, _N_LARGE, window_tokens=_N_LARGE * _DELTA // 2)
+    # Append/tool-result-phase state on top of the same slate (#1750).
+    await _seed_append_phase_state(pool)
     try:
         yield pool
     finally:
@@ -314,6 +399,55 @@ _SQL_BEGAN_AT = (
     "ORDER BY seq ASC LIMIT 1"
 )
 
+# ─── append / tool-result phase reads (issue #1750) ───────────────────────────
+#
+# The exact production SQL each append-phase read issues, mirroring the
+# read-phase constants above. ``_SQL_FIND_TOOL_RESULT_EVENT`` is the #1 #1733
+# exemplar (``db/queries/events.py:find_tool_result_event``, post-#1734 form —
+# filters the normalized ``role`` column, served by ``events_tool_result_idx``).
+# The ghost/confirm sweep reads (``sweep.py``) are registered verbatim from
+# their module constants below (imported, not re-typed, so a change to the
+# production SQL is caught by drift rather than silently diverging from what
+# this harness EXPLAINs).
+_SQL_FIND_TOOL_RESULT_EVENT = (
+    "SELECT * FROM events "
+    "WHERE session_id = $1 "
+    "  AND account_id = $2 "
+    "  AND kind = 'message' "
+    "  AND role = 'tool' "
+    "  AND data->>'tool_call_id' = $3 "
+    "LIMIT 1"
+)
+
+# The pre-#1734 predicate-mismatch form of the SAME query — the shape the
+# not-vacuous probe (``TestPrimaryGateIsNotVacuous``, extended below) proves
+# the generalized oracle catches.
+_SQL_FIND_TOOL_RESULT_EVENT_PRE_1734 = (
+    "SELECT * FROM events "
+    "WHERE session_id = $1 "
+    "  AND account_id = $2 "
+    "  AND kind = 'message' "
+    "  AND data->>'role' = 'tool' "
+    "  AND data->>'tool_call_id' = $3 "
+    "LIMIT 1"
+)
+
+# The ghost/confirm sweep reads, sourced verbatim from ``sweep.py``'s module
+# constants (not re-typed) so drift in the production SQL is caught rather
+# than silently diverging from what this harness EXPLAINs. Each is scoped to
+# a single session via the SAME ``.format(scope_clause=...)`` composition
+# ``find_and_repair_ghosts``/``find_sessions_needing_inference`` use for the
+# per-step scoped call (``session_id=...``) — the shape this harness exercises
+# is the exact production text, just single-session-parameterized. The
+# ``scope_clause`` text (alias + placeholder) matches the production call
+# sites exactly: ``"AND e.session_id = $1"`` for the ghost scan
+# (``find_and_repair_ghosts``), ``"AND s.id = $1"`` for the confirmed-rows
+# scan (``find_sessions_needing_inference``, which JOINs ``sessions AS s``).
+_SQL_GHOST_ASST_SCOPED = GHOST_ASST_SQL.format(scope_clause="AND e.session_id = $1")
+_SQL_ALL_RESULT_ROWS = ALL_RESULT_ROWS_SQL
+_SQL_UNREACTED_ROWS = UNREACTED_ROWS_SQL
+_SQL_CONFIRMED_ROWS_SCOPED = CONFIRMED_ROWS_SQL.format(scope_clause="AND s.id = $1", age_param="$2")
+
 
 HOT_PATH_READS: list[HotRead] = [
     HotRead(
@@ -351,6 +485,42 @@ HOT_PATH_READS: list[HotRead] = [
         args=lambda: (_SESSION_ID, _ACCOUNT_ID),
         max_rows=_O1_ROW_CEIL,
     ),
+    # ─── append / tool-result phase (issue #1750) ─────────────────────────
+    HotRead(
+        name="find_tool_result_event",
+        declared_complexity="O(1)",
+        sql=_SQL_FIND_TOOL_RESULT_EVENT,
+        args=lambda: (_SESSION_ID, _ACCOUNT_ID, "tc_no_such_call"),
+        max_rows=_O1_ROW_CEIL,
+    ),
+    HotRead(
+        name="ghost_asst_scan",
+        declared_complexity="O(open_tool_call_count)",
+        sql=_SQL_GHOST_ASST_SCOPED,
+        args=lambda: (_SESSION_ID,),
+        max_rows=_OW_ROW_CEIL,
+    ),
+    HotRead(
+        name="all_result_rows_scan",
+        declared_complexity="O(open_tool_call_count)",
+        sql=_SQL_ALL_RESULT_ROWS,
+        args=lambda: ([_SESSION_ID],),
+        max_rows=_OW_ROW_CEIL,
+    ),
+    HotRead(
+        name="unreacted_rows_scan",
+        declared_complexity="O(unreacted-tail)",
+        sql=_SQL_UNREACTED_ROWS,
+        args=lambda: ([_SESSION_ID],),
+        max_rows=_OW_ROW_CEIL,
+    ),
+    HotRead(
+        name="confirmed_rows_scan",
+        declared_complexity="O(confirmed-allow)",
+        sql=_SQL_CONFIRMED_ROWS_SCOPED,
+        args=lambda: (_SESSION_ID, 3600),
+        max_rows=_O1_ROW_CEIL,
+    ),
 ]
 
 
@@ -370,8 +540,11 @@ async def _explain(pool: asyncpg.Pool[Any], sql: str, *args: Any) -> dict[str, A
 class TestPrimaryPlanShapeGate:
     """For every hot read, ``EXPLAIN (FORMAT JSON)`` (no ANALYZE) the SQL and
     assert NO aggregate over ``events`` is unbounded by a
-    ``cumulative_tokens``/``seq`` lower bound. Deterministic shape verdict —
-    RED on the #1611/#1657 O(session-size) WindowAgg, GREEN on the O(1) fix."""
+    ``cumulative_tokens``/``seq`` lower bound, AND no ``events`` Seq Scan
+    carries the JSONB-over-column index-predicate-mismatch smell (issue
+    #1750). Deterministic shape verdict — RED on the #1611/#1657
+    O(session-size) WindowAgg or the #1734 index-predicate mismatch, GREEN on
+    the fixed forms."""
 
     @pytest.mark.parametrize("read", HOT_PATH_READS, ids=lambda r: r.name)
     async def test_no_unbounded_events_scan_over_seq(
@@ -385,6 +558,24 @@ class TestPrimaryPlanShapeGate:
             f"aggregate(s) scan ``events`` keyed on session_id alone — the "
             f"O(session-size) class that detonated Ultron (#1661/#1657). A hot "
             f"read must range-scan on cumulative_tokens/seq, not the whole slate."
+        )
+
+    @pytest.mark.parametrize("read", HOT_PATH_READS, ids=lambda r: r.name)
+    async def test_no_predicate_mismatch_events_scan(
+        self, seeded_pool: asyncpg.Pool[Any], read: HotRead
+    ) -> None:
+        """No registered read's plan carries an ``events`` Seq Scan whose
+        Filter is a JSONB-over-column index-predicate mismatch (issue #1750,
+        the #1 #1733 violation: ``find_tool_result_event`` pre-#1734)."""
+        plan = await _explain(seeded_pool, read.sql, *read.args())
+        offenders = find_predicate_mismatch_events_scan(plan)
+        assert not offenders, (
+            f"read-path index-predicate-mismatch regression in {read.name!r} "
+            f"(declared {read.declared_complexity}): {len(offenders)} Seq "
+            f"Scan(s) on events carry a data->>'role'/'tool_call_id' equality "
+            f"a partial index exists to serve via the normalized column "
+            f"(events_tool_result_idx et al., migrations 0011/0023/0065/0097) "
+            f"— the #1734 defect class (#1750)."
         )
 
 
@@ -460,6 +651,57 @@ class TestPrimaryGateIsNotVacuous:
             "(acceptance: RED against the #738 omission count(*) shape)."
         )
 
+    async def test_1734_predicate_mismatch_is_red(self, seeded_pool: asyncpg.Pool[Any]) -> None:
+        """Fix §4 not-vacuous probe: the pre-#1734 ``find_tool_result_event``
+        SQL (``data->>'role' = 'tool'``) — which the partial index
+        ``events_tool_result_idx`` (predicated on the ``role`` COLUMN) cannot
+        serve — MUST trip the generalized oracle on the SAME seeded slate.
+        Because this is ``EXPLAIN`` (no ``ANALYZE``), the ``LIMIT 1``
+        short-circuit is irrelevant: the Seq Scan node is present regardless
+        of where the matching row sits in the slate — plan shape is robust
+        where an executed buffer-count probe would be fragile."""
+        plan = await _explain(
+            seeded_pool,
+            _SQL_FIND_TOOL_RESULT_EVENT_PRE_1734,
+            _SESSION_ID,
+            _ACCOUNT_ID,
+            "tc_3",
+        )
+        offenders = find_predicate_mismatch_events_scan(plan)
+        assert offenders, (
+            "the pre-#1734 data->>'role' predicate-mismatch SQL did NOT trip "
+            "find_predicate_mismatch_events_scan — the generalized oracle is "
+            "vacuous. It must catch the exact index-predicate-mismatch shape "
+            "#1734 fixed (acceptance: RED against the pre-#1734 "
+            "find_tool_result_event SQL)."
+        )
+
+    async def test_1734_fixed_form_is_green_on_same_slate(
+        self, seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        """The other half of the not-vacuous proof: the post-#1734 ``role``
+        column form, EXPLAINed on the SAME single-session seeded slate, does
+        NOT trip the oracle. Together with the previous test this proves the
+        oracle distinguishes the defect from its fix on one slate,
+        single-session and all (Lens 0 finding 2's concern — a single-session
+        corpus inverting the planner's index-vs-seqscan choice — does not
+        apply here: the fixed query still uses the selective partial index on
+        this exact slate, while the broken query seq-scans)."""
+        plan = await _explain(
+            seeded_pool,
+            _SQL_FIND_TOOL_RESULT_EVENT,
+            _SESSION_ID,
+            _ACCOUNT_ID,
+            "tc_3",
+        )
+        offenders = find_predicate_mismatch_events_scan(plan)
+        assert not offenders, (
+            "the post-#1734 role-column find_tool_result_event SQL tripped "
+            "find_predicate_mismatch_events_scan on the seeded slate — false "
+            "positive; the fixed form must plan via the partial index, not a "
+            "flagged Seq Scan."
+        )
+
 
 # ─── GATE 2: ROWS-RETURNED (deterministic, GATING) ───────────────────────────
 
@@ -487,21 +729,32 @@ class TestRowsReturnedGate:
 
 # ─── GATE 3: REGISTRY-COMPLETENESS (deterministic, GATING) ───────────────────
 #
-# The durable class-guard: an import-time reflection scan of the read phase.
-# The read phase is ``read_windowed_events`` (the windowed slate read) and
+# The durable class-guard: an import-time reflection scan of the read phase
+# AND (issue #1750) the append/tool-result phase. The read phase is
+# ``read_windowed_events`` (the windowed slate read) and
 # ``compute_step_prelude`` (the events-independent prelude) — both awaited by
-# ``run_session_step`` before inference. We AST-walk each, collect the callables
-# it invokes that read the DB (take a ``conn``/issue ``fetch*``), and assert
-# every one is either registered in ``HOT_PATH_READS`` or carries an inline
-# ``# perf-exempt: <reason>`` marker in the read phase's source. A NEW,
-# unregistered DB read on the hot path turns this RED — the exact silent-O(N)
-# entry vector #1611 exploited.
+# ``run_session_step`` before inference. The append phase is
+# ``services.append_tool_result`` (every custom/builtin/MCP tool-result
+# intake) and ``sweep.find_and_repair_ghosts`` (the cross-session ghost-repair
+# scan) — the entry points the #1 #1733 violation (``find_tool_result_event``)
+# lived on and the existing read-phase registry does not reach. We AST-walk
+# each, collect the callables it invokes that read the DB (take a
+# ``conn``/issue ``fetch*``), and assert every one is either registered in
+# ``HOT_PATH_READS`` or carries an inline ``# perf-exempt: <reason>`` marker in
+# the entry's source. A NEW, unregistered DB read on either phase turns this
+# RED — the exact silent-O(N)-or-index-predicate-mismatch entry vector #1611
+# and #1734 each exploited.
 
-# The read-phase entry points, by (module, qualname). Kept as strings so the
-# scan is import-time-cheap and does not drag the whole harness into the test.
+# The read-phase + append-phase entry points, by (module, qualname). Kept as
+# strings so the scan is import-time-cheap and does not drag the whole harness
+# into the test.
 _READ_PHASE_ENTRIES: tuple[tuple[str, str], ...] = (
     ("aios.db.queries.events", "read_windowed_events"),
     ("aios.harness.step_context", "compute_step_prelude"),
+    # Append / tool-result phase (#1750): the entry points reached by every
+    # tool-result intake and by cross-session ghost repair.
+    ("aios.services.sessions", "append_tool_result"),
+    ("aios.harness.sweep", "find_and_repair_ghosts"),
 )
 
 # Names that ARE registered hot reads (matched against the callables the read
@@ -519,6 +772,20 @@ _REGISTERED_NAMES = frozenset(r.name for r in HOT_PATH_READS) | {
     "list_tools_for_session",
     "model_token_class_ratios",
     "read_windowed_context_events",
+    # Append phase (#1750): ``find_tool_result_event`` is a named callable the
+    # AST scan resolves directly (``db.queries.events.find_tool_result_event``,
+    # the #1 #1733 exemplar). The sweep's ghost/confirm reads
+    # (GHOST_ASST_SQL / ALL_RESULT_ROWS_SQL / UNREACTED_ROWS_SQL /
+    # CONFIRMED_ROWS_SQL) are issued via bare ``conn.fetch`` calls inside
+    # ``find_and_repair_ghosts`` — already covered by ``_INLINE_READ_COVER``
+    # below — and are registered here as logical names purely so the
+    # PLAN-SHAPE + ROWS-RETURNED gates (which key off ``HOT_PATH_READS``, not
+    # this set) cover their exact production SQL.
+    "find_tool_result_event",
+    "ghost_asst_scan",
+    "all_result_rows_scan",
+    "unreacted_rows_scan",
+    "confirmed_rows_scan",
 }
 
 # asyncpg connection read methods — a call to one of these is a DB read.
@@ -672,9 +939,10 @@ class TestRegistryCompletenessGate:
         )
 
     def test_registry_covers_the_named_read_phase_functions(self) -> None:
-        """Sanity: the two read-phase entry points import + AST-parse, and the
-        registry names at least the windowed-events + prelude reads the issue
-        enumerates (``read_windowed_events``, ``compute_step_prelude`` coverage)."""
+        """Sanity: the four read/append-phase entry points import + AST-parse,
+        and the registry names at least the windowed-events + prelude reads
+        the issue enumerates (``read_windowed_events``, ``compute_step_prelude``
+        coverage) plus the append-phase entry points (#1750)."""
         scanned = {
             entry
             for module_name, qualname in _READ_PHASE_ENTRIES
@@ -683,9 +951,13 @@ class TestRegistryCompletenessGate:
         assert scanned == {
             "aios.db.queries.events.read_windowed_events",
             "aios.harness.step_context.compute_step_prelude",
+            "aios.services.sessions.append_tool_result",
+            "aios.harness.sweep.find_and_repair_ghosts",
         }
         # The registry must at minimum cover the windowed read's own sub-reads.
         assert {"read_windowed_context_events", "_retained_class_mass"} <= _REGISTERED_NAMES
+        # ... and the append-phase #1 #1733 exemplar (#1750).
+        assert "find_tool_result_event" in _REGISTERED_NAMES
 
 
 # ─── GATE 4: ADVISORY scaling backstop (perf mark, NON-GATING) ───────────────
@@ -777,4 +1049,30 @@ class TestAdvisoryScalingBackstop:
             f"[ADVISORY, non-gating] latest-cumulative seek t(N2)/t(N1) = {ratio:.2f} "
             f">= 2.5 — an O(1) index seek should be flat across a 10x slate. Advisory "
             f"only (jitter); inspect, do not gate (#1661)."
+        )
+
+    async def test_find_tool_result_event_scales_flat(
+        self, two_scale_pool: asyncpg.Pool[Any]
+    ) -> None:
+        """Append-phase advisory backstop (#1750): the #1 #1733 exemplar
+        (``find_tool_result_event``, post-#1734 role-column form) is an O(1)
+        index seek and should stay flat across a 10x slate. Advisory only —
+        catches app-side/N+1 complexity the plan-shape oracle can't see."""
+        t1 = await _time_read(
+            two_scale_pool,
+            _SQL_FIND_TOOL_RESULT_EVENT,
+            (_SESSION_ID_SMALL, _ACCOUNT_ID, "tc_no_such_call"),
+            repeats=_M_REPEATS,
+        )
+        t2 = await _time_read(
+            two_scale_pool,
+            _SQL_FIND_TOOL_RESULT_EVENT,
+            (_SESSION_ID, _ACCOUNT_ID, "tc_no_such_call"),
+            repeats=_M_REPEATS,
+        )
+        ratio = t2 / t1 if t1 > 0 else float("inf")
+        assert ratio < 2.5, (
+            f"[ADVISORY, non-gating] find_tool_result_event t(N2)/t(N1) = {ratio:.2f} "
+            f">= 2.5 — an O(1) index seek should be flat across a 10x slate. Advisory "
+            f"only (jitter); inspect, do not gate (#1750)."
         )
