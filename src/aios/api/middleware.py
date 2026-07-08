@@ -16,6 +16,7 @@ import time
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from aios.api._log_redaction import redact_sensitive_path
 from aios.logging import get_logger
 
 log = get_logger(__name__)
@@ -52,7 +53,7 @@ class RequestLoggingMiddleware:
             log.info(
                 "api.request",
                 method=method,
-                path=path,
+                path=redact_sensitive_path(path),
                 status=status if status is not None else 500,
                 duration_ms=round((time.perf_counter() - start) * 1000, 2),
             )

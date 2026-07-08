@@ -185,6 +185,16 @@ async def _latest_cumulative_state(
 
 
 _MODEL_TOKEN_RATIO_MIN_SAMPLES = 5
+# Hard cap on the number of calibration spans the per-model ridge fit pulls
+# per query.  Without it the fetch had no ORDER BY / LIMIT / time bound and
+# scanned *every* successful calibration span ever logged for the model — a
+# row count that grows linearly and forever — on the step hot path
+# (``read_windowed_events``), eventually tripping the pool's 30 s
+# ``statement_timeout`` inside the session step and JSON-decoding all N rows
+# on the event loop.  1000 is large enough for a stable ridge fit while
+# riding migration 0024's ``((data->>'model'), seq DESC)`` partial index as a
+# bounded seek (``ORDER BY seq DESC LIMIT $2``).  See issue #1711.
+_MODEL_TOKEN_RATIO_SAMPLE_LIMIT = 1000
 _MODEL_TOKEN_RATIO_MIN = 0.5
 _MODEL_TOKEN_RATIO_BUCKET_FLOOR = 0.001
 _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS = 60.0
@@ -373,6 +383,23 @@ async def model_token_class_ratios(
     cached portions included — do NOT add ``cache_*`` breakdowns).  Uses
     the ``events_model_request_end_calibration_idx`` partial index
     (migration 0024).
+
+    **``account_id`` is intentionally not a query predicate — by design.**
+    These coefficients are model-intrinsic: the provider ``input_tokens``
+    is regressed on model-neutral, account-neutral local class counts, so
+    the fit is a deliberate *global-per-model* aggregate, not a
+    per-tenant one.  This is NOT a tenant leak.  Do **not** add an
+    ``account_id`` predicate: it would fragment the sample (slowing
+    calibration convergence) and require a new index without buying any
+    correctness.  The param is kept for signature/cache-key compatibility
+    with the scalar contract.
+
+    The fetch is bounded to the most recent
+    :data:`_MODEL_TOKEN_RATIO_SAMPLE_LIMIT` spans via ``ORDER BY seq DESC
+    LIMIT`` (issue #1711).  This rides the 0024 index as a bounded index
+    seek rather than an unbounded lifetime scan on the step hot path; the
+    limit is large enough that the ridge fit is stable while capping both
+    the SQL scan and the per-row JSON decode done on the event loop.
     """
     if k_bucket <= 0:
         raise ValueError("k_bucket must be positive")
@@ -403,8 +430,15 @@ async def model_token_class_ratios(
           AND (data->'model_usage') ? 'input_tokens'
           AND (data->'model_usage'->>'input_tokens') IS NOT NULL
           AND (data->>'local_tokens')::bigint > 0
+        -- Bound the scan to the most recent N spans (issue #1711): rides
+        -- migration 0024's ``((data->>'model'), seq DESC)`` partial index
+        -- as a bounded seek instead of a full lifetime scan on the step
+        -- hot path.  MIN_SAMPLES is still checked below the fetch.
+        ORDER BY seq DESC
+        LIMIT $2
         """,
         model,
+        _MODEL_TOKEN_RATIO_SAMPLE_LIMIT,
     )
 
     if len(rows) < _MODEL_TOKEN_RATIO_MIN_SAMPLES:
@@ -717,7 +751,7 @@ async def find_tool_result_event(
          WHERE session_id = $1
            AND account_id = $2
            AND kind = 'message'
-           AND data->>'role' = 'tool'
+           AND role = 'tool'
            AND data->>'tool_call_id' = $3
          LIMIT 1
         """,

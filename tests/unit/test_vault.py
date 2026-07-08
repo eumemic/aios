@@ -652,6 +652,37 @@ class TestRefreshCredential:
         conn.execute.assert_not_awaited()  # row not updated
 
     @pytest.mark.asyncio
+    async def test_refuses_plaintext_token_endpoint(self, crypto_box: CryptoBox) -> None:
+        """SECURITY-02: an expiring credential whose stored ``token_endpoint`` is
+        plain http is refused before the POST — the refresh_token/client_secret
+        must not travel cleartext even though the endpoint was https-guarded at
+        flow start."""
+        account_id = "acc_test_stub"
+        payload = _expiring_oauth_payload(token_endpoint="http://issuer.example/token")
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(_http_response(body={"access_token": "new"}))
+
+        with (
+            patch.object(
+                queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
+            pytest.raises(OAuthRefreshError, match="plaintext"),
+        ):
+            await refresh_credential(
+                crypto_box,
+                conn,
+                vault_id="vlt_1",
+                target_url="http://issuer.example",
+                account_id=account_id,
+            )
+
+        client.post.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_basic_method_uses_basic_auth(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         import httpx as _httpx

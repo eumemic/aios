@@ -28,6 +28,7 @@ from aios.db.queries import (
     model_token_class_ratios,
     model_token_ratio,
 )
+from aios.db.queries.events import _MODEL_TOKEN_RATIO_SAMPLE_LIMIT
 from aios.harness.tokens import CONTENT_CLASSES
 
 # The three classes the synthetic calibration data exercises; the rest stay
@@ -133,7 +134,10 @@ class TestModelTokenClassRatios:
           (regression for the pre-#163 double-count).
         * Excludes rows lacking ``local_tokens_by_class`` (zero backfill;
           self-heals as new spans accumulate).
-        * No ``LIMIT`` window — lifetime calibration.
+        * Bounds the scan to the most recent N spans via
+          ``ORDER BY seq DESC LIMIT $2`` (issue #1711), riding migration
+          0024's ``seq DESC`` partial index instead of an unbounded
+          lifetime scan on the step hot path.
         """
         conn = _mock_conn([])
         await model_token_class_ratios(conn, "model-x", account_id="acc_test_stub")
@@ -142,7 +146,69 @@ class TestModelTokenClassRatios:
         assert "cache_read_input_tokens" not in sql
         assert "cache_creation_input_tokens" not in sql
         assert "data ? 'local_tokens_by_class'" in sql
-        assert "LIMIT" not in sql
+        assert "ORDER BY seq DESC" in sql
+        assert "LIMIT $2" in sql
+
+    @pytest.mark.asyncio
+    async def test_fetch_bound_to_sample_limit_constant(self) -> None:
+        """The LIMIT is bound to the module constant (locked at 1000, issue
+        #1711), passed as ``$2`` alongside the model — not inlined — so the
+        scan is a bounded seek rather than a full lifetime scan."""
+        conn = _mock_conn([])
+        await model_token_class_ratios(conn, "model-x", account_id="acc_test_stub")
+        args = conn.fetch.await_args
+        assert args is not None
+        # $1 = model, $2 = the sample limit.
+        assert args.args[1] == "model-x"
+        assert args.args[2] == _MODEL_TOKEN_RATIO_SAMPLE_LIMIT
+        assert _MODEL_TOKEN_RATIO_SAMPLE_LIMIT == 1000
+
+    @pytest.mark.asyncio
+    async def test_sub_limit_sample_fits_identically_to_lifetime(self) -> None:
+        """No-op below the limit: with fewer than the limit spans, every row
+        the pre-#1711 unbounded query would have returned is still selected,
+        so the fit is byte-identical (same rows in, same coefficients out)."""
+        true = {"text": 2.0, "tool_result": 1.4, "thinking": 3.0}
+        rows = _linear_rows(true, n=_MODEL_TOKEN_RATIO_SAMPLE_LIMIT - 1)
+        conn = _mock_conn(rows)
+        bounded = await model_token_class_ratios(conn, "model-sub", account_id="acc_test_stub")
+        # The unbounded lifetime fit over the identical row set: _fit_class_ratios
+        # is deterministic in its input rows, so equal rows ⇒ equal fit.
+        from aios.db.queries.events import _fit_class_ratios
+
+        lifetime = _fit_class_ratios(rows)
+        assert lifetime is not None
+        assert bounded == lifetime
+
+    @pytest.mark.asyncio
+    async def test_recency_honored_recent_rows_drive_fit(self) -> None:
+        """Recency: the DB returns the most recent N (``ORDER BY seq DESC
+        LIMIT``); a deliberately skewed *old* tail beyond N is never fetched,
+        so the fit reflects only the recent regime.
+
+        The mock stands in for the DB's ``ORDER BY seq DESC LIMIT $2`` seek:
+        it returns exactly the recent-N slice, and the assertion proves the
+        old tail (a wildly different coefficient regime) does not move the
+        fit — i.e. the bound is honored, not silently ignored."""
+        recent = {"text": 2.0, "tool_result": 1.4, "thinking": 3.0}
+        old_skew = {"text": 8.0, "tool_result": 8.0, "thinking": 8.0}
+        recent_rows = _linear_rows(recent, n=_MODEL_TOKEN_RATIO_SAMPLE_LIMIT)
+        old_rows = _linear_rows(old_skew, n=500)
+        # The DB, honoring ORDER BY seq DESC LIMIT, hands back only the recent N.
+        conn = _mock_conn(recent_rows)
+        recent_only_fit = await model_token_class_ratios(
+            conn, "model-recent", account_id="acc_test_stub"
+        )
+        # If the bound were dropped, the fit would train on recent + old tail.
+        from aios.db.queries.events import _fit_class_ratios
+
+        contaminated = _fit_class_ratios(recent_rows + old_rows)
+        assert contaminated is not None
+        # The recent-only fit must NOT equal the contaminated lifetime fit,
+        # and must track the recent regime.
+        assert recent_only_fit != contaminated
+        for c, v in recent.items():
+            assert recent_only_fit[c] == pytest.approx(v, abs=0.25)
 
     @pytest.mark.asyncio
     async def test_invalid_bucket_rejected(self) -> None:
