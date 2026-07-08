@@ -728,17 +728,34 @@ async def count_request_nudges(
     ``jsonb_array_length > 0`` guard excludes a present-but-empty array so the
     anchor agrees byte-for-byte with the guard's ``assistant_msg.get('tool_calls')``
     truthiness short-circuit.
+
+    The anchor is additionally floored at this request's ``request_opened`` seq:
+    a nudge for ``request_id`` is only ever appended while it is open (the nudge
+    append follows ``get_open_request_ids``), so every counted row already has
+    ``seq >`` that request's opening seq by construction — the floor is a
+    semantic no-op on all naturally-occurring event orders. It matters only when
+    no tool-call turn exists (a tool-call-free session), where the anchor would
+    otherwise be 0 and the count would scan every user message in the session's
+    history instead of just those since the request opened.
     """
     n: int | None = await conn.fetchval(
         "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
         "AND kind = 'message' AND role = 'user' "
         "AND data->'metadata'->'nudged_request_ids' @> to_jsonb($3::text) "
-        "AND seq > COALESCE("
-        "    (SELECT max(seq) FROM events "
-        "     WHERE session_id = $1 AND account_id = $2 "
-        "     AND kind = 'message' AND role = 'assistant' "
-        "     AND data ? 'tool_calls' "
-        "     AND jsonb_array_length(data->'tool_calls') > 0), 0)",
+        "AND seq > GREATEST("
+        "    COALESCE("
+        "        (SELECT max(seq) FROM events "
+        "         WHERE session_id = $1 AND account_id = $2 "
+        "         AND kind = 'message' AND role = 'assistant' "
+        "         AND data ? 'tool_calls' "
+        "         AND jsonb_array_length(data->'tool_calls') > 0), 0),"
+        "    COALESCE("
+        "        (SELECT req.seq FROM events req "
+        "         WHERE req.session_id = $1 AND req.account_id = $2 "
+        "         AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+        "         AND req.data->>'request_id' = $3 "
+        "         ORDER BY req.seq ASC LIMIT 1), 0)"
+        ")",
         session_id,
         account_id,
         request_id,
