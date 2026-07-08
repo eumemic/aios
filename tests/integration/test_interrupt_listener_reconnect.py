@@ -11,7 +11,7 @@ import asyncpg
 import pytest
 
 from aios.db.listen import SESSION_INTERRUPT_CHANNEL
-from aios.db.pool import listener_application_name
+from aios.db.pool import create_pool, listener_application_name
 from aios.harness.worker import _run_interrupt_listener
 from tests.conftest import needs_docker
 
@@ -71,8 +71,13 @@ async def test_interrupt_listener_reconnects_after_backend_termination(
     registry = MagicMock()
     registry.cancel_step.side_effect = fake_registry.cancel_step
     registry.cancel_session.side_effect = fake_registry.cancel_session
+    # No locally-tracked sessions in this test, so the #1756 reconnect
+    # redrive (``_redrive_interrupts_for_tracked_sessions``) is a no-op —
+    # this test exercises the LIVE NOTIFY path post-reconnect, not the redrive.
+    registry.tracked_session_ids.return_value = set()
+    pool = await create_pool(migrated_db_url, min_size=1, max_size=2)
     listener_task = asyncio.create_task(
-        _run_interrupt_listener(migrated_db_url, registry),
+        _run_interrupt_listener(migrated_db_url, registry, pool),
         name="test-interrupt-listener",
     )
 
@@ -105,3 +110,4 @@ async def test_interrupt_listener_reconnects_after_backend_termination(
         listener_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await listener_task
+        await pool.close()
