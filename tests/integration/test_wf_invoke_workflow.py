@@ -187,7 +187,7 @@ async def test_cancelled_sub_run_wakes_its_parent_via_child_done(
         assert any(s.kind == "child_done" and s.call_key == sub.request_id for s in signals)
         # The unharvested child_done makes the parent sweep-visible (the durable backstop).
         needing = await wf_queries.list_run_ids_needing_step(
-            conn, agent_deadline_seconds=999, tool_stale_seconds=999
+            conn, agent_deadline_seconds=999, tool_stale_seconds=999, call_llm_stale_seconds=999
         )
         assert run_id in needing
 

@@ -596,6 +596,21 @@ class Settings(BaseSettings):
         "— a child doing real model+tool work can legitimately run for minutes; "
         "this is the never-resolves backstop, not a tight SLA.",
     )
+    workflow_call_llm_stale_seconds: float = Field(
+        default=1200.0,  # 20 minutes
+        gt=0,
+        description="Re-dispatch horizon for an inflight ``call_llm()`` capability "
+        "(#1706). A parked ``call_llm`` frame is worker-task-backed like ``tool``/"
+        "``agent``: the worker runs the inference and writes the result signal only "
+        "on completion. A worker crash mid-inference (restart / redeploy / OOM / "
+        "graceful-shutdown ``CancelledError``) leaves an open ``call_started`` with "
+        "no signal and no external resume, so — like ``tool`` — it needs the stale "
+        "backstop to re-wake and re-dispatch (at-least-once). ``gate`` stays NULL-"
+        "mapped because it is external-resume-driven, but ``call_llm`` is not. The "
+        "in-worker ``call_llm`` deadline lives inside the task, so a kill removes it "
+        "too; this horizon is the only recovery. Default is long enough to exceed "
+        "any healthy in-worker call, so the sweep never re-drives a live inference.",
+    )
     trace_max_nodes: int = Field(
         default=2000,
         ge=1,

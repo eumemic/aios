@@ -1068,6 +1068,7 @@ async def list_run_ids_needing_step(
     *,
     agent_deadline_seconds: float,
     tool_stale_seconds: float,
+    call_llm_stale_seconds: float,
 ) -> list[str]:
     """``id`` for every live run with something for a step to DO — the sweep
     predicate (#780). A parked run with nothing new is deliberately NOT matched
@@ -1083,9 +1084,13 @@ async def list_run_ids_needing_step(
       and child completion commits one atomically with its payload, so a lost
       ``defer_run_wake`` is always visible here.
     - a stale inflight call: an ``agent`` past the wall-clock deadline (the step
-      must force-resolve its timeout — this clause DRIVES that backstop) or a
-      ``tool`` past the re-dispatch horizon (its task crashed without a signal).
-      A ``gate`` maps to NULL — resume-driven only, never stale. Operator
+      must force-resolve its timeout — this clause DRIVES that backstop), a
+      ``tool`` past the re-dispatch horizon (its task crashed without a signal),
+      or a ``call_llm`` past its re-dispatch horizon (#1706 — a worker-task-backed
+      inference whose worker crashed mid-call leaves no signal and no external
+      resume, so like ``tool`` it needs this backstop to re-wake and re-dispatch).
+      A ``gate`` maps to NULL — resume-driven only, never stale (its recovery is
+      the unharvested-signal clause). Operator
       archive/delete of a child BEFORE it answers now COMPLETES the open request
       EAGERLY (the service layer fails it ``child_gone`` and writes a ``child_done``
       signal atomically with the archive/delete, like every other completion), so
@@ -1116,6 +1121,7 @@ async def list_run_ids_needing_step(
                       CASE cs.payload->>'capability'
                         WHEN 'agent' THEN $1::float8
                         WHEN 'tool' THEN $2::float8
+                        WHEN 'call_llm' THEN $3::float8
                       END)
                 AND NOT EXISTS (
                   SELECT 1 FROM wf_run_events e
@@ -1125,6 +1131,7 @@ async def list_run_ids_needing_step(
         """,
         agent_deadline_seconds,
         tool_stale_seconds,
+        call_llm_stale_seconds,
     )
     return [r["id"] for r in rows]
 
