@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 
-from aios.harness.sweep import UNREACTED_ROWS_SQL
+from aios.harness.sweep import UNREACTED_ROWS_SQL, _group_unreacted_rows
 
 
 def test_unreacted_rows_does_not_redefine_the_watermark() -> None:
@@ -69,3 +69,42 @@ def test_unreacted_rows_still_excludes_assistant_messages() -> None:
         "UNREACTED_ROWS_SQL must still exclude assistant messages."
     )
     assert "kind = 'message'" in sql
+
+
+def test_unreacted_rows_projects_two_fields_not_full_data() -> None:
+    """#1738: the sweep's only consumer reads exactly ``role``/``tool_call_id``.
+    ``UNREACTED_ROWS_SQL`` must project those fields server-side rather than
+    shipping and JSON-decoding the full ``data`` JSONB payload."""
+    sql = UNREACTED_ROWS_SQL
+
+    assert "data->>'tool_call_id'" in sql, (
+        "UNREACTED_ROWS_SQL must project tool_call_id via data->>'tool_call_id' "
+        "instead of fetching the full data payload (#1738)."
+    )
+    assert not re.search(r"e\.data\s*[,\s]\s*(from|FROM)", sql), (
+        "UNREACTED_ROWS_SQL must not select the bare e.data column (#1738)."
+    )
+    assert re.search(r"select\s+e\.session_id\s*,\s*e\.role\s*,", sql, re.IGNORECASE), (
+        "UNREACTED_ROWS_SQL must project e.role directly (the maintained column)."
+    )
+
+
+def test_group_unreacted_rows_groups_by_session_and_handles_none_tcid() -> None:
+    """``_group_unreacted_rows`` groups (role, tool_call_id) tuples per
+    session_id, preserving None tool_call_ids for downstream exclusion."""
+
+    class FakeRecord(dict):
+        """Mapping-style fake mimicking asyncpg.Record's __getitem__ access."""
+
+    rows = [
+        FakeRecord(session_id="s1", role="user", tool_call_id=None),
+        FakeRecord(session_id="s1", role="tool", tool_call_id="tc1"),
+        FakeRecord(session_id="s2", role="tool", tool_call_id="tc2"),
+    ]
+
+    grouped = _group_unreacted_rows(rows)
+
+    assert grouped == {
+        "s1": [("user", None), ("tool", "tc1")],
+        "s2": [("tool", "tc2")],
+    }

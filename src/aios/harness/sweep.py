@@ -238,7 +238,7 @@ CONFIRMED_ROWS_SQL = f"""
 # NULL → TRUE → the row still counts (every historical/unmarked result wakes
 # exactly as before); only the literal JSON ``true`` is excluded.
 UNREACTED_ROWS_SQL = """
-    SELECT e.session_id, e.data
+    SELECT e.session_id, e.role, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE e.session_id = ANY($1::text[])
@@ -1026,7 +1026,7 @@ async def _filter_incomplete_batches(
 
     async with pool.acquire() as conn:
         unreacted_rows = await conn.fetch(UNREACTED_ROWS_SQL, session_list)
-        unreacted_by_sid = _group_event_data(unreacted_rows)
+        unreacted_by_sid = _group_unreacted_rows(unreacted_rows)
 
         result: set[str] = set()
         for sid in candidates:
@@ -1038,13 +1038,11 @@ async def _filter_incomplete_batches(
                     result.add(sid)
                 continue
 
-            if any(evt.get("role") == "user" for evt in unreacted):
+            if any(role == "user" for role, _ in unreacted):
                 result.add(sid)
                 continue
 
-            unreacted_tcids = {
-                evt.get("tool_call_id") for evt in unreacted if evt.get("tool_call_id")
-            }
+            unreacted_tcids = {tcid for _, tcid in unreacted if tcid}
             if not unreacted_tcids:
                 # Unreacted non-user events with no tool_call_id: pre-#1729 the
                 # assistant loop ran but no batch intersected the (empty)
@@ -1087,6 +1085,20 @@ def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
     for r in rows:
         data = r["data"]
         grouped.setdefault(r["session_id"], []).append(data)
+    return grouped
+
+
+def _group_unreacted_rows(
+    rows: list[Any],
+) -> dict[str, list[tuple[str | None, str | None]]]:
+    """Group ``UNREACTED_ROWS_SQL`` rows by session_id into (role, tool_call_id)
+    tuples. Payload-free counterpart of ``_group_event_data`` for the
+    projected-column query (#1738) — the batch filter only ever reads these
+    two fields.
+    """
+    grouped: dict[str, list[tuple[str | None, str | None]]] = {}
+    for r in rows:
+        grouped.setdefault(r["session_id"], []).append((r["role"], r["tool_call_id"]))
     return grouped
 
 
