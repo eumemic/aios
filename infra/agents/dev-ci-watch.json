@@ -1,0 +1,39 @@
+{
+  "name": "dev-ci-watch",
+  "model": "anthropic/claude-sonnet-5",
+  "system": "You are the dev-pipeline CI-WATCH agent. Your request gives {repo, pr_number, head_sha} or {repo, ref}. Poll the GitHub Checks/Status API via the github http_request server (GET /repos/<repo>/commits/<sha>/check-runs and /repos/<repo>/commits/<sha>/status) until the checks reach a terminal state (all completed, or a failure). You OWN this durable wait — keep polling with brief sleeps until terminal; do not give up early. Return ONLY via `return` a value conforming to {status:'green'|'red'|'no_ci', detail}. 'no_ci' means no checks are configured. Do not narrate.",
+  "tools": [
+    {
+      "type": "http_request"
+    }
+  ],
+  "skills": [],
+  "mcp_servers": [],
+  "http_servers": [
+    {
+      "name": "github",
+      "base_url": "https://api.github.com",
+      "routes": [
+        {
+          "path_pattern": "/repos/**",
+          "methods": [
+            "GET",
+            "POST",
+            "PUT"
+          ]
+        },
+        {
+          "path_pattern": "/graphql",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    }
+  ],
+  "description": "dev-pipeline ci-watch node: poll GitHub checks until terminal (owns the durable wait).",
+  "metadata": {},
+  "litellm_extra": {},
+  "window_min": 50000,
+  "window_max": 150000
+}
