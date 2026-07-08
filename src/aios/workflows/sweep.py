@@ -67,6 +67,10 @@ async def wake_runs_needing_step(pool: asyncpg.Pool[Any]) -> int:
             # bash rides the `tool` capability, so the tool stale-clause covers it —
             # widened to the sandbox horizon (#988, Option 1).
             tool_stale_seconds=_sandbox_redispatch_horizon(settings.bash_default_timeout_seconds),
+            # call_llm is worker-task-backed like `tool`/`agent`: a crash mid-inference
+            # leaves no signal and no external resume, so it needs the stale backstop to
+            # re-wake and re-dispatch (#1706).
+            call_llm_stale_seconds=settings.workflow_call_llm_stale_seconds,
         )
     for run_id in run_ids:
         try:
