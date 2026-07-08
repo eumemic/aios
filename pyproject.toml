@@ -63,6 +63,7 @@ dependencies = [
     # Inbound image downsampling at staging time so vision-capable models
     # see the pixels instead of a path marker.  See harness/image_resize.py.
     "pillow>=10.0",
+    "sqlglot>=30.12.0",
 ]
 
 [dependency-groups]

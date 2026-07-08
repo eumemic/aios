@@ -19,7 +19,16 @@ from aios.tools.search_events import (
 
 
 class TestValidateSql:
-    """Tests for _validate_sql pure function."""
+    """Tests for ``_validate_sql`` — the sqlglot AST walk that gates the tool.
+
+    The guarantee: the model's SQL surface is exactly the per-session
+    ``events_search`` view. Validation parses the query and walks the AST,
+    so it enforces the boundary structurally rather than by pattern-matching
+    text — closing the regex-era bypasses (comma cross-join, in-string comment
+    tricks, ``UNION TABLE``, ``pg_*`` in SELECT position).
+    """
+
+    # ── Legitimate queries pass ──────────────────────────────────────────────
 
     def test_valid_select(self) -> None:
         assert _validate_sql("SELECT * FROM events_search") is None
@@ -30,147 +39,202 @@ class TestValidateSql:
     def test_valid_select_with_where(self) -> None:
         assert _validate_sql("SELECT id FROM events_search WHERE role = 'user' LIMIT 10") is None
 
-    def test_valid_select_with_subquery(self) -> None:
-        assert _validate_sql("SELECT * FROM (SELECT id FROM events_search) sub") is None
-
-    def test_valid_select_ilike(self) -> None:
-        assert (
-            _validate_sql("SELECT * FROM events_search WHERE content_text ILIKE '%hello%'") is None
-        )
-
-    def test_valid_select_case_insensitive_keyword(self) -> None:
+    def test_valid_select_case_insensitive(self) -> None:
         assert _validate_sql("select * from events_search") is None
 
-    def test_rejects_insert(self) -> None:
-        err = _validate_sql("INSERT INTO foo VALUES (1)")
-        assert err is not None
-        assert "SELECT" in err
+    def test_allows_leading_whitespace(self) -> None:
+        assert _validate_sql("  SELECT 1") is None
 
-    def test_rejects_update(self) -> None:
-        err = _validate_sql("UPDATE foo SET x = 1")
+    def test_allows_no_from(self) -> None:
+        """A query with no relation target touches no table and is allowed."""
+        assert _validate_sql("SELECT 1") is None
+        assert _validate_sql("SELECT now()") is None
+
+    def test_allows_schema_qualified_public(self) -> None:
+        """Explicit ``public.`` qualification is fine — that's where the view
+        lives on the default search path. (The regex era rejected any schema
+        qualification; the AST distinguishes ``public`` from ``pg_catalog``.)"""
+        assert _validate_sql("SELECT * FROM public.events_search") is None
+
+    def test_allows_cte(self) -> None:
+        """CTEs are genuinely supported now: the CTE name is a local relation,
+        and its body is walked so a CTE reading a forbidden table is still
+        caught (see ``test_rejects_forbidden_table_inside_cte_body``)."""
+        assert _validate_sql("WITH x AS (SELECT * FROM events_search) SELECT * FROM x") is None
+
+    def test_allows_subquery(self) -> None:
+        assert _validate_sql("SELECT * FROM (SELECT * FROM events_search) s") is None
+
+    def test_allows_window_function(self) -> None:
+        assert (
+            _validate_sql("SELECT seq, row_number() OVER (ORDER BY seq) FROM events_search") is None
+        )
+
+    def test_allows_from_keyword_inside_string_literal(self) -> None:
+        """A ``FROM`` inside a string literal is not a relation target — the
+        parser sees it as a string, so this legitimate query passes."""
+        assert (
+            _validate_sql("SELECT count(*) FROM events_search WHERE body ILIKE '%FROM secret%'")
+            is None
+        )
+
+    def test_allows_current_setting(self) -> None:
+        """``current_setting`` is not ``pg_*`` / ``set_config`` — it only reads
+        the (already session-scoped) GUC and is harmless."""
+        assert _validate_sql("SELECT current_setting('app.session_id')") is None
+
+    # ── The four confirmed regex-era cross-tenant bypasses now REJECT ────────
+
+    def test_rejects_comma_cross_join(self) -> None:
+        """``FROM events_search, events`` — a comma cross-join. The regex only
+        scanned the token right after FROM/JOIN; the AST surfaces every table."""
+        err = _validate_sql("SELECT * FROM events_search, events")
+        assert err is not None
+        assert "events" in err
+
+    def test_rejects_in_string_comment_union_tricks(self) -> None:
+        """A comment opened inside a string literal used to fool the regex's
+        strip-comments-before-strings ordering, hiding a trailing ``UNION``.
+        The parser reads the literal correctly and surfaces the ``events`` arm."""
+        for q in (
+            "SELECT * FROM events_search WHERE x='a -- ' UNION SELECT * FROM events",
+            "SELECT * FROM events_search WHERE x='a /* ' UNION SELECT * FROM events",
+        ):
+            err = _validate_sql(q)
+            assert err is not None, f"in-string comment bypass allowed: {q!r}"
+            assert "events" in err
+
+    def test_rejects_union_table_primary(self) -> None:
+        """``UNION TABLE accounts`` — the ``TABLE`` primary form reaches a
+        relation without a FROM/JOIN keyword. sqlglot rejects it as unparseable
+        for our read path, so it fails closed."""
+        err = _validate_sql("SELECT * FROM events_search UNION TABLE accounts")
         assert err is not None
 
-    def test_rejects_delete(self) -> None:
-        err = _validate_sql("DELETE FROM foo")
+    def test_rejects_pg_function_in_select_position(self) -> None:
+        """``pg_read_file`` reads host files with no table reference at all —
+        the regex only looked at FROM/JOIN. The function scan blocks all
+        ``pg_*`` functions wherever they appear."""
+        err = _validate_sql("SELECT pg_read_file('/etc/passwd')")
+        assert err is not None
+        assert "pg_read_file" in err
+
+    # ── Forbidden relations ──────────────────────────────────────────────────
+
+    def test_rejects_direct_events_table(self) -> None:
+        """The underlying ``events`` table holds every account's rows; reading
+        it directly bypasses the view's ``app.session_id`` scoping."""
+        err = _validate_sql("SELECT data FROM events")
+        assert err is not None
+        assert "events" in err
+
+    def test_rejects_other_tables(self) -> None:
+        for table in ("vault_credentials", "accounts", "sessions", "connections"):
+            err = _validate_sql(f"SELECT * FROM {table}")
+            assert err is not None, f"validator allowed access to {table!r}"
+
+    def test_rejects_forgotten_tables_the_old_denylist_missed(self) -> None:
+        """The regression this fix closes: the old hand-maintained denylist
+        never listed these, so ``SELECT * FROM <them>`` ran on the privileged
+        pool and returned every account's rows. An allowlist blocks them by
+        default (fail-closed)."""
+        for table in ("runtime_tokens", "oauth_flows", "wf_run_events", "chat_sessions"):
+            err = _validate_sql(f"SELECT * FROM {table}")
+            assert err is not None, f"validator allowed access to {table!r}"
+            assert "not allowed" in err
+
+    def test_rejects_memories_search_view(self) -> None:
+        """Deliberate narrowing: ``memories_search`` is owned by the separate
+        ``memory_search`` tool (a fixed parameterised query), not part of
+        search_events' raw-SQL surface, so it is not allowlisted."""
+        err = _validate_sql("SELECT * FROM memories_search")
+        assert err is not None
+        assert "memories_search" in err
+        assert "events_search" in err
+
+    def test_rejects_quoted_forbidden_identifier(self) -> None:
+        err = _validate_sql("SELECT * FROM \"events\" WHERE session_id = 'sess_OTHER'")
         assert err is not None
 
-    def test_rejects_drop_in_subquery(self) -> None:
-        err = _validate_sql("SELECT * FROM events_search WHERE id IN (DROP TABLE events)")
+    def test_rejects_forbidden_table_inside_cte_body(self) -> None:
+        """A CTE whose body reads a forbidden table is caught on that table,
+        not waved through because the outer query only names the CTE."""
+        err = _validate_sql("WITH x AS (SELECT * FROM accounts) SELECT * FROM x")
+        assert err is not None
+        assert "accounts" in err
+
+    def test_rejects_forbidden_table_in_join(self) -> None:
+        err = _validate_sql("SELECT * FROM events_search e JOIN accounts a ON e.id = a.id")
+        assert err is not None
+        assert "accounts" in err
+
+    def test_rejects_table_function_fail_closed(self) -> None:
+        """A table-valued function in FROM (``generate_series``) parses to a
+        relation with an off name that isn't allowlisted — rejected."""
+        err = _validate_sql("SELECT * FROM generate_series(1, 10)")
         assert err is not None
 
-    def test_rejects_create(self) -> None:
-        err = _validate_sql("SELECT * FROM events_search; CREATE TABLE evil (id int)")
-        assert err is not None
-        # Caught by semicolon check first
-        assert "semicolon" in err.lower() or "multiple" in err.lower()
+    def test_rejects_schema_introspection(self) -> None:
+        """``pg_catalog`` / ``information_schema`` enumerate the whole catalogue
+        and are rejected as inaccessible schemas."""
+        for q in (
+            "SELECT * FROM pg_catalog.pg_tables",
+            "SELECT * FROM information_schema.tables",
+        ):
+            err = _validate_sql(q)
+            assert err is not None, f"validator allowed {q!r}"
 
-    def test_rejects_truncate(self) -> None:
-        err = _validate_sql("SELECT * FROM events_search WHERE TRUNCATE = 1")
+    def test_rejection_message_names_the_allowed_relation(self) -> None:
+        err = _validate_sql("SELECT * FROM runtime_tokens")
         assert err is not None
-        assert "TRUNCATE" in err
+        assert "runtime_tokens" in err
+        assert "search_events may only read events_search" in err
+
+    # ── Read-only enforcement ────────────────────────────────────────────────
+
+    def test_rejects_write_and_ddl_statements(self) -> None:
+        """DML/DDL and command statements (``COPY``/``CALL`` parse to
+        ``exp.Command``) are all rejected — none is a read."""
+        for q in (
+            "INSERT INTO foo VALUES (1)",
+            "UPDATE foo SET x = 1",
+            "DELETE FROM foo",
+            "DROP TABLE events",
+            "COPY events TO '/tmp/x'",
+            "CALL do_thing()",
+        ):
+            err = _validate_sql(q)
+            assert err is not None, f"validator allowed non-read statement: {q!r}"
+
+    def test_rejects_set_config(self) -> None:
+        """``set_config`` could rewrite ``app.session_id`` (widening the view to
+        another session) even inside a read-only transaction, so it is blocked
+        wherever it appears."""
+        err = _validate_sql("SELECT set_config('app.session_id', 'sess_OTHER', true)")
+        assert err is not None
+        assert "set_config" in err
+
+    def test_rejects_data_modifying_cte(self) -> None:
+        """A data-modifying CTE (``WITH x AS (DELETE ... RETURNING ...)``) is a
+        write hiding behind a SELECT root — the write-node walk rejects it."""
+        err = _validate_sql("WITH x AS (DELETE FROM events RETURNING id) SELECT * FROM x")
+        assert err is not None
+
+    # ── Malformed / multi-statement ──────────────────────────────────────────
 
     def test_rejects_semicolon(self) -> None:
         err = _validate_sql("SELECT 1; DROP TABLE events")
         assert err is not None
         assert "semicolon" in err.lower() or "multiple" in err.lower()
 
-    def test_rejects_semicolon_case_insensitive(self) -> None:
-        err = _validate_sql("select * from events_search; delete from x")
-        assert err is not None
-
-    def test_rejects_non_select_start(self) -> None:
-        err = _validate_sql("WITH cte AS (DELETE FROM events) SELECT 1")
-        assert err is not None
-        assert "SELECT" in err
-
-    def test_rejects_direct_events_table_query(self) -> None:
-        """The agent's SQL surface is the per-session ``events_search`` view.
-
-        Allowing direct access to the ``events`` table bypasses the view's
-        ``session_id = current_setting('app.session_id', true)`` filter and
-        returns events from any session in the database (cross-tenant leak,
-        since the table holds rows for every account).
-        """
-        err = _validate_sql("SELECT data FROM events")
-        assert err is not None
-
-    def test_rejects_query_against_other_table(self) -> None:
-        """Tables other than ``events_search`` are out of scope for the agent.
-
-        A read-only SELECT against ``vault_credentials`` / ``accounts`` /
-        ``sessions`` / etc. still leaks cross-tenant rows; the view scoping
-        only works when the agent is forced to use the view.
-        """
-        for table in ("vault_credentials", "accounts", "sessions", "connections"):
-            err = _validate_sql(f"SELECT * FROM {table}")
-            assert err is not None, f"validator allowed access to {table!r}"
-
-    def test_rejects_events_table_via_cte(self) -> None:
-        """CTEs that reference ``events`` directly are the same defect class."""
-        err = _validate_sql(
-            "WITH peek AS (SELECT data FROM events WHERE session_id = 'sess_OTHER') "
-            "SELECT * FROM peek"
-        )
-        assert err is not None
-
-    def test_rejects_events_via_quoted_identifier(self) -> None:
-        """Postgres double-quoted identifiers must not bypass the check."""
-        err = _validate_sql("SELECT * FROM \"events\" WHERE session_id = 'sess_OTHER'")
-        assert err is not None
-
-    def test_rejects_pg_catalog_introspection(self) -> None:
-        """Postgres catalog tables enumerate the whole schema and must be blocked."""
-        for q in (
-            "SELECT * FROM pg_catalog.pg_tables",
-            "SELECT * FROM pg_class",
-            "SELECT * FROM information_schema.tables",
-        ):
-            err = _validate_sql(q)
-            assert err is not None, f"validator allowed {q!r}"
-
-    def test_allows_ilike_substring_with_table_name(self) -> None:
-        """ILIKE patterns containing a forbidden token must not false-positive.
-
-        ``content_text ILIKE '%events%'`` is a legitimate substring search
-        on the agent's own messages; the literal-stripping pass strips
-        the quoted string so the structural regex doesn't see it.
-        """
-        assert (
-            _validate_sql("SELECT * FROM events_search WHERE content_text ILIKE '%events%'") is None
-        )
-        assert (
-            _validate_sql("SELECT * FROM events_search WHERE content_text ILIKE '%sessions%'")
-            is None
-        )
-
-    def test_rejects_events_via_dollar_quoted_evasion(self) -> None:
-        """Dollar-quoted strings (Postgres-specific) must be stripped before the check.
-
-        Without dollar-quote stripping, a model could write
-        ``'%' || $$evil events$$ || '%'`` to confuse a naïve scanner; we want
-        to make sure the dollar-quoted body doesn't seed false positives
-        (i.e. that legitimate dollar-quoted strings containing forbidden
-        words still validate cleanly).
-        """
-        # Dollar-quoted string with forbidden word inside the literal — legit.
-        assert (
-            _validate_sql("SELECT * FROM events_search WHERE content_text ILIKE $$%events table%$$")
-            is None
-        )
-        # Dollar-quoted around a real FROM events bypass attempt — must reject.
-        err = _validate_sql("SELECT * FROM events_search UNION SELECT * FROM events")
-        assert err is not None
-
     def test_rejects_empty_string(self) -> None:
-        err = _validate_sql("")
-        assert err is not None
+        assert _validate_sql("") is not None
 
     def test_rejects_whitespace_only(self) -> None:
-        err = _validate_sql("   ")
-        assert err is not None
+        assert _validate_sql("   ") is not None
 
-    def test_allows_leading_whitespace(self) -> None:
-        assert _validate_sql("  SELECT 1") is None
+    def test_rejects_unparseable(self) -> None:
+        assert _validate_sql("SELECT FROM WHERE ORDER") is not None
 
 
 # ─── Format Results ──────────────────────────────────────────────────────────

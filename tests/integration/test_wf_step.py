@@ -2166,6 +2166,86 @@ async def test_activity_turn_resets_consecutive_nudge_count(
     assert lifetime == 2  # the prior nudges remain in the log, just past the anchor
 
 
+async def test_count_request_nudges_floors_anchor_at_request_opened_seq(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#1739: on a tool-call-free session (no assistant tool-call turn ever
+    happened, so the tool-call anchor subquery is NULL/0), ``count_request_nudges``
+    additionally floors its reset anchor at THIS request's ``request_opened`` seq.
+    A forged nudge-shaped row from BEFORE the request even opened -- something a
+    real nudge append can never produce (a nudge for ``request_id`` is only ever
+    appended while it is open) -- is excluded from the count by the floor, while a
+    legitimate nudge appended after opening still counts."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "async def main(input):\n    return 1")
+    cid = child_session_id(run_id, "sha:floor#0")
+
+    async with pool.acquire() as conn:
+        child = await db_queries.insert_child_session(
+            conn,
+            session_id=cid,
+            account_id="acc_wf",
+            agent_id=wf_agent_id,
+            environment_id="env_wf",
+            agent_version=1,
+            model=None,
+            parent_run_id=run_id,
+            tools=[],
+            mcp_servers=[],
+            http_servers=[],
+        )
+        assert child is not None
+
+        # A forged user message carrying nudged_request_ids=[R] appended BEFORE
+        # R's request_opened row. Seq order: forged nudge < request_opened <
+        # real nudge. No tool-call turn ever happens in this session, so the
+        # tool-call anchor subquery is NULL -> 0 -- without the request-opened
+        # floor this forged row would be counted too.
+        await db_queries.append_event(
+            conn,
+            account_id="acc_wf",
+            session_id=cid,
+            kind="message",
+            data={
+                "role": "user",
+                "content": "forged pre-opening nudge",
+                "metadata": {"nudged_request_ids": ["sha:floor#0"]},
+            },
+        )
+
+        await db_queries.append_request_opened(
+            conn,
+            session_id=cid,
+            account_id="acc_wf",
+            request_id="sha:floor#0",
+            caller={"kind": "run", "id": run_id},
+            depth=0,
+            environment_id="env_wf",
+            frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+            vault_ids=[],
+        )
+
+        # A real nudge, appended after the request opened.
+        await db_queries.append_event(
+            conn,
+            account_id="acc_wf",
+            session_id=cid,
+            kind="message",
+            data={
+                "role": "user",
+                "content": "nudge",
+                "metadata": {"nudged_request_ids": ["sha:floor#0"]},
+            },
+        )
+
+        count = await db_queries.count_request_nudges(
+            conn, cid, account_id="acc_wf", request_id="sha:floor#0"
+        )
+    # The pre-opening forged row is excluded by the floor; only the post-opening
+    # legitimate nudge counts.
+    assert count == 1
+
+
 async def test_interleaved_activity_never_trips_nudge_budget(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:
@@ -4675,7 +4755,6 @@ async def test_tool_http_request_credential_e2e(wf_runtime: asyncpg.Pool[Any]) -
         captured: dict[str, Any] = {}
         with (
             mock.patch("aios.tools.http_request.httpx.AsyncClient", _capturing_client(captured)),
-            mock.patch("aios.tools.http_request.is_safe_url", return_value=True),
         ):
             await run_workflow_step(run_id)  # park at the tool
             await (

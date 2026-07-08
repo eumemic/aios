@@ -152,7 +152,7 @@ async def test_no_creds_leaves_env_untouched() -> None:
 
 
 async def test_resolve_failure_aborts_before_git_proxy_or_broker_exist() -> None:
-    clones = AsyncMock(return_value=([], None))
+    clones = AsyncMock(return_value=([], [], None))
     broker = MagicMock()
     broker.port = 54321
     with contextlib.ExitStack() as stack:
@@ -382,7 +382,7 @@ async def test_failure_after_proxy_starts_stops_both_proxies() -> None:
         for ctx in patch_build_spec_deps(
             env_config=env_config,
             env_var_credentials=AsyncMock(return_value=(_CRED,)),
-            github_clones=AsyncMock(return_value=([], git_proxy)),
+            github_clones=AsyncMock(return_value=([], [], git_proxy)),
             tool_broker=broker,
         ):
             stack.enter_context(ctx)
@@ -427,7 +427,7 @@ async def test_secret_proxy_start_failure_does_not_double_stop() -> None:
             # Containing Limited env: required by the #879 gate.
             env_config=_LIMITED_GITHUB,
             env_var_credentials=AsyncMock(return_value=(_CRED,)),
-            github_clones=AsyncMock(return_value=([], None)),
+            github_clones=AsyncMock(return_value=([], [], None)),
             tool_broker=broker,
         ):
             stack.enter_context(ctx)
@@ -481,7 +481,7 @@ async def test_session_and_run_cleanup_share_one_envelope() -> None:
         for ctx in patch_build_spec_deps(
             env_config=env_config,
             env_var_credentials=AsyncMock(return_value=(_CRED,)),
-            github_clones=AsyncMock(return_value=([], git_proxy)),
+            github_clones=AsyncMock(return_value=([], [], git_proxy)),
             tool_broker=broker,
         ):
             stack.enter_context(ctx)

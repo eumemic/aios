@@ -34,6 +34,7 @@ from aios.db.queries.clone_policy import (
 from aios.errors import (
     ConflictError,
     NotFoundError,
+    RateLimitedError,
 )
 from aios.ids import (
     EVENT,
@@ -727,17 +728,34 @@ async def count_request_nudges(
     ``jsonb_array_length > 0`` guard excludes a present-but-empty array so the
     anchor agrees byte-for-byte with the guard's ``assistant_msg.get('tool_calls')``
     truthiness short-circuit.
+
+    The anchor is additionally floored at this request's ``request_opened`` seq:
+    a nudge for ``request_id`` is only ever appended while it is open (the nudge
+    append follows ``get_open_request_ids``), so every counted row already has
+    ``seq >`` that request's opening seq by construction — the floor is a
+    semantic no-op on all naturally-occurring event orders. It matters only when
+    no tool-call turn exists (a tool-call-free session), where the anchor would
+    otherwise be 0 and the count would scan every user message in the session's
+    history instead of just those since the request opened.
     """
     n: int | None = await conn.fetchval(
         "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
         "AND kind = 'message' AND role = 'user' "
         "AND data->'metadata'->'nudged_request_ids' @> to_jsonb($3::text) "
-        "AND seq > COALESCE("
-        "    (SELECT max(seq) FROM events "
-        "     WHERE session_id = $1 AND account_id = $2 "
-        "     AND kind = 'message' AND role = 'assistant' "
-        "     AND data ? 'tool_calls' "
-        "     AND jsonb_array_length(data->'tool_calls') > 0), 0)",
+        "AND seq > GREATEST("
+        "    COALESCE("
+        "        (SELECT max(seq) FROM events "
+        "         WHERE session_id = $1 AND account_id = $2 "
+        "         AND kind = 'message' AND role = 'assistant' "
+        "         AND data ? 'tool_calls' "
+        "         AND jsonb_array_length(data->'tool_calls') > 0), 0),"
+        "    COALESCE("
+        "        (SELECT req.seq FROM events req "
+        "         WHERE req.session_id = $1 AND req.account_id = $2 "
+        "         AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
+        "         AND req.data->>'request_id' = $3 "
+        "         ORDER BY req.seq ASC LIMIT 1), 0)"
+        ")",
         session_id,
         account_id,
         request_id,
@@ -1566,12 +1584,42 @@ async def clone_session(
     own session_id, leaving the clone's expected event stream undefined.
     The clone primitive locks the parent row for the copy, so concurrent
     appenders serialize behind it and the copied seq range is gapless.
+
+    Since ``enabled``/``next_fire`` are copied verbatim, a clone of a
+    trigger-bearing session is itself a trigger-CREATING write path, so it
+    honors ``Settings.triggers_per_account_max``. EVERY clone acquires the
+    same ``acquire_account_triggers_lock`` advisory lock ``add_trigger`` /
+    ``update_trigger``'s re-enable / session-attach use — unconditionally, at
+    the very top of the transaction, BEFORE the parent ``FOR UPDATE`` — to
+    match the siblings' advisory-first / session-row-second lock order (they
+    take the advisory lock, then the session row via their INSERT's FK). A
+    clone that locked the session row first would invert that order and
+    deadlock against a concurrent ``add_trigger``. With the lock held, the
+    parent's enabled-trigger count is exact through the copy, so when the
+    parent owns any triggers this enforces the cap against the account's
+    existing enabled count plus the clone's — raising ``RateLimitedError``
+    (and rolling back the whole clone) on breach. A trigger-free parent still
+    takes the lock (for ordering) but skips the cap CHECK; its empty row set
+    is self-consistent with the copy INSERT, which copies nothing.
     """
     new_id = make_id(SESSION)
     if workspace_path is None:
         workspace_path = _default_workspace_path(account_id, new_id)
 
     async with conn.transaction():
+        # Take the per-account trigger advisory lock FIRST — before the parent
+        # session FOR UPDATE below — because the sibling trigger-creating paths
+        # (add_trigger / update_trigger re-enable / session-attach) all acquire
+        # it before the session-row lock their trigger INSERT's FK takes. A
+        # clone that took the session row lock first, then this advisory lock,
+        # would invert that order and deadlock (AB/BA) against a concurrent
+        # add_trigger on the same account+session. Unconditional for every clone
+        # (not gated on trigger_count): the lock ordering is what makes the cap
+        # contractual, so its acquisition can't depend on the racy trigger set.
+        # It is xact-scoped, so it's held across the whole clone — the deliberate
+        # cost of correct ordering; clones are infrequent and the lock is
+        # per-account.
+        await queries.acquire_account_triggers_lock(conn, account_id)
         row = await conn.fetchrow(
             f"SELECT archived_at, ({_SESSION_ACTIVE_EXPR}) AS active, "
             f"({_SESSION_ERRORED_EXPR}) AS errored "
@@ -1703,6 +1751,34 @@ async def clone_session(
             "SELECT COUNT(*) FROM triggers WHERE owner_session_id = $1",
             parent_session_id,
         )
+        if trigger_count:
+            # Clone copies triggers with enabled=COPY (TRIGGERS_POLICY), so it is a
+            # trigger-CREATING write path and must honor the per-account active
+            # cap like add_trigger / update_trigger re-enable / session-attach do.
+            # The account advisory lock is already held (acquired at the top of
+            # this transaction), so this enabled count is exact — or stricter,
+            # since unlocked disables only reduce it — through the INSERT below;
+            # a concurrent locked re-enable can't flip a row between the count and
+            # the copy. The cap CHECK is gated on trigger_count: a trigger-free
+            # clone copies nothing and needs no check (the lock is still taken
+            # unconditionally above, for ordering).
+            enabled_to_clone: int = await conn.fetchval(
+                "SELECT COUNT(*) FROM triggers WHERE owner_session_id = $1 AND enabled",
+                parent_session_id,
+            )
+            if enabled_to_clone:
+                from aios.config import get_settings
+
+                cap = get_settings().triggers_per_account_max
+                existing_account = await queries.count_account_triggers(
+                    conn, account_id=account_id, enabled_only=True
+                )
+                if existing_account + enabled_to_clone > cap:
+                    raise RateLimitedError(
+                        "cloning this session would exceed the active-trigger cap: "
+                        f"{existing_account} existing + {enabled_to_clone} cloned > {cap}. "
+                        "Disable or remove triggers to free slots before cloning."
+                    )
         new_trigger_ids = [make_id(TRIGGER) for _ in range(trigger_count)]
         # A fresh ingest-token hash per trigger row, used ONLY by the
         # source-conditional MINT_INGEST_TOKEN arm: an external_event trigger

@@ -427,7 +427,7 @@ def patch_build_spec_deps(
         ),
         patch(
             "aios.sandbox.spec._materialize_github_clones",
-            github_clones or AsyncMock(return_value=([], None)),
+            github_clones or AsyncMock(return_value=([], [], None)),
         ),
         patch("aios.sandbox.spec.runtime.require_pool", MagicMock()),
         patch(

@@ -30,11 +30,13 @@ import pytest
 
 from aios.db.queries import _SESSION_STATUS_EXPR
 from aios.harness.sweep import (
+    BATCH_RESULT_ROWS_SQL,
     CANDIDATE_ROWS_SQL,
     ERRORED_SESSIONS_SQL,
     FAST_PATH_PENDING_WORK_SQL,
     GHOST_ASST_SQL,
     GHOST_SPAN_START_SQL,
+    REFERENCED_ASST_BATCH_SQL,
     UNREACTED_ROWS_SQL,
 )
 from tests.conftest import needs_docker
@@ -592,6 +594,57 @@ class TestGhostAsstSweepBounded:
         assert returned == {"sess_tc_open"}, (
             f"GHOST_ASST_SQL must return rows ONLY for sessions with "
             f"open_tool_call_count > 0; expected {{'sess_tc_open'}}, got {returned} (#840)."
+        )
+
+
+@needs_docker
+class TestBatchFilterBounded:
+    """#1729: the batch filter's assistant/result fetches are BOUNDED to the
+    batches referenced by the session's *unreacted* tool_call_ids — not the
+    session's entire lifetime.
+
+    The pre-#1729 filter ran two unbounded lifetime scans (every ``role='tool'``
+    row + every assistant ``tool_calls`` payload, 126 MB observed) and decoded
+    them on the worker event loop on every full sweep. The deep, fully-resolved
+    ``sess_tc_deep`` (500 turns x 4 tool_calls) is the fixture that would blow up
+    such a scan; here the bounded queries must return only the handful of rows
+    tied to a referenced batch id, no matter how deep the resolved history is.
+
+    Structural (row-set) assertions, not wall-clock — deterministic on any CI.
+    """
+
+    async def test_referenced_asst_scoped_to_containment_probe(
+        self, seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        # Probe for a single tool_call id belonging to ONE assistant turn deep in
+        # sess_tc_deep. The containment-bounded query must return exactly that
+        # one owning batch row, not the 500 assistant turns in the session.
+        probe_tcid = "tc_sess_tc_deep_250_0"
+        probes = [json.dumps([{"id": probe_tcid}])]
+        async with seeded_pool.acquire() as conn:
+            rows = await conn.fetch(REFERENCED_ASST_BATCH_SQL, "sess_tc_deep", probes)
+
+        assert len(rows) == 1, (
+            f"REFERENCED_ASST_BATCH_SQL must return ONLY the batch owning the "
+            f"probed tcid, got {len(rows)} rows — an unbounded scan leaked the "
+            f"deep resolved history (#1729)."
+        )
+        ids = {tcid for tcid in rows[0]["tool_call_ids"]}
+        assert probe_tcid in ids
+        # Payload-stripped: the row carries the id array, not the full ``data``.
+        assert "data" not in dict(rows[0])
+
+    async def test_batch_result_scoped_to_batch_ids(self, seeded_pool: asyncpg.Pool[Any]) -> None:
+        # Results are fetched ONLY for the specific batch ids, not every
+        # ``role='tool'`` row the deep session ever produced (2000 of them).
+        batch_ids = [f"tc_sess_tc_deep_250_{k}" for k in range(_N_TC_PER_ASST)]
+        async with seeded_pool.acquire() as conn:
+            rows = await conn.fetch(BATCH_RESULT_ROWS_SQL, "sess_tc_deep", batch_ids)
+
+        returned = {r["tool_call_id"] for r in rows}
+        assert returned == set(batch_ids), (
+            f"BATCH_RESULT_ROWS_SQL must return results ONLY for the requested "
+            f"batch ids; expected {set(batch_ids)}, got {returned} (#1729)."
         )
 
 

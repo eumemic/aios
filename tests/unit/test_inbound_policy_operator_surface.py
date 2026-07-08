@@ -294,6 +294,14 @@ async def test_configure_per_chat_defaults_inbound_policy_closed(
 
     conn_obj = _connection(inbound_policy=DenyAll())
     pool, conn = _bind_pool()
+    # configure_per_chat now validates the template account-scoped inside the
+    # tx (#1708); mock a live (un-archived) own-account template so the bind
+    # proceeds to the policy default under test.
+    template = MagicMock(archived_at=None)
+    monkeypatch.setattr(
+        "aios.services.connections.queries.get_session_template",
+        AsyncMock(return_value=template),
+    )
     monkeypatch.setattr("aios.services.connections.queries.insert_binding", AsyncMock())
     default_mock = AsyncMock()
     monkeypatch.setattr(
