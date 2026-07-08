@@ -58,7 +58,7 @@ async def test_filter_never_issues_unbounded_lifetime_scans() -> None:
     """The batch filter must not run the removed whole-history queries — the
     projected assistant/result select and the ``@>`` containment bound are the
     load-bearing fix (#1729)."""
-    unreacted = [{"session_id": "sess_a", "data": {"role": "tool", "tool_call_id": "tc_1"}}]
+    unreacted = [{"session_id": "sess_a", "role": "tool", "tool_call_id": "tc_1"}]
     asst = [{"session_id": "sess_a", "tool_call_ids": ["tc_1"]}]
     results = [{"session_id": "sess_a", "tool_call_id": "tc_1"}]
 
@@ -117,7 +117,7 @@ async def test_no_unreacted_events_touches_no_history() -> None:
 async def test_incomplete_batch_not_admitted() -> None:
     """A referenced batch whose sibling ids lack results is NOT admitted — the
     session is still waiting on in-flight tools (parity with pre-#1729)."""
-    unreacted = [{"session_id": "sess_a", "data": {"role": "tool", "tool_call_id": "tc_1"}}]
+    unreacted = [{"session_id": "sess_a", "role": "tool", "tool_call_id": "tc_1"}]
     # Batch owns tc_1 and tc_2, but only tc_1 has a result.
     asst = [{"session_id": "sess_a", "tool_call_ids": ["tc_1", "tc_2"]}]
     results = [{"session_id": "sess_a", "tool_call_id": "tc_1"}]
@@ -137,7 +137,7 @@ async def test_incomplete_batch_not_admitted() -> None:
 
 async def test_user_message_bypasses_batch_fetch() -> None:
     """An unreacted user message admits immediately, without any batch fetch."""
-    unreacted = [{"session_id": "sess_u", "data": {"role": "user", "content": "hi"}}]
+    unreacted = [{"session_id": "sess_u", "role": "user", "tool_call_id": None}]
     conn = _dispatching_conn([("s.last_reacted_seq", unreacted)])
     pool = fake_pool_yielding_conn(conn)
 
