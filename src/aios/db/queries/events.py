@@ -2375,6 +2375,39 @@ async def find_latest_model_workflow_park(
     return data if isinstance(data, dict) else None
 
 
+# The crash-recovery park scan (#1635). Held as a module constant — rather than
+# inlined in :func:`find_unharvested_model_dispatch_parks` — so the perf test can
+# EXPLAIN the exact production query text and assert an index scan (not a
+# ``Seq Scan on events``). ``{scope_clause}`` is empty on the cross-session
+# periodic path, so the ``model_workflow_park`` partial index (migration 0131) is
+# what restricts the outer scan there; the two ``NOT EXISTS`` anti-joins are served
+# by the companion ``model_workflow_harvest_end`` / ``model_workflow_harvest``
+# partial indexes added in the same migration.
+UNHARVESTED_MODEL_DISPATCH_PARKS_SQL = (
+    "SELECT DISTINCT ON (p.session_id) p.session_id, p.account_id, "
+    "    p.data->>'run_id' AS run_id "
+    "FROM events p "
+    "WHERE p.kind = 'span' AND p.data->>'event' = 'model_workflow_park' "
+    "{scope_clause} "
+    # not yet folded (consumed)
+    "AND NOT EXISTS ("
+    "    SELECT 1 FROM events c "
+    "    WHERE c.session_id = p.session_id AND c.account_id = p.account_id "
+    "    AND c.kind = 'span' AND c.data->>'event' = 'model_workflow_harvest_end' "
+    "    AND c.data->>'run_id' = p.data->>'run_id'"
+    ") "
+    # not yet harvested (the run's terminal state was never written back)
+    "AND NOT EXISTS ("
+    "    SELECT 1 FROM events h "
+    "    WHERE h.session_id = p.session_id AND h.account_id = p.account_id "
+    "    AND h.kind = 'span' AND h.data->>'event' = 'model_workflow_harvest' "
+    "    AND h.data->>'run_id' = p.data->>'run_id'"
+    ") "
+    "AND p.data->>'run_id' IS NOT NULL "
+    "ORDER BY p.session_id, p.seq DESC"
+)
+
+
 async def find_unharvested_model_dispatch_parks(
     conn: asyncpg.Connection[Any],
     *,
@@ -2408,27 +2441,7 @@ async def find_unharvested_model_dispatch_parks(
     scope_clause = "AND p.session_id = $1" if session_id else ""
     params: list[Any] = [session_id] if session_id else []
     rows = await conn.fetch(
-        "SELECT DISTINCT ON (p.session_id) p.session_id, p.account_id, "
-        "    p.data->>'run_id' AS run_id "
-        "FROM events p "
-        "WHERE p.kind = 'span' AND p.data->>'event' = 'model_workflow_park' "
-        f"{scope_clause} "
-        # not yet folded (consumed)
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM events c "
-        "    WHERE c.session_id = p.session_id AND c.account_id = p.account_id "
-        "    AND c.kind = 'span' AND c.data->>'event' = 'model_workflow_harvest_end' "
-        "    AND c.data->>'run_id' = p.data->>'run_id'"
-        ") "
-        # not yet harvested (the run's terminal state was never written back)
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM events h "
-        "    WHERE h.session_id = p.session_id AND h.account_id = p.account_id "
-        "    AND h.kind = 'span' AND h.data->>'event' = 'model_workflow_harvest' "
-        "    AND h.data->>'run_id' = p.data->>'run_id'"
-        ") "
-        "AND p.data->>'run_id' IS NOT NULL "
-        "ORDER BY p.session_id, p.seq DESC",
+        UNHARVESTED_MODEL_DISPATCH_PARKS_SQL.format(scope_clause=scope_clause),
         *params,
     )
     return [(r["session_id"], r["run_id"], r["account_id"]) for r in rows]
