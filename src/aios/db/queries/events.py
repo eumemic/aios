@@ -751,7 +751,7 @@ async def find_tool_result_event(
          WHERE session_id = $1
            AND account_id = $2
            AND kind = 'message'
-           AND data->>'role' = 'tool'
+           AND role = 'tool'
            AND data->>'tool_call_id' = $3
          LIMIT 1
         """,
