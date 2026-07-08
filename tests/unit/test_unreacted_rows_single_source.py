@@ -93,7 +93,7 @@ def test_group_unreacted_rows_groups_by_session_and_handles_none_tcid() -> None:
     """``_group_unreacted_rows`` groups (role, tool_call_id) tuples per
     session_id, preserving None tool_call_ids for downstream exclusion."""
 
-    class FakeRecord(dict):
+    class FakeRecord(dict[str, object]):
         """Mapping-style fake mimicking asyncpg.Record's __getitem__ access."""
 
     rows = [
